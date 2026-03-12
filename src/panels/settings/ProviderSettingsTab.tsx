@@ -2507,86 +2507,89 @@ function ModelRoutingSection() {
   if (!config) return null;
 
   return (
-    <div className="space-y-5">
-      <div>
-        <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
-          <SlidersHorizontal size={16} className="text-accent" />
-          Model Routing
-        </h2>
-        <p className="text-xs text-muted mt-0.5">
-          Configure how stories are assigned to model tiers and which models handle each task type.
-        </p>
-      </div>
+    <div className="rounded-xl border border-border bg-panel p-5 mt-4">
+      {/* Card header */}
+      <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
+        <SlidersHorizontal size={16} className="text-accent" />
+        Model Routing
+      </h2>
 
-      {/* Router mode */}
-      <div>
-        <label className="block text-xs text-muted mb-2">Router Mode</label>
-        <div className="grid grid-cols-3 gap-2">
-          {(['auto', 'fixed', 'manual'] as RouterMode[]).map(mode => {
-            const info = ROUTER_MODE_INFO[mode];
-            return (
-              <button
-                key={mode}
-                onClick={() => update('router', mode)}
-                className={`border rounded-lg p-3 text-left transition-all ${config.router === mode
-                    ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
-                    : 'border-border bg-bg hover:border-accent/30'
-                  }`}
-              >
-                <span className="text-xs font-medium text-[var(--text)]">{info.label}</span>
-                <p className="text-[10px] text-muted mt-0.5 leading-tight">{info.description}</p>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      {/* 3-column grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-4">
 
-      {/* Three-tier threshold slider (only shown in auto mode) */}
-      {config.router === 'auto' && (
+        {/* Left col — Router Mode */}
         <div>
-          <label className="block text-xs text-muted mb-2">Complexity Thresholds</label>
-          <ThresholdSlider
-            haikuMax={config.thresholds.haiku[1]}
-            sonnetMax={config.thresholds.sonnet[1]}
-            onChange={(haikuMax, sonnetMax) => {
-              update('thresholds', {
-                haiku: [0, haikuMax],
-                sonnet: [haikuMax + 1, sonnetMax],
-                opus: [sonnetMax + 1, 100],
-              });
-            }}
-          />
+          <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-3">Router Mode</p>
+          <div className="flex flex-col gap-2">
+            {(['auto', 'fixed', 'manual'] as RouterMode[]).map(mode => {
+              const info = ROUTER_MODE_INFO[mode];
+              return (
+                <button
+                  key={mode}
+                  onClick={() => update('router', mode)}
+                  className={`border rounded-lg p-3 text-left transition-all ${config.router === mode
+                      ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
+                      : 'border-border bg-bg hover:border-accent/30'
+                    }`}
+                >
+                  <span className="text-xs font-medium text-[var(--text)]">{info.label}</span>
+                  <p className="text-[10px] text-muted mt-0.5 leading-tight">{info.description}</p>
+                </button>
+              );
+            })}
+          </div>
         </div>
-      )}
 
-      {/* Task cascades */}
-      <div>
-        <label className="block text-xs text-muted mb-2">Task Type Model Assignments</label>
-        <div className="border border-border rounded overflow-hidden">
-          {(Object.entries(TASK_TYPE_LABELS) as [TaskType, { label: string; description: string }][]).map(([taskType, info]) => (
-            <div key={taskType} className="flex items-center justify-between px-4 py-2.5 border-b border-border last:border-b-0">
-              <div className="min-w-0">
-                <span className="text-sm text-[var(--text)]">{info.label}</span>
-                <p className="text-[10px] text-muted">{info.description}</p>
+        {/* Center col — Complexity Thresholds */}
+        <div>
+          <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-3">Complexity Thresholds</p>
+          {config.router === 'auto' ? (
+            <ThresholdSlider
+              haikuMax={config.thresholds.haiku[1]}
+              sonnetMax={config.thresholds.sonnet[1]}
+              onChange={(haikuMax, sonnetMax) => {
+                update('thresholds', {
+                  haiku: [0, haikuMax],
+                  sonnet: [haikuMax + 1, sonnetMax],
+                  opus: [sonnetMax + 1, 100],
+                });
+              }}
+            />
+          ) : (
+            <p className="text-xs text-muted">Switch to Auto router mode to configure complexity thresholds.</p>
+          )}
+        </div>
+
+        {/* Right col — Task Models */}
+        <div>
+          <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-3">Task Models</p>
+          <div className="flex flex-col gap-2">
+            {(Object.entries(TASK_TYPE_LABELS) as [TaskType, { label: string; description: string }][]).map(([taskType, info]) => (
+              <div key={taskType} className="flex items-center justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-bold text-[var(--text)] truncate">{info.label}</p>
+                  <p className="text-[10px] text-muted leading-tight">{info.description}</p>
+                </div>
+                <input
+                  type="text"
+                  value={config.taskCascades[taskType] ?? ''}
+                  onChange={e => {
+                    const newCascades = { ...config.taskCascades, [taskType]: e.target.value };
+                    update('taskCascades', newCascades);
+                  }}
+                  className="w-28 px-2 py-1 text-xs bg-bg border border-border rounded focus:border-accent outline-none font-mono flex-shrink-0"
+                  placeholder="model-id"
+                />
               </div>
-              <input
-                type="text"
-                value={config.taskCascades[taskType] ?? ''}
-                onChange={e => {
-                  const newCascades = { ...config.taskCascades, [taskType]: e.target.value };
-                  update('taskCascades', newCascades);
-                }}
-                className="w-64 px-2 py-1.5 text-xs bg-bg border border-border rounded focus:border-accent outline-none font-mono"
-                placeholder="model-id"
-              />
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       </div>
 
-      {/* Escalation */}
-      <div>
-        <label className="block text-xs text-muted mb-2">Escalation</label>
+      {/* Full-width below grid */}
+      <div className="border-t border-border pt-4 mt-2 space-y-4">
+
+        {/* Escalation */}
         <div className="border border-border rounded p-4 bg-bg space-y-3">
           <div className="flex items-center justify-between">
             <div>
@@ -2624,49 +2627,49 @@ function ModelRoutingSection() {
             </div>
           )}
         </div>
+
+        {/* Token budget */}
+        <div>
+          <label className="block text-xs text-muted mb-2">Token Budget Per Story</label>
+          <div className="flex items-center gap-3">
+            <input
+              type="number"
+              min={1000}
+              step={5000}
+              value={config.tokenBudgetPerStory}
+              onChange={e => update('tokenBudgetPerStory', parseInt(e.target.value) || 50000)}
+              className="w-40 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+            />
+            <span className="text-xs text-muted">input tokens before warning (default: 50,000)</span>
+          </div>
+        </div>
+
+        {/* Error */}
+        {error && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/20 text-red-400">
+            <XCircle size={14} />
+            {error}
+          </div>
+        )}
+
+        {/* No workspace warning */}
+        {!workspaceId && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-amber-500/10 border border-amber-500/20 text-amber-400">
+            <AlertTriangle size={14} />
+            Select a workspace to save routing configuration to .rorca/config.json
+          </div>
+        )}
+
+        {/* Save */}
+        <button
+          onClick={handleSave}
+          disabled={saving || !dirty || !workspaceId}
+          className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+        >
+          {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
+          {saved ? 'Saved' : 'Save Routing Configuration'}
+        </button>
       </div>
-
-      {/* Token budget */}
-      <div>
-        <label className="block text-xs text-muted mb-2">Token Budget Per Story</label>
-        <div className="flex items-center gap-3">
-          <input
-            type="number"
-            min={1000}
-            step={5000}
-            value={config.tokenBudgetPerStory}
-            onChange={e => update('tokenBudgetPerStory', parseInt(e.target.value) || 50000)}
-            className="w-40 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
-          />
-          <span className="text-xs text-muted">input tokens before warning (default: 50,000)</span>
-        </div>
-      </div>
-
-      {/* Error */}
-      {error && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/20 text-red-400">
-          <XCircle size={14} />
-          {error}
-        </div>
-      )}
-
-      {/* No workspace warning */}
-      {!workspaceId && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-amber-500/10 border border-amber-500/20 text-amber-400">
-          <AlertTriangle size={14} />
-          Select a workspace to save routing configuration to .rorca/config.json
-        </div>
-      )}
-
-      {/* Save */}
-      <button
-        onClick={handleSave}
-        disabled={saving || !dirty || !workspaceId}
-        className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
-      >
-        {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
-        {saved ? 'Saved' : 'Save Routing Configuration'}
-      </button>
     </div>
   );
 }
