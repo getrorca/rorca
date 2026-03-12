@@ -9063,4 +9063,43 @@ router.post(
   },
 );
 
+/**
+ * @swagger
+ * /api/specs/{specId}/attachments/{attachmentId}:
+ *   delete:
+ *     summary: Delete a specific attachment for a spec
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: attachmentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       204:
+ *         description: Attachment deleted
+ *       404:
+ *         description: Attachment not found
+ */
+router.delete('/:specId/attachments/:attachmentId', async (req: Request, res: Response) => {
+  const { specId, attachmentId } = req.params;
+
+  const result = await execute(
+    `DELETE FROM spec_attachments WHERE id = $1 AND spec_id = $2`,
+    [attachmentId, specId],
+  );
+
+  if (result.rowCount === 0) {
+    res.status(404).json({ error: 'Attachment not found' });
+    return;
+  }
+
+  res.status(204).send();
+});
+
 export default router;
