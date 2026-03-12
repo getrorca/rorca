@@ -121,6 +121,8 @@ export interface SpecDetailSlideOverProps {
   onApproved?: (specId: string) => void;
   /** Called when spec is rejected so parent can update */
   onRejected?: (specId: string) => void;
+  /** Active run status — disables Enrich button when running or queued */
+  activeRunStatus?: 'running' | 'queued';
 }
 
 /* ─── Spec Skills Tab ─────────────────────────────────────────────── */
@@ -280,6 +282,7 @@ export default function SpecDetailSlideOver({
   onTagsChange,
   onApproved,
   onRejected,
+  activeRunStatus,
 }: SpecDetailSlideOverProps) {
   const panelRef = useRef<HTMLDivElement>(null);
 
@@ -328,6 +331,7 @@ export default function SpecDetailSlideOver({
           onTagsChange={onTagsChange}
           onApproved={onApproved}
           onRejected={onRejected}
+          activeRunStatus={activeRunStatus}
         />
       </div>
     </div>,
@@ -348,6 +352,7 @@ function SpecDetailContent({
   onTagsChange,
   onApproved,
   onRejected,
+  activeRunStatus,
 }: {
   specId: string;
   initialSummary: SpecSlideOverSummary | null;
@@ -359,6 +364,7 @@ function SpecDetailContent({
   onTagsChange?: (specId: string, tags: string[]) => void;
   onApproved?: (specId: string) => void;
   onRejected?: (specId: string) => void;
+  activeRunStatus?: 'running' | 'queued';
 }) {
   const { workspaceId } = useWorkspace();
   const { user } = useAuth();
@@ -392,6 +398,10 @@ function SpecDetailContent({
   const [forkError, setForkError] = useState('');
   const [forkId, setForkId] = useState('');
   const [deleteState, setDeleteState] = useState<'idle' | 'confirm' | 'deleting'>('idle');
+
+  // Enrich
+  const [enrichState, setEnrichState] = useState<'idle' | 'enriching'>('idle');
+  const [enrichRefreshKey, setEnrichRefreshKey] = useState(0);
 
   // Approve/Reject
   const [actionLoading, setActionLoading] = useState(false);
@@ -524,6 +534,25 @@ function SpecDetailContent({
       const res = await apiFetch<{ ok: boolean; forkId: string }>(`/api/specs/${summary.id}/fork`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ workspaceId }) });
       if (res.ok) { setForkId(res.forkId); setForkState('done'); setTimeout(() => setForkState('idle'), 3000); }
     } catch (err) { setForkError(err instanceof Error ? err.message : 'Failed to fork spec'); setForkState('error'); }
+  };
+
+  const handleEnrich = async () => {
+    if (!workspaceId) return;
+    setEnrichState('enriching');
+    try {
+      const res = await apiFetch<{ ok: boolean; retrieval_method?: string }>(`/api/specs/${specId}/enrich`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      const method = res.retrieval_method ?? 'direction-only';
+      toast.show(`Spec enriched via ${method}`, 'success');
+      setEnrichRefreshKey(k => k + 1);
+    } catch (err: unknown) {
+      toast.show(err instanceof Error ? err.message : 'Enrichment failed', 'error');
+    } finally {
+      setEnrichState('idle');
+    }
   };
 
   const handleAddStories = async () => {
@@ -660,7 +689,7 @@ function SpecDetailContent({
                 onStoryUpdated={(updated) => setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))} />
             )}
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
-            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} />}
+            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} />}
             {activeTab === 'skills' && <SpecSkillsTab stories={stories} workspaceId={workspaceId ?? ''} />}
             {activeTab === 'graph' && workspaceId && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
@@ -778,6 +807,23 @@ function SpecDetailContent({
               {deleteState === 'deleting' ? <><Loader2 size={14} className="animate-spin" /> Deleting...</> : <><Trash2 size={14} /> Delete Spec</>}
             </button>
           )}
+
+          {/* Enrich with Context */}
+          {(() => {
+            const enrichDisabled = activeRunStatus === 'running' || activeRunStatus === 'queued' || enrichState === 'enriching';
+            return (
+              <button
+                onClick={handleEnrich}
+                disabled={enrichDisabled}
+                title={activeRunStatus === 'running' || activeRunStatus === 'queued' ? 'Cannot enrich while a run is active' : 'Enrich stories with contextual annotations'}
+                className={`flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors ${enrichDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+              >
+                {enrichState === 'enriching'
+                  ? <><Loader2 size={14} className="animate-spin" /> Enriching…</>
+                  : <><Sparkles size={14} /> Enrich with Context</>}
+              </button>
+            );
+          })()}
         </div>
       )}
     </div>
@@ -879,6 +925,8 @@ interface GenerationLog {
   error_category: string | null;
   status: string;
   created_at: string;
+  retrieval_method?: string | null;
+  enriched?: boolean;
 }
 
 /** Rough per-1K-token cost estimates by model family (input/output). */
@@ -901,7 +949,27 @@ function estimateCost(model: string, inputTokens: number, outputTokens: number):
   return null;
 }
 
-function GenerationLogTab({ specId, stories }: { specId: string; stories: Story[] }) {
+function StoryAnnotationPreview({ preview, hasMore, fullText }: { preview: string; hasMore: boolean; fullText: string }) {
+  const [expanded, setExpanded] = useState(false);
+  const text = expanded ? fullText : preview;
+  return (
+    <div className="mt-1">
+      <pre className="text-[10px] text-muted/80 font-mono whitespace-pre-wrap break-words leading-relaxed">
+        {text}
+      </pre>
+      {hasMore && (
+        <button
+          onClick={() => setExpanded(e => !e)}
+          className="text-[10px] text-accent hover:text-accent/80 mt-1 transition-colors"
+        >
+          {expanded ? 'Show less' : 'Show more'}
+        </button>
+      )}
+    </div>
+  );
+}
+
+function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; stories: Story[]; refreshKey?: number }) {
   const [logs, setLogs] = useState<GenerationLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
@@ -939,7 +1007,7 @@ function GenerationLogTab({ specId, stories }: { specId: string; stories: Story[
       .finally(() => { if (!cancelled) setLoading(false); });
 
     return () => { cancelled = true; };
-  }, [specId, showAll]);
+  }, [specId, showAll, refreshKey]);
 
   if (loading) {
     return (
@@ -1058,6 +1126,58 @@ function GenerationLogTab({ specId, stories }: { specId: string; stories: Story[
                 </div>
               </div>
             )}
+
+            {/* Retrieval method badge + per-story annotation preview (enriched entries) */}
+            {log.enriched && log.retrieval_method && (() => {
+              const methodColors: Record<string, string> = {
+                pgvector: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
+                graph: 'bg-purple-500/15 text-purple-400 border-purple-500/30',
+                fulltext: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
+                'direction-only': 'bg-gray-500/15 text-gray-400 border-gray-500/30',
+              };
+              const colorClass = methodColors[log.retrieval_method] ?? methodColors['direction-only'];
+
+              // Collect stories that have a ## Context section in their description
+              const annotatedStories = stories.filter(s => {
+                const desc = (s as any).description ?? '';
+                return typeof desc === 'string' && desc.includes('## Context');
+              });
+
+              return (
+                <div className="px-4 py-3 border-t border-border/50">
+                  <div className="flex items-center gap-2 mb-2">
+                    <span className={`inline-flex items-center px-2 py-0.5 text-[10px] font-semibold rounded border ${colorClass}`}>
+                      {log.retrieval_method}
+                    </span>
+                    <span className="text-[10px] text-muted">retrieval method</span>
+                  </div>
+                  {annotatedStories.length > 0 && (
+                    <div className="space-y-1">
+                      <p className="text-[10px] text-muted mb-1">Story annotations ({annotatedStories.length})</p>
+                      {annotatedStories.map(story => {
+                        const desc: string = (story as any).description ?? '';
+                        const ctxMatch = desc.match(/## Context\n([\s\S]*?)(?:\n##|$)/);
+                        const ctxText = ctxMatch ? ctxMatch[1].trim() : '';
+                        const lines = ctxText.split('\n');
+                        const preview = lines.slice(0, 3).join('\n');
+                        const hasMore = lines.length > 3;
+                        return (
+                          <details key={story.id} className="group rounded border border-border/50 bg-bg/50 overflow-hidden">
+                            <summary className="flex items-center gap-2 px-2 py-1.5 text-xs cursor-pointer select-none list-none hover:bg-panel transition-colors">
+                              <span className="font-mono text-[10px] text-accent shrink-0">{story.id}</span>
+                              <span className="text-muted truncate">{story.title}</span>
+                            </summary>
+                            <div className="px-2 pb-2">
+                              <StoryAnnotationPreview preview={preview} hasMore={hasMore} fullText={ctxText} />
+                            </div>
+                          </details>
+                        );
+                      })}
+                    </div>
+                  )}
+                </div>
+              );
+            })()}
 
           </div>
         );
