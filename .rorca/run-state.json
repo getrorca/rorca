@@ -2,7 +2,7 @@
   "specId": "collapsible-left-nav-drag-to-close",
   "runId": 54,
   "startedAt": "2026-03-12T08:12:11.075Z",
-  "lastUpdatedAt": "2026-03-12T08:14:29.381Z",
+  "lastUpdatedAt": "2026-03-12T08:17:14.594Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 137655
+    },
+    {
+      "storyId": "US-002",
+      "title": "Add double-click toggle on drag handle",
+      "status": "passed",
+      "startedAt": "2026-03-12T08:15:46.486Z",
+      "finishedAt": "2026-03-12T08:17:14.594Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 88108
     }
   ],
   "failedStories": [],
