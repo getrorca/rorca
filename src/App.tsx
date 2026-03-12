@@ -456,7 +456,7 @@ function AppLayout() {
     { key: 'mod+enter', handler: () => { if (activePanel !== 'specs' && activePanel !== 'spec-review') handleNavigate('specs'); } },
     { key: 'mod+backspace', handler: () => { if (activePanel !== 'specs' && activePanel !== 'spec-review') handleNavigate('specs'); } },
     { key: 'mod+shift+n', handler: () => { handleSendToForge(''); handleNavigate('specs'); } },
-    { key: 'mod+shift+r', handler: () => handleNavigate('runs') },
+    // mod+shift+r intentionally removed — conflicts with browser hard refresh (Cmd+Shift+R)
     // Escape: close overlays in reverse order
     { key: 'escape', handler: () => {
       if (showCommandPalette) { setShowCommandPalette(false); return; }
