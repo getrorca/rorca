@@ -1,28 +1,18 @@
 {
-  "specId": "rorca-post-run-qa",
-  "runId": 61,
-  "startedAt": "2026-03-12T08:34:23.363Z",
-  "lastUpdatedAt": "2026-03-12T09:19:12.633Z",
+  "specId": "providers-models-page-redesign",
+  "runId": 66,
+  "startedAt": "2026-03-12T20:08:56.201Z",
+  "lastUpdatedAt": "2026-03-12T20:13:20.643Z",
   "completedStories": [
     {
-      "storyId": "QA-001",
-      "title": "Frontend TypeScript validation and error resolution",
+      "storyId": "PM-001",
+      "title": "Replace single-column scroll with responsive grid shell",
       "status": "passed",
-      "startedAt": "2026-03-12T08:35:52.778Z",
-      "finishedAt": "2026-03-12T09:15:48.429Z",
+      "startedAt": "2026-03-12T20:08:56.945Z",
+      "finishedAt": "2026-03-12T20:13:20.642Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 2395651
-    },
-    {
-      "storyId": "QA-002",
-      "title": "Backend TypeScript validation and error resolution",
-      "status": "passed",
-      "startedAt": "2026-03-12T09:16:14.867Z",
-      "finishedAt": "2026-03-12T09:19:12.633Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 177766
+      "elapsedMs": 263697
     }
   ],
   "failedStories": [],
