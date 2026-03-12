@@ -3,10 +3,11 @@
 import { readFileSync, existsSync, mkdirSync, writeFileSync, createWriteStream, unlinkSync, rmSync, readdirSync, renameSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { execSync, fork, spawn } from 'child_process';
+import { execSync, spawnSync, fork, spawn } from 'child_process';
 import { homedir, platform, arch } from 'os';
 import { get as httpsGet } from 'https';
 import { get as httpGet, type IncomingMessage } from 'http';
+import { createConnection } from 'net';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
@@ -144,21 +145,30 @@ async function runStart(startArgs: string[]): Promise<void> {
     console.log(`Created config directory: ${rorcaHome}`);
   }
 
-  // Ensure Postgres binaries are available
-  await ensurePostgres();
+  // ── Postgres provisioning ──
+  // If DATABASE_URL is already set and reachable, use it as-is (user-provided).
+  // Otherwise, provision and start a managed Postgres instance.
+  let managedPostgresStarted = false;
+  let databaseUrl = process.env.DATABASE_URL || '';
 
-  const databaseUrl = process.env.DATABASE_URL || 'postgres://rorca:rorca@localhost:5432/rorca';
-
-  // Check Postgres reachability before starting
-  try {
-    const { Pool: PgPool } = await import('pg');
-    const testPool = new PgPool({ connectionString: databaseUrl, connectionTimeoutMillis: 5000 });
-    await testPool.query('SELECT 1');
-    await testPool.end();
-  } catch {
-    console.error('Cannot connect to PostgreSQL. Run: docker compose up -d db');
-    console.error(`  DATABASE_URL: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
-    process.exit(1);
+  if (databaseUrl) {
+    // User provided DATABASE_URL — check if it's reachable
+    const urlObj = parsePostgresUrl(databaseUrl);
+    if (urlObj && await tcpReachable(urlObj.host, urlObj.port, 3000)) {
+      console.log(`Using user-provided DATABASE_URL (${urlObj.host}:${urlObj.port})`);
+    } else {
+      console.error(`Cannot reach Postgres at user-provided DATABASE_URL`);
+      console.error(`  DATABASE_URL: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
+      process.exit(1);
+    }
+  } else {
+    // No DATABASE_URL — provision managed Postgres
+    const pgDir = await ensurePostgres();
+    await startPostgres(pgDir);
+    managedPostgresStarted = true;
+    databaseUrl = `postgres://rorca:rorca@127.0.0.1:${MANAGED_PG_PORT}/rorca`;
+    process.env.DATABASE_URL = databaseUrl;
+    console.log(`Managed Postgres ready at 127.0.0.1:${MANAGED_PG_PORT}`);
   }
 
   // Auto-build frontend if dist/ is missing
@@ -203,6 +213,7 @@ async function runStart(startArgs: string[]): Promise<void> {
     });
   } else {
     console.error('Could not find backend entry point. Run "npm run build" first.');
+    if (managedPostgresStarted) stopManagedPostgres();
     process.exit(1);
     return; // unreachable — satisfies TypeScript
   }
@@ -211,6 +222,7 @@ async function runStart(startArgs: string[]): Promise<void> {
 
   child.on('error', (err: Error) => {
     console.error('Failed to start server:', err.message);
+    if (managedPostgresStarted) stopManagedPostgres();
     process.exit(1);
   });
 
@@ -218,6 +230,7 @@ async function runStart(startArgs: string[]): Promise<void> {
     if (code !== 0 && code !== null) {
       console.error(`Server exited with code ${code}`);
     }
+    if (managedPostgresStarted) stopManagedPostgres();
     process.exit(code ?? 1);
   });
 
@@ -229,10 +242,12 @@ async function runStart(startArgs: string[]): Promise<void> {
     }, 1500);
   }
 
-  // Forward signals for clean shutdown
+  // Graceful shutdown: stop managed Postgres before exiting
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     process.on(sig, () => {
       child.kill(sig);
+      if (managedPostgresStarted) stopManagedPostgres();
+      process.exit(0);
     });
   }
 }
@@ -557,9 +572,152 @@ async function initDataDir(binDir: string, dataDir: string): Promise<void> {
   }
 }
 
+/**
+ * Check if a TCP host:port is reachable within timeoutMs.
+ */
+function tcpReachable(host: string, port: number, timeoutMs = 3000): Promise<boolean> {
+  return new Promise((resolve) => {
+    const sock = createConnection({ host, port });
+    sock.setTimeout(timeoutMs);
+    sock.on('connect', () => { sock.destroy(); resolve(true); });
+    sock.on('timeout', () => { sock.destroy(); resolve(false); });
+    sock.on('error', () => { sock.destroy(); resolve(false); });
+  });
+}
+
+const MANAGED_PG_PORT = 5433;
+
+/**
+ * Start the managed Postgres instance via pg_ctl on port MANAGED_PG_PORT.
+ * Creates the 'rorca' database if it doesn't exist.
+ * Returns true if Postgres was started successfully.
+ */
+async function startPostgres(pgDir: string): Promise<void> {
+  const ext = platform() === 'win32' ? '.exe' : '';
+  const binDir = join(pgDir, 'bin');
+  const dataDir = join(pgDir, 'data');
+  const pgCtl = join(binDir, `pg_ctl${ext}`);
+  const logFile = join(pgDir, 'postgres.log');
+
+  // Check if already running on our port
+  if (await tcpReachable('127.0.0.1', MANAGED_PG_PORT, 1000)) {
+    console.log(`Managed Postgres already running on port ${MANAGED_PG_PORT}`);
+    return;
+  }
+
+  // Configure port in postgresql.conf if not already set
+  const confPath = join(dataDir, 'postgresql.conf');
+  if (existsSync(confPath)) {
+    const conf = readFileSync(confPath, 'utf8');
+    if (!conf.includes(`port = ${MANAGED_PG_PORT}`)) {
+      writeFileSync(confPath, conf + `\nport = ${MANAGED_PG_PORT}\n`);
+    }
+  }
+
+  console.log(`  Starting Postgres on port ${MANAGED_PG_PORT}...`);
+  const startResult = spawnSync(
+    pgCtl,
+    ['start', '-D', dataDir, '-l', logFile, '-w', '-o', `-p ${MANAGED_PG_PORT}`],
+    { encoding: 'utf8', timeout: 30000 }
+  );
+
+  if (startResult.status !== 0) {
+    const errMsg = startResult.stderr || startResult.stdout || 'unknown error';
+    throw new Error(`pg_ctl start failed:\n${errMsg}`);
+  }
+
+  console.log(`  Postgres started (port ${MANAGED_PG_PORT}, log: ${logFile})`);
+
+  // Create the 'rorca' database if it doesn't exist
+  const createdbBin = join(binDir, `createdb${ext}`);
+  if (existsSync(createdbBin)) {
+    const dbResult = spawnSync(
+      createdbBin,
+      ['-h', '127.0.0.1', '-p', String(MANAGED_PG_PORT), '-U', 'rorca', 'rorca'],
+      { encoding: 'utf8', timeout: 10000 }
+    );
+    // Exit code 0 = created, non-zero with "already exists" = fine
+    if (dbResult.status === 0) {
+      console.log('  Created database: rorca');
+    } else if (dbResult.stderr?.includes('already exists')) {
+      // Database already exists — nothing to do
+    } else if (dbResult.status !== 0) {
+      console.warn(`  Warning: createdb returned code ${dbResult.status}: ${dbResult.stderr}`);
+    }
+  } else {
+    // Fallback: use psql to create database
+    const psqlBin = join(binDir, `psql${ext}`);
+    if (existsSync(psqlBin)) {
+      spawnSync(
+        psqlBin,
+        ['-h', '127.0.0.1', '-p', String(MANAGED_PG_PORT), '-U', 'rorca', '-c',
+         "SELECT 'exists' FROM pg_database WHERE datname='rorca'" +
+         " UNION ALL SELECT 'create' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname='rorca');"],
+        { encoding: 'utf8', timeout: 10000 }
+      );
+      // Simple attempt — if it fails, the backend migration runner will report the error
+      spawnSync(
+        psqlBin,
+        ['-h', '127.0.0.1', '-p', String(MANAGED_PG_PORT), '-U', 'rorca', '-tc',
+         "CREATE DATABASE rorca;"],
+        { encoding: 'utf8', timeout: 10000 }
+      );
+    }
+  }
+}
+
+/**
+ * Stop the managed Postgres instance via pg_ctl.
+ * Uses spawnSync to ensure the stop completes before process exits.
+ */
+function stopManagedPostgres(): void {
+  const pgDir = join(homedir(), '.rorca', 'postgres');
+  const dataDir = join(pgDir, 'data');
+  const ext = platform() === 'win32' ? '.exe' : '';
+  const pgCtl = join(pgDir, 'bin', `pg_ctl${ext}`);
+
+  if (!existsSync(pgCtl) || !existsSync(dataDir)) {
+    return;
+  }
+
+  console.log('\nStopping managed Postgres...');
+  const result = spawnSync(pgCtl, ['stop', '-D', dataDir, '-m', 'fast'], {
+    encoding: 'utf8',
+    timeout: 15000,
+  });
+
+  if (result.status === 0) {
+    console.log('Managed Postgres stopped.');
+  } else {
+    // pg_ctl stop returns non-zero if server wasn't running — not an error
+    const msg = result.stderr || result.stdout || '';
+    if (!msg.includes('not running')) {
+      console.warn(`pg_ctl stop warning: ${msg.trim()}`);
+    }
+  }
+}
+
 // ────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────
+
+/**
+ * Parse a postgres:// URL into host and port.
+ * Returns null if the URL is not parseable.
+ */
+function parsePostgresUrl(url: string): { host: string; port: number } | null {
+  try {
+    // Replace postgres:// with http:// for URL parsing
+    const normalized = url.replace(/^postgres(ql)?:\/\//, 'http://');
+    const parsed = new URL(normalized);
+    return {
+      host: parsed.hostname || '127.0.0.1',
+      port: parsed.port ? parseInt(parsed.port, 10) : 5432,
+    };
+  } catch {
+    return null;
+  }
+}
 
 function findBinary(name: string): string | null {
   try {
