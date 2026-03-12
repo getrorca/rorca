@@ -2103,6 +2103,14 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   const [savedAttachments, setSavedAttachments] = useState<SavedAttachment[]>([]);
   const [deletingIds, setDeletingIds] = useState<Set<string>>(new Set());
 
+  // Slug preview — declared here so handlePaste/handleFileSelect can reference effectiveSlug
+  const [previewSlug, setPreviewSlug] = useState('');
+  useEffect(() => {
+    const timer = setTimeout(() => setPreviewSlug(specName ? '' : briefToSlug(specBrief)), 300);
+    return () => clearTimeout(timer);
+  }, [specBrief, specName]);
+  const effectiveSlug = useMemo(() => specName || previewSlug, [specName, previewSlug]);
+
   const handlePaste = useCallback(async (e: React.ClipboardEvent<HTMLTextAreaElement>) => {
     const items = Array.from(e.clipboardData.items);
     const imageItem = items.find((item) => item.type.startsWith('image/'));
@@ -2120,13 +2128,13 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     try {
       const formData = new FormData();
       formData.append('file', namedFile);
-      // Upload to a temporary "forge" slot — spec ID will be wired after generation (US-007)
+      if (effectiveSlug) formData.append('specSlug', effectiveSlug);
       await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
       setPendingAttachments((prev) => [...prev, { filename, contentType: file.type, size: file.size }]);
     } catch {
       showToast('Image upload failed', 'error');
     }
-  }, [showToast]);
+  }, [showToast, effectiveSlug]);
 
   const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
     const files = Array.from(e.target.files ?? []);
@@ -2138,6 +2146,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       try {
         const formData = new FormData();
         formData.append('file', file);
+        if (effectiveSlug) formData.append('specSlug', effectiveSlug);
         await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
         setPendingAttachments((prev) => [...prev, { filename: file.name, contentType: file.type, size: file.size }]);
         showToast(`Uploaded ${file.name}`, 'success');
@@ -2145,7 +2154,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
         showToast(`Upload failed: ${file.name}`, 'error');
       }
     }
-  }, [showToast]);
+  }, [showToast, effectiveSlug]);
 
   // Model accept handler — PUTs the accepted model to the story on disk
   const handleModelAccepted = useCallback(async (storyId: string, model: string) => {
@@ -2160,14 +2169,6 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       // Silent — local state already updated in preview
     }
   }, [generatedSpec, workspaceId]);
-
-  // Slug preview
-  const [previewSlug, setPreviewSlug] = useState('');
-  useEffect(() => {
-    const timer = setTimeout(() => setPreviewSlug(specName ? '' : briefToSlug(specBrief)), 300);
-    return () => clearTimeout(timer);
-  }, [specBrief, specName]);
-  const effectiveSlug = useMemo(() => specName || previewSlug, [specName, previewSlug]);
 
   // Direction layers
   const [directionLayers, setDirectionLayers] = useState<DirectionAllResponse['layers'] | null>(null);
