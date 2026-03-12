@@ -175,21 +175,105 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: () =>
 
 // ─── Main Export ──────────────────────────────────────────────────────────────
 
+const PROVIDER_TABS = [
+  { id: 'execution', label: 'Execution Engine' },
+  { id: 'model-browser', label: 'Model Browser' },
+  { id: 'embeddings', label: 'Embeddings' },
+  { id: 'routing', label: 'Routing' },
+  { id: 'providers', label: 'Providers' },
+  { id: 'display', label: 'Display' },
+] as const;
+
+type ProviderTabId = typeof PROVIDER_TABS[number]['id'];
+
 export function ProviderSettingsTab() {
+  const [activeTab, setActiveTab] = useState<ProviderTabId>('execution');
+
+  const sectionRefs = useRef<Record<ProviderTabId, HTMLDivElement | null>>({
+    'execution': null,
+    'model-browser': null,
+    'embeddings': null,
+    'routing': null,
+    'providers': null,
+    'display': null,
+  });
+
+  const scrollToSection = (id: ProviderTabId) => {
+    setActiveTab(id);
+    sectionRefs.current[id]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  useEffect(() => {
+    const observers: IntersectionObserver[] = [];
+    const visibilityMap: Record<string, number> = {};
+
+    PROVIDER_TABS.forEach(({ id }) => {
+      const el = sectionRefs.current[id];
+      if (!el) return;
+      const obs = new IntersectionObserver(
+        ([entry]) => {
+          visibilityMap[id] = entry.intersectionRatio;
+          const mostVisible = Object.entries(visibilityMap).reduce(
+            (best, [k, v]) => (v > best[1] ? [k, v] : best),
+            ['execution', 0] as [string, number]
+          );
+          if (mostVisible[1] > 0) setActiveTab(mostVisible[0] as ProviderTabId);
+        },
+        { threshold: [0, 0.1, 0.25, 0.5, 0.75, 1] }
+      );
+      obs.observe(el);
+      observers.push(obs);
+    });
+
+    return () => observers.forEach(o => o.disconnect());
+  }, []);
+
   return (
-    <div className="max-w-2xl space-y-8">
-      <DisplaySection />
-      <div className="border-t border-border pt-6">
-        <ExecutionEngineSection />
+    <div className="w-full">
+      {/* Sticky tab nav */}
+      <div
+        className="sticky top-0 z-10 border-b border-border overflow-x-auto scrollbar-none"
+        style={{ background: 'var(--bg)' }}
+      >
+        <div className="flex min-w-max">
+          {PROVIDER_TABS.map(({ id, label }) => (
+            <button
+              key={id}
+              onClick={() => scrollToSection(id)}
+              className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
+                activeTab === id
+                  ? 'border-accent text-accent'
+                  : 'border-transparent text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="border-t border-border pt-6">
-        <SemanticEngineSection />
-      </div>
-      <div className="border-t border-border pt-6">
-        <ModelRoutingSection />
-      </div>
-      <div className="border-t border-border pt-6">
-        <ProvidersSection />
+
+      {/* Sections */}
+      <div className="grid grid-cols-12 gap-0">
+        <div className="col-span-12 space-y-10 pt-6">
+          <div ref={el => { sectionRefs.current['execution'] = el; }}>
+            <ExecutionEngineSection />
+          </div>
+          <div ref={el => { sectionRefs.current['model-browser'] = el; }} className="border-t border-border pt-6">
+            <DisplaySection />
+          </div>
+          <div ref={el => { sectionRefs.current['embeddings'] = el; }} className="border-t border-border pt-6">
+            <SemanticEngineSection />
+          </div>
+          <div ref={el => { sectionRefs.current['routing'] = el; }} className="border-t border-border pt-6">
+            <ModelRoutingSection />
+          </div>
+          <div ref={el => { sectionRefs.current['providers'] = el; }} className="border-t border-border pt-6">
+            <ProvidersSection />
+          </div>
+          <div ref={el => { sectionRefs.current['display'] = el; }} className="border-t border-border pt-6">
+            <ExaSearchSection />
+          </div>
+        </div>
       </div>
     </div>
   );
@@ -1630,8 +1714,6 @@ function ProvidersSection() {
         })}
       </div>
 
-      {/* Exa Search — Pro feature */}
-      <ExaSearchSection />
     </div>
   );
 }
