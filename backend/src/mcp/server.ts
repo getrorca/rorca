@@ -2468,7 +2468,7 @@ function specErrorSuggestion(cat: SpecErrorCategory): string {
     case 'api_key_error': return 'Check your API key in Rorca Settings > API Keys or run rorca_update_direction to verify your configuration';
     case 'rate_limit':    return 'Rate limit reached. Try again in 60 seconds or switch to a different model using the spec_model parameter';
     case 'context_too_large': return 'Brief or direction stack too long. Shorten the brief or reduce L1/L2 direction layers via rorca_update_direction';
-    case 'parse_error':   return 'The model returned invalid JSON. Try spec_model: claude-sonnet-4-5-20250929 which has reliable JSON output';
+    case 'parse_error':   return 'The model returned invalid JSON. Try spec_model: claude-sonnet-4-6 which has reliable JSON output';
     case 'timeout':       return 'Spec generation timed out. Try a shorter brief or a faster model.';
     case 'model_error':   return 'Check the model name in Rorca Settings or use the default by omitting the spec_model parameter';
     case 'network_error': return 'Check your internet connection and API provider status. The brief has NOT been processed.';
@@ -2672,8 +2672,7 @@ server.registerTool(
     if (model) {
       // Quick check — allow any string for execution model (provider/model format for opencode)
       // Only validate single-word Claude model IDs against SUPPORTED_MODELS
-      const CLAUDE_MODELS = ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001',
-        'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'];
+      const CLAUDE_MODELS = ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'];
       if (!model.includes('/') && !CLAUDE_MODELS.includes(model)) {
         return errorResult({
           phase: 'validation',
