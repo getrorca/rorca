@@ -178,7 +178,10 @@
     "watch:esbuild": "node esbuild.js --watch",
     "watch:tsc": "tsc --noEmit --watch --project tsconfig.json",
     "vscode:prepublish": "npm run package",
-    "package": "npm run check-types && node esbuild.js --production"
+    "package": "npm run check-types && node esbuild.js --production",
+    "package:vsix": "vsce package",
+    "publish": "vsce publish",
+    "publish:pre": "vsce publish --pre-release"
   },
   "devDependencies": {
     "@types/node": "^20.19.37",
