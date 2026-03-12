@@ -1,9 +1,9 @@
 # Run State Summary
 
-Spec: rorca-quick-run-context-injection
-Run ID: 44
-Started: 2026-03-12T05:48:54.321Z
-Last Updated: 2026-03-12T05:52:02.776Z
+Spec: rorca-distribution
+Run ID: 48
+Started: 2026-03-12T06:04:21.346Z
+Last Updated: 2026-03-12T06:05:05.009Z
 
 ## Completed Stories (1)
-- QCI-001: Inject direction stack, MEMORY.md, and installed skills into Quick Run spec generation prompt — DONE (claude, claude-sonnet-4-6, 186s)
+- DIST-006: LICENSE & Legal Files — DONE (claude, claude-sonnet-4-6, 41s)

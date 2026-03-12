@@ -1,18 +1,18 @@
 {
-  "specId": "rorca-quick-run-context-injection",
-  "runId": 44,
-  "startedAt": "2026-03-12T05:48:54.321Z",
-  "lastUpdatedAt": "2026-03-12T05:52:02.776Z",
+  "specId": "rorca-distribution",
+  "runId": 48,
+  "startedAt": "2026-03-12T06:04:21.346Z",
+  "lastUpdatedAt": "2026-03-12T06:05:05.009Z",
   "completedStories": [
     {
-      "storyId": "QCI-001",
-      "title": "Inject direction stack, MEMORY.md, and installed skills into Quick Run spec generation prompt",
+      "storyId": "DIST-006",
+      "title": "LICENSE & Legal Files",
       "status": "passed",
-      "startedAt": "2026-03-12T05:48:57.144Z",
-      "finishedAt": "2026-03-12T05:52:02.776Z",
+      "startedAt": "2026-03-12T06:04:24.054Z",
+      "finishedAt": "2026-03-12T06:05:05.009Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 185632
+      "elapsedMs": 40955
     }
   ],
   "failedStories": [],
