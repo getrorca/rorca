@@ -1,18 +1,18 @@
 {
-  "specId": "rorca-mcp-cli-spec-enhancement",
-  "runId": 40,
-  "startedAt": "2026-03-12T04:20:33.580Z",
-  "lastUpdatedAt": "2026-03-12T04:29:43.149Z",
+  "specId": "rorca-spec-validator",
+  "runId": 41,
+  "startedAt": "2026-03-12T05:48:49.923Z",
+  "lastUpdatedAt": "2026-03-12T05:55:54.306Z",
   "completedStories": [
     {
-      "storyId": "US-001",
-      "title": "Research Best Practices and Rewrite rorca-mcp-cli Spec with Exhaustive Acceptance Criteria",
+      "storyId": "SV-001",
+      "title": "Implement rorca_check_spec structural validation",
       "status": "passed",
-      "startedAt": "2026-03-12T04:20:41.412Z",
-      "finishedAt": "2026-03-12T04:29:43.149Z",
+      "startedAt": "2026-03-12T05:52:31.285Z",
+      "finishedAt": "2026-03-12T05:55:54.306Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 541737
+      "elapsedMs": 203021
     }
   ],
   "failedStories": [],
