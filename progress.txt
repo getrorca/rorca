@@ -1,13 +1,28 @@
 # Run State Summary
 
-Spec: rorca-mcp-cli
-Run ID: 47
-Started: 2026-03-12T06:04:08.654Z
-Last Updated: 2026-03-12T06:44:39.969Z
+Spec: add copy paste photo as attachment (meaning someone can screen capture with whatever tool they want and attach it to the new spec description screen here where i am typing now) and also an upload file so that users can upload PRD, SDD or whatever they want as context.
+Run ID: 45
+Started: 2026-03-12T05:48:55.677Z
+Last Updated: 2026-03-12T07:42:25.632Z
 
-## Completed Stories (5)
-- MC-004: MCP Tools Tree View in rorca VS Code Extension — DONE (claude, claude-sonnet-4-6, 472s)
-- MC-006: VS Code Extension Settings Contribution Point Schema — DONE (claude, claude-sonnet-4-6, 421s)
-- MC-007: MCP Tool Error Recovery and Offline Graceful Degradation — DONE (claude, claude-sonnet-4-6, 964s)
-- MC-009: rorca-vscode Extension Package Scaffold — DONE (claude, claude-sonnet-4-6, 279s)
-- MC-010: Spec Tree View Provider — V2-060 Feature Properly Built — DONE (claude, claude-sonnet-4-6, 207s)
+## Completed Stories (20)
+- US-001: Add spec_attachments database table — DONE (claude, claude-sonnet-4-6, 91s)
+- US-002: Create backend API route for attachment upload — DONE (claude, claude-sonnet-4-6, 137s)
+- US-003: Create backend API route to list spec attachments — DONE (claude, claude-sonnet-4-6, 115s)
+- US-004: Create backend API route to download attachment — DONE (claude, claude-sonnet-4-6, 149s)
+- US-005: Create backend API route to delete attachment — DONE (claude, claude-sonnet-4-6, 102s)
+- US-006: Add paste event listener to SpecForge description textarea — DONE (claude, claude-sonnet-4-6, 232s)
+- US-007: Implement frontend attachment upload handler — DONE (claude, claude-sonnet-4-6, 144s)
+- US-008: Add file input button to SpecForge UI — DONE (claude, claude-sonnet-4-6, 250s)
+- US-009: Display attached files list in SpecForge UI — DONE (claude, claude-sonnet-4-6, 433s)
+- US-010: Pass attachment context to spec generation LLM call — DONE (claude, claude-sonnet-4-6, 528s)
+- US-011: Add Attachment type to frontend types — DONE (claude, claude-sonnet-4-6, 106s)
+- US-012: Show attachment count badge in SpecsPanel kanban cards — DONE (claude, claude-sonnet-4-6, 488s)
+- US-013: Add Attachments tab to SpecDetailSlideOver — DONE (claude, claude-sonnet-4-6, 259s)
+- US-014: Update SpecForgeProgress to show attachment upload status — DONE (claude, claude-sonnet-4-6, 532s)
+- US-015: Add attachment metadata to spec_generation_logs table — DONE (claude, claude-sonnet-4-6, 339s)
+- US-016: Add image preview modal for attachment thumbnails — DONE (claude, claude-sonnet-4-6, 537s)
+- US-017: Add drag-and-drop file upload to SpecForge UI — DONE (claude, claude-sonnet-4-6, 204s)
+- US-018: Add file type validation error messages — DONE (claude, claude-sonnet-4-6, 256s)
+- US-019: Add attachment context extraction unit tests — DONE (claude, claude-sonnet-4-6, 975s)
+- US-020: Add attachment upload E2E tests — DONE (claude, claude-sonnet-4-6, 437s)
