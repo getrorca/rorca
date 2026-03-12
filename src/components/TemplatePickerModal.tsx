@@ -38,7 +38,8 @@ export default function TemplatePickerModal({ onClose, onSelect }: TemplatePicke
   }, [templates, search]);
 
   const handleSelect = async (tpl: Template) => {
-    // Track usage
+    // Track usage (useTemplate is an API function, not a React hook)
+    // eslint-disable-next-line react-hooks/rules-of-hooks
     useTemplate(tpl.id).catch(() => {});
     onSelect({ brief: tpl.brief ?? '', storyCount: tpl.storyCount });
   };
