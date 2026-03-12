@@ -19,6 +19,7 @@ interface ModelSearchSelectProps {
   value: string;
   defaultModelId?: string | null;
   onChange: (modelId: string) => void;
+  disabled?: boolean;
 }
 
 function formatCost(cost: number): string {
@@ -38,7 +39,7 @@ const SpeedIcon = ({ tier }: { tier?: string }) => {
   return <Clock size={10} className="text-muted/50" />;
 };
 
-export default function ModelSearchSelect({ models, value, defaultModelId, onChange }: ModelSearchSelectProps) {
+export default function ModelSearchSelect({ models, value, defaultModelId, onChange, disabled }: ModelSearchSelectProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [highlightIdx, setHighlightIdx] = useState(0);
@@ -204,8 +205,9 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
       <button
         ref={triggerRef}
         type="button"
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none hover:border-accent/50 focus:border-accent transition-colors cursor-pointer text-left"
+        onClick={() => !disabled && setOpen(!open)}
+        disabled={disabled}
+        className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none hover:border-accent/50 focus:border-accent transition-colors text-left ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-label="Select LLM model"
