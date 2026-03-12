@@ -284,7 +284,7 @@ server.registerTool(
 server.registerTool(
   'rorca_list_specs',
   {
-    description: 'List all specs in a workspace. Returns specs grouped by status: pending (generated, awaiting review), approved (ready to run via Ralph Loop), and running (currently executing in a pipeline). Useful for checking queue state before starting a pipeline.',
+    description: 'List all specs in a workspace. Returns specs grouped by status: pending (generated, awaiting review), approved (ready to run via the execution engine), and running (currently executing in a pipeline). Useful for checking queue state before starting a pipeline.',
     inputSchema: {
       workspaceId: z.string().describe('Rorca workspace ID'),
       status: z.enum(['pending', 'approved', 'all']).optional().default('all').describe('Filter by spec status'),
@@ -310,7 +310,7 @@ server.registerTool(
 server.registerTool(
   'rorca_approve_spec',
   {
-    description: 'Approve a pending spec and move it to the approved queue. Once approved, the spec can be executed by Ralph Loop via run-loop.sh. Use rorca_list_specs to find the spec ID first.',
+    description: 'Approve a pending spec and move it to the approved queue. Once approved, the spec can be executed by the execution engine. Use rorca_list_specs to find the spec ID first.',
     inputSchema: {
       workspaceId: z.string().describe('Rorca workspace ID'),
       specId: z.string().describe('Spec ID (from rorca_list_specs output)'),
@@ -327,11 +327,11 @@ server.registerTool(
         body: JSON.stringify(body),
       });
       if (!res.ok) return httpError('rorca_approve_spec', res);
-      const { path: approvedPath } = await res.json() as { path: string };
+      const { approvedPath } = await res.json() as { approvedPath: string };
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ ok: true, specId, approvedPath, message: `Spec approved and moved to: ${approvedPath}` }, null, 2),
+          text: JSON.stringify({ ok: true, specId, approvedPath, message: 'Spec approved. Run it with rorca_trigger_run' }, null, 2),
         }],
       };
     });
@@ -341,7 +341,7 @@ server.registerTool(
 server.registerTool(
   'rorca_pipeline_status',
   {
-    description: 'Get the status of the active (or most recent) pipeline run for a workspace. Returns run status (running/paused/done/failed), story-level progress (pass/fail/skip counts), elapsed time, and last log line. Use this to monitor a Ralph Loop session without switching windows.',
+    description: 'Get the status of the active (or most recent) pipeline run for a workspace. Returns run status (running/paused/done/failed), story-level progress (pass/fail/skip counts), elapsed time, and last log line. Use this to monitor an execution engine session without switching windows.',
     inputSchema: {
       workspaceId: z.string().describe('Rorca workspace ID'),
       runId: z.number().optional().describe('Specific run ID. If omitted, returns the most recent run.'),
@@ -379,7 +379,7 @@ server.registerTool(
 server.registerTool(
   'rorca_trigger_run',
   {
-    description: 'Start a pipeline run for an approved spec. Spawns run-loop.sh in the project workspace to execute all user stories sequentially. Optionally runs in dry-run mode (returns cost estimate without executing) or creates an isolated git worktree for the run.',
+    description: 'Start a pipeline run for an approved spec. Spawns the execution engine in the project workspace to execute all user stories sequentially. Optionally runs in dry-run mode (returns cost estimate without executing) or creates an isolated git worktree for the run.',
     inputSchema: {
       workspaceId: z.string().describe('Rorca workspace ID'),
       specId: z.string().describe('Spec ID (filename slug) — must be in approved status'),
@@ -517,7 +517,7 @@ server.registerTool(
 server.registerTool(
   'rorca_retry_story',
   {
-    description: 'Retry one or more failed stories within a completed pipeline run. The run must be in a terminal state (failed, done, or partial_failure). Creates new story_result rows with incremented retry counts and respawns run-loop.sh for only the specified stories.',
+    description: 'Retry one or more failed stories within a completed pipeline run. The run must be in a terminal state (failed, done, or partial_failure). Creates new story_result rows with incremented retry counts and respawns the execution engine for only the specified stories.',
     inputSchema: {
       runId: z.number().describe('Pipeline run ID'),
       storyIds: z.array(z.string()).optional().describe('Story IDs to retry (e.g. ["US-003", "US-005"]). If omitted, retries ALL failed stories.'),
