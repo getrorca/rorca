@@ -393,7 +393,8 @@ function chatCompleteCLI(messages: ChatMessage[], model?: string): Promise<ChatR
     child.on('close', (code) => {
       if (stderr) logger.warn({ stderr: stderr.slice(0, 500) }, '[LLM] claude stderr');
       if (code !== 0) {
-        reject(new Error(`claude exited with code ${code}. stderr: ${stderr.slice(0, 300)}`));
+        const detail = stderr.slice(0, 300) || stdout.slice(0, 300);
+        reject(new Error(`claude exited with code ${code}. detail: ${detail}`));
         return;
       }
       if (!stdout.trim()) {

@@ -1,9 +1,9 @@
 # Run State Summary
 
-Spec: rorca-forge-approve-and-queue
-Run ID: 39
-Started: 2026-03-11T22:00:06.703Z
-Last Updated: 2026-03-11T22:01:33.989Z
+Spec: rorca-mcp-cli-spec-enhancement
+Run ID: 40
+Started: 2026-03-12T04:20:33.580Z
+Last Updated: 2026-03-12T04:29:43.149Z
 
 ## Completed Stories (1)
-- FAQ-001: Add Approve & Queue button to SpecForgePreview so specs can be queued when a run is already active — DONE (claude, claude-sonnet-4-6, 79s)
+- US-001: Research Best Practices and Rewrite rorca-mcp-cli Spec with Exhaustive Acceptance Criteria — DONE (claude, claude-sonnet-4-6, 542s)
