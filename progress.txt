@@ -1,10 +1,9 @@
 # Run State Summary
 
-Spec: rorca-post-run-qa
-Run ID: 61
-Started: 2026-03-12T08:34:23.363Z
-Last Updated: 2026-03-12T09:19:12.633Z
+Spec: providers-models-page-redesign
+Run ID: 66
+Started: 2026-03-12T20:08:56.201Z
+Last Updated: 2026-03-12T20:13:20.643Z
 
-## Completed Stories (2)
-- QA-001: Frontend TypeScript validation and error resolution — DONE (claude, claude-sonnet-4-6, 2396s)
-- QA-002: Backend TypeScript validation and error resolution — DONE (claude, claude-sonnet-4-6, 178s)
+## Completed Stories (1)
+- PM-001: Replace single-column scroll with responsive grid shell — DONE (claude, claude-sonnet-4-6, 264s)
