@@ -2,7 +2,7 @@
   "specId": "rorca-enrich-spec",
   "runId": 77,
   "startedAt": "2026-03-12T23:12:07.557Z",
-  "lastUpdatedAt": "2026-03-12T23:21:21.788Z",
+  "lastUpdatedAt": "2026-03-12T23:23:00.634Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 553684
+    },
+    {
+      "storyId": "US-002",
+      "title": "spec_generation_logs migration and enrichment schema support",
+      "status": "passed",
+      "startedAt": "2026-03-12T23:21:36.217Z",
+      "finishedAt": "2026-03-12T23:23:00.634Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 84417
     }
   ],
   "failedStories": [],
