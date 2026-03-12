@@ -8769,6 +8769,112 @@ ${storyList}`;
   }
 });
 
+// GET /api/specs/:specId/attachments — list all attachments for a spec
+
+/**
+ * @swagger
+ * /api/specs/{specId}/attachments:
+ *   get:
+ *     summary: List all attachments for a spec
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Spec slug ID
+ *     responses:
+ *       200:
+ *         description: List of attachments (metadata only, no binary data)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 properties:
+ *                   id:
+ *                     type: string
+ *                   filename:
+ *                     type: string
+ *                   contentType:
+ *                     type: string
+ *                   fileSize:
+ *                     type: integer
+ *                   createdAt:
+ *                     type: string
+ *                   uploadedBy:
+ *                     type: object
+ *                     nullable: true
+ *                     properties:
+ *                       id:
+ *                         type: string
+ *                       name:
+ *                         type: string
+ *       404:
+ *         description: Spec not found
+ */
+router.get('/:specId/attachments', async (req: Request, res: Response) => {
+  const { specId } = req.params;
+
+  // Verify spec exists across all workspaces
+  const workspaces = await query<{ id: string; path: string }>(
+    `SELECT id, path FROM workspaces`
+  );
+  let specExists = false;
+  for (const ws of workspaces) {
+    const pendingPath = path.join(ws.path, 'forge/specs/pending', `${specId}.json`);
+    const approvedPath = path.join(ws.path, 'forge/specs/approved', `${specId}.json`);
+    if (fs.existsSync(pendingPath) || fs.existsSync(approvedPath)) {
+      specExists = true;
+      break;
+    }
+  }
+
+  if (!specExists) {
+    res.status(404).json({ error: `Spec not found: ${specId}` });
+    return;
+  }
+
+  const rows = await query<{
+    id: string;
+    filename: string;
+    content_type: string;
+    file_size: number;
+    created_at: string;
+    uploader_id: string | null;
+    uploader_name: string | null;
+  }>(
+    `SELECT
+       sa.id,
+       sa.filename,
+       sa.content_type,
+       sa.file_size,
+       sa.created_at,
+       u.id AS uploader_id,
+       u.name AS uploader_name
+     FROM spec_attachments sa
+     LEFT JOIN users u ON u.id = sa.uploaded_by
+     WHERE sa.spec_id = $1
+     ORDER BY sa.created_at DESC`,
+    [specId]
+  );
+
+  res.json(
+    rows.map((row) => ({
+      id: row.id,
+      filename: row.filename,
+      contentType: row.content_type,
+      fileSize: row.file_size,
+      createdAt: row.created_at,
+      uploadedBy: row.uploader_id
+        ? { id: row.uploader_id, name: row.uploader_name }
+        : null,
+    }))
+  );
+});
+
 // POST /api/specs/:specId/attachments — upload a file attachment for a spec
 const ALLOWED_CONTENT_TYPES = new Set([
   'image/png',
