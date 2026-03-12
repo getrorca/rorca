@@ -3,7 +3,8 @@
 Spec: rorca-ensure-postgres
 Run ID: 1
 Started: 2026-03-12T18:19:22.650Z
-Last Updated: 2026-03-12T18:27:23.221Z
+Last Updated: 2026-03-12T18:32:06.463Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Platform detection and Postgres binary download — DONE (claude, 350s)
+- US-002: Extract archive and run initdb to initialize data directory — DONE (claude, 260s)
