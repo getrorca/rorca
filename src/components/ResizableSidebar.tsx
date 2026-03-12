@@ -103,14 +103,19 @@ export default function ResizableSidebar({ children, className = '' }: Resizable
         };
     }, [isDragging]);
 
-    // Double-click to toggle collapse
+    // Double-click to toggle collapse — also persists to localStorage immediately
     const onDoubleClick = useCallback(() => {
         setCollapsed((prev) => {
+            const next = !prev;
             if (prev) {
                 // Expanding: restore last expanded width
                 setWidth(lastExpandedWidthRef.current);
+                saveStoredState({ collapsed: false, lastWidth: lastExpandedWidthRef.current });
+            } else {
+                // Collapsing
+                saveStoredState({ collapsed: true, lastWidth: lastExpandedWidthRef.current });
             }
-            return !prev;
+            return next;
         });
     }, []);
 
@@ -157,7 +162,7 @@ export default function ResizableSidebar({ children, className = '' }: Resizable
                 aria-valuenow={effectiveWidth}
                 aria-valuemin={MIN_WIDTH}
                 aria-valuemax={MAX_WIDTH}
-                title="Drag to resize"
+                title={`Drag to resize · Double-click to ${collapsed ? 'expand' : 'collapse'}`}
             >
                 {/* Visual indicator line */}
                 <div
