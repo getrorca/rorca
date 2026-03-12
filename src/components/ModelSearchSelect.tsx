@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { Search, ChevronDown, Check, Sparkles, Zap, Clock, Turtle } from 'lucide-react';
+import { Search, ChevronDown, ChevronRight, Check, Sparkles, Zap, Clock, Turtle } from 'lucide-react';
 
 export interface ModelOption {
   id: string;
@@ -43,6 +43,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [highlightIdx, setHighlightIdx] = useState(0);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(['OpenRouter']));
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -54,8 +55,63 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
 
   const selected = models.find(m => m.id === value);
 
+  // Auto-expand OpenRouter when the effective model belongs to OpenRouter
+  useEffect(() => {
+    if (!open) return;
+    const effectiveModel = models.find(m => m.id === value);
+    if (effectiveModel?.provider === 'OpenRouter') {
+      setCollapsed(prev => {
+        if (!prev.has('OpenRouter')) return prev;
+        const next = new Set(prev);
+        next.delete('OpenRouter');
+        return next;
+      });
+    }
+  }, [open, value, models]);
+
+  // Auto-expand OpenRouter when search/filter produces OpenRouter results
+  useEffect(() => {
+    if (!open) return;
+    const q = query.toLowerCase().trim();
+    if (!q) return;
+    const hasOrResults = models.some(m =>
+      m.provider === 'OpenRouter' && (
+        m.label.toLowerCase().includes(q) ||
+        m.provider.toLowerCase().includes(q) ||
+        m.id.toLowerCase().includes(q)
+      )
+    );
+    if (hasOrResults) {
+      setCollapsed(prev => {
+        if (!prev.has('OpenRouter')) return prev;
+        const next = new Set(prev);
+        next.delete('OpenRouter');
+        return next;
+      });
+    }
+  }, [query, open, models]);
+
+  // Reset collapse state when dropdown closes
+  useEffect(() => {
+    if (!open) {
+      setCollapsed(new Set(['OpenRouter']));
+    }
+  }, [open]);
+
+  const toggleCollapsed = useCallback((label: string) => {
+    setCollapsed(prev => {
+      const next = new Set(prev);
+      if (next.has(label)) {
+        next.delete(label);
+      } else {
+        next.add(label);
+      }
+      return next;
+    });
+  }, []);
+
   // Filter + group models
-  const { groups, flatList } = useMemo(() => {
+  const { groups } = useMemo(() => {
     const q = query.toLowerCase().trim();
     const filtered = q
       ? models.filter(m =>
@@ -91,16 +147,9 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
     // OpenRouter last (largest group)
     const orModels = byProvider.get('OpenRouter');
     if (orModels) {
-      // When not searching, limit OpenRouter to first 20 to avoid overwhelming
-      const displayModels = !q && orModels.length > 20 ? orModels.slice(0, 20) : orModels;
-      groups.push({
-        label: `OpenRouter${!q && orModels.length > 20 ? ` (showing 20 of ${orModels.length} — type to search)` : ''}`,
-        models: displayModels,
-      });
+      groups.push({ label: 'OpenRouter', models: orModels });
     }
 
-    // Flat list for keyboard navigation
-    const flatList = groups.flatMap(g => g.models);
     // Dedupe (recommended models appear in their provider group too)
     const seen = new Set<string>();
     const deduped: ModelOption[] = [];
@@ -113,7 +162,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
       }
     }
 
-    return { groups, flatList: deduped };
+    return { groups };
   }, [models, query]);
 
   // Reset highlight on filter change
@@ -164,6 +213,22 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
     items[highlightIdx]?.scrollIntoView({ block: 'nearest' });
   }, [highlightIdx, open]);
 
+  // Effective flat list excludes models from collapsed groups (for keyboard nav)
+  const visibleFlatList = useMemo(() => {
+    const seen = new Set<string>();
+    const result: ModelOption[] = [];
+    for (const g of groups) {
+      if (collapsed.has(g.label)) continue;
+      for (const m of g.models) {
+        if (!seen.has(m.id)) {
+          seen.add(m.id);
+          result.push(m);
+        }
+      }
+    }
+    return result;
+  }, [groups, collapsed]);
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (!open) {
       if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
@@ -175,7 +240,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();
-        setHighlightIdx(i => Math.min(i + 1, flatList.length - 1));
+        setHighlightIdx(i => Math.min(i + 1, visibleFlatList.length - 1));
         break;
       case 'ArrowUp':
         e.preventDefault();
@@ -183,8 +248,8 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
         break;
       case 'Enter':
         e.preventDefault();
-        if (flatList[highlightIdx]) {
-          onChange(flatList[highlightIdx].id);
+        if (visibleFlatList[highlightIdx]) {
+          onChange(visibleFlatList[highlightIdx].id);
           setOpen(false);
         }
         break;
@@ -193,7 +258,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
         setOpen(false);
         break;
     }
-  }, [open, flatList, highlightIdx, onChange]);
+  }, [open, visibleFlatList, highlightIdx, onChange]);
 
   // Track flat index across groups for highlighting
   let flatIdx = -1;
@@ -279,16 +344,40 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
                 const newModels = group.models.filter(m => !seenIds.has(m.id));
                 if (newModels.length === 0) return null;
 
+                const isCollapsed = collapsed.has(group.label);
+                const isCollapsible = group.label !== 'Recommended';
+
                 return (
                   <div key={group.label}>
                     {/* Group header */}
-                    <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted/60 bg-[var(--bg)] sticky top-0">
-                      {group.label === 'Recommended' && <Sparkles size={10} className="inline mr-1 text-amber-400" />}
-                      {group.label}
-                    </div>
+                    {isCollapsible ? (
+                      <button
+                        type="button"
+                        onClick={() => toggleCollapsed(group.label)}
+                        className="w-full flex items-center justify-between px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted/60 bg-[var(--bg)] sticky top-0 hover:text-muted transition-colors cursor-pointer"
+                      >
+                        <span>{group.label}</span>
+                        <span className="flex items-center gap-1.5">
+                          {isCollapsed && (
+                            <span className="text-[9px] font-normal normal-case tracking-normal text-muted/40">
+                              {newModels.length} models
+                            </span>
+                          )}
+                          {isCollapsed
+                            ? <ChevronRight size={10} className="text-muted/40" />
+                            : <ChevronDown size={10} className="text-muted/40" />
+                          }
+                        </span>
+                      </button>
+                    ) : (
+                      <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted/60 bg-[var(--bg)] sticky top-0">
+                        <Sparkles size={10} className="inline mr-1 text-amber-400" />
+                        {group.label}
+                      </div>
+                    )}
 
-                    {/* Models */}
-                    {group.models.map(m => {
+                    {/* Models — hidden when collapsed */}
+                    {!isCollapsed && group.models.map(m => {
                       if (seenIds.has(m.id)) return null;
                       seenIds.add(m.id);
                       flatIdx++;
