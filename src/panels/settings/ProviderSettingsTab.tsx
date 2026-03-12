@@ -3,7 +3,7 @@ import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, Che
 import { ProBadge } from '../../components/UpgradePrompt';
 import { useAuth } from '../../contexts/AuthContext';
 import AgentPicker from '../../components/AgentPicker';
-import type { ModelOption } from '../../components/ModelSearchSelect';
+import ModelSearchSelect, { type ModelOption } from '../../components/ModelSearchSelect';
 import { useWorkspace } from '../../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../../contexts/ThemeContext';
 import { apiFetch } from '../../lib/apiFetch';
@@ -1904,17 +1904,12 @@ function DisplaySection() {
       <div className="border-t border-border pt-6">
         <h2 className="text-sm font-semibold text-[var(--text)] mb-1">Default Model</h2>
         <p className="text-xs text-muted mb-3">Global default when no workspace override is set</p>
-        <select
+        <ModelSearchSelect
+          models={models}
           value={defaultModel}
-          onChange={e => setDefaultModel(e.target.value)}
-          className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
-        >
-          {models.map(m => (
-            <option key={m.id} value={m.id}>
-              {m.label} ({m.provider}) — {formatContextWindow(m.contextWindow)} ctx, {SPEED_LABELS[m.speedTier]?.label}, {COST_LABELS[m.costTier]?.label} cost
-            </option>
-          ))}
-        </select>
+          defaultModelId={null}
+          onChange={setDefaultModel}
+        />
       </div>
 
       {/* Per-workspace preferred model override */}
