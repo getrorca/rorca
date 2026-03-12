@@ -82,3 +82,72 @@ The extension uses **esbuild** for bundling (not `tsc` directly), producing `dis
 | `Rorca: Test Connection` | Ping backend and show status |
 | `Rorca: Start Server` | Open terminal with server start instructions |
 | `Rorca: Forge from Selection` | Use selected text as a spec brief |
+
+## Publishing
+
+### Prerequisites
+
+**1. Create Azure DevOps organization**
+
+Go to [dev.azure.com](https://dev.azure.com) and create an organization (free).
+
+**2. Create a Personal Access Token (PAT)**
+
+In Azure DevOps: User Settings → Personal Access Tokens → New Token.
+
+- **Organization**: set to **All accessible organizations** (NOT a specific org — vsce requires this)
+- **Scopes**: expand Marketplace → check **Manage**
+- **Expiration**: 1 year recommended for CI usage
+
+Copy the token — it won't be shown again.
+
+**3. Register a publisher**
+
+Go to [marketplace.visualstudio.com/manage](https://marketplace.visualstudio.com/manage) and create a publisher:
+
+- **Publisher ID**: `rorca`
+- **Display name**: `Rorca`
+
+**4. Verify locally**
+
+```bash
+npx @vscode/vsce login rorca
+# Paste your PAT when prompted
+```
+
+**5. Add VSCE_PAT as a repository secret**
+
+In GitHub: Settings → Secrets and variables → Actions → New repository secret.
+
+- **Name**: `VSCE_PAT`
+- **Value**: your Azure DevOps PAT
+
+**6. Tag a release to trigger automated publish**
+
+```bash
+git tag v0.1.0-vscode
+git push --tags
+```
+
+The `publish-vscode.yml` workflow runs on tags matching `v*-vscode` and publishes to the VS Code Marketplace automatically.
+
+### Manual publishing
+
+```bash
+cd rorca-vscode
+
+# Create .vsix package locally
+npx @vscode/vsce package
+# or: npm run package:vsix
+
+# Publish directly (requires vsce login)
+npx @vscode/vsce publish
+# or: npm run publish
+
+# Publish as pre-release
+npm run publish:pre
+```
+
+### Open VSX Registry (optional)
+
+To also publish to the [Open VSX Registry](https://open-vsx.org) (used by VSCodium and other editors), add an `OVSX_PAT` repository secret. The workflow publishes to Open VSX automatically when this secret is present.
