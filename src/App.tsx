@@ -25,7 +25,7 @@ import {
 } from './components/skeletons';
 import SlideOver from './components/SlideOver';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
-import { useAppNavigate, useActivePanel } from './routes';
+import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
 
 // — Lazy-loaded pages (not part of initial bundle) —
 const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
@@ -280,7 +280,7 @@ interface ActivePanelProps {
   onForgeBriefConsumed: () => void;
 }
 
-function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId: _reviewSpecId, onNavigateToSpecReview: _onNavigateToSpecReview, forgeBrief, onForgeBriefConsumed }: ActivePanelProps) {
+function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigateToSpecReview, forgeBrief, onForgeBriefConsumed }: ActivePanelProps) {
   const { activeRunId, navigateBackFromRun } = useAppContentContext();
 
   switch (id) {
@@ -344,7 +344,7 @@ function AppLayout() {
   const [showShortcutsOverlay, setShowShortcutsOverlay] = useState(false);
   const [mobileNavOpen, setMobileNavOpen] = useState(false);
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
-  const [_queueCount, setQueueCount] = useState(0);
+  const [queueCount, setQueueCount] = useState(0);
   const [pendingSpecsCount, setPendingSpecsCount] = useState(0);
   const [activeRunCount, setActiveRunCount] = useState(0);
 
