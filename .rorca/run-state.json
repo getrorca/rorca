@@ -1,38 +1,44 @@
 {
-  "specId": "rorca-distribution",
-  "runId": 48,
-  "startedAt": "2026-03-12T06:04:21.346Z",
-  "lastUpdatedAt": "2026-03-12T06:07:00.205Z",
+  "specId": "rorca-frontend-routing",
+  "runId": 833,
+  "startedAt": "2026-02-28T22:04:07.575Z",
+  "lastUpdatedAt": "2026-03-01T02:08:53.314Z",
   "completedStories": [
     {
-      "storyId": "DIST-006",
-      "title": "LICENSE & Legal Files",
+      "storyId": "FR-002",
+      "title": "Migrate Sidebar and Programmatic Navigation",
       "status": "passed",
-      "startedAt": "2026-03-12T06:04:24.054Z",
-      "finishedAt": "2026-03-12T06:05:05.009Z",
+      "startedAt": "2026-02-28T22:04:12.924Z",
+      "finishedAt": "2026-02-28T22:10:30.622Z",
       "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 40955
+      "elapsedMs": 377698
     },
     {
-      "storyId": "DIST-007",
-      "title": "GitHub Actions — Release Workflow",
+      "storyId": "FR-003",
+      "title": "SlideOver Deep Linking via Nested Routes",
       "status": "passed",
-      "startedAt": "2026-03-12T06:05:24.046Z",
-      "finishedAt": "2026-03-12T06:05:51.169Z",
+      "startedAt": "2026-02-28T22:10:39.936Z",
+      "finishedAt": "2026-02-28T22:15:51.171Z",
       "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 27123
+      "elapsedMs": 311235
     },
     {
-      "storyId": "DIST-008",
-      "title": "Install Script (curl | sh)",
+      "storyId": "FR-004",
+      "title": "Settings Sub-Routes and SPA Fallback",
       "status": "passed",
-      "startedAt": "2026-03-12T06:06:09.044Z",
-      "finishedAt": "2026-03-12T06:07:00.205Z",
+      "startedAt": "2026-02-28T22:16:00.409Z",
+      "finishedAt": "2026-02-28T22:27:06.507Z",
       "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 51161
+      "elapsedMs": 666098
+    },
+    {
+      "storyId": "CA-001",
+      "title": "Convention Pack Schema and Registry",
+      "status": "passed",
+      "startedAt": "2026-03-01T01:59:31.211Z",
+      "finishedAt": "2026-03-01T02:08:53.313Z",
+      "agentType": "claude",
+      "elapsedMs": 562102
     }
   ],
   "failedStories": [],
