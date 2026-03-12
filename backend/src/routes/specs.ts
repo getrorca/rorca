@@ -10081,4 +10081,116 @@ router.delete('/:specId/attachments/:attachmentId', async (req: Request, res: Re
   res.status(204).send();
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}:
+ *   put:
+ *     summary: Update spec-level metadata
+ *     description: Updates top-level metadata fields (model, title, _notes) without touching userStories.
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Spec slug (filename without .json)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace ID (required)
+ *               model:
+ *                 type: string
+ *                 description: LLM model identifier
+ *               title:
+ *                 type: string
+ *                 description: Human-readable spec title
+ *               _notes:
+ *                 type: string
+ *                 description: Internal notes for the spec
+ *             required:
+ *               - workspaceId
+ *     responses:
+ *       200:
+ *         description: Updated spec metadata
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id:
+ *                   type: string
+ *                 title:
+ *                   type: string
+ *                 model:
+ *                   type: string
+ *                 _notes:
+ *                   type: string
+ *                 storyCount:
+ *                   type: number
+ *       400:
+ *         description: Missing required parameter
+ *       404:
+ *         description: Workspace or spec not found
+ */
+router.put('/:specId', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId, model, title, _notes } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required body param: workspaceId' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specFile: string;
+    let content: any;
+    if (fs.existsSync(pendingFile)) {
+      specFile = pendingFile;
+      content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    } else if (fs.existsSync(approvedFile)) {
+      specFile = approvedFile;
+      content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    if (model !== undefined) content.model = model;
+    if (title !== undefined) content.title = title;
+    if (_notes !== undefined) content._notes = _notes;
+
+    const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
+    fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
+    await snapshotVersion(specId, JSON.stringify(content), specStatus);
+
+    const userStories: any[] = content.userStories ?? [];
+    res.json({
+      id: specId,
+      title: content.title,
+      model: content.model,
+      _notes: content._notes,
+      storyCount: userStories.length,
+    });
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
+  }
+});
+
 export default router;
