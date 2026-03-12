@@ -2,7 +2,7 @@
   "specId": "add-rorca-edit-spec-mcp-tool",
   "runId": 68,
   "startedAt": "2026-03-12T20:40:00.872Z",
-  "lastUpdatedAt": "2026-03-12T20:42:08.103Z",
+  "lastUpdatedAt": "2026-03-12T20:44:41.524Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 126523
+    },
+    {
+      "storyId": "US-002",
+      "title": "Register rorca_edit_spec MCP tool in backend/src/mcp/server.ts",
+      "status": "passed",
+      "startedAt": "2026-03-12T20:42:23.252Z",
+      "finishedAt": "2026-03-12T20:44:41.524Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 138272
     }
   ],
   "failedStories": [],
