@@ -1158,6 +1158,79 @@ server.registerTool(
   }
 );
 
+server.registerTool(
+  'rorca_validate_spec',
+  {
+    description: 'LLM-powered deep spec review using claude-sonnet-4-6. Injects spec-gap-analysis and assumption-buster skills to identify: implicit assumptions (with risk assessment), coverage gaps (missing error handling, auth, edge cases), untestable acceptance criteria (vague/subjective), and missed stories. Returns structured analysis with four arrays: assumptions, gaps, untestableACs, missedStories.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces)'),
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+    },
+  },
+  async ({ workspaceId, specId }) => {
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId }),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Spec validation failed (${res.status}): ${err}`);
+    }
+    const data = await res.json() as {
+      assumptions: Array<{ storyId: string; assumption: string; risk: string }>;
+      gaps: Array<{ area: string; description: string }>;
+      untestableACs: Array<{ storyId: string; acIndex: number; reason: string }>;
+      missedStories: Array<{ title: string; description: string; reason: string }>;
+    };
+
+    const lines: string[] = [];
+    lines.push(`Deep Validation: ${specId}`);
+    lines.push('');
+
+    if (data.assumptions.length > 0) {
+      lines.push(`Implicit Assumptions (${data.assumptions.length}):`);
+      for (const a of data.assumptions) {
+        lines.push(`  ⚠️  [${a.storyId}] ${a.assumption}`);
+        lines.push(`       Risk: ${a.risk}`);
+      }
+      lines.push('');
+    }
+
+    if (data.gaps.length > 0) {
+      lines.push(`Coverage Gaps (${data.gaps.length}):`);
+      for (const g of data.gaps) {
+        lines.push(`  🔍 [${g.area}] ${g.description}`);
+      }
+      lines.push('');
+    }
+
+    if (data.untestableACs.length > 0) {
+      lines.push(`Untestable Acceptance Criteria (${data.untestableACs.length}):`);
+      for (const u of data.untestableACs) {
+        lines.push(`  ❌ [${u.storyId}] AC #${u.acIndex}: ${u.reason}`);
+      }
+      lines.push('');
+    }
+
+    if (data.missedStories.length > 0) {
+      lines.push(`Missed Stories (${data.missedStories.length}):`);
+      for (const m of data.missedStories) {
+        lines.push(`  📋 ${m.title}`);
+        lines.push(`       ${m.description}`);
+        lines.push(`       Why needed: ${m.reason}`);
+      }
+      lines.push('');
+    }
+
+    if (data.assumptions.length === 0 && data.gaps.length === 0 && data.untestableACs.length === 0 && data.missedStories.length === 0) {
+      lines.push('No issues found — spec looks comprehensive.');
+    }
+
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  }
+);
+
 // ─── Slash-command Prompts (/mcp__rorca__<name>) ──────────────────────────────
 // These are user-invocable via /mcp__rorca__<name> [args] in Claude Code.
 // Each prompt calls the backend directly and injects formatted results into
@@ -1830,6 +1903,80 @@ server.registerPrompt(
     }
     const data = await res.json() as { entry: { title: string; rule: string }; total: number };
     return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `📝 Decision logged: ${data.entry.title}\n\n${data.entry.rule}\n\nTotal memories: ${data.total}` } }] };
+  }
+);
+
+server.registerPrompt(
+  'validate_spec',
+  {
+    title: 'Validate Spec (Deep LLM Review)',
+    description: 'LLM-powered deep spec review. Uses claude-sonnet-4-6 with spec-gap-analysis and assumption-buster skills to find: implicit assumptions, coverage gaps, untestable ACs, and missed stories.',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/validate`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws }),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Spec validation failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      assumptions: Array<{ storyId: string; assumption: string; risk: string }>;
+      gaps: Array<{ area: string; description: string }>;
+      untestableACs: Array<{ storyId: string; acIndex: number; reason: string }>;
+      missedStories: Array<{ title: string; description: string; reason: string }>;
+    };
+
+    const lines: string[] = [];
+    lines.push(`Deep Validation: ${specId}`);
+    lines.push('');
+
+    if (data.assumptions.length > 0) {
+      lines.push(`Implicit Assumptions (${data.assumptions.length}):`);
+      for (const a of data.assumptions) {
+        lines.push(`  ⚠️  [${a.storyId}] ${a.assumption}`);
+        lines.push(`       Risk: ${a.risk}`);
+      }
+      lines.push('');
+    }
+
+    if (data.gaps.length > 0) {
+      lines.push(`Coverage Gaps (${data.gaps.length}):`);
+      for (const g of data.gaps) {
+        lines.push(`  🔍 [${g.area}] ${g.description}`);
+      }
+      lines.push('');
+    }
+
+    if (data.untestableACs.length > 0) {
+      lines.push(`Untestable Acceptance Criteria (${data.untestableACs.length}):`);
+      for (const u of data.untestableACs) {
+        lines.push(`  ❌ [${u.storyId}] AC #${u.acIndex}: ${u.reason}`);
+      }
+      lines.push('');
+    }
+
+    if (data.missedStories.length > 0) {
+      lines.push(`Missed Stories (${data.missedStories.length}):`);
+      for (const m of data.missedStories) {
+        lines.push(`  📋 ${m.title}`);
+        lines.push(`       ${m.description}`);
+        lines.push(`       Why needed: ${m.reason}`);
+      }
+      lines.push('');
+    }
+
+    if (data.assumptions.length === 0 && data.gaps.length === 0 && data.untestableACs.length === 0 && data.missedStories.length === 0) {
+      lines.push('No issues found — spec looks comprehensive.');
+    }
+
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: lines.join('\n') } }] };
   }
 );
 
