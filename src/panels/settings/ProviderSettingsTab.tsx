@@ -1,8 +1,7 @@
 import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
+import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal } from 'lucide-react';
 import { ProBadge } from '../../components/UpgradePrompt';
 import { useAuth } from '../../contexts/AuthContext';
-import AgentPicker from '../../components/AgentPicker';
 import ModelSearchSelect, { type ModelOption } from '../../components/ModelSearchSelect';
 import { useWorkspace } from '../../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../../contexts/ThemeContext';
@@ -392,14 +391,37 @@ export function ProviderSettingsTab() {
       {/* Sections */}
       <div className="grid grid-cols-12 gap-0">
         <div className="col-span-12 space-y-10 pt-6">
-          <div ref={el => { sectionRefs.current['execution'] = el; }}>
-            <ExecutionEngineSection />
+          {/* Execution + Semantic side-by-side */}
+          <div
+            className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start"
+          >
+            {/* Execution Engine card */}
+            <div
+              ref={el => { sectionRefs.current['execution'] = el; }}
+              className="rounded-xl border border-border bg-panel p-5"
+            >
+              <div className="flex items-center gap-2 mb-4">
+                <Zap size={15} className="text-accent flex-shrink-0" />
+                <span className="text-sm font-semibold text-[var(--text)]">Execution Engine</span>
+              </div>
+              <ExecutionEngineSection />
+            </div>
+
+            {/* Semantic Engine card */}
+            <div
+              ref={el => { sectionRefs.current['embeddings'] = el; }}
+              className="rounded-xl border border-border bg-panel p-5"
+            >
+              <div className="flex items-center gap-2 mb-4">
+                <Database size={15} className="text-accent flex-shrink-0" />
+                <span className="text-sm font-semibold text-[var(--text)]">Semantic Engine</span>
+              </div>
+              <SemanticEngineSection />
+            </div>
           </div>
+
           <div ref={el => { sectionRefs.current['model-browser'] = el; }} className="border-t border-border pt-6">
             <DisplaySection />
-          </div>
-          <div ref={el => { sectionRefs.current['embeddings'] = el; }} className="border-t border-border pt-6">
-            <SemanticEngineSection />
           </div>
           <div ref={el => { sectionRefs.current['routing'] = el; }} className="border-t border-border pt-6">
             <ModelRoutingSection />
@@ -893,7 +915,7 @@ function ExecutionEngineSection() {
     }
   };
 
-  // Transform backend models into ModelOption format for AgentPicker
+  // Transform backend models into ModelOption format for ModelSearchSelect
   const modelOptions: ModelOption[] = useMemo(() => {
     const staticOptions: ModelOption[] = models.map(m => ({
       id: m.id,
@@ -935,36 +957,106 @@ function ExecutionEngineSection() {
   return (
     <div className="space-y-5">
       {showSetupGuide && <OpenCodeSetupGuide onClose={() => setShowSetupGuide(false)} />}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
-            <Cpu size={16} className="text-accent" />
-            Execution Engine
-          </h2>
-          <p className="text-xs text-muted mt-0.5">
-            Choose how Rorca executes pipeline stories
-            <button
-              onClick={() => setShowSetupGuide(true)}
-              className="inline-flex items-center gap-1 ml-2 text-accent hover:text-accent/80 transition-colors"
-            >
-              <BookOpen size={11} />
-              <span className="underline underline-offset-2">Setup Guide</span>
-            </button>
-          </p>
-        </div>
+
+      {/* Setup guide link */}
+      <p className="text-xs text-muted">
+        Choose how Rorca executes pipeline stories
+        <button
+          onClick={() => setShowSetupGuide(true)}
+          className="inline-flex items-center gap-1 ml-2 text-accent hover:text-accent/80 transition-colors"
+        >
+          <BookOpen size={11} />
+          <span className="underline underline-offset-2">Setup Guide</span>
+        </button>
+      </p>
+
+      {/* Agent type — 3 icon tiles */}
+      <div className="grid grid-cols-3 gap-2">
+        {/* Claude tile */}
+        <button
+          type="button"
+          onClick={() => setSelectedType('claude')}
+          className={`flex flex-col items-center gap-1.5 p-3 rounded-lg border cursor-pointer transition-colors ${
+            selectedType === 'claude'
+              ? 'border-accent bg-accent/10 text-accent'
+              : 'border-border hover:border-accent/30 text-[var(--text)]'
+          }`}
+        >
+          <Lock size={18} className="flex-shrink-0" />
+          <span className="text-xs font-medium leading-tight">Claude</span>
+          <span className={`text-[10px] leading-tight ${selectedType === 'claude' ? 'text-accent/70' : 'text-muted'}`}>
+            Subscription
+          </span>
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-0.5 ${
+            selectedType === 'claude'
+              ? 'bg-accent'
+              : config?.opencodeInstalled !== false
+                ? 'bg-emerald-500/60'
+                : 'bg-border'
+          }`} />
+        </button>
+
+        {/* OpenCode tile */}
+        <button
+          type="button"
+          onClick={() => setSelectedType('opencode')}
+          className={`flex flex-col items-center gap-1.5 p-3 rounded-lg border cursor-pointer transition-colors ${
+            selectedType === 'opencode'
+              ? 'border-accent bg-accent/10 text-accent'
+              : 'border-border hover:border-accent/30 text-[var(--text)]'
+          }`}
+        >
+          <Globe size={18} className="flex-shrink-0" />
+          <span className="text-xs font-medium leading-tight">OpenCode</span>
+          <span className={`text-[10px] leading-tight ${selectedType === 'opencode' ? 'text-accent/70' : 'text-muted'}`}>
+            75+ models
+          </span>
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-0.5 ${
+            selectedType === 'opencode'
+              ? 'bg-accent'
+              : config?.opencodeInstalled === true
+                ? 'bg-emerald-500/60'
+                : config?.opencodeInstalled === false
+                  ? 'bg-red-400/60'
+                  : 'bg-border'
+          }`} />
+        </button>
+
+        {/* Codex tile */}
+        <button
+          type="button"
+          onClick={() => setSelectedType('codex')}
+          className={`flex flex-col items-center gap-1.5 p-3 rounded-lg border cursor-pointer transition-colors ${
+            selectedType === 'codex'
+              ? 'border-accent bg-accent/10 text-accent'
+              : 'border-border hover:border-accent/30 text-[var(--text)]'
+          }`}
+        >
+          <Terminal size={18} className="flex-shrink-0" />
+          <span className="text-xs font-medium leading-tight">Codex</span>
+          <span className={`text-[10px] leading-tight ${selectedType === 'codex' ? 'text-accent/70' : 'text-muted'}`}>
+            ChatGPT Sub
+          </span>
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-0.5 ${
+            selectedType === 'codex'
+              ? 'bg-accent'
+              : config?.codexInstalled === true
+                ? 'bg-emerald-500/60'
+                : config?.codexInstalled === false
+                  ? 'bg-red-400/60'
+                  : 'bg-border'
+          }`} />
+        </button>
       </div>
 
-      {/* Agent type + model selection */}
-      <AgentPicker
-        agentType={selectedType}
-        agentModel={selectedModel || null}
-        onAgentTypeChange={setSelectedType}
-        onModelChange={setSelectedModel}
-        models={modelOptions}
-        claudeInstalled={config?.opencodeInstalled !== false}
-        opencodeInstalled={config?.opencodeInstalled ?? undefined}
-        codexInstalled={config?.codexInstalled ?? undefined}
-      />
+      {/* Model selector (only for OpenCode) */}
+      {selectedType === 'opencode' && (
+        <ModelSearchSelect
+          models={modelOptions}
+          value={selectedModel ?? ''}
+          onChange={setSelectedModel}
+        />
+      )}
 
       {/* Claude auth status (OC-025) */}
       {selectedType === 'claude' && <ClaudeAuthStatus />}
@@ -1351,17 +1443,9 @@ function SemanticEngineSection() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
-            <Database size={16} className="text-accent" />
-            Semantic Engine (Embeddings)
-          </h2>
-          <p className="text-xs text-muted mt-0.5">
-            Vector embeddings power semantic search, memory recall, and knowledge graph features
-          </p>
-        </div>
-      </div>
+      <p className="text-xs text-muted">
+        Vector embeddings power semantic search, memory recall, and knowledge graph features
+      </p>
 
       {/* Provider radio buttons */}
       <div className="space-y-1.5">
