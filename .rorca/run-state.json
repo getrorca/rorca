@@ -1,28 +1,18 @@
 {
-  "specId": "fix-mcp-approve-spec-runloop-references",
-  "runId": 58,
-  "startedAt": "2026-03-12T08:30:35.786Z",
-  "lastUpdatedAt": "2026-03-12T08:34:30.641Z",
+  "specId": "rorca-post-run-qa",
+  "runId": 64,
+  "startedAt": "2026-03-12T08:41:26.946Z",
+  "lastUpdatedAt": "2026-03-12T09:22:28.111Z",
   "completedStories": [
     {
-      "storyId": "US-001",
-      "title": "Fix rorca_approve_spec response destructuring and update stale run-loop.sh references in MCP server",
+      "storyId": "QA-001",
+      "title": "Frontend TypeScript validation and error resolution",
       "status": "passed",
-      "startedAt": "2026-03-12T08:30:44.618Z",
-      "finishedAt": "2026-03-12T08:32:38.340Z",
+      "startedAt": "2026-03-12T08:41:35.072Z",
+      "finishedAt": "2026-03-12T09:22:28.111Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 113722
-    },
-    {
-      "storyId": "US-002",
-      "title": "Update model references from claude-sonnet-4-5-20250929 to claude-sonnet-4-6 in MCP server and specs.ts",
-      "status": "passed",
-      "startedAt": "2026-03-12T08:33:12.258Z",
-      "finishedAt": "2026-03-12T08:34:30.629Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 78371
+      "elapsedMs": 2453039
     }
   ],
   "failedStories": [],
