@@ -1,28 +1,38 @@
 {
-  "specId": "fix-archive-500-jsonb-parse",
-  "runId": 52,
-  "startedAt": "2026-03-12T08:12:07.494Z",
-  "lastUpdatedAt": "2026-03-12T08:15:20.322Z",
+  "specId": "collapsible-left-nav-drag-to-close",
+  "runId": 54,
+  "startedAt": "2026-03-12T08:12:11.075Z",
+  "lastUpdatedAt": "2026-03-12T08:19:39.250Z",
   "completedStories": [
     {
       "storyId": "US-001",
-      "title": "Fix JSONB payload parsing in GET /api/specs/archive",
+      "title": "Implement drag-to-collapse threshold and snap behavior",
       "status": "passed",
-      "startedAt": "2026-03-12T08:12:08.141Z",
-      "finishedAt": "2026-03-12T08:13:51.053Z",
+      "startedAt": "2026-03-12T08:12:11.726Z",
+      "finishedAt": "2026-03-12T08:14:29.381Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 102912
+      "elapsedMs": 137655
     },
     {
       "storyId": "US-002",
-      "title": "Audit all JSONB payload parsing in specs.ts",
+      "title": "Add double-click toggle on drag handle",
       "status": "passed",
-      "startedAt": "2026-03-12T08:14:05.917Z",
-      "finishedAt": "2026-03-12T08:15:20.322Z",
+      "startedAt": "2026-03-12T08:15:46.486Z",
+      "finishedAt": "2026-03-12T08:17:14.594Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 74405
+      "elapsedMs": 88108
+    },
+    {
+      "storyId": "US-003",
+      "title": "Render icon-only sidebar in collapsed state",
+      "status": "passed",
+      "startedAt": "2026-03-12T08:17:29.293Z",
+      "finishedAt": "2026-03-12T08:19:39.250Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 129957
     }
   ],
   "failedStories": [],
