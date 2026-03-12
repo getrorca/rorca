@@ -1,8 +1,7 @@
-import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight } from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
+import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal } from 'lucide-react';
 import { ProBadge } from '../../components/UpgradePrompt';
 import { useAuth } from '../../contexts/AuthContext';
-import AgentPicker from '../../components/AgentPicker';
 import ModelSearchSelect, { type ModelOption } from '../../components/ModelSearchSelect';
 import { useWorkspace } from '../../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../../contexts/ThemeContext';
@@ -173,23 +172,277 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: () =>
   );
 }
 
+// ─── Status Bar ──────────────────────────────────────────────────────────────
+
+interface StatusBarData {
+  agentType: 'claude' | 'opencode' | 'codex' | null;
+  agentModel: string | null;
+  defaultModel: string | null;
+  embeddingProvider: string | null;
+  vectorCount: number | null;
+  keyCount: number | null;
+}
+
+function StatusBar() {
+  const toast = useGlobalToast();
+  const [data, setData] = useState<StatusBarData>({
+    agentType: null, agentModel: null, defaultModel: null,
+    embeddingProvider: null, vectorCount: null, keyCount: null,
+  });
+  const [loading, setLoading] = useState(true);
+  const [rebuilding, setRebuilding] = useState(false);
+
+  useEffect(() => {
+    Promise.allSettled([
+      apiFetch<AgentConfig>('/api/config'),
+      apiFetch<DisplaySettings>('/api/settings/display'),
+      apiFetch<EmbeddingProviderStatus>('/api/config/embedding-provider'),
+      apiFetch<EmbedAllStatus>('/api/admin/embed-all/status'),
+      apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
+    ]).then(([agentRes, displayRes, embedProvRes, embedStatusRes, keysRes]) => {
+      setData({
+        agentType: agentRes.status === 'fulfilled' ? agentRes.value.agentType : null,
+        agentModel: agentRes.status === 'fulfilled' ? agentRes.value.agentModel : null,
+        defaultModel: displayRes.status === 'fulfilled' ? displayRes.value.defaultModel : null,
+        embeddingProvider: embedProvRes.status === 'fulfilled' ? embedProvRes.value.provider : null,
+        vectorCount: embedStatusRes.status === 'fulfilled' ? (embedStatusRes.value.embeddings ?? null) : null,
+        keyCount: keysRes.status === 'fulfilled' ? keysRes.value.keys.length : null,
+      });
+    }).finally(() => setLoading(false));
+  }, []);
+
+  const handleRebuild = async () => {
+    setRebuilding(true);
+    try {
+      const result = await apiFetch<{ queued: number }>('/api/admin/embed-all', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ force: true }),
+      });
+      toast.show(`Rebuild started — ${result.queued} items queued`, 'success');
+    } catch (err: any) {
+      toast.show(err.message || 'Failed to start rebuild', 'error');
+    } finally {
+      setRebuilding(false);
+    }
+  };
+
+  const agentDotColor = data.agentType === 'claude'
+    ? 'bg-green-500'
+    : data.agentType === 'opencode'
+    ? 'bg-orange-400'
+    : data.agentType === 'codex'
+    ? 'bg-blue-400'
+    : 'bg-zinc-500';
+
+  const agentLabel = data.agentType === 'claude'
+    ? 'Claude'
+    : data.agentType === 'opencode'
+    ? 'OpenCode'
+    : data.agentType === 'codex'
+    ? 'Codex'
+    : '—';
+
+  const pillClass = 'flex items-center gap-1.5 text-xs text-muted bg-panel border border-border rounded-full px-2.5 py-1';
+  const skeletonClass = 'animate-pulse bg-border rounded-full w-24 h-5';
+
+  return (
+    <div className="flex items-center justify-between gap-4 px-1 py-3 mb-2">
+      <div className="flex items-center gap-3 flex-wrap">
+        {loading ? (
+          <>
+            <div className={skeletonClass} />
+            <div className={skeletonClass} />
+            <div className={skeletonClass} />
+            <div className={skeletonClass} />
+          </>
+        ) : (
+          <>
+            {/* Agent pill */}
+            <span className={pillClass}>
+              <span className={`w-2 h-2 rounded-full flex-shrink-0 ${agentDotColor}`} />
+              {agentLabel}
+            </span>
+
+            {/* Model pill */}
+            {data.defaultModel && (
+              <span className={pillClass}>
+                <Cpu size={12} className="flex-shrink-0" />
+                {data.defaultModel}
+              </span>
+            )}
+
+            {/* Embeddings pill */}
+            {data.embeddingProvider && (
+              <span className={pillClass}>
+                <Database size={12} className="flex-shrink-0" />
+                {data.vectorCount !== null
+                  ? `${data.embeddingProvider} · ${data.vectorCount} vectors`
+                  : data.embeddingProvider}
+              </span>
+            )}
+
+            {/* API keys pill */}
+            {data.keyCount !== null && (
+              <span className={pillClass}>
+                <Key size={12} className="flex-shrink-0" />
+                {data.keyCount} {data.keyCount === 1 ? 'key' : 'keys'}
+              </span>
+            )}
+          </>
+        )}
+      </div>
+
+      {/* Rebuild Embeddings */}
+      <button
+        onClick={handleRebuild}
+        disabled={rebuilding}
+        className="text-xs text-muted hover:text-[var(--text)] flex items-center gap-1.5 transition-colors disabled:opacity-50 flex-shrink-0"
+      >
+        <RefreshCw size={12} className={rebuilding ? 'animate-spin' : ''} />
+        Rebuild Embeddings
+      </button>
+    </div>
+  );
+}
+
 // ─── Main Export ──────────────────────────────────────────────────────────────
 
+const PROVIDER_TABS = [
+  { id: 'execution', label: 'Execution Engine' },
+  { id: 'model-browser', label: 'Model Browser' },
+  { id: 'embeddings', label: 'Embeddings' },
+  { id: 'routing', label: 'Routing' },
+  { id: 'providers', label: 'Providers' },
+  { id: 'display', label: 'Display' },
+] as const;
+
+type ProviderTabId = typeof PROVIDER_TABS[number]['id'];
+
 export function ProviderSettingsTab() {
+  const [activeTab, setActiveTab] = useState<ProviderTabId>('execution');
+
+  // Refs for each scrollable section. 'embeddings' maps to the same DOM node as 'execution'
+  // (they share a card row), so clicking Embeddings tab scrolls to top of that grid.
+  const sectionRefs = useRef<Record<ProviderTabId, HTMLDivElement | null>>({
+    'execution': null,
+    'model-browser': null,
+    'embeddings': null,
+    'routing': null,
+    'providers': null,
+    'display': null,
+  });
+
+  const scrollToSection = (id: ProviderTabId) => {
+    setActiveTab(id);
+    // 'embeddings' and 'execution' share the same card row — scroll to execution ref
+    const targetId: ProviderTabId = id === 'embeddings' ? 'execution' : id;
+    sectionRefs.current[targetId]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
+  };
+
+  useEffect(() => {
+    const observers: IntersectionObserver[] = [];
+    const visibilityMap: Record<string, number> = {};
+
+    // Observe the 5 distinct DOM sections (embeddings shares execution's ref)
+    const observedTabs: ProviderTabId[] = ['execution', 'model-browser', 'routing', 'providers', 'display'];
+    observedTabs.forEach((id) => {
+      const el = sectionRefs.current[id];
+      if (!el) return;
+      const obs = new IntersectionObserver(
+        ([entry]) => {
+          visibilityMap[id] = entry.intersectionRatio;
+          const mostVisible = Object.entries(visibilityMap).reduce(
+            (best, [k, v]) => (v > best[1] ? [k, v] : best),
+            ['execution', 0] as [string, number]
+          );
+          if (mostVisible[1] > 0) setActiveTab(mostVisible[0] as ProviderTabId);
+        },
+        { threshold: 0.3, rootMargin: '-10% 0px -60% 0px' }
+      );
+      obs.observe(el);
+      observers.push(obs);
+    });
+
+    return () => observers.forEach(o => o.disconnect());
+  }, []);
+
   return (
-    <div className="max-w-2xl space-y-8">
-      <DisplaySection />
-      <div className="border-t border-border pt-6">
-        <ExecutionEngineSection />
+    <div className="w-full">
+      {/* (1) Status bar */}
+      <StatusBar />
+
+      {/* (2) Sticky section tab nav */}
+      <div
+        className="sticky top-0 z-10 border-b border-border overflow-x-auto scrollbar-none"
+        style={{ background: 'var(--bg)' }}
+      >
+        <div className="flex min-w-max">
+          {PROVIDER_TABS.map(({ id, label }) => (
+            <button
+              key={id}
+              onClick={() => scrollToSection(id)}
+              className={`px-4 py-2 text-sm font-medium whitespace-nowrap transition-colors border-b-2 -mb-px ${
+                activeTab === id
+                  ? 'border-accent text-accent'
+                  : 'border-transparent text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              {label}
+            </button>
+          ))}
+        </div>
       </div>
-      <div className="border-t border-border pt-6">
-        <SemanticEngineSection />
-      </div>
-      <div className="border-t border-border pt-6">
-        <ModelRoutingSection />
-      </div>
-      <div className="border-t border-border pt-6">
-        <ProvidersSection />
+
+      {/* (3–7) Section cards — space-y-4 provides visual separation, no border dividers */}
+      <div className="space-y-4 pt-4">
+        {/* (3) Execution Engine + Embeddings side-by-side grid */}
+        <div
+          ref={el => {
+            sectionRefs.current['execution'] = el;
+            // 'embeddings' tab maps to this same row
+            sectionRefs.current['embeddings'] = el;
+          }}
+          className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start"
+        >
+          {/* Execution Engine card */}
+          <div className="rounded-xl border border-border bg-panel p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <Zap size={15} className="text-accent flex-shrink-0" />
+              <span className="text-sm font-semibold text-[var(--text)]">Execution Engine</span>
+            </div>
+            <ExecutionEngineSection />
+          </div>
+
+          {/* Embeddings / Semantic Engine card */}
+          <div className="rounded-xl border border-border bg-panel p-5">
+            <div className="flex items-center gap-2 mb-4">
+              <Database size={15} className="text-accent flex-shrink-0" />
+              <span className="text-sm font-semibold text-[var(--text)]">Semantic Engine</span>
+            </div>
+            <SemanticEngineSection />
+          </div>
+        </div>
+
+        {/* (4) Model Routing card */}
+        <div ref={el => { sectionRefs.current['routing'] = el; }}>
+          <ModelRoutingSection />
+        </div>
+
+        {/* (5) Model Browser */}
+        <div ref={el => { sectionRefs.current['model-browser'] = el; }}>
+          <ModelBrowserContainer />
+        </div>
+
+        {/* (6) Providers + API Keys */}
+        <div ref={el => { sectionRefs.current['providers'] = el; }}>
+          <ProviderConnectionsAndVaultSection />
+        </div>
+
+        {/* (7) Display card */}
+        <div ref={el => { sectionRefs.current['display'] = el; }}>
+          <DisplaySection />
+        </div>
       </div>
     </div>
   );
@@ -672,7 +925,7 @@ function ExecutionEngineSection() {
     }
   };
 
-  // Transform backend models into ModelOption format for AgentPicker
+  // Transform backend models into ModelOption format for ModelSearchSelect
   const modelOptions: ModelOption[] = useMemo(() => {
     const staticOptions: ModelOption[] = models.map(m => ({
       id: m.id,
@@ -714,36 +967,106 @@ function ExecutionEngineSection() {
   return (
     <div className="space-y-5">
       {showSetupGuide && <OpenCodeSetupGuide onClose={() => setShowSetupGuide(false)} />}
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
-            <Cpu size={16} className="text-accent" />
-            Execution Engine
-          </h2>
-          <p className="text-xs text-muted mt-0.5">
-            Choose how Rorca executes pipeline stories
-            <button
-              onClick={() => setShowSetupGuide(true)}
-              className="inline-flex items-center gap-1 ml-2 text-accent hover:text-accent/80 transition-colors"
-            >
-              <BookOpen size={11} />
-              <span className="underline underline-offset-2">Setup Guide</span>
-            </button>
-          </p>
-        </div>
+
+      {/* Setup guide link */}
+      <p className="text-xs text-muted">
+        Choose how Rorca executes pipeline stories
+        <button
+          onClick={() => setShowSetupGuide(true)}
+          className="inline-flex items-center gap-1 ml-2 text-accent hover:text-accent/80 transition-colors"
+        >
+          <BookOpen size={11} />
+          <span className="underline underline-offset-2">Setup Guide</span>
+        </button>
+      </p>
+
+      {/* Agent type — 3 icon tiles */}
+      <div className="grid grid-cols-3 gap-2">
+        {/* Claude tile */}
+        <button
+          type="button"
+          onClick={() => setSelectedType('claude')}
+          className={`flex flex-col items-center gap-1.5 p-3 rounded-lg border cursor-pointer transition-colors ${
+            selectedType === 'claude'
+              ? 'border-accent bg-accent/10 text-accent'
+              : 'border-border hover:border-accent/30 text-[var(--text)]'
+          }`}
+        >
+          <Lock size={18} className="flex-shrink-0" />
+          <span className="text-xs font-medium leading-tight">Claude</span>
+          <span className={`text-[10px] leading-tight ${selectedType === 'claude' ? 'text-accent/70' : 'text-muted'}`}>
+            Subscription
+          </span>
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-0.5 ${
+            selectedType === 'claude'
+              ? 'bg-accent'
+              : config?.opencodeInstalled !== false
+                ? 'bg-emerald-500/60'
+                : 'bg-border'
+          }`} />
+        </button>
+
+        {/* OpenCode tile */}
+        <button
+          type="button"
+          onClick={() => setSelectedType('opencode')}
+          className={`flex flex-col items-center gap-1.5 p-3 rounded-lg border cursor-pointer transition-colors ${
+            selectedType === 'opencode'
+              ? 'border-accent bg-accent/10 text-accent'
+              : 'border-border hover:border-accent/30 text-[var(--text)]'
+          }`}
+        >
+          <Globe size={18} className="flex-shrink-0" />
+          <span className="text-xs font-medium leading-tight">OpenCode</span>
+          <span className={`text-[10px] leading-tight ${selectedType === 'opencode' ? 'text-accent/70' : 'text-muted'}`}>
+            75+ models
+          </span>
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-0.5 ${
+            selectedType === 'opencode'
+              ? 'bg-accent'
+              : config?.opencodeInstalled === true
+                ? 'bg-emerald-500/60'
+                : config?.opencodeInstalled === false
+                  ? 'bg-red-400/60'
+                  : 'bg-border'
+          }`} />
+        </button>
+
+        {/* Codex tile */}
+        <button
+          type="button"
+          onClick={() => setSelectedType('codex')}
+          className={`flex flex-col items-center gap-1.5 p-3 rounded-lg border cursor-pointer transition-colors ${
+            selectedType === 'codex'
+              ? 'border-accent bg-accent/10 text-accent'
+              : 'border-border hover:border-accent/30 text-[var(--text)]'
+          }`}
+        >
+          <Terminal size={18} className="flex-shrink-0" />
+          <span className="text-xs font-medium leading-tight">Codex</span>
+          <span className={`text-[10px] leading-tight ${selectedType === 'codex' ? 'text-accent/70' : 'text-muted'}`}>
+            ChatGPT Sub
+          </span>
+          <span className={`w-1.5 h-1.5 rounded-full flex-shrink-0 mt-0.5 ${
+            selectedType === 'codex'
+              ? 'bg-accent'
+              : config?.codexInstalled === true
+                ? 'bg-emerald-500/60'
+                : config?.codexInstalled === false
+                  ? 'bg-red-400/60'
+                  : 'bg-border'
+          }`} />
+        </button>
       </div>
 
-      {/* Agent type + model selection */}
-      <AgentPicker
-        agentType={selectedType}
-        agentModel={selectedModel || null}
-        onAgentTypeChange={setSelectedType}
-        onModelChange={setSelectedModel}
-        models={modelOptions}
-        claudeInstalled={config?.opencodeInstalled !== false}
-        opencodeInstalled={config?.opencodeInstalled ?? undefined}
-        codexInstalled={config?.codexInstalled ?? undefined}
-      />
+      {/* Model selector (only for OpenCode) */}
+      {selectedType === 'opencode' && (
+        <ModelSearchSelect
+          models={modelOptions}
+          value={selectedModel ?? ''}
+          onChange={setSelectedModel}
+        />
+      )}
 
       {/* Claude auth status (OC-025) */}
       {selectedType === 'claude' && <ClaudeAuthStatus />}
@@ -1130,17 +1453,9 @@ function SemanticEngineSection() {
 
   return (
     <div className="space-y-5">
-      <div className="flex items-center justify-between">
-        <div>
-          <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
-            <Database size={16} className="text-accent" />
-            Semantic Engine (Embeddings)
-          </h2>
-          <p className="text-xs text-muted mt-0.5">
-            Vector embeddings power semantic search, memory recall, and knowledge graph features
-          </p>
-        </div>
-      </div>
+      <p className="text-xs text-muted">
+        Vector embeddings power semantic search, memory recall, and knowledge graph features
+      </p>
 
       {/* Provider radio buttons */}
       <div className="space-y-1.5">
@@ -1293,6 +1608,425 @@ function SemanticEngineSection() {
           ) : (
             <p className="text-xs text-muted">No graph stats available</p>
           )}
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── Provider Connections + API Key Vault (PM-006) ──────────────────────────
+
+interface ProviderRowDef {
+  id: string;
+  name: string;
+  dot: 'green' | 'amber' | 'grey';
+  statusLabel: string;
+  actionLabel?: string;
+  actionVariant?: 'connect' | 'disconnect';
+  onAction?: () => void;
+  actionDisabled?: boolean;
+}
+
+function ProviderConnectionsAndVaultSection() {
+  const toast = useGlobalToast();
+  const { user } = useAuth();
+  const { workspaceId } = useWorkspace();
+  const isFreePlan = !user?.plan || user.plan === 'free';
+
+  // ── Vault key state ──────────────────────────────────────────────────────
+  const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
+  const [keysLoading, setKeysLoading] = useState(true);
+
+  // Add key form
+  const [addProvider, setAddProvider] = useState('anthropic');
+  const [addKey, setAddKey] = useState('');
+  const [addBaseUrl, setAddBaseUrl] = useState('');
+  const [addLabel, setAddLabel] = useState('');
+  const [addError, setAddError] = useState<string | null>(null);
+  const [adding, setAdding] = useState(false);
+
+  // ── Agent config / provider status state ────────────────────────────────
+  const [agentConfig, setAgentConfig] = useState<AgentConfig | null>(null);
+  const [providers, setProviders] = useState<ProviderStatus[]>([]);
+  const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null);
+  const [copilotStatus, setCopilotStatus] = useState<CopilotStatus>({ connected: false, githubUsername: null, connectedAt: null });
+  const [copilotLoading, setCopilotLoading] = useState(false);
+  const [openRouterConnected, setOpenRouterConnected] = useState(false);
+  const [openRouterModelCount, setOpenRouterModelCount] = useState<number | null>(null);
+  const [configLoading, setConfigLoading] = useState(true);
+
+  // ── Default provider (for workspace) ────────────────────────────────────
+  const [defaultProvider, setDefaultProvider] = useState('claude-cli');
+
+  const fetchData = useCallback(async () => {
+    try {
+      const [agentCfg, provData, keyData, ollama, defaultData] = await Promise.all([
+        apiFetch<AgentConfig>('/api/config'),
+        apiFetch<{ providers: ProviderStatus[] }>('/api/vault/keys/providers'),
+        apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
+        apiFetch<OllamaStatus>('/api/config/ollama'),
+        workspaceId
+          ? apiFetch<{ provider: string }>(`/api/vault/keys/default-provider?workspaceId=${workspaceId}`)
+          : Promise.resolve({ provider: 'claude-cli' }),
+      ]);
+      setAgentConfig(agentCfg);
+      setCopilotStatus({ connected: agentCfg.copilotConnected, githubUsername: agentCfg.copilotUsername, connectedAt: null });
+      setProviders(provData.providers);
+      setKeys(keyData.keys);
+      setOllamaStatus(ollama);
+      setDefaultProvider(defaultData.provider);
+      // Check OpenRouter connection
+      const orProvider = provData.providers.find(p => p.id === 'openrouter');
+      if (orProvider?.configured) {
+        setOpenRouterConnected(true);
+        try {
+          const orData = await apiFetch<{ modelCount: number }>('/api/config/openrouter-models');
+          setOpenRouterModelCount(orData.modelCount);
+        } catch { /* silent */ }
+      }
+    } catch { /* silent */ } finally {
+      setConfigLoading(false);
+      setKeysLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => { fetchData(); }, [fetchData]);
+
+  // ── Copilot connect / disconnect ─────────────────────────────────────────
+  const handleCopilotConnect = async () => {
+    setCopilotLoading(true);
+    try {
+      const { url } = await apiFetch<{ url: string }>('/api/copilot/connect');
+      window.location.href = url;
+    } catch { setCopilotLoading(false); }
+  };
+
+  const handleCopilotDisconnect = async () => {
+    setCopilotLoading(true);
+    try {
+      await apiFetch('/api/copilot/disconnect', { method: 'DELETE' });
+      setCopilotStatus({ connected: false, githubUsername: null, connectedAt: null });
+    } catch { /* silent */ } finally {
+      setCopilotLoading(false);
+    }
+  };
+
+  // ── Vault key handlers ───────────────────────────────────────────────────
+  const removeKey = async (id: string) => {
+    try {
+      await apiFetch(`/api/vault/keys/${id}`, { method: 'DELETE' });
+      toast.show('API key removed', 'success');
+      fetchData();
+    } catch {
+      toast.show('Failed to remove API key', 'error');
+    }
+  };
+
+  const handleAddKey = async () => {
+    setAdding(true);
+    setAddError(null);
+    try {
+      await apiFetch('/api/vault/keys', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          provider: addProvider,
+          key: addKey,
+          label: addLabel,
+          base_url: addProvider === 'openai-compat' && addBaseUrl ? addBaseUrl : undefined,
+        }),
+      });
+      setAddKey('');
+      setAddBaseUrl('');
+      setAddLabel('');
+      toast.show('API key added', 'success');
+      fetchData();
+    } catch (err: any) {
+      const msg = err.message || 'Failed to add key';
+      setAddError(msg);
+      toast.show(msg, 'error');
+    } finally {
+      setAdding(false);
+    }
+  };
+
+  // ── Build provider row definitions ───────────────────────────────────────
+  const providerRows: ProviderRowDef[] = (() => {
+    // Claude
+    const claudeAuth = agentConfig;
+    const claudeRow: ProviderRowDef = {
+      id: 'claude',
+      name: 'Claude',
+      dot: claudeAuth ? 'green' : 'grey',
+      statusLabel: claudeAuth?.opencodeInstalled !== false ? 'Connected' : 'CLI not found',
+      actionLabel: 'Manage',
+      actionVariant: 'connect',
+    };
+
+    // Codex
+    const codexRow: ProviderRowDef = {
+      id: 'codex',
+      name: 'Codex',
+      dot: agentConfig?.codexInstalled ? 'green' : 'grey',
+      statusLabel: agentConfig?.codexInstalled
+        ? `Installed${agentConfig.codexVersion ? ` (v${agentConfig.codexVersion})` : ''}`
+        : 'Not configured',
+    };
+
+    // GitHub Copilot
+    const copilotRow: ProviderRowDef = {
+      id: 'copilot',
+      name: 'GitHub Copilot',
+      dot: copilotStatus.connected ? 'green' : 'grey',
+      statusLabel: copilotStatus.connected
+        ? `Connected${copilotStatus.githubUsername ? ` (${copilotStatus.githubUsername})` : ''}`
+        : 'Not configured',
+      actionLabel: copilotStatus.connected ? 'Disconnect' : 'Connect',
+      actionVariant: copilotStatus.connected ? 'disconnect' : 'connect',
+      onAction: copilotStatus.connected ? handleCopilotDisconnect : handleCopilotConnect,
+      actionDisabled: copilotLoading,
+    };
+
+    // OpenRouter
+    const orProvider = providers.find(p => p.id === 'openrouter');
+    const openRouterRow: ProviderRowDef = {
+      id: 'openrouter',
+      name: 'OpenRouter',
+      dot: openRouterConnected ? 'green' : orProvider?.configured ? 'amber' : 'grey',
+      statusLabel: openRouterConnected
+        ? `Running${openRouterModelCount !== null ? ` (${openRouterModelCount} models)` : ''}`
+        : orProvider?.configured ? 'API key set' : 'Not configured',
+    };
+
+    // Ollama
+    const ollamaRow: ProviderRowDef = {
+      id: 'ollama',
+      name: 'Ollama',
+      dot: ollamaStatus?.available ? 'green' : 'grey',
+      statusLabel: ollamaStatus?.available
+        ? `Running (${ollamaStatus.models.length} model${ollamaStatus.models.length !== 1 ? 's' : ''})`
+        : 'Not configured',
+    };
+
+    // Exa
+    const exaRow: ProviderRowDef = {
+      id: 'exa',
+      name: 'Exa Search',
+      dot: 'grey',
+      statusLabel: isFreePlan ? 'Upgrade to unlock' : 'Coming soon',
+      actionLabel: isFreePlan ? 'Upgrade' : undefined,
+      actionVariant: isFreePlan ? 'connect' : undefined,
+    };
+
+    return [claudeRow, codexRow, copilotRow, openRouterRow, ollamaRow, exaRow];
+  })();
+
+  const dotColor = (dot: ProviderRowDef['dot']) => {
+    if (dot === 'green') return 'bg-green-500';
+    if (dot === 'amber') return 'bg-amber-400';
+    return 'bg-zinc-500';
+  };
+
+  const VAULT_PROVIDER_OPTIONS = [
+    { id: 'anthropic', name: 'Anthropic' },
+    { id: 'openai-compat', name: 'OpenAI / compatible' },
+    { id: 'openrouter', name: 'OpenRouter' },
+    { id: 'google', name: 'Google' },
+    { id: 'mistral', name: 'Mistral' },
+  ];
+
+  return (
+    <div className="space-y-4 mt-4">
+      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
+
+        {/* ── Left: Provider Connections ──────────────────────────────────── */}
+        <div className="rounded-xl border border-border bg-panel p-5">
+          <div className="flex items-center gap-2 mb-4">
+            <Globe size={15} className="text-accent flex-shrink-0" />
+            <span className="text-sm font-semibold text-[var(--text)]">Provider Connections</span>
+          </div>
+          {configLoading ? (
+            <div className="flex items-center gap-2 text-muted text-xs">
+              <Loader2 size={12} className="animate-spin" /> Loading...
+            </div>
+          ) : (
+            <div>
+              {providerRows.map(row => (
+                <div key={row.id} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
+                  <span className={`w-2 h-2 rounded-full shrink-0 ${dotColor(row.dot)}`} />
+                  <span className="text-xs font-medium text-[var(--text)] min-w-0 flex-1">{row.name}</span>
+                  <span className="text-xs text-muted truncate">{row.statusLabel}</span>
+                  {row.actionLabel && (
+                    row.id === 'exa' && isFreePlan ? (
+                      <a
+                        href="#billing"
+                        className="shrink-0 px-2.5 py-1 text-xs rounded border border-accent/40 text-accent hover:bg-accent/10 transition-colors"
+                      >
+                        {row.actionLabel}
+                      </a>
+                    ) : row.onAction ? (
+                      <button
+                        onClick={row.onAction}
+                        disabled={row.actionDisabled}
+                        className={`shrink-0 px-2.5 py-1 text-xs rounded border transition-colors disabled:opacity-50 ${
+                          row.actionVariant === 'disconnect'
+                            ? 'border-red-500/30 text-red-400 hover:bg-red-500/10'
+                            : 'border-accent/40 text-accent hover:bg-accent/10'
+                        }`}
+                      >
+                        {row.actionDisabled ? <Loader2 size={10} className="animate-spin inline" /> : row.actionLabel}
+                      </button>
+                    ) : null
+                  )}
+                </div>
+              ))}
+            </div>
+          )}
+        </div>
+
+        {/* ── Right: API Key Vault ─────────────────────────────────────────── */}
+        <div className="rounded-xl border border-border bg-panel p-5">
+          <div className="flex items-center gap-2 mb-4">
+            <Key size={15} className="text-accent flex-shrink-0" />
+            <span className="text-sm font-semibold text-[var(--text)]">API Key Vault</span>
+          </div>
+          {keysLoading ? (
+            <div className="flex items-center gap-2 text-muted text-xs">
+              <Loader2 size={12} className="animate-spin" /> Loading...
+            </div>
+          ) : (
+            <div>
+              {/* Existing keys */}
+              {keys.length > 0 && (
+                <div className="mb-4">
+                  {keys.map(k => (
+                    <div key={k.id} className="flex items-center gap-2 py-2 border-b border-border last:border-0 text-xs">
+                      <Key size={11} className="text-muted shrink-0" />
+                      <span className="font-mono text-muted truncate">{k.masked_key}</span>
+                      {k.label && <span className="text-[var(--text)] truncate">{k.label}</span>}
+                      <span className="text-muted capitalize">{k.provider}</span>
+                      {k.spend_total_usd > 0 && (
+                        <span className="text-muted ml-auto shrink-0">${k.spend_total_usd.toFixed(2)}</span>
+                      )}
+                      {k.last_used_at && (
+                        <span className="text-muted shrink-0" title={k.last_used_at}>
+                          {new Date(k.last_used_at).toLocaleDateString()}
+                        </span>
+                      )}
+                      <button
+                        onClick={() => removeKey(k.id)}
+                        className="ml-auto shrink-0 p-1 text-muted hover:text-red-500 transition-colors"
+                        title="Remove key"
+                        aria-label="Remove API key"
+                      >
+                        <Trash2 size={11} />
+                      </button>
+                    </div>
+                  ))}
+                </div>
+              )}
+              {keys.length === 0 && (
+                <p className="text-xs text-muted mb-4">No API keys stored yet.</p>
+              )}
+
+              {/* Add Key form */}
+              <div className="border border-border rounded p-3 space-y-2.5 bg-bg">
+                <p className="text-xs font-medium text-[var(--text)]">Add Key</p>
+                <div className="grid grid-cols-2 gap-2">
+                  <div>
+                    <label className="block text-[10px] text-muted mb-1">Provider</label>
+                    <select
+                      value={addProvider}
+                      onChange={e => setAddProvider(e.target.value)}
+                      className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none"
+                    >
+                      {VAULT_PROVIDER_OPTIONS.map(p => (
+                        <option key={p.id} value={p.id}>{p.name}</option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label className="block text-[10px] text-muted mb-1">Label (optional)</label>
+                    <input
+                      type="text"
+                      value={addLabel}
+                      onChange={e => setAddLabel(e.target.value)}
+                      placeholder="e.g. Personal"
+                      className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none"
+                    />
+                  </div>
+                </div>
+                <div>
+                  <label className="block text-[10px] text-muted mb-1">API Key</label>
+                  <input
+                    type="password"
+                    value={addKey}
+                    onChange={e => setAddKey(e.target.value)}
+                    placeholder="sk-..."
+                    className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none font-mono"
+                  />
+                </div>
+                {addProvider === 'openai-compat' && (
+                  <div>
+                    <label className="block text-[10px] text-muted mb-1">Base URL</label>
+                    <input
+                      type="url"
+                      value={addBaseUrl}
+                      onChange={e => setAddBaseUrl(e.target.value)}
+                      placeholder="https://api.openai.com/v1"
+                      className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none font-mono"
+                    />
+                    <p className="text-[10px] text-muted mt-1">Groq, Together, DeepSeek, Ollama, etc.</p>
+                  </div>
+                )}
+                {addError && <p className="text-xs text-red-500">{addError}</p>}
+                <button
+                  onClick={handleAddKey}
+                  disabled={adding || !addKey}
+                  className="flex items-center gap-2 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+                >
+                  {adding ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
+                  Save Key
+                </button>
+              </div>
+              <p className="text-[10px] text-muted mt-2">Keys are AES-256-GCM encrypted at rest.</p>
+            </div>
+          )}
+        </div>
+
+      </div>
+
+      {/* Default provider (workspace-scoped) */}
+      {workspaceId && providers.length > 0 && (
+        <div className="border border-border rounded p-4 bg-bg">
+          <div className="flex items-center justify-between mb-2">
+            <div>
+              <h3 className="text-sm font-medium text-[var(--text)]">Default Provider</h3>
+              <p className="text-xs text-muted mt-0.5">Used when no per-spec model override is set</p>
+            </div>
+          </div>
+          <select
+            value={defaultProvider}
+            onChange={async e => {
+              const provider = e.target.value;
+              setDefaultProvider(provider);
+              try {
+                await apiFetch('/api/vault/keys/default-provider', {
+                  method: 'PUT',
+                  headers: { 'Content-Type': 'application/json' },
+                  body: JSON.stringify({ workspaceId, provider }),
+                });
+                toast.show('Default provider saved', 'success');
+              } catch { /* silent */ }
+            }}
+            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded focus:border-accent outline-none"
+          >
+            {providers.map(p => (
+              <option key={p.id} value={p.id} disabled={p.id !== 'claude-cli' && !p.configured}>
+                {p.name}{!p.configured && p.id !== 'claude-cli' ? ' (not configured)' : ''}
+              </option>
+            ))}
+          </select>
         </div>
       )}
     </div>
@@ -1630,8 +2364,6 @@ function ProvidersSection() {
         })}
       </div>
 
-      {/* Exa Search — Pro feature */}
-      <ExaSearchSection />
     </div>
   );
 }
@@ -1754,6 +2486,347 @@ function ModelCard({ model, isSelected, isWorkspaceOverride, onSelect, onTest, t
   );
 }
 
+// ─── Model Browser Container (PM-008 — standalone, owns its own state) ───────
+
+function ModelBrowserContainer() {
+  const { workspaceId } = useWorkspace();
+  const [models, setModels] = useState<DisplayModelOption[]>([]);
+  const [defaultModel, setDefaultModel] = useState('claude-sonnet-4-6');
+  const [workspaceModel, setWorkspaceModel] = useState<string | null>(null);
+  const [workspaceModelInitial, setWorkspaceModelInitial] = useState<string | null>(null);
+  const [savingWorkspace, setSavingWorkspace] = useState(false);
+  const [testingModel, setTestingModel] = useState<string | null>(null);
+  const [testResult, setTestResult] = useState<ModelTestResult | null>(null);
+  const [searchText, setSearchText] = useState('');
+  const [activeProvider, setActiveProvider] = useState<string>('All');
+  const [activeCostTier, setActiveCostTier] = useState<string>('All');
+  const [activeSpeedTier, setActiveSpeedTier] = useState<string>('All');
+
+  useEffect(() => {
+    const fetchPromises: Promise<any>[] = [
+      apiFetch<DisplaySettings>('/api/settings/display'),
+      apiFetch<{ models: DisplayModelOption[]; defaultModel: string }>(`/api/direction/models${workspaceId ? `?workspaceId=${workspaceId}` : ''}`),
+    ];
+    if (workspaceId) {
+      fetchPromises.push(
+        apiFetch<{ contentYaml: string; preferredModel: string | null }>(`/api/direction?layer=3&workspaceId=${workspaceId}`)
+      );
+    }
+    Promise.all(fetchPromises).then(([displayData, modelData, l3Data]) => {
+      setDefaultModel(displayData.defaultModel);
+      setModels(modelData.models);
+      if (l3Data) {
+        setWorkspaceModel(l3Data.preferredModel);
+        setWorkspaceModelInitial(l3Data.preferredModel);
+      }
+    }).catch(() => { });
+  }, [workspaceId]);
+
+  const saveWorkspaceModel = async (modelId: string | null) => {
+    if (!workspaceId) return;
+    setSavingWorkspace(true);
+    try {
+      const l3 = await apiFetch<{ contentYaml: string; preferredModel: string | null }>(`/api/direction?layer=3&workspaceId=${workspaceId}`);
+      await apiFetch('/api/direction', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          layer: 3,
+          workspaceId,
+          contentYaml: l3.contentYaml || '',
+          preferredModel: modelId,
+          skipValidation: true,
+        }),
+      });
+      setWorkspaceModel(modelId);
+      setWorkspaceModelInitial(modelId);
+    } catch { /* silent */ }
+    finally { setSavingWorkspace(false); }
+  };
+
+  const testModel = async (modelId: string) => {
+    setTestingModel(modelId);
+    setTestResult(null);
+    try {
+      const result = await apiFetch<{ ok: boolean; latencyMs: number; response: string }>(`/api/models/${encodeURIComponent(modelId)}/test`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ modelId }),
+      });
+      setTestResult({ modelId, ok: true, latencyMs: result.latencyMs, response: result.response });
+    } catch (err: any) {
+      setTestResult({ modelId, ok: false, error: err.message || 'Test failed' });
+    } finally {
+      setTestingModel(null);
+    }
+  };
+
+  const effectiveModel = workspaceModel ?? defaultModel;
+
+  // Suppress unused variable warning — savingWorkspace used indirectly via saveWorkspaceModel
+  void savingWorkspace;
+  void workspaceModelInitial;
+
+  return (
+    <ModelBrowserSection
+      models={models}
+      effectiveModel={effectiveModel}
+      workspaceModel={workspaceModel}
+      workspaceId={workspaceId ?? null}
+      searchText={searchText}
+      setSearchText={setSearchText}
+      activeProvider={activeProvider}
+      setActiveProvider={setActiveProvider}
+      activeCostTier={activeCostTier}
+      setActiveCostTier={setActiveCostTier}
+      activeSpeedTier={activeSpeedTier}
+      setActiveSpeedTier={setActiveSpeedTier}
+      testResult={testResult}
+      testingModel={testingModel}
+      onSelectModel={(m) => {
+        if (workspaceId) {
+          setWorkspaceModel(m.id);
+          saveWorkspaceModel(m.id);
+        } else {
+          setDefaultModel(m.id);
+        }
+      }}
+      onTestModel={(id) => testModel(id)}
+    />
+  );
+}
+
+// ─── Model Browser Section (PM-005) ──────────────────────────────────────────
+
+type SortOption = 'best' | 'cost-asc' | 'cost-desc' | 'context' | 'speed';
+
+function ModelBrowserSection({
+  models,
+  effectiveModel,
+  workspaceModel,
+  workspaceId,
+  searchText,
+  setSearchText,
+  activeProvider,
+  setActiveProvider,
+  activeCostTier,
+  setActiveCostTier,
+  activeSpeedTier,
+  setActiveSpeedTier,
+  testResult,
+  testingModel,
+  onSelectModel,
+  onTestModel,
+}: {
+  models: DisplayModelOption[];
+  effectiveModel: string;
+  workspaceModel: string | null;
+  workspaceId: string | null;
+  searchText: string;
+  setSearchText: (v: string) => void;
+  activeProvider: string;
+  setActiveProvider: (v: string) => void;
+  activeCostTier: string;
+  setActiveCostTier: (v: string) => void;
+  activeSpeedTier: string;
+  setActiveSpeedTier: (v: string) => void;
+  testResult: ModelTestResult | null;
+  testingModel: string | null;
+  onSelectModel: (m: DisplayModelOption) => void;
+  onTestModel: (id: string) => void;
+}) {
+  const [sortBy, setSortBy] = useState<SortOption>('best');
+
+  const SPEED_ORDER: Record<string, number> = { fast: 0, medium: 1, slow: 2 };
+
+  // Compute per-provider counts respecting active cost+speed filters (but not provider filter)
+  // so that tab counts reflect what's visible in those tiers
+  const providerTabCounts = useMemo(() => {
+    const q = searchText.toLowerCase();
+    const counts: Record<string, number> = {};
+    for (const m of models) {
+      if (
+        (activeCostTier === 'All' || m.costTier === activeCostTier) &&
+        (activeSpeedTier === 'All' || m.speedTier === activeSpeedTier) &&
+        (!q || m.label.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
+      ) {
+        counts[m.provider] = (counts[m.provider] ?? 0) + 1;
+      }
+    }
+    return counts;
+  }, [models, searchText, activeCostTier, activeSpeedTier]);
+
+  const providers = useMemo(
+    () => Object.entries(
+      models.reduce<Record<string, number>>((acc, m) => {
+        acc[m.provider] = (acc[m.provider] ?? 0) + 1;
+        return acc;
+      }, {})
+    )
+      .sort((a, b) => b[1] - a[1])
+      .map(([p]) => p),
+    [models]
+  );
+
+  const filtered = useMemo(() => {
+    const q = searchText.toLowerCase();
+    const base = models.filter(m =>
+      (activeProvider === 'All' || m.provider === activeProvider) &&
+      (activeCostTier === 'All' || m.costTier === activeCostTier) &&
+      (activeSpeedTier === 'All' || m.speedTier === activeSpeedTier) &&
+      (!q || m.label.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
+    );
+    switch (sortBy) {
+      case 'cost-asc':
+        return [...base].sort((a, b) => a.costPer1kInput - b.costPer1kInput);
+      case 'cost-desc':
+        return [...base].sort((a, b) => b.costPer1kInput - a.costPer1kInput);
+      case 'context':
+        return [...base].sort((a, b) => b.contextWindow - a.contextWindow);
+      case 'speed':
+        return [...base].sort((a, b) => (SPEED_ORDER[a.speedTier] ?? 1) - (SPEED_ORDER[b.speedTier] ?? 1));
+      default:
+        return base;
+    }
+  }, [models, searchText, activeProvider, activeCostTier, activeSpeedTier, sortBy]);
+
+  const clearFilters = () => {
+    setSearchText('');
+    setActiveProvider('All');
+    setActiveCostTier('All');
+    setActiveSpeedTier('All');
+    setSortBy('best');
+  };
+
+  const totalProviderCount = providerTabCounts['All'] ?? models.length;
+
+  return (
+    <div className="rounded-xl border border-border bg-panel p-5 mt-4">
+      {/* Card header */}
+      <div className="flex items-center gap-2 mb-4">
+        <Search size={15} className="text-accent flex-shrink-0" />
+        <span className="text-sm font-semibold text-[var(--text)]">Model Browser</span>
+        <span className="bg-panel border border-border rounded-full px-2 py-0.5 text-xs text-muted ml-auto">
+          {filtered.length} models
+        </span>
+      </div>
+
+      {/* Search input */}
+      <div className="relative mb-4">
+        <Search size={14} className="absolute left-3 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
+        <input
+          type="text"
+          value={searchText}
+          onChange={e => setSearchText(e.target.value)}
+          placeholder={`Search ${models.length} models...`}
+          className="w-full text-sm bg-bg border border-border rounded-lg px-3 py-2 pl-9 focus:border-accent/50 outline-none placeholder:text-muted"
+        />
+      </div>
+
+      {/* Provider tab strip */}
+      <div className="flex gap-1.5 overflow-x-auto pb-1 mb-4 scrollbar-hide">
+        {(['All', ...providers]).map(p => {
+          const count = p === 'All' ? totalProviderCount : (providerTabCounts[p] ?? 0);
+          return (
+            <button
+              key={p}
+              onClick={() => setActiveProvider(p)}
+              className={`px-3 py-1 text-xs rounded-full border whitespace-nowrap flex-shrink-0 transition-colors ${
+                activeProvider === p
+                  ? 'border-accent bg-accent/10 text-accent font-medium'
+                  : 'border-border text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              {p} {count > 0 && <span className="ml-1 opacity-70">{count}</span>}
+            </button>
+          );
+        })}
+      </div>
+
+      {/* COST + SPEED filter rows */}
+      <div className="flex flex-col gap-2 mb-4">
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] font-semibold text-muted uppercase tracking-widest w-10 flex-shrink-0">COST</span>
+          {(['All', 'free', 'low', 'medium', 'high', 'premium'] as const).map(tier => (
+            <button
+              key={tier}
+              onClick={() => setActiveCostTier(tier)}
+              className={`px-2.5 py-0.5 text-xs rounded border transition-colors ${
+                activeCostTier === tier
+                  ? 'border-accent/60 bg-accent/10 text-accent'
+                  : 'border-border text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              {tier === 'All' ? 'All' : COST_LABELS[tier].label}
+            </button>
+          ))}
+        </div>
+        <div className="flex items-center gap-2 flex-wrap">
+          <span className="text-[10px] font-semibold text-muted uppercase tracking-widest w-10 flex-shrink-0">SPEED</span>
+          {(['All', 'fast', 'medium', 'slow'] as const).map(tier => (
+            <button
+              key={tier}
+              onClick={() => setActiveSpeedTier(tier)}
+              className={`px-2.5 py-0.5 text-xs rounded border transition-colors ${
+                activeSpeedTier === tier
+                  ? 'border-accent/60 bg-accent/10 text-accent'
+                  : 'border-border text-muted hover:text-[var(--text)]'
+              }`}
+            >
+              {tier === 'All' ? 'All' : SPEED_LABELS[tier].label}
+            </button>
+          ))}
+        </div>
+      </div>
+
+      {/* Result count + sort */}
+      <div className="flex items-center justify-between mb-3">
+        <span className="text-xs text-muted">{filtered.length} models</span>
+        <select
+          value={sortBy}
+          onChange={e => setSortBy(e.target.value as SortOption)}
+          className="text-xs bg-bg border border-border rounded px-2 py-1 text-muted focus:border-accent/50 outline-none"
+        >
+          <option value="best">Best Match</option>
+          <option value="cost-asc">Cost ↑</option>
+          <option value="cost-desc">Cost ↓</option>
+          <option value="context">Context Window</option>
+          <option value="speed">Speed</option>
+        </select>
+      </div>
+
+      {/* Model grid or empty state */}
+      {filtered.length === 0 ? (
+        <div className="py-10 flex flex-col items-center gap-3 text-center">
+          <Search size={24} className="text-muted opacity-40" />
+          <p className="text-sm text-muted">No models match your filters</p>
+          <button
+            onClick={clearFilters}
+            className="text-xs text-accent hover:underline"
+          >
+            Clear filters
+          </button>
+        </div>
+      ) : (
+        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
+          {filtered.map(m => (
+            <ModelCard
+              key={m.id}
+              model={m}
+              isSelected={m.id === effectiveModel}
+              isWorkspaceOverride={m.id === workspaceModel}
+              onSelect={() => onSelectModel(m)}
+              onTest={() => onTestModel(m.id)}
+              testResult={testResult}
+              isTesting={testingModel === m.id}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 function DisplaySection() {
   const toast = useGlobalToast();
   const { mode, setMode } = useTheme();
@@ -1772,16 +2845,6 @@ function DisplaySection() {
   const [workspaceModelInitial, setWorkspaceModelInitial] = useState<string | null>(null);
   const [savingWorkspace, setSavingWorkspace] = useState(false);
   const [savedWorkspace, setSavedWorkspace] = useState(false);
-
-  // Test model state
-  const [testingModel, setTestingModel] = useState<string | null>(null);
-  const [testResult, setTestResult] = useState<ModelTestResult | null>(null);
-
-  // Catalog filter state
-  const [searchText, setSearchText] = useState('');
-  const [activeProvider, setActiveProvider] = useState<string>('All');
-  const [activeCostTier, setActiveCostTier] = useState<string>('All');
-  const [activeSpeedTier, setActiveSpeedTier] = useState<string>('All');
 
   useEffect(() => {
     const fetchPromises: Promise<any>[] = [
@@ -1855,282 +2918,101 @@ function DisplaySection() {
     }
   };
 
-  const testModel = async (modelId: string) => {
-    setTestingModel(modelId);
-    setTestResult(null);
-    try {
-      const result = await apiFetch<{ ok: boolean; latencyMs: number; response: string }>('/api/direction/models/test', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ modelId }),
-      });
-      setTestResult({ modelId, ok: true, latencyMs: result.latencyMs, response: result.response });
-    } catch (err: any) {
-      setTestResult({ modelId, ok: false, error: err.message || 'Test failed' });
-    } finally {
-      setTestingModel(null);
-    }
-  };
-
   if (loading) {
-    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading model settings...</div>;
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading display settings...</div>;
   }
 
-  const hasChanges = settings && (defaultModel !== settings.defaultModel || itemsPerPage !== settings.itemsPerPage);
-  const effectiveModel = workspaceModel ?? defaultModel;
-
-  // Group models by provider
-  const _modelsByProvider = models.reduce<Record<string, DisplayModelOption[]>>((acc, m) => {
-    (acc[m.provider] ??= []).push(m);
-    return acc;
-  }, {});
+  const hasChanges = settings !== null && defaultModel !== settings.defaultModel;
 
   return (
-    <div className="space-y-6">
-      {/* Theme */}
-      <div>
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Theme</h2>
-        <div className="flex gap-2">
-          {(['light', 'dark', 'system'] as ThemeMode[]).map(m => (
-            <button
-              key={m}
-              onClick={() => setMode(m)}
-              className={`px-4 py-2 text-sm rounded border transition-colors capitalize ${mode === m
-                  ? 'bg-accent/10 border-accent text-accent'
-                  : 'border-border text-muted hover:text-[var(--text)] hover:border-accent/50'
-                }`}
-            >
-              {m}
-            </button>
-          ))}
-        </div>
-      </div>
-
-      {/* Default Model (global) */}
-      <div className="border-t border-border pt-6">
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-1">Default Model</h2>
-        <p className="text-xs text-muted mb-3">Global default when no workspace override is set</p>
-        <ModelSearchSelect
-          models={models}
-          value={defaultModel}
-          defaultModelId={null}
-          onChange={setDefaultModel}
-        />
-      </div>
-
-      {/* Per-workspace preferred model override */}
-      {workspaceId && (
-        <div className="border-t border-border pt-6">
-          <div className="flex items-center justify-between mb-1">
-            <h2 className="text-sm font-semibold text-[var(--text)]">Workspace Model Override</h2>
-            {savedWorkspace && (
-              <span className="flex items-center gap-1 text-xs text-green-500"><Check size={12} /> Saved</span>
-            )}
-          </div>
-          <p className="text-xs text-muted mb-3">
-            Override the global default for this workspace. Persists to the Project direction layer.
-          </p>
-          <div className="flex gap-2">
-            <div className="flex-1">
-              <ModelSearchSelect
-                models={[
-                  { id: '', label: `Use global default (${models.find(m => m.id === defaultModel)?.label ?? defaultModel})`, provider: '', costPer1kInput: 0, costPer1kOutput: 0, recommended: false },
-                  ...models,
-                ]}
-                value={workspaceModel ?? ''}
-                defaultModelId={null}
-                onChange={modelId => setWorkspaceModel(modelId || null)}
-                disabled={savingWorkspace}
-              />
-            </div>
-            <button
-              onClick={() => saveWorkspaceModel(workspaceModel)}
-              disabled={savingWorkspace || workspaceModel === workspaceModelInitial}
-              className="flex items-center gap-1.5 px-3 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors shrink-0"
-            >
-              {savingWorkspace ? <Loader2 size={14} className="animate-spin" /> : <Save size={14} />}
-              Save
-            </button>
-          </div>
-        </div>
-      )}
-
-      {/* Model catalog with test buttons */}
-      <div className="border-t border-border pt-6">
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-1">Available Models</h2>
-        <p className="text-xs text-muted mb-3">Click a model to set it as the {workspaceId ? 'workspace' : 'global'} default. Use Test to verify connectivity.</p>
-
-        {/* Search bar row */}
-        <div className="flex items-center gap-2 mb-3">
-          <div className="relative flex-1">
-            <Search size={14} className="absolute left-2.5 top-1/2 -translate-y-1/2 text-muted pointer-events-none" />
-            <input
-              type="text"
-              value={searchText}
-              onChange={e => setSearchText(e.target.value)}
-              placeholder="Search models..."
-              className="w-full pl-8 pr-3 py-1.5 text-sm bg-bg border border-border rounded focus:border-accent outline-none placeholder:text-muted"
-            />
-          </div>
-          <span className="text-xs text-muted whitespace-nowrap">
-            {(() => {
-              const q = searchText.toLowerCase();
-              return models.filter(m =>
-                (activeProvider === 'All' || m.provider === activeProvider) &&
-                (activeCostTier === 'All' || m.costTier === activeCostTier) &&
-                (activeSpeedTier === 'All' || m.speedTier === activeSpeedTier) &&
-                (!q || m.label.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
-              ).length;
-            })()} models
-          </span>
+      <div className="rounded-xl border border-border bg-panel p-5">
+        {/* Card header */}
+        <div className="flex items-center gap-2 mb-4">
+          <SlidersHorizontal size={15} className="text-accent" />
+          <span className="text-sm font-semibold text-[var(--text)]">Display</span>
         </div>
 
-        {/* Provider filter chips */}
-        {(() => {
-          const providerCounts = models.reduce<Record<string, number>>((acc, m) => {
-            acc[m.provider] = (acc[m.provider] ?? 0) + 1;
-            return acc;
-          }, {});
-          const providers = Object.entries(providerCounts)
-            .sort((a, b) => b[1] - a[1])
-            .map(([p]) => p);
-          return (
-            <div className="flex flex-wrap gap-1.5 mb-4">
-              {(['All', ...providers]).map(p => (
+        {/* Two-column grid: Theme | Default Model */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+          {/* Theme */}
+          <div>
+            <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">Theme</p>
+            <div className="flex rounded-lg border border-border overflow-hidden">
+              {(['light', 'dark', 'system'] as ThemeMode[]).map((m, i) => (
                 <button
-                  key={p}
-                  onClick={() => setActiveProvider(p)}
-                  className={`px-2.5 py-1 text-xs rounded border transition-colors ${
-                    activeProvider === p
-                      ? 'bg-accent/10 border-accent text-accent'
-                      : 'border-border text-muted hover:text-[var(--text)]'
-                  }`}
+                  key={m}
+                  onClick={() => setMode(m)}
+                  className={`flex-1 px-3 py-1.5 text-xs capitalize transition-colors ${i > 0 ? 'border-l border-border' : ''} ${mode === m
+                      ? 'bg-accent text-white'
+                      : 'bg-bg text-muted hover:text-[var(--text)]'
+                    }`}
                 >
-                  {p}
+                  {m}
                 </button>
               ))}
             </div>
-          );
-        })()}
-
-        {/* Cost + Speed filter row */}
-        <div className="flex flex-wrap gap-x-4 gap-y-2 mb-4">
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Cost</span>
-            {(['All', 'free', 'low', 'medium', 'high', 'premium'] as const).map(tier => (
-              <button
-                key={tier}
-                onClick={() => setActiveCostTier(tier)}
-                className={`px-2.5 py-1 text-xs rounded border transition-colors ${
-                  activeCostTier === tier
-                    ? 'bg-accent/10 border-accent text-accent'
-                    : 'border-border text-muted hover:text-[var(--text)]'
-                }`}
-              >
-                {tier === 'All' ? 'All' : COST_LABELS[tier].label}
-              </button>
-            ))}
           </div>
-          <div className="flex items-center gap-1.5">
-            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Speed</span>
-            {(['All', 'fast', 'medium', 'slow'] as const).map(tier => (
-              <button
-                key={tier}
-                onClick={() => setActiveSpeedTier(tier)}
-                className={`px-2.5 py-1 text-xs rounded border transition-colors ${
-                  activeSpeedTier === tier
-                    ? 'bg-accent/10 border-accent text-accent'
-                    : 'border-border text-muted hover:text-[var(--text)]'
-                }`}
-              >
-                {tier === 'All' ? 'All' : SPEED_LABELS[tier].label}
-              </button>
-            ))}
-          </div>
-        </div>
 
-        {/* Filtered model cards */}
-        <div className="space-y-4">
-          {(() => {
-            const q = searchText.toLowerCase();
-            const filtered = models.filter(m =>
-              (activeProvider === 'All' || m.provider === activeProvider) &&
-              (activeCostTier === 'All' || m.costTier === activeCostTier) &&
-              (activeSpeedTier === 'All' || m.speedTier === activeSpeedTier) &&
-              (!q || m.label.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
-            );
-            if (filtered.length === 0) {
-              return (
-                <div className="py-8 text-center">
-                  <p className="text-sm text-muted mb-2">No models match your filters</p>
-                  <button
-                    onClick={() => { setSearchText(''); setActiveProvider('All'); setActiveCostTier('All'); setActiveSpeedTier('All'); }}
-                    className="text-xs text-accent hover:underline"
-                  >
-                    Clear filters
-                  </button>
-                </div>
-              );
-            }
-            const filteredByProvider = filtered.reduce<Record<string, DisplayModelOption[]>>((acc, m) => {
-              (acc[m.provider] ??= []).push(m);
-              return acc;
-            }, {});
-            return Object.entries(filteredByProvider).map(([provider, providerModels]) => (
-              <div key={provider}>
-                <h3 className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-2">{provider}</h3>
-                <div className="space-y-1.5">
-                  {providerModels.map(m => (
-                    <ModelCard
-                      key={m.id}
-                      model={m}
-                      isSelected={m.id === effectiveModel}
-                      isWorkspaceOverride={m.id === workspaceModel}
-                      onSelect={() => {
-                        if (workspaceId) {
-                          setWorkspaceModel(m.id);
-                          saveWorkspaceModel(m.id);
-                        } else {
-                          setDefaultModel(m.id);
-                        }
-                      }}
-                      onTest={() => testModel(m.id)}
-                      testResult={testResult}
-                      isTesting={testingModel === m.id}
-                    />
-                  ))}
-                </div>
+          {/* Default Model */}
+          <div>
+            <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">Default Model</p>
+            <div className="flex gap-2 items-center">
+              <div className="flex-1 min-w-0">
+                <ModelSearchSelect
+                  models={models}
+                  value={defaultModel}
+                  defaultModelId={null}
+                  onChange={setDefaultModel}
+                />
               </div>
-            ));
-          })()}
+              {hasChanges && (
+                <button
+                  onClick={saveDisplay}
+                  disabled={saving}
+                  className="px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors shrink-0"
+                >
+                  {saving ? <Loader2 size={12} className="animate-spin inline" /> : saved ? <Check size={12} className="inline" /> : 'Save'}
+                </button>
+              )}
+            </div>
+          </div>
         </div>
-      </div>
 
-      {/* Items per page */}
-      <div className="border-t border-border pt-6">
-        <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Items Per Page</h2>
-        <select
-          value={itemsPerPage}
-          onChange={e => setItemsPerPage(Number(e.target.value))}
-          className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
-        >
-          {[10, 20, 30, 50, 100].map(n => (
-            <option key={n} value={n}>{n} items</option>
-          ))}
-        </select>
-        <p className="text-xs text-muted mt-1">Number of items shown per page in lists and archives</p>
-      </div>
+        {/* Workspace Model Override — full-width row below grid */}
+        {workspaceId && (
+          <div className="mt-6 pt-5 border-t border-border">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-semibold text-muted uppercase tracking-wider">Workspace Model Override</p>
+              {savedWorkspace && (
+                <span className="flex items-center gap-1 text-xs text-green-500"><Check size={12} /> Saved</span>
+              )}
+            </div>
+            <div className="flex gap-2 items-center">
+              <div className="flex-1 min-w-0">
+                <ModelSearchSelect
+                  models={[
+                    { id: '', label: `Use global default (${models.find(m => m.id === defaultModel)?.label ?? defaultModel})`, provider: '', costPer1kInput: 0, costPer1kOutput: 0, recommended: false },
+                    ...models,
+                  ]}
+                  value={workspaceModel ?? ''}
+                  defaultModelId={null}
+                  onChange={modelId => setWorkspaceModel(modelId || null)}
+                  disabled={savingWorkspace}
+                />
+              </div>
+              <button
+                onClick={() => saveWorkspaceModel(workspaceModel)}
+                disabled={savingWorkspace || workspaceModel === workspaceModelInitial}
+                className="px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors shrink-0"
+              >
+                {savingWorkspace ? <Loader2 size={12} className="animate-spin inline" /> : 'Save'}
+              </button>
+            </div>
+          </div>
+        )}
 
-      {/* Save display settings button */}
-      <button
-        onClick={saveDisplay}
-        disabled={saving || !hasChanges}
-        className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
-      >
-        {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
-        {saved ? 'Saved' : 'Save Display Settings'}
-      </button>
-    </div>
+        {/* itemsPerPage deprecated */}
+      </div>
   );
 }
 
@@ -2204,86 +3086,89 @@ function ModelRoutingSection() {
   if (!config) return null;
 
   return (
-    <div className="space-y-5">
-      <div>
-        <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
-          <SlidersHorizontal size={16} className="text-accent" />
-          Model Routing
-        </h2>
-        <p className="text-xs text-muted mt-0.5">
-          Configure how stories are assigned to model tiers and which models handle each task type.
-        </p>
-      </div>
+    <div className="rounded-xl border border-border bg-panel p-5 mt-4">
+      {/* Card header */}
+      <h2 className="text-sm font-semibold text-[var(--text)] flex items-center gap-2">
+        <SlidersHorizontal size={16} className="text-accent" />
+        Model Routing
+      </h2>
 
-      {/* Router mode */}
-      <div>
-        <label className="block text-xs text-muted mb-2">Router Mode</label>
-        <div className="grid grid-cols-3 gap-2">
-          {(['auto', 'fixed', 'manual'] as RouterMode[]).map(mode => {
-            const info = ROUTER_MODE_INFO[mode];
-            return (
-              <button
-                key={mode}
-                onClick={() => update('router', mode)}
-                className={`border rounded-lg p-3 text-left transition-all ${config.router === mode
-                    ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
-                    : 'border-border bg-bg hover:border-accent/30'
-                  }`}
-              >
-                <span className="text-xs font-medium text-[var(--text)]">{info.label}</span>
-                <p className="text-[10px] text-muted mt-0.5 leading-tight">{info.description}</p>
-              </button>
-            );
-          })}
-        </div>
-      </div>
+      {/* 3-column grid */}
+      <div className="grid grid-cols-1 lg:grid-cols-3 gap-6 mt-4">
 
-      {/* Three-tier threshold slider (only shown in auto mode) */}
-      {config.router === 'auto' && (
+        {/* Left col — Router Mode */}
         <div>
-          <label className="block text-xs text-muted mb-2">Complexity Thresholds</label>
-          <ThresholdSlider
-            haikuMax={config.thresholds.haiku[1]}
-            sonnetMax={config.thresholds.sonnet[1]}
-            onChange={(haikuMax, sonnetMax) => {
-              update('thresholds', {
-                haiku: [0, haikuMax],
-                sonnet: [haikuMax + 1, sonnetMax],
-                opus: [sonnetMax + 1, 100],
-              });
-            }}
-          />
+          <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-3">Router Mode</p>
+          <div className="flex flex-col gap-2">
+            {(['auto', 'fixed', 'manual'] as RouterMode[]).map(mode => {
+              const info = ROUTER_MODE_INFO[mode];
+              return (
+                <button
+                  key={mode}
+                  onClick={() => update('router', mode)}
+                  className={`border rounded-lg p-3 text-left transition-all ${config.router === mode
+                      ? 'border-accent bg-accent/5 ring-1 ring-accent/30'
+                      : 'border-border bg-bg hover:border-accent/30'
+                    }`}
+                >
+                  <span className="text-xs font-medium text-[var(--text)]">{info.label}</span>
+                  <p className="text-[10px] text-muted mt-0.5 leading-tight">{info.description}</p>
+                </button>
+              );
+            })}
+          </div>
         </div>
-      )}
 
-      {/* Task cascades */}
-      <div>
-        <label className="block text-xs text-muted mb-2">Task Type Model Assignments</label>
-        <div className="border border-border rounded overflow-hidden">
-          {(Object.entries(TASK_TYPE_LABELS) as [TaskType, { label: string; description: string }][]).map(([taskType, info]) => (
-            <div key={taskType} className="flex items-center justify-between px-4 py-2.5 border-b border-border last:border-b-0">
-              <div className="min-w-0">
-                <span className="text-sm text-[var(--text)]">{info.label}</span>
-                <p className="text-[10px] text-muted">{info.description}</p>
+        {/* Center col — Complexity Thresholds */}
+        <div>
+          <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-3">Complexity Thresholds</p>
+          {config.router === 'auto' ? (
+            <ThresholdSlider
+              haikuMax={config.thresholds.haiku[1]}
+              sonnetMax={config.thresholds.sonnet[1]}
+              onChange={(haikuMax, sonnetMax) => {
+                update('thresholds', {
+                  haiku: [0, haikuMax],
+                  sonnet: [haikuMax + 1, sonnetMax],
+                  opus: [sonnetMax + 1, 100],
+                });
+              }}
+            />
+          ) : (
+            <p className="text-xs text-muted">Switch to Auto router mode to configure complexity thresholds.</p>
+          )}
+        </div>
+
+        {/* Right col — Task Models */}
+        <div>
+          <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-3">Task Models</p>
+          <div className="flex flex-col gap-2">
+            {(Object.entries(TASK_TYPE_LABELS) as [TaskType, { label: string; description: string }][]).map(([taskType, info]) => (
+              <div key={taskType} className="flex items-center justify-between gap-2">
+                <div className="min-w-0 flex-1">
+                  <p className="text-xs font-bold text-[var(--text)] truncate">{info.label}</p>
+                  <p className="text-[10px] text-muted leading-tight">{info.description}</p>
+                </div>
+                <input
+                  type="text"
+                  value={config.taskCascades[taskType] ?? ''}
+                  onChange={e => {
+                    const newCascades = { ...config.taskCascades, [taskType]: e.target.value };
+                    update('taskCascades', newCascades);
+                  }}
+                  className="w-28 px-2 py-1 text-xs bg-bg border border-border rounded focus:border-accent outline-none font-mono flex-shrink-0"
+                  placeholder="model-id"
+                />
               </div>
-              <input
-                type="text"
-                value={config.taskCascades[taskType] ?? ''}
-                onChange={e => {
-                  const newCascades = { ...config.taskCascades, [taskType]: e.target.value };
-                  update('taskCascades', newCascades);
-                }}
-                className="w-64 px-2 py-1.5 text-xs bg-bg border border-border rounded focus:border-accent outline-none font-mono"
-                placeholder="model-id"
-              />
-            </div>
-          ))}
+            ))}
+          </div>
         </div>
       </div>
 
-      {/* Escalation */}
-      <div>
-        <label className="block text-xs text-muted mb-2">Escalation</label>
+      {/* Full-width below grid */}
+      <div className="border-t border-border pt-4 mt-2 space-y-4">
+
+        {/* Escalation */}
         <div className="border border-border rounded p-4 bg-bg space-y-3">
           <div className="flex items-center justify-between">
             <div>
@@ -2321,49 +3206,49 @@ function ModelRoutingSection() {
             </div>
           )}
         </div>
+
+        {/* Token budget */}
+        <div>
+          <label className="block text-xs text-muted mb-2">Token Budget Per Story</label>
+          <div className="flex items-center gap-3">
+            <input
+              type="number"
+              min={1000}
+              step={5000}
+              value={config.tokenBudgetPerStory}
+              onChange={e => update('tokenBudgetPerStory', parseInt(e.target.value) || 50000)}
+              className="w-40 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+            />
+            <span className="text-xs text-muted">input tokens before warning (default: 50,000)</span>
+          </div>
+        </div>
+
+        {/* Error */}
+        {error && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/20 text-red-400">
+            <XCircle size={14} />
+            {error}
+          </div>
+        )}
+
+        {/* No workspace warning */}
+        {!workspaceId && (
+          <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-amber-500/10 border border-amber-500/20 text-amber-400">
+            <AlertTriangle size={14} />
+            Select a workspace to save routing configuration to .rorca/config.json
+          </div>
+        )}
+
+        {/* Save */}
+        <button
+          onClick={handleSave}
+          disabled={saving || !dirty || !workspaceId}
+          className="w-full flex items-center justify-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+        >
+          {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
+          {saved ? 'Saved' : 'Save Routing Configuration'}
+        </button>
       </div>
-
-      {/* Token budget */}
-      <div>
-        <label className="block text-xs text-muted mb-2">Token Budget Per Story</label>
-        <div className="flex items-center gap-3">
-          <input
-            type="number"
-            min={1000}
-            step={5000}
-            value={config.tokenBudgetPerStory}
-            onChange={e => update('tokenBudgetPerStory', parseInt(e.target.value) || 50000)}
-            className="w-40 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
-          />
-          <span className="text-xs text-muted">input tokens before warning (default: 50,000)</span>
-        </div>
-      </div>
-
-      {/* Error */}
-      {error && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-red-500/10 border border-red-500/20 text-red-400">
-          <XCircle size={14} />
-          {error}
-        </div>
-      )}
-
-      {/* No workspace warning */}
-      {!workspaceId && (
-        <div className="flex items-center gap-2 px-3 py-2 rounded text-xs bg-amber-500/10 border border-amber-500/20 text-amber-400">
-          <AlertTriangle size={14} />
-          Select a workspace to save routing configuration to .rorca/config.json
-        </div>
-      )}
-
-      {/* Save */}
-      <button
-        onClick={handleSave}
-        disabled={saving || !dirty || !workspaceId}
-        className="flex items-center gap-2 px-4 py-2 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
-      >
-        {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
-        {saved ? 'Saved' : 'Save Routing Configuration'}
-      </button>
     </div>
   );
 }
