@@ -24,6 +24,7 @@ import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
 import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
+import { matchSkills } from '../lib/skill-matcher';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -5089,6 +5090,373 @@ router.get('/:specId/generation-log', async (req: Request, res: Response) => {
   }
 });
 
+// ─── SV-001: GET /:specId/check — Structural spec validation ─────────────────
+
+/**
+ * @swagger
+ * /api/specs/{specId}/check:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Validate a spec's structure and story integrity
+ *     operationId: checkSpec
+ *     description: >
+ *       Performs structural validation on a spec JSON file. Checks for missing
+ *       required fields per story (id, title, description, acceptanceCriteria),
+ *       orphaned dependsOn references, duplicate story IDs, and empty
+ *       acceptanceCriteria arrays. Returns categorized errors, warnings, and
+ *       aggregate structural stats.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Spec slug (filename without .json)
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Validation result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 valid: { type: boolean }
+ *                 errors:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       field: { type: string }
+ *                       message: { type: string }
+ *                 warnings:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       field: { type: string }
+ *                       message: { type: string }
+ *                 stats:
+ *                   type: object
+ *                   properties:
+ *                     totalStories: { type: integer }
+ *                     avgACCount: { type: number }
+ *                     maxDependencyDepth: { type: integer }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ */
+router.get('/:specId/check', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const workspaceId = req.query.workspaceId as string;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let content: any;
+    if (fs.existsSync(pendingFile)) {
+      content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    } else if (fs.existsSync(approvedFile)) {
+      content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const stories: any[] = content.userStories ?? content.stories ?? [];
+
+    interface ValidationIssue {
+      storyId: string;
+      field: string;
+      message: string;
+    }
+
+    const errors: ValidationIssue[] = [];
+    const warnings: ValidationIssue[] = [];
+
+    // Collect all story IDs for orphan detection
+    const storyIds = new Set<string>();
+    const seenIds = new Set<string>();
+
+    // First pass: collect IDs and detect duplicates
+    for (const story of stories) {
+      const sid = story.id;
+      if (typeof sid !== 'string' || sid.trim() === '') {
+        errors.push({ storyId: '(unknown)', field: 'id', message: 'Story is missing required field: id' });
+        continue;
+      }
+      if (seenIds.has(sid)) {
+        errors.push({ storyId: sid, field: 'id', message: `Duplicate story ID: ${sid}` });
+      } else {
+        seenIds.add(sid);
+        storyIds.add(sid);
+      }
+    }
+
+    // Second pass: validate required fields and dependsOn references
+    let totalACCount = 0;
+
+    for (const story of stories) {
+      const sid = (typeof story.id === 'string' && story.id.trim() !== '') ? story.id : '(unknown)';
+
+      // Required field: title
+      if (typeof story.title !== 'string' || story.title.trim() === '') {
+        errors.push({ storyId: sid, field: 'title', message: 'Story is missing required field: title' });
+      }
+
+      // Required field: description
+      if (typeof story.description !== 'string' || story.description.trim() === '') {
+        errors.push({ storyId: sid, field: 'description', message: 'Story is missing required field: description' });
+      }
+
+      // Required field: acceptanceCriteria (must be array)
+      if (!Array.isArray(story.acceptanceCriteria)) {
+        errors.push({ storyId: sid, field: 'acceptanceCriteria', message: 'Story is missing required field: acceptanceCriteria (must be array)' });
+      } else {
+        totalACCount += story.acceptanceCriteria.length;
+        if (story.acceptanceCriteria.length === 0) {
+          warnings.push({ storyId: sid, field: 'acceptanceCriteria', message: 'Story has empty acceptanceCriteria array' });
+        }
+        // Validate each AC is a string
+        for (let i = 0; i < story.acceptanceCriteria.length; i++) {
+          if (typeof story.acceptanceCriteria[i] !== 'string') {
+            errors.push({ storyId: sid, field: `acceptanceCriteria[${i}]`, message: `Acceptance criteria entry ${i} is not a string` });
+          }
+        }
+      }
+
+      // Orphaned dependsOn references
+      if (Array.isArray(story.dependsOn)) {
+        for (const dep of story.dependsOn) {
+          if (typeof dep !== 'string') {
+            errors.push({ storyId: sid, field: 'dependsOn', message: `dependsOn entry is not a string: ${JSON.stringify(dep)}` });
+          } else if (!storyIds.has(dep)) {
+            errors.push({ storyId: sid, field: 'dependsOn', message: `Orphaned dependsOn reference: "${dep}" does not exist in this spec` });
+          }
+        }
+      }
+    }
+
+    // Compute maxDependencyDepth via BFS/memoization
+    function computeDepth(sid: string, visited: Set<string>): number {
+      if (visited.has(sid)) return 0; // cycle guard
+      const story = stories.find((s: any) => s.id === sid);
+      if (!story || !Array.isArray(story.dependsOn) || story.dependsOn.length === 0) return 0;
+      visited.add(sid);
+      let max = 0;
+      for (const dep of story.dependsOn) {
+        if (typeof dep === 'string' && storyIds.has(dep)) {
+          const d = computeDepth(dep, new Set(visited));
+          if (d > max) max = d;
+        }
+      }
+      return max + 1;
+    }
+
+    let maxDependencyDepth = 0;
+    for (const story of stories) {
+      if (typeof story.id === 'string' && storyIds.has(story.id)) {
+        const depth = computeDepth(story.id, new Set<string>());
+        if (depth > maxDependencyDepth) maxDependencyDepth = depth;
+      }
+    }
+
+    const totalStories = stories.length;
+    const avgACCount = totalStories > 0 ? Math.round((totalACCount / totalStories) * 10) / 10 : 0;
+
+    res.json({
+      valid: errors.length === 0,
+      errors,
+      warnings,
+      stats: { totalStories, avgACCount, maxDependencyDepth },
+    });
+  } catch (error: any) {
+    logger.error('[Specs] Check error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── SV-002: GET /:specId/score — AC quality scoring ─────────────────────────
+
+/**
+ * @swagger
+ * /api/specs/{specId}/score:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Compute quality score for a spec's acceptance criteria
+ *     operationId: scoreSpec
+ *     description: >
+ *       Scores each story's acceptance criteria on a 0-100 scale using three
+ *       dimensions: AC count (base score), specificity (penalty for vague
+ *       phrases like "properly", "correctly", "as expected"), and state
+ *       coverage (bonus for mentioning error, empty, and loading states).
+ *       Returns per-story scores and an aggregate spec score (average).
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Spec slug (filename without .json)
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Quality score result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 specScore:
+ *                   type: number
+ *                   description: Aggregate score 0-100 (average of all story scores)
+ *                 stories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       score: { type: number }
+ *                       acCount: { type: integer }
+ *                       vaguePhrasesFound:
+ *                         type: array
+ *                         items: { type: string }
+ *                       stateCoverage:
+ *                         type: object
+ *                         properties:
+ *                           error: { type: boolean }
+ *                           empty: { type: boolean }
+ *                           loading: { type: boolean }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ */
+router.get('/:specId/score', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const workspaceId = req.query.workspaceId as string;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let content: any;
+    if (fs.existsSync(pendingFile)) {
+      content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    } else if (fs.existsSync(approvedFile)) {
+      content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const stories: any[] = content.userStories ?? content.stories ?? [];
+
+    // Vague phrases that indicate non-measurable acceptance criteria
+    const VAGUE_PHRASES = [
+      'properly', 'correctly', 'as expected', 'appropriate', 'suitable',
+      'should work', 'must work', 'works correctly', 'works properly',
+      'behaves correctly', 'behaves properly', 'functions correctly',
+      'functions properly', 'handles correctly', 'handles properly',
+    ];
+
+    // State coverage patterns
+    const ERROR_PATTERNS = /\b(error|errors|fail|failure|failures|exception|invalid|unauthorized|forbidden|not found|500|404|400|401|403)\b/i;
+    const EMPTY_PATTERNS = /\b(empty|no results|no items|no data|no records|zero results|empty state|nothing found)\b/i;
+    const LOADING_PATTERNS = /\b(loading|load|spinner|skeleton|pending|fetching|in progress|progress)\b/i;
+
+    interface StoryScore {
+      id: string;
+      score: number;
+      acCount: number;
+      vaguePhrasesFound: string[];
+      stateCoverage: { error: boolean; empty: boolean; loading: boolean };
+    }
+
+    const storyScores: StoryScore[] = stories.map((story: any) => {
+      const sid = typeof story.id === 'string' ? story.id : '(unknown)';
+      const acs: string[] = Array.isArray(story.acceptanceCriteria) ? story.acceptanceCriteria.filter((ac: any) => typeof ac === 'string') : [];
+      const acCount = acs.length;
+      const allAcText = acs.join(' ');
+
+      // Base score from AC count:
+      // 0 AC = 0pt, 1-2 AC = 20pt, 3-4 AC = 40pt, 5-6 AC = 60pt, 7+ AC = 70pt (diminishing returns cap)
+      let baseScore: number;
+      if (acCount === 0) {
+        baseScore = 0;
+      } else if (acCount <= 2) {
+        baseScore = 20;
+      } else if (acCount <= 4) {
+        baseScore = 40;
+      } else if (acCount <= 6) {
+        baseScore = 60;
+      } else {
+        baseScore = 70;
+      }
+
+      // Specificity penalty: -5pt per unique vague phrase found, min 0
+      const vaguePhrasesFound: string[] = [];
+      for (const phrase of VAGUE_PHRASES) {
+        if (allAcText.toLowerCase().includes(phrase.toLowerCase()) && !vaguePhrasesFound.includes(phrase)) {
+          vaguePhrasesFound.push(phrase);
+        }
+      }
+      const specificityPenalty = vaguePhrasesFound.length * 5;
+
+      // State coverage bonus: +10pt each for error/empty/loading mentions (max +30pt)
+      const stateCoverage = {
+        error: ERROR_PATTERNS.test(allAcText),
+        empty: EMPTY_PATTERNS.test(allAcText),
+        loading: LOADING_PATTERNS.test(allAcText),
+      };
+      const coverageBonus = (stateCoverage.error ? 10 : 0) + (stateCoverage.empty ? 10 : 0) + (stateCoverage.loading ? 10 : 0);
+
+      const score = Math.min(100, Math.max(0, baseScore - specificityPenalty + coverageBonus));
+
+      return { id: sid, score, acCount, vaguePhrasesFound, stateCoverage };
+    });
+
+    const specScore = storyScores.length > 0
+      ? Math.round(storyScores.reduce((sum, s) => sum + s.score, 0) / storyScores.length)
+      : 0;
+
+    res.json({ specScore, stories: storyScores });
+  } catch (error: any) {
+    logger.error('[Specs] Score error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── DELETE /:specId — Hard-delete a spec (any status) ──────────────────────
 
 /**
@@ -8764,6 +9132,492 @@ ${storyList}`;
     res.json({ suggestions });
   } catch (error: any) {
     logger.error('[Specs] suggest-models error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── SV-003: POST /:specId/validate — LLM-powered deep spec review ────────────
+
+/**
+ * @swagger
+ * /api/specs/{specId}/validate:
+ *   post:
+ *     tags: [Specs]
+ *     summary: LLM-powered deep spec review
+ *     operationId: validateSpec
+ *     description: >
+ *       Uses an LLM (claude-sonnet-4-6) to perform a deep review of a spec,
+ *       injecting spec-gap-analysis and assumption-buster skills into the prompt.
+ *       Returns structured analysis: implicit assumptions, coverage gaps,
+ *       untestable acceptance criteria, and missed stories.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Spec slug (filename without .json)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Deep validation result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 assumptions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       assumption: { type: string }
+ *                       risk: { type: string }
+ *                 gaps:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       area: { type: string }
+ *                       description: { type: string }
+ *                 untestableACs:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       acIndex: { type: integer }
+ *                       reason: { type: string }
+ *                 missedStories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       title: { type: string }
+ *                       description: { type: string }
+ *                       reason: { type: string }
+ *       400: { description: "Missing workspaceId" }
+ *       404: { description: "Workspace or spec not found" }
+ *       422: { description: "LLM response is not valid JSON" }
+ */
+router.post('/:specId/validate', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId } = req.body as { workspaceId?: string };
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specContent: any;
+    if (fs.existsSync(pendingFile)) {
+      specContent = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    } else if (fs.existsSync(approvedFile)) {
+      specContent = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    // Load skill files from .claude/skills/ (primary) or .rorca/skills/ (fallback)
+    function loadSkill(name: string): string {
+      const claudeSkillPath = path.join(workspace!.path, '.claude', 'skills', `${name}.md`);
+      const rorcaSkillPath = path.join(workspace!.path, '.rorca', 'skills', `${name}.md`);
+      if (fs.existsSync(claudeSkillPath)) {
+        return fs.readFileSync(claudeSkillPath, 'utf8');
+      }
+      if (fs.existsSync(rorcaSkillPath)) {
+        return fs.readFileSync(rorcaSkillPath, 'utf8');
+      }
+      return '';
+    }
+
+    const specGapSkill = loadSkill('spec-gap-analysis');
+    const assumptionBusterSkill = loadSkill('assumption-buster');
+
+    const prompt = `You are an expert spec reviewer performing a deep quality analysis. Your goal is to identify hidden risks, gaps, and assumptions in the following spec.
+
+${specGapSkill ? `## Spec Gap Analysis Skill\n${specGapSkill}\n\n` : ''}${assumptionBusterSkill ? `## Assumption Buster Skill\n${assumptionBusterSkill}\n\n` : ''}## Spec to Review
+
+\`\`\`json
+${JSON.stringify(specContent, null, 2)}
+\`\`\`
+
+## Your Task
+
+Analyze this spec and return a JSON object with exactly these four arrays:
+
+1. **assumptions** — implicit assumptions embedded in stories that are never explicitly stated or validated. For each: which story, what assumption, and what risk if it's wrong.
+
+2. **gaps** — areas of functionality not covered by any story. Think: error handling, auth, edge cases, data validation, rollback/undo, permissions, empty states, concurrent access, rate limiting, accessibility.
+
+3. **untestableACs** — acceptance criteria that are vague, subjective, or otherwise not verifiable by an automated test. Examples: "works correctly", "looks good", "is fast enough".
+
+4. **missedStories** — user stories that should exist but don't, given the feature area being built. Think about onboarding, error recovery, admin views, audit logs, notifications, mobile/responsive behavior.
+
+Respond with ONLY valid JSON, no markdown fences, no prose. Format:
+{
+  "assumptions": [{ "storyId": "US-001", "assumption": "...", "risk": "..." }],
+  "gaps": [{ "area": "...", "description": "..." }],
+  "untestableACs": [{ "storyId": "US-001", "acIndex": 0, "reason": "..." }],
+  "missedStories": [{ "title": "...", "description": "...", "reason": "..." }]
+}`;
+
+    const llmResult = await chatComplete(
+      [{ role: 'user', content: prompt }],
+      { model: 'claude-sonnet-4-6' },
+    );
+
+    // Parse LLM response — strip markdown fences and extract JSON
+    let parsed: {
+      assumptions: Array<{ storyId: string; assumption: string; risk: string }>;
+      gaps: Array<{ area: string; description: string }>;
+      untestableACs: Array<{ storyId: string; acIndex: number; reason: string }>;
+      missedStories: Array<{ title: string; description: string; reason: string }>;
+    };
+
+    try {
+      let cleaned = llmResult.text.replace(/```json\s*/g, '').replace(/```\s*/g, '').trim();
+      const jsonStart = cleaned.indexOf('{');
+      if (jsonStart > 0) {
+        cleaned = cleaned.slice(jsonStart);
+      }
+      const lastBrace = cleaned.lastIndexOf('}');
+      if (lastBrace >= 0 && lastBrace < cleaned.length - 1) {
+        cleaned = cleaned.slice(0, lastBrace + 1);
+      }
+      parsed = JSON.parse(cleaned);
+    } catch {
+      logger.error(`[Specs] validate: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
+      res.status(422).json({ error: 'LLM response is not valid JSON' });
+      return;
+    }
+
+    const result = {
+      assumptions: Array.isArray(parsed.assumptions) ? parsed.assumptions : [],
+      gaps: Array.isArray(parsed.gaps) ? parsed.gaps : [],
+      untestableACs: Array.isArray(parsed.untestableACs) ? parsed.untestableACs : [],
+      missedStories: Array.isArray(parsed.missedStories) ? parsed.missedStories : [],
+    };
+
+    res.json(result);
+  } catch (error: any) {
+    logger.error('[Specs] validate error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /:specId/suggest-skills — Skill-matcher module entry point ────────
+
+/**
+ * @swagger
+ * /api/specs/{specId}/suggest-skills:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Run skill matching for a spec via the skill-matcher module
+ *     operationId: suggestSkills
+ *     description: >
+ *       Delegates to the skill-matcher module (backend/src/lib/skill-matcher.ts).
+ *       Reads installed skills from .rorca/skills/, MEMORY.md, and AGENTS.md,
+ *       then calls the LLM to assign suggestedSkills arrays to each story with
+ *       name, relevance (1-10), and reasoning. Writes the updated spec JSON back
+ *       to the filesystem.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Spec slug (filename without .json)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       200:
+ *         description: Skill suggestions written to spec
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 matched: { type: integer, description: Total skills matched across all stories }
+ *                 storiesAffected: { type: integer, description: Stories that received at least one skill }
+ *                 stories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       skills:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                           properties:
+ *                             name: { type: string }
+ *                             relevance: { type: integer }
+ *                             reason: { type: string }
+ *       400:
+ *         description: Missing workspaceId
+ *       404:
+ *         description: Spec or workspace not found
+ *       422:
+ *         description: No skills installed or spec has no stories
+ */
+router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
+  try {
+    const specId = req.params.specId as string;
+    const { workspaceId } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'workspaceId is required' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Resolve spec file: approved first, then pending
+    const { pendingDir, approvedDir } = specsDirs(workspace.path as string);
+    let specFilePath = path.join(approvedDir, `${specId}.json`);
+    let specStatus = 'approved';
+    if (!fs.existsSync(specFilePath)) {
+      specFilePath = path.join(pendingDir, `${specId}.json`);
+      specStatus = 'pending';
+      if (!fs.existsSync(specFilePath)) {
+        res.status(404).json({ error: 'Spec not found in approved or pending directories' });
+        return;
+      }
+    }
+
+    // Read spec
+    const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
+    if (!Array.isArray(specContent.userStories) || specContent.userStories.length === 0) {
+      res.status(422).json({ error: 'Spec has no user stories' });
+      return;
+    }
+
+    // Delegate to skill-matcher module
+    let result;
+    try {
+      result = await matchSkills(specContent, workspace.path as string, specFilePath, workspaceId);
+    } catch (matchErr: any) {
+      if (matchErr.message?.includes('No skills installed')) {
+        res.status(422).json({ error: matchErr.message });
+        return;
+      }
+      throw matchErr;
+    }
+
+    // Create spec version for audit trail
+    await snapshotVersion(specId, JSON.stringify(result.spec), specStatus === 'approved' ? 'approved' : 'pending');
+
+    // Emit WAL event
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ($1, $2, $3, $4) RETURNING *`,
+      ['skill_matched', specId, workspaceId, JSON.stringify({
+        matched_count: result.matched,
+        stories_affected: result.storiesAffected,
+        source: 'suggest-skills',
+      })],
+    );
+    broadcastAll(walEvent!);
+
+    res.json({
+      matched: result.matched,
+      storiesAffected: result.storiesAffected,
+      stories: result.stories,
+    });
+  } catch (error: any) {
+    logger.error('[Specs] suggest-skills error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/{specId}/fix:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Apply automated structural fixes to a spec
+ *     operationId: fixSpec
+ *     description: >
+ *       Reindexes story IDs to sequential US-001..US-N (updating dependsOn references),
+ *       adds passes:false to stories missing the field, normalizes dependsOn to array,
+ *       and removes duplicate story IDs (keeping first occurrence). Never modifies
+ *       title, description, or acceptanceCriteria text.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Spec slug (filename without .json)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Fix result
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 fixed:
+ *                   type: boolean
+ *                 changes:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       type:
+ *                         type: string
+ *                         enum: [reindex, add_passes, normalize_depends, remove_duplicate]
+ *                       storyId:
+ *                         type: string
+ *                       description:
+ *                         type: string
+ *       400:
+ *         description: Missing workspaceId
+ *       404:
+ *         description: Workspace or spec not found
+ */
+router.post('/:specId/fix', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+    const { workspaceId } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required body param: workspaceId' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
+
+    let specFile: string;
+    let content: any;
+    if (fs.existsSync(pendingFile)) {
+      specFile = pendingFile;
+      content = JSON.parse(fs.readFileSync(pendingFile, 'utf8'));
+    } else if (fs.existsSync(approvedFile)) {
+      specFile = approvedFile;
+      content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
+    } else {
+      res.status(404).json({ error: 'Spec not found' });
+      return;
+    }
+
+    const stories: any[] = content.userStories ?? [];
+    const changes: Array<{ type: 'reindex' | 'add_passes' | 'normalize_depends' | 'remove_duplicate'; storyId: string; description: string }> = [];
+
+    // Fix 4: Remove duplicate IDs (keep first occurrence)
+    const seenIds = new Set<string>();
+    const deduped: any[] = [];
+    for (const story of stories) {
+      const sid = story.id as string;
+      if (seenIds.has(sid)) {
+        changes.push({ type: 'remove_duplicate', storyId: sid, description: `Duplicate story ID "${sid}" removed (keeping first occurrence)` });
+        logger.warn(`[Specs] fix: duplicate story ID "${sid}" in spec ${specId}`);
+      } else {
+        seenIds.add(sid);
+        deduped.push(story);
+      }
+    }
+
+    // Fix 3: Normalize dependsOn to array before reindex
+    for (const story of deduped) {
+      if (story.dependsOn === undefined || story.dependsOn === null) {
+        changes.push({ type: 'normalize_depends', storyId: story.id, description: `dependsOn was undefined/null, set to []` });
+        story.dependsOn = [];
+      } else if (typeof story.dependsOn === 'string') {
+        const orig = story.dependsOn;
+        story.dependsOn = orig === '' ? [] : [orig];
+        changes.push({ type: 'normalize_depends', storyId: story.id, description: `dependsOn was string "${orig}", normalized to array` });
+      }
+    }
+
+    // Fix 1: Reindex story IDs to US-001..US-N and update dependsOn references
+    const idMap = new Map<string, string>();
+    deduped.forEach((story, idx) => {
+      const newId = `US-${String(idx + 1).padStart(3, '0')}`;
+      if (story.id !== newId) {
+        idMap.set(story.id, newId);
+        changes.push({ type: 'reindex', storyId: story.id, description: `Story "${story.id}" reindexed to "${newId}"` });
+        story.id = newId;
+      }
+    });
+
+    if (idMap.size > 0) {
+      // Update dependsOn references to use new IDs
+      for (const story of deduped) {
+        story.dependsOn = (story.dependsOn as string[]).map((dep: string) => idMap.get(dep) ?? dep);
+      }
+    }
+
+    // Fix 2: Add passes:false to stories missing the field
+    for (const story of deduped) {
+      if (!Object.prototype.hasOwnProperty.call(story, 'passes')) {
+        changes.push({ type: 'add_passes', storyId: story.id, description: `Missing passes field added as false` });
+        story.passes = false;
+      }
+    }
+
+    const fixed = changes.length > 0;
+    if (fixed) {
+      content.userStories = deduped;
+      const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
+      fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
+      await snapshotVersion(specId, JSON.stringify(content), specStatus);
+    }
+
+    res.json({ fixed, changes });
+  } catch (error: any) {
+    logger.error('[Specs] fix error:', error);
     res.status(500).json({ error: error.message });
   }
 });
