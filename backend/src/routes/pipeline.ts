@@ -2074,8 +2074,26 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       }
     }
 
-    // 7. Generate 1-story spec via LLM
-    const quickRunPrompt = [
+    // 7. Synthesize direction stack (L1–L3) for this workspace
+    let directionContext = '';
+    try {
+      const domain = workspace.domain ?? '';
+      const [l1Row, l2Row, l3Row] = await Promise.all([
+        queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = '' AND COALESCE(team_id, '') = '' LIMIT 1`, []) as Promise<{ content_yaml: string } | undefined>,
+        queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND COALESCE(workspace_id, '') = '' AND (domain = $1 OR COALESCE(domain, '') = '') AND COALESCE(team_id, '') = '' ORDER BY (domain = $1) DESC LIMIT 1`, [domain]) as Promise<{ content_yaml: string } | undefined>,
+        queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = '' LIMIT 1`, [workspaceId]) as Promise<{ content_yaml: string } | undefined>,
+      ]);
+      directionContext = synthesize({ l1: l1Row?.content_yaml, l2: l2Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: brief });
+    } catch {
+      // Silently skip — direction context is best-effort
+    }
+
+    // 8. Generate 1-story spec via LLM
+    const quickRunPromptParts: string[] = [];
+    if (directionContext.trim()) {
+      quickRunPromptParts.push('=== DIRECTION STACK ===', directionContext.trim(), '');
+    }
+    quickRunPromptParts.push(
       '=== INSTRUCTIONS: READ THIS FIRST ===',
       'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
       'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
@@ -2098,7 +2116,8 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       '- dependsOn must be an empty array (single story has no deps)',
       '- The description should be detailed enough for an engineer to implement',
       '- Your entire response must be valid JSON parseable by JSON.parse()',
-    ].join('\n');
+    );
+    const quickRunPrompt = quickRunPromptParts.join('\n');
 
     const llmResult = await chatComplete(
       [{ role: 'user', content: quickRunPrompt }],
