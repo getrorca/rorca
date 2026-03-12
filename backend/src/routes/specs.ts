@@ -25,6 +25,8 @@ import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
 import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
+import { PDFParse } from 'pdf-parse';
+import mammoth from 'mammoth';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -47,6 +49,86 @@ function briefToSlug(text: string): string {
   let slug = words.slice(0, 8).join('-');
   if (slug.length > 60) slug = words.slice(0, 5).join('-');
   return slug.slice(0, 60).replace(/-$/, '');
+}
+
+const MAX_ATTACHMENT_TOKENS = 2000;
+const IMAGE_CONTENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
+
+/**
+ * Extract text content from an attachment's binary data based on MIME type.
+ * Returns extracted text (truncated to MAX_ATTACHMENT_TOKENS tokens), or null for images.
+ */
+async function extractAttachmentText(contentType: string, fileData: Buffer, filename: string): Promise<string | null> {
+  try {
+    if (IMAGE_CONTENT_TYPES.has(contentType)) {
+      return null; // images handled separately as metadata
+    }
+
+    let text = '';
+    if (contentType === 'application/pdf') {
+      const parser = new PDFParse({ data: fileData });
+      const result = await parser.getText();
+      await parser.destroy();
+      text = result.text;
+    } else if (contentType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+      const result = await mammoth.extractRawText({ buffer: fileData });
+      text = result.value;
+    } else if (contentType === 'text/plain' || contentType === 'text/markdown' || contentType.startsWith('text/')) {
+      text = fileData.toString('utf-8');
+    } else {
+      return `[Unsupported file type: ${contentType}]`;
+    }
+
+    // Token budget: ~4 chars per token
+    const maxChars = MAX_ATTACHMENT_TOKENS * 4;
+    if (text.length > maxChars) {
+      return text.slice(0, maxChars) + '\n[truncated]';
+    }
+    return text;
+  } catch (err) {
+    return `[Error extracting text from ${filename}: ${(err as Error).message}]`;
+  }
+}
+
+/**
+ * Query spec_attachments for a given spec slug and build the
+ * '=== ATTACHED DOCUMENTS ===' prompt section.
+ * Returns empty string if no attachments found.
+ */
+async function buildAttachmentSection(specSlug: string): Promise<string> {
+  type AttachmentRow = {
+    filename: string;
+    content_type: string;
+    file_size: number;
+    file_data: Buffer;
+  };
+
+  const rows = await query<AttachmentRow>(
+    'SELECT filename, content_type, file_size, file_data FROM spec_attachments WHERE spec_id = $1 ORDER BY created_at ASC',
+    [specSlug],
+  );
+
+  if (rows.length === 0) return '';
+
+  const parts: string[] = ['=== ATTACHED DOCUMENTS ==='];
+
+  for (const row of rows) {
+    if (IMAGE_CONTENT_TYPES.has(row.content_type)) {
+      parts.push(
+        `${row.filename}:`,
+        `[Image attachment — type: ${row.content_type}, size: ${row.file_size} bytes. Image provided for visual context.]`,
+        '',
+      );
+    } else {
+      const text = await extractAttachmentText(row.content_type, row.file_data, row.filename);
+      if (text !== null) {
+        parts.push(`${row.filename}:`, text, '');
+      }
+    }
+  }
+
+  parts.push('=== END ATTACHED DOCUMENTS ===');
+  return parts.join('\n');
 }
 
 /** Resolve vault credentials (API key + baseUrl) for a given model and user. */
@@ -914,6 +996,15 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
     ];
 
+    // Pre-compute slug — needed for attachment lookup and multi-pass version snapshots
+    const slug = title
+      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+      : briefToSlug(brief);
+    genSlug = slug;
+
+    // Load attachment context for this spec slug (before prompt assembly)
+    const attachmentSection = await buildAttachmentSection(slug);
+
     // Build catalog sections (only include if non-empty)
     const catalogSections: string[] = [];
     if (catalogs.memoryMd) {
@@ -948,6 +1039,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         '',
       ] : []),
       ...catalogSections,
+      ...(attachmentSection ? [attachmentSection, ''] : []),
       ...(templateContext ? [templateContext, '---'] : []),
       '---',
       storyCount === 0
@@ -986,12 +1078,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     let parsed: { stories: unknown[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
     let tokenUsage = { inputTokens: 0, outputTokens: 0 };
 
-    // Pre-compute slug early — needed for multi-pass version snapshots
-    const slug = title
-      ? title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
-      : briefToSlug(brief);
-    genSlug = slug;
-
     if (multiPass) {
       // ── Multi-pass mode: Pass 1 (PM) → Pass 2 (Spec Writer) ──
       logger.info(`[Specs] Multi-pass generation enabled for "${effectiveTitle}"`);
@@ -1024,6 +1110,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         '=== END PERSONA ===',
         '',
         synthesized,
+        ...(attachmentSection ? [attachmentSection, ''] : []),
         ...(templateContext ? [templateContext, '---'] : []),
         '---',
         'TASK: Generate a HIGH-LEVEL software specification JSON with coarse user stories (10-20 stories).',
