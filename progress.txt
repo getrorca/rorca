@@ -3,12 +3,13 @@
 Spec: rorca-model-catalog-ux
 Run ID: 42
 Started: 2026-03-12T05:48:51.132Z
-Last Updated: 2026-03-12T06:10:05.009Z
+Last Updated: 2026-03-12T06:20:18.246Z
 
-## Completed Stories (6)
+## Completed Stories (7)
 - US-001: Fix hardcoded stale default model state — DONE (claude, claude-sonnet-4-6, 93s)
 - US-002: Replace Default Model native select with ModelSearchSelect — DONE (claude, claude-sonnet-4-6, 68s)
 - US-003: Replace Workspace Model Override native select with ModelSearchSelect — DONE (claude, claude-sonnet-4-6, 158s)
 - US-004: Add search bar and provider filter chips to Available Models catalog — DONE (claude, claude-sonnet-4-6, 190s)
 - US-005: Add cost tier and speed filter pills to model catalog — DONE (claude, claude-sonnet-4-6, 174s)
 - US-006: Collapse OpenRouter section by default with count badge and expand toggle — DONE (claude, claude-sonnet-4-6, 359s)
+- US-007: Limit OpenRouter expanded view to 30 models with Show More button — DONE (claude, claude-sonnet-4-6, 588s)

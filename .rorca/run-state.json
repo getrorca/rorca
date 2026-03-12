@@ -2,7 +2,7 @@
   "specId": "rorca-model-catalog-ux",
   "runId": 42,
   "startedAt": "2026-03-12T05:48:51.132Z",
-  "lastUpdatedAt": "2026-03-12T06:10:05.009Z",
+  "lastUpdatedAt": "2026-03-12T06:20:18.246Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -63,6 +63,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 359479
+    },
+    {
+      "storyId": "US-007",
+      "title": "Limit OpenRouter expanded view to 30 models with Show More button",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:10:30.679Z",
+      "finishedAt": "2026-03-12T06:20:18.245Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 587566
     }
   ],
   "failedStories": [],
