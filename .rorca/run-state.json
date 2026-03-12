@@ -1,93 +1,31 @@
 {
   "specId": "rorca-post-run-qa",
-  "runId": 57,
-  "startedAt": "2026-03-12T08:22:15.934Z",
-  "lastUpdatedAt": "2026-03-12T11:09:46.805Z",
+  "runId": 61,
+  "startedAt": "2026-03-12T08:34:23.363Z",
+  "lastUpdatedAt": "2026-03-12T09:19:12.633Z",
   "completedStories": [
-    {
-      "storyId": "QA-003",
-      "title": "ESLint validation and code quality fixes",
-      "status": "passed",
-      "startedAt": "2026-03-12T08:22:22.687Z",
-      "finishedAt": "2026-03-12T08:27:58.300Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 335613
-    },
     {
       "storyId": "QA-001",
       "title": "Frontend TypeScript validation and error resolution",
       "status": "passed",
-      "startedAt": "2026-03-12T09:14:10.141Z",
-      "finishedAt": "2026-03-12T09:17:46.935Z",
+      "startedAt": "2026-03-12T08:35:52.778Z",
+      "finishedAt": "2026-03-12T09:15:48.429Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 216794
+      "elapsedMs": 2395651
     },
     {
       "storyId": "QA-002",
       "title": "Backend TypeScript validation and error resolution",
       "status": "passed",
-      "startedAt": "2026-03-12T09:18:23.625Z",
-      "finishedAt": "2026-03-12T09:22:01.338Z",
+      "startedAt": "2026-03-12T09:16:14.867Z",
+      "finishedAt": "2026-03-12T09:19:12.633Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 217713
-    },
-    {
-      "storyId": "QA-003",
-      "title": "ESLint validation and code quality fixes",
-      "status": "passed",
-      "startedAt": "2026-03-12T09:22:40.817Z",
-      "finishedAt": "2026-03-12T09:36:45.803Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 844986
-    },
-    {
-      "storyId": "QA-005",
-      "title": "Spec validator endpoint smoke test script",
-      "status": "passed",
-      "startedAt": "2026-03-12T10:27:26.709Z",
-      "finishedAt": "2026-03-12T10:29:13.225Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 106496
-    },
-    {
-      "storyId": "QA-006",
-      "title": "MCP tool registration verification",
-      "status": "passed",
-      "startedAt": "2026-03-12T10:40:00.000Z",
-      "finishedAt": "2026-03-12T10:45:00.000Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 300000
-    },
-    {
-      "storyId": "QA-006",
-      "title": "MCP tool registration and schema validation",
-      "status": "passed",
-      "startedAt": "2026-03-12T10:34:47.102Z",
-      "finishedAt": "2026-03-12T11:09:46.755Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 2099647
+      "elapsedMs": 177766
     }
   ],
-  "failedStories": [
-    {
-      "storyId": "QA-004",
-      "title": "Backend Jest test suite validation and new test coverage",
-      "status": "failed",
-      "startedAt": "2026-03-12T09:37:03.339Z",
-      "finishedAt": "2026-03-12T10:22:07.240Z",
-      "agentType": "claude",
-      "failReason": "max_retries",
-      "retries": 3,
-      "elapsedMs": 2703901
-    }
-  ],
+  "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
