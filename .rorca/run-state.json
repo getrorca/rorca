@@ -2,7 +2,7 @@
   "specId": "providers-models-page-redesign",
   "runId": 66,
   "startedAt": "2026-03-12T20:08:56.201Z",
-  "lastUpdatedAt": "2026-03-12T20:32:33.274Z",
+  "lastUpdatedAt": "2026-03-12T20:35:02.003Z",
   "completedStories": [
     {
       "storyId": "PM-001",
@@ -63,6 +63,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 249223
+    },
+    {
+      "storyId": "PM-007",
+      "title": "Display & Theme compact card with inline saves",
+      "status": "passed",
+      "startedAt": "2026-03-12T20:33:00.632Z",
+      "finishedAt": "2026-03-12T20:35:02.002Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 121370
     }
   ],
   "failedStories": [],
