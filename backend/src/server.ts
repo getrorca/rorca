@@ -1,5 +1,4 @@
 import express from 'express';
-import helmet from 'helmet';
 import cors from 'cors';
 import path from 'path';
 import dotenv from 'dotenv';
@@ -41,42 +40,25 @@ import { startNotificationDispatcher } from './lib/notification-dispatcher';
 import { startQueueConsumer } from './lib/queue-consumer';
 import { startMemorySynthesis } from './lib/memory-synthesis';
 import { startFileWatcher } from './lib/file-watcher';
-import { startEmbeddingPipeline } from './lib/embedding-pipeline';
-import { subscribe, type WalEvent } from './lib/sse-hub';
-import { rotateMemory } from './lib/memory-ledger';
-import { deduplicateMemory } from './lib/memory-dedup';
+import { subscribe } from './lib/sse-hub';
 import swaggerUi from 'swagger-ui-express';
 import { swaggerSpec } from './lib/swagger';
-import { rateLimiter, initRateLimiterCache } from './lib/rate-limiter';
+import { rateLimiter } from './lib/rate-limiter';
 import { publicReviewRouter, specReviewRouter } from './routes/review';
 import fileWatchRouter from './routes/file-watch';
 import { errorHandler } from './lib/error-handler';
 import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
-import { queryOne } from './db/index';
+import { db } from './db/index';
 import runQueueRouter from './routes/run-queue';
 import configRouter from './routes/config';
 import copilotRouter from './routes/copilot';
 import memoryRouter from './routes/memory';
-import crossWorkspaceMemoryRouter from './routes/cross-workspace-memory';
 import agentsRouter from './routes/agents';
 import contextRoutingRouter from './routes/context-routing';
 import contextFilesRouter from './routes/context-files';
 import conventionsRouter from './routes/conventions';
-import packsRouter from './routes/packs';
-import skillsRouter from './routes/skills';
-import personasRouter from './routes/personas';
-import marketplaceRouter from './routes/marketplace';
-import searchRouter from './routes/search';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
-import { createMcpRequestHandler } from './lib/mcp-http';
-import telemetryRouter from './routes/telemetry';
-import { logger } from './lib/logger';
-import pinoHttp from 'pino-http';
-import { startGraphPopulator } from './lib/graph-populator';
-import workspaceDriftRouter from './routes/workspace-drift';
-import { startDriftSubscriber } from './lib/drift-subscriber';
-import mcpToolsRouter from './routes/mcp-tools';
 
 dotenv.config();
 
@@ -88,67 +70,11 @@ if (agentType === 'opencode') {
 const app = express();
 const PORT = process.env.PORT || 3030;
 
-// PR-008: Structured request/response logging — method, url, statusCode, responseTime
-app.use(pinoHttp({ logger }));
-
-// PR-006: HTTP security headers via helmet
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"], // required for Tailwind inline styles
-      imgSrc: ["'self'", 'data:', 'https:'],
-      connectSrc: ["'self'", 'ws:', 'wss:'],   // allow SSE and WebSocket connections
-    },
-  },
-  frameguard: { action: 'deny' },               // X-Frame-Options: DENY
-  noSniff: true,                                 // X-Content-Type-Options: nosniff
-  hsts: { maxAge: 31536000 },                   // Strict-Transport-Security
-  xssFilter: false,                              // X-XSS-Protection: 0 (CSP is the real protection)
-  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-  permittedCrossDomainPolicies: false,
-}));
-// Permissions-Policy: restrict camera, microphone, geolocation
-app.use((_req, res, next) => {
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  next();
-});
-
-// CORS configuration — supports comma-separated allowed origins
-// In production, CORS_ORIGIN must be set to a specific origin; '*' or absent logs a warning.
-let corsOrigin: boolean | string | string[];
-let allowCredentials = false;
-
-if (process.env.RORCA_SERVE_STATIC === '1') {
-  // Same-origin static mode: reflect request origin (frontend served by Express)
-  corsOrigin = true;
-  allowCredentials = true;
-} else {
-  const rawOrigin = process.env.CORS_ORIGIN || '';
-
-  if (process.env.NODE_ENV === 'production' && (!rawOrigin || rawOrigin === '*')) {
-    console.warn('WARNING: CORS_ORIGIN not configured — API accessible from any origin');
-  }
-
-  if (!rawOrigin || rawOrigin === '*') {
-    // Wildcard: allow all origins, no credentials
-    corsOrigin = '*';
-    allowCredentials = false;
-  } else {
-    // Specific origin(s): support comma-separated list
-    const origins = rawOrigin.split(',').map((o: string) => o.trim()).filter(Boolean);
-    corsOrigin = origins.length === 1 ? origins[0] : origins;
-    allowCredentials = true;
-  }
-}
-
-app.use(cors({
-  origin: corsOrigin,
-  credentials: allowCredentials,
-  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
-}));
+// When serving static frontend (rorca start), allow same-origin; otherwise allow Vite dev server
+const corsOrigin = process.env.RORCA_SERVE_STATIC === '1'
+  ? true  // reflect request origin (same-origin when served by Express)
+  : (process.env.CORS_ORIGIN || 'http://localhost:5210');
+app.use(cors({ origin: corsOrigin }));
 
 // Capture raw body for webhook signature verification.
 // The verify callback fires before JSON parsing, giving us the exact bytes GitHub sent.
@@ -166,7 +92,6 @@ app.use(queryTimerMiddleware);
 
 // ─── Public routes (no auth required) ───
 app.use('/api/health', healthRouter);
-app.use('/api/telemetry', telemetryRouter);
 
 app.get('/api/docs/openapi.json', (_req, res) => {
   res.json(swaggerSpec);
@@ -185,21 +110,9 @@ app.use('/api/invites', rateLimiter, invitesRouter);
 app.use('/api/review', rateLimiter, publicReviewRouter);
 registerWebhookHandlers();
 
-// CA-021: MCP Streamable HTTP transport — auto-generated from OpenAPI spec
-const mcpHandlers = createMcpRequestHandler(swaggerSpec as any);
-app.post('/mcp', mcpHandlers.handlePost);
-app.get('/mcp', mcpHandlers.handleGet);
-app.delete('/mcp', mcpHandlers.handleDelete);
-
-// MC-004: MCP tools discovery endpoint — used by VS Code extension tree view
-app.use('/api/mcp/tools', mcpToolsRouter);
-
 // ─── Auth middleware (all routes below require authentication) ───
-// PR-009: Conditional auth — AUTH_REQUIRED=true enforces JWT on all protected routes.
-// Default (false/absent) = no-op, preserving local single-user behavior.
-if (process.env.AUTH_REQUIRED === 'true') {
-  app.use(authRequired);
-}
+// Auth gate bypassed — Rorca is a local single-user tool (see CLAUDE.md)
+// app.use(authRequired);
 
 // ─── Rate limiting (after auth so req.user is available) ───
 app.use(rateLimiter);
@@ -224,7 +137,6 @@ app.use('/api/workspaces/:id/budget', budgetRouter);
 app.use('/api/workspaces/:id/agent-hooks', agentHooksRouter);
 app.use('/api/workspaces/:id/agent-profiles', agentProfilesRouter);
 app.use('/api/workspaces/:id/github', workspaceGithubRouter);
-app.use('/api/workspaces', workspaceDriftRouter);
 app.use('/api/github/checks', githubChecksRouter);
 app.use('/api/teams', teamsRouter);
 app.use('/api/activity', activityRouter);
@@ -240,16 +152,10 @@ app.use('/api/run-queue', runQueueRouter);
 app.use('/api/config', configRouter);
 app.use('/api/copilot', copilotRouter);
 app.use('/api/memory', memoryRouter);
-app.use('/api/memory/cross-workspace', crossWorkspaceMemoryRouter);
 app.use('/api/agents', agentsRouter);
 app.use('/api/workspaces', contextRoutingRouter);
 app.use('/api/workspaces', contextFilesRouter);
 app.use('/api/conventions', conventionsRouter);
-app.use('/api/packs', packsRouter);
-app.use('/api/skills', skillsRouter);
-app.use('/api/personas', personasRouter);
-app.use('/api/marketplace', marketplaceRouter);
-app.use('/api/search', searchRouter);
 
 // V2-108: Serve frontend static files when running via `rorca start`
 if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
@@ -277,45 +183,16 @@ startQueueConsumer();
 // CIE-005: Subscribe memory synthesis to generate ledger entries after successful runs
 startMemorySynthesis();
 
-// PG-007: Subscribe embedding pipeline to WAL events for automatic vector generation
-startEmbeddingPipeline();
-
-// PG-015: Subscribe graph populator to WAL events for knowledge graph edges
-startGraphPopulator();
-
-// PG-017: Subscribe drift detector to WAL events for post-run convention drift analysis
-startDriftSubscriber();
-
-// PR-019: Auto-rotate memory after each pipeline run completion
-// PR-018: Auto-deduplicate memory after rotation (post-run)
-subscribe((event: WalEvent) => {
-  if (event.event_type !== 'run_finished' || !event.workspace_id) return;
-  const workspaceId = event.workspace_id;
-  (async () => {
-    try {
-      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
-      if (!ws) return;
-      rotateMemory(ws.path);
-      // Run dedup after rotation — removes semantically duplicate entries
-      await deduplicateMemory(ws.path, workspaceId);
-    } catch {
-      // Non-fatal — rotation/dedup failure must not affect the run result
-    }
-  })();
-});
-
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
   app.listen(PORT, () => {
-    logger.info(`Rorca backend listening on port ${PORT}`);
+    console.log(`Rorca backend listening on port ${PORT}`);
     // OC-015: Clean up orphan runs (stale status='running' from crashed backend)
     cleanupOrphanRuns();
     startScheduler();
     cleanupOldLogs();
-    // PR-xxx: Init rate limiter cache so fallback user ID is loaded (prevents 429s in single-user mode)
-    initRateLimiterCache().catch(err => logger.error({ err }, '[RateLimiter] Cache init failed'));
     // V2-099: Run EXPLAIN QUERY PLAN audit at startup
-    runQueryPlanAudit().catch(err => logger.error({ err }, '[QueryAudit] Startup audit failed'));
+    runQueryPlanAudit(db);
     // CIE-009: Start file watchers for all registered workspaces
     startFileWatcher();
   });
