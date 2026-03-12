@@ -2,7 +2,7 @@
   "specId": "add copy paste photo as attachment (meaning someone can screen capture with whatever tool they want and attach it to the new spec description screen here where i am typing now) and also an upload file so that users can upload PRD, SDD or whatever they want as context.",
   "runId": 45,
   "startedAt": "2026-03-12T05:48:55.677Z",
-  "lastUpdatedAt": "2026-03-12T06:31:49.696Z",
+  "lastUpdatedAt": "2026-03-12T06:40:15.620Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -113,6 +113,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 106251
+    },
+    {
+      "storyId": "US-012",
+      "title": "Show attachment count badge in SpecsPanel kanban cards",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:32:07.485Z",
+      "finishedAt": "2026-03-12T06:40:15.620Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 488135
     }
   ],
   "failedStories": [],

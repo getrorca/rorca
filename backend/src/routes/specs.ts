@@ -2701,6 +2701,7 @@ interface KanbanSpec {
   activeRunStatus?: 'running' | 'queued';
   queuePosition?: number;
   model?: string;
+  attachmentCount: number;
 }
 
 router.get('/kanban', async (req: Request, res: Response) => {
@@ -2719,6 +2720,15 @@ router.get('/kanban', async (req: Request, res: Response) => {
 
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
 
+    // Fetch attachment counts for all specs
+    const attachmentRows = await query<{ spec_id: string; cnt: string }>(
+      `SELECT spec_id, COUNT(*)::text AS cnt FROM spec_attachments GROUP BY spec_id`
+    );
+    const attachmentCountBySpecId = new Map<string, number>();
+    for (const row of attachmentRows) {
+      attachmentCountBySpecId.set(row.spec_id, parseInt(row.cnt, 10));
+    }
+
     // Build summaries from filesystem
     const pendingSpecs: KanbanSpec[] = [];
     for (const file of safeReaddir(pendingDir)) {
@@ -2736,6 +2746,7 @@ router.get('/kanban', async (req: Request, res: Response) => {
           reviewStatus: s.reviewStatus,
           storyTitles: s.storyTitles,
           model: content.model,
+          attachmentCount: attachmentCountBySpecId.get(s.id) ?? 0,
         });
       } catch { /* skip unparseable */ }
     }
@@ -2757,6 +2768,7 @@ router.get('/kanban', async (req: Request, res: Response) => {
           reviewStatus: s.reviewStatus,
           storyTitles: s.storyTitles,
           model: content.model,
+          attachmentCount: attachmentCountBySpecId.get(s.id) ?? 0,
         });
       } catch { /* skip unparseable */ }
     }

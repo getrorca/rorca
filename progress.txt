@@ -3,9 +3,9 @@
 Spec: add copy paste photo as attachment (meaning someone can screen capture with whatever tool they want and attach it to the new spec description screen here where i am typing now) and also an upload file so that users can upload PRD, SDD or whatever they want as context.
 Run ID: 45
 Started: 2026-03-12T05:48:55.677Z
-Last Updated: 2026-03-12T06:31:49.696Z
+Last Updated: 2026-03-12T06:40:15.620Z
 
-## Completed Stories (11)
+## Completed Stories (12)
 - US-001: Add spec_attachments database table — DONE (claude, claude-sonnet-4-6, 91s)
 - US-002: Create backend API route for attachment upload — DONE (claude, claude-sonnet-4-6, 137s)
 - US-003: Create backend API route to list spec attachments — DONE (claude, claude-sonnet-4-6, 115s)
@@ -17,3 +17,4 @@ Last Updated: 2026-03-12T06:31:49.696Z
 - US-009: Display attached files list in SpecForge UI — DONE (claude, claude-sonnet-4-6, 433s)
 - US-010: Pass attachment context to spec generation LLM call — DONE (claude, claude-sonnet-4-6, 528s)
 - US-011: Add Attachment type to frontend types — DONE (claude, claude-sonnet-4-6, 106s)
+- US-012: Show attachment count badge in SpecsPanel kanban cards — DONE (claude, claude-sonnet-4-6, 488s)
