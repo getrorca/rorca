@@ -333,7 +333,7 @@ router.get('/models', async (req: Request, res: Response, next: NextFunction) =>
       );
 
       if (vaultUser) {
-        const result = getVaultKey(vaultUser.user_id, 'openrouter');
+        const result = await getVaultKey(vaultUser.user_id, 'openrouter');
         if (result) openrouterKey = result.key;
       }
 
@@ -428,7 +428,7 @@ router.post('/models/test', async (req: Request, res: Response, next: NextFuncti
       );
 
       if (vaultRow) {
-        const result = getVaultKey(vaultRow.user_id, providerType);
+        const result = await getVaultKey(vaultRow.user_id, providerType);
         if (result) {
           apiKey = result.key;
           baseUrl = result.baseUrl ?? undefined;
@@ -448,7 +448,7 @@ router.post('/models/test', async (req: Request, res: Response, next: NextFuncti
       );
 
       if (vaultRow) {
-        const result = getVaultKey(vaultRow.user_id, 'anthropic');
+        const result = await getVaultKey(vaultRow.user_id, 'anthropic');
         if (result) apiKey = result.key;
       }
       if (!apiKey) apiKey = process.env.ANTHROPIC_API_KEY;
