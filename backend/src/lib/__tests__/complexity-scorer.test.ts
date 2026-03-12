@@ -5,7 +5,6 @@ import {
   clearConfigCache,
   getNextEscalationTier,
   type ScorerStory,
-  type ModelTier,
 } from '../complexity-scorer';
 import { validateOrchestrationConfig } from '../config';
 import * as fs from 'fs';

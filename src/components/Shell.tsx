@@ -1,12 +1,9 @@
-import { useState, useEffect, useCallback, useRef } from 'react';
-import { Menu, HelpCircle, Settings, Zap, Plus, Check } from 'lucide-react';
+import { useState, useEffect, useRef } from 'react';
+import { HelpCircle, Settings, Zap, Check } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import PricingModal from './PricingModal';
 import { useHelpTips } from '../contexts/HelpTipsContext';
-import AppHeader from './AppHeader';
-import ThemeToggle from './ThemeToggle';
-import NotificationBell from './NotificationBell';
 import { useNetworkOffline, NetworkIndicator } from './NetworkBanner';
 import { apiFetch } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
@@ -264,7 +261,7 @@ interface ShellProps {
   onNavigate?: (panel: PanelId) => void;
 }
 
-export default function Shell({ sidebar, header, children, onMenuToggle, showMenuButton, onNavigate }: ShellProps) {
+export default function Shell({ sidebar, header, children, onMenuToggle: _onMenuToggle, showMenuButton: _showMenuButton, onNavigate: _onNavigate }: ShellProps) {
   const offline = useNetworkOffline();
 
   return (

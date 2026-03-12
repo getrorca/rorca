@@ -65,7 +65,7 @@ const ACTION_PATTERNS: [RegExp, ActionType][] = [
 
 /** Strip ANSI escape codes from a string */
 function stripAnsi(str: string): string {
-  // eslint-disable-next-line no-control-regex
+   
   return str.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
 }
 

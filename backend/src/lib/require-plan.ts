@@ -16,7 +16,7 @@ interface QuotaRow {
 }
 
 /** Plan hierarchy — higher index = higher tier */
-const PLAN_TIER: Record<string, number> = { free: 0, solo: 1, pro: 2, team: 3 };
+const _PLAN_TIER: Record<string, number> = { free: 0, solo: 1, pro: 2, team: 3 };
 
 async function getUserPlan(userId: string): Promise<PlanId> {
   const row = await queryOne<{ plan: string }>('SELECT plan FROM users WHERE id = $1', [userId]);

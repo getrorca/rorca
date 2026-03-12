@@ -12,7 +12,7 @@
 
 import * as fs from 'fs';
 import * as path from 'path';
-import { echolocate, inferSkillsFromStack, STACK_TO_SKILLS } from './workspace-echolocation';
+import { echolocate, STACK_TO_SKILLS } from './workspace-echolocation';
 import type { StackItem, EcholocationReport } from './workspace-echolocation';
 import { generateAgentsMd } from './agents-parser';
 import { chatComplete } from './llm-client';

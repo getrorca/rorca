@@ -53,7 +53,7 @@ const MOCK_AGENT_CONFIG = {
   codexVersion: null,
 };
 
-const MOCK_VAULT_KEYS = {
+const _MOCK_VAULT_KEYS = {
   items: [],
   total: 0,
 };

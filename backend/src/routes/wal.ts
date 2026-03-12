@@ -1,6 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
-import { query, queryOne, execute } from '../db/index';
+import { query, queryOne } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
@@ -209,7 +209,7 @@ const WalEventSchema = z.object({
   payload: z.record(z.string(), z.unknown()).optional(),
 });
 
-router.post('/', validateBody(WalEventSchema), async (req: Request, res: Response, next: NextFunction) => {
+router.post('/', validateBody(WalEventSchema), async (req: Request, res: Response, _next: NextFunction) => {
   try {
     const { event_type, workspace_id, story_id, spec_id, payload } = req.body;
 

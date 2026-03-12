@@ -24,7 +24,6 @@ import {
   defaultRorcaConfig,
   invalidateConfigCache,
 } from '../lib/rorca-config';
-import type { RorcaConfig } from '../lib/rorca-config';
 import { invalidateConfig } from '../lib/context-cache';
 import { populateConventionsFromConfig } from '../lib/knowledge-graph';
 

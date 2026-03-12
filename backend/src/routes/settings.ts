@@ -1,9 +1,8 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import { query, queryOne, execute } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
-import type { AuthUser } from './auth';
 import { getEffectiveUser } from '../lib/get-user';
 
 const router = Router();

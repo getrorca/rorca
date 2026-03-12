@@ -1,37 +1,39 @@
 /**
- * agent-personas.ts — Persona Registry for agent persona system (CA-007)
+ * agent-personas.ts — Persona file format, discovery, and registry.
  *
- * Personas are markdown files with YAML frontmatter in .rorca/personas/.
- * The body is the prompt injection text. Frontmatter defines metadata:
- *   category, name, description, triggers (glob patterns), reviewPriority.
+ * CA-007: Personas are markdown files with YAML frontmatter living in
+ * .rorca/personas/ (organized into _primary, _adversarial, _specialist, _review
+ * subdirectories). The body is prompt injection text for buildPrompt().
  *
- * PersonaRegistry discovers, validates, indexes, and serves personas
- * for prompt injection during spec generation and story execution.
- *
- * Persona markdown format:
- * ```markdown
+ * Frontmatter schema:
+ * ```yaml
  * ---
- * category: specialist
- * name: frontend
- * description: Specialist in React, CSS, UI/UX implementation
+ * category: primary | adversarial | specialist | review
+ * name: architect
+ * description: Structural decisions, dependency graphs
  * triggers:
- *   - "src/components/**"
- *   - "src/panels/**"
- *   - "src/styles/**"
- * reviewPriority: 50
+ *   - "backend/src/lib/**"
+ *   - "*.config.*"
+ * reviewPriority: 10
  * ---
- *
- * You are a frontend specialist agent. Focus on...
  * ```
  */
 
 import * as fs from 'fs';
 import * as path from 'path';
+import * as yaml from 'js-yaml';
 import micromatch from 'micromatch';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
 export type PersonaCategory = 'primary' | 'adversarial' | 'specialist' | 'review';
+
+export const PERSONA_CATEGORIES: readonly PersonaCategory[] = [
+  'primary',
+  'adversarial',
+  'specialist',
+  'review',
+] as const;
 
 export interface PersonaMetadata {
   category: PersonaCategory;
@@ -39,261 +41,180 @@ export interface PersonaMetadata {
   description: string;
   /** Glob patterns for auto-assignment based on story file touches. */
   triggers: string[];
-  /** Ordering priority for review passes (lower = runs first). Default: 50. */
+  /** Lower number = higher priority in review ordering. Default 50. */
   reviewPriority: number;
 }
 
 export interface Persona {
   metadata: PersonaMetadata;
-  /** The markdown body (everything after frontmatter) — injected as prompt text. */
+  /** The markdown body — prompt injection text. */
   promptText: string;
-  /** Absolute path to the persona file on disk. */
+  /** Absolute path to the source .md file. */
   filePath: string;
 }
 
-/** Validation warning for persona files with bad frontmatter. */
-export interface PersonaWarning {
+export interface PersonaValidationWarning {
   filePath: string;
-  message: string;
+  reason: string;
 }
-
-// ─── Category directory mapping ──────────────────────────────────────────────
-
-const CATEGORY_DIRS: Record<string, PersonaCategory> = {
-  _primary: 'primary',
-  _adversarial: 'adversarial',
-  _specialist: 'specialist',
-  _review: 'review',
-};
-
-const VALID_CATEGORIES = new Set<string>(['primary', 'adversarial', 'specialist', 'review']);
 
 // ─── Frontmatter Parser ─────────────────────────────────────────────────────
 
+const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
+
 /**
- * Parse YAML frontmatter from a markdown string.
- * Returns the parsed key-value pairs and the body text after the frontmatter.
- * Handles the --- delimited block at the top of the file.
+ * Split a markdown file into YAML frontmatter and body.
+ * Returns null if no valid frontmatter delimiter found.
  */
-export function parseFrontmatter(content: string): { attrs: Record<string, unknown>; body: string } | null {
-  const trimmed = content.trimStart();
-  if (!trimmed.startsWith('---')) return null;
-
-  const endIdx = trimmed.indexOf('---', 3);
-  if (endIdx === -1) return null;
-
-  const yamlBlock = trimmed.slice(3, endIdx).trim();
-  const body = trimmed.slice(endIdx + 3).replace(/^(\r?\n)+/, '');
-
-  const attrs: Record<string, unknown> = {};
-  let currentKey: string | null = null;
-  let currentList: string[] | null = null;
-
-  for (const line of yamlBlock.split('\n')) {
-    const trimmedLine = line.trim();
-    if (!trimmedLine || trimmedLine.startsWith('#')) continue;
-
-    // Check for list item (indented - "value")
-    const listMatch = trimmedLine.match(/^-\s+["']?(.+?)["']?\s*$/);
-    if (listMatch && currentKey && currentList) {
-      currentList.push(listMatch[1]);
-      continue;
-    }
-
-    // Check for key: value
-    const kvMatch = trimmedLine.match(/^(\w+)\s*:\s*(.*)$/);
-    if (kvMatch) {
-      // Flush previous list
-      if (currentKey && currentList) {
-        attrs[currentKey] = currentList;
-        currentList = null;
-      }
-
-      const key = kvMatch[1];
-      const val = kvMatch[2].trim();
-
-      if (val === '' || val === '[]') {
-        // Start of a list or empty value
-        currentKey = key;
-        currentList = [];
-      } else {
-        // Scalar value — strip quotes
-        currentKey = null;
-        currentList = null;
-        attrs[key] = val.replace(/^["']|["']$/g, '');
-      }
-    }
-  }
-
-  // Flush final list
-  if (currentKey && currentList) {
-    attrs[currentKey] = currentList;
-  }
-
-  return { attrs, body };
+export function parseFrontmatter(content: string): { yaml: string; body: string } | null {
+  const match = content.match(FRONTMATTER_RE);
+  if (!match) return null;
+  return { yaml: match[1], body: match[2] };
 }
 
 /**
- * Validate parsed frontmatter attributes into PersonaMetadata.
- * Returns null + warning message if validation fails.
+ * Validate and normalize parsed YAML into PersonaMetadata.
+ * Returns the metadata or null + reason string on failure.
  */
 function validateMetadata(
-  attrs: Record<string, unknown>,
-  filePath: string,
-  inferredCategory?: PersonaCategory,
-): { metadata: PersonaMetadata; warning?: string } | { metadata: null; warning: string } {
-  // Name is required
-  const name = typeof attrs.name === 'string' ? attrs.name.trim() : '';
-  if (!name) {
-    return { metadata: null, warning: `Missing required 'name' in frontmatter: ${filePath}` };
+  raw: Record<string, unknown>,
+  _filePath: string,
+): { metadata: PersonaMetadata } | { error: string } {
+  // category
+  const category = raw['category'];
+  if (typeof category !== 'string' || !(PERSONA_CATEGORIES as readonly string[]).includes(category)) {
+    return { error: `Invalid or missing category (got: ${JSON.stringify(category)}). Must be one of: ${PERSONA_CATEGORIES.join(', ')}` };
   }
 
-  // Category: from frontmatter or inferred from directory
-  let category: PersonaCategory;
-  const rawCategory = typeof attrs.category === 'string' ? attrs.category.trim().toLowerCase() : '';
-  if (rawCategory && VALID_CATEGORIES.has(rawCategory)) {
-    category = rawCategory as PersonaCategory;
-  } else if (inferredCategory) {
-    category = inferredCategory;
-  } else {
-    return { metadata: null, warning: `Invalid or missing 'category' in frontmatter: ${filePath}` };
+  // name
+  const name = raw['name'];
+  if (typeof name !== 'string' || name.trim().length === 0) {
+    return { error: `Invalid or missing name (got: ${JSON.stringify(name)})` };
   }
 
-  const description = typeof attrs.description === 'string' ? attrs.description.trim() : '';
+  // description
+  const description = raw['description'];
+  if (typeof description !== 'string' || description.trim().length === 0) {
+    return { error: `Invalid or missing description (got: ${JSON.stringify(description)})` };
+  }
 
-  // Triggers: array of strings (glob patterns)
+  // triggers — optional, default []
   let triggers: string[] = [];
-  if (Array.isArray(attrs.triggers)) {
-    triggers = (attrs.triggers as unknown[])
-      .filter((t): t is string => typeof t === 'string')
-      .map(t => t.trim())
-      .filter(Boolean);
+  if (raw['triggers'] !== undefined) {
+    if (!Array.isArray(raw['triggers'])) {
+      return { error: `triggers must be an array (got: ${typeof raw['triggers']})` };
+    }
+    for (const t of raw['triggers']) {
+      if (typeof t !== 'string') {
+        return { error: `Each trigger must be a string (got: ${typeof t})` };
+      }
+    }
+    triggers = raw['triggers'] as string[];
   }
 
-  // reviewPriority: number, default 50
+  // reviewPriority — optional, default 50
   let reviewPriority = 50;
-  if (attrs.reviewPriority !== undefined) {
-    const parsed = Number(attrs.reviewPriority);
-    if (!isNaN(parsed)) reviewPriority = parsed;
+  if (raw['reviewPriority'] !== undefined) {
+    if (typeof raw['reviewPriority'] !== 'number' || !Number.isFinite(raw['reviewPriority'])) {
+      return { error: `reviewPriority must be a number (got: ${JSON.stringify(raw['reviewPriority'])})` };
+    }
+    reviewPriority = raw['reviewPriority'];
   }
 
   return {
-    metadata: { category, name, description, triggers, reviewPriority },
+    metadata: {
+      category: category as PersonaCategory,
+      name: name.trim(),
+      description: description.trim(),
+      triggers,
+      reviewPriority,
+    },
   };
 }
 
-// ─── PersonaRegistry ─────────────────────────────────────────────────────────
+// ─── PersonaRegistry ────────────────────────────────────────────────────────
 
 export class PersonaRegistry {
-  private personas: Map<string, Persona> = new Map();
+  private personas: Persona[] = [];
+  private byName: Map<string, Persona> = new Map();
   private byCategory: Map<PersonaCategory, Persona[]> = new Map();
-  private warnings: PersonaWarning[] = [];
-
-  /** All discovered personas. */
-  getAll(): Persona[] {
-    return Array.from(this.personas.values());
-  }
-
-  /** Get warnings from the last discover() call. */
-  getWarnings(): PersonaWarning[] {
-    return this.warnings;
-  }
+  private warnings: PersonaValidationWarning[] = [];
+  private disabledNames: Set<string> = new Set();
 
   /**
-   * Discover all persona markdown files under `<rorcaDir>/personas/`.
-   * Scans recursively. Category is inferred from subdirectory name
-   * (_primary, _adversarial, _specialist, _review) or from frontmatter.
+   * Set the disabled persona names. Disabled personas are excluded from
+   * getPersona(), getReviewers(), getByCategory(), and getAll() results.
    */
-  discover(rorcaDir: string): void {
-    this.personas.clear();
-    this.byCategory.clear();
-    this.warnings = [];
+  setDisabled(names: string[]): void {
+    this.disabledNames = new Set(names.map(n => n.toLowerCase()));
+  }
 
-    const personasDir = path.join(rorcaDir, 'personas');
-    if (!fs.existsSync(personasDir)) return;
+  private isEnabled(name: string): boolean {
+    return !this.disabledNames.has(name.toLowerCase());
+  }
 
-    const files = this.findMarkdownFiles(personasDir);
+  /** All discovered personas (excluding disabled). */
+  getAll(): Persona[] {
+    return this.personas.filter(p => this.isEnabled(p.metadata.name));
+  }
 
-    for (const filePath of files) {
-      let content: string;
-      try {
-        content = fs.readFileSync(filePath, 'utf-8');
-      } catch {
-        this.warnings.push({ filePath, message: `Failed to read file: ${filePath}` });
-        continue;
-      }
+  /** All discovered personas including disabled ones. */
+  getAllIncludingDisabled(): Persona[] {
+    return [...this.personas];
+  }
 
-      const parsed = parseFrontmatter(content);
-      if (!parsed) {
-        this.warnings.push({ filePath, message: `No valid YAML frontmatter found: ${filePath}` });
-        continue;
-      }
-
-      // Infer category from directory structure
-      const relPath = path.relative(personasDir, filePath);
-      const firstDir = relPath.split(path.sep)[0];
-      const inferredCategory = CATEGORY_DIRS[firstDir];
-
-      const result = validateMetadata(parsed.attrs, filePath, inferredCategory);
-      if (!result.metadata) {
-        this.warnings.push({ filePath, message: result.warning });
-        continue;
-      }
-
-      if (result.warning) {
-        this.warnings.push({ filePath, message: result.warning });
-      }
-
-      const persona: Persona = {
-        metadata: result.metadata,
-        promptText: parsed.body.trim(),
-        filePath,
-      };
-
-      // Index by name (lowercase for case-insensitive lookup)
-      this.personas.set(result.metadata.name.toLowerCase(), persona);
-
-      // Index by category
-      const catList = this.byCategory.get(result.metadata.category) ?? [];
-      catList.push(persona);
-      this.byCategory.set(result.metadata.category, catList);
-    }
+  /** Validation warnings from the last discover() call. */
+  getWarnings(): PersonaValidationWarning[] {
+    return [...this.warnings];
   }
 
   /**
    * Get a persona by name (case-insensitive).
+   * Returns undefined if not found or disabled.
    */
   getPersona(name: string): Persona | undefined {
-    return this.personas.get(name.toLowerCase());
+    const persona = this.byName.get(name.toLowerCase());
+    if (persona && !this.isEnabled(persona.metadata.name)) return undefined;
+    return persona;
   }
 
   /**
-   * Get all personas in a category.
+   * Compact catalog for LLM prompt injection.
+   * Format: "[category] name: description" per line.
+   */
+  getPersonaCatalogForPrompt(): string {
+    return this.personas
+      .filter(p => this.isEnabled(p.metadata.name))
+      .map(p => `[${p.metadata.category}] ${p.metadata.name}: ${p.metadata.description}`)
+      .join('\n');
+  }
+
+  /**
+   * Get all enabled personas in a category.
    */
   getByCategory(category: PersonaCategory): Persona[] {
-    return this.byCategory.get(category) ?? [];
+    return (this.byCategory.get(category) ?? []).filter(p => this.isEnabled(p.metadata.name));
   }
 
   /**
-   * Get reviewer personas whose triggers match the story's likely file touches.
-   * Returns personas sorted by reviewPriority (ascending — lower priority number runs first).
+   * Get reviewer personas whose trigger globs match the given story paths.
+   * Sorted by reviewPriority (ascending — lower number = higher priority).
    *
-   * @param storyPaths - Predicted file paths the story will touch
+   * @param storyPaths - Predicted file paths the story will touch.
    */
   getReviewers(storyPaths: string[]): Persona[] {
     if (storyPaths.length === 0) return [];
 
     const matched: Persona[] = [];
 
-    for (const persona of this.personas.values()) {
+    for (const persona of this.personas) {
+      if (!this.isEnabled(persona.metadata.name)) continue;
       if (persona.metadata.triggers.length === 0) continue;
-
-      // Check if any predicted path matches any trigger glob
-      const hasMatch = storyPaths.some(p =>
-        micromatch.isMatch(p, persona.metadata.triggers),
+      // Check if any of the story paths match any trigger glob
+      const isMatch = storyPaths.some(sp =>
+        micromatch.isMatch(sp, persona.metadata.triggers),
       );
-
-      if (hasMatch) {
+      if (isMatch) {
         matched.push(persona);
       }
     }
@@ -302,35 +223,40 @@ export class PersonaRegistry {
   }
 
   /**
-   * Produce a compact catalog string for LLM injection during spec generation.
-   * One line per persona: 'name: description'
-   * Grouped by category.
+   * Scan .rorca/personas/ recursively for .md files, parse frontmatter,
+   * and populate the registry.
+   *
+   * @param rorcaDir - Path to the .rorca/ directory.
+   * @returns This registry instance (for chaining).
    */
-  getPersonaCatalogForPrompt(): string {
-    if (this.personas.size === 0) return '';
+  discover(rorcaDir: string): PersonaRegistry {
+    this.personas = [];
+    this.byName = new Map();
+    this.byCategory = new Map();
+    this.warnings = [];
 
-    const sections: string[] = ['## Available Agent Personas', ''];
-    const categoryOrder: PersonaCategory[] = ['primary', 'adversarial', 'specialist', 'review'];
-
-    for (const cat of categoryOrder) {
-      const personas = this.byCategory.get(cat);
-      if (!personas || personas.length === 0) continue;
-
-      sections.push(`### ${cat.charAt(0).toUpperCase() + cat.slice(1)}`);
-      for (const p of personas) {
-        const desc = p.metadata.description || 'No description';
-        sections.push(`- **${p.metadata.name}**: ${desc}`);
-      }
-      sections.push('');
+    for (const cat of PERSONA_CATEGORIES) {
+      this.byCategory.set(cat, []);
     }
 
-    return sections.join('\n').trim();
+    const personasDir = path.join(rorcaDir, 'personas');
+    if (!fs.existsSync(personasDir)) {
+      return this;
+    }
+
+    const mdFiles = this.findMdFiles(personasDir);
+
+    for (const filePath of mdFiles) {
+      this.loadPersonaFile(filePath);
+    }
+
+    return this;
   }
 
   /**
    * Recursively find all .md files under a directory.
    */
-  private findMarkdownFiles(dir: string): string[] {
+  private findMdFiles(dir: string): string[] {
     const results: string[] = [];
 
     let entries: fs.Dirent[];
@@ -343,12 +269,83 @@ export class PersonaRegistry {
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        results.push(...this.findMarkdownFiles(fullPath));
+        results.push(...this.findMdFiles(fullPath));
       } else if (entry.isFile() && entry.name.endsWith('.md')) {
         results.push(fullPath);
       }
     }
 
     return results;
+  }
+
+  /**
+   * Load and parse a single persona markdown file.
+   * Invalid files are logged as warnings but don't crash.
+   */
+  private loadPersonaFile(filePath: string): void {
+    let content: string;
+    try {
+      content = fs.readFileSync(filePath, 'utf-8');
+    } catch (err) {
+      this.warnings.push({
+        filePath,
+        reason: `Failed to read file: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+
+    const parsed = parseFrontmatter(content);
+    if (!parsed) {
+      this.warnings.push({
+        filePath,
+        reason: 'No valid YAML frontmatter found (missing --- delimiters)',
+      });
+      return;
+    }
+
+    let rawYaml: unknown;
+    try {
+      rawYaml = yaml.load(parsed.yaml);
+    } catch (err) {
+      this.warnings.push({
+        filePath,
+        reason: `Invalid YAML in frontmatter: ${err instanceof Error ? err.message : String(err)}`,
+      });
+      return;
+    }
+
+    if (typeof rawYaml !== 'object' || rawYaml === null || Array.isArray(rawYaml)) {
+      this.warnings.push({
+        filePath,
+        reason: 'Frontmatter YAML must be an object',
+      });
+      return;
+    }
+
+    const result = validateMetadata(rawYaml as Record<string, unknown>, filePath);
+    if ('error' in result) {
+      this.warnings.push({ filePath, reason: result.error });
+      return;
+    }
+
+    const persona: Persona = {
+      metadata: result.metadata,
+      promptText: parsed.body.trim(),
+      filePath,
+    };
+
+    // Dedup: if same name already registered, warn and skip
+    const key = persona.metadata.name.toLowerCase();
+    if (this.byName.has(key)) {
+      this.warnings.push({
+        filePath,
+        reason: `Duplicate persona name "${persona.metadata.name}" — already registered from ${this.byName.get(key)!.filePath}`,
+      });
+      return;
+    }
+
+    this.personas.push(persona);
+    this.byName.set(key, persona);
+    this.byCategory.get(persona.metadata.category)!.push(persona);
   }
 }

@@ -1,64 +1,64 @@
+/**
+ * CA-001: PackRegistry + pack.json schema tests
+ */
+
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { PackJsonSchema, type PackJson } from '../pack-registry';
 
-// ─── DB mock ────────────────────────────────────────────────────────────────
+// ─── DB Mock ────────────────────────────────────────────────────────────────
 
-const mockRun = jest.fn().mockReturnValue({ changes: 0, lastInsertRowid: 1 });
-const mockGet = jest.fn().mockReturnValue(undefined);
-const mockAll = jest.fn().mockReturnValue([]);
-const mockPrepare = jest.fn().mockReturnValue({
-  run: mockRun,
-  get: mockGet,
-  all: mockAll,
-});
+const mockRows: Record<string, unknown[]> = {};
+const mockSingleRows: Record<string, unknown> = {};
+let lastChanges = 1;
+
+/** Normalize whitespace in SQL for lookup-key matching. */
+function normSql(sql: string): string {
+  return sql.replace(/\s+/g, ' ').trim();
+}
 
 jest.mock('../../db/index', () => ({
-  db: { prepare: (...args: unknown[]) => mockPrepare(...args) },
+  query: jest.fn(async (sql: string, ..._args: unknown[]) => {
+    const key = Object.keys(mockRows).find(k => normSql(k) === normSql(sql));
+    return key ? mockRows[key] : [];
+  }),
+  queryOne: jest.fn(async (sql: string, ..._args: unknown[]) => {
+    const key = Object.keys(mockSingleRows).find(k => normSql(k) === normSql(sql));
+    return key !== undefined ? mockSingleRows[key] : undefined;
+  }),
+  execute: jest.fn(async (_sql: string, ..._args: unknown[]) => ({ rowCount: lastChanges })),
 }));
 
-// Import after mock
-import { PackRegistry, type PackValidationResult } from '../pack-registry';
+// ─── Imports (after mocks) ──────────────────────────────────────────────────
 
-// ─── Test fixtures ──────────────────────────────────────────────────────────
+import { PackJsonSchema, PackRegistry, type PackJson } from '../pack-registry';
+
+// ─── Helpers ────────────────────────────────────────────────────────────────
 
 let tmpDir: string;
-let packsDir: string;
 
-function validPackJson(overrides: Partial<PackJson> = {}): PackJson {
-  return {
-    name: 'test-pack',
-    version: '1.0.0',
-    description: 'A test convention pack',
-    compatibility: { frameworks: [] },
-    dependencies: [],
-    skills: [],
-    ...overrides,
-  };
+function writePackJson(dir: string, content: object) {
+  fs.mkdirSync(dir, { recursive: true });
+  fs.writeFileSync(path.join(dir, 'pack.json'), JSON.stringify(content, null, 2));
 }
 
-function createPackOnDisk(name: string, packJson: object, skillFiles: string[] = []): string {
-  const packDir = path.join(packsDir, name);
-  fs.mkdirSync(packDir, { recursive: true });
-  fs.writeFileSync(path.join(packDir, 'pack.json'), JSON.stringify(packJson, null, 2));
-
-  if (skillFiles.length > 0) {
-    const skillsDir = path.join(packDir, 'skills');
-    fs.mkdirSync(skillsDir, { recursive: true });
-    for (const sf of skillFiles) {
-      fs.writeFileSync(path.join(skillsDir, sf), `# ${sf}\nSkill content.`);
-    }
-  }
-
-  return packDir;
-}
+const validPack: PackJson = {
+  name: 'react-saas',
+  version: '1.0.0',
+  description: 'React SaaS starter pack',
+  compatibility: { frameworks: ['react', 'next.js'] },
+  dependencies: [],
+  skills: ['auth', 'billing'],
+};
 
 beforeEach(() => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'pack-registry-test-'));
-  packsDir = path.join(tmpDir, '.rorca', 'packs');
-  fs.mkdirSync(packsDir, { recursive: true });
+  fs.mkdirSync(path.join(tmpDir, '.rorca', 'packs'), { recursive: true });
   jest.clearAllMocks();
+  lastChanges = 1;
+  // Clear row maps
+  for (const key of Object.keys(mockRows)) delete mockRows[key];
+  for (const key of Object.keys(mockSingleRows)) delete mockSingleRows[key];
 });
 
 afterEach(() => {
@@ -68,124 +68,99 @@ afterEach(() => {
 // ─── PackJsonSchema Tests ───────────────────────────────────────────────────
 
 describe('PackJsonSchema', () => {
-  it('validates a minimal valid pack.json', () => {
-    const result = PackJsonSchema.safeParse({
-      name: 'my-pack',
-      version: '1.0.0',
-      description: 'A convention pack',
-    });
+  it('validates a complete valid pack.json', () => {
+    const result = PackJsonSchema.safeParse(validPack);
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.name).toBe('my-pack');
+      expect(result.data.name).toBe('react-saas');
       expect(result.data.version).toBe('1.0.0');
-      expect(result.data.skills).toEqual([]);
-      expect(result.data.dependencies).toEqual([]);
-      expect(result.data.compatibility.frameworks).toEqual([]);
+      expect(result.data.skills).toEqual(['auth', 'billing']);
     }
   });
 
-  it('validates a full pack.json with all fields', () => {
-    const result = PackJsonSchema.safeParse({
-      name: 'nextjs-saas',
-      version: '2.3.1',
-      description: 'Convention pack for Next.js SaaS applications',
-      compatibility: { node: '>=18.0.0', frameworks: ['next', 'react'] },
-      dependencies: ['base-typescript'],
-      skills: ['auth.md', 'billing.md', 'crud.md'],
-    });
+  it('fills defaults for optional fields', () => {
+    const result = PackJsonSchema.safeParse({ name: 'minimal', version: '0.1.0' });
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.compatibility.node).toBe('>=18.0.0');
-      expect(result.data.compatibility.frameworks).toEqual(['next', 'react']);
-      expect(result.data.dependencies).toEqual(['base-typescript']);
-      expect(result.data.skills).toEqual(['auth.md', 'billing.md', 'crud.md']);
+      expect(result.data.description).toBe('');
+      expect(result.data.compatibility).toEqual({ frameworks: [] });
+      expect(result.data.dependencies).toEqual([]);
+      expect(result.data.skills).toEqual([]);
     }
-  });
-
-  it('rejects missing name', () => {
-    const result = PackJsonSchema.safeParse({
-      version: '1.0.0',
-      description: 'A pack',
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it('rejects missing version', () => {
-    const result = PackJsonSchema.safeParse({
-      name: 'my-pack',
-      description: 'A pack',
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it('rejects missing description', () => {
-    const result = PackJsonSchema.safeParse({
-      name: 'my-pack',
-      version: '1.0.0',
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it('rejects invalid version format', () => {
-    const result = PackJsonSchema.safeParse({
-      name: 'my-pack',
-      version: 'latest',
-      description: 'A pack',
-    });
-    expect(result.success).toBe(false);
-    if (!result.success) {
-      const versionErr = result.error.issues.find(i => i.path.includes('version'));
-      expect(versionErr).toBeDefined();
-    }
-  });
-
-  it('rejects pack name with uppercase', () => {
-    const result = PackJsonSchema.safeParse({
-      name: 'MyPack',
-      version: '1.0.0',
-      description: 'A pack',
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it('rejects pack name with spaces', () => {
-    const result = PackJsonSchema.safeParse({
-      name: 'my pack',
-      version: '1.0.0',
-      description: 'A pack',
-    });
-    expect(result.success).toBe(false);
-  });
-
-  it('accepts pack name with dashes', () => {
-    const result = PackJsonSchema.safeParse({
-      name: 'my-convention-pack',
-      version: '0.1.0',
-      description: 'A pack',
-    });
-    expect(result.success).toBe(true);
   });
 
   it('rejects empty name', () => {
+    const result = PackJsonSchema.safeParse({ name: '', version: '1.0.0' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects uppercase pack name', () => {
+    const result = PackJsonSchema.safeParse({ name: 'MyPack', version: '1.0.0' });
+    expect(result.success).toBe(false);
+  });
+
+  it('rejects invalid semver', () => {
+    const result = PackJsonSchema.safeParse({ name: 'test', version: 'not-semver' });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts semver with pre-release tag', () => {
+    const result = PackJsonSchema.safeParse({ name: 'test', version: '1.0.0-beta.1' });
+    expect(result.success).toBe(true);
+  });
+
+  it('rejects name with spaces', () => {
+    const result = PackJsonSchema.safeParse({ name: 'my pack', version: '1.0.0' });
+    expect(result.success).toBe(false);
+  });
+
+  it('accepts name with dots, hyphens, underscores', () => {
+    const cases = ['my-pack', 'my.pack', 'my_pack', 'react-saas.starter'];
+    for (const name of cases) {
+      const result = PackJsonSchema.safeParse({ name, version: '1.0.0' });
+      expect(result.success).toBe(true);
+    }
+  });
+
+  it('rejects missing version', () => {
+    const result = PackJsonSchema.safeParse({ name: 'test' });
+    expect(result.success).toBe(false);
+  });
+
+  it('validates dependencies array', () => {
     const result = PackJsonSchema.safeParse({
-      name: '',
+      name: 'test',
       version: '1.0.0',
-      description: 'A pack',
+      dependencies: [{ name: 'base-pack', version: '>=1.0.0' }],
+    });
+    expect(result.success).toBe(true);
+    if (result.success) {
+      expect(result.data.dependencies).toHaveLength(1);
+      expect(result.data.dependencies[0].name).toBe('base-pack');
+    }
+  });
+
+  it('rejects dependency with empty name', () => {
+    const result = PackJsonSchema.safeParse({
+      name: 'test',
+      version: '1.0.0',
+      dependencies: [{ name: '' }],
     });
     expect(result.success).toBe(false);
   });
 
-  it('rejects empty description', () => {
-    const result = PackJsonSchema.safeParse({
-      name: 'my-pack',
-      version: '1.0.0',
-      description: '',
-    });
+  it('provides field-level errors on invalid input', () => {
+    const result = PackJsonSchema.safeParse({ name: 123, version: true });
     expect(result.success).toBe(false);
+    if (!result.success) {
+      const paths = result.error.issues.map(i => i.path.join('.'));
+      expect(paths).toContain('name');
+      expect(paths).toContain('version');
+    }
   });
 });
 
-// ─── PackRegistry.validatePack ──────────────────────────────────────────────
+// ─── PackRegistry.validatePack Tests ────────────────────────────────────────
 
 describe('PackRegistry.validatePack', () => {
   let registry: PackRegistry;
@@ -195,66 +170,49 @@ describe('PackRegistry.validatePack', () => {
   });
 
   it('returns valid for a correct pack directory', () => {
-    const packDir = createPackOnDisk('valid-pack', validPackJson());
+    const packDir = path.join(tmpDir, '.rorca', 'packs', 'test-pack');
+    writePackJson(packDir, validPack);
+
     const result = registry.validatePack(packDir);
     expect(result.valid).toBe(true);
-    expect(result.pack).not.toBeNull();
-    expect(result.pack!.name).toBe('test-pack');
+    expect(result.pack?.name).toBe('react-saas');
     expect(result.errors).toHaveLength(0);
   });
 
-  it('returns invalid when pack.json is missing', () => {
-    const packDir = path.join(packsDir, 'missing');
+  it('returns error when pack.json is missing', () => {
+    const packDir = path.join(tmpDir, '.rorca', 'packs', 'empty');
     fs.mkdirSync(packDir, { recursive: true });
+
     const result = registry.validatePack(packDir);
     expect(result.valid).toBe(false);
     expect(result.pack).toBeNull();
-    expect(result.errors[0].message).toContain('pack.json not found');
+    expect(result.errors[0].message).toBe('pack.json not found');
   });
 
-  it('returns invalid when pack.json has bad JSON', () => {
-    const packDir = path.join(packsDir, 'bad-json');
+  it('returns error for invalid JSON', () => {
+    const packDir = path.join(tmpDir, '.rorca', 'packs', 'bad-json');
     fs.mkdirSync(packDir, { recursive: true });
-    fs.writeFileSync(path.join(packDir, 'pack.json'), '{ invalid json }');
+    fs.writeFileSync(path.join(packDir, 'pack.json'), '{ broken json');
+
     const result = registry.validatePack(packDir);
     expect(result.valid).toBe(false);
-    expect(result.errors[0].message).toContain('Invalid JSON syntax');
+    expect(result.errors[0].path).toBe('pack.json');
+    expect(result.errors[0].message).toContain('Invalid JSON');
   });
 
   it('returns field-level errors for schema violations', () => {
-    const packDir = createPackOnDisk('bad-schema', {
-      name: 'Invalid Name!',
-      version: 'not-semver',
-    });
+    const packDir = path.join(tmpDir, '.rorca', 'packs', 'bad-schema');
+    writePackJson(packDir, { name: 'INVALID_NAME!', version: 'nope' });
+
     const result = registry.validatePack(packDir);
     expect(result.valid).toBe(false);
-    expect(result.errors.length).toBeGreaterThanOrEqual(2);
-    const paths = result.errors.map(e => e.path);
-    expect(paths).toContain('name');
-  });
-
-  it('validates skills files exist on disk', () => {
-    const packDir = createPackOnDisk('missing-skills', validPackJson({
-      skills: ['existing.md', 'missing.md'],
-    }), ['existing.md']); // only create existing.md
-    const result = registry.validatePack(packDir);
-    expect(result.valid).toBe(false);
-    expect(result.errors).toHaveLength(1);
-    expect(result.errors[0].message).toContain("missing.md");
-    expect(result.errors[0].path).toBe('skills');
-  });
-
-  it('passes when all declared skills exist', () => {
-    const packDir = createPackOnDisk('with-skills', validPackJson({
-      skills: ['auth.md', 'crud.md'],
-    }), ['auth.md', 'crud.md']);
-    const result = registry.validatePack(packDir);
-    expect(result.valid).toBe(true);
-    expect(result.errors).toHaveLength(0);
+    expect(result.errors.length).toBeGreaterThanOrEqual(1);
+    const errorPaths = result.errors.map(e => e.path);
+    expect(errorPaths.some(p => p === 'name' || p === 'version')).toBe(true);
   });
 });
 
-// ─── PackRegistry.listInstalled ─────────────────────────────────────────────
+// ─── PackRegistry.listInstalled Tests ───────────────────────────────────────
 
 describe('PackRegistry.listInstalled', () => {
   let registry: PackRegistry;
@@ -263,51 +221,52 @@ describe('PackRegistry.listInstalled', () => {
     registry = new PackRegistry(tmpDir, 'ws-1');
   });
 
-  it('returns empty array when no packs installed', () => {
-    mockAll.mockReturnValueOnce([]);
-    const packs = registry.listInstalled();
-    expect(packs).toEqual([]);
-    expect(mockPrepare).toHaveBeenCalledWith(
-      expect.stringContaining('SELECT'),
-    );
+  it('returns empty array when no packs installed', async () => {
+    // DB returns empty
+    const selectSql = 'SELECT * FROM convention_packs WHERE workspace_id = $1 ORDER BY installed_at DESC';
+    mockRows[selectSql] = [];
+
+    const result = await registry.listInstalled();
+    expect(result).toEqual([]);
   });
 
-  it('returns installed packs with manifest from disk', () => {
-    const packDir = createPackOnDisk('my-pack', validPackJson());
-    mockAll.mockReturnValueOnce([{
+  it('cross-references DB rows with filesystem pack.json', async () => {
+    const packDir = path.join(tmpDir, '.rorca', 'packs', 'react-saas');
+    writePackJson(packDir, validPack);
+
+    const selectSql = 'SELECT * FROM convention_packs WHERE workspace_id = $1 ORDER BY installed_at DESC';
+    mockRows[selectSql] = [{
       id: 1,
       workspace_id: 'ws-1',
-      pack_name: 'my-pack',
+      pack_name: 'react-saas',
       pack_version: '1.0.0',
-      installed_at: '2026-02-28T00:00:00.000Z',
-      pack_path: packDir,
-    }]);
+      installed_at: '2026-02-28T00:00:00',
+      pack_path: '.rorca/packs/react-saas',
+    }];
 
-    const packs = registry.listInstalled();
-    expect(packs).toHaveLength(1);
-    expect(packs[0].name).toBe('my-pack');
-    expect(packs[0].manifest).not.toBeNull();
-    expect(packs[0].manifest!.name).toBe('test-pack');
+    const result = await registry.listInstalled();
+    expect(result).toHaveLength(1);
+    expect(result[0].packJson?.name).toBe('react-saas');
   });
 
-  it('returns manifest: null when pack directory is missing', () => {
-    mockAll.mockReturnValueOnce([{
+  it('returns null packJson when pack dir is missing from disk', async () => {
+    const selectSql = 'SELECT * FROM convention_packs WHERE workspace_id = $1 ORDER BY installed_at DESC';
+    mockRows[selectSql] = [{
       id: 1,
       workspace_id: 'ws-1',
       pack_name: 'gone-pack',
       pack_version: '1.0.0',
-      installed_at: '2026-02-28T00:00:00.000Z',
-      pack_path: '/nonexistent/path',
-    }]);
+      installed_at: '2026-02-28T00:00:00',
+      pack_path: '.rorca/packs/gone-pack',
+    }];
 
-    const packs = registry.listInstalled();
-    expect(packs).toHaveLength(1);
-    expect(packs[0].name).toBe('gone-pack');
-    expect(packs[0].manifest).toBeNull();
+    const result = await registry.listInstalled();
+    expect(result).toHaveLength(1);
+    expect(result[0].packJson).toBeNull();
   });
 });
 
-// ─── PackRegistry.getPackPath ───────────────────────────────────────────────
+// ─── PackRegistry.getPackPath Tests ─────────────────────────────────────────
 
 describe('PackRegistry.getPackPath', () => {
   let registry: PackRegistry;
@@ -316,85 +275,131 @@ describe('PackRegistry.getPackPath', () => {
     registry = new PackRegistry(tmpDir, 'ws-1');
   });
 
-  it('returns path from DB when pack is registered', () => {
-    mockGet.mockReturnValueOnce({ pack_path: '/some/path/my-pack' });
-    const result = registry.getPackPath('my-pack');
-    expect(result).toBe('/some/path/my-pack');
+  it('returns absolute path for installed pack', async () => {
+    const selectSql = 'SELECT pack_path FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
+    mockSingleRows[selectSql] = { pack_path: '.rorca/packs/react-saas' };
+
+    const result = await registry.getPackPath('react-saas');
+    expect(result).toBe(path.join(tmpDir, '.rorca/packs/react-saas'));
   });
 
-  it('falls back to conventional .rorca/packs/<name> directory', () => {
-    mockGet.mockReturnValueOnce(undefined);
-    const packDir = path.join(packsDir, 'fallback-pack');
-    fs.mkdirSync(packDir, { recursive: true });
-    const result = registry.getPackPath('fallback-pack');
-    expect(result).toBe(packDir);
+  it('returns absolute path as-is if pack_path is absolute', async () => {
+    const selectSql = 'SELECT pack_path FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
+    mockSingleRows[selectSql] = { pack_path: '/abs/path/to/pack' };
+
+    const result = await registry.getPackPath('react-saas');
+    expect(result).toBe('/abs/path/to/pack');
   });
 
-  it('throws NotFoundError when pack not in DB and not on disk', () => {
-    mockGet.mockReturnValueOnce(undefined);
-    expect(() => registry.getPackPath('nonexistent')).toThrow(/not found/i);
+  it('throws NotFoundError for unknown pack', async () => {
+    const selectSql = 'SELECT pack_path FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
+    mockSingleRows[selectSql] = undefined;
+
+    await expect(registry.getPackPath('nonexistent')).rejects.toThrow(/not found/i);
   });
 });
 
-// ─── PackRegistry.registerPack ──────────────────────────────────────────────
+// ─── PackRegistry.register Tests ────────────────────────────────────────────
 
-describe('PackRegistry.registerPack', () => {
+describe('PackRegistry.register', () => {
   let registry: PackRegistry;
 
   beforeEach(() => {
     registry = new PackRegistry(tmpDir, 'ws-1');
   });
 
-  it('registers a valid pack and returns InstalledPack', () => {
-    const packDir = createPackOnDisk('new-pack', validPackJson({ name: 'new-pack' }));
-    mockGet.mockReturnValueOnce(undefined); // no existing row
+  it('registers a valid pack and returns DB row', async () => {
+    const packDir = path.join(tmpDir, '.rorca', 'packs', 'react-saas');
+    writePackJson(packDir, validPack);
 
-    const result = registry.registerPack(packDir);
-    expect(result.name).toBe('new-pack');
-    expect(result.version).toBe('1.0.0');
-    expect(result.manifest).not.toBeNull();
-    expect(mockPrepare).toHaveBeenCalledWith(expect.stringContaining('INSERT'));
+    // No existing row
+    const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
+    mockSingleRows[existsSql] = undefined;
+
+    // After insert, RETURNING * returns the new row
+    const insertSql = 'INSERT INTO convention_packs (workspace_id, pack_name, pack_version, pack_path) VALUES ($1, $2, $3, $4) RETURNING *';
+    mockSingleRows[insertSql] = {
+      id: 1,
+      workspace_id: 'ws-1',
+      pack_name: 'react-saas',
+      pack_version: '1.0.0',
+      installed_at: '2026-02-28T00:00:00',
+      pack_path: '.rorca/packs/react-saas',
+    };
+
+    const result = await registry.register(packDir);
+    expect(result.pack_name).toBe('react-saas');
+    expect(result.pack_version).toBe('1.0.0');
   });
 
-  it('updates version when pack already registered', () => {
-    const packDir = createPackOnDisk('existing-pack', validPackJson({
-      name: 'existing-pack',
-      version: '2.0.0',
-    }));
-    mockGet.mockReturnValueOnce({ id: 42 }); // existing row
+  it('throws ValidationError for invalid pack', async () => {
+    const packDir = path.join(tmpDir, '.rorca', 'packs', 'bad');
+    writePackJson(packDir, { name: 'INVALID!', version: 'nope' });
 
-    const result = registry.registerPack(packDir);
-    expect(result.name).toBe('existing-pack');
-    expect(result.version).toBe('2.0.0');
-    expect(result.id).toBe(42);
-    expect(mockPrepare).toHaveBeenCalledWith(expect.stringContaining('UPDATE'));
-  });
-
-  it('throws ValidationError on invalid pack', () => {
-    const packDir = path.join(packsDir, 'invalid');
-    fs.mkdirSync(packDir, { recursive: true });
-    fs.writeFileSync(path.join(packDir, 'pack.json'), '{}');
-    expect(() => registry.registerPack(packDir)).toThrow(/Invalid pack\.json/);
+    await expect(registry.register(packDir)).rejects.toThrow(/Invalid pack\.json/);
   });
 });
 
-// ─── PackRegistry.unregisterPack ────────────────────────────────────────────
+// ─── PackRegistry.unregister Tests ──────────────────────────────────────────
 
-describe('PackRegistry.unregisterPack', () => {
+describe('PackRegistry.unregister', () => {
   let registry: PackRegistry;
 
   beforeEach(() => {
     registry = new PackRegistry(tmpDir, 'ws-1');
   });
 
-  it('deletes DB row for installed pack', () => {
-    mockRun.mockReturnValueOnce({ changes: 1, lastInsertRowid: 0 });
-    expect(() => registry.unregisterPack('my-pack')).not.toThrow();
-    expect(mockPrepare).toHaveBeenCalledWith(expect.stringContaining('DELETE'));
+  it('throws NotFoundError when pack is not registered', async () => {
+    lastChanges = 0;
+    await expect(registry.unregister('ghost-pack')).rejects.toThrow(/not found/i);
+  });
+});
+
+// ─── PackRegistry.scanUnregistered Tests ────────────────────────────────────
+
+describe('PackRegistry.scanUnregistered', () => {
+  let registry: PackRegistry;
+
+  beforeEach(() => {
+    registry = new PackRegistry(tmpDir, 'ws-1');
   });
 
-  it('throws NotFoundError when pack is not installed', () => {
-    mockRun.mockReturnValueOnce({ changes: 0, lastInsertRowid: 0 });
-    expect(() => registry.unregisterPack('nonexistent')).toThrow(/not found/i);
+  it('returns empty when packs dir does not exist', async () => {
+    const reg = new PackRegistry('/nonexistent', 'ws-1');
+    expect(await reg.scanUnregistered()).toEqual([]);
+  });
+
+  it('finds unregistered packs on disk', async () => {
+    const packDir = path.join(tmpDir, '.rorca', 'packs', 'my-pack');
+    writePackJson(packDir, { name: 'my-pack', version: '0.1.0' });
+
+    // Not in DB
+    const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
+    mockSingleRows[existsSql] = undefined;
+
+    const result = await registry.scanUnregistered();
+    expect(result).toHaveLength(1);
+    expect(result[0].pack.name).toBe('my-pack');
+    expect(result[0].dir).toBe(packDir);
+  });
+
+  it('skips packs that are already registered', async () => {
+    const packDir = path.join(tmpDir, '.rorca', 'packs', 'registered-pack');
+    writePackJson(packDir, { name: 'registered-pack', version: '1.0.0' });
+
+    // Already in DB
+    const existsSql = 'SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2';
+    mockSingleRows[existsSql] = { id: 42 };
+
+    const result = await registry.scanUnregistered();
+    expect(result).toHaveLength(0);
+  });
+
+  it('skips invalid pack directories', async () => {
+    const packDir = path.join(tmpDir, '.rorca', 'packs', 'invalid-pack');
+    writePackJson(packDir, { name: 'BAD!', version: 'nope' });
+
+    const result = await registry.scanUnregistered();
+    expect(result).toHaveLength(0);
   });
 });

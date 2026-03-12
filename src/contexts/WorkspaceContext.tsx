@@ -132,7 +132,6 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
         }
       })
       .catch(console.error);
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, []);
 
   // Refresh active runs and settings when workspace changes

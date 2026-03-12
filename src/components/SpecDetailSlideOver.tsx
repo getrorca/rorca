@@ -9,7 +9,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   X, Clock, CheckCircle2, XCircle, AlertCircle,
-  Download, Copy, Check, ChevronRight, Play, GitBranch, GitFork,
+  Download, Copy, Check, Play, GitFork,
   Loader2, Plus, Sparkles, Trash2, History, FileSearch, Paperclip,
   FileText, FileImage, File, ZoomIn,
 } from 'lucide-react';
@@ -341,7 +341,7 @@ function SpecDetailContent({
   initialTab,
   onClose,
   onNavigate,
-  onNavigateToRun,
+  onNavigateToRun: _onNavigateToRun,
   onDeleted,
   onTagsChange,
   onApproved,
@@ -838,7 +838,7 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
 
 /* ─── JSON Tab ─────────────────────────────────────────────────────── */
 
-function JsonTab({ spec, specId }: { spec: SpecDetailData; specId: string }) {
+function JsonTab({ spec, specId: _specId }: { spec: SpecDetailData; specId: string }) {
   const [copied, setCopied] = useState(false);
   const rawJson = JSON.stringify(spec, null, 2);
 

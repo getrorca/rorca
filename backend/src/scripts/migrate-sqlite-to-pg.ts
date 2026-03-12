@@ -134,7 +134,7 @@ function toJsonb(val: unknown): unknown {
 }
 
 /** Safe JSON stringify for JSONB columns. */
-function jsonbStr(val: unknown): string | null {
+function _jsonbStr(val: unknown): string | null {
   if (val === null || val === undefined) return null;
   if (typeof val === 'string') {
     try {

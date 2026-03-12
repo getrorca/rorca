@@ -125,7 +125,7 @@ describe('RunViewPanel', () => {
     );
 
     // Skeleton or loading indicator should be present immediately
-    const skeleton = document.querySelector('[class*="skeleton"]') ??
+    const _skeleton = document.querySelector('[class*="skeleton"]') ??
       document.querySelector('[class*="animate-pulse"]') ??
       document.querySelector('[data-testid*="skeleton"]');
     // Alternatively, the component renders loading state or the panel shell

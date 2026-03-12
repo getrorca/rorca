@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import simpleGit from 'simple-git';
 import path from 'path';
-import { queryOne, execute } from '../db/index';
+import { queryOne } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 

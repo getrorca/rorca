@@ -5,7 +5,7 @@ import jwt from 'jsonwebtoken';
 import app from '../../server';
 import { JWT_SECRET } from '../auth';
 import { createNotification } from '../notifications';
-import { query, queryOne, execute } from '../../db/index';
+import { execute } from '../../db/index';
 
 async function createUser(overrides: { email?: string } = {}) {
   const id = crypto.randomUUID();

@@ -13,8 +13,6 @@ import {
   writeProgressTxt,
   migrateProgressTxt,
   getResumeContext,
-  type RunState,
-  type StoryEntry,
 } from '../run-state';
 
 describe('run-state', () => {
@@ -47,7 +45,7 @@ describe('run-state', () => {
 
     it('detects resume from previous run of same spec', () => {
       // Simulate a previous run
-      const first = initRunState(tmpDir, 'my-spec', 1);
+      const _first = initRunState(tmpDir, 'my-spec', 1);
       markStoryCompleted(tmpDir, {
         storyId: 'US-001', title: 'First Story', status: 'passed',
         startedAt: '2026-01-01T00:00:00Z', finishedAt: '2026-01-01T00:05:00Z',

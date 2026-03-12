@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
 import { query, queryOne, execute } from '../db/index';
-import { AuthUser } from './auth';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { logger } from '../lib/logger';
@@ -24,12 +23,6 @@ interface TemplateRow {
   author_id: string | null;
   usage_count: number;
   last_used_at: string | null;
-}
-
-interface RatingRow {
-  template_id: string;
-  avg_rating: number;
-  rating_count: number;
 }
 
 async function getUserTeamIds(userId: string): Promise<string[]> {
