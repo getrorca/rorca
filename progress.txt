@@ -3,9 +3,10 @@
 Spec: add copy paste photo as attachment (meaning someone can screen capture with whatever tool they want and attach it to the new spec description screen here where i am typing now) and also an upload file so that users can upload PRD, SDD or whatever they want as context.
 Run ID: 45
 Started: 2026-03-12T05:48:55.677Z
-Last Updated: 2026-03-12T05:57:01.476Z
+Last Updated: 2026-03-12T05:59:47.415Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - US-001: Add spec_attachments database table — DONE (claude, claude-sonnet-4-6, 91s)
 - US-002: Create backend API route for attachment upload — DONE (claude, claude-sonnet-4-6, 137s)
 - US-003: Create backend API route to list spec attachments — DONE (claude, claude-sonnet-4-6, 115s)
+- US-004: Create backend API route to download attachment — DONE (claude, claude-sonnet-4-6, 149s)
