@@ -1780,6 +1780,8 @@ function DisplaySection() {
   // Catalog filter state
   const [searchText, setSearchText] = useState('');
   const [activeProvider, setActiveProvider] = useState<string>('All');
+  const [activeCostTier, setActiveCostTier] = useState<string>('All');
+  const [activeSpeedTier, setActiveSpeedTier] = useState<string>('All');
 
   useEffect(() => {
     const fetchPromises: Promise<any>[] = [
@@ -1975,6 +1977,8 @@ function DisplaySection() {
               const q = searchText.toLowerCase();
               return models.filter(m =>
                 (activeProvider === 'All' || m.provider === activeProvider) &&
+                (activeCostTier === 'All' || m.costTier === activeCostTier) &&
+                (activeSpeedTier === 'All' || m.speedTier === activeSpeedTier) &&
                 (!q || m.label.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
               ).length;
             })()} models
@@ -2009,14 +2013,65 @@ function DisplaySection() {
           );
         })()}
 
+        {/* Cost + Speed filter row */}
+        <div className="flex flex-wrap gap-x-4 gap-y-2 mb-4">
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Cost</span>
+            {(['All', 'free', 'low', 'medium', 'high', 'premium'] as const).map(tier => (
+              <button
+                key={tier}
+                onClick={() => setActiveCostTier(tier)}
+                className={`px-2.5 py-1 text-xs rounded border transition-colors ${
+                  activeCostTier === tier
+                    ? 'bg-accent/10 border-accent text-accent'
+                    : 'border-border text-muted hover:text-[var(--text)]'
+                }`}
+              >
+                {tier === 'All' ? 'All' : COST_LABELS[tier].label}
+              </button>
+            ))}
+          </div>
+          <div className="flex items-center gap-1.5">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Speed</span>
+            {(['All', 'fast', 'medium', 'slow'] as const).map(tier => (
+              <button
+                key={tier}
+                onClick={() => setActiveSpeedTier(tier)}
+                className={`px-2.5 py-1 text-xs rounded border transition-colors ${
+                  activeSpeedTier === tier
+                    ? 'bg-accent/10 border-accent text-accent'
+                    : 'border-border text-muted hover:text-[var(--text)]'
+                }`}
+              >
+                {tier === 'All' ? 'All' : SPEED_LABELS[tier].label}
+              </button>
+            ))}
+          </div>
+        </div>
+
         {/* Filtered model cards */}
         <div className="space-y-4">
           {(() => {
             const q = searchText.toLowerCase();
             const filtered = models.filter(m =>
               (activeProvider === 'All' || m.provider === activeProvider) &&
+              (activeCostTier === 'All' || m.costTier === activeCostTier) &&
+              (activeSpeedTier === 'All' || m.speedTier === activeSpeedTier) &&
               (!q || m.label.toLowerCase().includes(q) || m.provider.toLowerCase().includes(q) || m.id.toLowerCase().includes(q))
             );
+            if (filtered.length === 0) {
+              return (
+                <div className="py-8 text-center">
+                  <p className="text-sm text-muted mb-2">No models match your filters</p>
+                  <button
+                    onClick={() => { setSearchText(''); setActiveProvider('All'); setActiveCostTier('All'); setActiveSpeedTier('All'); }}
+                    className="text-xs text-accent hover:underline"
+                  >
+                    Clear filters
+                  </button>
+                </div>
+              );
+            }
             const filteredByProvider = filtered.reduce<Record<string, DisplayModelOption[]>>((acc, m) => {
               (acc[m.provider] ??= []).push(m);
               return acc;
