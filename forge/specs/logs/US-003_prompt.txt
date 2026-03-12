@@ -1326,7 +1326,7 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
 
 Follow this workflow for implementation:
-## Agent Role: Backend Routes
+## Agent Role: Database
 
 ---
 name: rorca
@@ -1479,11 +1479,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-003):
-Implement GET /api/specs/:specId/attachments to return all attachments for a spec. Include metadata but not binary data (separate download endpoint).
+Start the managed Postgres process using pg_ctl start -D ~/.rorca/postgres/data -o '-p 5433 -k /tmp' and wait until it accepts connections (poll pg_isready or attempt a TCP connect in a loop with 100ms delay, max 30s). After confirming Postgres is up, use psql or createuser/createdb binaries to create the rorca user (if not exists) and rorca database (if not exists). Handle the case where Postgres is already running on 5433 (idempotent: skip start, still ensure user/db exist).
 
 Acceptance Criteria:
-- Endpoint returns JSON array: [{ id, filename, contentType, fileSize, createdAt, uploadedBy: { id, name } }]
-- Joins with users table to include uploader name
-- Ordered by created_at DESC (newest first)
-- Returns 404 if spec not found
-- Returns empty array if no attachments exist
+- pg_ctl start is invoked with -D ~/.rorca/postgres/data -o '-p 5433' — the process is started in the background (not blocking the Node process)
+- After spawning pg_ctl, ensurePostgres() polls for readiness by attempting TCP connect to localhost:5433 every 100ms for up to 30 seconds — throws Error('Postgres failed to start within 30s') if not ready
+- If port 5433 is already accepting connections before pg_ctl is called, pg_ctl start is skipped entirely (idempotent) — a log line 'Postgres already running on 5433' is shown
+- createuser -h localhost -p 5433 -s rorca is run; if exit code is non-zero AND stderr contains 'already exists', the error is swallowed (idempotent) — any other non-zero exit throws
+- createdb -h localhost -p 5433 -O rorca rorca is run with the same idempotent error-swallowing logic for 'already exists'
