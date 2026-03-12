@@ -301,10 +301,10 @@ router.get('/top', async (req: Request, res: Response) => {
         signal: AbortSignal.timeout(5_000),
       });
       if (!r.ok) return [];
-      const d = await r.json().catch(() => null);
+      const d = await r.json().catch(() => null) as Record<string, unknown> | null;
       if (!d) return [];
-      return Array.isArray(d?.skills) ? d.skills
-        : Array.isArray(d?.results) ? d.results
+      return Array.isArray((d as Record<string, unknown>)?.skills) ? (d as Record<string, unknown[]>).skills
+        : Array.isArray((d as Record<string, unknown>)?.results) ? (d as Record<string, unknown[]>).results
         : Array.isArray(d) ? d : [];
     } catch {
       return [];
