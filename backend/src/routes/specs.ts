@@ -5210,14 +5210,40 @@ router.get('/:specId/generation-log', async (req: Request, res: Response) => {
       return;
     }
 
-    const log = await queryOne(`SELECT * FROM spec_generation_logs WHERE spec_slug = $1 ORDER BY created_at DESC LIMIT 1`, [specId]);
+    const log = await queryOne<{
+      id: number;
+      spec_slug: string;
+      model: string;
+      provider: string | null;
+      duration_ms: number | null;
+      input_tokens: number | null;
+      output_tokens: number | null;
+      context_summary: string;
+      error: string | null;
+      status: string;
+      created_at: string;
+    }>(`SELECT * FROM spec_generation_logs WHERE spec_slug = $1 ORDER BY created_at DESC LIMIT 1`, [specId]);
 
     if (!log) {
       res.status(404).json({ error: 'No generation log found' });
       return;
     }
 
-    res.json(log);
+    let contextSummary: any = null;
+    try {
+      contextSummary = log.context_summary ? JSON.parse(log.context_summary) : null;
+    } catch {
+      contextSummary = null;
+    }
+
+    res.json({
+      contextSummary,
+      model: log.model,
+      provider: log.provider ?? null,
+      duration: log.duration_ms ?? 0,
+      tokens: (log.input_tokens ?? 0) + (log.output_tokens ?? 0),
+      createdAt: log.created_at,
+    });
   } catch (err: any) {
     res.status(500).json({ error: err.message || 'Failed to fetch generation log' });
   }
