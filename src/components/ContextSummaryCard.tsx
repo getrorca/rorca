@@ -1,5 +1,5 @@
 import { useState } from 'react';
-import { ChevronDown, ChevronRight, Check, X, AlertTriangle, FileText, Brain, Shield, Layers, Puzzle, Search, Share2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, Check, X, AlertTriangle, FileText, Brain, Shield, Layers, Puzzle, Search, Share2, FolderOpen } from 'lucide-react';
 import type { ContextSummary } from '../panels/SpecForgeOutput';
 
 interface SkillDetail {
@@ -86,6 +86,7 @@ function TokenBar({ estimated, contextWindow }: { estimated: number; contextWind
 
 export default function ContextSummaryCard({ summary, isGenerating, skillDetails }: ContextSummaryCardProps) {
   const [expanded, setExpanded] = useState(!!isGenerating);
+  const [filesExpanded, setFilesExpanded] = useState(false);
 
   const { directionLayers, skills, memoryEntries, agentsMd, template, schemaSnapshot, gitMemory, estimatedTokens, modelContextWindow, retrieval } = summary;
   // Prefer nested retrieval object (SW-010); fall back to legacy flat fields for older logs
@@ -266,6 +267,43 @@ export default function ContextSummaryCard({ summary, isGenerating, skillDetails
               <span className="text-muted">{skills.join(', ')}</span>
             ) : null}
           </div>
+
+          {/* Context Files (CU-004) — only shown if predictedFiles is non-empty */}
+          {summary.predictedFiles && summary.predictedFiles.length > 0 && (() => {
+            const allFiles = summary.predictedFiles!;
+            const displayFiles = allFiles.slice(0, 20);
+            const overflow = allFiles.length - 20;
+            return (
+              <div className="text-xs">
+                <button
+                  onClick={() => setFilesExpanded(e => !e)}
+                  className="flex items-center gap-1 text-muted hover:text-text transition-colors"
+                  aria-expanded={filesExpanded}
+                >
+                  {filesExpanded
+                    ? <ChevronDown className="w-3 h-3" />
+                    : <ChevronRight className="w-3 h-3" />
+                  }
+                  <FolderOpen className="w-3 h-3" />
+                  <span className="font-medium">Context Files ({allFiles.length})</span>
+                </button>
+                {filesExpanded && (
+                  <div className="mt-1.5 pl-4 space-y-0.5">
+                    {displayFiles.map(f => (
+                      <div key={f} className="flex items-center gap-1">
+                        <code className="px-1 py-0 rounded bg-muted/10 text-[10px] font-mono text-text break-all">
+                          {f}
+                        </code>
+                      </div>
+                    ))}
+                    {overflow > 0 && (
+                      <span className="text-muted text-[10px]">+{overflow} more</span>
+                    )}
+                  </div>
+                )}
+              </div>
+            );
+          })()}
 
           {/* Memory + Template */}
           <div className="flex flex-wrap items-center gap-3 text-xs">

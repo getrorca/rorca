@@ -26,6 +26,8 @@ import { retrieveContext } from '../lib/memory-router';
 import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
+import { route as routeContext } from '../lib/context-router';
+import { loadRorcaConfig } from '../lib/rorca-config';
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 
@@ -1961,6 +1963,40 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     // 10. Merge diagrams (algorithmic overwrites LLM for storyDeps)
     const allDiagrams = { ...(parsed.diagrams || {}), ...algorithmicDiagrams };
+
+    // 11. CU-004: Compute predictedFiles — union of injectedFiles from routeContext() for each story
+    if (precomputedContextSummary && workspace.path) {
+      try {
+        const rorcaCfg = loadRorcaConfig(workspace.path as string);
+        if (rorcaCfg.routing && Array.isArray(rorcaCfg.routing.scopes) && rorcaCfg.routing.scopes.length > 0) {
+          const allFileSet = new Set<string>();
+          const stories: any[] = Array.isArray(parsed.stories) ? parsed.stories : [];
+          for (const story of stories) {
+            const payload = routeContext(
+              {
+                id: story.id ?? '',
+                title: story.title ?? '',
+                description: story.description ?? '',
+                acceptanceCriteria: story.acceptanceCriteria,
+                dependsOn: story.dependsOn,
+                tags: story.tags,
+              },
+              rorcaCfg.routing,
+              workspace.path as string,
+            );
+            for (const f of payload.injectedFiles) {
+              allFileSet.add(f);
+            }
+          }
+          // Sort by path, deduplicate, limit to 30
+          const allFiles = Array.from(allFileSet).sort();
+          (precomputedContextSummary as Record<string, unknown>).predictedFiles =
+            allFiles.slice(0, 30);
+        }
+      } catch {
+        // routeContext failures are non-fatal — predictedFiles simply absent
+      }
+    }
 
     // 12. WAL event
     const model = resolvedModel;
