@@ -2254,6 +2254,95 @@ server.registerPrompt(
   },
 );
 
+server.registerTool(
+  'rorca_queue_run',
+  {
+    description: 'Smart run trigger — start a pipeline run immediately if no active run exists, or queue it if one is already running. Accepts workspaceId + specId (slug) for convenience. Returns { queued, runId/queuePosition, activeRunId, message }.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID'),
+      specId: z.string().describe('Spec slug (filename without .json, e.g. rorca-curated-skills-library)'),
+    },
+  },
+  async ({ workspaceId, specId }) => {
+    const res = await fetch(`${RORCA_API}/api/pipeline/queue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId, specId }),
+    });
+
+    const data = await res.json() as Record<string, unknown>;
+
+    if (!res.ok) {
+      throw new Error(`Queue run failed (${res.status}): ${data.error ?? JSON.stringify(data)}`);
+    }
+
+    if (data.queued) {
+      return {
+        content: [{
+          type: 'text' as const,
+          text: `Run queued for spec "${specId}" (position ${data.queuePosition}).\nActive run: #${data.activeRunId}\n\nUse rorca_run_status to monitor the active run.`,
+        }],
+      };
+    }
+
+    return {
+      content: [{
+        type: 'text' as const,
+        text: `Pipeline run #${data.runId} started immediately for spec "${specId}".\n\nTrack progress with: rorca_run_status runId=${data.runId}`,
+      }],
+    };
+  }
+);
+
+server.registerPrompt(
+  'queue_run',
+  {
+    title: 'Queue Pipeline Run',
+    description: 'Smart run trigger — starts immediately if no active run, or queues if one is running. Accepts specId (slug) and optional workspaceId.',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (e.g. rorca-curated-skills-library)'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/pipeline/queue`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws, specId }),
+    });
+    const data = await res.json() as Record<string, unknown>;
+    if (!res.ok) {
+      return {
+        messages: [{
+          role: 'user' as const,
+          content: { type: 'text' as const, text: `Queue run failed (${res.status}): ${data.error ?? JSON.stringify(data)}` },
+        }],
+      };
+    }
+    if (data.queued) {
+      return {
+        messages: [{
+          role: 'user' as const,
+          content: {
+            type: 'text' as const,
+            text: `⏳ Run queued for spec "${specId}" (position ${data.queuePosition}).\nActive run: #${data.activeRunId}\n\nTrack active run: /mcp__rorca__run_status ${data.activeRunId}`,
+          },
+        }],
+      };
+    }
+    return {
+      messages: [{
+        role: 'user' as const,
+        content: {
+          type: 'text' as const,
+          text: `🚀 Pipeline run #${data.runId} started immediately!\nSpec: ${specId}\nWorkspace: ${ws}\n\nTrack progress: /mcp__rorca__run_status ${data.runId}`,
+        },
+      }],
+    };
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
