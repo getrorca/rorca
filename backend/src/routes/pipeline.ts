@@ -3380,7 +3380,8 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
 
 // ─── GET /api/pipeline/runs/:runId/output — Raw terminal output SSE ──────────
 // Streams raw stdout/stderr (with ANSI codes) to xterm.js on the frontend.
-// Late-joiners receive a full replay of buffered chunks, then live updates.
+// Output is stored in run_output_chunks table (persisted across backend restarts).
+// Late-joiners receive full replay of all existing chunks, then live updates via polling.
 
 /**
  * @swagger
@@ -3389,7 +3390,7 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Stream raw terminal output (SSE)
  *     operationId: streamPipelineOutput
- *     description: Server-Sent Events stream of base64-encoded terminal output. Late joiners receive full buffer replay.
+ *     description: Server-Sent Events stream of base64-encoded terminal output. Late joiners receive full buffer replay from run_output_chunks table.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -3427,101 +3428,68 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   });
   res.write(': connected\n\n');
 
-  const buf = outputBuffers.get(runId);
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
 
   // Resolve agent type for semantic parsing (defaults to 'claude')
-  const runRow = await queryOne('SELECT agent_type, agent, agent_model FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null } | undefined;
+  const runRow = await queryOne('SELECT agent_type, agent, agent_model, status FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null; status: string } | undefined;
   const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
 
   // Emit run metadata so frontend knows which renderer to use
   res.write(`event: run_meta\ndata: ${JSON.stringify({ agentType: agent, agentModel: runRow?.agent_model ?? null })}\n\n`);
 
-  if (buf) {
-    // ── Hot path: in-memory buffer exists ──────────────────────────────────
-    // Replay buffered output + semantic steps
-    for (const chunk of buf.chunks) {
-      const encoded = Buffer.from(chunk).toString('base64');
-      res.write(`event: chunk\ndata: ${encoded}\n\n`);
-      emitSemanticSteps(chunk, agent, res);
-    }
+  // ── Replay all existing chunks (late-join support) ────────────────────────
+  interface ChunkRow { sequence: number; chunk: Buffer }
+  const existingChunks = await query<ChunkRow>(
+    'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 ORDER BY sequence ASC',
+    [runId],
+  );
 
-    if (buf.done) {
-      clearInterval(hb);
-      res.write('event: done\ndata: \n\n');
-      res.end();
-      return;
-    }
-
-    // Subscribe to live output
-    const onChunk = (chunk: string) => {
-      const encoded = Buffer.from(chunk).toString('base64');
-      res.write(`event: chunk\ndata: ${encoded}\n\n`);
-      emitSemanticSteps(chunk, agent, res);
-    };
-    buf.subscribers.add(onChunk);
-
-    req.on('close', () => {
-      buf.subscribers.delete(onChunk);
-      clearInterval(hb);
-    });
-    return;
+  let lastSequence = 0;
+  for (const row of existingChunks) {
+    const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
+    res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
+    emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
+    lastSequence = row.sequence;
   }
 
-  // ── Cold path: buffer not in memory (backend restarted) ──────────────────
-  // Fall back to the persisted log file (check DB log_path, then legacy /tmp).
-  const logPath = await resolveLogPath(runId);
-  if (!logPath) {
-    // No log file — run finished before this server started or never ran
+  // ── If the run is already terminal, close immediately ────────────────────
+  const terminalStatuses = ['done', 'failed', 'cancelled'];
+  if (runRow && terminalStatuses.includes(runRow.status)) {
     clearInterval(hb);
     res.write('event: done\ndata: \n\n');
     res.end();
     return;
   }
 
-  // Replay everything written so far + semantic steps
-  const existing = fs.readFileSync(logPath);
-  if (existing.length > 0) {
-    res.write(`event: chunk\ndata: ${existing.toString('base64')}\n\n`);
-    emitSemanticSteps(existing.toString('utf8'), agent, res);
-  }
-
-  // Check if the original process is still alive
-  const run = await queryOne('SELECT pid, status FROM pipeline_runs WHERE id = $1', [runId]) as { pid: number | null; status: string } | undefined;
-  const stillRunning = (run?.status === 'running' || run?.status === 'paused') && run?.pid != null && isPidAlive(run.pid);
-
-  if (!stillRunning) {
-    clearInterval(hb);
-    res.write('event: done\ndata: \n\n');
-    res.end();
-    return;
-  }
-
-  // Tail the log file — poll for new bytes every 200 ms
-  let offset = existing.length;
-  const tailInterval = setInterval(() => {
+  // ── Poll for new chunks while run is active ───────────────────────────────
+  // Checks every 200 ms; uses lastSequence to fetch only new rows efficiently.
+  const pollInterval = setInterval(async () => {
     try {
-      const stat = fs.statSync(logPath);
-      if (stat.size > offset) {
-        const newBytes = Buffer.alloc(stat.size - offset);
-        const fd = fs.openSync(logPath, 'r');
-        fs.readSync(fd, newBytes, 0, newBytes.length, offset);
-        fs.closeSync(fd);
-        offset = stat.size;
-        const text = newBytes.toString('utf8');
-        res.write(`event: chunk\ndata: ${newBytes.toString('base64')}\n\n`);
-        emitSemanticSteps(text, agent, res);
+      const newChunks = await query<ChunkRow>(
+        'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC',
+        [runId, lastSequence],
+      );
+
+      for (const row of newChunks) {
+        const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
+        res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
+        emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
+        lastSequence = row.sequence;
       }
 
-      // Stop tailing once the process exits
-      if (run?.pid != null && !isPidAlive(run.pid)) {
-        clearInterval(tailInterval);
+      // Check if run has reached a terminal state
+      const statusRow = await queryOne<{ status: string }>(
+        'SELECT status FROM pipeline_runs WHERE id = $1',
+        [runId],
+      );
+      if (!statusRow || terminalStatuses.includes(statusRow.status)) {
+        clearInterval(pollInterval);
         clearInterval(hb);
         res.write('event: done\ndata: \n\n');
         res.end();
       }
     } catch {
-      clearInterval(tailInterval);
+      clearInterval(pollInterval);
       clearInterval(hb);
       res.write('event: done\ndata: \n\n');
       res.end();
@@ -3529,7 +3497,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   }, 200);
 
   req.on('close', () => {
-    clearInterval(tailInterval);
+    clearInterval(pollInterval);
     clearInterval(hb);
   });
 });
