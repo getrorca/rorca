@@ -1,28 +1,18 @@
 {
-  "specId": "add-rorca-edit-spec-mcp-tool",
-  "runId": 68,
-  "startedAt": "2026-03-12T20:40:00.872Z",
-  "lastUpdatedAt": "2026-03-12T20:44:41.524Z",
+  "specId": "rorca-pg-boss-job-queue",
+  "runId": 72,
+  "startedAt": "2026-03-12T21:16:28.988Z",
+  "lastUpdatedAt": "2026-03-12T21:18:39.313Z",
   "completedStories": [
     {
-      "storyId": "US-001",
-      "title": "Add PUT /api/specs/:specId backend endpoint to update spec metadata",
+      "storyId": "PG-001",
+      "title": "Fix SIGTERM inheritance bug — guard db/index.ts shutdown handlers",
       "status": "passed",
-      "startedAt": "2026-03-12T20:40:01.580Z",
-      "finishedAt": "2026-03-12T20:42:08.103Z",
+      "startedAt": "2026-03-12T21:16:29.592Z",
+      "finishedAt": "2026-03-12T21:18:39.313Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 126523
-    },
-    {
-      "storyId": "US-002",
-      "title": "Register rorca_edit_spec MCP tool in backend/src/mcp/server.ts",
-      "status": "passed",
-      "startedAt": "2026-03-12T20:42:23.252Z",
-      "finishedAt": "2026-03-12T20:44:41.524Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 138272
+      "elapsedMs": 129721
     }
   ],
   "failedStories": [],

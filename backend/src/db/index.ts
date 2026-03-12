@@ -448,6 +448,12 @@ async function shutdown(): Promise<void> {
   }
 }
 
-process.on('SIGTERM', () => { shutdown().catch(() => {}); });
-process.on('SIGINT', () => { shutdown().catch(() => {}); });
+// Only register shutdown handlers in the Express server process.
+// execution-engine.ts subprocesses set RORCA_PROCESS_ROLE=engine and manage
+// their own pool lifecycle — registering here would close the pool when tsx watch
+// sends SIGTERM to the old server process group, killing active story subprocesses.
+if (process.env.RORCA_PROCESS_ROLE !== 'engine') {
+  process.on('SIGTERM', () => { shutdown().catch(() => {}); });
+  process.on('SIGINT', () => { shutdown().catch(() => {}); });
+}
 
