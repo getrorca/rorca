@@ -2161,6 +2161,99 @@ server.registerPrompt(
   },
 );
 
+server.registerTool(
+  'rorca_fix_spec',
+  {
+    description: 'Apply automated structural fixes to a spec: reindex story IDs to sequential US-001..US-N (updating dependsOn refs), add missing passes:false fields, normalize dependsOn to array, remove duplicate IDs. Never modifies title, description, or acceptanceCriteria text.',
+    inputSchema: {
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/fix`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws }),
+    });
+    if (!res.ok) {
+      const err = await res.text();
+      throw new Error(`Spec fix failed (${res.status}): ${err}`);
+    }
+    const data = await res.json() as {
+      fixed: boolean;
+      changes: Array<{ type: string; storyId: string; description: string }>;
+    };
+    const lines: string[] = [
+      `Spec: ${specId}`,
+      `Fixed: ${data.fixed ? '✅ yes' : '⬜ no changes needed'}`,
+      '',
+    ];
+    if (data.changes.length === 0) {
+      lines.push('No structural issues found.');
+    } else {
+      const byType: Record<string, typeof data.changes> = {};
+      for (const c of data.changes) {
+        (byType[c.type] ??= []).push(c);
+      }
+      const typeLabels: Record<string, string> = {
+        reindex: 'Reindexed IDs',
+        add_passes: 'Added passes field',
+        normalize_depends: 'Normalized dependsOn',
+        remove_duplicate: 'Removed duplicates',
+      };
+      for (const [type, items] of Object.entries(byType)) {
+        lines.push(`${typeLabels[type] ?? type} (${items.length}):`);
+        for (const item of items) {
+          lines.push(`  • [${item.storyId}] ${item.description}`);
+        }
+      }
+    }
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  },
+);
+
+server.registerPrompt(
+  'fix_spec',
+  {
+    title: 'Fix Spec',
+    description: 'Apply automated structural fixes to a spec (reindex IDs, add passes field, normalize dependsOn, remove duplicates). Never modifies acceptance criteria text.',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/fix`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws }),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Spec fix failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      fixed: boolean;
+      changes: Array<{ type: string; storyId: string; description: string }>;
+    };
+    const lines: string[] = [
+      `Spec: ${specId}`,
+      `Fixed: ${data.fixed ? '✅ yes' : '⬜ no changes needed'}`,
+      '',
+    ];
+    if (data.changes.length === 0) {
+      lines.push('No structural issues found.');
+    } else {
+      for (const c of data.changes) {
+        lines.push(`• [${c.type}] [${c.storyId}] ${c.description}`);
+      }
+    }
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: lines.join('\n') } }] };
+  },
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
