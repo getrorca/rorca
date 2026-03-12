@@ -349,7 +349,7 @@ async function resolveOpenRouterKey(): Promise<string | null> {
   try {
     const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
     if (userRow) {
-      const vaultResult = getVaultKey(userRow.id, 'openrouter');
+      const vaultResult = await getVaultKey(userRow.id, 'openrouter');
       if (vaultResult) return vaultResult.key;
     }
   } catch { /* table may not exist */ }
