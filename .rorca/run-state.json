@@ -1,18 +1,18 @@
 {
-  "specId": "rorca-mcp-cli-spec-enhancement",
-  "runId": 40,
-  "startedAt": "2026-03-12T04:20:33.580Z",
-  "lastUpdatedAt": "2026-03-12T04:29:43.149Z",
+  "specId": "add copy paste photo as attachment (meaning someone can screen capture with whatever tool they want and attach it to the new spec description screen here where i am typing now) and also an upload file so that users can upload PRD, SDD or whatever they want as context.",
+  "runId": 45,
+  "startedAt": "2026-03-12T05:48:55.677Z",
+  "lastUpdatedAt": "2026-03-12T05:50:29.084Z",
   "completedStories": [
     {
       "storyId": "US-001",
-      "title": "Research Best Practices and Rewrite rorca-mcp-cli Spec with Exhaustive Acceptance Criteria",
+      "title": "Add spec_attachments database table",
       "status": "passed",
-      "startedAt": "2026-03-12T04:20:41.412Z",
-      "finishedAt": "2026-03-12T04:29:43.149Z",
+      "startedAt": "2026-03-12T05:48:58.183Z",
+      "finishedAt": "2026-03-12T05:50:29.084Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 541737
+      "elapsedMs": 90901
     }
   ],
   "failedStories": [],
