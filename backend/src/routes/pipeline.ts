@@ -4,9 +4,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import simpleGit from 'simple-git';
-import { z } from 'zod';
-import { query, queryOne, execute, transaction } from '../db/index';
-import { validateBody } from '../lib/validate';
+import { db } from '../db/index';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
 import { estimateDryRunCost } from '../lib/cost-estimator';
@@ -28,11 +26,7 @@ import { readRunState, type RunState } from '../lib/run-state';
 import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
 import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
-import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
-import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
-import { synthesizeRunMemory } from '../lib/auto-memory';
-import { logger } from '../lib/logger';
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
 function autoSelectOrchestration(userStories: WaveUserStory[]): {
@@ -110,8 +104,8 @@ function workspaceLogPath(workspacePath: string, runId: number): string {
 }
 
 /** Resolve log path for a run: check DB log_path, then legacy /tmp path */
-async function resolveLogPath(runId: number): Promise<string | null> {
-  const row = await queryOne('SELECT log_path FROM pipeline_runs WHERE id = $1', [runId]) as { log_path: string | null } | undefined;
+function resolveLogPath(runId: number): string | null {
+  const row = db.prepare('SELECT log_path FROM pipeline_runs WHERE id = ?').get(runId) as { log_path: string | null } | undefined;
   if (row?.log_path && fs.existsSync(row.log_path)) return row.log_path;
   const legacy = tmpLogPath(runId);
   if (fs.existsSync(legacy)) return legacy;
@@ -128,7 +122,7 @@ function isPidAlive(pid: number): boolean {
 // (backend down, restart, port mismatch), they write to .rorca-results.jsonl.
 // This function reads that file and replays entries into the DB.
 
-async function syncFallbackResults(cwd: string, workspaceId: string): Promise<number> {
+function syncFallbackResults(cwd: string, workspaceId: string): number {
   const entries = readFallbackResults(cwd);
   if (entries.length === 0) return 0;
 
@@ -138,12 +132,17 @@ async function syncFallbackResults(cwd: string, workspaceId: string): Promise<nu
       if (entry.type === 'wal') {
         // Replay WAL event directly into DB
         const p = entry.payload as Record<string, unknown>;
-        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5)` + ' RETURNING *', [p.event_type ?? entry.status,
+        const walResult = db.prepare(
+          `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES (?, ?, ?, ?, ?)`
+        ).run(
+          p.event_type ?? entry.status,
           p.workspace_id ?? workspaceId,
           p.spec_id ?? null,
           p.story_id ?? entry.storyId,
-          JSON.stringify(p.payload ?? p),]);
-        broadcastAll(walEvent!);
+          JSON.stringify(p.payload ?? p),
+        );
+        const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+        broadcastAll(walEvent);
         synced++;
       } else if (entry.type === 'story_result') {
         // Replay story_result into DB
@@ -155,29 +154,31 @@ async function syncFallbackResults(cwd: string, workspaceId: string): Promise<nu
         if (!runId || !storyId || !status) continue;
 
         // Check if already synced (idempotent — don't double-insert)
-        const existing = await queryOne('SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2', [runId, storyId]);
+        const existing = db.prepare(
+          'SELECT id FROM story_results WHERE run_id = ? AND story_id = ?'
+        ).get(runId, storyId);
 
         if (!existing) {
-          const activeSkillsVal = Array.isArray(p.activeSkills) && (p.activeSkills as string[]).length > 0
-            ? JSON.stringify(p.activeSkills)
-            : null;
-          await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, active_skills)
-             VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10)`, [runId, storyId, status,
+          db.prepare(
+            `INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd)
+             VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?)`
+          ).run(
+            runId, storyId, status,
             (p.worktreePath as string) ?? null, (p.worktreeBranch as string) ?? null,
             (p.inputTokens as number) ?? null, (p.outputTokens as number) ?? null,
             (p.modelUsed as string) ?? null, (p.costUsd as number) ?? null,
-            activeSkillsVal,]);
+          );
         }
         synced++;
       }
     } catch (err: any) {
-      logger.error(`[Pipeline] Failed to sync fallback entry: ${err.message}`);
+      console.error(`[Pipeline] Failed to sync fallback entry: ${err.message}`);
     }
   }
 
   if (synced > 0) {
     deleteFallbackFile(cwd);
-    logger.info(`[Pipeline] Synced ${synced} fallback result(s) from ${cwd}/.rorca-results.jsonl`);
+    console.log(`[Pipeline] Synced ${synced} fallback result(s) from ${cwd}/.rorca-results.jsonl`);
   }
   return synced;
 }
@@ -195,30 +196,44 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
  * OpenCode reads skill files from this directory automatically.
  * Returns the absolute path of the written file (for cleanup), or null if nothing to write.
  */
-async function writeOpenCodeSkillFile(workspaceCwd: string, workspaceId: string, specBrief: string): Promise<string | null> {
+function writeOpenCodeSkillFile(workspaceCwd: string, workspaceId: string, specBrief: string): string | null {
   // Fetch direction layers from DB
-  const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
+  const l1Row = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+  ).get() as { content_yaml: string } | undefined;
 
-  const wsRow = await queryOne('SELECT domain FROM workspaces WHERE id = $1', [workspaceId]) as { domain: string | null } | undefined;
+  const wsRow = db.prepare('SELECT domain FROM workspaces WHERE id = ?').get(workspaceId) as { domain: string | null } | undefined;
   const domain = wsRow?.domain;
 
   const l2Row = domain
-    ? await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [domain]) as { content_yaml: string } | undefined
+    ? db.prepare(
+        `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = ? AND COALESCE(workspace_id, '') = ''`
+      ).get(domain) as { content_yaml: string } | undefined
     : undefined;
 
-  const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
+  const l3Row = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+  ).get(workspaceId) as { content_yaml: string } | undefined;
 
   // Fetch auto-hydrated context
-  const ctx = await queryOne(`SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`, [workspaceId]) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+  const ctx = db.prepare(
+    `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = ?`
+  ).get(workspaceId) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
 
   // Fetch team layers
-  const access = await queryOne('SELECT team_id FROM workspace_access WHERE workspace_id = $1 LIMIT 1', [workspaceId]) as { team_id: string } | undefined;
+  const access = db.prepare(
+    'SELECT team_id FROM workspace_access WHERE workspace_id = ? LIMIT 1'
+  ).get(workspaceId) as { team_id: string } | undefined;
 
   let teamL1: string | undefined;
   let teamL2: string | undefined;
   if (access) {
-    const tl1 = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`, [access.team_id]) as { content_yaml: string } | undefined;
-    const tl2 = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`, [access.team_id]) as { content_yaml: string } | undefined;
+    const tl1 = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = ? AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`
+    ).get(access.team_id) as { content_yaml: string } | undefined;
+    const tl2 = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = ? AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`
+    ).get(access.team_id) as { content_yaml: string } | undefined;
     teamL1 = tl1?.content_yaml;
     teamL2 = tl2?.content_yaml;
   }
@@ -302,30 +317,44 @@ interface CodexAgentsMdState {
   originalContent: string | null;
 }
 
-async function writeCodexAgentsMd(workspaceCwd: string, workspaceId: string, specBrief: string): Promise<CodexAgentsMdState | null> {
+function writeCodexAgentsMd(workspaceCwd: string, workspaceId: string, specBrief: string): CodexAgentsMdState | null {
   // Fetch direction layers from DB (same pattern as writeOpenCodeSkillFile)
-  const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
+  const l1Row = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+  ).get() as { content_yaml: string } | undefined;
 
-  const wsRow = await queryOne('SELECT domain FROM workspaces WHERE id = $1', [workspaceId]) as { domain: string | null } | undefined;
+  const wsRow = db.prepare('SELECT domain FROM workspaces WHERE id = ?').get(workspaceId) as { domain: string | null } | undefined;
   const domain = wsRow?.domain;
 
   const l2Row = domain
-    ? await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [domain]) as { content_yaml: string } | undefined
+    ? db.prepare(
+        `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = ? AND COALESCE(workspace_id, '') = ''`
+      ).get(domain) as { content_yaml: string } | undefined
     : undefined;
 
-  const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
+  const l3Row = db.prepare(
+    `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+  ).get(workspaceId) as { content_yaml: string } | undefined;
 
   // Fetch auto-hydrated context
-  const ctx = await queryOne(`SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`, [workspaceId]) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+  const ctx = db.prepare(
+    `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = ?`
+  ).get(workspaceId) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
 
   // Fetch team layers
-  const access = await queryOne('SELECT team_id FROM workspace_access WHERE workspace_id = $1 LIMIT 1', [workspaceId]) as { team_id: string } | undefined;
+  const access = db.prepare(
+    'SELECT team_id FROM workspace_access WHERE workspace_id = ? LIMIT 1'
+  ).get(workspaceId) as { team_id: string } | undefined;
 
   let teamL1: string | undefined;
   let teamL2: string | undefined;
   if (access) {
-    const tl1 = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`, [access.team_id]) as { content_yaml: string } | undefined;
-    const tl2 = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = $1 AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`, [access.team_id]) as { content_yaml: string } | undefined;
+    const tl1 = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND team_id = ? AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`
+    ).get(access.team_id) as { content_yaml: string } | undefined;
+    const tl2 = db.prepare(
+      `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND team_id = ? AND COALESCE(workspace_id,'') = '' AND COALESCE(domain,'') = ''`
+    ).get(access.team_id) as { content_yaml: string } | undefined;
     teamL1 = tl1?.content_yaml;
     teamL2 = tl2?.content_yaml;
   }
@@ -403,242 +432,38 @@ function removeCodexAgentsMd(state: CodexAgentsMdState): void {
 }
 
 /** FR-005: When a pipeline run finishes with status='done', snapshot spec version as 'completed'. */
-async function markSpecCompleted(specPath: string): Promise<void> {
+function markSpecCompleted(specPath: string): void {
   try {
     const slug = path.basename(specPath, '.json');
     // Check if latest spec_versions entry is already 'completed'
-    const latestVersion = await queryOne(`SELECT status FROM spec_versions WHERE spec_slug = $1 ORDER BY version DESC LIMIT 1`, [slug]) as { status: string } | undefined;
+    const latestVersion = db.prepare(
+      `SELECT status FROM spec_versions WHERE spec_slug = ? ORDER BY version DESC LIMIT 1`
+    ).get(slug) as { status: string } | undefined;
     if (latestVersion?.status === 'completed') return; // already marked
 
     // Read spec content from filesystem (approved dir is the canonical location)
     // spec_path stored in pipeline_runs is relative like 'forge/specs/approved/slug.json'
     // We just need the slug for the version snapshot
-    const run = await queryOne(`SELECT pr.workspace_id, w.path as workspace_path FROM pipeline_runs pr
+    const run = db.prepare(
+      `SELECT pr.workspace_id, w.path as workspace_path FROM pipeline_runs pr
        JOIN workspaces w ON w.id = pr.workspace_id
-       WHERE pr.spec_path = $1 ORDER BY pr.id DESC LIMIT 1`, [specPath]) as { workspace_id: string; workspace_path: string } | undefined;
+       WHERE pr.spec_path = ? ORDER BY pr.id DESC LIMIT 1`
+    ).get(specPath) as { workspace_id: string; workspace_path: string } | undefined;
     if (!run) return;
 
     const absSpecPath = path.join(run.workspace_path, specPath);
     if (!fs.existsSync(absSpecPath)) return;
 
     const content = fs.readFileSync(absSpecPath, 'utf8');
-    const nextVer = ((await queryOne('SELECT MAX(version) as max_ver FROM spec_versions WHERE spec_slug = $1', [slug]) as { max_ver: number | null } | undefined)?.max_ver ?? 0) + 1;
+    const nextVer = ((db.prepare(
+      'SELECT MAX(version) as max_ver FROM spec_versions WHERE spec_slug = ?'
+    ).get(slug) as { max_ver: number | null } | undefined)?.max_ver ?? 0) + 1;
 
-    await execute(`INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES ($1, $2, $3, 'completed')`, [slug, nextVer, content]);
+    db.prepare(
+      `INSERT INTO spec_versions (spec_slug, version, content_json, status) VALUES (?, ?, ?, 'completed')`
+    ).run(slug, nextVer, content);
   } catch {
     // Non-fatal — completed status is also derived from pipeline_runs at query time
-  }
-}
-
-// ─── Auto-merge worktree on run completion ─────────────────────────────────────
-// Called after run_finished WAL event. Merges the run-level worktree branch back
-// into the main workspace branch automatically. Zero user action required.
-//
-// Strategy:
-//   1. Stash any uncommitted workspace changes
-//   2. Dry-run merge (safety pre-check) — bail out if real code conflicts detected
-//   3. Try --ff-only (no merge commit, cleanest)
-//   4. Fall back to --no-ff; auto-resolve tracking files (.rorca/run-state.json, progress.txt)
-//   5. If real code conflicts: abort + emit worktree_merge_failed WAL event (no merge attempted)
-//   6. On success: emit worktree_merged WAL event + remove the worktree directory
-//   7. Always restore stash
-
-// OutputBuffer is declared after the router — forward-declare the type here for use in autoMergeWorktree
-type MergeOutputBuffer = { chunks: string[]; done: boolean; subscribers: Set<(chunk: string) => void> };
-
-async function autoMergeWorktree(
-  workspacePath: string,
-  worktreePath: string,
-  branchName: string,
-  workspaceId: string,
-  runId: number,
-  buf: MergeOutputBuffer,
-  logPath: string,
-): Promise<void> {
-  const appendLog = (msg: string, color = '\x1b[36m') => {
-    const line = `\r\n${color}[auto-merge] ${msg}\x1b[0m\r\n`;
-    buf.chunks.push(line);
-    buf.subscribers.forEach(cb => cb(line));
-    try { fs.appendFileSync(logPath, line); } catch { /* best-effort */ }
-  };
-
-  // Skip if the worktree directory no longer exists (already manually merged/removed)
-  if (!fs.existsSync(worktreePath)) {
-    appendLog('Worktree already removed — skipping auto-merge', '\x1b[90m');
-    return;
-  }
-
-  const git = simpleGit(workspacePath);
-
-  // 1. Stash any uncommitted workspace changes so the merge can proceed
-  let stashed = false;
-  try {
-    const status = await git.status();
-    if (status.files.length > 0) {
-      await git.stash(['push', '--include-untracked', '-m', `rorca-autostash-before-merge-${branchName}`]);
-      stashed = true;
-      appendLog('Stashed uncommitted workspace changes');
-    }
-  } catch (err: any) {
-    appendLog(`Stash failed — proceeding without stash: ${err.message}`, '\x1b[33m');
-  }
-
-  // ── Tracking-only files that are always safe to resolve with --theirs ──────
-  const TRACKING_PATTERNS = [
-    '.rorca/run-state.json',
-    'progress.txt',
-    '.rorca/memory/runs/',
-  ];
-
-  // 2. Safety pre-check: dry-run merge to detect any conflicts BEFORE touching main
-  appendLog(`Pre-checking merge safety for ${branchName}...`);
-  let preCheckConflictFiles: string[] = [];
-  let preCheckIsClean = false;
-  try {
-    await git.merge([branchName, '--no-commit', '--no-ff']);
-    // Merged cleanly in dry-run (no CONFLICT markers) — abort it, proceed with real merge
-    preCheckIsClean = true;
-    try { await git.merge(['--abort']); } catch { /* nothing to abort on clean ff */ }
-  } catch (dryRunErr: any) {
-    if (
-      dryRunErr.message?.includes('CONFLICT') ||
-      dryRunErr.message?.includes('Automatic merge failed') ||
-      dryRunErr.message?.includes('fix conflicts')
-    ) {
-      // Collect conflict files before aborting
-      try {
-        const diffOut = await git.raw(['diff', '--name-only', '--diff-filter=U']);
-        preCheckConflictFiles = diffOut.trim().split('\n').filter(Boolean);
-      } catch { /* continue */ }
-      try { await git.merge(['--abort']); } catch { /* already clean */ }
-
-      // Only auto-resolve tracking files — real code conflicts block the merge
-      const realConflicts = preCheckConflictFiles.filter(
-        f => !TRACKING_PATTERNS.some(tp => f.includes(tp))
-      );
-
-      if (realConflicts.length === 0) {
-        // Only tracking files conflict — safe to merge with auto-resolution
-        preCheckIsClean = true;
-        appendLog(
-          `Pre-check: only tracking file conflicts (${preCheckConflictFiles.join(', ')}) — auto-resolvable`,
-          '\x1b[33m',
-        );
-      } else {
-        // Real code conflicts — do NOT auto-merge, report to UI
-        appendLog(
-          `Pre-check: merge UNSAFE — code conflicts in: ${realConflicts.join(', ')}`,
-          '\x1b[31m',
-        );
-        appendLog('Worktree preserved — resolve conflicts manually via the Worktrees panel', '\x1b[33m');
-        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('worktree_merge_failed', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({
-          run_id: runId,
-          branchName,
-          worktreePath,
-          conflictFiles: realConflicts,
-          message: 'Auto-merge skipped — code conflicts detected. Resolve manually via Worktrees panel.',
-        })]);
-        broadcastAll(walEvent!);
-        return; // bail out — do NOT attempt the real merge
-      }
-    } else if (dryRunErr.message?.includes('Already up to date')) {
-      preCheckIsClean = true;
-      appendLog('Already up to date — nothing to merge', '\x1b[32m');
-    } else {
-      appendLog(`Pre-check error: ${dryRunErr.message}`, '\x1b[31m');
-      return; // unknown error — don't attempt the merge
-    }
-  }
-
-  if (!preCheckIsClean) return;
-
-  // 3. Pre-check passed — execute the real merge
-  let mergeSuccess = false;
-  try {
-    appendLog(`Merging ${branchName} into workspace...`);
-
-    // Try fast-forward first (no merge commit, cleanest)
-    try {
-      await git.merge([branchName, '--ff-only']);
-      appendLog('Merged via fast-forward — no conflicts', '\x1b[32m');
-      mergeSuccess = true;
-    } catch {
-      // ff-only failed — do no-ff merge with tracking-file auto-resolution
-      try {
-        await git.merge([branchName, '--no-ff', '--no-commit']);
-      } catch (mergeErr: any) {
-        // Expected if tracking files conflict — resolve them now
-        if (
-          mergeErr.message?.includes('CONFLICT') ||
-          mergeErr.message?.includes('Automatic merge failed')
-        ) {
-          // Auto-resolve tracking files (pre-check already confirmed only these conflict)
-          for (const file of preCheckConflictFiles) {
-            try {
-              await git.raw(['checkout', '--theirs', '--', file]);
-              await git.add(file);
-              appendLog(`Auto-resolved tracking file: ${file}`);
-            } catch { /* best-effort */ }
-          }
-        } else {
-          throw mergeErr;
-        }
-      }
-
-      // Commit the merge
-      try {
-        await git.commit(`merge: ${branchName} (auto)`);
-        appendLog('Merged (no-ff) — no conflicts', '\x1b[32m');
-        mergeSuccess = true;
-      } catch (commitErr: any) {
-        if (commitErr.message?.includes('nothing to commit') || commitErr.message?.includes('nothing added')) {
-          appendLog('Merged — already up to date', '\x1b[32m');
-          mergeSuccess = true;
-        } else {
-          try { await git.merge(['--abort']); } catch { /* already clean */ }
-          appendLog(`Commit failed: ${commitErr.message}`, '\x1b[31m');
-        }
-      }
-    }
-  } catch (unexpectedErr: any) {
-    try { await git.merge(['--abort']); } catch { /* already clean */ }
-    appendLog(`Unexpected merge error: ${unexpectedErr.message}`, '\x1b[31m');
-  } finally {
-    // 4. Always restore stash — even if merge failed
-    if (stashed) {
-      try {
-        await git.stash(['pop']);
-        appendLog('Restored stashed workspace changes');
-      } catch (popErr: any) {
-        appendLog(
-          `Stash pop conflict — run 'git stash pop' manually to restore your changes: ${popErr.message}`,
-          '\x1b[33m',
-        );
-      }
-    }
-  }
-
-  // 5. On success: emit WAL event + remove worktree directory
-  if (mergeSuccess) {
-    let mergeCommitSha = '';
-    try { mergeCommitSha = (await git.raw(['rev-parse', 'HEAD'])).trim(); } catch { /* non-fatal */ }
-
-    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('worktree_merged', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({ run_id: runId, branchName, mergeCommitSha })]);
-    broadcastAll(walEvent!);
-
-    // Remove the worktree directory — run is done, branch merged
-    try {
-      await git.raw(['worktree', 'remove', '--force', worktreePath]);
-      appendLog(`Worktree removed: ${path.basename(worktreePath)}`, '\x1b[32m');
-    } catch (rmErr: any) {
-      // Worktree removal is best-effort — not a failure
-      appendLog(`Worktree removal skipped: ${(rmErr as Error).message}`, '\x1b[33m');
-    }
-
-    // Clear worktree_path from pipeline_runs so UI knows it's merged
-    try {
-      await execute(`UPDATE pipeline_runs SET worktree_path = NULL WHERE id = $1`, [runId]);
-    } catch { /* non-fatal */ }
   }
 }
 
@@ -676,8 +501,6 @@ interface PipelineRunRow {
   total_input_tokens: number | null;
   total_output_tokens: number | null;
   total_cost_usd: number | null;
-  queued_at: string | null;
-  queue_position: number | null;
 }
 
 interface StoryResultRow {
@@ -702,8 +525,6 @@ interface StoryResultRow {
  *   post:
  *     tags: [Pipeline]
  *     summary: Pre-flight capability check for spec stories vs engine
- *     operationId: preflightPipelineCheck
- *     description: Validates that the current execution engine supports all tools required by each story in the spec and returns a compatibility report.
  *     requestBody:
  *       required: true
  *       content:
@@ -726,7 +547,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
       { id: string; path: string } | undefined;
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
@@ -758,7 +579,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
       })),
     });
   } catch (error: any) {
-    logger.error('[Pipeline] Preflight error:', error);
+    console.error('[Pipeline] Preflight error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -769,8 +590,6 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Trigger a pipeline run (spawn run-loop.sh)
- *     operationId: triggerPipelineRun
- *     description: Spawns the execution engine as a subprocess to run all stories in the specified spec, optionally in a git worktree.
  *     requestBody:
  *       required: true
  *       content:
@@ -804,26 +623,17 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace or spec not found" }
  */
-const PipelineTriggerSchema = z.object({
-  specPath: z.string().min(1),
-  workspaceId: z.union([z.string().min(1), z.number()]),
-  autoWorktree: z.boolean().optional(),
-  dryRun: z.boolean().optional(),
-  triggerType: z.enum(['manual', 'scheduled']).optional(),
-  forceSequential: z.boolean().optional(),
-  agentOverride: z.enum(['claude', 'opencode', 'codex']).optional(),
-  modelOverride: z.string().optional(),
-  storyId: z.string().optional(),
-  queuedRunId: z.number().optional(),
-  queue: z.boolean().optional(),
-});
-
-router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
+router.post('/trigger', async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, dryRun, triggerType, forceSequential, queuedRunId } = req.body;
+    const { specPath, workspaceId, autoWorktree, dryRun, triggerType } = req.body;
+
+    if (!specPath || !workspaceId) {
+      res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
+      return;
+    }
 
     // 1. Look up workspace path
-    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
       { id: string; label: string; path: string; domain?: string } | undefined;
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
@@ -831,9 +641,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // ── Plan enforcement: Free tier cannot execute pipelines ─────
-    const effectiveUser = await getEffectiveUser(req);
+    const effectiveUser = getEffectiveUser(req);
     if (effectiveUser?.id) {
-      const userRow = await queryOne('SELECT plan FROM users WHERE id = $1', [effectiveUser.id]) as { plan: string } | undefined;
+      const userRow = db.prepare('SELECT plan FROM users WHERE id = ?').get(effectiveUser.id) as { plan: string } | undefined;
       const plan = userRow?.plan || 'free';
       if (plan === 'free' && !dryRun) {
         res.status(403).json({ error: 'plan_required', message: 'Pipeline execution requires a paid plan. Upgrade to Solo, Pro, or Team.' });
@@ -860,7 +670,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       if (specJson.model) {
         model = specJson.model;
       } else {
-        const l3Pref = await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined;
+        const l3Pref = db.prepare(
+          `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+        ).get(workspaceId) as { preferred_model: string | null } | undefined;
         if (l3Pref?.preferred_model) {
           model = l3Pref.preferred_model;
         }
@@ -872,7 +684,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // 2. Budget cap guard — block if hard cap exceeded for this period
-    const budgetStatus = await checkBudgetThresholds(workspaceId);
+    const budgetStatus = checkBudgetThresholds(workspaceId);
     if (budgetStatus.capExceeded) {
       res.status(409).json({
         error: 'Budget cap exceeded for this period',
@@ -886,11 +698,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     // 3. Resolve agent type and verify execution engine is available.
     //    Priority: execution-engine.ts (universal) → bash run-loop.sh (legacy fallback)
     const resolvedAgentType: AgentType = agentConfig.agentType;
-    // Model priority: RORCA_MODEL env var > workspace L3 preferred_model > null (agent default)
-    const l3WorkspaceModel = workspaceId
-      ? (await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined)?.preferred_model ?? null
-      : null;
-    const resolvedAgentModel: string | null = agentConfig.agentModel ?? l3WorkspaceModel;
+    const resolvedAgentModel: string | null = agentConfig.agentModel;
 
     // OC-025: Block pipeline trigger if Claude is selected but not authenticated
     if (resolvedAgentType === 'claude') {
@@ -1017,90 +825,32 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       }
     }
 
-    // CA-006: Pre-execution convention drift check
-    // If .rorca/config.json has execution.driftCheck: true, run drift detection
-    // and block the pipeline if error-severity violations exist.
-    if (isDriftCheckEnabled(workspace.path)) {
-      try {
-        const driftReport: DriftReport = await detectDrift(workspace.path, workspaceId);
-
-        // Store the report
-        await execute(`INSERT INTO drift_reports (workspace_id, violations_json, score, conventions_checked, files_sampled, trigger_type)
-           VALUES ($1, $2, $3, $4, $5, $6)`, [workspaceId,
-          JSON.stringify(driftReport.violations),
-          driftReport.score,
-          driftReport.conventionsChecked,
-          driftReport.filesSampled,
-          'pre-execution',]);
-
-        // Emit WAL event
-        const walPayload: Record<string, unknown> = {
-          score: driftReport.score,
-          violationCount: driftReport.violations.length,
-          errorCount: driftReport.violations.filter(v => v.severity === 'error').length,
-          warningCount: driftReport.violations.filter(v => v.severity === 'warning').length,
-          conventionsChecked: driftReport.conventionsChecked,
-          filesSampled: driftReport.filesSampled,
-          triggerType: 'pre-execution',
-        };
-        const walResult = await queryOne<WalEvent>('INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ($1, $2, $3) RETURNING *', ['convention_drift_detected', workspaceId, JSON.stringify(walPayload)]);
-        broadcastAll({
-          id: walResult!.id,
-          ts: new Date().toISOString(),
-          event_type: 'convention_drift_detected',
-          workspace_id: workspaceId,
-          spec_id: null,
-          story_id: null,
-          actor: '',
-          payload: JSON.stringify(walPayload),
-        });
-
-        if (hasBlockingViolations(driftReport)) {
-          res.status(409).json({
-            error: 'convention_drift_detected',
-            message: 'Convention drift check found error-severity violations. Fix violations or disable driftCheck in .rorca/config.json.',
-            report: driftReport,
-          });
-          return;
-        }
-      } catch (driftErr: any) {
-        // Drift check failure is non-fatal — log and continue
-        logger.warn('[drift-check] Pre-execution drift check failed:', driftErr.message);
-      }
-    }
-
     const executionEngineTs = path.join(__dirname, '..', 'lib', 'execution-engine.ts');
     const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
+    const runLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
     const hasExecutionEngine = fs.existsSync(executionEngineTs);
     const hasBashRunLoop = fs.existsSync(runLoopSh);
-    const useExecutionEngine = hasExecutionEngine;
+    const hasTsRunLoop = fs.existsSync(runLoopTs);
 
-    if (!hasExecutionEngine && !hasBashRunLoop) {
-      res.status(422).json({ error: `No execution engine found — execution-engine.ts is missing` });
+    // When agent is opencode/codex, execution-engine.ts is required (not the legacy loops)
+    if (resolvedAgentType !== 'claude' && !hasExecutionEngine) {
+      res.status(422).json({ error: `execution-engine.ts required for agent type '${resolvedAgentType}' but not found` });
       return;
     }
+    if (!hasExecutionEngine && !hasBashRunLoop && !hasTsRunLoop) {
+      res.status(422).json({ error: `No execution engine found` });
+      return;
+    }
+    // Use execution-engine.ts when available, fall back to legacy run-loop
+    const useExecutionEngine = hasExecutionEngine;
+    const useLegacyTsRunLoop = !useExecutionEngine && !hasBashRunLoop && hasTsRunLoop;
 
     // 4. Conflict check — is there already an active run for this workspace?
-    //    If queuedRunId is set, this is an internal promotion call — skip conflict check
-    const activeRun = queuedRunId ? undefined : await queryOne(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') LIMIT 1`, [workspaceId]) as PipelineRunRow | undefined;
+    const activeRun = db.prepare(
+      `SELECT * FROM pipeline_runs WHERE workspace_id = ? AND status IN ('running', 'paused') LIMIT 1`
+    ).get(workspaceId) as PipelineRunRow | undefined;
 
     if (activeRun && !autoWorktree) {
-      // Check if user explicitly requested queueing
-      const { queue } = req.body;
-      if (queue) {
-        // Explicit queue request — insert with status='queued'
-        const queueCount = (await queryOne(`SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`, [workspaceId]) as { count: number }).count;
-        const position = queueCount + 1;
-
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position]);
-        const queuedId = queueResult!.id;
-
-        res.status(202).json({ queued: true, runId: queuedId, position });
-        return;
-      }
-
-      // No explicit queue — return conflict so user can choose
       res.json({ conflict: true, activeRunId: activeRun.id });
       return;
     }
@@ -1109,7 +859,6 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const absSpecPath = path.join(workspace.path, specPath);
 
     // 4b. Auto-select orchestration mode (sequential vs wave-parallel)
-    // IMPORTANT: Respect waveParallelism from .rorca/config.json — if false, force sequential
     let parallelism = 1;
     let orchestration: ReturnType<typeof autoSelectOrchestration> | null = null;
     try {
@@ -1124,34 +873,11 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         excluded: s.excluded,
       }));
       orchestration = autoSelectOrchestration(orchStories);
-
-      // Check forceSequential from trigger request (UI toggle) or .rorca/config.json
-      if (forceSequential) {
-        parallelism = 1;
-        logger.info(`[orchestration] Forced sequential (user selected sequential in UI)`);
-      } else {
-        let waveParallelismEnabled = true;
-        try {
-          const rorcaConfigPath = path.join(workspace.path, '.rorca', 'config.json');
-          if (fs.existsSync(rorcaConfigPath)) {
-            const rorcaConfig = JSON.parse(fs.readFileSync(rorcaConfigPath, 'utf8'));
-            if (rorcaConfig?.execution?.waveParallelism === false) {
-              waveParallelismEnabled = false;
-            }
-          }
-        } catch { /* config parse error — use default */ }
-
-        if (!waveParallelismEnabled) {
-          parallelism = 1;
-          logger.info(`[orchestration] Forced sequential (waveParallelism: false in .rorca/config.json)`);
-        } else {
-          parallelism = orchestration.parallelism;
-          logger.info(`[orchestration] Using ${orchestration.mode} (${orchestration.reason})`);
-        }
-      }
+      parallelism = orchestration.parallelism;
+      console.log(`[orchestration] Using ${orchestration.mode} (${orchestration.reason})`);
     } catch {
       // Spec parse error — fall back to sequential
-      logger.info('[orchestration] Using sequential (spec parse error, fallback)');
+      console.log('[orchestration] Using sequential (spec parse error, fallback)');
     }
 
     // 5. Determine CWD — main workspace or new worktree
@@ -1170,41 +896,14 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       const git = simpleGit(workspace.path);
       await git.raw(['worktree', 'add', '-b', branchName, worktreePath, 'HEAD']);
       cwd = worktreePath;
-
-      // Add run-tracking files to worktree's .gitignore so parallel stories
-      // don't conflict on these files during wave merges.
-      const worktreeGitignore = path.join(worktreePath, '.gitignore');
-      const trackingPatterns = '\n# Rorca run-tracking files (parallel-safe)\nprogress.txt\n.rorca/run-state.json\n.rorca/memory/health-log.json\n';
-      try {
-        const existing = fs.existsSync(worktreeGitignore) ? fs.readFileSync(worktreeGitignore, 'utf-8') : '';
-        if (!existing.includes('progress.txt')) {
-          fs.appendFileSync(worktreeGitignore, trackingPatterns);
-        }
-      } catch { /* non-fatal */ }
     }
 
     // 6. Create pipeline_runs record (with agent_type and agent_model)
-    //    If queuedRunId is provided, promote the existing queued row instead of inserting
     const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
-    let runId: number;
-
-    if (queuedRunId) {
-      // Promote queued run to running
-      await execute(`UPDATE pipeline_runs SET status = 'running', started_at = NOW(), queued_at = NULL, queue_position = NULL,
-         parallelism = $1, agent = $2, agent_type = $3, agent_model = $4 WHERE id = $5 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, queuedRunId]);
-      runId = queuedRunId;
-    } else {
-      const runResult = await queryOne<WalEvent>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model) VALUES ($1, $2, 'running', $3, $4, $5, $6, $7) RETURNING *`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel]);
-      runId = runResult!.id;
-    }
-
-    // PG-013: Pre-populate context cache for all stories in this run
-    try {
-      const { warmup: cacheWarmup } = await import('../lib/context-cache');
-      await cacheWarmup(workspaceId);
-    } catch (warmupErr: any) {
-      logger.warn('[pipeline/trigger] Cache warmup failed (non-fatal):', warmupErr.message);
-    }
+    const runResult = db.prepare(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model) VALUES (?, ?, 'running', ?, ?, ?, ?, ?)`
+    ).run(specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel);
+    const runId = runResult.lastInsertRowid as number;
 
     // 7. Build clean env — strip Claude Code vars so subprocess isn't blocked
     const env: Record<string, string> = {};
@@ -1221,39 +920,41 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // 7c. Inject vault API keys for all configured providers
-    const pipelineUser = await getEffectiveUser(req);
-    const anthropicVaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, 'anthropic') : null;
+    const pipelineUser = getEffectiveUser(req);
+    const anthropicVaultKey = pipelineUser ? getVaultKey(pipelineUser.id, 'anthropic') : null;
     if (anthropicVaultKey) {
       env['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
     }
-    const openaiVaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, 'openai-compat') : null;
+    const openaiVaultKey = pipelineUser ? getVaultKey(pipelineUser.id, 'openai-compat') : null;
     if (openaiVaultKey) {
       env['OPENAI_API_KEY'] = openaiVaultKey.key;
       if (openaiVaultKey.baseUrl) {
         env['OPENAI_BASE_URL'] = openaiVaultKey.baseUrl;
       }
     }
-    const openrouterVaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, 'openrouter') : null;
+    const openrouterVaultKey = pipelineUser ? getVaultKey(pipelineUser.id, 'openrouter') : null;
     if (openrouterVaultKey) {
       env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
     }
 
     // 7c-copilot. Inject GitHub Copilot token when using github/copilot model
     if (resolvedAgentModel === 'github/copilot' && pipelineUser) {
-      const copilotToken = await getCopilotToken(pipelineUser.id);
+      const copilotToken = getCopilotToken(pipelineUser.id);
       if (copilotToken) {
         env['GITHUB_TOKEN'] = copilotToken;
       }
     }
 
     // 7d. Inject active agent profile (system prompt + allowed tools + model override)
-    const activeProfile = await queryOne('SELECT * FROM agent_profiles WHERE workspace_id = $1 AND is_active = true LIMIT 1', [workspaceId]) as AgentProfileRow | undefined;
+    const activeProfile = db.prepare(
+      'SELECT * FROM agent_profiles WHERE workspace_id = ? AND is_active = 1 LIMIT 1'
+    ).get(workspaceId) as AgentProfileRow | undefined;
 
     if (activeProfile) {
       if (activeProfile.system_prompt_override) {
         env['RORCA_AGENT_SYSTEM_PROMPT'] = activeProfile.system_prompt_override;
       }
-      const tools = (Array.isArray(activeProfile.allowed_tools) ? activeProfile.allowed_tools : JSON.parse(activeProfile.allowed_tools)) as string[];
+      const tools = JSON.parse(activeProfile.allowed_tools) as string[];
       if (tools.length > 0) {
         env['RORCA_AGENT_ALLOWED_TOOLS'] = tools.join(',');
       }
@@ -1264,8 +965,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     // 8. Run pre-run hooks — abort if any exit non-zero
     const logPath = workspaceLogPath(workspace.path, runId);
-    await execute('UPDATE pipeline_runs SET log_path = $1 WHERE id = $2', [logPath, runId]);
-    const preRunResults = await runHooks(workspaceId, 'pre_run', cwd, env);
+    db.prepare('UPDATE pipeline_runs SET log_path = ? WHERE id = ?').run(logPath, runId);
+    const preRunResults = runHooks(workspaceId, 'pre_run', cwd, env);
     if (preRunResults.length > 0) {
       // Write hook output to the log file so it appears in the terminal
       const hookOutput = preRunResults.map(r =>
@@ -1277,16 +978,20 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       const failed = preRunResults.find(r => r.exitCode !== 0);
       if (failed) {
         // Mark run as failed and emit WAL event
-        await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [runId]);
+        db.prepare(
+          `UPDATE pipeline_runs SET status = 'failed', finished_at = datetime('now') WHERE id = ?`
+        ).run(runId);
 
-        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({
+        const walResult = db.prepare(
+          `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
+        ).run(workspaceId, JSON.stringify({
           run_id: runId, status: 'failed', reason: 'pre_run_hook_failed',
           hook_command: failed.command, exit_code: failed.exitCode,
-        })]);
-        broadcastAll(walEvent!);
-
-        // PR-RQ-1: Advance run queue even on pre-run hook failure
-        advanceQueue(workspaceId);
+        }));
+        const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+          walResult.lastInsertRowid
+        ) as WalEvent;
+        broadcastAll(walEvent);
 
         // Set up output buffer so terminal can display hook output
         const failBuf: OutputBuffer = { chunks: [hookOutput], done: true, subscribers: new Set() };
@@ -1326,22 +1031,25 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       try {
         ocServer = new OpenCodeServer({
           runId,
-          onPidReady: async (pid) => {
-            await execute('UPDATE pipeline_runs SET opencode_server_pid = $1 WHERE id = $2', [pid, runId]);
+          onPidReady: (pid) => {
+            db.prepare('UPDATE pipeline_runs SET opencode_server_pid = ? WHERE id = ?').run(pid, runId);
           },
         });
         await ocServer.start();
         attachAddr = ocServer.attach();
       } catch (serverErr: any) {
         // Failed to start OpenCode server — mark run failed
-        await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [runId]);
-        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({
+        db.prepare(
+          `UPDATE pipeline_runs SET status = 'failed', finished_at = datetime('now') WHERE id = ?`
+        ).run(runId);
+        const walResult = db.prepare(
+          `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
+        ).run(workspaceId, JSON.stringify({
           run_id: runId, status: 'failed', reason: 'opencode_server_start_failed',
           error: serverErr.message,
-        })]);
-        broadcastAll(walEvent!);
-        // PR-RQ-1: Advance run queue even on OpenCode server failure
-        advanceQueue(workspaceId);
+        }));
+        const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+        broadcastAll(walEvent);
         res.status(422).json({ error: `Failed to start OpenCode server: ${serverErr.message}`, runId });
         return;
       }
@@ -1356,13 +1064,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         // Read spec title from the spec JSON for L4 brief
         const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
         const specBrief = specJson.title || path.basename(specPath, '.json');
-        openCodeSkillPath = await writeOpenCodeSkillFile(cwd, workspaceId, `Running spec: ${specBrief}`);
+        openCodeSkillPath = writeOpenCodeSkillFile(cwd, workspaceId, `Running spec: ${specBrief}`);
         if (openCodeSkillPath) {
-          logger.info(`[Pipeline] Wrote OpenCode skill file: ${openCodeSkillPath}`);
+          console.log(`[Pipeline] Wrote OpenCode skill file: ${openCodeSkillPath}`);
         }
       } catch (err: any) {
         // Non-fatal — run can proceed without the skill file
-        logger.warn(`[Pipeline] Failed to write OpenCode skill file: ${err.message}`);
+        console.warn(`[Pipeline] Failed to write OpenCode skill file: ${err.message}`);
       }
     }
 
@@ -1375,13 +1083,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       try {
         const specJson3 = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
         const specBrief3 = specJson3.title || path.basename(specPath, '.json');
-        codexAgentsMdState = await writeCodexAgentsMd(cwd, workspaceId, `Running spec: ${specBrief3}`);
+        codexAgentsMdState = writeCodexAgentsMd(cwd, workspaceId, `Running spec: ${specBrief3}`);
         if (codexAgentsMdState) {
-          logger.info(`[Pipeline] Wrote Codex AGENTS.md: ${codexAgentsMdState.agentsMdPath}`);
+          console.log(`[Pipeline] Wrote Codex AGENTS.md: ${codexAgentsMdState.agentsMdPath}`);
         }
       } catch (err: any) {
         // Non-fatal — run can proceed without direction context
-        logger.warn(`[Pipeline] Failed to write Codex AGENTS.md: ${err.message}`);
+        console.warn(`[Pipeline] Failed to write Codex AGENTS.md: ${err.message}`);
       }
     }
 
@@ -1415,6 +1123,24 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         detached: true,
         env,
       });
+    } else if (useLegacyTsRunLoop) {
+      // Legacy TypeScript run-loop (fallback when execution-engine.ts doesn't exist)
+      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
+      const backendPort = process.env.PORT || '3030';
+      const runLoopArgs = [
+        runLoopTs,
+        '--json', absSpecPath,
+        '--cwd', cwd,
+        '--run-id', String(runId),
+        '--port', backendPort,
+        '--parallelism', String(parallelism),
+      ];
+      child = spawn(tsxBin, runLoopArgs, {
+        cwd,
+        stdio: ['ignore', logFd, logFd],
+        detached: true,
+        env,
+      });
     } else {
       // Legacy bash run-loop (fallback for workspaces that still have run-loop.sh)
       const scriptInCwd = path.join(cwd, 'forge', 'run-loop.sh');
@@ -1430,7 +1156,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     // 10b. Store PID + branch info
     if (child.pid) {
-      await execute(`UPDATE pipeline_runs SET pid = $1, branch_name = $2, worktree_path = $3 WHERE id = $4`, [child.pid, branchName, worktreePath, runId]);
+      db.prepare(`UPDATE pipeline_runs SET pid = ?, branch_name = ?, worktree_path = ? WHERE id = ?`)
+        .run(child.pid, branchName, worktreePath, runId);
     }
 
     // CIE-016: Compute and store predicted context preview for post-run comparison
@@ -1457,7 +1184,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
             injectedFiles: routed.injectedFiles,
           };
         });
-      await execute('UPDATE pipeline_runs SET context_preview = $1 WHERE id = $2', [JSON.stringify({ tokenBudget: rorcaCfg.routing.tokenBudget, stories: ctxStories }), runId]);
+      db.prepare('UPDATE pipeline_runs SET context_preview = ? WHERE id = ?')
+        .run(JSON.stringify({ tokenBudget: rorcaCfg.routing.tokenBudget, stories: ctxStories }), runId);
     } catch { /* non-fatal — context preview is best-effort */ }
 
     // 9b. Record excluded stories immediately — run-loop.sh will skip them,
@@ -1472,26 +1200,32 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       const excludedStories = (specJson.userStories ?? []).filter(
         (s: { excluded?: boolean }) => s.excluded === true
       );
+      const insertExcluded = db.prepare(
+        `INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES (?, ?, 'excluded', datetime('now'))`
+      );
       for (const s of excludedStories) {
-        await execute(
-          `INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES ($1, $2, 'excluded', NOW())`,
-          [runId, s.id]
-        );
-        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_excluded_from_run', $1, $2, $3, $4)` + ' RETURNING *', [workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId })]);
-        broadcastAll(walEvent!);
+        insertExcluded.run(runId, s.id);
+        const walResult = db.prepare(
+          `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_excluded_from_run', ?, ?, ?, ?)`
+        ).run(workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId }));
+        const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+        broadcastAll(walEvent);
       }
 
       // 9c — backfill already-passing stories as 'skipped'
       const alreadyPassing = (specJson.userStories ?? []).filter(
         (s: { passes?: boolean; excluded?: boolean }) => s.passes === true && s.excluded !== true
       );
+      const insertSkipped = db.prepare(
+        `INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES (?, ?, 'skip', datetime('now'))`
+      );
       for (const s of alreadyPassing) {
-        await execute(
-          `INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES ($1, $2, 'skip', NOW())`,
-          [runId, s.id]
-        );
-        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_skipped', $1, $2, $3, $4)` + ' RETURNING *', [workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId, reason: 'already_passing' })]);
-        broadcastAll(walEvent!);
+        insertSkipped.run(runId, s.id);
+        const walResult = db.prepare(
+          `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_skipped', ?, ?, ?, ?)`
+        ).run(workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId, reason: 'already_passing' }));
+        const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+        broadcastAll(walEvent);
       }
     } catch { /* spec read error — non-fatal, run-loop will handle */ }
 
@@ -1522,7 +1256,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const fallbackPollCwd = cwd; // worktree path or main workspace path
     const fallbackPollInterval = setInterval(() => {
       try {
-        if (true /* pg pool always available */) {
+        if (db.open) {
           syncFallbackResults(fallbackPollCwd, workspaceId);
         }
       } catch { /* non-fatal */ }
@@ -1538,7 +1272,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         }
 
         if (!ocServer.isAlive()) {
-          logger.info(`[Pipeline] OpenCode server crashed for run ${runId}, attempting restart...`);
+          console.log(`[Pipeline] OpenCode server crashed for run ${runId}, attempting restart...`);
 
           const restartMsg = `\r\n\x1b[33m[OpenCode server crashed — attempting restart...]\x1b[0m\r\n`;
           buf.chunks.push(restartMsg);
@@ -1547,19 +1281,22 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
           const restarted = await ocServer.restart();
           if (restarted) {
-            logger.info(`[Pipeline] OpenCode server restarted for run ${runId}`);
+            console.log(`[Pipeline] OpenCode server restarted for run ${runId}`);
             const successMsg = `\r\n\x1b[32m[OpenCode server restarted successfully]\x1b[0m\r\n`;
             buf.chunks.push(successMsg);
             buf.subscribers.forEach(cb => cb(successMsg));
             fs.appendFileSync(logPath, successMsg);
 
             // Emit WAL event for restart
-            if (true /* pg pool always available */) {
-              const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('opencode_server_restarted', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({ run_id: runId })]);
-              broadcastAll(walEvent!);
+            if (db.open) {
+              const walResult = db.prepare(
+                `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('opencode_server_restarted', ?, ?)`
+              ).run(workspaceId, JSON.stringify({ run_id: runId }));
+              const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+              broadcastAll(walEvent);
             }
           } else {
-            logger.error(`[Pipeline] OpenCode server restart failed for run ${runId} — killing execution engine`);
+            console.error(`[Pipeline] OpenCode server restart failed for run ${runId} — killing execution engine`);
             const failMsg = `\r\n\x1b[31m[OpenCode server restart failed — aborting run]\x1b[0m\r\n`;
             buf.chunks.push(failMsg);
             buf.subscribers.forEach(cb => cb(failMsg));
@@ -1574,12 +1311,15 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
             }, 5_000);
 
             // Emit WAL event
-            if (true /* pg pool always available */) {
-              const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('opencode_server_crash', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({
+            if (db.open) {
+              const walResult = db.prepare(
+                `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('opencode_server_crash', ?, ?)`
+              ).run(workspaceId, JSON.stringify({
                 run_id: runId, reason: 'restart_failed',
                 error: 'OpenCode server crashed and could not be restarted. Run aborted.',
-              })]);
-              broadcastAll(walEvent!);
+              }));
+              const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(walResult.lastInsertRowid) as WalEvent;
+              broadcastAll(walEvent);
             }
           }
         }
@@ -1587,13 +1327,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // 11. Update status when process exits; stop OpenCode server if running
-    child.on('exit', async (code) => {
+    child.on('exit', (code) => {
       clearInterval(tailInterval);
       clearInterval(fallbackPollInterval);
       if (ocHealthInterval) clearInterval(ocHealthInterval);
 
       // Final sync of any remaining fallback results before marking run complete
-      if (true /* pg pool always available */) {
+      if (db.open) {
         try { syncFallbackResults(fallbackPollCwd, workspaceId); } catch { /* best-effort */ }
       }
 
@@ -1626,24 +1366,23 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       } catch { /* ignore */ }
 
       // Guard: DB may be closed if the process exits after test teardown
-      if (false /* pg pool always available */) {
+      if (!db.open) {
         buf.done = true;
         buf.subscribers.clear();
         return;
       }
 
       const status = code === 0 ? 'done' : 'failed';
-      await execute(`UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`, [status, runId]);
+      db.prepare(
+        `UPDATE pipeline_runs SET status = ?, finished_at = datetime('now') WHERE id = ?`
+      ).run(status, runId);
 
       // FR-005: Mark spec as completed when run succeeds
       if (status === 'done') markSpecCompleted(specPath);
 
-      // PG-021: Synthesize run-level memory (non-blocking, best-effort)
-      synthesizeRunMemory(runId, workspaceId).catch(() => {});
-
       // Run post-run hooks with RUN_STATUS and RUN_ID env vars
       const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
-      const postRunResults = await runHooks(workspaceId, 'post_run', cwd, postRunEnv);
+      const postRunResults = runHooks(workspaceId, 'post_run', cwd, postRunEnv);
       if (postRunResults.length > 0) {
         const hookOutput = postRunResults.map(r =>
           `\r\n\x1b[36m[post_run hook: ${r.command}]\x1b[0m\r\n${r.output}` +
@@ -1654,38 +1393,22 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         fs.appendFileSync(logPath, hookOutput);
       }
 
-      const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({ run_id: runId, status, exit_code: code })]);
-      broadcastAll(walEvent!);
+      const walResult = db.prepare(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
+      ).run(workspaceId, JSON.stringify({ run_id: runId, status, exit_code: code }));
 
-      // PR-RQ-1: Advance run queue — promote next queued run if any
-      advanceQueue(workspaceId);
+      const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+        walResult.lastInsertRowid
+      ) as WalEvent;
+      broadcastAll(walEvent);
 
-      // Notify terminal that the process exited
-      const exitMsg = `\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`;
-      buf.chunks.push(exitMsg);
-      buf.subscribers.forEach(cb => cb(exitMsg));
-      fs.appendFileSync(logPath, exitMsg);
-
-      // Close the buffer — handles both worktree and non-worktree paths
-      const closeBuffer = () => {
-        buf.done = true;
-        buf.subscribers.clear();
-        setTimeout(() => { outputBuffers.delete(runId); }, 30 * 60 * 1000);
-      };
-
-      // Auto-merge worktree if run used one — safety pre-check included
-      if (worktreePath && branchName) {
-        autoMergeWorktree(workspace.path, worktreePath, branchName, workspaceId, runId, buf, logPath)
-          .then(closeBuffer)
-          .catch((err: Error) => {
-            const errMsg = `\r\n\x1b[31m[auto-merge] Unexpected error: ${err.message}\x1b[0m\r\n`;
-            buf.chunks.push(errMsg);
-            fs.appendFileSync(logPath, errMsg);
-            closeBuffer();
-          });
-      } else {
-        closeBuffer();
-      }
+      // Mark buffer done; notify subscribers; clean up buffer after 30 min (log file retained on disk)
+      buf.done = true;
+      buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`));
+      buf.subscribers.clear();
+      setTimeout(() => {
+        outputBuffers.delete(runId);
+      }, 30 * 60 * 1000);
     });
 
     // OC-031: Include capability warnings in trigger response
@@ -1698,7 +1421,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       ...(orchestration ? { orchestration } : {}),
     });
   } catch (error: any) {
-    logger.error('[Pipeline] Trigger error:', error);
+    console.error('[Pipeline] Trigger error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -1711,7 +1434,6 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
  *   post:
  *     tags: [Pipeline]
  *     summary: Preview context routing for each story in a spec
- *     operationId: previewContextRouting
  *     description: >
  *       Returns the predicted context payload for each story, including
  *       global files, scope matches, tag matches, token estimates, and
@@ -1733,7 +1455,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
  *       400: { description: "Missing required fields" }
  *       404: { description: "Workspace or spec not found" }
  */
-router.post('/context-preview', async (req: Request, res: Response) => {
+router.post('/context-preview', (req: Request, res: Response) => {
   try {
     const { specPath, workspaceId } = req.body;
     if (!specPath || !workspaceId) {
@@ -1741,7 +1463,7 @@ router.post('/context-preview', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
       { id: string; path: string } | undefined;
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
@@ -1905,8 +1627,6 @@ router.post('/context-preview', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Preview auto-orchestration mode for a spec
- *     operationId: previewOrchestrationMode
- *     description: Analyzes the spec's dependency graph and returns the recommended orchestration mode (sequential or wave-parallel) with wave groupings.
  *     requestBody:
  *       required: true
  *       content:
@@ -1921,7 +1641,7 @@ router.post('/context-preview', async (req: Request, res: Response) => {
  *       200:
  *         description: Orchestration preview
  */
-router.post('/orchestration-preview', async (req: Request, res: Response) => {
+router.post('/orchestration-preview', (req: Request, res: Response) => {
   try {
     const { specPath, workspaceId } = req.body;
     if (!specPath || !workspaceId) {
@@ -1929,7 +1649,7 @@ router.post('/orchestration-preview', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
       { id: string; path: string } | undefined;
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
@@ -1970,20 +1690,6 @@ router.post('/orchestration-preview', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Quick-run — generate a 1-story spec from a brief and execute immediately
- *     operationId: quickRunPipeline
- *     description: |
- *       Generates a single-story spec from a plain-English brief, writes it directly to
- *       approved (no review queue), and immediately triggers pipeline execution.
- *
- *       The spec generation prompt incorporates a layered context cascade in this order:
- *       1. **Direction Stack (L1-L3)** — synthesized from direction_layers table:
- *          L1 (global engineering principles), L2 (domain conventions matched by workspace.domain),
- *          L3 (project-specific context scoped to this workspace). Merged via synthesize().
- *       2. **MEMORY.md** — episodic ledger from workspace root (first 2000 chars).
- *          Contains timestamped Architecture/Convention/Bug Fix/Decision/Pattern/Gotcha entries.
- *       3. **Installed Skills** — list of skills from installed_skills table (name + description).
- *          Informs the LLM which reusable skill files are available for the generated story.
- *       All three context sources are best-effort: silently omitted if missing or on error.
  *     requestBody:
  *       required: true
  *       content:
@@ -2019,7 +1725,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 1. Look up workspace
-    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(workspaceId) as
       { id: string; label: string; path: string; domain?: string } | undefined;
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
@@ -2027,9 +1733,9 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 2. Plan enforcement
-    const effectiveUser = await getEffectiveUser(req);
+    const effectiveUser = getEffectiveUser(req);
     if (effectiveUser?.id) {
-      const userRow = await queryOne('SELECT plan FROM users WHERE id = $1', [effectiveUser.id]) as { plan: string } | undefined;
+      const userRow = db.prepare('SELECT plan FROM users WHERE id = ?').get(effectiveUser.id) as { plan: string } | undefined;
       const plan = userRow?.plan || 'free';
       if (plan === 'free') {
         res.status(403).json({ error: 'plan_required', message: 'Pipeline execution requires a paid plan.' });
@@ -2038,7 +1744,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 3. Budget cap guard
-    const budgetStatus = await checkBudgetThresholds(workspaceId);
+    const budgetStatus = checkBudgetThresholds(workspaceId);
     if (budgetStatus.capExceeded) {
       res.status(409).json({
         error: 'Budget cap exceeded for this period',
@@ -2050,7 +1756,9 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 4. Conflict detection
-    const activeRun = await queryOne(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') LIMIT 1`, [workspaceId]) as PipelineRunRow | undefined;
+    const activeRun = db.prepare(
+      `SELECT * FROM pipeline_runs WHERE workspace_id = ? AND status IN ('running', 'paused') LIMIT 1`
+    ).get(workspaceId) as PipelineRunRow | undefined;
     if (activeRun) {
       res.json({ conflict: true, activeRunId: activeRun.id });
       return;
@@ -2061,89 +1769,35 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     if (requestedModel) {
       resolvedModel = requestedModel;
     } else {
-      const l3Pref = await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined;
+      const l3Pref = db.prepare(
+        `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = ? AND COALESCE(domain, '') = ''`
+      ).get(workspaceId) as { preferred_model: string | null } | undefined;
       if (l3Pref?.preferred_model) {
         resolvedModel = l3Pref.preferred_model;
       }
     }
 
     // 6. Resolve vault creds for LLM call
-    const user = await getEffectiveUser(req);
+    const user = getEffectiveUser(req);
     let vaultCreds: { apiKey?: string; baseUrl?: string } = {};
     if (user?.id) {
       const vaultProvider = resolveVaultProvider(resolvedModel);
       if (vaultProvider) {
-        const result = await getVaultKey(user.id, vaultProvider);
+        const result = getVaultKey(user.id, vaultProvider);
         if (result) vaultCreds = { apiKey: result.key, baseUrl: result.baseUrl ?? undefined };
       }
       if (!vaultCreds.apiKey) {
-        const compat = await getVaultKey(user.id, 'openai-compat');
+        const compat = getVaultKey(user.id, 'openai-compat');
         if (compat) vaultCreds = { apiKey: compat.key, baseUrl: compat.baseUrl ?? undefined };
       }
       if (!vaultCreds.apiKey) {
-        const anthropic = await getVaultKey(user.id, 'anthropic');
+        const anthropic = getVaultKey(user.id, 'anthropic');
         if (anthropic) vaultCreds = { apiKey: anthropic.key };
       }
     }
 
-    // Context cascade: direction stack → MEMORY.md → installed skills → instructions
-    // Each layer is best-effort (silently omitted on error or absence):
-    //   1. Direction Stack (L1–L3): global engineering principles → domain conventions → project context
-    //   2. MEMORY.md: episodic ledger at workspace root, capped at 2000 chars
-    //   3. Installed Skills: names + descriptions from installed_skills table
-    // Layers are assembled in this order and prepended to the LLM instructions block.
-    // An empty layer is filtered out — the prompt degrades gracefully to bare instructions.
-
-    // 7. Synthesize direction stack (L1–L3) for this workspace
-    let directionContext = '';
-    try {
-      const domain = workspace.domain ?? '';
-      const [l1Row, l2Row, l3Row] = await Promise.all([
-        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = '' AND COALESCE(team_id, '') = '' LIMIT 1`, []),
-        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND COALESCE(workspace_id, '') = '' AND (domain = $1 OR COALESCE(domain, '') = '') AND COALESCE(team_id, '') = '' ORDER BY (domain = $1) DESC LIMIT 1`, [domain]),
-        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = '' LIMIT 1`, [workspaceId]),
-      ]);
-      directionContext = synthesize({ l1: l1Row?.content_yaml, l2: l2Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: brief });
-    } catch (err: unknown) {
-      // Silently skip — direction context is best-effort
-      if (err instanceof Error) void err.message;
-    }
-
-    // 8. Generate 1-story spec via LLM
-    // Read MEMORY.md from workspace root (best-effort, silent on error)
-    let memoryContent = '';
-    try {
-      const memoryRaw = await fs.promises.readFile(path.join(workspace.path, 'MEMORY.md'), 'utf8');
-      memoryContent = memoryRaw.slice(0, 2000);
-    } catch (err: unknown) {
-      // ENOENT or any read error — silently skip
-      if (err instanceof Error) void err.message;
-    }
-
-    // Fetch installed skills for this workspace (best-effort, silent on error)
-    let skillsContext = '';
-    try {
-      const skillRows = await query<{ name: string; description: string | null }>(
-        `SELECT name, description FROM installed_skills ORDER BY name`,
-        [],
-      );
-      if (skillRows.length > 0) {
-        const skillLines = skillRows.map(s => `- ${s.name}: ${s.description ?? ''}`).join('\n');
-        skillsContext = `=== INSTALLED SKILLS ===\n${skillLines}`;
-      }
-    } catch (err: unknown) {
-      // DB error — silently skip
-      if (err instanceof Error) void err.message;
-    }
-
-    // Build ordered context blocks and filter empty entries
-    const contextBlocks = [
-      directionContext.trim() ? `=== DIRECTION STACK ===\n${directionContext.trim()}` : '',
-      memoryContent.trim() ? `=== MEMORY.md ===\n${memoryContent.trim()}` : '',
-      skillsContext,
-    ].filter(Boolean);
-
-    const instructions = [
+    // 7. Generate 1-story spec via LLM
+    const quickRunPrompt = [
       '=== INSTRUCTIONS: READ THIS FIRST ===',
       'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
       'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
@@ -2161,16 +1815,12 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       '',
       'Rules:',
       '- Generate exactly 1 story with id "QR-001"',
-      '- The story must have at most 8 acceptance criteria',
+      '- The story must have at most 5 acceptance criteria',
       '- acceptanceCriteria must be specific and testable',
       '- dependsOn must be an empty array (single story has no deps)',
       '- The description should be detailed enough for an engineer to implement',
       '- Your entire response must be valid JSON parseable by JSON.parse()',
     ].join('\n');
-
-    const quickRunPrompt = contextBlocks.length > 0
-      ? `${contextBlocks.join('\n\n')}\n\n${instructions}`
-      : instructions;
 
     const llmResult = await chatComplete(
       [{ role: 'user', content: quickRunPrompt }],
@@ -2195,10 +1845,10 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       return;
     }
 
-    // Enforce single story + max 8 AC
+    // Enforce single story + max 5 AC
     const story = parsed.stories[0];
-    if (story.acceptanceCriteria && story.acceptanceCriteria.length > 8) {
-      story.acceptanceCriteria = story.acceptanceCriteria.slice(0, 8);
+    if (story.acceptanceCriteria && story.acceptanceCriteria.length > 5) {
+      story.acceptanceCriteria = story.acceptanceCriteria.slice(0, 5);
     }
 
     // 9. Build slug and write spec directly to approved/
@@ -2226,8 +1876,13 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     const relativeSpecPath = `forge/specs/approved/${slug}.json`;
 
     // 10. Emit spec_approved WAL event with actor: 'quick-run'
-    const walApproveEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_approved', $1, $2, $3)` + ' RETURNING *', [slug, workspaceId, JSON.stringify({ actor: 'quick-run', brief: brief.slice(0, 200), model: resolvedModel })]);
-    broadcastAll(walApproveEvent!);
+    const walApproveResult = db.prepare(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload) VALUES ('spec_approved', ?, ?, ?)`
+    ).run(slug, workspaceId, JSON.stringify({ actor: 'quick-run', brief: brief.slice(0, 200), model: resolvedModel }));
+    const walApproveEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walApproveResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walApproveEvent);
 
     // 11. Trigger pipeline execution (same logic as /trigger)
     const runLoopSh = path.join(workspace.path, 'forge', 'run-loop.sh');
@@ -2240,8 +1895,10 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
     const useTypescriptRunLoop = !hasBashRunLoop && hasTsRunLoop;
 
-    const runResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type) VALUES ($1, $2, 'running', 'quick-run') RETURNING id`, [relativeSpecPath, workspaceId]);
-    const runId = runResult!.id;
+    const runResult = db.prepare(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type) VALUES (?, ?, 'running', 'quick-run')`
+    ).run(relativeSpecPath, workspaceId);
+    const runId = runResult.lastInsertRowid as number;
 
     // Build clean env
     const env: Record<string, string> = {};
@@ -2257,36 +1914,38 @@ router.post('/quick-run', async (req: Request, res: Response) => {
 
     // Inject vault API keys
     if (user?.id) {
-      const anthropicVaultKey = await getVaultKey(user.id, 'anthropic');
+      const anthropicVaultKey = getVaultKey(user.id, 'anthropic');
       if (anthropicVaultKey) env['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
-      const openaiVaultKey = await getVaultKey(user.id, 'openai-compat');
+      const openaiVaultKey = getVaultKey(user.id, 'openai-compat');
       if (openaiVaultKey) {
         env['OPENAI_API_KEY'] = openaiVaultKey.key;
         if (openaiVaultKey.baseUrl) env['OPENAI_BASE_URL'] = openaiVaultKey.baseUrl;
       }
-      const openrouterVaultKey = await getVaultKey(user.id, 'openrouter');
+      const openrouterVaultKey = getVaultKey(user.id, 'openrouter');
       if (openrouterVaultKey) env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
 
       // Inject Copilot token when using github/copilot model
       const resolvedModel = agentConfig.agentModel;
       if (resolvedModel === 'github/copilot') {
-        const copilotToken = await getCopilotToken(user.id);
+        const copilotToken = getCopilotToken(user.id);
         if (copilotToken) env['GITHUB_TOKEN'] = copilotToken;
       }
     }
 
     // Inject agent profile
-    const activeProfile = await queryOne('SELECT * FROM agent_profiles WHERE workspace_id = $1 AND is_active = true LIMIT 1', [workspaceId]) as AgentProfileRow | undefined;
+    const activeProfile = db.prepare(
+      'SELECT * FROM agent_profiles WHERE workspace_id = ? AND is_active = 1 LIMIT 1'
+    ).get(workspaceId) as AgentProfileRow | undefined;
     if (activeProfile) {
       if (activeProfile.system_prompt_override) env['RORCA_AGENT_SYSTEM_PROMPT'] = activeProfile.system_prompt_override;
-      const tools = (Array.isArray(activeProfile.allowed_tools) ? activeProfile.allowed_tools : JSON.parse(activeProfile.allowed_tools)) as string[];
+      const tools = JSON.parse(activeProfile.allowed_tools) as string[];
       if (tools.length > 0) env['RORCA_AGENT_ALLOWED_TOOLS'] = tools.join(',');
       if (activeProfile.model_override) env['RORCA_AGENT_MODEL_OVERRIDE'] = activeProfile.model_override;
     }
 
     // Spawn run-loop
     const logPath = workspaceLogPath(workspace.path, runId);
-    await execute('UPDATE pipeline_runs SET log_path = $1 WHERE id = $2', [logPath, runId]);
+    db.prepare('UPDATE pipeline_runs SET log_path = ? WHERE id = ?').run(logPath, runId);
     const logFd = fs.openSync(logPath, 'a');
     let child: ReturnType<typeof spawn>;
 
@@ -2319,7 +1978,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     child.unref();
 
     if (child.pid) {
-      await execute(`UPDATE pipeline_runs SET pid = $1 WHERE id = $2`, [child.pid, runId]);
+      db.prepare(`UPDATE pipeline_runs SET pid = ? WHERE id = ?`).run(child.pid, runId);
     }
 
     // Set up output buffer
@@ -2344,7 +2003,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }, 200);
 
     // Handle process exit
-    child.on('exit', async (code) => {
+    child.on('exit', (code) => {
       clearInterval(tailInterval);
       try {
         const stat = fs.statSync(logPath);
@@ -2358,23 +2017,22 @@ router.post('/quick-run', async (req: Request, res: Response) => {
         }
       } catch { /* ignore */ }
 
-      if (false /* pg pool always available */) {
+      if (!db.open) {
         buf.done = true;
         buf.subscribers.clear();
         return;
       }
 
       const status = code === 0 ? 'done' : 'failed';
-      await execute(`UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`, [status, runId]);
+      db.prepare(
+        `UPDATE pipeline_runs SET status = ?, finished_at = datetime('now') WHERE id = ?`
+      ).run(status, runId);
 
       // FR-005: Mark spec as completed when run succeeds
       if (status === 'done') markSpecCompleted(relativeSpecPath);
 
-      // PG-021: Synthesize run-level memory (non-blocking, best-effort)
-      synthesizeRunMemory(runId, workspaceId).catch(() => {});
-
       const postRunEnv = { ...env, RUN_STATUS: status, RUN_ID: String(runId) };
-      const postRunResults = await runHooks(workspaceId, 'post_run', workspace.path, postRunEnv);
+      const postRunResults = runHooks(workspaceId, 'post_run', workspace.path, postRunEnv);
       if (postRunResults.length > 0) {
         const hookOutput = postRunResults.map(r =>
           `\r\n\x1b[36m[post_run hook: ${r.command}]\x1b[0m\r\n${r.output}` +
@@ -2385,11 +2043,13 @@ router.post('/quick-run', async (req: Request, res: Response) => {
         fs.appendFileSync(logPath, hookOutput);
       }
 
-      const walFinishEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [workspaceId, JSON.stringify({ run_id: runId, status, exit_code: code, source: 'quick-run' })]);
-      broadcastAll(walFinishEvent!);
-
-      // PR-RQ-1: Advance run queue — promote next queued run if any
-      advanceQueue(workspaceId);
+      const walFinishResult = db.prepare(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
+      ).run(workspaceId, JSON.stringify({ run_id: runId, status, exit_code: code, source: 'quick-run' }));
+      const walFinishEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+        walFinishResult.lastInsertRowid
+      ) as WalEvent;
+      broadcastAll(walFinishEvent);
 
       buf.done = true;
       buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Process exited with code ${code}]\x1b[0m\r\n`));
@@ -2399,44 +2059,14 @@ router.post('/quick-run', async (req: Request, res: Response) => {
 
     res.status(202).json({ runId, specId: slug });
   } catch (error: any) {
-    logger.error('[Pipeline] Quick-run error:', error);
+    console.error('[Pipeline] Quick-run error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // ─── POST /api/pipeline/runs — Create a pipeline run ────────────────────────
 
-/**
- * @swagger
- * /api/pipeline/runs:
- *   post:
- *     tags: [Pipeline]
- *     summary: Create a pipeline run record
- *     operationId: createPipelineRun
- *     description: Creates a new pipeline_runs row with status 'running' and emits a run_started WAL event. Does not spawn an execution engine — use POST /api/pipeline/trigger for that.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [specPath, workspaceId]
- *             properties:
- *               specPath: { type: string, description: "Relative spec path within the workspace" }
- *               workspaceId: { type: string, description: "Workspace ID" }
- *     responses:
- *       201:
- *         description: Pipeline run created
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 run: { $ref: '#/components/schemas/PipelineRun' }
- *       400: { description: "Missing required fields (specPath, workspaceId)" }
- *       500: { description: "Internal server error" }
- */
-router.post('/runs', async (req: Request, res: Response) => {
+router.post('/runs', (req: Request, res: Response) => {
   try {
     const { specPath, workspaceId } = req.body;
 
@@ -2445,20 +2075,31 @@ router.post('/runs', async (req: Request, res: Response) => {
       return;
     }
 
-    const result = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, 'running') RETURNING id`, [specPath, workspaceId]);
+    const result = db.prepare(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES (?, ?, 'running')`
+    ).run(specPath, workspaceId);
 
-    const runId = result!.id;
+    const runId = result.lastInsertRowid as number;
 
-    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow;
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow;
 
-    // Insert WAL event and broadcast to SSE subscribers
-    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_started', $1, $2) RETURNING *`, [workspaceId, JSON.stringify({ run_id: runId, spec_path: specPath })]);
+    // Insert WAL event
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_started', ?, ?)`
+    ).run(workspaceId, JSON.stringify({ run_id: runId, spec_path: specPath }));
 
-    broadcastAll(walEvent!);
+    // Broadcast to SSE subscribers
+    const walEvent = db.prepare(
+      'SELECT * FROM wal_events WHERE id = ?'
+    ).get(walResult.lastInsertRowid) as WalEvent;
+
+    broadcastAll(walEvent);
 
     res.status(201).json({ run });
   } catch (error: any) {
-    logger.error('[Pipeline] Create run error:', error);
+    console.error('[Pipeline] Create run error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2471,8 +2112,6 @@ router.post('/runs', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Pipeline]
  *     summary: List pipeline runs
- *     operationId: listPipelineRuns
- *     description: Returns a paginated list of pipeline runs for the specified workspace, ordered by most recent first.
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -2490,7 +2129,7 @@ router.post('/runs', async (req: Request, res: Response) => {
  *                   type: array
  *                   items: { $ref: '#/components/schemas/PipelineRun' }
  */
-router.get('/runs', async (req: Request, res: Response) => {
+router.get('/runs', (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
@@ -2499,9 +2138,9 @@ router.get('/runs', async (req: Request, res: Response) => {
     }
 
     const pagination = parsePaginationParams(req);
-    const result = await paginateQuery<PipelineRunRow>({
-      query: 'SELECT * FROM pipeline_runs WHERE workspace_id = $1',
-      countQuery: 'SELECT COUNT(*) as total FROM pipeline_runs WHERE workspace_id = $1',
+    const result = paginateQuery<PipelineRunRow>(db, {
+      query: 'SELECT * FROM pipeline_runs WHERE workspace_id = ?',
+      countQuery: 'SELECT COUNT(*) as total FROM pipeline_runs WHERE workspace_id = ?',
       params: [workspaceId],
       pagination,
       orderBy: 'id DESC',
@@ -2511,63 +2150,14 @@ router.get('/runs', async (req: Request, res: Response) => {
 
     res.json(result);
   } catch (error: any) {
-    logger.error('[Pipeline] List runs error:', error);
+    console.error('[Pipeline] List runs error:', error);
     res.status(500).json({ error: error.message });
   }
 });
 
 // ─── GET /api/pipeline/runs/compare — Compare two pipeline runs side-by-side ─
 
-/**
- * @swagger
- * /api/pipeline/runs/compare:
- *   get:
- *     tags: [Pipeline]
- *     summary: Compare two pipeline runs side-by-side
- *     operationId: comparePipelineRuns
- *     description: Fetches story results for two runs and produces a per-story diff showing improved, regressed, new, or removed stories along with summary statistics.
- *     parameters:
- *       - in: query
- *         name: run1
- *         required: true
- *         schema: { type: integer }
- *         description: First run ID
- *       - in: query
- *         name: run2
- *         required: true
- *         schema: { type: integer }
- *         description: Second run ID
- *     responses:
- *       200:
- *         description: Side-by-side comparison with per-story diffs and summary
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 run1: { $ref: '#/components/schemas/PipelineRun' }
- *                 run2: { $ref: '#/components/schemas/PipelineRun' }
- *                 stories:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       storyId: { type: string }
- *                       run1Status: { type: string, nullable: true }
- *                       run2Status: { type: string, nullable: true }
- *                       change: { type: string, enum: [unchanged, improved, regressed, new_in_run2, removed_in_run2] }
- *                 summary:
- *                   type: object
- *                   properties:
- *                     run1PassRate: { type: integer }
- *                     run2PassRate: { type: integer }
- *                     improved: { type: integer }
- *                     regressed: { type: integer }
- *       400: { description: "Missing or invalid run1/run2 params, or comparing a run with itself" }
- *       404: { description: "One or both runs not found" }
- *       500: { description: "Internal server error" }
- */
-router.get('/runs/compare', async (req: Request, res: Response) => {
+router.get('/runs/compare', (req: Request, res: Response) => {
   try {
     const run1Id = parseInt(String(req.query.run1), 10);
     const run2Id = parseInt(String(req.query.run2), 10);
@@ -2583,15 +2173,19 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
     }
 
     // Fetch both runs
-    const run1 = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [run1Id]) as PipelineRunRow | undefined;
-    const run2 = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [run2Id]) as PipelineRunRow | undefined;
+    const run1 = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(run1Id) as PipelineRunRow | undefined;
+    const run2 = db.prepare('SELECT * FROM pipeline_runs WHERE id = ?').get(run2Id) as PipelineRunRow | undefined;
 
     if (!run1) { res.status(404).json({ error: `Run ${run1Id} not found` }); return; }
     if (!run2) { res.status(404).json({ error: `Run ${run2Id} not found` }); return; }
 
     // Fetch story results for both runs (latest per story_id by highest id)
-    const stories1All = await query('SELECT * FROM story_results WHERE run_id = $1 ORDER BY id ASC', [run1Id]) as StoryResultRow[];
-    const stories2All = await query('SELECT * FROM story_results WHERE run_id = $1 ORDER BY id ASC', [run2Id]) as StoryResultRow[];
+    const stories1All = db.prepare(
+      'SELECT * FROM story_results WHERE run_id = ? ORDER BY id ASC'
+    ).all(run1Id) as StoryResultRow[];
+    const stories2All = db.prepare(
+      'SELECT * FROM story_results WHERE run_id = ? ORDER BY id ASC'
+    ).all(run2Id) as StoryResultRow[];
 
     // Deduplicate to latest result per story_id (retries produce multiple rows)
     const latestStory = (rows: StoryResultRow[]) => {
@@ -2700,7 +2294,7 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
 
     res.json({ run1, run2, stories, summary });
   } catch (error: any) {
-    logger.error('[Pipeline] Compare runs error:', error);
+    console.error('[Pipeline] Compare runs error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2713,8 +2307,6 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Pipeline]
  *     summary: Get a pipeline run with story results
- *     operationId: getPipelineRun
- *     description: Retrieves a single pipeline run by ID along with all its story results and spec metadata.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -2734,7 +2326,7 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
  *                   items: { $ref: '#/components/schemas/StoryResult' }
  *       404: { description: "Run not found" }
  */
-router.get('/runs/:runId', async (req: Request, res: Response) => {
+router.get('/runs/:runId', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
@@ -2742,14 +2334,18 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
 
     if (!run) {
       res.status(404).json({ error: 'Run not found' });
       return;
     }
 
-    const stories = await query('SELECT * FROM story_results WHERE run_id = $1 ORDER BY id ASC', [runId]) as StoryResultRow[];
+    const stories = db.prepare(
+      'SELECT * FROM story_results WHERE run_id = ? ORDER BY id ASC'
+    ).all(runId) as StoryResultRow[];
 
     // Read spec JSON to return full userStories list (including pending ones)
     // OC-029: Include per-story engine assignment in response
@@ -2757,7 +2353,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     let specStories: { id: string; title: string; dependsOn?: string[]; passes?: boolean; agent?: string; reroute?: { fromEngine: string; toEngine: string; reason: string } }[] = [];
     let specModel: string | null = null;
     try {
-      const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
+      const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(run.workspace_id) as { path: string } | undefined;
       if (workspace) {
         const absSpecPath = path.join(workspace.path, run.spec_path);
         if (fs.existsSync(absSpecPath)) {
@@ -2786,7 +2382,9 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     // OC-029: Enrich specStories with reroute data from WAL events (for historical runs)
     if (specStories.length > 0) {
       try {
-        const rerouteEvents = await query(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_rerouted' AND payload::text LIKE '%"run_id":' || $1 || '%' ORDER BY id ASC`, [runId]) as Array<{ story_id: string; payload: string }>;
+        const rerouteEvents = db.prepare(
+          `SELECT story_id, payload FROM wal_events WHERE event_type = 'story_rerouted' AND payload LIKE '%"run_id":' || ? || '%' ORDER BY id ASC`
+        ).all(runId) as Array<{ story_id: string; payload: string }>;
         for (const evt of rerouteEvents) {
           const story = specStories.find(s => s.id === evt.story_id);
           if (story && !story.reroute) {
@@ -2800,10 +2398,12 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     }
 
     // Aggregate token counts and cost from story_results
-    const tokenRow = await queryOne(`SELECT COALESCE(SUM(input_tokens), 0) AS total_input,
+    const tokenRow = db.prepare(
+      `SELECT COALESCE(SUM(input_tokens), 0) AS total_input,
               COALESCE(SUM(output_tokens), 0) AS total_output,
               COALESCE(SUM(cost_usd), 0) AS total_cost
-       FROM story_results WHERE run_id = $1`, [runId]) as { total_input: number; total_output: number; total_cost: number };
+       FROM story_results WHERE run_id = ?`
+    ).get(runId) as { total_input: number; total_output: number; total_cost: number };
 
     // Per-story token breakdown
     const storyTokenBreakdown = stories.map((s) => ({
@@ -2818,7 +2418,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     // CIE-007: Read run-state.json for real-time story progress fallback
     let runState: RunState | null = null;
     try {
-      const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
+      const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?').get(run.workspace_id) as { path: string } | undefined;
       if (workspace) {
         runState = readRunState(workspace.path);
         // Only include if it belongs to this run
@@ -2844,7 +2444,9 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
         // Collect actual context_files from story_started WAL events
         const actualMap: Record<string, { contextFiles: string[] }> = {};
         try {
-          const walRows = await query(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_started' AND payload::text LIKE '%"run_id":' || $1 || '%'`, [runId]) as Array<{ story_id: string; payload: string }>;
+          const walRows = db.prepare(
+            `SELECT story_id, payload FROM wal_events WHERE event_type = 'story_started' AND payload LIKE '%"run_id":' || ? || '%'`
+          ).all(runId) as Array<{ story_id: string; payload: string }>;
           for (const row of walRows) {
             try {
               const p = JSON.parse(row.payload);
@@ -2876,7 +2478,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       contextComparison,
     });
   } catch (error: any) {
-    logger.error('[Pipeline] Get run error:', error);
+    console.error('[Pipeline] Get run error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -2891,8 +2493,6 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Retry failed stories in a pipeline run
- *     operationId: retryPipelineRun
- *     description: Re-executes failed stories from a completed or partially failed pipeline run, optionally filtering to specific story IDs.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -2923,7 +2523,9 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     const { storyIds } = req.body as { storyIds?: string[] };
 
     // 1. Fetch the original run
-    const originalRun = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [originalRunId]) as PipelineRunRow | undefined;
+    const originalRun = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(originalRunId) as PipelineRunRow | undefined;
 
     if (!originalRun) {
       res.status(404).json({ error: 'Run not found' });
@@ -2937,7 +2539,9 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     }
 
     // 2. Find all stories and their latest status from the original run
-    const allStories = await query('SELECT * FROM story_results WHERE run_id = $1 ORDER BY id ASC', [originalRunId]) as StoryResultRow[];
+    const allStories = db.prepare(
+      'SELECT * FROM story_results WHERE run_id = ? ORDER BY id ASC'
+    ).all(originalRunId) as StoryResultRow[];
 
     // Get the latest result per story_id (last row wins — ordered by id ASC)
     const latestByStory = new Map<string, StoryResultRow>();
@@ -2945,34 +2549,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       latestByStory.set(s.story_id, s);
     }
 
-    // Fallback: if story_results is empty (subprocess HTTP calls failed), derive from spec JSON
-    if (latestByStory.size === 0 && originalRun.spec_path) {
-      try {
-        const wsRow = await queryOne('SELECT path FROM workspaces WHERE id = $1', [originalRun.workspace_id]) as { path: string } | undefined;
-        if (wsRow) {
-          const specPath = path.join(wsRow.path, originalRun.spec_path);
-          if (fs.existsSync(specPath)) {
-            const specData = JSON.parse(fs.readFileSync(specPath, 'utf8'));
-            const stories = specData.userStories || specData.phases?.flatMap((p: { stories: unknown[] }) => p.stories) || [];
-            for (const s of stories as Array<{ id: string; passes?: boolean }>) {
-              latestByStory.set(s.id, {
-                id: 0, run_id: originalRunId, story_id: s.id,
-                status: s.passes ? 'pass' : 'fail',
-                retries: 0, log_path: null, started_at: new Date().toISOString(), finished_at: null,
-                elapsed_seconds: null, input_tokens: null, output_tokens: null,
-                model_used: null, cost_usd: null,
-              } as StoryResultRow);
-            }
-            logger.info(`[retry] Derived ${latestByStory.size} story statuses from spec JSON (story_results table was empty)`);
-          }
-        }
-      } catch (specErr: unknown) {
-        logger.warn(`[retry] Could not derive stories from spec JSON: ${(specErr as Error).message}`);
-      }
-    }
-
-    // Include both 'fail' and 'skip' (blocked) stories as retryable
-    const failedStories = Array.from(latestByStory.values()).filter(s => s.status === 'fail' || s.status === 'skip');
+    const failedStories = Array.from(latestByStory.values()).filter(s => s.status === 'fail');
     const passedStories = Array.from(latestByStory.values()).filter(s => s.status === 'pass');
 
     if (failedStories.length === 0) {
@@ -2993,7 +2570,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     }
 
     // 4. Look up workspace
-    const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [originalRun.workspace_id]) as
+    const workspace = db.prepare('SELECT * FROM workspaces WHERE id = ?').get(originalRun.workspace_id) as
       { id: string; label: string; path: string } | undefined;
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
@@ -3004,78 +2581,86 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     const cwd = originalRun.worktree_path || workspace.path;
     const retryRunLoopSh = path.join(cwd, 'forge', 'run-loop.sh');
     const retryRunLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
-    const retryExecutionEngineTs = path.join(__dirname, '..', 'lib', 'execution-engine.ts');
-    const retryHasExecutionEngine = fs.existsSync(retryExecutionEngineTs);
     const retryHasBash = fs.existsSync(retryRunLoopSh);
     const retryHasTs = fs.existsSync(retryRunLoopTs);
-    if (!retryHasExecutionEngine && !retryHasBash && !retryHasTs) {
-      res.status(422).json({ error: `No execution engine found` });
+    if (!retryHasBash && !retryHasTs) {
+      res.status(422).json({ error: `run-loop.sh not found at ${retryRunLoopSh}` });
       return;
     }
-    // Prefer execution-engine.ts (same as regular trigger), fall back to legacy loops
-    const retryUseExecutionEngine = retryHasExecutionEngine;
-    const retryUseTs = !retryUseExecutionEngine && !retryHasBash && retryHasTs;
+    const retryUseTs = !retryHasBash && retryHasTs;
 
     // 6. Create a NEW pipeline_run linked to the original via retried_from_run_id
-    const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id)
-       VALUES ($1, $2, 'running', 'retry', $3, $4, $5) RETURNING id`, [originalRun.spec_path,
+    const newRunResult = db.prepare(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id)
+       VALUES (?, ?, 'running', 'retry', ?, ?, ?)`
+    ).run(
+      originalRun.spec_path,
       originalRun.workspace_id,
       originalRun.branch_name,
       originalRun.worktree_path,
-      originalRunId,]);
-    const newRunId = newRunResult!.id;
+      originalRunId,
+    );
+    const newRunId = newRunResult.lastInsertRowid as number;
 
     // 7. Copy successful story results from the original run to the new run
+    const insertCopied = db.prepare(
+      `INSERT INTO story_results (run_id, story_id, status, retries, log_path, started_at, finished_at, elapsed_seconds, input_tokens, output_tokens)
+       VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)`
+    );
     for (const passed of passedStories) {
-      await execute(
-        `INSERT INTO story_results (run_id, story_id, status, retries, log_path, started_at, finished_at, elapsed_seconds, input_tokens, output_tokens)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
-        [
-          newRunId,
-          passed.story_id,
-          'pass',
-          passed.retries,
-          passed.log_path,
-          passed.started_at,
-          passed.finished_at,
-          passed.elapsed_seconds,
-          passed.input_tokens,
-          passed.output_tokens,
-        ]
+      insertCopied.run(
+        newRunId,
+        passed.story_id,
+        'pass',
+        passed.retries,
+        passed.log_path,
+        passed.started_at,
+        passed.finished_at,
+        passed.elapsed_seconds,
+        passed.input_tokens,
+        passed.output_tokens,
       );
     }
 
     // 8. Insert 'retry' placeholder rows for stories being retried + emit WAL events
     const retriedStoryInfo: Array<{ storyId: string; attempt: number }> = [];
+    const insertRetryStory = db.prepare(
+      `INSERT INTO story_results (run_id, story_id, status, retries) VALUES (?, ?, 'retry', ?)`
+    );
+    const insertWal = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload) VALUES ('story_retried', ?, ?, ?)`
+    );
 
     for (const story of storiesToRetry) {
       const attempt = story.retries + 1;
-      await execute(
-        `INSERT INTO story_results (run_id, story_id, status, retries) VALUES ($1, $2, 'retry', $3)`,
-        [newRunId, story.story_id, attempt]
-      );
+      insertRetryStory.run(newRunId, story.story_id, attempt);
 
-      const walEvent = await queryOne<WalEvent>(
-        `INSERT INTO wal_events (event_type, workspace_id, story_id, payload) VALUES ('story_retried', $1, $2, $3) RETURNING *`,
-        [
-          originalRun.workspace_id,
-          story.story_id,
-          JSON.stringify({ run_id: newRunId, original_run_id: originalRunId, story_id: story.story_id, attempt }),
-        ]
+      const walResult = insertWal.run(
+        originalRun.workspace_id,
+        story.story_id,
+        JSON.stringify({ run_id: newRunId, original_run_id: originalRunId, story_id: story.story_id, attempt }),
       );
-      if (walEvent) broadcastAll(walEvent!);
+      const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+        walResult.lastInsertRowid
+      ) as WalEvent;
+      broadcastAll(walEvent);
 
       retriedStoryInfo.push({ storyId: story.story_id, attempt });
     }
 
     // Emit run_started WAL event for the new retry run
-    const runStartEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_started', $1, $2)` + ' RETURNING *', [originalRun.workspace_id, JSON.stringify({
+    const runStartWal = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_started', ?, ?)`
+    ).run(originalRun.workspace_id, JSON.stringify({
       run_id: newRunId,
       spec_path: originalRun.spec_path,
       retried_from_run_id: originalRunId,
       retried_stories: storiesToRetry.map(s => s.story_id),
-    })]);
-    broadcastAll(runStartEvent!);
+    }));
+    const runStartEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      runStartWal.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(runStartEvent);
 
     // 9. Read the original spec and create a filtered version with only retry stories
     const absSpecPath = path.join(workspace.path, originalRun.spec_path);
@@ -3086,11 +2671,9 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
 
     const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
     const retryStoryIds = new Set(storiesToRetry.map(s => s.story_id));
-    // Include all stories (not just failed ones) so dependency resolution works correctly.
-    // Passed stories (passes:true) are skipped naturally by the engine. Filtering them out
-    // breaks dep checks — stories that depend on a passed-but-filtered story get stuck blocked.
     const retrySpec = {
       ...specJson,
+      userStories: specJson.userStories.filter((s: { id: string }) => retryStoryIds.has(s.id)),
     };
 
     // Write temporary retry spec
@@ -3113,34 +2696,12 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       env[k] = v;
     }
 
-    // 11. Spawn execution engine with the retry spec — detached, output to log file
+    // 11. Spawn run-loop with the retry spec — detached, output to log file
     const retryLogPath = workspaceLogPath(workspace.path, newRunId);
-    await execute('UPDATE pipeline_runs SET log_path = $1 WHERE id = $2', [retryLogPath, newRunId]);
+    db.prepare('UPDATE pipeline_runs SET log_path = ? WHERE id = ?').run(retryLogPath, newRunId);
     const retryLogFd = fs.openSync(retryLogPath, 'a');
     let child: ReturnType<typeof spawn>;
-    if (retryUseExecutionEngine) {
-      // Universal execution engine (same priority as regular trigger)
-      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
-      const backendPort = process.env.PORT || '3030';
-      const engineArgs = [
-        retryExecutionEngineTs,
-        '--json', retrySpecPath,
-        '--cwd', cwd,
-        '--run-id', String(newRunId),
-        '--port', backendPort,
-        '--parallelism', '1',
-        '--agent', agentConfig.agentType,
-      ];
-      if (agentConfig.agentModel) {
-        engineArgs.push('--model', agentConfig.agentModel);
-      }
-      child = spawn(tsxBin, engineArgs, {
-        cwd,
-        stdio: ['ignore', retryLogFd, retryLogFd],
-        detached: true,
-        env,
-      });
-    } else if (retryUseTs) {
+    if (retryUseTs) {
       const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
       const backendPort = process.env.PORT || '3030';
       child = spawn(tsxBin, [
@@ -3168,7 +2729,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     child.unref();
 
     if (child.pid) {
-      await execute(`UPDATE pipeline_runs SET pid = $1 WHERE id = $2`, [child.pid, newRunId]);
+      db.prepare(`UPDATE pipeline_runs SET pid = ? WHERE id = ?`).run(child.pid, newRunId);
     }
 
     // 12. Set up output buffer — tail log file for live streaming
@@ -3193,7 +2754,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     }, 200);
 
     // 13. Handle process exit — determine final status based on all story outcomes in new run
-    child.on('exit', async (code) => {
+    child.on('exit', (code) => {
       clearInterval(retryTailInterval);
       try {
         const stat = fs.statSync(retryLogPath);
@@ -3207,14 +2768,16 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
         }
       } catch { /* ignore */ }
 
-      if (false /* pg pool always available */) {
+      if (!db.open) {
         buf.done = true;
         buf.subscribers.clear();
         return;
       }
 
       // Check all stories in the new run (copied passes + retried stories)
-      const currentStories = await query('SELECT * FROM story_results WHERE run_id = $1 ORDER BY id ASC', [newRunId]) as StoryResultRow[];
+      const currentStories = db.prepare(
+        'SELECT * FROM story_results WHERE run_id = ? ORDER BY id ASC'
+      ).all(newRunId) as StoryResultRow[];
 
       // Build latest status per story_id (last row wins)
       const latest = new Map<string, string>();
@@ -3225,64 +2788,35 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       const hasFailures = Array.from(latest.values()).some(st => st === 'fail');
       const finalStatus = hasFailures ? 'partial_failure' : (code === 0 ? 'done' : 'partial_failure');
 
-      await execute(`UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`, [finalStatus, newRunId]);
+      db.prepare(
+        `UPDATE pipeline_runs SET status = ?, finished_at = datetime('now') WHERE id = ?`
+      ).run(finalStatus, newRunId);
 
       // FR-005: Mark spec as completed when retry succeeds
       if (finalStatus === 'done') markSpecCompleted(originalRun.spec_path);
 
-      // PG-021: Synthesize run-level memory (non-blocking, best-effort)
-      synthesizeRunMemory(newRunId, originalRun.workspace_id).catch(() => {});
-
-      const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [originalRun.workspace_id, JSON.stringify({
+      const walResult = db.prepare(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
+      ).run(originalRun.workspace_id, JSON.stringify({
         run_id: newRunId,
         retried_from_run_id: originalRunId,
         status: finalStatus,
         exit_code: code,
-      })]);
-      broadcastAll(walEvent!);
+      }));
+      const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+        walResult.lastInsertRowid
+      ) as WalEvent;
+      broadcastAll(walEvent);
 
-      // PR-RQ-1: Advance run queue — promote next queued run if any
-      advanceQueue(originalRun.workspace_id);
-
-      // Notify terminal that the retry process exited
-      const retryExitMsg = `\r\n\x1b[90m[Retry process exited with code ${code}]\x1b[0m\r\n`;
-      buf.chunks.push(retryExitMsg);
-      buf.subscribers.forEach(cb => cb(retryExitMsg));
-      try { fs.appendFileSync(retryLogPath, retryExitMsg); } catch { /* best-effort */ }
+      buf.done = true;
+      buf.subscribers.forEach(cb => cb(`\r\n\x1b[90m[Retry process exited with code ${code}]\x1b[0m\r\n`));
+      buf.subscribers.clear();
+      setTimeout(() => {
+        outputBuffers.delete(newRunId);
+      }, 30 * 60 * 1000);
 
       // Clean up temporary retry spec
       try { fs.unlinkSync(retrySpecPath); } catch { /* ignore */ }
-
-      // Close the buffer — handles both worktree and non-worktree paths
-      const closeRetryBuffer = () => {
-        buf.done = true;
-        buf.subscribers.clear();
-        setTimeout(() => { outputBuffers.delete(newRunId); }, 30 * 60 * 1000);
-      };
-
-      // Auto-merge worktree if run used one — safety pre-check included
-      const retryWorktreePath = originalRun.worktree_path as string | null;
-      const retryBranchName = originalRun.branch_name as string | null;
-      if (retryWorktreePath && retryBranchName) {
-        autoMergeWorktree(
-          workspace.path,
-          retryWorktreePath,
-          retryBranchName,
-          originalRun.workspace_id,
-          newRunId,
-          buf,
-          retryLogPath,
-        )
-          .then(closeRetryBuffer)
-          .catch((err: Error) => {
-            const errMsg = `\r\n\x1b[31m[auto-merge] Unexpected error: ${err.message}\x1b[0m\r\n`;
-            buf.chunks.push(errMsg);
-            try { fs.appendFileSync(retryLogPath, errMsg); } catch { /* best-effort */ }
-            closeRetryBuffer();
-          });
-      } else {
-        closeRetryBuffer();
-      }
     });
 
     res.status(201).json({
@@ -3293,7 +2827,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       copiedStories: passedStories.map(s => s.story_id),
     });
   } catch (error: any) {
-    logger.error('[Pipeline] Retry error:', error);
+    console.error('[Pipeline] Retry error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3307,8 +2841,6 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Pause a running pipeline
- *     operationId: pausePipelineRun
- *     description: Sends SIGTSTP to the pipeline process group, allowing the current story to finish before pausing execution.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -3318,7 +2850,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
  *       200: { description: "Paused", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer }, status: { type: string } } } } } }
  *       404: { description: "Run not found" }
  */
-router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
+router.post('/runs/:runId/pause', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
@@ -3326,7 +2858,9 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
 
     if (!run) {
       res.status(404).json({ error: 'Run not found' });
@@ -3354,24 +2888,34 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
     }
 
     // Update status to 'paused'
-    await execute(`UPDATE pipeline_runs SET status = 'paused' WHERE id = $1`, [runId]);
+    db.prepare(
+      `UPDATE pipeline_runs SET status = 'paused' WHERE id = ?`
+    ).run(runId);
 
     // Compute elapsed time and completed story count for the WAL event
     const elapsedMs = Date.now() - new Date(run.started_at + 'Z').getTime();
     const elapsedSeconds = Math.floor(elapsedMs / 1000);
-    const completedStories = await queryOne(`SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1 AND status IN ('pass', 'fail')`, [runId]) as { cnt: number };
+    const completedStories = db.prepare(
+      `SELECT COUNT(*) as cnt FROM story_results WHERE run_id = ? AND status IN ('pass', 'fail')`
+    ).get(runId) as { cnt: number };
 
     // Emit WAL event
-    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_paused', $1, $2)` + ' RETURNING *', [run.workspace_id, JSON.stringify({
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_paused', ?, ?)`
+    ).run(run.workspace_id, JSON.stringify({
       run_id: runId,
       elapsed_seconds: elapsedSeconds,
       completed_stories: completedStories.cnt,
-    })]);
-    broadcastAll(walEvent!);
+    }));
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
 
     res.json({ ok: true, runId, status: 'paused' });
   } catch (error: any) {
-    logger.error('[Pipeline] Pause error:', error);
+    console.error('[Pipeline] Pause error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3385,8 +2929,6 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Resume a paused pipeline
- *     operationId: resumePipelineRun
- *     description: Sends SIGCONT to the paused pipeline process group to resume story execution from where it left off.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -3396,7 +2938,7 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
  *       200: { description: "Resumed", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer }, status: { type: string } } } } } }
  *       404: { description: "Run not found" }
  */
-router.post('/runs/:runId/resume', async (req: Request, res: Response) => {
+router.post('/runs/:runId/resume', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
@@ -3404,7 +2946,9 @@ router.post('/runs/:runId/resume', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
 
     if (!run) {
       res.status(404).json({ error: 'Run not found' });
@@ -3430,15 +2974,23 @@ router.post('/runs/:runId/resume', async (req: Request, res: Response) => {
     }
 
     // Update status back to 'running'
-    await execute(`UPDATE pipeline_runs SET status = 'running' WHERE id = $1`, [runId]);
+    db.prepare(
+      `UPDATE pipeline_runs SET status = 'running' WHERE id = ?`
+    ).run(runId);
 
     // Emit WAL event
-    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_resumed', $1, $2)` + ' RETURNING *', [run.workspace_id, JSON.stringify({ run_id: runId })]);
-    broadcastAll(walEvent!);
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_resumed', ?, ?)`
+    ).run(run.workspace_id, JSON.stringify({ run_id: runId }));
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
 
     res.json({ ok: true, runId, status: 'running' });
   } catch (error: any) {
-    logger.error('[Pipeline] Resume error:', error);
+    console.error('[Pipeline] Resume error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3454,8 +3006,6 @@ router.post('/runs/:runId/resume', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Inject context into a blocked (HITL) pipeline run and resume
- *     operationId: injectPipelineContext
- *     description: Writes free-text context to a file for the run-loop to pick up and sends SIGCONT to resume a blocked or paused pipeline run.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -3476,7 +3026,7 @@ router.post('/runs/:runId/resume', async (req: Request, res: Response) => {
  *       404: { description: "Run not found" }
  *       409: { description: "Run is not in blocked or paused state" }
  */
-router.post('/runs/:runId/context', async (req: Request, res: Response) => {
+router.post('/runs/:runId/context', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
@@ -3490,7 +3040,9 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
 
     if (!run) {
       res.status(404).json({ error: 'Run not found' });
@@ -3504,7 +3056,8 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
     }
 
     // Write context to a file the run-loop can pick up
-    const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
+    const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?')
+      .get(run.workspace_id) as { path: string } | undefined;
     if (workspace) {
       const contextDir = path.join(workspace.path, 'forge', 'logs');
       fs.mkdirSync(contextDir, { recursive: true });
@@ -3522,15 +3075,23 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
     }
 
     // Update status back to running
-    await execute(`UPDATE pipeline_runs SET status = 'running' WHERE id = $1`, [runId]);
+    db.prepare(
+      `UPDATE pipeline_runs SET status = 'running' WHERE id = ?`
+    ).run(runId);
 
     // Emit run_resumed WAL event with injected context info
-    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_resumed', $1, $2)` + ' RETURNING *', [run.workspace_id, JSON.stringify({
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_resumed', ?, ?)`
+    ).run(run.workspace_id, JSON.stringify({
       run_id: runId,
       context_injected: true,
       context_length: context.trim().length,
-    })]);
-    broadcastAll(walEvent!);
+    }));
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
 
     // Also append context to the output buffer so it shows in the terminal
     const buf = outputBuffers.get(runId);
@@ -3542,7 +3103,7 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
 
     res.json({ ok: true, runId, status: 'running' });
   } catch (error: any) {
-    logger.error('[Pipeline] Context injection error:', error);
+    console.error('[Pipeline] Context injection error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3558,8 +3119,6 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Pipeline]
  *     summary: Cancel a running or paused pipeline
- *     operationId: cancelPipelineRun
- *     description: Sends SIGTERM (escalating to SIGKILL after 5 seconds) to the pipeline process group and marks the run as cancelled.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -3569,7 +3128,7 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
  *       200: { description: "Cancelled", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer }, status: { type: string } } } } } }
  *       404: { description: "Run not found" }
  */
-router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
+router.post('/runs/:runId/cancel', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
@@ -3577,7 +3136,9 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
 
     if (!run) {
       res.status(404).json({ error: 'Run not found' });
@@ -3612,7 +3173,9 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     }
 
     // Mark run as cancelled
-    await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW() WHERE id = $1`, [runId]);
+    db.prepare(
+      `UPDATE pipeline_runs SET status = 'cancelled', finished_at = datetime('now') WHERE id = ?`
+    ).run(runId);
 
     // Append [Run cancelled] message to the output buffer
     const buf = outputBuffers.get(runId);
@@ -3627,75 +3190,27 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     // Compute elapsed time and completed story count for the WAL event
     const elapsedMs = Date.now() - new Date(run.started_at + 'Z').getTime();
     const elapsedSeconds = Math.floor(elapsedMs / 1000);
-    const completedStories = await queryOne(`SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1 AND status IN ('pass', 'fail')`, [runId]) as { cnt: number };
+    const completedStories = db.prepare(
+      `SELECT COUNT(*) as cnt FROM story_results WHERE run_id = ? AND status IN ('pass', 'fail')`
+    ).get(runId) as { cnt: number };
 
     // Emit WAL event
-    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', $1, $2)` + ' RETURNING *', [run.workspace_id, JSON.stringify({
+    const walResult = db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', ?, ?)`
+    ).run(run.workspace_id, JSON.stringify({
       run_id: runId,
       elapsed_seconds: elapsedSeconds,
       completed_stories: completedStories.cnt,
-    })]);
-    broadcastAll(walEvent!);
+    }));
+
+    const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+      walResult.lastInsertRowid
+    ) as WalEvent;
+    broadcastAll(walEvent);
 
     res.json({ ok: true, runId, status: 'cancelled' });
   } catch (error: any) {
-    logger.error('[Pipeline] Cancel error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ─── DELETE /api/pipeline/runs/:runId — Cancel a queued run ──────────────────
-// Only works for runs with status='queued'. Returns 409 if the run is active/done.
-// Recalculates queue_position for remaining queued runs after cancellation.
-
-/**
- * @swagger
- * /api/pipeline/runs/{runId}:
- *   delete:
- *     tags: [Pipeline]
- *     summary: Cancel a queued pipeline run
- *     operationId: cancelQueuedRun
- *     description: Cancels a queued run by marking it as failed with finished_at set. Only works for runs with status='queued'. Returns 409 if the run is already active or completed.
- *     parameters:
- *       - in: path
- *         name: runId
- *         required: true
- *         schema: { type: integer }
- *     responses:
- *       200: { description: "Queued run cancelled", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer } } } } } }
- *       404: { description: "Run not found" }
- *       409: { description: "Run is not in queued state" }
- */
-router.delete('/runs/:runId', async (req: Request, res: Response) => {
-  try {
-    const runId = parseInt(String(req.params.runId), 10);
-    if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
-      return;
-    }
-
-    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
-
-    if (!run) {
-      res.status(404).json({ error: 'Run not found' });
-      return;
-    }
-
-    if (run.status !== 'queued') {
-      res.status(409).json({ error: `Cannot cancel run with status '${run.status}' — only queued runs can be cancelled via DELETE` });
-      return;
-    }
-
-    // Mark as failed
-    await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), queued_at = NULL, queue_position = NULL WHERE id = $1`, [runId]);
-
-    // Recalculate positions for remaining queued runs
-    const { recalculateQueuePositions } = require('../lib/run-queue') as typeof import('../lib/run-queue');
-    recalculateQueuePositions(run.workspace_id);
-
-    res.json({ ok: true, runId });
-  } catch (error: any) {
-    logger.error('[Pipeline] Delete queued run error:', error);
+    console.error('[Pipeline] Cancel error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3710,7 +3225,6 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Pipeline]
  *     summary: Stream raw terminal output (SSE)
- *     operationId: streamPipelineOutput
  *     description: Server-Sent Events stream of base64-encoded terminal output. Late joiners receive full buffer replay.
  *     parameters:
  *       - in: path
@@ -3725,21 +3239,11 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
  *             schema:
  *               type: string
  */
-router.get('/runs/:runId/output', async (req: Request, res: Response) => {
+router.get('/runs/:runId/output', (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.runId), 10);
   if (isNaN(runId)) {
     res.status(400).json({ error: 'Invalid runId' });
     return;
-  }
-
-  // Validate workspace ownership if workspaceId is provided
-  const wsId = req.query.workspaceId as string | undefined;
-  if (wsId) {
-    const ownerCheck = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: number } | undefined;
-    if (ownerCheck && String(ownerCheck.workspace_id) !== wsId) {
-      res.status(403).json({ error: 'Run does not belong to this workspace' });
-      return;
-    }
   }
 
   res.writeHead(200, {
@@ -3753,7 +3257,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
 
   // Resolve agent type for semantic parsing (defaults to 'claude')
-  const runRow = await queryOne('SELECT agent_type, agent, agent_model FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null } | undefined;
+  const runRow = db.prepare('SELECT agent_type, agent, agent_model FROM pipeline_runs WHERE id = ?')
+    .get(runId) as { agent_type: string; agent: string; agent_model: string | null } | undefined;
   const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
 
   // Emit run metadata so frontend knows which renderer to use
@@ -3792,7 +3297,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
   // ── Cold path: buffer not in memory (backend restarted) ──────────────────
   // Fall back to the persisted log file (check DB log_path, then legacy /tmp).
-  const logPath = await resolveLogPath(runId);
+  const logPath = resolveLogPath(runId);
   if (!logPath) {
     // No log file — run finished before this server started or never ran
     clearInterval(hb);
@@ -3809,7 +3314,8 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   }
 
   // Check if the original process is still alive
-  const run = await queryOne('SELECT pid, status FROM pipeline_runs WHERE id = $1', [runId]) as { pid: number | null; status: string } | undefined;
+  const run = db.prepare('SELECT pid, status FROM pipeline_runs WHERE id = ?')
+    .get(runId) as { pid: number | null; status: string } | undefined;
   const stillRunning = (run?.status === 'running' || run?.status === 'paused') && run?.pid != null && isPidAlive(run.pid);
 
   if (!stillRunning) {
@@ -3866,68 +3372,41 @@ interface ModelPricingRow {
   output_cost_per_1k: number;
 }
 
-async function recordTokenUsage(runId: number, storyId: string, inputTokens: number, outputTokens: number, model?: string) {
-  const run = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: string } | undefined;
+function recordTokenUsage(runId: number, storyId: string, inputTokens: number, outputTokens: number, model?: string) {
+  const run = db.prepare(
+    'SELECT workspace_id FROM pipeline_runs WHERE id = ?'
+  ).get(runId) as { workspace_id: string } | undefined;
   if (!run) return;
 
   const modelName = model || 'unknown';
-  const pricing = await queryOne('SELECT * FROM model_pricing WHERE model_id = $1', [modelName]) as ModelPricingRow | undefined;
+  const pricing = db.prepare(
+    'SELECT * FROM model_pricing WHERE model_id = ?'
+  ).get(modelName) as ModelPricingRow | undefined;
 
   const costUsd = pricing
     ? (inputTokens / 1000) * pricing.input_cost_per_1k + (outputTokens / 1000) * pricing.output_cost_per_1k
     : 0;
 
-  await execute(`INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`, [runId, storyId, run.workspace_id, modelName, inputTokens, outputTokens, Math.round(costUsd * 1_000_000) / 1_000_000]);
+  db.prepare(
+    `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd)
+     VALUES (?, ?, ?, ?, ?, ?, ?)`
+  ).run(runId, storyId, run.workspace_id, modelName, inputTokens, outputTokens, Math.round(costUsd * 1_000_000) / 1_000_000);
 }
 
 // ─── POST /api/pipeline/story-result — Record story outcome from run-loop.ts ──
 // Called by the TypeScript run-loop to insert story_results rows.
 
-/**
- * @swagger
- * /api/pipeline/story-result:
- *   post:
- *     tags: [Pipeline]
- *     summary: Record a story outcome from the execution engine
- *     operationId: recordStoryResult
- *     description: Called by run-loop.ts or execution-engine.ts to insert a story_results row after a story finishes. Also records token usage into the analytics table when tokens are present.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [runId, storyId, status]
- *             properties:
- *               runId: { type: integer, description: "Pipeline run ID" }
- *               storyId: { type: string, description: "Story ID (e.g. US-001)" }
- *               status: { type: string, enum: [pass, fail, skip, excluded] }
- *               worktreePath: { type: string, nullable: true }
- *               worktreeBranch: { type: string, nullable: true }
- *               inputTokens: { type: integer, nullable: true }
- *               outputTokens: { type: integer, nullable: true }
- *               modelUsed: { type: string, nullable: true }
- *               costUsd: { type: number, nullable: true }
- *               logPath: { type: string, nullable: true }
- *               blockedBy: { type: array, items: { type: string }, nullable: true }
- *               activeSkills: { type: array, items: { type: string }, nullable: true }
- *     responses:
- *       201: { description: "Story result recorded" }
- *       400: { description: "Missing required fields or invalid status" }
- *       500: { description: "Internal server error" }
- */
-router.post('/story-result', async (req: Request, res: Response) => {
+router.post('/story-result', (req: Request, res: Response) => {
   try {
     const {
       runId, storyId, status, worktreePath, worktreeBranch,
       inputTokens, outputTokens, modelUsed, costUsd,
-      logPath, blockedBy, activeSkills,
+      logPath, blockedBy,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string;
       inputTokens?: number; outputTokens?: number; modelUsed?: string; costUsd?: number;
-      logPath?: string; blockedBy?: string[]; activeSkills?: string[];
+      logPath?: string; blockedBy?: string[];
     };
 
     if (!runId || !storyId || !status) {
@@ -3940,14 +3419,17 @@ router.post('/story-result', async (req: Request, res: Response) => {
       return;
     }
 
-    await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by, active_skills)
-       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12)`, [runId, storyId, status,
+    db.prepare(
+      `INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by)
+       VALUES (?, ?, ?, datetime('now'), ?, ?, ?, ?, ?, ?, ?, ?)`
+    ).run(
+      runId, storyId, status,
       worktreePath ?? null, worktreeBranch ?? null,
       inputTokens ?? null, outputTokens ?? null,
       modelUsed ?? null, costUsd ?? null,
       logPath ?? null,
       blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
-      activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,]);
+    );
 
     // Also record into token_usage analytics table if tokens are present
     if ((inputTokens && inputTokens > 0) || (outputTokens && outputTokens > 0)) {
@@ -3956,7 +3438,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
 
     res.status(201).json({ ok: true });
   } catch (error: any) {
-    logger.error('[Pipeline] Story result error:', error);
+    console.error('[Pipeline] Story result error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -3964,40 +3446,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
 // ─── POST /api/pipeline/runs/:runId/stories/:storyId/tokens — Record token usage ─
 // Allows run-loop.ts or external callers to report token usage for a story.
 
-/**
- * @swagger
- * /api/pipeline/runs/{runId}/stories/{storyId}/tokens:
- *   post:
- *     tags: [Pipeline]
- *     summary: Record token usage for a story
- *     operationId: recordStoryTokenUsage
- *     description: Updates the story_results row with token counts and records an entry in the token_usage analytics table. Called by run-loop.ts or external callers.
- *     parameters:
- *       - in: path
- *         name: runId
- *         required: true
- *         schema: { type: integer }
- *       - in: path
- *         name: storyId
- *         required: true
- *         schema: { type: string }
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             properties:
- *               inputTokens: { type: integer, description: "Number of input tokens consumed" }
- *               outputTokens: { type: integer, description: "Number of output tokens consumed" }
- *               model: { type: string, description: "Model name used for this story" }
- *     responses:
- *       200: { description: "Token usage recorded" }
- *       400: { description: "Invalid runId or missing token counts" }
- *       404: { description: "Story result not found for this run and story" }
- *       500: { description: "Internal server error" }
- */
-router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Response) => {
+router.post('/runs/:runId/stories/:storyId/tokens', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     const storyId = String(req.params.storyId);
@@ -4014,21 +3463,25 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
     }
 
     // Find the latest story_result row for this run + storyId
-    const row = await queryOne(`SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2 ORDER BY id DESC LIMIT 1`, [runId, storyId]) as { id: number } | undefined;
+    const row = db.prepare(
+      `SELECT id FROM story_results WHERE run_id = ? AND story_id = ? ORDER BY id DESC LIMIT 1`
+    ).get(runId, storyId) as { id: number } | undefined;
 
     if (!row) {
       res.status(404).json({ error: 'Story result not found' });
       return;
     }
 
-    await execute(`UPDATE story_results SET input_tokens = COALESCE($1, input_tokens), output_tokens = COALESCE($2, output_tokens) WHERE id = $3`, [inputTokens ?? null, outputTokens ?? null, row.id]);
+    db.prepare(
+      `UPDATE story_results SET input_tokens = COALESCE(?, input_tokens), output_tokens = COALESCE(?, output_tokens) WHERE id = ?`
+    ).run(inputTokens ?? null, outputTokens ?? null, row.id);
 
     // Also record into token_usage analytics table
     recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, model);
 
     res.json({ ok: true });
   } catch (error: any) {
-    logger.error('[Pipeline] Record tokens error:', error);
+    console.error('[Pipeline] Record tokens error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4036,49 +3489,7 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
 // ─── GET /api/pipeline/runs/:runId/stories/:storyId/output — Last N lines of story output ─
 // Extracts the story's log section from the run log file or returns WAL failure info.
 
-/**
- * @swagger
- * /api/pipeline/runs/{runId}/stories/{storyId}/output:
- *   get:
- *     tags: [Pipeline]
- *     summary: Get last N lines of a story's output
- *     operationId: getStoryOutput
- *     description: Returns the tail of a story's log output extracted from the per-story log file, the run log file, or the in-memory buffer. Also includes failure reason and blocked-by info from WAL events.
- *     parameters:
- *       - in: path
- *         name: runId
- *         required: true
- *         schema: { type: integer }
- *       - in: path
- *         name: storyId
- *         required: true
- *         schema: { type: string }
- *       - in: query
- *         name: lines
- *         schema: { type: integer, default: 20, maximum: 100 }
- *         description: Number of lines to return (max 100)
- *     responses:
- *       200:
- *         description: Story output lines with metadata
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 storyId: { type: string }
- *                 runId: { type: integer }
- *                 status: { type: string }
- *                 retries: { type: integer }
- *                 failureReason: { type: string, nullable: true }
- *                 failureAttempts: { type: integer, nullable: true }
- *                 blockedBy: { type: array, items: { type: string }, nullable: true }
- *                 output: { type: array, items: { type: string } }
- *                 lineCount: { type: integer }
- *       400: { description: "Invalid runId" }
- *       404: { description: "Story result not found" }
- *       500: { description: "Internal server error" }
- */
-router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Response) => {
+router.get('/runs/:runId/stories/:storyId/output', (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     const storyId = String(req.params.storyId);
@@ -4090,7 +3501,9 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     }
 
     // 1. Check story_result exists
-    const storyResult = await queryOne(`SELECT * FROM story_results WHERE run_id = $1 AND story_id = $2 ORDER BY id DESC LIMIT 1`, [runId, storyId]) as StoryResultRow | undefined;
+    const storyResult = db.prepare(
+      `SELECT * FROM story_results WHERE run_id = ? AND story_id = ? ORDER BY id DESC LIMIT 1`
+    ).get(runId, storyId) as StoryResultRow | undefined;
 
     if (!storyResult) {
       res.status(404).json({ error: 'Story result not found' });
@@ -4098,7 +3511,9 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     }
 
     // 2. Try to get failure details from WAL events
-    const walEvent = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'story_failed' AND story_id = $1 AND payload::text LIKE $2 ORDER BY id DESC LIMIT 1`, [storyId, `%"run_id":${runId}%`]) as { payload: string } | undefined;
+    const walEvent = db.prepare(
+      `SELECT payload FROM wal_events WHERE event_type = 'story_failed' AND story_id = ? AND payload LIKE ? ORDER BY id DESC LIMIT 1`
+    ).get(storyId, `%"run_id":${runId}%`) as { payload: string } | undefined;
 
     let failureReason: string | null = null;
     let failureAttempts: number | null = null;
@@ -4131,7 +3546,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     }
 
     // 4. Fallback: Try to extract story output from the run log file
-    const logPath = await resolveLogPath(runId);
+    const logPath = resolveLogPath(runId);
     if (outputLines.length === 0 && logPath) {
       try {
         const content = fs.readFileSync(logPath, 'utf-8');
@@ -4200,7 +3615,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
       lineCount: outputLines.length,
     });
   } catch (error: any) {
-    logger.error('[Pipeline] Story output error:', error);
+    console.error('[Pipeline] Story output error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4209,33 +3624,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
 // Streams a per-story log file as SSE chunks (same protocol as /runs/:runId/output).
 // Used by the multi-pane terminal grid when parallelism > 1.
 
-/**
- * @swagger
- * /api/pipeline/runs/{runId}/stories/{storyId}/log:
- *   get:
- *     tags: [Pipeline]
- *     summary: Stream per-story log output via SSE
- *     operationId: streamStoryLog
- *     description: Opens an SSE connection that streams a per-story log file in real time. Used by the multi-pane terminal grid for parallel story execution. Emits base64-encoded output chunks and semantic_step events.
- *     parameters:
- *       - in: path
- *         name: runId
- *         required: true
- *         schema: { type: integer }
- *       - in: path
- *         name: storyId
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       200:
- *         description: SSE stream of log chunks
- *         content:
- *           text/event-stream:
- *             schema:
- *               type: string
- *       400: { description: "Invalid runId" }
- */
-router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Response) => {
+router.get('/runs/:runId/stories/:storyId/log', (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.runId), 10);
   const storyId = String(req.params.storyId);
   if (isNaN(runId)) {
@@ -4253,14 +3642,17 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
 
   // Resolve agent type for semantic parsing
-  const runRow = await queryOne('SELECT agent, workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { agent: string; workspace_id: string } | undefined;
+  const runRow = db.prepare('SELECT agent, workspace_id FROM pipeline_runs WHERE id = ?')
+    .get(runId) as { agent: string; workspace_id: string } | undefined;
   const agent = runRow?.agent ?? 'claude';
 
   // Find story log file: check WAL event payload first, then scan forge/logs/
   let storyLogPath: string | null = null;
 
   // 1. Check story_started WAL event for log_file path
-  const walRow = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND payload::text LIKE $2 ORDER BY id DESC LIMIT 1`, [storyId, `%"run_id":${runId}%`]) as { payload: string } | undefined;
+  const walRow = db.prepare(
+    `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = ? AND payload LIKE ? ORDER BY id DESC LIMIT 1`
+  ).get(storyId, `%"run_id":${runId}%`) as { payload: string } | undefined;
   if (walRow?.payload) {
     try {
       const payload = JSON.parse(walRow.payload);
@@ -4272,7 +3664,8 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
 
   // 2. Fallback: scan forge/logs/ for <storyId>_*.log pattern
   if (!storyLogPath && runRow?.workspace_id) {
-    const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [runRow.workspace_id]) as { path: string } | undefined;
+    const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?')
+      .get(runRow.workspace_id) as { path: string } | undefined;
     if (workspace) {
       const logDir = path.join(workspace.path, 'forge', 'logs');
       if (fs.existsSync(logDir)) {
@@ -4294,9 +3687,11 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
     res.write(`event: status\ndata: waiting\n\n`);
 
     // Poll every 500ms for the log file to appear
-    const pollForLog = setInterval(async () => {
+    const pollForLog = setInterval(() => {
       // Re-check WAL event
-      const freshWal = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND payload::text LIKE $2 ORDER BY id DESC LIMIT 1`, [storyId, `%"run_id":${runId}%`]) as { payload: string } | undefined;
+      const freshWal = db.prepare(
+        `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = ? AND payload LIKE ? ORDER BY id DESC LIMIT 1`
+      ).get(storyId, `%"run_id":${runId}%`) as { payload: string } | undefined;
       if (freshWal?.payload) {
         try {
           const payload = JSON.parse(freshWal.payload);
@@ -4310,7 +3705,9 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
       }
 
       // Check if story already finished (no log will come)
-      const finishEvent = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND payload::text LIKE $2 LIMIT 1`, [storyId, `%"run_id":${runId}%`]);
+      const finishEvent = db.prepare(
+        `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = ? AND payload LIKE ? LIMIT 1`
+      ).get(storyId, `%"run_id":${runId}%`);
       if (finishEvent) {
         clearInterval(pollForLog);
         clearInterval(hb);
@@ -4335,7 +3732,7 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
 });
 
 /** Tail a story log file and stream as SSE chunks. */
-async function startTailing(logPath: string, agent: string, res: Response, hb: ReturnType<typeof setInterval>, runId: number, storyId: string): Promise<void> {
+function startTailing(logPath: string, agent: string, res: Response, hb: ReturnType<typeof setInterval>, runId: number, storyId: string): void {
   // Replay existing content
   let offset = 0;
   try {
@@ -4348,7 +3745,9 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
   } catch { /* file may have disappeared */ }
 
   // Check if story already finished
-  const finishEvent = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND payload::text LIKE $2 LIMIT 1`, [storyId, `%"run_id":${runId}%`]);
+  const finishEvent = db.prepare(
+    `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = ? AND payload LIKE ? LIMIT 1`
+  ).get(storyId, `%"run_id":${runId}%`);
   if (finishEvent) {
     clearInterval(hb);
     res.write('event: done\ndata: \n\n');
@@ -4357,7 +3756,7 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
   }
 
   // Tail the log file — poll for new bytes every 200 ms
-  const tailInterval = setInterval(async () => {
+  const tailInterval = setInterval(() => {
     try {
       const stat = fs.statSync(logPath);
       if (stat.size > offset) {
@@ -4372,7 +3771,9 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
       }
 
       // Check if story finished
-      const done = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND payload::text LIKE $2 LIMIT 1`, [storyId, `%"run_id":${runId}%`]);
+      const done = db.prepare(
+        `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = ? AND payload LIKE ? LIMIT 1`
+      ).get(storyId, `%"run_id":${runId}%`);
       if (done) {
         // Read any final bytes
         const finalStat = fs.statSync(logPath);
@@ -4413,7 +3814,6 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
  *   get:
  *     tags: [Pipeline]
  *     summary: Stream WAL events (SSE)
- *     operationId: streamPipelineEvents
  *     description: Server-Sent Events stream of WAL events (story progress). Polls wal_events table every 3s.
  *     parameters:
  *       - in: query
@@ -4428,7 +3828,7 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
  *             schema:
  *               type: string
  */
-router.get('/stream', async (req: Request, res: Response) => {
+router.get('/stream', (req: Request, res: Response) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -4448,47 +3848,27 @@ router.get('/stream', async (req: Request, res: Response) => {
 
   // Also poll WAL for events (catch events from external processes like Ralph)
   const runId = req.query.runId as string;
-  const wsId = req.query.workspaceId as string | undefined;
-
-  // Resolve workspace_id from the run if not provided explicitly
-  let resolvedWsId = wsId ?? null;
-  if (!resolvedWsId && runId) {
-    const runRow = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [Number(runId)]) as { workspace_id: number } | undefined;
-    if (runRow) resolvedWsId = String(runRow.workspace_id);
-  }
-
   let lastSeenId = 0;
-  const pollInterval = setInterval(async () => {
+  const pollInterval = setInterval(() => {
     try {
       let events;
-      if (runId && resolvedWsId) {
-        events = await query(`SELECT * FROM wal_events
-           WHERE id > $1
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND payload::text LIKE $2
-             AND workspace_id = $3
+      if (runId) {
+        events = db.prepare(
+          `SELECT * FROM wal_events
+           WHERE id > ?
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
+             AND payload LIKE ?
            ORDER BY id ASC
-           LIMIT 50`, [lastSeenId, `%"run_id":${runId}%`, resolvedWsId]);
-      } else if (runId) {
-        events = await query(`SELECT * FROM wal_events
-           WHERE id > $1
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND payload::text LIKE $2
-           ORDER BY id ASC
-           LIMIT 50`, [lastSeenId, `%"run_id":${runId}%`]);
-      } else if (resolvedWsId) {
-        events = await query(`SELECT * FROM wal_events
-           WHERE id > $1
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND workspace_id = $2
-           ORDER BY id ASC
-           LIMIT 50`, [lastSeenId, resolvedWsId]);
+           LIMIT 50`
+        ).all(lastSeenId, `%"run_id":${runId}%`);
       } else {
-        events = await query(`SELECT * FROM wal_events
-           WHERE id > $1
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
+        events = db.prepare(
+          `SELECT * FROM wal_events
+           WHERE id > ?
+             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
            ORDER BY id ASC
-           LIMIT 50`, [lastSeenId]);
+           LIMIT 50`
+        ).all(lastSeenId);
       }
 
       for (const event of events as any[]) {
@@ -4503,9 +3883,13 @@ router.get('/stream', async (req: Request, res: Response) => {
             if (payload.input_tokens != null || payload.output_tokens != null) {
               const runIdFromPayload = payload.run_id;
               if (runIdFromPayload) {
-                const storyRow = await queryOne(`SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2 ORDER BY id DESC LIMIT 1`, [runIdFromPayload, event.story_id]) as { id: number } | undefined;
+                const storyRow = db.prepare(
+                  `SELECT id FROM story_results WHERE run_id = ? AND story_id = ? ORDER BY id DESC LIMIT 1`
+                ).get(runIdFromPayload, event.story_id) as { id: number } | undefined;
                 if (storyRow) {
-                  await execute(`UPDATE story_results SET input_tokens = COALESCE($1, input_tokens), output_tokens = COALESCE($2, output_tokens) WHERE id = $3`, [payload.input_tokens ?? null, payload.output_tokens ?? null, storyRow.id]);
+                  db.prepare(
+                    `UPDATE story_results SET input_tokens = COALESCE(?, input_tokens), output_tokens = COALESCE(?, output_tokens) WHERE id = ?`
+                  ).run(payload.input_tokens ?? null, payload.output_tokens ?? null, storyRow.id);
                 }
                 // Record into token_usage analytics table
                 recordTokenUsage(
@@ -4540,8 +3924,6 @@ router.get('/stream', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Pipeline]
  *     summary: Download raw pipeline log file
- *     operationId: downloadPipelineLog
- *     description: Returns the raw log file for a completed pipeline run as a downloadable text/plain attachment.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -4555,14 +3937,14 @@ router.get('/stream', async (req: Request, res: Response) => {
  *             schema: { type: string }
  *       404: { description: "Log file not found" }
  */
-router.get('/runs/:runId/log', async (req: Request, res: Response) => {
+router.get('/runs/:runId/log', (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.runId), 10);
   if (isNaN(runId)) {
     res.status(400).json({ error: 'Invalid runId' });
     return;
   }
 
-  const logPath = await resolveLogPath(runId);
+  const logPath = resolveLogPath(runId);
   if (!logPath) {
     res.status(404).json({ error: 'Log file not found for this run' });
     return;
@@ -4581,12 +3963,14 @@ router.get('/runs/:runId/log', async (req: Request, res: Response) => {
 
 const LOG_RETENTION_DAYS = 30;
 
-export async function cleanupOldLogs(): Promise<number> {
+export function cleanupOldLogs(): number {
   const cutoff = Date.now() - LOG_RETENTION_DAYS * 24 * 60 * 60 * 1000;
   let deleted = 0;
 
   // Clean logs referenced in pipeline_runs.log_path
-  const rows = await query(`SELECT id, log_path FROM pipeline_runs WHERE log_path IS NOT NULL AND finished_at IS NOT NULL`) as { id: number; log_path: string }[];
+  const rows = db.prepare(
+    `SELECT id, log_path FROM pipeline_runs WHERE log_path IS NOT NULL AND finished_at IS NOT NULL`
+  ).all() as { id: number; log_path: string }[];
 
   for (const row of rows) {
     try {
@@ -4601,7 +3985,9 @@ export async function cleanupOldLogs(): Promise<number> {
   }
 
   // Also clean legacy /tmp logs for old runs without log_path
-  const legacyRows = await query(`SELECT id FROM pipeline_runs WHERE log_path IS NULL AND finished_at IS NOT NULL`) as { id: number }[];
+  const legacyRows = db.prepare(
+    `SELECT id FROM pipeline_runs WHERE log_path IS NULL AND finished_at IS NOT NULL`
+  ).all() as { id: number }[];
 
   for (const row of legacyRows) {
     try {
@@ -4617,7 +4003,7 @@ export async function cleanupOldLogs(): Promise<number> {
   }
 
   if (deleted > 0) {
-    logger.info(`[Pipeline] Cleaned up ${deleted} log file(s) older than ${LOG_RETENTION_DAYS} days`);
+    console.log(`[Pipeline] Cleaned up ${deleted} log file(s) older than ${LOG_RETENTION_DAYS} days`);
   }
   return deleted;
 }
@@ -4630,8 +4016,6 @@ export async function cleanupOldLogs(): Promise<number> {
  *   get:
  *     tags: [Pipeline]
  *     summary: Get git commits for a pipeline run's branch
- *     operationId: getPipelineRunCommits
- *     description: Returns the list of git commits made on the pipeline run's feature branch since it diverged from main.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -4650,14 +4034,17 @@ router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
+    const run = db.prepare(
+      'SELECT * FROM pipeline_runs WHERE id = ?'
+    ).get(runId) as PipelineRunRow | undefined;
 
     if (!run) {
       res.status(404).json({ error: 'Run not found' });
       return;
     }
 
-    const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
+    const workspace = db.prepare('SELECT path FROM workspaces WHERE id = ?')
+      .get(run.workspace_id) as { path: string } | undefined;
 
     if (!workspace) {
       res.status(404).json({ error: 'Workspace not found' });
@@ -4708,170 +4095,12 @@ router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
       }
     } catch (gitErr: any) {
       // Branch may not exist yet or repo issues
-      logger.warn(`[Pipeline] Git log error for run ${runId}:`, gitErr.message);
+      console.warn(`[Pipeline] Git log error for run ${runId}:`, gitErr.message);
     }
 
     res.json({ commits, branchName: branchName || null });
   } catch (error: any) {
-    logger.error('[Pipeline] Get run commits error:', error);
-    res.status(500).json({ error: error.message });
-  }
-});
-
-// ─── SL-004: Skills Usage Per-Run API Endpoint ──────────────────────────────
-
-/**
- * @swagger
- * /api/pipeline/runs/{runId}/skills:
- *   get:
- *     summary: Get per-story skill usage data for a specific pipeline run
- *     tags: [Pipeline]
- *     parameters:
- *       - in: path
- *         name: runId
- *         required: true
- *         schema:
- *           type: integer
- *     responses:
- *       200:
- *         description: Skill usage data with per-story breakdown and run-level summary
- *       400:
- *         description: Invalid runId
- *       404:
- *         description: Run not found
- */
-router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
-  try {
-    const runId = parseInt(String(req.params.runId), 10);
-    if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
-      return;
-    }
-
-    const run = await queryOne('SELECT id, spec_path, workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { id: number; spec_path: string; workspace_id: string } | undefined;
-
-    if (!run) {
-      res.status(404).json({ error: 'Run not found' });
-      return;
-    }
-
-    // Get all story results for this run
-    const storyRows = await query('SELECT story_id, status, active_skills FROM story_results WHERE run_id = $1 ORDER BY id ASC', [runId]) as Array<{ story_id: string; status: string; active_skills: string | null }>;
-
-    // Try to read spec JSON for suggestedSkills and story titles
-    const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
-
-    let specStories: Array<{
-      id: string;
-      title: string;
-      suggestedSkills?: Array<{ name: string; relevance: number; reason: string }>;
-    }> = [];
-
-    if (workspace) {
-      try {
-        const absSpecPath = path.join(workspace.path, run.spec_path);
-        const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
-        specStories = specJson.userStories || [];
-      } catch {
-        // Spec file missing/unreadable — titles and relevance will be null
-      }
-    }
-
-    // Build title and suggestedSkills lookup maps
-    const titleMap = new Map<string, string>();
-    const skillSuggestionsMap = new Map<string, Array<{ name: string; relevance: number; reason: string }>>();
-    for (const s of specStories) {
-      titleMap.set(s.id, s.title);
-      if (s.suggestedSkills) {
-        skillSuggestionsMap.set(s.id, s.suggestedSkills);
-      }
-    }
-
-    // Get installed skill descriptions
-    const installedSkills = await query('SELECT name, description FROM installed_skills') as Array<{ name: string; description: string }>;
-    const descriptionMap = new Map<string, string>();
-    for (const sk of installedSkills) {
-      descriptionMap.set(sk.name, sk.description);
-    }
-
-    // Build per-story data
-    const skillCounts = new Map<string, { count: number; passCount: number; totalCount: number }>();
-
-    const perStory = storyRows.map((row) => {
-      let activeSkillNames: string[] = [];
-      if (row.active_skills) {
-        try {
-          activeSkillNames = JSON.parse(row.active_skills);
-        } catch { /* malformed JSON */ }
-      }
-
-      const suggestions = skillSuggestionsMap.get(row.story_id) || [];
-      const suggestionMap = new Map<string, { relevance: number; reason: string }>();
-      for (const s of suggestions) {
-        suggestionMap.set(s.name, { relevance: s.relevance, reason: s.reason });
-      }
-
-      // If active_skills was never recorded (older runs), fall back to suggestedSkills from spec
-      const skillNamesToShow = activeSkillNames.length > 0
-        ? activeSkillNames
-        : suggestions.map(s => s.name);
-
-      const skills = skillNamesToShow.map((name) => {
-        const suggestion = suggestionMap.get(name);
-        return {
-          name,
-          relevance: suggestion?.relevance ?? null,
-          reason: suggestion?.reason ?? null,
-          description: descriptionMap.get(name) ?? null,
-          category: null as string | null,
-        };
-      });
-
-      // Update frequency counts (use the names actually shown)
-      for (const name of skillNamesToShow) {
-        const existing = skillCounts.get(name) || { count: 0, passCount: 0, totalCount: 0 };
-        existing.count++;
-        existing.totalCount++;
-        if (row.status === 'pass') existing.passCount++;
-        skillCounts.set(name, existing);
-      }
-
-      return {
-        storyId: row.story_id,
-        storyTitle: titleMap.get(row.story_id) || row.story_id,
-        storyStatus: row.status,
-        skills,
-      };
-    });
-
-    // Build summary
-    const skillFrequency = Array.from(skillCounts.entries())
-      .map(([name, data]) => ({
-        name,
-        count: data.count,
-        passRate: data.totalCount > 0 ? data.passCount / data.totalCount : 0,
-        category: null as string | null,
-      }))
-      .sort((a, b) => b.count - a.count);
-
-    const uniqueSkills = skillFrequency.map((s) => s.name);
-    const storiesWithSkills = perStory.filter((s) => s.skills.length > 0).length;
-    const storiesWithoutSkills = perStory.filter((s) => s.skills.length === 0).length;
-    const totalSkillInjections = perStory.reduce((sum, s) => sum + s.skills.length, 0);
-
-    res.json({
-      runId,
-      perStory,
-      summary: {
-        totalSkillInjections,
-        uniqueSkills,
-        skillFrequency,
-        storiesWithSkills,
-        storiesWithoutSkills,
-      },
-    });
-  } catch (error: any) {
-    logger.error('[Pipeline] Get run skills error:', error);
+    console.error('[Pipeline] Get run commits error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -4880,8 +4109,10 @@ router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
 // Scans pipeline_runs WHERE status='running', kills orphan PIDs (engine + OpenCode server),
 // marks runs as failed. Called once at server startup.
 
-export async function cleanupOrphanRuns(): Promise<number> {
-  const staleRuns = await query(`SELECT id, pid, opencode_server_pid, workspace_id, agent_type FROM pipeline_runs WHERE status IN ('running', 'paused')`) as Array<{
+export function cleanupOrphanRuns(): number {
+  const staleRuns = db.prepare(
+    `SELECT id, pid, opencode_server_pid, workspace_id, agent_type FROM pipeline_runs WHERE status IN ('running', 'paused')`
+  ).all() as Array<{
     id: number;
     pid: number | null;
     opencode_server_pid: number | null;
@@ -4900,7 +4131,7 @@ export async function cleanupOrphanRuns(): Promise<number> {
         process.kill(run.pid, 0); // Check alive
         try {
           process.kill(-run.pid, 'SIGTERM'); // Kill process group
-          logger.info(`[Cleanup] Sent SIGTERM to engine PID ${run.pid} (run ${run.id})`);
+          console.log(`[Cleanup] Sent SIGTERM to engine PID ${run.pid} (run ${run.id})`);
         } catch {
           try { process.kill(run.pid, 'SIGTERM'); } catch { /* already dead */ }
         }
@@ -4915,7 +4146,7 @@ export async function cleanupOrphanRuns(): Promise<number> {
         process.kill(run.opencode_server_pid, 0); // Check alive
         try {
           process.kill(run.opencode_server_pid, 'SIGTERM');
-          logger.info(`[Cleanup] Sent SIGTERM to OpenCode server PID ${run.opencode_server_pid} (run ${run.id})`);
+          console.log(`[Cleanup] Sent SIGTERM to OpenCode server PID ${run.opencode_server_pid} (run ${run.id})`);
         } catch { /* already dead */ }
       } catch {
         // Process already dead — expected
@@ -4923,168 +4154,38 @@ export async function cleanupOrphanRuns(): Promise<number> {
     }
 
     // Mark run as failed
-    await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`, [run.id]);
+    db.prepare(
+      `UPDATE pipeline_runs SET status = 'failed', finished_at = datetime('now') WHERE id = ?`
+    ).run(run.id);
 
     // Emit WAL event
     try {
-      const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [run.workspace_id, JSON.stringify({
+      const walResult = db.prepare(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', ?, ?)`
+      ).run(run.workspace_id, JSON.stringify({
         run_id: run.id,
         status: 'failed',
         reason: 'orphan_cleanup',
         error: 'Run was still marked as running after backend restart — process likely crashed.',
         agent_type: run.agent_type ?? 'claude',
-      })]);
-      broadcastAll(walEvent!);
+      }));
+      const walEvent = db.prepare('SELECT * FROM wal_events WHERE id = ?').get(
+        walResult.lastInsertRowid
+      ) as WalEvent;
+      broadcastAll(walEvent);
     } catch {
       // WAL emit failure is non-fatal during startup cleanup
     }
 
     cleaned++;
-    logger.info(`[Cleanup] Run ${run.id} (agent: ${run.agent_type ?? 'claude'}) marked as failed (orphan cleanup)`);
+    console.log(`[Cleanup] Run ${run.id} (agent: ${run.agent_type ?? 'claude'}) marked as failed (orphan cleanup)`);
   }
 
   if (cleaned > 0) {
-    logger.info(`[Cleanup] Cleaned up ${cleaned} orphan run(s)`);
+    console.log(`[Cleanup] Cleaned up ${cleaned} orphan run(s)`);
   }
 
   return cleaned;
 }
-
-/**
- * @swagger
- * /api/pipeline/queue:
- *   post:
- *     summary: Smart run trigger — start immediately or queue if a run is active
- *     description: >
- *       Checks for an active run in the workspace. If none, triggers the run immediately.
- *       If one is active, queues the run and returns its position. Accepts workspaceId + specId
- *       (filename slug) instead of specPath for convenience.
- *     tags: [Pipeline]
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [workspaceId, specId]
- *             properties:
- *               workspaceId:
- *                 type: string
- *                 description: Rorca workspace ID
- *               specId:
- *                 type: string
- *                 description: Spec slug (filename without .json)
- *     responses:
- *       200:
- *         description: Run started immediately
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 queued:
- *                   type: boolean
- *                   example: false
- *                 runId:
- *                   type: number
- *                 message:
- *                   type: string
- *                   example: "Run started immediately"
- *       202:
- *         description: Run queued (active run exists)
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 queued:
- *                   type: boolean
- *                   example: true
- *                 queuePosition:
- *                   type: number
- *                 activeRunId:
- *                   type: number
- *                 message:
- *                   type: string
- *                   example: "Run queued, position 2"
- *       404:
- *         description: Workspace or spec not found
- */
-router.post('/queue', async (req: Request, res: Response) => {
-  try {
-    const { workspaceId, specId } = req.body as { workspaceId?: string; specId?: string };
-
-    if (!workspaceId || !specId) {
-      res.status(400).json({ error: 'workspaceId and specId are required' });
-      return;
-    }
-
-    // Validate workspace exists
-    const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]) as
-      { id: string } | undefined;
-    if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
-      return;
-    }
-
-    // Validate spec file exists
-    const workspaceRow = await queryOne('SELECT path FROM workspaces WHERE id = $1', [workspaceId]) as
-      { path: string } | undefined;
-    const specPath = `forge/specs/approved/${specId}.json`;
-    const absSpecPath = path.join(workspaceRow!.path, specPath);
-    if (!fs.existsSync(absSpecPath)) {
-      res.status(404).json({ error: `Spec not found at ${specPath}` });
-      return;
-    }
-
-    // Check for active run
-    const activeRun = await queryOne(
-      `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') LIMIT 1`,
-      [workspaceId]
-    ) as { id: number } | undefined;
-
-    if (!activeRun) {
-      // No active run — trigger immediately
-      const triggerRes = await fetch(`http://localhost:${process.env.PORT || 3030}/api/pipeline/trigger`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId, specPath }),
-      });
-      const triggerData = await triggerRes.json() as Record<string, unknown>;
-      if (!triggerRes.ok) {
-        res.status(triggerRes.status).json(triggerData);
-        return;
-      }
-      res.json({
-        queued: false,
-        runId: triggerData.runId,
-        message: 'Run started immediately',
-      });
-      return;
-    }
-
-    // Active run exists — queue it
-    const triggerRes = await fetch(`http://localhost:${process.env.PORT || 3030}/api/pipeline/trigger`, {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ workspaceId, specPath, queue: true }),
-    });
-    const triggerData = await triggerRes.json() as Record<string, unknown>;
-    if (!triggerRes.ok) {
-      res.status(triggerRes.status).json(triggerData);
-      return;
-    }
-    const queuePosition = (triggerData.position as number) ?? 1;
-    res.status(202).json({
-      queued: true,
-      queuePosition,
-      activeRunId: activeRun.id,
-      message: `Run queued, position ${queuePosition}`,
-    });
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    res.status(500).json({ error: msg });
-  }
-});
 
 export default router;
