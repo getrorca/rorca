@@ -106,6 +106,7 @@ interface KanbanSpec {
   activeRunStatus?: 'running' | 'queued';
   queuePosition?: number;
   model?: string;
+  attachments?: import('../types').Attachment[];
 }
 
 interface CustomColumnData {
