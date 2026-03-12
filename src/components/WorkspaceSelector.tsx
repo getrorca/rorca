@@ -2,13 +2,13 @@ import { useState, useRef, useEffect } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import AddWorkspaceModal from './AddWorkspaceModal';
-import { Settings, LogOut, ChevronDown, Plus, Check, FolderOpen } from 'lucide-react';
+import { Settings, LogOut, ChevronDown, Plus, Check } from 'lucide-react';
 
 interface WorkspaceSelectorProps {
     onNavigateSettings?: () => void;
 }
 
-export default function WorkspaceSelector({ onNavigateSettings }: WorkspaceSelectorProps) {
+export default function WorkspaceSelector({ onNavigateSettings: _onNavigateSettings }: WorkspaceSelectorProps) {
     const { workspaceId, setWorkspaceId, workspaces, addWorkspace } = useWorkspace();
     const { logout } = useAuth();
     const [open, setOpen] = useState(false);

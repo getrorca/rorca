@@ -1,5 +1,5 @@
 import { useState, useEffect } from 'react';
-import { User, Save, Loader2, Trash2, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, CheckCircle2, XCircle, Crown, Users, ChevronDown, ChevronUp, Download, ExternalLink, FileText, CreditCard, Shield, Sun, Moon, Monitor } from 'lucide-react';
+import { Save, Loader2, Trash2, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, XCircle, Crown, Users, ChevronDown, ChevronUp, Download, ExternalLink, FileText, Shield, Sun, Moon, Monitor } from 'lucide-react';
 import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
 import { apiFetch, clearTokens } from '../../lib/apiFetch';

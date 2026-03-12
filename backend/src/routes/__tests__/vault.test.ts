@@ -4,7 +4,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
-import { query, queryOne, execute } from '../../db/index';
+import { queryOne } from '../../db/index';
 
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
@@ -39,7 +39,7 @@ beforeEach(async () => {
   }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-vault-test-'));
-  const dbPath = path.join(tmpDir, 'test.db');
+  const _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');

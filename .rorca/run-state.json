@@ -1,53 +1,58 @@
 {
-  "specId": "rorca-ensure-postgres",
-  "runId": 1,
-  "startedAt": "2026-03-12T18:19:22.650Z",
-  "lastUpdatedAt": "2026-03-12T18:42:25.342Z",
+  "specId": "rorca-post-run-qa",
+  "runId": 51,
+  "startedAt": "2026-03-12T07:21:44.343Z",
+  "lastUpdatedAt": "2026-03-12T09:27:17.046Z",
   "completedStories": [
     {
-      "storyId": "US-001",
-      "title": "Platform detection and Postgres binary download",
+      "storyId": "QA-001",
+      "title": "Frontend TypeScript validation and error resolution",
       "status": "passed",
-      "startedAt": "2026-03-12T18:21:33.078Z",
-      "finishedAt": "2026-03-12T18:27:23.221Z",
+      "startedAt": "2026-03-12T07:26:47.453Z",
+      "finishedAt": "2026-03-12T07:31:09.491Z",
       "agentType": "claude",
-      "elapsedMs": 350143
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 261725
     },
     {
-      "storyId": "US-002",
-      "title": "Extract archive and run initdb to initialize data directory",
+      "storyId": "QA-002",
+      "title": "Backend TypeScript validation and error resolution",
       "status": "passed",
-      "startedAt": "2026-03-12T18:27:46.585Z",
-      "finishedAt": "2026-03-12T18:32:06.463Z",
+      "startedAt": "2026-03-12T07:32:16.831Z",
+      "finishedAt": "2026-03-12T07:50:43.656Z",
       "agentType": "claude",
-      "elapsedMs": 259878
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 1106825
     },
     {
-      "storyId": "US-003",
-      "title": "Start postgres process on port 5433 and create rorca user/database",
+      "storyId": "QA-001",
+      "title": "Frontend TypeScript validation and error resolution",
       "status": "passed",
-      "startedAt": "2026-03-12T18:32:32.546Z",
-      "finishedAt": "2026-03-12T18:32:47.985Z",
+      "startedAt": "2026-03-12T08:38:48.520Z",
+      "finishedAt": "2026-03-12T09:18:01.668Z",
       "agentType": "claude",
-      "elapsedMs": 15439
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 2353148
     },
     {
-      "storyId": "US-004",
-      "title": "Wire ensurePostgres() into bin/rorca.ts start command with graceful shutdown",
+      "storyId": "QA-002",
+      "title": "Backend TypeScript validation and error resolution",
       "status": "passed",
-      "startedAt": "2026-03-12T18:33:13.352Z",
-      "finishedAt": "2026-03-12T18:37:29.614Z",
+      "startedAt": "2026-03-12T09:18:23.408Z",
+      "finishedAt": "2026-03-12T09:19:23.546Z",
       "agentType": "claude",
-      "elapsedMs": 256262
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 60138
     },
     {
-      "storyId": "US-005",
-      "title": "Error handling, edge cases, and manual test of full zero-prereq startup",
+      "storyId": "QA-003",
+      "title": "ESLint validation and code quality fixes",
       "status": "passed",
-      "startedAt": "2026-03-12T18:37:49.074Z",
-      "finishedAt": "2026-03-12T18:42:25.342Z",
+      "startedAt": "2026-03-12T09:19:44.811Z",
+      "finishedAt": "2026-03-12T09:27:17.046Z",
       "agentType": "claude",
-      "elapsedMs": 276268
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 452235
     }
   ],
   "failedStories": [],

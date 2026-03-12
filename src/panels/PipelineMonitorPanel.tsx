@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Play, Terminal, Clock, ChevronRight, Copy, Check, List, XCircle, Loader2, Sparkles, ArrowRight } from 'lucide-react';
+import { Terminal, Clock, ChevronRight, List, XCircle, ArrowRight } from 'lucide-react';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
@@ -94,8 +94,8 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
   const { workspaceId } = useWorkspace();
   const navigateTo = useAppNavigate();
   const [runs, setRuns] = useState<PipelineRun[]>([]);
-  const [showStartHelp, setShowStartHelp] = useState(false);
-  const [copied, setCopied] = useState(false);
+  const [_showStartHelp, _setShowStartHelp] = useState(false);
+  const [_copied, setCopied] = useState(false);
   const [queueEntries, setQueueEntries] = useState<QueueEntry[]>([]);
   const [specPickerOpen, setSpecPickerOpen] = useState(false);
   const [cancellingRunId, setCancellingRunId] = useState<number | null>(null);
@@ -220,7 +220,7 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
     }
   }, [workspaceId, fetchQueue]);
 
-  const handleCopyCommand = () => {
+  const _handleCopyCommand = () => {
     const cmd = `./forge/run-loop.sh --json forge/specs/approved/<spec>.json`;
     navigator.clipboard.writeText(cmd);
     setCopied(true);

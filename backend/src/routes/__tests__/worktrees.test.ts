@@ -4,7 +4,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
-import { query, queryOne, execute } from '../../db/index';
+import { query, execute } from '../../db/index';
 
 // ─── Mock simple-git ────────────────────────────────────────────────────────
 
@@ -24,7 +24,7 @@ jest.mock('simple-git', () => ({
 
 let app: Express;
 let tmpDir: string;
-let dbPath: string;
+let _dbPath: string;
 let authToken: string;
 
 beforeEach(async () => {
@@ -41,7 +41,7 @@ beforeEach(async () => {
   mockMerge.mockResolvedValue({});
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-wt-test-'));
-  dbPath = path.join(tmpDir, 'test.db');
+  _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');

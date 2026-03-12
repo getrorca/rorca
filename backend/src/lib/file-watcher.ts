@@ -16,7 +16,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import chokidar, { type FSWatcher } from 'chokidar';
-import { query, queryOne, execute } from '../db/index';
+import { query, queryOne } from '../db/index';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { loadRorcaConfig } from './rorca-config';
 import { computeHealthReport } from './workspace-echolocation';

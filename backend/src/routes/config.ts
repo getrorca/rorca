@@ -5,7 +5,7 @@ import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
 import { getClaudeAuthState, triggerClaudeLogin, triggerClaudeLogout } from '../lib/claude-auth';
 import { getCodexAuthState, triggerCodexLogin, triggerCodexLogout } from '../lib/codex-auth';
-import { query, queryOne, execute } from '../db/index';
+import { queryOne, execute } from '../db/index';
 import { getVaultKey } from './vault';
 import { getProviderAsync, getProviderSource, invalidateProviderCache } from '../lib/embedding-pipeline';
 import { loadRorcaConfig, writeRorcaConfig, invalidateConfigCache } from '../lib/rorca-config';

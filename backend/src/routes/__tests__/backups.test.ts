@@ -35,7 +35,7 @@ beforeEach(async () => {
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-backup-test-'));
   backupDir = path.join(tmpDir, 'backups');
-  const dbPath = path.join(tmpDir, 'test.db');
+  const _dbPath = path.join(tmpDir, 'test.db');
 process.env.BACKUP_DIR = backupDir;
   process.env.NODE_ENV = 'test';
 

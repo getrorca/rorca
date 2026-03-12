@@ -1,5 +1,5 @@
 import { createContext, useContext, useCallback, useEffect, useState, type ReactNode } from 'react';
-import { apiFetch, BASE_URL, setTokens, clearTokens, getAccessToken, getRefreshToken } from '../lib/apiFetch';
+import { apiFetch, BASE_URL, setTokens, clearTokens, getRefreshToken } from '../lib/apiFetch';
 
 export interface AuthUser {
   id: string;

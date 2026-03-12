@@ -10,7 +10,8 @@
     "resolveJsonModule": true,
     "outDir": "dist",
     "rootDir": "src",
-    "declaration": true
+    "declaration": true,
+    "types": ["node", "jest"]
   },
   "include": ["src"],
   "exclude": ["src/db/bun-sqlite-shim.ts"]

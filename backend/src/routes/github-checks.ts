@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { queryOne, execute } from '../db/index';
+import { queryOne } from '../db/index';
 import { postCommitStatus, CHECK_NAME, type CheckState } from '../lib/github-checks';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';

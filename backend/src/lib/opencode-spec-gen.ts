@@ -10,7 +10,6 @@
 // Output is parsed from the JSON event stream to extract the final spec JSON.
 
 import { spawn } from 'child_process';
-import * as fs from 'fs';
 import { detectOpenCode } from './opencode-detector';
 import { OpenCodeStreamParser, type ParsedEvent } from './opencode-parser';
 import type { TokenUsage } from './llm-client';

@@ -4,7 +4,6 @@ import {
   parseOpenCodeStream,
   aggregateSignals,
   type OpenCodeEvent,
-  type ParsedEvent,
 } from '../opencode-parser';
 
 // ─── parseOpenCodeEvent ──────────────────────────────────────────────────────

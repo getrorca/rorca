@@ -6,7 +6,6 @@ import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
 import { PackLoader } from '../convention-packs';
-import type { Pack } from '../convention-packs';
 
 // ─── DB Mock (required by pack-registry import chain) ────────────────────────
 

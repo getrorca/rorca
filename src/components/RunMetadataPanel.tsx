@@ -59,7 +59,7 @@ function formatDuration(seconds: number): string {
   return `${h}h ${m % 60}m`;
 }
 
-function modelShortName(model: string): string {
+function _modelShortName(model: string): string {
   // "claude-sonnet-4-5-20250929" → "Sonnet 4.5"
   // "claude-opus-4-6" → "Opus 4.6"
   // "openai/gpt-4o" → "GPT-4o"
