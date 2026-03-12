@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { Search, ChevronDown, Check, Sparkles, Zap, Clock, Turtle } from 'lucide-react';
+import { Search, ChevronDown, ChevronRight, Check, Sparkles, Zap, Clock, Turtle } from 'lucide-react';
 
 export interface ModelOption {
   id: string;
@@ -19,6 +19,7 @@ interface ModelSearchSelectProps {
   value: string;
   defaultModelId?: string | null;
   onChange: (modelId: string) => void;
+  disabled?: boolean;
 }
 
 function formatCost(cost: number): string {
@@ -38,10 +39,12 @@ const SpeedIcon = ({ tier }: { tier?: string }) => {
   return <Clock size={10} className="text-muted/50" />;
 };
 
-export default function ModelSearchSelect({ models, value, defaultModelId, onChange }: ModelSearchSelectProps) {
+export default function ModelSearchSelect({ models, value, defaultModelId, onChange, disabled }: ModelSearchSelectProps) {
   const [open, setOpen] = useState(false);
   const [query, setQuery] = useState('');
   const [highlightIdx, setHighlightIdx] = useState(0);
+  const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(['OpenRouter']));
+  const [showAllOpenRouter, setShowAllOpenRouter] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
   const inputRef = useRef<HTMLInputElement>(null);
@@ -53,8 +56,65 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
 
   const selected = models.find(m => m.id === value);
 
+  // Auto-expand OpenRouter when the effective model belongs to OpenRouter
+  useEffect(() => {
+    if (!open) return;
+    const effectiveModel = models.find(m => m.id === value);
+    if (effectiveModel?.provider === 'OpenRouter') {
+      setCollapsed(prev => {
+        if (!prev.has('OpenRouter')) return prev;
+        const next = new Set(prev);
+        next.delete('OpenRouter');
+        return next;
+      });
+    }
+  }, [open, value, models]);
+
+  // Auto-expand OpenRouter when search/filter produces OpenRouter results
+  useEffect(() => {
+    if (!open) return;
+    const q = query.toLowerCase().trim();
+    if (!q) return;
+    const hasOrResults = models.some(m =>
+      m.provider === 'OpenRouter' && (
+        m.label.toLowerCase().includes(q) ||
+        m.provider.toLowerCase().includes(q) ||
+        m.id.toLowerCase().includes(q)
+      )
+    );
+    if (hasOrResults) {
+      setCollapsed(prev => {
+        if (!prev.has('OpenRouter')) return prev;
+        const next = new Set(prev);
+        next.delete('OpenRouter');
+        return next;
+      });
+    }
+  }, [query, open, models]);
+
+  // Reset collapse state when dropdown closes
+  useEffect(() => {
+    if (!open) {
+      setCollapsed(new Set(['OpenRouter']));
+      setShowAllOpenRouter(false);
+    }
+  }, [open]);
+
+  const toggleCollapsed = useCallback((label: string) => {
+    setCollapsed(prev => {
+      const next = new Set(prev);
+      if (next.has(label)) {
+        next.delete(label);
+      } else {
+        next.add(label);
+        if (label === 'OpenRouter') setShowAllOpenRouter(false);
+      }
+      return next;
+    });
+  }, []);
+
   // Filter + group models
-  const { groups, flatList } = useMemo(() => {
+  const { groups } = useMemo(() => {
     const q = query.toLowerCase().trim();
     const filtered = q
       ? models.filter(m =>
@@ -90,16 +150,9 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
     // OpenRouter last (largest group)
     const orModels = byProvider.get('OpenRouter');
     if (orModels) {
-      // When not searching, limit OpenRouter to first 20 to avoid overwhelming
-      const displayModels = !q && orModels.length > 20 ? orModels.slice(0, 20) : orModels;
-      groups.push({
-        label: `OpenRouter${!q && orModels.length > 20 ? ` (showing 20 of ${orModels.length} — type to search)` : ''}`,
-        models: displayModels,
-      });
+      groups.push({ label: 'OpenRouter', models: orModels });
     }
 
-    // Flat list for keyboard navigation
-    const flatList = groups.flatMap(g => g.models);
     // Dedupe (recommended models appear in their provider group too)
     const seen = new Set<string>();
     const deduped: ModelOption[] = [];
@@ -112,7 +165,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
       }
     }
 
-    return { groups, flatList: deduped };
+    return { groups };
   }, [models, query]);
 
   // Reset highlight on filter change
@@ -163,6 +216,22 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
     items[highlightIdx]?.scrollIntoView({ block: 'nearest' });
   }, [highlightIdx, open]);
 
+  // Effective flat list excludes models from collapsed groups (for keyboard nav)
+  const visibleFlatList = useMemo(() => {
+    const seen = new Set<string>();
+    const result: ModelOption[] = [];
+    for (const g of groups) {
+      if (collapsed.has(g.label)) continue;
+      for (const m of g.models) {
+        if (!seen.has(m.id)) {
+          seen.add(m.id);
+          result.push(m);
+        }
+      }
+    }
+    return result;
+  }, [groups, collapsed]);
+
   const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
     if (!open) {
       if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
@@ -174,7 +243,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
     switch (e.key) {
       case 'ArrowDown':
         e.preventDefault();
-        setHighlightIdx(i => Math.min(i + 1, flatList.length - 1));
+        setHighlightIdx(i => Math.min(i + 1, visibleFlatList.length - 1));
         break;
       case 'ArrowUp':
         e.preventDefault();
@@ -182,8 +251,8 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
         break;
       case 'Enter':
         e.preventDefault();
-        if (flatList[highlightIdx]) {
-          onChange(flatList[highlightIdx].id);
+        if (visibleFlatList[highlightIdx]) {
+          onChange(visibleFlatList[highlightIdx].id);
           setOpen(false);
         }
         break;
@@ -192,7 +261,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
         setOpen(false);
         break;
     }
-  }, [open, flatList, highlightIdx, onChange]);
+  }, [open, visibleFlatList, highlightIdx, onChange]);
 
   // Track flat index across groups for highlighting
   let flatIdx = -1;
@@ -204,8 +273,9 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
       <button
         ref={triggerRef}
         type="button"
-        onClick={() => setOpen(!open)}
-        className="w-full flex items-center justify-between gap-2 px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none hover:border-accent/50 focus:border-accent transition-colors cursor-pointer text-left"
+        onClick={() => !disabled && setOpen(!open)}
+        disabled={disabled}
+        className={`w-full flex items-center justify-between gap-2 px-3 py-2 text-sm bg-panel border border-border rounded text-text outline-none hover:border-accent/50 focus:border-accent transition-colors text-left ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
         aria-expanded={open}
         aria-haspopup="listbox"
         aria-label="Select LLM model"
@@ -277,70 +347,149 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
                 const newModels = group.models.filter(m => !seenIds.has(m.id));
                 if (newModels.length === 0) return null;
 
+                const isCollapsed = collapsed.has(group.label);
+                const isCollapsible = group.label !== 'Recommended';
+
                 return (
                   <div key={group.label}>
                     {/* Group header */}
-                    <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted/60 bg-[var(--bg)] sticky top-0">
-                      {group.label === 'Recommended' && <Sparkles size={10} className="inline mr-1 text-amber-400" />}
-                      {group.label}
-                    </div>
+                    {isCollapsible ? (
+                      <button
+                        type="button"
+                        onClick={() => toggleCollapsed(group.label)}
+                        className="w-full flex items-center justify-between px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted/60 bg-[var(--bg)] sticky top-0 hover:text-muted transition-colors cursor-pointer"
+                      >
+                        <span>{group.label}</span>
+                        <span className="flex items-center gap-1.5">
+                          {isCollapsed && (
+                            <span className="text-[9px] font-normal normal-case tracking-normal text-muted/40">
+                              {newModels.length} models
+                            </span>
+                          )}
+                          {isCollapsed
+                            ? <ChevronRight size={10} className="text-muted/40" />
+                            : <ChevronDown size={10} className="text-muted/40" />
+                          }
+                        </span>
+                      </button>
+                    ) : (
+                      <div className="px-3 py-1.5 text-[10px] font-semibold uppercase tracking-wider text-muted/60 bg-[var(--bg)] sticky top-0">
+                        <Sparkles size={10} className="inline mr-1 text-amber-400" />
+                        {group.label}
+                      </div>
+                    )}
 
-                    {/* Models */}
-                    {group.models.map(m => {
-                      if (seenIds.has(m.id)) return null;
-                      seenIds.add(m.id);
-                      flatIdx++;
-                      const idx = flatIdx;
-                      const isSelected = m.id === value;
-                      const isHighlighted = idx === highlightIdx;
+                    {/* Models — hidden when collapsed */}
+                    {!isCollapsed && (() => {
+                      const OR_PAGE = 30;
+                      const isOpenRouter = group.label === 'OpenRouter';
+                      const activeSearch = query.trim().length > 0;
+
+                      // For OpenRouter without active search: hoist selected model, then paginate
+                      let modelsToRender: ModelOption[];
+                      let hoistedSelected: ModelOption | null = null;
+                      let remainingCount = 0;
+
+                      if (isOpenRouter && !activeSearch) {
+                        const undeduped = group.models.filter(m => !seenIds.has(m.id));
+                        const selectedInGroup = undeduped.find(m => m.id === value) ?? null;
+                        const rest = selectedInGroup
+                          ? undeduped.filter(m => m.id !== value)
+                          : undeduped;
+
+                        if (!showAllOpenRouter) {
+                          // If selected model exists in this group, reserve a slot for it
+                          const slots = selectedInGroup ? OR_PAGE - 1 : OR_PAGE;
+                          const sliced = rest.slice(0, slots);
+                          remainingCount = rest.length - sliced.length;
+                          hoistedSelected = selectedInGroup;
+                          modelsToRender = sliced;
+                        } else {
+                          hoistedSelected = selectedInGroup;
+                          modelsToRender = rest;
+                        }
+                      } else {
+                        modelsToRender = group.models.filter(m => !seenIds.has(m.id));
+                      }
+
+                      const renderModelButton = (m: ModelOption) => {
+                        seenIds.add(m.id);
+                        flatIdx++;
+                        const idx = flatIdx;
+                        const isSelected = m.id === value;
+                        const isHighlighted = idx === highlightIdx;
+                        return (
+                          <button
+                            key={m.id}
+                            data-model-item
+                            type="button"
+                            role="option"
+                            aria-selected={isSelected}
+                            onClick={() => { onChange(m.id); setOpen(false); }}
+                            onMouseEnter={() => setHighlightIdx(idx)}
+                            className={`w-full text-left px-3 py-1.5 text-[13px] transition-colors flex items-center gap-2 ${
+                              isHighlighted
+                                ? 'bg-accent/8 text-[var(--text)]'
+                                : 'text-[var(--text)]/80 hover:bg-[var(--surface-100)]'
+                            }`}
+                          >
+                            <span className="w-3.5 shrink-0">
+                              {isSelected && <Check size={12} className="text-accent" />}
+                            </span>
+                            <div className="flex-1 min-w-0 flex items-center gap-2">
+                              <span className={`truncate ${isSelected ? 'font-medium' : ''}`}>
+                                {m.label}
+                              </span>
+                              {m.id === defaultModelId && (
+                                <span className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-accent/10 text-accent font-medium">
+                                  Default
+                                </span>
+                              )}
+                            </div>
+                            <div className="flex items-center gap-2 shrink-0">
+                              <SpeedIcon tier={m.speedTier} />
+                              {m.contextWindow && (
+                                <span className="text-[10px] font-mono text-muted/40 tabular-nums w-8 text-right">
+                                  {formatContext(m.contextWindow)}
+                                </span>
+                              )}
+                              <span className="text-[10px] font-mono text-muted/60 tabular-nums w-16 text-right">
+                                {formatCost(m.costPer1kInput)}/1K
+                              </span>
+                            </div>
+                          </button>
+                        );
+                      };
 
                       return (
-                        <button
-                          key={m.id}
-                          data-model-item
-                          type="button"
-                          role="option"
-                          aria-selected={isSelected}
-                          onClick={() => { onChange(m.id); setOpen(false); }}
-                          onMouseEnter={() => setHighlightIdx(idx)}
-                          className={`w-full text-left px-3 py-1.5 text-[13px] transition-colors flex items-center gap-2 ${
-                            isHighlighted
-                              ? 'bg-accent/8 text-[var(--text)]'
-                              : 'text-[var(--text)]/80 hover:bg-[var(--surface-100)]'
-                          }`}
-                        >
-                          {/* Selected check */}
-                          <span className="w-3.5 shrink-0">
-                            {isSelected && <Check size={12} className="text-accent" />}
-                          </span>
+                        <>
+                          {/* Hoisted selected model for OpenRouter (no-search mode) */}
+                          {hoistedSelected && !seenIds.has(hoistedSelected.id) && (
+                            <>
+                              {renderModelButton(hoistedSelected)}
+                              <div className="mx-3 my-0.5 border-t border-[var(--surface-200)]" />
+                            </>
+                          )}
 
-                          {/* Model info */}
-                          <div className="flex-1 min-w-0 flex items-center gap-2">
-                            <span className={`truncate ${isSelected ? 'font-medium' : ''}`}>
-                              {m.label}
-                            </span>
-                            {m.id === defaultModelId && (
-                              <span className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-accent/10 text-accent font-medium">
-                                Default
-                              </span>
-                            )}
-                          </div>
+                          {/* Main model list */}
+                          {modelsToRender.map(m => {
+                            if (seenIds.has(m.id)) return null;
+                            return renderModelButton(m);
+                          })}
 
-                          {/* Meta: speed + context + cost */}
-                          <div className="flex items-center gap-2 shrink-0">
-                            <SpeedIcon tier={m.speedTier} />
-                            {m.contextWindow && (
-                              <span className="text-[10px] font-mono text-muted/40 tabular-nums w-8 text-right">
-                                {formatContext(m.contextWindow)}
-                              </span>
-                            )}
-                            <span className="text-[10px] font-mono text-muted/60 tabular-nums w-16 text-right">
-                              {formatCost(m.costPer1kInput)}/1K
-                            </span>
-                          </div>
-                        </button>
+                          {/* Show more button for OpenRouter */}
+                          {isOpenRouter && !activeSearch && remainingCount > 0 && (
+                            <button
+                              type="button"
+                              onClick={() => setShowAllOpenRouter(true)}
+                              className="w-full px-3 py-2 text-[11px] text-muted/60 hover:text-muted transition-colors text-left"
+                            >
+                              Show more ({remainingCount} remaining)
+                            </button>
+                          )}
+                        </>
                       );
-                    })}
+                    })()}
                   </div>
                 );
               })
