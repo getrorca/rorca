@@ -10,6 +10,7 @@ import {
   RefreshCw, AlertTriangle, ChevronDown, LayoutGrid, List,
   GripVertical, Trash2, Palette, Pencil, AlignJustify,
   Sparkles,
+  Paperclip,
 } from 'lucide-react';
 import EmptyState from '../components/EmptyState';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -2013,6 +2014,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   const [specNameError, setSpecNameError] = useState('');
   const [specBrief, setSpecBrief] = useState(() => initialBrief ?? '');
   const briefRef = useRef<HTMLTextAreaElement>(null);
+  const fileInputRef = useRef<HTMLInputElement>(null);
 
   // Model
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
@@ -2099,6 +2101,25 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       setPendingAttachments((prev) => [...prev, { filename, contentType: file.type, size: file.size }]);
     } catch {
       showToast('Image upload failed', 'error');
+    }
+  }, [showToast]);
+
+  const handleFileSelect = useCallback(async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const files = Array.from(e.target.files ?? []);
+    if (files.length === 0) return;
+    // Reset so the same file can be re-selected
+    e.target.value = '';
+    for (const file of files) {
+      showToast(`Uploading ${file.name}...`, 'info');
+      try {
+        const formData = new FormData();
+        formData.append('file', file);
+        await apiFetch('/api/attachments/pending', { method: 'POST', body: formData });
+        setPendingAttachments((prev) => [...prev, { filename: file.name, contentType: file.type, size: file.size }]);
+        showToast(`Uploaded ${file.name}`, 'success');
+      } catch {
+        showToast(`Upload failed: ${file.name}`, 'error');
+      }
     }
   }, [showToast]);
 
@@ -2384,6 +2405,26 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
             aria-label="Spec brief — describe what you want to build"
             className="w-full px-4 py-4 text-sm bg-panel border border-border rounded-lg text-text placeholder:text-muted/50 outline-none focus:border-accent focus:ring-2 focus:ring-accent/50 transition-colors resize-none leading-relaxed"
           />
+          <input
+            ref={fileInputRef}
+            type="file"
+            multiple
+            accept="image/*,.pdf,.md,.txt,.docx"
+            className="hidden"
+            onChange={handleFileSelect}
+          />
+          <div className="mt-1.5 flex items-center">
+            <button
+              type="button"
+              aria-label="Attach files"
+              disabled={isGenerating || !workspaceId}
+              onClick={() => fileInputRef.current?.click()}
+              className="inline-flex items-center gap-1.5 px-2 py-1 text-xs text-muted hover:text-accent disabled:opacity-40 disabled:cursor-not-allowed transition-colors rounded"
+            >
+              <Paperclip size={13} />
+              Attach files
+            </button>
+          </div>
           {pendingAttachments.length > 0 && (
             <div className="mt-2 flex flex-wrap gap-2">
               {pendingAttachments.map((att) => (
