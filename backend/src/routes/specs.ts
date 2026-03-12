@@ -8875,6 +8875,64 @@ router.get('/:specId/attachments', async (req: Request, res: Response) => {
   );
 });
 
+// GET /api/specs/:specId/attachments/:attachmentId — download a specific attachment
+
+/**
+ * @swagger
+ * /api/specs/{specId}/attachments/{attachmentId}:
+ *   get:
+ *     summary: Download a specific attachment for a spec
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Spec slug ID
+ *       - in: path
+ *         name: attachmentId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Attachment UUID
+ *     responses:
+ *       200:
+ *         description: Binary file data
+ *         content:
+ *           application/octet-stream:
+ *             schema:
+ *               type: string
+ *               format: binary
+ *       404:
+ *         description: Attachment not found or spec mismatch
+ */
+router.get('/:specId/attachments/:attachmentId', async (req: Request, res: Response) => {
+  const { specId, attachmentId } = req.params;
+
+  const row = await queryOne<{
+    filename: string;
+    content_type: string;
+    file_size: number;
+    file_data: Buffer;
+  }>(
+    `SELECT filename, content_type, file_size, file_data
+     FROM spec_attachments
+     WHERE id = $1 AND spec_id = $2`,
+    [attachmentId, specId]
+  );
+
+  if (!row || !row.file_data) {
+    res.status(404).json({ error: 'Attachment not found' });
+    return;
+  }
+
+  res.setHeader('Content-Type', row.content_type);
+  res.setHeader('Content-Disposition', `attachment; filename="${row.filename}"`);
+  res.setHeader('Content-Length', row.file_size);
+  res.send(row.file_data);
+});
+
 // POST /api/specs/:specId/attachments — upload a file attachment for a spec
 const ALLOWED_CONTENT_TYPES = new Set([
   'image/png',
