@@ -19,7 +19,8 @@ Increase the acceptance criteria limit from 5 to 8 to match the richer context n
 The LLM call itself (chatComplete) stays unchanged — only the prompt content changes. The spec JSON schema and pipeline trigger logic are untouched.
 Run ID: 49
 Started: 2026-03-12T07:21:12.666Z
-Last Updated: 2026-03-12T07:51:03.324Z
+Last Updated: 2026-03-12T07:53:09.684Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-007: Write Jest unit tests for Quick Run context injection logic — DONE (claude, claude-sonnet-4-6, 1790s)
+- US-008: Manual integration smoke test and documentation update — DONE (claude, claude-sonnet-4-6, 114s)
