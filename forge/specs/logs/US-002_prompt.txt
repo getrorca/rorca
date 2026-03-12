@@ -1326,8 +1326,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
 
 Follow this workflow for implementation:
-## Agent Role: Database
-
 ---
 name: rorca
 description: Implement and validate changes to the Rorca codebase with subagent-assisted context management.
@@ -1479,12 +1477,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-002):
-Implement POST /api/specs/:specId/attachments endpoint to handle multipart/form-data file uploads. Support image paste (PNG/JPEG) and file uploads (PDF, DOCX, MD, TXT). Validate file types and size limits.
+After the binary archive is downloaded to a temp path, extract the .tar.gz to ~/.rorca/postgres/bin/ using Node.js child_process (tar command on unix, expand/7z on windows or tar which ships with Windows 10+). Then run initdb to initialize a fresh data directory at ~/.rorca/postgres/data/ — but ONLY if the data directory does not already exist (idempotent). Pass --no-locale --encoding=UTF8 --username=rorca flags to initdb. Log each step clearly.
 
 Acceptance Criteria:
-- Endpoint accepts multipart/form-data with 'file' field via multer middleware
-- File type validation: allow image/png, image/jpeg, image/webp, application/pdf, text/markdown, text/plain, application/vnd.openxmlformats-officedocument.wordprocessingml.document
-- File size limit enforced: 10MB per file
-- Inserts record into spec_attachments table with storage_type='database' and file_data as bytea
-- Returns JSON: { id, filename, contentType, fileSize, createdAt }
-- Error handling: 400 for invalid file type, 413 for size exceeded, 404 for spec not found
+- Extraction places postgres binaries at ~/.rorca/postgres/bin/postgres, ~/.rorca/postgres/bin/initdb, ~/.rorca/postgres/bin/pg_ctl, and ~/.rorca/postgres/bin/createuser — verified by checking file existence after extraction
+- initdb is only called when ~/.rorca/postgres/data/ does not exist — calling ensurePostgres() twice does not re-run initdb or produce an error
+- initdb is called with --no-locale --encoding=UTF8 --username=rorca — the data directory is owned by the current OS user
+- If initdb exits with non-zero, ensurePostgres() throws an Error with the stderr output included in the message
+- Extraction works on macOS (darwin), Linux, and Windows — uses `tar -xzf` on unix, `tar -xzf` on Windows 10+ (tar ships with Windows 10)

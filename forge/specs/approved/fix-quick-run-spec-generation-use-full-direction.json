@@ -277,7 +277,9 @@
         "lead-dev",
         "spec-verifier"
       ],
-      "passes": false
+      "passes": false,
+      "skipped": true,
+      "notes": "Skipped after max retries — fix manually and re-run with --story US-007"
     },
     {
       "id": "US-008",
