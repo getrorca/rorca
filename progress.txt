@@ -3,10 +3,11 @@
 Spec: Rorca Context Usage Visibility — Spec Generation & Run View
 Run ID: 67
 Started: 2026-03-12T20:18:32.740Z
-Last Updated: 2026-03-12T20:30:18.621Z
+Last Updated: 2026-03-12T20:36:06.445Z
 
-## Completed Stories (4)
+## Completed Stories (5)
 - CU-001: Elevate ContextSummaryCard in Context tab — always visible, above the fold — DONE (claude, claude-sonnet-4-6, 121s)
 - CU-002: Direction layer titles and token contribution in ContextSummaryCard — DONE (claude, claude-sonnet-4-6, 127s)
 - CU-003: Skill chips with relevance and reason in ContextSummaryCard — DONE (claude, claude-sonnet-4-6, 170s)
 - CU-004: Injected context files list in ContextSummaryCard — DONE (claude, claude-sonnet-4-6, 243s)
+- CU-005: Per-story context injection accordion in Run View Stories tab — DONE (claude, claude-sonnet-4-6, 186s)
