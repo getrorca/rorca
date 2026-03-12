@@ -1971,7 +1971,19 @@ router.post('/orchestration-preview', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Quick-run — generate a 1-story spec from a brief and execute immediately
  *     operationId: quickRunPipeline
- *     description: Generates a single-story spec from a plain-English brief, writes it directly to approved, and immediately triggers pipeline execution.
+ *     description: |
+ *       Generates a single-story spec from a plain-English brief, writes it directly to
+ *       approved (no review queue), and immediately triggers pipeline execution.
+ *
+ *       The spec generation prompt incorporates a layered context cascade in this order:
+ *       1. **Direction Stack (L1-L3)** — synthesized from direction_layers table:
+ *          L1 (global engineering principles), L2 (domain conventions matched by workspace.domain),
+ *          L3 (project-specific context scoped to this workspace). Merged via synthesize().
+ *       2. **MEMORY.md** — episodic ledger from workspace root (first 2000 chars).
+ *          Contains timestamped Architecture/Convention/Bug Fix/Decision/Pattern/Gotcha entries.
+ *       3. **Installed Skills** — list of skills from installed_skills table (name + description).
+ *          Informs the LLM which reusable skill files are available for the generated story.
+ *       All three context sources are best-effort: silently omitted if missing or on error.
  *     requestBody:
  *       required: true
  *       content:
@@ -2073,6 +2085,14 @@ router.post('/quick-run', async (req: Request, res: Response) => {
         if (anthropic) vaultCreds = { apiKey: anthropic.key };
       }
     }
+
+    // Context cascade: direction stack → MEMORY.md → installed skills → instructions
+    // Each layer is best-effort (silently omitted on error or absence):
+    //   1. Direction Stack (L1–L3): global engineering principles → domain conventions → project context
+    //   2. MEMORY.md: episodic ledger at workspace root, capped at 2000 chars
+    //   3. Installed Skills: names + descriptions from installed_skills table
+    // Layers are assembled in this order and prepended to the LLM instructions block.
+    // An empty layer is filtered out — the prompt degrades gracefully to bare instructions.
 
     // 7. Synthesize direction stack (L1–L3) for this workspace
     let directionContext = '';
