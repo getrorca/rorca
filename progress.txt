@@ -1,26 +1,9 @@
 # Run State Summary
 
-Spec: Fix Quick Run spec generation to use the full direction + memory context cascade.
+Spec: fix-kanban-progress-bar-multi-run
+Run ID: 53
+Started: 2026-03-12T08:12:10.359Z
+Last Updated: 2026-03-12T08:14:04.468Z
 
-POST /api/pipeline/quick-run in backend/src/routes/pipeline.ts generates a 1-story spec with a bare LLM call (step 7, quickRunPrompt) that has no awareness of the workspace's direction stack, MEMORY.md, or installed skills. Fix this so the spec is generated with the same context that regular POST /api/specs/generate uses.
-
-Changes needed in backend/src/routes/pipeline.ts:
-
-After resolving the workspace, call synthesize(workspaceId, domain) from backend/src/lib/direction-stack.ts to get the merged L1–L3 direction context string.
-
-Read MEMORY.md from the workspace root (path.join(workspace.path, 'MEMORY.md')) — if it exists, include the first 2000 chars prefixed with === MEMORY.md ===.
-
-Read installed skills from GET /api/skills?workspaceId= internally (or query the DB directly) — include skill names + descriptions as a brief list prefixed with === INSTALLED SKILLS ===.
-
-Prepend all three context blocks to the quickRunPrompt before the === INSTRUCTIONS === section. If a block is empty/missing, skip it silently.
-
-Increase the acceptance criteria limit from 5 to 8 to match the richer context now available.
-
-The LLM call itself (chatComplete) stays unchanged — only the prompt content changes. The spec JSON schema and pipeline trigger logic are untouched.
-Run ID: 49
-Started: 2026-03-12T07:21:12.666Z
-Last Updated: 2026-03-12T07:53:09.684Z
-
-## Completed Stories (2)
-- US-007: Write Jest unit tests for Quick Run context injection logic — DONE (claude, claude-sonnet-4-6, 1790s)
-- US-008: Manual integration smoke test and documentation update — DONE (claude, claude-sonnet-4-6, 114s)
+## Completed Stories (1)
+- US-001: Fix kanban progress calculation to use spec JSON passes field — DONE (claude, claude-sonnet-4-6, 114s)
