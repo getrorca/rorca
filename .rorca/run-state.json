@@ -2,7 +2,7 @@
   "specId": "fix-archive-500-jsonb-parse",
   "runId": 52,
   "startedAt": "2026-03-12T08:12:07.494Z",
-  "lastUpdatedAt": "2026-03-12T08:13:51.053Z",
+  "lastUpdatedAt": "2026-03-12T08:15:20.322Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 102912
+    },
+    {
+      "storyId": "US-002",
+      "title": "Audit all JSONB payload parsing in specs.ts",
+      "status": "passed",
+      "startedAt": "2026-03-12T08:14:05.917Z",
+      "finishedAt": "2026-03-12T08:15:20.322Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 74405
     }
   ],
   "failedStories": [],
