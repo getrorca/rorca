@@ -2079,13 +2079,14 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     try {
       const domain = workspace.domain ?? '';
       const [l1Row, l2Row, l3Row] = await Promise.all([
-        queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = '' AND COALESCE(team_id, '') = '' LIMIT 1`, []) as Promise<{ content_yaml: string } | undefined>,
-        queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND COALESCE(workspace_id, '') = '' AND (domain = $1 OR COALESCE(domain, '') = '') AND COALESCE(team_id, '') = '' ORDER BY (domain = $1) DESC LIMIT 1`, [domain]) as Promise<{ content_yaml: string } | undefined>,
-        queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = '' LIMIT 1`, [workspaceId]) as Promise<{ content_yaml: string } | undefined>,
+        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = '' AND COALESCE(team_id, '') = '' LIMIT 1`, []),
+        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND COALESCE(workspace_id, '') = '' AND (domain = $1 OR COALESCE(domain, '') = '') AND COALESCE(team_id, '') = '' ORDER BY (domain = $1) DESC LIMIT 1`, [domain]),
+        queryOne<{ content_yaml: string }>(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = '' LIMIT 1`, [workspaceId]),
       ]);
       directionContext = synthesize({ l1: l1Row?.content_yaml, l2: l2Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: brief });
-    } catch {
+    } catch (err: unknown) {
       // Silently skip — direction context is best-effort
+      if (err instanceof Error) void err.message;
     }
 
     // 8. Generate 1-story spec via LLM
@@ -2094,14 +2095,15 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     try {
       const memoryRaw = await fs.promises.readFile(path.join(workspace.path, 'MEMORY.md'), 'utf8');
       memoryContent = memoryRaw.slice(0, 2000);
-    } catch {
+    } catch (err: unknown) {
       // ENOENT or any read error — silently skip
+      if (err instanceof Error) void err.message;
     }
 
     // Fetch installed skills for this workspace (best-effort, silent on error)
     let skillsContext = '';
     try {
-      const skillRows = await query<{ name: string; description: string }>(
+      const skillRows = await query<{ name: string; description: string | null }>(
         `SELECT name, description FROM installed_skills ORDER BY name`,
         [],
       );
@@ -2109,8 +2111,9 @@ router.post('/quick-run', async (req: Request, res: Response) => {
         const skillLines = skillRows.map(s => `- ${s.name}: ${s.description ?? ''}`).join('\n');
         skillsContext = `=== INSTALLED SKILLS ===\n${skillLines}`;
       }
-    } catch {
+    } catch (err: unknown) {
       // DB error — silently skip
+      if (err instanceof Error) void err.message;
     }
 
     // Build ordered context blocks and filter empty entries

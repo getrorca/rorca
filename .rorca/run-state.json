@@ -2,7 +2,7 @@
   "specId": "Fix Quick Run spec generation to use the full direction + memory context cascade.\n\nPOST /api/pipeline/quick-run in backend/src/routes/pipeline.ts generates a 1-story spec with a bare LLM call (step 7, quickRunPrompt) that has no awareness of the workspace's direction stack, MEMORY.md, or installed skills. Fix this so the spec is generated with the same context that regular POST /api/specs/generate uses.\n\nChanges needed in backend/src/routes/pipeline.ts:\n\nAfter resolving the workspace, call synthesize(workspaceId, domain) from backend/src/lib/direction-stack.ts to get the merged L1–L3 direction context string.\n\nRead MEMORY.md from the workspace root (path.join(workspace.path, 'MEMORY.md')) — if it exists, include the first 2000 chars prefixed with === MEMORY.md ===.\n\nRead installed skills from GET /api/skills?workspaceId= internally (or query the DB directly) — include skill names + descriptions as a brief list prefixed with === INSTALLED SKILLS ===.\n\nPrepend all three context blocks to the quickRunPrompt before the === INSTRUCTIONS === section. If a block is empty/missing, skip it silently.\n\nIncrease the acceptance criteria limit from 5 to 8 to match the richer context now available.\n\nThe LLM call itself (chatComplete) stays unchanged — only the prompt content changes. The spec JSON schema and pipeline trigger logic are untouched.",
   "runId": 43,
   "startedAt": "2026-03-12T05:48:53.196Z",
-  "lastUpdatedAt": "2026-03-12T06:00:32.867Z",
+  "lastUpdatedAt": "2026-03-12T06:05:35.876Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -53,6 +53,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 83811
+    },
+    {
+      "storyId": "US-006",
+      "title": "Add TypeScript types and guard context injection paths",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:00:51.413Z",
+      "finishedAt": "2026-03-12T06:05:35.876Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 284463
     }
   ],
   "failedStories": [],
