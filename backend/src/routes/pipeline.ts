@@ -26,7 +26,7 @@ import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedS
 import { readRunState, type RunState } from '../lib/run-state';
 import { checkSpec, type CapabilityStory } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
-import { readFallbackResults, deleteFallbackFile, type FallbackResultEntry } from '../lib/resilient-post';
+import { readFallbackResults, deleteFallbackFile } from '../lib/resilient-post';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';

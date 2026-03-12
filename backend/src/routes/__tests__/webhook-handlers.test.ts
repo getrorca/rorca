@@ -9,7 +9,7 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
-import { query, queryOne, execute } from '../../db/index';
+import { query, execute } from '../../db/index';
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
   getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
