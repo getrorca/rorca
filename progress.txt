@@ -3,7 +3,8 @@
 Spec: add copy paste photo as attachment (meaning someone can screen capture with whatever tool they want and attach it to the new spec description screen here where i am typing now) and also an upload file so that users can upload PRD, SDD or whatever they want as context.
 Run ID: 50
 Started: 2026-03-12T07:21:19.651Z
-Last Updated: 2026-03-12T07:39:38.856Z
+Last Updated: 2026-03-12T07:48:26.718Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-019: Add attachment context extraction unit tests — DONE (claude, claude-sonnet-4-6, 1099s)
+- US-020: Add attachment upload E2E tests — DONE (claude, claude-sonnet-4-6, 515s)
