@@ -57,12 +57,13 @@ function mkError(toolName: string, fields: Record<string, unknown>) {
 }
 
 /**
- * Make a fetch call with a 30s AbortController timeout.
+ * Make a fetch call with a configurable AbortController timeout.
+ * Default: 5 minutes (covers Opus spec generation at 40-90s + overhead).
  * Throws on ECONNREFUSED, fetch failure, or timeout.
  */
-async function timedFetch(url: string, init?: RequestInit): Promise<Response> {
+async function timedFetch(url: string, init?: RequestInit, timeoutMs = 300_000): Promise<Response> {
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), 30_000);
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
     return await fetch(url, { ...init, signal: controller.signal });
   } catch (err: unknown) {
@@ -267,7 +268,7 @@ server.registerTool(
           includeDiagrams: resolvedIncludeDiagrams,
           ...(model ? { model } : {}),
         }),
-      });
+      }, 600_000); // 10 min — Opus with 20+ stories can take 90s+
       if (!res.ok) return httpError('rorca_generate_spec', res);
       const spec = await res.json() as { model?: string; usage?: { inputTokens?: number; outputTokens?: number } };
       return {
