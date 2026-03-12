@@ -1,50 +1,48 @@
 /**
- * conventions.ts — Convention discovery and proposal management routes.
+ * CA-005: Convention Discovery Routes
  *
- * CA-005: POST /api/conventions/discover spawns analysis agent.
- *         GET  /api/conventions/proposals/:workspaceId lists proposals.
- *         POST /api/conventions/proposals/:id/approve applies proposal.
- *         POST /api/conventions/proposals/:id/reject rejects proposal.
+ * POST /api/conventions/discover       — Spawn analysis agent against workspace
+ * GET  /api/conventions/proposals/:workspaceId — List proposals for workspace
+ * GET  /api/conventions/proposals/:workspaceId/:id — Single proposal detail
+ * POST /api/conventions/proposals/:id/approve — Apply proposal artifacts
+ * POST /api/conventions/proposals/:id/reject  — Reject proposal
  */
-
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { query, queryOne, execute } from '../db/index';
-import { discoverConventions } from '../lib/convention-discovery';
-import type { ConventionProposal } from '../lib/convention-discovery';
-import { detectDrift } from '../lib/drift-detector';
-import type { DriftReport, DriftViolation } from '../lib/drift-detector';
-import { broadcastAll, type WalEvent } from '../lib/sse-hub';
+import { db } from '../db/index';
+import { discoverConventions } from '../lib/convention-agent';
+import type { ConventionProposal } from '../lib/convention-agent';
 
 const router = Router();
 
-async function emitWalEvent(eventType: string, workspaceId: string, payload: Record<string, unknown>): Promise<void> {
-  const result = await queryOne<{ id: number }>(
-    'INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ($1, $2, $3) RETURNING id',
-    [eventType, workspaceId, JSON.stringify(payload)]
-  );
-  const walEvent: WalEvent = {
-    id: result?.id ?? 0,
-    ts: new Date().toISOString(),
-    event_type: eventType,
-    workspace_id: workspaceId,
-    spec_id: null,
-    story_id: null,
-    actor: '',
-    payload: JSON.stringify(payload),
-  };
-  broadcastAll(walEvent);
+// ─── Types ──────────────────────────────────────────────────────────────────
+
+interface WorkspaceRow {
+  id: string;
+  label: string;
+  path: string;
 }
+
+interface ProposalRow {
+  id: number;
+  workspace_id: string;
+  proposal_json: string;
+  status: string;
+  reject_reason: string | null;
+  created_at: string;
+  resolved_at: string | null;
+}
+
+// ─── POST /discover ─────────────────────────────────────────────────────────
 
 /**
  * @swagger
  * /api/conventions/discover:
  *   post:
  *     tags: [Conventions]
- *     summary: Discover conventions in a workspace codebase
- *     operationId: discoverConventions
- *     description: Spawns an async convention analysis agent to scan the workspace codebase. Detects stack, architecture pattern, and generates a convention proposal with L3 direction layer, AGENTS.md template, and per-library guides. Stores the result as a pending proposal in the convention_proposals table.
+ *     summary: Discover conventions from workspace codebase
+ *     description: Spawns an analysis agent that reads config files, source code, and existing context files to produce convention artifacts staged for human review.
  *     requestBody:
  *       required: true
  *       content:
@@ -53,29 +51,16 @@ async function emitWalEvent(eventType: string, workspaceId: string, payload: Rec
  *             type: object
  *             required: [workspaceId]
  *             properties:
- *               workspaceId: { type: string }
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace to analyze
  *     responses:
- *       200:
+ *       201:
  *         description: Convention proposal created
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 ok: { type: boolean }
- *                 proposalId: { type: integer }
- *                 proposal:
- *                   type: object
- *                   properties:
- *                     stack: { type: array, items: { type: string } }
- *                     conventions: { type: array, items: { type: object } }
- *                     architecture: { type: object, properties: { pattern: { type: string } } }
- *                     directionL3: { type: string, description: "YAML content for L3 direction layer" }
- *                     fileGovernance: { type: string, description: "Generated AGENTS.md content" }
- *                     perLibraryGuides: { type: object, additionalProperties: { type: string }, description: "filename → markdown content map" }
- *       400: { description: "Missing workspaceId" }
- *       404: { description: "Workspace not found or path missing on disk" }
- *       500: { description: "Convention discovery failed" }
+ *       400:
+ *         description: Missing workspaceId
+ *       404:
+ *         description: Workspace not found
  */
 router.post('/discover', async (req: Request, res: Response) => {
   const { workspaceId } = req.body;
@@ -85,48 +70,53 @@ router.post('/discover', async (req: Request, res: Response) => {
     return;
   }
 
-  const workspace = await queryOne<{ id: string; path: string; label: string }>(
-    'SELECT * FROM workspaces WHERE id = $1', [workspaceId]
-  );
+  const workspace = db.prepare('SELECT id, label, path FROM workspaces WHERE id = ?')
+    .get(workspaceId) as WorkspaceRow | undefined;
 
   if (!workspace) {
-    res.status(404).json({ error: 'Workspace not found' });
+    res.status(404).json({ error: `Workspace '${workspaceId}' not found` });
     return;
   }
 
   if (!fs.existsSync(workspace.path)) {
-    res.status(404).json({ error: 'Workspace path does not exist on disk' });
+    res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
     return;
   }
 
   try {
     const proposal = await discoverConventions(workspace.path);
 
-    // Store proposal in DB
-    const inserted = await queryOne<{ id: number }>(
-      'INSERT INTO convention_proposals (workspace_id, proposal_json, status) VALUES ($1, $2, $3) RETURNING id',
-      [workspaceId, JSON.stringify(proposal), 'pending']
-    );
+    // Store as proposal (NOT auto-applied)
+    const result = db.prepare(
+      `INSERT INTO convention_proposals (workspace_id, proposal_json, status, created_at)
+       VALUES (?, ?, 'pending', datetime('now'))`
+    ).run(workspaceId, JSON.stringify(proposal));
 
-    const proposalId = inserted?.id ?? 0;
+    const proposalId = result.lastInsertRowid;
 
-    // Emit WAL event
-    await emitWalEvent('convention_discovered', workspaceId, {
-      proposalId,
+    // WAL event
+    db.prepare(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('convention_discovered', ?, ?)`
+    ).run(workspaceId, JSON.stringify({
+      proposalId: Number(proposalId),
       stackCount: proposal.stack.length,
       conventionCount: proposal.conventions.length,
+      skillCount: proposal.skills.length,
       architecture: proposal.architecture.pattern,
-    });
+    }));
 
-    res.json({
-      ok: true,
-      proposalId,
+    res.status(201).json({
+      id: Number(proposalId),
+      workspaceId,
       proposal,
+      status: 'pending',
     });
   } catch (err: any) {
-    res.status(500).json({ error: 'Convention discovery failed', details: err.message });
+    res.status(500).json({ error: `Convention discovery failed: ${err.message}` });
   }
 });
+
+// ─── GET /proposals/:workspaceId ────────────────────────────────────────────
 
 /**
  * @swagger
@@ -134,59 +124,94 @@ router.post('/discover', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Conventions]
  *     summary: List convention proposals for a workspace
- *     operationId: listConventionProposals
- *     description: Returns all convention proposals for the specified workspace, ordered by creation date descending.
  *     parameters:
  *       - in: path
  *         name: workspaceId
  *         required: true
  *         schema: { type: string }
+ *       - in: query
+ *         name: status
+ *         schema: { type: string, enum: [pending, approved, rejected, all] }
+ *         description: Filter by status (default: all)
  *     responses:
  *       200:
  *         description: List of proposals
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 proposals:
- *                   type: array
- *                   items:
- *                     type: object
- *                     properties:
- *                       id: { type: integer }
- *                       workspaceId: { type: string }
- *                       proposal: { type: object }
- *                       status: { type: string, enum: [pending, approved, rejected] }
- *                       createdAt: { type: string }
- *                       resolvedAt: { type: string, nullable: true }
  */
-router.get('/proposals/:workspaceId', async (req: Request, res: Response) => {
+router.get('/proposals/:workspaceId', (req: Request, res: Response) => {
   const { workspaceId } = req.params;
+  const status = (req.query.status as string) || 'all';
 
-  const rows = await query<{
-    id: number;
-    workspace_id: string;
-    proposal_json: string;
-    status: string;
-    created_at: string;
-    resolved_at: string | null;
-  }>(
-    'SELECT id, workspace_id, proposal_json, status, created_at, resolved_at FROM convention_proposals WHERE workspace_id = $1 ORDER BY created_at DESC',
-    [workspaceId]
-  );
+  let rows: ProposalRow[];
+  if (status === 'all') {
+    rows = db.prepare(
+      'SELECT * FROM convention_proposals WHERE workspace_id = ? ORDER BY created_at DESC'
+    ).all(workspaceId) as ProposalRow[];
+  } else {
+    rows = db.prepare(
+      'SELECT * FROM convention_proposals WHERE workspace_id = ? AND status = ? ORDER BY created_at DESC'
+    ).all(workspaceId, status) as ProposalRow[];
+  }
 
-  const proposals = rows.map(row => ({
+  const items = rows.map(row => ({
     id: row.id,
     workspaceId: row.workspace_id,
     proposal: JSON.parse(row.proposal_json) as ConventionProposal,
     status: row.status,
+    rejectReason: row.reject_reason,
     createdAt: row.created_at,
     resolvedAt: row.resolved_at,
   }));
 
-  res.json({ proposals });
+  res.json({ items, total: items.length });
 });
+
+// ─── GET /proposals/:workspaceId/:id ────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/conventions/proposals/{workspaceId}/{id}:
+ *   get:
+ *     tags: [Conventions]
+ *     summary: Get a single convention proposal
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Proposal detail
+ *       404:
+ *         description: Proposal not found
+ */
+router.get('/proposals/:workspaceId/:id', (req: Request, res: Response) => {
+  const { workspaceId, id } = req.params;
+
+  const row = db.prepare(
+    'SELECT * FROM convention_proposals WHERE id = ? AND workspace_id = ?'
+  ).get(Number(id), workspaceId) as ProposalRow | undefined;
+
+  if (!row) {
+    res.status(404).json({ error: 'Proposal not found' });
+    return;
+  }
+
+  res.json({
+    id: row.id,
+    workspaceId: row.workspace_id,
+    proposal: JSON.parse(row.proposal_json) as ConventionProposal,
+    status: row.status,
+    rejectReason: row.reject_reason,
+    createdAt: row.created_at,
+    resolvedAt: row.resolved_at,
+  });
+});
+
+// ─── POST /proposals/:id/approve ────────────────────────────────────────────
 
 /**
  * @swagger
@@ -194,8 +219,7 @@ router.get('/proposals/:workspaceId', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Conventions]
  *     summary: Approve and apply a convention proposal
- *     operationId: approveConventionProposal
- *     description: "Applies the proposal's changes to the workspace: upserts L3 direction layer to DB, writes AGENTS.md if not present, and writes per-library convention guides to .rorca/conventions/. Emits convention_approved WAL event."
+ *     description: Applies L3 direction layer, writes AGENTS.md, and creates skill files in .rorca/skills/
  *     parameters:
  *       - in: path
  *         name: id
@@ -204,37 +228,17 @@ router.get('/proposals/:workspaceId', async (req: Request, res: Response) => {
  *     responses:
  *       200:
  *         description: Proposal approved and applied
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 ok: { type: boolean }
- *                 applied:
- *                   type: array
- *                   items: { type: string }
- *                   description: List of changes applied (e.g. 'L3 direction layer', 'AGENTS.md (created)')
- *       400: { description: "Invalid proposal ID" }
- *       404: { description: "Proposal or workspace not found" }
- *       409: { description: "Proposal already resolved" }
+ *       404:
+ *         description: Proposal not found
+ *       409:
+ *         description: Proposal already resolved
  */
-router.post('/proposals/:id/approve', async (req: Request, res: Response) => {
-  const proposalId = parseInt(String(req.params.id), 10);
+router.post('/proposals/:id/approve', (req: Request, res: Response) => {
+  const { id } = req.params;
 
-  if (isNaN(proposalId)) {
-    res.status(400).json({ error: 'Invalid proposal ID' });
-    return;
-  }
-
-  const row = await queryOne<{
-    id: number;
-    workspace_id: string;
-    proposal_json: string;
-    status: string;
-  }>(
-    'SELECT id, workspace_id, proposal_json, status FROM convention_proposals WHERE id = $1',
-    [proposalId]
-  );
+  const row = db.prepare(
+    'SELECT * FROM convention_proposals WHERE id = ?'
+  ).get(Number(id)) as ProposalRow | undefined;
 
   if (!row) {
     res.status(404).json({ error: 'Proposal not found' });
@@ -246,66 +250,82 @@ router.post('/proposals/:id/approve', async (req: Request, res: Response) => {
     return;
   }
 
-  const workspace = await queryOne<{ id: string; path: string }>(
-    'SELECT * FROM workspaces WHERE id = $1', [row.workspace_id]
-  );
+  const proposal = JSON.parse(row.proposal_json) as ConventionProposal;
+  const workspace = db.prepare('SELECT id, label, path FROM workspaces WHERE id = ?')
+    .get(row.workspace_id) as WorkspaceRow | undefined;
 
   if (!workspace) {
     res.status(404).json({ error: 'Workspace not found' });
     return;
   }
 
-  const proposal = JSON.parse(row.proposal_json) as ConventionProposal;
+  // Apply artifacts
   const applied: string[] = [];
 
-  // 1. Apply L3 direction layer
-  if (proposal.directionL3) {
-    await execute(`
-      INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, updated_at)
-      VALUES (3, $1, NULL, $2, NOW())
-      ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''))
-      DO UPDATE SET content_yaml = excluded.content_yaml, updated_at = NOW()
-    `, [workspace.id, proposal.directionL3]);
-    applied.push('L3 direction layer');
-  }
+  // 1. Upsert L3 direction layer
+  db.prepare(`
+    INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, updated_at)
+    VALUES (3, ?, NULL, ?, datetime('now'))
+    ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''))
+    DO UPDATE SET content_yaml = excluded.content_yaml, updated_at = datetime('now')
+  `).run(row.workspace_id, proposal.directionL3);
+  applied.push('Direction Stack L3');
 
-  // 2. Write AGENTS.md (if not already present)
-  if (proposal.fileGovernance) {
+  // 2. Write AGENTS.md (if workspace path exists)
+  try {
     const agentsPath = path.join(workspace.path, 'AGENTS.md');
-    if (!fs.existsSync(agentsPath)) {
-      fs.writeFileSync(agentsPath, proposal.fileGovernance, 'utf-8');
-      applied.push('AGENTS.md (created)');
-    } else {
-      applied.push('AGENTS.md (skipped — already exists)');
-    }
+    fs.writeFileSync(agentsPath, proposal.agentsMd, 'utf-8');
+    applied.push('AGENTS.md');
+  } catch (err: any) {
+    // Log but don't fail the whole operation
+    console.error(`Failed to write AGENTS.md: ${err.message}`);
   }
 
-  // 3. Write per-library convention guides
-  if (Object.keys(proposal.perLibraryGuides).length > 0) {
-    const conventionsDir = path.join(workspace.path, '.rorca', 'conventions');
-    fs.mkdirSync(conventionsDir, { recursive: true });
-    for (const [filename, content] of Object.entries(proposal.perLibraryGuides)) {
-      const guidePath = path.join(conventionsDir, filename);
-      if (!fs.existsSync(guidePath)) {
-        fs.writeFileSync(guidePath, content, 'utf-8');
-        applied.push(`conventions/${filename}`);
+  // 3. Write CLAUDE.md if proposal includes one (only when missing)
+  if (proposal.claudeMd) {
+    try {
+      const claudePath = path.join(workspace.path, 'CLAUDE.md');
+      if (!fs.existsSync(claudePath)) {
+        fs.writeFileSync(claudePath, proposal.claudeMd, 'utf-8');
+        applied.push('CLAUDE.md');
       }
+    } catch (err: any) {
+      console.error(`Failed to write CLAUDE.md: ${err.message}`);
     }
   }
 
-  // Mark proposal as approved
-  await execute(
-    "UPDATE convention_proposals SET status = 'approved', resolved_at = NOW() WHERE id = $1",
-    [proposalId]
-  );
+  // 4. Write skill files to .rorca/skills/
+  if (proposal.skills.length > 0) {
+    try {
+      const skillsDir = path.join(workspace.path, '.rorca', 'skills');
+      fs.mkdirSync(skillsDir, { recursive: true });
+      for (const skill of proposal.skills) {
+        const skillPath = path.join(skillsDir, skill.filename);
+        fs.writeFileSync(skillPath, skill.content, 'utf-8');
+      }
+      applied.push(`${proposal.skills.length} skill files`);
+    } catch (err: any) {
+      console.error(`Failed to write skill files: ${err.message}`);
+    }
+  }
 
-  await emitWalEvent('convention_approved', workspace.id, {
-    proposalId,
+  // Mark approved
+  db.prepare(
+    `UPDATE convention_proposals SET status = 'approved', resolved_at = datetime('now') WHERE id = ?`
+  ).run(Number(id));
+
+  // WAL event
+  db.prepare(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('convention_approved', ?, ?)`
+  ).run(row.workspace_id, JSON.stringify({
+    proposalId: row.id,
     applied,
-  });
+  }));
 
   res.json({ ok: true, applied });
 });
+
+// ─── POST /proposals/:id/reject ─────────────────────────────────────────────
 
 /**
  * @swagger
@@ -313,38 +333,35 @@ router.post('/proposals/:id/approve', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Conventions]
  *     summary: Reject a convention proposal
- *     operationId: rejectConventionProposal
- *     description: Marks a pending convention proposal as rejected without applying any changes to the workspace. Emits convention_rejected WAL event.
  *     parameters:
  *       - in: path
  *         name: id
  *         required: true
  *         schema: { type: integer }
+ *     requestBody:
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               reason:
+ *                 type: string
+ *                 description: Optional rejection reason
  *     responses:
  *       200:
  *         description: Proposal rejected
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 ok: { type: boolean }
- *       400: { description: "Invalid proposal ID" }
- *       404: { description: "Proposal not found" }
- *       409: { description: "Proposal already resolved" }
+ *       404:
+ *         description: Proposal not found
+ *       409:
+ *         description: Proposal already resolved
  */
-router.post('/proposals/:id/reject', async (req: Request, res: Response) => {
-  const proposalId = parseInt(String(req.params.id), 10);
+router.post('/proposals/:id/reject', (req: Request, res: Response) => {
+  const { id } = req.params;
+  const { reason } = req.body || {};
 
-  if (isNaN(proposalId)) {
-    res.status(400).json({ error: 'Invalid proposal ID' });
-    return;
-  }
-
-  const row = await queryOne<{ id: number; workspace_id: string; status: string }>(
-    'SELECT id, workspace_id, status FROM convention_proposals WHERE id = $1',
-    [proposalId]
-  );
+  const row = db.prepare(
+    'SELECT * FROM convention_proposals WHERE id = ?'
+  ).get(Number(id)) as ProposalRow | undefined;
 
   if (!row) {
     res.status(404).json({ error: 'Proposal not found' });
@@ -356,188 +373,19 @@ router.post('/proposals/:id/reject', async (req: Request, res: Response) => {
     return;
   }
 
-  await execute(
-    "UPDATE convention_proposals SET status = 'rejected', resolved_at = NOW() WHERE id = $1",
-    [proposalId]
-  );
+  db.prepare(
+    `UPDATE convention_proposals SET status = 'rejected', reject_reason = ?, resolved_at = datetime('now') WHERE id = ?`
+  ).run(reason || null, Number(id));
 
-  await emitWalEvent('convention_rejected', row.workspace_id, { proposalId });
+  // WAL event
+  db.prepare(
+    `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('convention_rejected', ?, ?)`
+  ).run(row.workspace_id, JSON.stringify({
+    proposalId: row.id,
+    reason: reason || null,
+  }));
 
   res.json({ ok: true });
-});
-
-/**
- * @swagger
- * /api/conventions/check:
- *   post:
- *     tags: [Conventions]
- *     summary: Run convention drift detection on a workspace
- *     operationId: checkConventionDrift
- *     description: Spawns a drift analysis agent that reads .rorca/conventions/*.md and direction stack L0-L3, samples up to 50 source files, and checks for violations. Stores the report in drift_reports table and emits convention_drift_detected WAL event.
- *     requestBody:
- *       required: true
- *       content:
- *         application/json:
- *           schema:
- *             type: object
- *             required: [workspaceId]
- *             properties:
- *               workspaceId: { type: string }
- *     responses:
- *       200:
- *         description: Drift report generated
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 ok: { type: boolean }
- *                 report:
- *                   type: object
- *                   properties:
- *                     violations:
- *                       type: array
- *                       items:
- *                         type: object
- *                         properties:
- *                           file: { type: string }
- *                           convention: { type: string }
- *                           severity: { type: string, enum: [error, warning] }
- *                           message: { type: string }
- *                     score: { type: integer, description: "Compliance score 0-100" }
- *                     conventionsChecked: { type: integer }
- *                     filesSampled: { type: integer }
- *                     checkedAt: { type: string }
- *       400: { description: "Missing workspaceId" }
- *       404: { description: "Workspace not found or path missing on disk" }
- *       500: { description: "Drift detection failed" }
- */
-router.post('/check', async (req: Request, res: Response) => {
-  const { workspaceId } = req.body;
-
-  if (!workspaceId) {
-    res.status(400).json({ error: 'Missing required field: workspaceId' });
-    return;
-  }
-
-  const workspace = await queryOne<{ id: string; path: string; label: string }>(
-    'SELECT * FROM workspaces WHERE id = $1', [workspaceId]
-  );
-
-  if (!workspace) {
-    res.status(404).json({ error: 'Workspace not found' });
-    return;
-  }
-
-  if (!fs.existsSync(workspace.path)) {
-    res.status(404).json({ error: 'Workspace path does not exist on disk' });
-    return;
-  }
-
-  try {
-    const report = await detectDrift(workspace.path, workspaceId);
-
-    // Store in drift_reports table
-    await execute(
-      `INSERT INTO drift_reports (workspace_id, violations_json, score, conventions_checked, files_sampled, trigger_type)
-       VALUES ($1, $2, $3, $4, $5, $6)`,
-      [
-        workspaceId,
-        JSON.stringify(report.violations),
-        report.score,
-        report.conventionsChecked,
-        report.filesSampled,
-        'manual',
-      ]
-    );
-
-    // Emit WAL event
-    await emitWalEvent('convention_drift_detected', workspaceId, {
-      score: report.score,
-      violationCount: report.violations.length,
-      errorCount: report.violations.filter((v: DriftViolation) => v.severity === 'error').length,
-      warningCount: report.violations.filter((v: DriftViolation) => v.severity === 'warning').length,
-      conventionsChecked: report.conventionsChecked,
-      filesSampled: report.filesSampled,
-    });
-
-    res.json({ ok: true, report });
-  } catch (err: any) {
-    res.status(500).json({ error: 'Drift detection failed', details: err.message });
-  }
-});
-
-/**
- * @swagger
- * /api/conventions/drift/{workspaceId}:
- *   get:
- *     tags: [Conventions]
- *     summary: Get the latest drift report for a workspace
- *     operationId: getLatestDriftReport
- *     description: "Returns the most recent convention drift report from the drift_reports table. Returns { report: null } if no drift check has been run yet."
- *     parameters:
- *       - in: path
- *         name: workspaceId
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       200:
- *         description: Latest drift report or null
- *         content:
- *           application/json:
- *             schema:
- *               type: object
- *               properties:
- *                 id: { type: integer, nullable: true }
- *                 workspaceId: { type: string, nullable: true }
- *                 triggerType: { type: string, nullable: true }
- *                 report:
- *                   nullable: true
- *                   type: object
- *                   properties:
- *                     violations: { type: array, items: { type: object } }
- *                     score: { type: integer }
- *                     conventionsChecked: { type: integer }
- *                     filesSampled: { type: integer }
- *                     checkedAt: { type: string }
- */
-router.get('/drift/:workspaceId', async (req: Request, res: Response) => {
-  const { workspaceId } = req.params;
-
-  const row = await queryOne<{
-    id: number;
-    workspace_id: string;
-    violations_json: string;
-    score: number;
-    conventions_checked: number;
-    files_sampled: number;
-    trigger_type: string;
-    created_at: string;
-  }>(
-    `SELECT id, workspace_id, violations_json, score, conventions_checked, files_sampled, trigger_type, created_at
-     FROM drift_reports WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 1`,
-    [workspaceId]
-  );
-
-  if (!row) {
-    res.json({ report: null });
-    return;
-  }
-
-  const report: DriftReport = {
-    violations: JSON.parse(row.violations_json) as DriftViolation[],
-    score: row.score,
-    conventionsChecked: row.conventions_checked,
-    filesSampled: row.files_sampled,
-    checkedAt: row.created_at,
-  };
-
-  res.json({
-    id: row.id,
-    workspaceId: row.workspace_id,
-    triggerType: row.trigger_type,
-    report,
-  });
 });
 
 export default router;
