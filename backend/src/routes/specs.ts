@@ -90,17 +90,27 @@ async function extractAttachmentText(contentType: string, fileData: Buffer, file
   }
 }
 
+export interface AttachmentContextMeta {
+  id: string;
+  filename: string;
+  contentType: string;
+  tokenCount: number;
+  extractionMethod: 'utf8' | 'pdf-parse' | 'mammoth' | 'none';
+}
+
 /**
  * Query spec_attachments for a given spec slug and build the
  * '=== ATTACHED DOCUMENTS ===' prompt section.
- * Returns empty string if no attachments found.
+ * Returns the section string (empty string if no attachments) and per-attachment metadata
+ * for inclusion in the spec_generation_logs.context_summary audit trail.
  * Optionally emits SSE attachment_processing events via the provided callback.
  */
 async function buildAttachmentSection(
   specSlug: string,
   onAttachment?: (filename: string, status: 'extracting_text' | 'complete') => void,
-): Promise<string> {
+): Promise<{ section: string; metadata: AttachmentContextMeta[] }> {
   type AttachmentRow = {
+    id: string;
     filename: string;
     content_type: string;
     file_size: number;
@@ -108,13 +118,14 @@ async function buildAttachmentSection(
   };
 
   const rows = await query<AttachmentRow>(
-    'SELECT filename, content_type, file_size, file_data FROM spec_attachments WHERE spec_id = $1 ORDER BY created_at ASC',
+    'SELECT id, filename, content_type, file_size, file_data FROM spec_attachments WHERE spec_id = $1 ORDER BY created_at ASC',
     [specSlug],
   );
 
-  if (rows.length === 0) return '';
+  if (rows.length === 0) return { section: '', metadata: [] };
 
   const parts: string[] = ['=== ATTACHED DOCUMENTS ==='];
+  const metadata: AttachmentContextMeta[] = [];
 
   for (const row of rows) {
     if (IMAGE_CONTENT_TYPES.has(row.content_type)) {
@@ -125,6 +136,7 @@ async function buildAttachmentSection(
         '',
       );
       onAttachment?.(row.filename, 'complete');
+      metadata.push({ id: row.id, filename: row.filename, contentType: row.content_type, tokenCount: 0, extractionMethod: 'none' });
     } else {
       onAttachment?.(row.filename, 'extracting_text');
       const text = await extractAttachmentText(row.content_type, row.file_data, row.filename);
@@ -132,11 +144,19 @@ async function buildAttachmentSection(
         parts.push(`${row.filename}:`, text, '');
       }
       onAttachment?.(row.filename, 'complete');
+      const extractedTokenCount = text ? Math.min(Math.ceil(text.length / 4), MAX_ATTACHMENT_TOKENS) : 0;
+      let extractionMethod: AttachmentContextMeta['extractionMethod'] = 'utf8';
+      if (row.content_type === 'application/pdf') {
+        extractionMethod = 'pdf-parse';
+      } else if (row.content_type === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
+        extractionMethod = 'mammoth';
+      }
+      metadata.push({ id: row.id, filename: row.filename, contentType: row.content_type, tokenCount: extractedTokenCount, extractionMethod });
     }
   }
 
   parts.push('=== END ATTACHED DOCUMENTS ===');
-  return parts.join('\n');
+  return { section: parts.join('\n'), metadata };
 }
 
 /** Resolve vault credentials (API key + baseUrl) for a given model and user. */
@@ -797,6 +817,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
   let resolvedModel = 'unknown';
   let usedProvider = 'unknown';
   let precomputedContextSummary: Record<string, unknown> | undefined;
+  let attachmentMeta: AttachmentContextMeta[] = [];
   const genStartTime = Date.now();
   let genSlug = 'unknown';
 
@@ -944,6 +965,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       gitMemory: synthResult.meta.memory,
       estimatedTokens,
       modelContextWindow,
+      attachments: attachmentMeta,
       ...(retrievalMeta ? {
         vectorHits: retrievalMeta.ragHits,
         graphHits: retrievalMeta.graphHits,
@@ -1033,9 +1055,11 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     // Load attachment context for this spec slug (before prompt assembly)
     // Emit SSE events for each attachment as it's being processed
-    const attachmentSection = await buildAttachmentSection(slug, (filename, status) => {
+    const attachmentBuild = await buildAttachmentSection(slug, (filename, status) => {
       emitAttachmentEvent(slug, filename, status, String(workspaceId)).catch(() => {/* non-fatal */});
     });
+    const attachmentSection = attachmentBuild.section;
+    attachmentMeta = attachmentBuild.metadata;
 
     // Build catalog sections (only include if non-empty)
     const catalogSections: string[] = [];
