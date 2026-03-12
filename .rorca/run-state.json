@@ -2,7 +2,7 @@
   "specId": "rorca-spec-validator",
   "runId": 41,
   "startedAt": "2026-03-12T05:48:49.923Z",
-  "lastUpdatedAt": "2026-03-12T06:06:52.289Z",
+  "lastUpdatedAt": "2026-03-12T06:19:26.974Z",
   "completedStories": [
     {
       "storyId": "SV-001",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 388982
+    },
+    {
+      "storyId": "SV-004",
+      "title": "Implement rorca_suggest_skills on-demand skill matcher",
+      "status": "passed",
+      "startedAt": "2026-03-12T06:07:09.382Z",
+      "finishedAt": "2026-03-12T06:19:26.973Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 737591
     }
   ],
   "failedStories": [],

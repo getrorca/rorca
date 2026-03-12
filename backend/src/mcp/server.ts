@@ -2079,6 +2079,88 @@ server.registerPrompt(
   }
 );
 
+server.registerTool(
+  'rorca_suggest_skills',
+  {
+    description: 'Run LLM-driven skill matching for a spec. Reads installed skills from .rorca/skills/, MEMORY.md, and AGENTS.md, then assigns suggestedSkills arrays (name, relevance 1-10, reason) to each story. Writes updated spec JSON back to the filesystem.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID'),
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+    },
+  },
+  async ({ workspaceId, specId }) => {
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/suggest-skills`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId }),
+    });
+    if (!res.ok) {
+      throw new Error(`Skill suggestion failed (${res.status}): ${await res.text()}`);
+    }
+    const data = await res.json() as {
+      matched: number;
+      storiesAffected: number;
+      stories: Array<{ storyId: string; skills: Array<{ name: string; relevance: number; reason: string }> }>;
+    };
+    const lines: string[] = [
+      `Skill matching complete: ${data.matched} skills across ${data.storiesAffected} stories`,
+      '',
+    ];
+    for (const s of data.stories) {
+      if (s.skills.length === 0) continue;
+      lines.push(`[${s.storyId}]`);
+      for (const sk of s.skills) {
+        lines.push(`  • ${sk.name} (relevance ${sk.relevance}/10): ${sk.reason}`);
+      }
+    }
+    return { content: [{ type: 'text' as const, text: lines.join('\n') }] };
+  },
+);
+
+server.registerPrompt(
+  'suggest_skills',
+  {
+    title: 'Suggest Skills',
+    description: 'Run LLM-driven skill matching for a spec. Assigns suggestedSkills with name, relevance (1-10), and reasoning to each story based on installed skills, MEMORY.md, and AGENTS.md.',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (e.g. "rorca-feature-enhancements") — filename without .json'),
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ specId, workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    const res = await fetch(`${RORCA_API}/api/specs/${encodeURIComponent(specId)}/suggest-skills`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ workspaceId: ws }),
+    });
+    if (!res.ok) {
+      return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: `Skill suggestion failed (${res.status}): ${await res.text()}` } }] };
+    }
+    const data = await res.json() as {
+      matched: number;
+      storiesAffected: number;
+      stories: Array<{ storyId: string; skills: Array<{ name: string; relevance: number; reason: string }> }>;
+    };
+    const lines: string[] = [
+      `Spec: ${specId}`,
+      `Skills matched: ${data.matched} across ${data.storiesAffected} stories`,
+      '',
+    ];
+    for (const s of data.stories) {
+      if (s.skills.length === 0) continue;
+      lines.push(`[${s.storyId}]`);
+      for (const sk of s.skills) {
+        lines.push(`  • ${sk.name} (${sk.relevance}/10): ${sk.reason}`);
+      }
+    }
+    if (data.matched === 0) {
+      lines.push('No skills matched. Install skills from the Marketplace first.');
+    }
+    return { messages: [{ role: 'user' as const, content: { type: 'text' as const, text: lines.join('\n') } }] };
+  },
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
