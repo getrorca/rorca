@@ -30,7 +30,7 @@ import type { PanelId } from './Sidebar';
 /* ─── Types ───────────────────────────────────────────────────────── */
 
 type SpecStatus = 'pending' | 'approved' | 'rejected' | 'completed';
-type PreviewTab = 'stories' | 'history' | 'context' | 'skills' | 'graph' | 'diagram' | 'json';
+export type PreviewTab = 'stories' | 'history' | 'context' | 'skills' | 'graph' | 'diagram' | 'json' | 'attachments';
 
 export interface SpecSlideOverSummary {
   id: string;
@@ -102,6 +102,8 @@ export interface SpecDetailSlideOverProps {
   isOpen: boolean;
   specId: string | null;
   initialSummary?: SpecSlideOverSummary | null;
+  /** Which tab to open initially (defaults to 'stories') */
+  initialTab?: PreviewTab;
   onClose: () => void;
   onNavigate?: (panel: PanelId) => void;
   onNavigateToRun?: (runId: number) => void;
@@ -264,6 +266,7 @@ export default function SpecDetailSlideOver({
   isOpen,
   specId,
   initialSummary,
+  initialTab,
   onClose,
   onNavigate,
   onNavigateToRun,
@@ -311,6 +314,7 @@ export default function SpecDetailSlideOver({
         <SpecDetailContent
           specId={specId}
           initialSummary={initialSummary ?? null}
+          initialTab={initialTab}
           onClose={onClose}
           onNavigate={onNavigate}
           onNavigateToRun={onNavigateToRun}
@@ -330,6 +334,7 @@ export default function SpecDetailSlideOver({
 function SpecDetailContent({
   specId,
   initialSummary,
+  initialTab,
   onClose,
   onNavigate,
   onNavigateToRun,
@@ -340,6 +345,7 @@ function SpecDetailContent({
 }: {
   specId: string;
   initialSummary: SpecSlideOverSummary | null;
+  initialTab?: PreviewTab;
   onClose: () => void;
   onNavigate?: (panel: PanelId) => void;
   onNavigateToRun?: (runId: number) => void;
@@ -357,7 +363,7 @@ function SpecDetailContent({
   const [summary, setSummary] = useState<SpecSlideOverSummary | null>(initialSummary);
   const [detail, setDetail] = useState<SpecDetailData | null>(null);
   const [detailLoading, setDetailLoading] = useState(true);
-  const [activeTab, setActiveTab] = useState<PreviewTab>('stories');
+  const [activeTab, setActiveTab] = useState<PreviewTab>(initialTab ?? 'stories');
 
   // Stories
   const [localStories, setLocalStories] = useState<Story[]>([]);
@@ -417,7 +423,7 @@ function SpecDetailContent({
   useEffect(() => { setLocalStories(detail?.userStories ?? detail?.stories ?? []); }, [detail]);
 
   // Reset tab on spec change
-  useEffect(() => { setActiveTab('stories'); }, [specId]);
+  useEffect(() => { setActiveTab(initialTab ?? 'stories'); }, [specId, initialTab]);
 
   // Check if workspace has an active run (so we can show Queue button upfront)
   useEffect(() => {
