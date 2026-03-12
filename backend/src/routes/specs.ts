@@ -25,8 +25,7 @@ import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
 import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
-import { PDFParse } from 'pdf-parse';
-import mammoth from 'mammoth';
+import { extractAttachmentText, MAX_ATTACHMENT_TOKENS, IMAGE_CONTENT_TYPES } from '../lib/attachment-extraction';
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -51,44 +50,6 @@ function briefToSlug(text: string): string {
   return slug.slice(0, 60).replace(/-$/, '');
 }
 
-const MAX_ATTACHMENT_TOKENS = 2000;
-const IMAGE_CONTENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
-
-/**
- * Extract text content from an attachment's binary data based on MIME type.
- * Returns extracted text (truncated to MAX_ATTACHMENT_TOKENS tokens), or null for images.
- */
-async function extractAttachmentText(contentType: string, fileData: Buffer, filename: string): Promise<string | null> {
-  try {
-    if (IMAGE_CONTENT_TYPES.has(contentType)) {
-      return null; // images handled separately as metadata
-    }
-
-    let text = '';
-    if (contentType === 'application/pdf') {
-      const parser = new PDFParse({ data: fileData });
-      const result = await parser.getText();
-      await parser.destroy();
-      text = result.text;
-    } else if (contentType === 'application/vnd.openxmlformats-officedocument.wordprocessingml.document') {
-      const result = await mammoth.extractRawText({ buffer: fileData });
-      text = result.value;
-    } else if (contentType === 'text/plain' || contentType === 'text/markdown' || contentType.startsWith('text/')) {
-      text = fileData.toString('utf-8');
-    } else {
-      return `[Unsupported file type: ${contentType}]`;
-    }
-
-    // Token budget: ~4 chars per token
-    const maxChars = MAX_ATTACHMENT_TOKENS * 4;
-    if (text.length > maxChars) {
-      return text.slice(0, maxChars) + '\n[truncated]';
-    }
-    return text;
-  } catch (err) {
-    return `[Error extracting text from ${filename}: ${(err as Error).message}]`;
-  }
-}
 
 export interface AttachmentContextMeta {
   id: string;
