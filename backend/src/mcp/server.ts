@@ -63,7 +63,7 @@ server.registerTool(
       title: z.string().describe('Short title for the spec (used as filename slug)'),
       storyCount: z.number().min(1).max(500).optional().default(8).describe('Target number of user stories (default 8)'),
       includeDiagrams: z.boolean().optional().default(true).describe('Whether to include Mermaid and ASCII diagrams in output'),
-      model: z.enum(['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001']).optional().describe('LLM model to use for generation. If omitted, uses workspace default or claude-sonnet-4-5-20250929.'),
+      model: z.enum(['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001']).optional().describe('LLM model to use for generation. If omitted, uses workspace default or claude-sonnet-4-6.'),
     },
   },
   async ({ workspaceId, specBrief, title, storyCount, includeDiagrams, model }) => {

@@ -64,7 +64,8 @@
         "security",
         "red-team"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-003",
@@ -85,7 +86,8 @@
       "suggestedReviewers": [
         "database"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-004",
@@ -114,7 +116,8 @@
       "suggestedReviewers": [
         "security"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-005",
@@ -134,7 +137,8 @@
       "suggestedReviewers": [
         "database"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-006",
@@ -161,7 +165,8 @@
       "suggestedReviewers": [
         "ux-designer"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-007",
@@ -183,7 +188,8 @@
       "suggestedReviewers": [
         "backend"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-008",
@@ -213,7 +219,8 @@
         "ux-designer",
         "accessibility-audit"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-009",
@@ -244,7 +251,8 @@
       "suggestedReviewers": [
         "ux-designer"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-010",
@@ -276,7 +284,8 @@
         "architect",
         "security"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-011",
@@ -294,7 +303,8 @@
       "suggestedReviewers": [
         "architect"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-012",
@@ -317,7 +327,8 @@
       "suggestedReviewers": [
         "ux-designer"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-013",
@@ -348,7 +359,8 @@
       "suggestedReviewers": [
         "ux-designer"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-014",

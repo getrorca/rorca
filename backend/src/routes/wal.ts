@@ -203,9 +203,9 @@ router.get('/', async (req, res, next) => {
  */
 const WalEventSchema = z.object({
   event_type: z.string().min(1),
-  workspace_id: z.string().optional(),
-  spec_id: z.string().optional(),
-  story_id: z.string().optional(),
+  workspace_id: z.string().nullish(),
+  spec_id: z.string().nullish(),
+  story_id: z.string().nullish(),
   payload: z.record(z.string(), z.unknown()).optional(),
 });
 
