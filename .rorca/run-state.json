@@ -1,11 +1,23 @@
 {
-  "specId": "",
-  "runId": 0,
-  "startedAt": "",
-  "lastUpdatedAt": "2026-03-12T18:44:16.737Z",
-  "completedStories": [],
+  "specId": "fix-kanban-progress-bar-multi-run",
+  "runId": 53,
+  "startedAt": "2026-03-12T08:12:10.359Z",
+  "lastUpdatedAt": "2026-03-12T08:14:04.468Z",
+  "completedStories": [
+    {
+      "storyId": "US-001",
+      "title": "Fix kanban progress calculation to use spec JSON passes field",
+      "status": "passed",
+      "startedAt": "2026-03-12T08:12:10.897Z",
+      "finishedAt": "2026-03-12T08:14:04.468Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 113571
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
-  "decisions": []
+  "decisions": [],
+  "resumedFromStory": null
 }
