@@ -1,9 +1,9 @@
 # Run State Summary
 
-Spec: rorca-mcp-cli-spec-enhancement
-Run ID: 40
-Started: 2026-03-12T04:20:33.580Z
-Last Updated: 2026-03-12T04:29:43.149Z
+Spec: rorca-quick-run-context-injection
+Run ID: 44
+Started: 2026-03-12T05:48:54.321Z
+Last Updated: 2026-03-12T05:52:02.776Z
 
 ## Completed Stories (1)
-- US-001: Research Best Practices and Rewrite rorca-mcp-cli Spec with Exhaustive Acceptance Criteria — DONE (claude, claude-sonnet-4-6, 542s)
+- QCI-001: Inject direction stack, MEMORY.md, and installed skills into Quick Run spec generation prompt — DONE (claude, claude-sonnet-4-6, 186s)
