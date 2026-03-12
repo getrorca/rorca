@@ -74,7 +74,8 @@
         "architect",
         "best-practices"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-003",
@@ -115,7 +116,8 @@
         "database",
         "architect"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-004",
@@ -152,7 +154,8 @@
         "architect",
         "best-practices"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-005",
@@ -185,7 +188,8 @@
       "suggestedReviewers": [
         "spec-verifier"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-006",
@@ -225,7 +229,8 @@
         "lead-dev",
         "best-practices"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-007",

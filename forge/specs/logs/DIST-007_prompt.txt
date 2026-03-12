@@ -19,7 +19,7 @@ npm run lint               # ESLint
 npx tsc --noEmit           # Frontend type check
 
 # Backend (backend/)
-cd backend && npm run dev  # Express server (:3030) — NO hot-reload, requires restart
+cd backend && npm run dev  # Express server (:3030) — auto-restarts on file save (tsx watch)
 cd backend && npm run mcp  # Run MCP server standalone (for debugging)
 cd backend && npm test     # Jest test suite
 cd backend && npx tsc --noEmit   # Backend type check
@@ -316,6 +316,7 @@ Key routes (see `backend/src/server.ts` for full mount list):
 | `POST /api/skills/install` | Install skill from raw markdown content |
 | `POST /api/skills/install-from-sh` | Install from skills.sh registry → GitHub fetch → dual-save |
 | `GET /api/skills/preview` | Preview uninstalled skill from skills.sh WITHOUT installing |
+| `GET /api/skills/top` | Top skills from skills.sh ranked by install count (24h leaderboard) |
 | `GET /api/skills/suggestions` | Echolocation-inferred skill suggestions for current workspace |
 | `GET /api/skills/:name/content` | Full markdown of installed skill (SkillRegistry → DB fallback) |
 | `DELETE /api/skills/:name` | Remove installed skill |
@@ -379,7 +380,7 @@ When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the buil
 2. **pg is async — always `await` DB calls**. `await queryOne<T>(sql, params)` returns T|undefined, `await query<T>(sql, params)` returns T[], `await execute(sql, params)` returns `{ rowCount }`. Use `$1, $2, ...` numbered placeholders (not `?`).
 3. **spec `id` ≠ spec `specName`** — `id` is the filename slug (`rorca-feature-enhancements`), `specName` is the human title. Use `spec.id` to construct file paths.
 4. **run-loop.sh is a bash fallback only** — lives at `workspace.path/forge/run-loop.sh`. Only used if `execution-engine.ts` is missing. Claude-only, no multi-agent support. Do not rely on it.
-5. **Backend requires restart** — `tsx` has no hot-reload. Always `lsof -ti:3030 | xargs kill -9 && npm run dev` after any backend changes.
+5. **Backend auto-restarts** — `tsx watch` detects file changes and restarts automatically. Manual restart only needed if the process itself crashes: `lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev`.
 
 ### Auth Middleware — Intentionally Bypassed
 `app.use(authRequired)` in `backend/src/server.ts` line ~78 is **commented out**. This is intentional — Rorca is a local single-user tool and the login wall blocks workspaces API causing onboarding to show incorrectly. Do NOT re-enable globally. Auth routes (`/api/auth/*`) still work for the registered user (`admin@rorca.local` / `rorca123`). If authRequired reappears as a global middleware, comment it out again.
@@ -471,10 +472,53 @@ Express API routes → @swagger JSDoc annotations → OpenAPI spec (/api/docs/op
                                                 → Served over HTTP on same :3030 port
 ```
 
-**Current state**: 5 hand-written stdio MCP tools in `backend/src/mcp/server.ts`:
-`rorca_get_context` | `rorca_generate_spec` | `rorca_list_specs` | `rorca_approve_spec` | `rorca_pipeline_status`
+**Current state**: 24 hand-written stdio MCP tools in `backend/src/mcp/server.ts`.
 
-Setup (stdio, legacy): `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
+Setup (stdio): `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
+
+**Specs & Pipeline**
+| Tool | Purpose |
+|------|---------|
+| `rorca_get_context` | Get synthesized Direction Stack (L1–L5) for a workspace |
+| `rorca_generate_spec` | Generate a spec JSON from a brief |
+| `rorca_list_specs` | List all specs grouped by status (pending/approved/running) |
+| `rorca_approve_spec` | Approve a pending spec and move it to the queue |
+| `rorca_pipeline_status` | Status of active/most recent pipeline run |
+| `rorca_trigger_run` | Start a pipeline run for an approved spec (supports dry-run + worktree) |
+| `rorca_run_status` | Detailed per-story status for a specific run |
+| `rorca_list_runs` | List recent pipeline runs |
+| `rorca_retry_story` | Retry failed stories in a completed run |
+
+**Story Editing**
+| Tool | Purpose |
+|------|---------|
+| `rorca_edit_story` | Update a story's title/description/acceptance criteria |
+| `rorca_add_stories` | Generate and append new LLM-generated stories to a spec |
+| `rorca_delete_story` | Remove a story (reindexes remaining, snapshots before delete) |
+| `rorca_search_stories` | Full-text search across all stories in all specs |
+
+**Direction Stack**
+| Tool | Purpose |
+|------|---------|
+| `rorca_get_direction` | Get all direction layers (L1–L3) with raw content |
+| `rorca_update_direction` | Update a specific direction layer (L1/L2/L3) |
+| `rorca_synthesize_direction` | Preview the merged direction string exactly as sent to the LLM |
+
+**Workspaces**
+| Tool | Purpose |
+|------|---------|
+| `rorca_list_workspaces` | List all registered workspaces |
+| `rorca_create_workspace` | Register a new workspace by filesystem path |
+| `rorca_workspace_stats` | Spec/run counts, pass rate, last activity |
+| `rorca_team_members` | Get team members for a workspace |
+| `rorca_usage_stats` | Token usage + cost summary over a date range |
+
+**Memory**
+| Tool | Purpose |
+|------|---------|
+| `rorca_save_memory` | Save a memory entry (Architecture/Convention/Bug Fix/Decision/Pattern/Gotcha) |
+| `rorca_log_decision` | Shortcut for saving architectural decisions with structured reasoning |
+| `rorca_get_memories` | Retrieve memories, optionally filtered by category |
 
 **Target state**: MCP Streamable HTTP transport at `http://localhost:3030/mcp`, auto-generated from OpenAPI spec. All API routes become MCP tools automatically. Stdio server kept as offline fallback.
 
@@ -1221,9 +1265,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-02-27 [Architecture] Direction Stack 5-Layer Cascade
-> Rule: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
-
 ## 2026-02-27 [Convention] Spec ID vs specName
 > Rule: spec.id is the filename slug (use for API calls and path construction). spec.specName is the human-readable title (display only).
 
@@ -1277,6 +1318,12 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 ## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
 > Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+
+## 2026-03-12 [Bug Fix] MCP rorca_list_specs and rorca_list_runs wrong response shape
+> Rule: Both tools assumed wrong API response shapes. rorca_list_specs treated response as a bare array but API returns { items: [...] }. rorca_list_runs destructured { runs } but API returns { items: [...] }. Fixed by normalizing: Array.isArray(data) ? data : (data.items ?? []) for list_specs, and payload.runs ?? payload.items ?? [] for list_runs. Also fixed specName field: API uses specName not title — display as s.specName ?? s.title ?? s.id.
+
+## 2026-03-12 [Pattern] MCP tools vs prompts — tools are Claude-callable, prompts are user slash commands
+> Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
 
 Follow this workflow for implementation:
 ## Agent Role: Frontend

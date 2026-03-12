@@ -33,7 +33,8 @@
       "dependsOn": [
         "US-001"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-003",
@@ -52,7 +53,8 @@
       "dependsOn": [
         "US-002"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-004",
@@ -74,7 +76,8 @@
       "dependsOn": [
         "US-001"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-005",
@@ -93,7 +96,8 @@
       "dependsOn": [
         "US-004"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-006",
@@ -114,7 +118,8 @@
       "dependsOn": [
         "US-004"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-007",
@@ -133,7 +138,8 @@
       "dependsOn": [
         "US-006"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ],
   "model": "claude-sonnet-4-6",
