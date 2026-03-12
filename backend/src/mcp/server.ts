@@ -3028,6 +3028,71 @@ server.registerTool(
   }
 );
 
+// ─── US-003: Spec Enrichment MCP Tool & Prompt ────────────────────────────────
+
+server.registerTool(
+  'rorca_enrich_spec',
+  {
+    description: '[Specs] Enrich a spec by running the 4-layer retrieval cascade (direction stack synthesis, workspace context, git history, schema snapshot) against each user story. Adds retrieved context to story descriptions so the execution engine has richer information at runtime. Returns retrieval method used, number of stories enriched, and token usage.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID'),
+      specId: z.string().describe('Spec ID (filename slug) to enrich'),
+    },
+  },
+  async ({ workspaceId, specId }) => {
+    return wrapToolCall('rorca_enrich_spec', async () => {
+      const res = await timedFetch(`${RORCA_API}/api/specs/${specId}/enrich`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId }),
+      });
+      if (!res.ok) return httpError('rorca_enrich_spec', res);
+      const data = await res.json() as {
+        specId: string;
+        method: string;
+        storiesEnriched: number;
+        usage?: { input?: number; output?: number };
+      };
+      const input = data.usage?.input ?? 0;
+      const output = data.usage?.output ?? 0;
+      return {
+        content: [{
+          type: 'text' as const,
+          text: [
+            `Spec ${data.specId} enriched`,
+            `Retrieval method: ${data.method}`,
+            `Stories enriched: ${data.storiesEnriched}`,
+            `Tokens used: ${input}in / ${output}out`,
+          ].join('\n'),
+        }],
+      };
+    });
+  }
+);
+
+server.registerPrompt(
+  'rorca_enrich_spec',
+  {
+    title: 'Enrich Spec',
+    description: 'Enrich a spec via the 4-layer retrieval cascade. Usage: /mcp__rorca__rorca_enrich_spec <workspaceId> <specId>',
+    argsSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID'),
+      specId: z.string().describe('Spec ID (filename slug) to enrich'),
+    },
+  },
+  async ({ workspaceId, specId }) => {
+    return {
+      messages: [{
+        role: 'user' as const,
+        content: {
+          type: 'text' as const,
+          text: `Enrich spec "${specId}" in workspace "${workspaceId}" by calling rorca_enrich_spec tool with workspaceId="${workspaceId}" and specId="${specId}".`,
+        },
+      }],
+    };
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
