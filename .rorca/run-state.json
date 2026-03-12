@@ -2,7 +2,7 @@
   "specId": "providers-models-page-redesign",
   "runId": 66,
   "startedAt": "2026-03-12T20:08:56.201Z",
-  "lastUpdatedAt": "2026-03-12T20:28:09.075Z",
+  "lastUpdatedAt": "2026-03-12T20:32:33.274Z",
   "completedStories": [
     {
       "storyId": "PM-001",
@@ -53,6 +53,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 259347
+    },
+    {
+      "storyId": "PM-006",
+      "title": "Provider Config + API Keys side-by-side cards",
+      "status": "passed",
+      "startedAt": "2026-03-12T20:28:24.051Z",
+      "finishedAt": "2026-03-12T20:32:33.274Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 249223
     }
   ],
   "failedStories": [],
