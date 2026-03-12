@@ -1,89 +1,83 @@
 import * as vscode from 'vscode';
 import { apiFetch, getServerUrl } from './auth';
 
-type SpecStatus = 'pending' | 'approved' | 'running';
+// ─── Data shapes ────────────────────────────────────────────────────────────
 
-interface RorcaSpec {
+interface ApiSpec {
   id: string;
   specName?: string;
   title?: string;
-  status?: string;
+  status: string;
   userStories?: Array<{ passes?: boolean }>;
 }
 
+// ─── Tree item types ─────────────────────────────────────────────────────────
+
+export type SpecItemKind = 'group' | 'spec' | 'empty' | 'offline';
+
 export class SpecTreeItem extends vscode.TreeItem {
+  public readonly kind: SpecItemKind;
   public readonly specId: string;
-  public readonly specStatus: SpecStatus;
+  public readonly specStatus: 'pending' | 'approved' | 'running' | '';
   public readonly storyCount: number;
   public readonly readinessPercent: number;
-  public readonly isGroup: boolean;
 
   constructor(opts: {
+    kind: SpecItemKind;
     label: string;
     description?: string;
-    collapsibleState: vscode.TreeItemCollapsibleState;
-    contextValue: string;
     iconPath?: vscode.ThemeIcon;
+    collapsibleState?: vscode.TreeItemCollapsibleState;
+    contextValue?: string;
     command?: vscode.Command;
     specId?: string;
-    specStatus?: SpecStatus;
+    specStatus?: 'pending' | 'approved' | 'running' | '';
     storyCount?: number;
     readinessPercent?: number;
-    isGroup?: boolean;
   }) {
-    super(opts.label, opts.collapsibleState);
+    super(opts.label, opts.collapsibleState ?? vscode.TreeItemCollapsibleState.None);
+    this.kind = opts.kind;
     this.description = opts.description;
+    this.iconPath = opts.iconPath;
     this.contextValue = opts.contextValue;
-    if (opts.iconPath) {
-      this.iconPath = opts.iconPath;
-    }
-    if (opts.command) {
-      this.command = opts.command;
-    }
+    this.command = opts.command;
     this.specId = opts.specId ?? '';
-    this.specStatus = opts.specStatus ?? 'pending';
+    this.specStatus = opts.specStatus ?? '';
     this.storyCount = opts.storyCount ?? 0;
     this.readinessPercent = opts.readinessPercent ?? 0;
-    this.isGroup = opts.isGroup ?? false;
   }
 }
+
+// ─── Provider ────────────────────────────────────────────────────────────────
 
 export class SpecTreeDataProvider implements vscode.TreeDataProvider<SpecTreeItem> {
   private _onDidChangeTreeData = new vscode.EventEmitter<SpecTreeItem | undefined | null | void>();
   readonly onDidChangeTreeData = this._onDidChangeTreeData.event;
 
-  private autoRefreshTimer: NodeJS.Timeout | undefined;
+  private _autoRefreshTimer: ReturnType<typeof setInterval> | undefined;
+  private _configListener: vscode.Disposable | undefined;
 
   constructor() {
-    this.startAutoRefresh();
-
-    vscode.workspace.onDidChangeConfiguration((e) => {
+    this._startAutoRefresh();
+    this._configListener = vscode.workspace.onDidChangeConfiguration((e) => {
       if (e.affectsConfiguration('rorca.autoRefreshInterval')) {
-        this.startAutoRefresh();
+        this._startAutoRefresh();
       }
     });
   }
 
-  private startAutoRefresh(): void {
-    if (this.autoRefreshTimer) {
-      clearInterval(this.autoRefreshTimer);
-      this.autoRefreshTimer = undefined;
-    }
-    const interval = vscode.workspace.getConfiguration('rorca').get<number>('autoRefreshInterval', 60);
-    if (interval > 0) {
-      this.autoRefreshTimer = setInterval(() => this.refresh(), interval * 1000);
-    }
+  dispose(): void {
+    this._stopAutoRefresh();
+    this._configListener?.dispose();
   }
 
-  dispose(): void {
-    if (this.autoRefreshTimer) {
-      clearInterval(this.autoRefreshTimer);
-    }
-  }
+  // ── Public API ────────────────────────────────────────────────────────────
 
   refresh(): void {
     this._onDidChangeTreeData.fire(undefined);
   }
+
+  // ── TreeDataProvider ──────────────────────────────────────────────────────
 
   getTreeItem(element: SpecTreeItem): SpecTreeItem {
     return element;
@@ -91,164 +85,293 @@ export class SpecTreeDataProvider implements vscode.TreeDataProvider<SpecTreeIte
 
   async getChildren(element?: SpecTreeItem): Promise<SpecTreeItem[]> {
     if (!element) {
-      return this.getRootGroups();
+      // Root level: fetch specs and return group nodes
+      return this._fetchGroups();
     }
-    if (element.isGroup) {
-      return this.getGroupChildren(element.specStatus);
+
+    if (element.kind === 'group' && element.specStatus !== '') {
+      // Group level: return child spec items for this status
+      return this._getGroupChildren(element.specStatus);
     }
+
     return [];
   }
 
-  private async fetchSpecs(): Promise<RorcaSpec[]> {
+  // ── Private helpers ───────────────────────────────────────────────────────
+
+  private async _fetchGroups(): Promise<SpecTreeItem[]> {
+    let specs: ApiSpec[];
     try {
-      const data = await apiFetch('/api/specs?status=all');
-      if (Array.isArray(data)) {
-        return data as RorcaSpec[];
+      const res = await apiFetch('/api/specs?status=all');
+      if (!res.ok) {
+        throw new Error(`HTTP ${res.status}`);
       }
-      const obj = data as Record<string, unknown>;
-      if (Array.isArray(obj['items'])) {
-        return obj['items'] as RorcaSpec[];
+      const data: unknown = await res.json();
+      specs = Array.isArray(data) ? (data as ApiSpec[]) : ((data as { items?: ApiSpec[] }).items ?? []);
+    } catch (err: unknown) {
+      const msg = err instanceof Error ? err.message : String(err);
+      const isOffline =
+        msg.includes('ECONNREFUSED') ||
+        msg.includes('fetch failed') ||
+        msg.includes('Failed to fetch') ||
+        msg.includes('ENOTFOUND') ||
+        msg.includes('network');
+
+      if (isOffline) {
+        return [
+          new SpecTreeItem({
+            kind: 'offline',
+            label: '⚠ Server offline',
+            description: 'Click to start server',
+            iconPath: new vscode.ThemeIcon('warning', new vscode.ThemeColor('problemsWarningIcon.foreground')),
+            contextValue: 'rorcaOffline',
+            command: { command: 'rorca.startServer', title: 'Start Server' },
+          }),
+        ];
       }
-      return [];
-    } catch {
-      return [];
+      return [
+        new SpecTreeItem({
+          kind: 'empty',
+          label: 'Failed to load specs',
+          description: msg,
+          iconPath: new vscode.ThemeIcon('error'),
+        }),
+      ];
     }
+
+    // Partition by status
+    const pending = specs.filter((s) => s.status === 'pending');
+    const approved = specs.filter((s) => s.status === 'approved');
+    const running = specs.filter((s) => s.status === 'running');
+
+    // Build group nodes, filtering empty groups
+    const groups: SpecTreeItem[] = [];
+
+    if (running.length > 0) {
+      groups.push(this._makeGroupNode('running', running.length));
+    }
+    if (approved.length > 0) {
+      groups.push(this._makeGroupNode('approved', approved.length));
+    }
+    if (pending.length > 0) {
+      groups.push(this._makeGroupNode('pending', pending.length));
+    }
+
+    if (groups.length === 0) {
+      return [
+        new SpecTreeItem({
+          kind: 'empty',
+          label: 'No specs found',
+          description: 'Generate one with rorca forge',
+          iconPath: new vscode.ThemeIcon('info'),
+        }),
+      ];
+    }
+
+    // Cache specs for group child lookups
+    this._specsCache = specs;
+    return groups;
   }
 
-  private classifyStatus(spec: RorcaSpec): SpecStatus {
-    const s = (spec.status ?? '').toLowerCase();
-    if (s === 'running' || s === 'in_progress' || s === 'active') {
-      return 'running';
-    }
-    if (s === 'approved') {
-      return 'approved';
-    }
-    return 'pending';
+  private _specsCache: ApiSpec[] = [];
+
+  private _makeGroupNode(status: 'pending' | 'approved' | 'running', count: number): SpecTreeItem {
+    const labels: Record<string, string> = {
+      pending: 'Pending',
+      approved: 'Approved',
+      running: 'Running',
+    };
+    return new SpecTreeItem({
+      kind: 'group',
+      label: labels[status],
+      description: `(${count})`,
+      iconPath: new vscode.ThemeIcon('folder'),
+      collapsibleState: vscode.TreeItemCollapsibleState.Collapsed,
+      contextValue: 'rorcaSpecGroup',
+      specStatus: status,
+    });
   }
 
-  private buildSpecItem(spec: RorcaSpec, status: SpecStatus): SpecTreeItem {
+  private _getGroupChildren(status: 'pending' | 'approved' | 'running' | ''): SpecTreeItem[] {
+    const filtered = this._specsCache.filter((s) => s.status === status);
+    return filtered.map((s) => this._makeSpecItem(s));
+  }
+
+  private _makeSpecItem(spec: ApiSpec): SpecTreeItem {
     const label = spec.specName ?? spec.title ?? spec.id;
     const stories = spec.userStories ?? [];
     const storyCount = stories.length;
-    const passed = stories.filter((s) => s.passes === true).length;
+    const passed = stories.filter((st) => st.passes === true).length;
     const readinessPercent = storyCount > 0 ? Math.round((passed / storyCount) * 100) : 0;
 
-    const iconMap: Record<SpecStatus, vscode.ThemeIcon> = {
+    const iconMap: Record<string, vscode.ThemeIcon> = {
       pending: new vscode.ThemeIcon('clock'),
       approved: new vscode.ThemeIcon('check'),
       running: new vscode.ThemeIcon('sync~spin'),
     };
 
     return new SpecTreeItem({
+      kind: 'spec',
       label,
       description: `${storyCount} stories · ${readinessPercent}% ready`,
+      iconPath: iconMap[spec.status] ?? new vscode.ThemeIcon('circle-outline'),
       collapsibleState: vscode.TreeItemCollapsibleState.None,
       contextValue: 'rorcaSpec',
-      iconPath: iconMap[status],
       specId: spec.id,
-      specStatus: status,
+      specStatus: (spec.status as 'pending' | 'approved' | 'running') ?? '',
       storyCount,
       readinessPercent,
-      isGroup: false,
     });
   }
 
-  private async getRootGroups(): Promise<SpecTreeItem[]> {
-    let specs: RorcaSpec[];
-    let offline = false;
-
-    try {
-      const data = await apiFetch('/api/specs?status=all');
-      if (Array.isArray(data)) {
-        specs = data as RorcaSpec[];
-      } else {
-        const obj = data as Record<string, unknown>;
-        specs = (Array.isArray(obj['items']) ? obj['items'] : []) as RorcaSpec[];
-      }
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : String(err);
-      offline = message.includes('ECONNREFUSED') || message.includes('Timeout') || message.includes('connect') || message.includes('Network Error');
-      specs = [];
+  private _startAutoRefresh(): void {
+    this._stopAutoRefresh();
+    const interval = vscode.workspace
+      .getConfiguration('rorca')
+      .get<number>('autoRefreshInterval', 60);
+    if (interval > 0) {
+      this._autoRefreshTimer = setInterval(() => this.refresh(), interval * 1000);
     }
+  }
 
-    if (offline) {
-      return [
-        new SpecTreeItem({
-          label: '⚠ Server offline',
-          description: 'Click to start server',
-          collapsibleState: vscode.TreeItemCollapsibleState.None,
-          contextValue: 'rorcaOffline',
-          iconPath: new vscode.ThemeIcon('warning'),
-          command: { command: 'rorca.startServer', title: 'Start Server' },
-          specId: '',
-          specStatus: 'pending',
-        }),
-      ];
+  private _stopAutoRefresh(): void {
+    if (this._autoRefreshTimer !== undefined) {
+      clearInterval(this._autoRefreshTimer);
+      this._autoRefreshTimer = undefined;
     }
+  }
+}
 
-    if (specs.length === 0) {
-      return [
-        new SpecTreeItem({
-          label: 'No specs found',
-          description: 'Generate one with rorca forge',
-          collapsibleState: vscode.TreeItemCollapsibleState.None,
-          contextValue: 'rorcaEmpty',
-          iconPath: new vscode.ThemeIcon('info'),
-          specId: '',
-          specStatus: 'pending',
-        }),
-      ];
+// ─── Command handlers ─────────────────────────────────────────────────────────
+// These are exported so extension.ts can register them with proper typing.
+
+export async function cmdApproveSpec(
+  item: SpecTreeItem,
+  provider: SpecTreeDataProvider
+): Promise<void> {
+  if (!item?.specId) {
+    await vscode.window.showErrorMessage('No spec selected.');
+    return;
+  }
+  try {
+    const res = await apiFetch(`/api/specs/${item.specId}/approve`, { method: 'POST' });
+    if (res.status === 200) {
+      await vscode.window.showInformationMessage(`Spec approved: ${String(item.label)}`);
+      provider.refresh();
+    } else if (res.status === 409) {
+      await vscode.window.showWarningMessage('Spec is already approved');
+    } else {
+      const body = await res.text();
+      await vscode.window.showErrorMessage(`Failed to approve spec: ${body}`);
     }
+  } catch (err: unknown) {
+    await vscode.window.showErrorMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
-    const groups: Record<SpecStatus, RorcaSpec[]> = { pending: [], approved: [], running: [] };
-    for (const spec of specs) {
-      groups[this.classifyStatus(spec)].push(spec);
-    }
+export async function cmdTriggerRun(
+  item: SpecTreeItem,
+  provider: SpecTreeDataProvider,
+  queue = false
+): Promise<void> {
+  if (!item?.specId) {
+    await vscode.window.showErrorMessage('No spec selected.');
+    return;
+  }
 
-    const groupOrder: SpecStatus[] = ['running', 'approved', 'pending'];
-    const groupLabels: Record<SpecStatus, string> = { running: 'Running', approved: 'Approved', pending: 'Pending' };
-    const groupIcons: Record<SpecStatus, vscode.ThemeIcon> = {
-      running: new vscode.ThemeIcon('sync~spin'),
-      approved: new vscode.ThemeIcon('folder'),
-      pending: new vscode.ThemeIcon('folder'),
-    };
+  const cfg = vscode.workspace.getConfiguration('rorca');
+  const workspacePath = cfg.get<string>('defaultWorkspacePath', '');
+  const specPath = `forge/specs/approved/${item.specId}.json`;
 
-    const result: SpecTreeItem[] = [];
-    for (const status of groupOrder) {
-      const children = groups[status];
-      if (children.length === 0) {
-        continue;
-      }
-      result.push(
-        new SpecTreeItem({
-          label: groupLabels[status],
-          description: `(${children.length})`,
-          collapsibleState: vscode.TreeItemCollapsibleState.Collapsed,
-          contextValue: 'rorcaSpecGroup',
-          iconPath: groupIcons[status],
-          specId: '',
-          specStatus: status,
-          isGroup: true,
-        }),
+  try {
+    const res = await apiFetch('/api/pipeline/trigger', {
+      method: 'POST',
+      body: JSON.stringify({ specPath, workspacePath, ...(queue ? { queue: true } : {}) }),
+    });
+
+    const data: unknown = await res.json().catch(() => ({}));
+    const payload = data as Record<string, unknown>;
+
+    if (res.ok && !payload['conflict']) {
+      const runId = payload['runId'] ?? payload['id'] ?? '?';
+      await vscode.window.showInformationMessage(`Pipeline started: run #${String(runId)}`);
+      provider.refresh();
+    } else if (payload['conflict']) {
+      const choice = await vscode.window.showWarningMessage(
+        'A run is already active',
+        { modal: true },
+        'Queue Next'
       );
+      if (choice === 'Queue Next') {
+        await cmdTriggerRun(item, provider, true);
+      }
+    } else {
+      const errMsg = payload['error'] ?? res.statusText;
+      await vscode.window.showErrorMessage(`Failed to trigger run: ${String(errMsg)}`);
     }
+  } catch (err: unknown) {
+    await vscode.window.showErrorMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
 
-    return result;
+export async function cmdOpenInBrowser(item: SpecTreeItem): Promise<void> {
+  if (!item?.specId) {
+    await vscode.window.showErrorMessage('No spec selected.');
+    return;
+  }
+  const url = `${getServerUrl()}/specs/${item.specId}/review`;
+  await vscode.env.openExternal(vscode.Uri.parse(url));
+}
+
+export async function cmdCopySpecJson(item: SpecTreeItem): Promise<void> {
+  if (!item?.specId) {
+    await vscode.window.showErrorMessage('No spec selected.');
+    return;
+  }
+  try {
+    const res = await apiFetch(`/api/specs/${item.specId}`);
+    if (!res.ok) {
+      await vscode.window.showErrorMessage(`Failed to fetch spec: HTTP ${res.status}`);
+      return;
+    }
+    const data: unknown = await res.json();
+    const json = JSON.stringify(data, null, 2);
+    await vscode.env.clipboard.writeText(json);
+    await vscode.window.showInformationMessage('Spec JSON copied to clipboard');
+  } catch (err: unknown) {
+    await vscode.window.showErrorMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
+  }
+}
+
+export async function cmdForgeFromSelection(
+  provider: SpecTreeDataProvider
+): Promise<void> {
+  const brief = await vscode.window.showInputBox({
+    prompt: 'Describe what to build',
+    placeHolder: 'Add Stripe payment integration...',
+  });
+  if (!brief) {
+    return;
   }
 
-  private async getGroupChildren(status: SpecStatus): Promise<SpecTreeItem[]> {
-    const allSpecs = await this.fetchSpecs();
-    return allSpecs
-      .filter((spec) => this.classifyStatus(spec) === status)
-      .map((spec) => this.buildSpecItem(spec, status));
-  }
+  const cfg = vscode.workspace.getConfiguration('rorca');
+  const workspacePath = cfg.get<string>('defaultWorkspacePath', '');
 
-  // Expose for command handlers to get workspace info
-  static getDefaultWorkspaceId(): string {
-    return vscode.workspace.getConfiguration('rorca').get<string>('defaultWorkspacePath', '');
-  }
-
-  static getServerUrl(): string {
-    return getServerUrl();
+  try {
+    const res = await apiFetch('/api/specs/generate', {
+      method: 'POST',
+      body: JSON.stringify({ brief, workspacePath }),
+    });
+    if (res.ok) {
+      const data: unknown = await res.json().catch(() => ({}));
+      const specId = (data as Record<string, unknown>)['id'] ?? 'new';
+      await vscode.window.showInformationMessage(`Spec generated: ${String(specId)}`);
+      provider.refresh();
+    } else {
+      const body = await res.text();
+      await vscode.window.showErrorMessage(`Failed to generate spec: ${body}`);
+    }
+  } catch (err: unknown) {
+    await vscode.window.showErrorMessage(`Error: ${err instanceof Error ? err.message : String(err)}`);
   }
 }

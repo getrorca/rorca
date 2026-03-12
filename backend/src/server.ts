@@ -191,7 +191,7 @@ app.post('/mcp', mcpHandlers.handlePost);
 app.get('/mcp', mcpHandlers.handleGet);
 app.delete('/mcp', mcpHandlers.handleDelete);
 
-// MC-004: MCP Tools enumeration endpoint (public — used by VS Code extension, no auth required)
+// MC-004: MCP tools discovery endpoint — used by VS Code extension tree view
 app.use('/api/mcp/tools', mcpToolsRouter);
 
 // ─── Auth middleware (all routes below require authentication) ───
