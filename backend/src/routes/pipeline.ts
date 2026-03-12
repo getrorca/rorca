@@ -2098,15 +2098,8 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       // ENOENT or any read error — silently skip
     }
 
-    const quickRunPromptParts: string[] = [];
-    if (directionContext.trim()) {
-      quickRunPromptParts.push('=== DIRECTION STACK ===', directionContext.trim(), '');
-    }
-    if (memoryContent.trim()) {
-      quickRunPromptParts.push('=== MEMORY.md ===', memoryContent.trim(), '');
-    }
-
     // Fetch installed skills for this workspace (best-effort, silent on error)
+    let skillsContext = '';
     try {
       const skillRows = await query<{ name: string; description: string }>(
         `SELECT name, description FROM installed_skills ORDER BY name`,
@@ -2114,13 +2107,20 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       );
       if (skillRows.length > 0) {
         const skillLines = skillRows.map(s => `- ${s.name}: ${s.description ?? ''}`).join('\n');
-        quickRunPromptParts.push('=== INSTALLED SKILLS ===', skillLines, '');
+        skillsContext = `=== INSTALLED SKILLS ===\n${skillLines}`;
       }
     } catch {
       // DB error — silently skip
     }
 
-    quickRunPromptParts.push(
+    // Build ordered context blocks and filter empty entries
+    const contextBlocks = [
+      directionContext.trim() ? `=== DIRECTION STACK ===\n${directionContext.trim()}` : '',
+      memoryContent.trim() ? `=== MEMORY.md ===\n${memoryContent.trim()}` : '',
+      skillsContext,
+    ].filter(Boolean);
+
+    const instructions = [
       '=== INSTRUCTIONS: READ THIS FIRST ===',
       'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
       'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
@@ -2143,8 +2143,11 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       '- dependsOn must be an empty array (single story has no deps)',
       '- The description should be detailed enough for an engineer to implement',
       '- Your entire response must be valid JSON parseable by JSON.parse()',
-    );
-    const quickRunPrompt = quickRunPromptParts.join('\n');
+    ].join('\n');
+
+    const quickRunPrompt = contextBlocks.length > 0
+      ? `${contextBlocks.join('\n\n')}\n\n${instructions}`
+      : instructions;
 
     const llmResult = await chatComplete(
       [{ role: 'user', content: quickRunPrompt }],
