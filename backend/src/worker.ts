@@ -17,7 +17,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, execSync, type ChildProcess } from 'child_process';
 import { z } from 'zod';
 import PgBoss from 'pg-boss';
 import {
@@ -158,6 +158,126 @@ async function emitWalEvent(
   }
 }
 
+// ── Helper: post-run auto-merge worktree branch into main ─────────────────
+// Executes synchronously after execution-engine exits with status='done'.
+// Conditions: autoWorktree=true AND autoMerge=true AND branchName exists.
+// On merge failure (exit code != 0), sets merge_status='failed' but does NOT
+// abort — leaves conflict markers for US-005 agentic resolution.
+
+interface AutoMergeResult {
+  merged: boolean;
+  sha: string | null;
+  error: string | null;
+}
+
+async function autoMergeWorktreeBranch(
+  workspacePath: string,
+  worktreePath: string | null,
+  branchName: string,
+  workspaceId: number | string,
+  runId: number,
+): Promise<AutoMergeResult> {
+  const gitOpts = { cwd: workspacePath, stdio: 'pipe' as const, timeout: 120_000 };
+
+  // 1. Set merge_status = 'merging'
+  await execute(
+    `UPDATE pipeline_runs SET merge_status = 'merging' WHERE id = $1`,
+    [runId],
+  );
+
+  // 2. Emit worktree_merge_started WAL event
+  await emitWalEvent('worktree_merge_started', workspaceId, {
+    run_id: runId,
+    branch_name: branchName,
+  });
+
+  // 3. git checkout main (or whatever the default branch is)
+  try {
+    execSync('git checkout main', gitOpts);
+  } catch {
+    // Try 'master' as fallback
+    try {
+      execSync('git checkout master', gitOpts);
+    } catch (checkoutErr: unknown) {
+      const msg = (checkoutErr as Error).message ?? String(checkoutErr);
+      logger.error({ runId, err: msg }, '[auto-merge] Failed to checkout main/master');
+      await execute(
+        `UPDATE pipeline_runs SET merge_status = 'failed' WHERE id = $1`,
+        [runId],
+      );
+      return { merged: false, sha: null, error: `checkout failed: ${msg}` };
+    }
+  }
+
+  // 4. git pull --ff-only origin main (sync with remote, skip if no remote)
+  try {
+    execSync('git pull --ff-only origin main', gitOpts);
+  } catch {
+    // No remote or pull failed — non-fatal, proceed with local merge
+    try {
+      execSync('git pull --ff-only origin master', gitOpts);
+    } catch {
+      logger.info({ runId }, '[auto-merge] git pull skipped — no remote or ff-only failed');
+    }
+  }
+
+  // 5. git merge --no-ff <branch>
+  try {
+    execSync(
+      `git merge --no-ff ${branchName} -m "chore: merge ${branchName} (run #${runId})"`,
+      gitOpts,
+    );
+  } catch (mergeErr: unknown) {
+    const msg = (mergeErr as Error).message ?? String(mergeErr);
+    logger.warn({ runId, branchName, err: msg }, '[auto-merge] Merge failed — leaving conflict markers for agentic resolution');
+    await execute(
+      `UPDATE pipeline_runs SET merge_status = 'failed' WHERE id = $1`,
+      [runId],
+    );
+    await emitWalEvent('worktree_merge_failed', workspaceId, {
+      run_id: runId,
+      branch_name: branchName,
+      error: msg,
+    });
+    return { merged: false, sha: null, error: msg };
+  }
+
+  // 6. Capture merge commit SHA
+  let sha: string | null = null;
+  try {
+    sha = execSync('git rev-parse HEAD', gitOpts).toString().trim();
+  } catch {
+    logger.warn({ runId }, '[auto-merge] Failed to capture merge commit SHA');
+  }
+
+  // 7. Update pipeline_runs with merge result
+  await execute(
+    `UPDATE pipeline_runs SET merge_status = 'merged', merge_commit_sha = $1 WHERE id = $2`,
+    [sha, runId],
+  );
+
+  // 8. Emit worktree_merged WAL event
+  await emitWalEvent('worktree_merged', workspaceId, {
+    run_id: runId,
+    branch_name: branchName,
+    merge_commit_sha: sha,
+  });
+
+  // 9. Clean up the worktree directory
+  if (worktreePath) {
+    try {
+      execSync(`git worktree remove "${worktreePath}" --force`, gitOpts);
+      logger.info({ runId, worktreePath }, '[auto-merge] Worktree removed');
+    } catch (rmErr: unknown) {
+      const msg = (rmErr as Error).message ?? String(rmErr);
+      logger.warn({ runId, worktreePath, err: msg }, '[auto-merge] Worktree removal failed (non-fatal)');
+    }
+  }
+
+  logger.info({ runId, branchName, sha }, '[auto-merge] Merge succeeded');
+  return { merged: true, sha, error: null };
+}
+
 // ── Job handler: pipeline:run ─────────────────────────────────────────────
 
 async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
@@ -296,6 +416,40 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               exit_code: code,
               source: 'worker',
             });
+
+            // ── Post-run auto-merge ─────────────────────────────────────
+            // Merge worktree branch back into main when ALL conditions met:
+            // (1) run status is 'done' (all stories passed)
+            // (2) autoWorktree was true
+            // (3) autoMerge is true
+            // (4) branchName exists
+            if (
+              status === 'done' &&
+              payload.autoWorktree &&
+              payload.autoMerge &&
+              payload.branchName
+            ) {
+              logger.info({ runId, branchName: payload.branchName }, '[worker] Starting post-run auto-merge');
+              await execute(
+                `UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`,
+                [runId],
+              );
+              try {
+                await autoMergeWorktreeBranch(
+                  workspacePath,
+                  worktreePath,
+                  payload.branchName,
+                  workspaceId,
+                  runId,
+                );
+              } catch (mergeErr) {
+                logger.error({ mergeErr, runId }, '[worker] Auto-merge threw unexpectedly');
+                await execute(
+                  `UPDATE pipeline_runs SET merge_status = 'failed' WHERE id = $1`,
+                  [runId],
+                ).catch(() => {});
+              }
+            }
           }
         } catch (err) {
           logger.error({ err, runId }, '[worker] Failed to update run status on exit');
