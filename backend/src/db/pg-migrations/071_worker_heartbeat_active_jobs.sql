@@ -1,4 +1,4 @@
--- Migration 069: worker_heartbeat — add active_jobs column
+-- Migration 071: worker_heartbeat — add active_jobs column
 -- Tracks the number of active child execution-engine processes currently
 -- managed by this worker. Written on every heartbeat tick (every 30s).
 
