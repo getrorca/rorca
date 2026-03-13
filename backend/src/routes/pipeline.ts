@@ -4619,4 +4619,138 @@ router.post('/queue', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/pipeline/worker/health — Worker health check ───────────────────
+// Queries Postgres directly — no IPC with the worker process.
+// Accessible without authentication (health checks must be unauthenticated).
+
+/**
+ * @swagger
+ * /api/pipeline/worker/health:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Worker process health check
+ *     operationId: getWorkerHealth
+ *     description: >
+ *       Returns the health status of the standalone pg-boss worker process by
+ *       querying the worker_heartbeat table and pgboss.* tables directly.
+ *       No IPC with the worker is required. The worker is considered active when
+ *       its last_seen timestamp is within the past 60 seconds.
+ *     responses:
+ *       200:
+ *         description: Worker health object
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 workerActive: { type: boolean }
+ *                 workerPid: { type: integer, nullable: true }
+ *                 workerStartedAt: { type: string, nullable: true, format: date-time }
+ *                 activeJobs:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       runId: { type: integer }
+ *                       specId: { type: string }
+ *                       startedAt: { type: string, format: date-time }
+ *                       elapsedMs: { type: integer }
+ *                 queueDepth: { type: integer }
+ *                 scheduledJobs:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       scheduleId: { type: string }
+ *                       cronExpr: { type: string }
+ *                       nextFireAt: { type: string, nullable: true, format: date-time }
+ *                 dlqDepth: { type: integer }
+ *                 pgBossVersion: { type: string }
+ */
+router.get('/worker/health', async (req: Request, res: Response) => {
+  try {
+    // ── 1. Worker heartbeat ─────────────────────────────────────────────────
+    const heartbeat = await queryOne<{
+      pid: number;
+      started_at: string;
+      last_seen: string;
+    }>('SELECT pid, started_at, last_seen FROM worker_heartbeat ORDER BY last_seen DESC LIMIT 1');
+
+    const workerActive = heartbeat
+      ? Date.now() - new Date(heartbeat.last_seen).getTime() < 60_000
+      : false;
+
+    // ── 2. Active jobs (pgboss.job joined with pipeline_runs) ───────────────
+    interface ActiveJobRow {
+      run_id: string;
+      spec_path: string | null;
+      started_at: string;
+    }
+    const activeJobRows = await query<ActiveJobRow>(
+      `SELECT (j.data->>'runId') AS run_id,
+              pr.spec_path,
+              j.startedon::text AS started_at
+       FROM   pgboss.job j
+       LEFT   JOIN pipeline_runs pr ON pr.id = (j.data->>'runId')::int
+       WHERE  j.name = 'pipeline:run'
+         AND  j.state = 'active'`,
+    ).catch(() => [] as ActiveJobRow[]);
+
+    const activeJobs = activeJobRows.map(row => ({
+      runId: parseInt(row.run_id, 10),
+      specId: row.spec_path ? row.spec_path.replace(/^.*\//, '').replace(/\.json$/, '') : null,
+      startedAt: row.started_at,
+      elapsedMs: Date.now() - new Date(row.started_at).getTime(),
+    }));
+
+    // ── 3. Queue depth (pending pipeline:run jobs) ──────────────────────────
+    const queueDepthRow = await queryOne<{ cnt: string }>(
+      `SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE name = 'pipeline:run' AND state = 'created'`,
+    ).catch(() => ({ cnt: '0' }));
+    const queueDepth = parseInt(queueDepthRow?.cnt ?? '0', 10);
+
+    // ── 4. Scheduled jobs ───────────────────────────────────────────────────
+    interface ScheduleRow {
+      name: string;
+      cron: string;
+      timezone: string | null;
+    }
+    const scheduleRows = await query<ScheduleRow>(
+      `SELECT name, cron, timezone FROM pgboss.schedule ORDER BY name`,
+    ).catch(() => [] as ScheduleRow[]);
+
+    const scheduledJobs = scheduleRows.map(r => ({
+      scheduleId: r.name,
+      cronExpr: r.cron,
+      nextFireAt: null as string | null, // pgboss doesn't surface next-fire directly
+    }));
+
+    // ── 5. DLQ depth (failed archived jobs) ────────────────────────────────
+    const dlqRow = await queryOne<{ cnt: string }>(
+      `SELECT COUNT(*)::text AS cnt FROM pgboss.archive WHERE state = 'failed'`,
+    ).catch(() => ({ cnt: '0' }));
+    const dlqDepth = parseInt(dlqRow?.cnt ?? '0', 10);
+
+    // ── 6. pg-boss schema version ───────────────────────────────────────────
+    const versionRow = await queryOne<{ version: string }>(
+      `SELECT version FROM pgboss.version LIMIT 1`,
+    ).catch(() => undefined);
+    const pgBossVersion = versionRow?.version ?? 'unknown';
+
+    res.json({
+      workerActive,
+      workerPid: heartbeat?.pid ?? null,
+      workerStartedAt: heartbeat?.started_at ?? null,
+      activeJobs,
+      queueDepth,
+      scheduledJobs,
+      dlqDepth,
+      pgBossVersion,
+    });
+  } catch (error: unknown) {
+    logger.error({ err: error }, '[Pipeline] worker health check error');
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 export default router;
