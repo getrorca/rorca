@@ -80,9 +80,9 @@ test('GET /api/direction/preview with hydrated workspace includes schema section
     .set('Authorization', `Bearer ${authToken}`)
     .send({ layer: 3, workspaceId: 'ws-dir-test', contentYaml: validL3Yaml });
 
-  // Seed workspace_context with schema + git
-  await execute(`INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_table_count, git_memory, git_commit_count)
-     VALUES ($1, $2, $3, $4, $5)`, ['ws-dir-test', 'CREATE TABLE users (id TEXT);', 1, 'conventions:\n  - use snake_case', 42]);
+  // Seed workspace_context with schema (git_memory column was removed in migration 064)
+  await execute(`INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_table_count, git_commit_count)
+     VALUES ($1, $2, $3, $4)`, ['ws-dir-test', 'CREATE TABLE users (id TEXT);', 1, 42]);
 
   const res = await request(app)
     .get('/api/direction/preview?brief=build+auth&workspaceId=ws-dir-test')
@@ -91,8 +91,7 @@ test('GET /api/direction/preview with hydrated workspace includes schema section
   expect(res.status).toBe(200);
   expect(res.body.synthesized).toContain('=== DATABASE SCHEMA (Auto-Hydrated) ===');
   expect(res.body.synthesized).toContain('CREATE TABLE users (id TEXT);');
-  expect(res.body.synthesized).toContain('=== PROJECT MEMORY (Git History) ===');
-  expect(res.body.synthesized).toContain('use snake_case');
+  expect(res.body.synthesized).not.toContain('=== PROJECT MEMORY (Git History) ===');
   expect(res.body.schemaTableCount).toBe(1);
   expect(res.body.gitCommitCount).toBe(42);
 });
