@@ -2,7 +2,7 @@
   "specId": "rorca-auto-merge",
   "runId": 107,
   "startedAt": "2026-03-13T20:55:03.668Z",
-  "lastUpdatedAt": "2026-03-13T21:04:42.686Z",
+  "lastUpdatedAt": "2026-03-13T21:10:28.925Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 309499
+    },
+    {
+      "storyId": "US-003",
+      "title": "Add WAL event types for merge lifecycle",
+      "status": "passed",
+      "startedAt": "2026-03-13T21:05:19.508Z",
+      "finishedAt": "2026-03-13T21:10:28.923Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 309415
     }
   ],
   "failedStories": [],
