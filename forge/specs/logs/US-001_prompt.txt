@@ -1309,18 +1309,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution
-> Rule: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
-
-## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern
-> Rule: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
-
-## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization
-> Rule: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
-
-## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table
-> Rule: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
-
 ## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model
 > Rule: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
 
@@ -1369,8 +1357,20 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
 > Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
 
+## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
+> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
+
+## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
+> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
+
+## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
+> Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
+
+## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
+> Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
+
 Follow this workflow for implementation:
-## Agent Role: Execution Engine
+## Agent Role: Backend Routes
 
 ---
 name: rorca
@@ -1523,12 +1523,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-001):
-Implement the backend API route `POST /api/specs/:id/assign-models` in `backend/src/routes/specs.ts`. The route reads the spec JSON from disk, detects the active execution engine (RORCA_AGENT) and model (RORCA_MODEL) from the `workspace_env_vars` table for the spec's workspace, then scores each story for complexity using logic extracted from `execution-engine.ts` (story text length + AC count + dependsOn depth + keyword matching: 'architecture','security','payments','migration' → high; 'copy','config','CRUD','label' → low). Maps complexity tier to model strings per agent: claude (low=claude-haiku-4-5-20251001, medium=claude-sonnet-4-6, high=claude-opus-4-6), opencode (reads RORCA_MODEL provider prefix: openai low=gpt-4o-mini/high=o3, anthropic low=claude-haiku-4-5-20251001/high=claude-opus-4-6, google low=gemini-2.0-flash/high=gemini-2.0-pro), codex (returns skipped=true with reason). Unless `dryRun=true`, writes `story.model` field to each UserStory in the spec JSON file on disk. Returns `{ storiesAssigned: N, skipped: boolean, reason?: string, breakdown: [{ storyId, complexity, model, reason }] }`.
+The POST /api/specs/:id/enrich route in backend/src/routes/specs.ts currently implements its own inline 4-layer retrieval cascade that is disconnected from memory-router.ts. This story replaces that inline logic with per-story calls to retrieveContext(workspaceId, story.title + ' ' + story.description, { maxTokens: 2000, includeGraph: true }) from backend/src/lib/memory-router.ts. Each story in the spec gets its own semantically matched context via cosine similarity instead of the same 10 recency-ordered memories. Aggregate cagHits, ragHits, graphHits, and latencyMs across all per-story calls. After all stories are processed, write a context_summary_json entry to spec_generation_logs using the canonical ContextSummary schema: { directionLayers: [...], skills: [...], memory: { count, tier, cagHits, ragHits, graphHits, latencyMs }, tokenBudget, flags }. Set the retrieval_method column to the highest tier used across all story calls (graph > rag > cag > direction_only). The existing inline pgvector/AGE/tsvector/direction-only code block must be fully removed from the enrich route handler — no dead code left behind.
 
 Acceptance Criteria:
-- POST /api/specs/:id/assign-models returns 200 with { storiesAssigned, breakdown } when RORCA_AGENT=claude; each breakdown entry has storyId, complexity ('low'|'medium'|'high'), model (one of claude-haiku-4-5-20251001/claude-sonnet-4-6/claude-opus-4-6), and reason string
-- When RORCA_AGENT=opencode and RORCA_MODEL=openai/gpt-4o, low-complexity stories get gpt-4o-mini and high-complexity stories get o3 in breakdown
-- When RORCA_AGENT=codex, route returns { storiesAssigned: 0, skipped: true, reason: 'Codex CLI does not support per-story model selection — model is fixed to your ChatGPT subscription' } and does NOT write story.model to spec JSON
-- When dryRun=true query param is set, spec JSON on disk is NOT modified but breakdown is still returned with correct model assignments
-- Stories containing keywords 'architecture', 'security', 'payments', or 'migration' in title+description+acceptanceCriteria are scored high complexity; stories containing 'copy', 'config', 'CRUD', or 'label' score low; others score medium
-- RORCA_AGENT and RORCA_MODEL are read from workspace_env_vars table (workspace derived from spec's workspace_id); falls back to process.env.RORCA_AGENT / RORCA_MODEL if not found in DB
+- POST /api/specs/:id/enrich no longer contains any inline SQL queries against pgvector, tsvector, or AGE — all retrieval is delegated to memory-router.ts retrieveContext()
+- Each userStory in the spec receives its own retrieveContext(workspaceId, story.title + ' ' + story.description, { maxTokens: 2000, includeGraph: true }) call, producing semantically different context per story based on cosine similarity
+- cagHits in the aggregated context_summary_json is non-zero when memory-router.ts CAG cache contains relevant entries (i.e., the cache is actually consulted via memory-router.ts, not bypassed)
+- After enrichment, a row is inserted into spec_generation_logs with context_summary_json matching the ContextSummary schema shape used by the generate route: { directionLayers, skills, memory: { count, tier, cagHits, ragHits, graphHits, latencyMs }, tokenBudget, flags }
+- retrieval_method column in spec_generation_logs is set to 'graph' if any story call used AGE traversal, 'rag' if pgvector/tsvector was used, 'cag' if only cache was used, or 'direction_only' as fallback — reflecting the highest tier actually used across all per-story calls
