@@ -1309,18 +1309,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution
-> Rule: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
-
-## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern
-> Rule: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
-
-## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization
-> Rule: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
-
-## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table
-> Rule: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
-
 ## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model
 > Rule: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
 
@@ -1369,8 +1357,81 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
 > Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
 
+## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
+> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
+
+## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
+> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
+
+## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
+> Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
+
+## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
+> Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
+
 Follow this workflow for implementation:
-## Agent Role: Backend Routes
+## Agent Role: Frontend
+
+
+## Skill: react-review (relevance: 8)
+---
+name: react-review
+description: Review React components for best practices and performance issues
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers
+  category: development
+---
+
+# React Review Skill
+
+Review React components for best practices, performance issues, and common patterns.
+
+## When to use me
+
+Use this skill when:
+- Reviewing React component code
+- Optimizing component performance
+- Checking for React best practices
+- Refactoring legacy components
+- Auditing component architecture
+
+## What I do
+
+- Analyze React components for performance issues (unnecessary re-renders, large bundles)
+- Check for React best practices (hooks usage, prop patterns, state management)
+- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
+- Suggest optimizations (memoization, code splitting, lazy loading)
+- Review TypeScript usage and type safety
+
+## Key Patterns
+
+### Performance
+- Use `React.memo` for components receiving object/function props from parent
+- Memoize expensive calculations with `useMemo`
+- Stabilize callback references with `useCallback`
+- Avoid inline object/array creation in JSX props
+- Use `React.lazy` + `Suspense` for code splitting
+
+### Hooks
+- Always include all dependencies in `useEffect` dependency arrays
+- Never call hooks conditionally or inside loops
+- Extract complex logic into custom hooks
+- Clean up subscriptions and timers in useEffect return
+
+### TypeScript
+- Define explicit interfaces for all component props
+- Use discriminated unions for variant components
+- Prefer `interface` over `type` for component props
+- Use `React.FC` sparingly — prefer explicit return types
+
+## Notes
+
+- Focuses on React 18+ patterns and best practices
+- Considers both class and function components
+- Includes TypeScript and JavaScript variants
+- References official React documentation and community patterns
 
 ---
 name: rorca
@@ -1523,10 +1584,10 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-002):
-Register a new MCP tool `rorca_assign_story_models` in `backend/src/mcp/server.ts`. Input schema: `{ workspaceId: string, specId: string, dryRun?: boolean }`. The tool calls `POST /api/specs/:id/assign-models?dryRun=<bool>` on the local backend (same pattern as other MCP tools that call the Express API). Returns the JSON response directly. Also register a corresponding MCP prompt (slash command `/mcp__rorca__assign_story_models`) with argsSchema `{ specId: string, dryRun?: string }` that formats a user-message instructing Claude to call the tool. The tool description must explain the dryRun flag and codex skipping behavior. Add JSDoc `@swagger` annotation to the backend route.
+After US-001 writes context_summary_json to spec_generation_logs for enriched specs, the frontend SpecDetailSlideOver Context tab must render the same rich ContextSummaryCard component that is already shown for generated specs. Currently the Context tab either shows nothing or a fallback empty state for specs that were enriched rather than generated. This story ensures the Context tab fetches the spec_generation_logs entry for the enrich operation (trigger_type = 'enrich' or equivalent) and passes context_summary_json to the existing ContextSummaryCard component. The card must display: direction layers count, skills matched, memory tier (cag/rag/graph/direction_only), cagHits, ragHits, graphHits, latencyMs, tokenBudget, and flags. No new UI components should be created — reuse the existing ContextSummaryCard. If multiple log entries exist (e.g., both a generate and a later enrich), show the most recent one. Add a label or badge indicating whether the context came from 'Generated' or 'Enriched' to distinguish the source.
 
 Acceptance Criteria:
-- Tool `rorca_assign_story_models` appears in MCP tool list with inputSchema requiring workspaceId (string) and specId (string), and optional dryRun (boolean)
-- Calling the tool with a valid workspaceId and specId returns the same response shape as the underlying API route: { storiesAssigned, skipped?, reason?, breakdown }
-- Slash command `/mcp__rorca__assign_story_models` is registered as an MCP prompt and produces a user message instructing Claude to call the tool with the provided specId (and optional dryRun)
-- The `POST /api/specs/:id/assign-models` route has a JSDoc `@swagger` annotation documenting request body (dryRun boolean), response schema (storiesAssigned, skipped, reason, breakdown array), and 200/404 response codes
+- The Context tab in SpecDetailSlideOver for a spec that has been enriched (but not generated via Rorca) renders ContextSummaryCard with data from the enrich operation's spec_generation_logs row — no empty state or null render
+- ContextSummaryCard shows memory.cagHits, memory.ragHits, memory.graphHits, and memory.latencyMs sourced from the aggregated per-story retrieveContext() calls written by US-001
+- When a spec has both a 'generate' log entry and a later 'enrich' log entry, the Context tab displays the most recent entry and shows a 'Enriched' badge (e.g., amber label) next to the timestamp to distinguish it from a 'Generated' entry (green label)
+- No new ContextSummaryCard component is introduced — the existing component used by the generate flow is reused without duplication

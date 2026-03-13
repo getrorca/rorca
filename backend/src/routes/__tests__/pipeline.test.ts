@@ -6,6 +6,9 @@ import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
 
+// Server initialization + migrations can take > 30s on first run
+jest.setTimeout(90_000);
+
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -825,7 +828,7 @@ describe('OC-006: Pipeline trigger agent integration', () => {
 
 describe('POST /api/pipeline/queue', () => {
   // The global beforeEach re-requires the server (DB migrations) — allow extra time
-  jest.setTimeout(60_000);
+  jest.setTimeout(90_000);
   let fetchSpy: jest.SpyInstance;
 
   /** Seed a spec in forge/specs/approved/ (the path queue endpoint expects) */
