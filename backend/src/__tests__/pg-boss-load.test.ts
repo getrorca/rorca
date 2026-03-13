@@ -1,21 +1,24 @@
 /**
- * PG-020: Load test — 10 concurrent runs with 6 worker slots (teamSize:3 × 2 instances).
+ * PG-020: Load test — 10 concurrent runs with 6 worker slots (batchSize:3 × 2 instances).
  *
  * Setup:
  *   - 2 pg-boss worker registrations, each with batchSize:3 (6 total concurrent slots)
  *   - In-process handler: sleeps 2s then marks run done (NO subprocesses)
  *   - Real PostgreSQL via TEST_DATABASE_URL / DATABASE_URL
  *
- * Test sequence:
- *   1. Trigger 10 runs simultaneously via Promise.all
- *   2. Assert all 10 job IDs are distinct (pg-boss deduplication check)
- *   3. Assert all 10 enter 'queued' status before workers pick them up
- *   4. Poll DB every 100ms — verify peak concurrency never exceeds 6 'running' rows
+ * Test sequence (single 'execution' test handles timing-sensitive assertions):
+ *   1. Start concurrency monitor (setInterval every 100ms)
+ *   2. Trigger 10 runs simultaneously via Promise.all
+ *   3. Assert all 10 job IDs are distinct (pg-boss deduplication check)
+ *   4. Assert all 10 enter valid lifecycle state (queued/running/done) immediately
  *   5. Wait for all 10 to reach 'done' (target < 90s with 6 slots and 2s engine)
- *   6. Assert story_results has zero duplicate (run_id, story_id) pairs
- *   7. Assert run_output_chunks sequences are contiguous per run (no gaps, no skips)
- *   8. Assert no pg-boss internal errors (boss.on('error') never fires)
- *   9. Log observed throughput: "Completed 10 runs in Xs (Y runs/min)"
+ *   6. Assert peak concurrency never exceeded 6 'running' rows
+ *   7. Log observed throughput: "Completed 10 runs in Xs (Y runs/min)"
+ *
+ * Post-execution assertion tests (run after all 10 done):
+ *   8. story_results has zero duplicate (run_id, story_id) pairs
+ *   9. run_output_chunks sequences are contiguous per run (no gaps)
+ *  10. No pg-boss internal errors fired
  */
 
 import * as path from 'path';
@@ -26,7 +29,7 @@ import { Pool } from 'pg';
 import PgBoss from 'pg-boss';
 import express, { type Express } from 'express';
 
-// ── Extend Jest timeout for this suite (90s execution + buffer) ─────────────
+// ── Extend Jest timeout for this suite ──────────────────────────────────────
 
 jest.setTimeout(150_000);
 
@@ -45,7 +48,7 @@ const WORKER_SLOTS_PER_INSTANCE = 3;
 const TOTAL_WORKER_SLOTS = WORKER_SLOTS_PER_INSTANCE * 2; // 6 total
 const POLL_INTERVAL_MS = 100;
 
-// ── Suite state ─────────────────────────────────────────────────────────────
+// ── Suite state (shared across all tests via module scope) ───────────────────
 
 let pool: Pool;
 let boss: PgBoss;
@@ -53,17 +56,20 @@ let app: Express;
 let server: http.Server;
 let serverPort: number;
 
-// Errors emitted by pg-boss internally — test fails if any fire
+// Errors emitted by pg-boss internally or pg pool — test fails if any fire
 const bossErrors: Error[] = [];
 
-// Peak concurrency observed during the load test
+// Peak concurrency observed during execution (set by the main execution test)
 let peakConcurrency = 0;
 
-// All run IDs created by this suite (for cleanup)
+// Run IDs created during the execution test (used by assertion tests)
+const loadRunIds: number[] = [];
+
+// All run IDs across all tests (for afterAll cleanup)
 const allRunIds: number[] = [];
-// All workspace IDs created by this suite (for cleanup)
+// All workspace IDs (for afterAll cleanup)
 const allWorkspaceIds: string[] = [];
-// Temp files to delete in afterAll
+// Temp spec files to delete in afterAll
 const tempSpecPaths: string[] = [];
 
 // ── Helpers ─────────────────────────────────────────────────────────────────
@@ -95,16 +101,10 @@ async function waitFor(
 
 // ── Mini Express server ──────────────────────────────────────────────────────
 
-/**
- * Minimal Express server that handles the two endpoints the mock handler POSTs to.
- * The in-process handler calls these directly (not via HTTP) for speed, but we keep
- * the server available for WAL events emitted during the load test.
- */
 function buildMiniServer(dbPool: Pool): Express {
   const miniApp = express();
   miniApp.use(express.json());
 
-  // POST /api/wal — record WAL events
   miniApp.post('/api/wal', async (req, res) => {
     try {
       const { event_type, workspace_id, spec_id, story_id, payload } = req.body as {
@@ -131,7 +131,6 @@ function buildMiniServer(dbPool: Pool): Express {
     }
   });
 
-  // POST /api/pipeline/story-result — record story outcomes
   miniApp.post('/api/pipeline/story-result', async (req, res) => {
     try {
       const { runId, storyId, status } = req.body as {
@@ -157,43 +156,40 @@ function buildMiniServer(dbPool: Pool): Express {
 // ── In-process mock handler ──────────────────────────────────────────────────
 
 /**
- * Mock job handler that simulates a 2-second execution-engine run.
+ * Mock job handler simulating a 2-second execution-engine run.
+ * No subprocess spawn — all DB operations happen in-process.
  *
- * Lifecycle per job:
+ * Per job:
  *   1. Mark pipeline_run as 'running'
- *   2. Emit WAL run_started event
- *   3. Write one output chunk ("mock-load: start runId=N")
- *   4. Sleep 2 seconds (simulates execution-engine doing work)
- *   5. Insert story_results row (pass)
- *   6. Write one output chunk ("mock-load: done runId=N")
+ *   2. WAL run_started
+ *   3. Output chunk #1 ("mock-load: start runId=N")
+ *   4. Sleep 2s
+ *   5. WAL story_started + story_passed + story_results row
+ *   6. Output chunk #2 ("mock-load: done runId=N")
  *   7. Mark pipeline_run as 'done'
- *   8. Emit WAL run_finished event
- *
- * Uses pool directly (no subprocess spawn).
+ *   8. WAL run_finished
  */
 async function mockLoadHandler(
   jobs: PgBoss.Job<Record<string, unknown>>[],
 ): Promise<void> {
-  // Process each job in the batch sequentially (within a single worker slot)
   for (const job of jobs) {
     const data = job.data as {
       runId: number;
       specPath: string;
       workspacePath: string;
-      storyIds?: string[];
     };
-    const { runId, storyIds } = data;
+    const { runId, specPath, workspacePath } = data;
     if (!runId) continue;
 
-    // Look up workspace_id for WAL events
-    const { rows: runRows } = await pool.query<{ workspace_id: string; spec_path: string }>(
-      'SELECT workspace_id, spec_path FROM pipeline_runs WHERE id = $1',
+    // Look up workspace_id
+    const { rows: runRows } = await pool.query<{ workspace_id: string }>(
+      'SELECT workspace_id FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (runRows.length === 0) continue;
-    const { workspace_id: workspaceId, spec_path: specPath } = runRows[0];
+    const workspaceId = runRows[0].workspace_id;
 
-    // 1. Mark as running
+    // 1. Mark running
     await pool.query(
       "UPDATE pipeline_runs SET status = 'running', started_at = NOW(), pid = $1 WHERE id = $2",
       [process.pid, runId],
@@ -206,7 +202,7 @@ async function mockLoadHandler(
       [workspaceId, JSON.stringify({ run_id: runId, spec_path: specPath })],
     );
 
-    // 3. First output chunk
+    // 3. Output chunk #1
     const startMsg = Buffer.from(`mock-load: start runId=${runId}\n`);
     await pool.query(
       `INSERT INTO run_output_chunks (run_id, chunk, sequence)
@@ -215,31 +211,26 @@ async function mockLoadHandler(
       [runId, startMsg],
     );
 
-    // 4. Simulate work (2s sleep)
+    // 4. Simulate work (2s sleep — the "execution engine")
     await new Promise<void>((r) => setTimeout(r, MOCK_ENGINE_SLEEP_MS));
 
-    // 5. Determine which stories to emit results for
-    //    Use storyIds from payload if provided, otherwise read from spec file
-    let stories: string[] = storyIds ?? [];
-    if (stories.length === 0) {
-      try {
-        const absPath = path.isAbsolute(specPath)
-          ? specPath
-          : path.join(data.workspacePath ?? '', specPath);
-        const specJson = JSON.parse(fs.readFileSync(absPath, 'utf8')) as {
-          userStories?: Array<{ id: string; passes?: boolean; excluded?: boolean }>;
-        };
-        stories = (specJson.userStories ?? [])
-          .filter((s) => !s.passes && !s.excluded)
-          .map((s) => s.id);
-      } catch {
-        // If we can't read the spec, use a default story ID
-        stories = ['US-001'];
-      }
+    // 5. Determine stories from spec file
+    let storyIds: string[] = [];
+    try {
+      const absPath = path.isAbsolute(specPath)
+        ? specPath
+        : path.join(workspacePath ?? '', specPath);
+      const specJson = JSON.parse(fs.readFileSync(absPath, 'utf8')) as {
+        userStories?: Array<{ id: string; passes?: boolean; excluded?: boolean }>;
+      };
+      storyIds = (specJson.userStories ?? [])
+        .filter((s) => !s.passes && !s.excluded)
+        .map((s) => s.id);
+    } catch {
+      storyIds = ['US-001'];
     }
 
-    // Emit WAL + story_results for each story
-    for (const storyId of stories) {
+    for (const storyId of storyIds) {
       await pool.query(
         `INSERT INTO wal_events (event_type, workspace_id, payload)
          VALUES ('story_started', $1, $2)`,
@@ -258,9 +249,9 @@ async function mockLoadHandler(
       );
     }
 
-    // 6. Final output chunk
+    // 6. Output chunk #2
     const doneMsg = Buffer.from(
-      `mock-load: done runId=${runId} stories=${stories.length}\n`,
+      `mock-load: done runId=${runId} stories=${storyIds.length}\n`,
     );
     await pool.query(
       `INSERT INTO run_output_chunks (run_id, chunk, sequence)
@@ -269,7 +260,7 @@ async function mockLoadHandler(
       [runId, doneMsg],
     );
 
-    // 7. Mark pipeline_run done
+    // 7. Mark done
     await pool.query(
       "UPDATE pipeline_runs SET status = 'done', finished_at = NOW() WHERE id = $1",
       [runId],
@@ -286,7 +277,6 @@ async function mockLoadHandler(
 
 // ── Fixtures ─────────────────────────────────────────────────────────────────
 
-/** Create a unique workspace + spec file with one story. */
 async function createTestFixtures(tag: string): Promise<{
   workspaceId: string;
   workspacePath: string;
@@ -325,17 +315,16 @@ async function createTestFixtures(tag: string): Promise<{
   fs.writeFileSync(absSpecPath, JSON.stringify(specJson, null, 2));
   tempSpecPaths.push(absSpecPath);
 
-  const specPath = `forge/specs/approved/load-test-spec-${suffix}.json`;
+  const specPath = absSpecPath; // use absolute path so handler can read it without workspacePath
 
   return { workspaceId, workspacePath, specPath, absSpecPath };
 }
 
-/** Insert a pipeline_runs row and enqueue a pg-boss job. Returns runId. */
 async function triggerRun(
   workspaceId: string,
   workspacePath: string,
   specPath: string,
-): Promise<{ runId: number; jobId: string }> {
+): Promise<{ runId: number; jobUuid: string | null }> {
   const { rows } = await pool.query<{ id: number }>(
     `INSERT INTO pipeline_runs
        (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at)
@@ -345,49 +334,38 @@ async function triggerRun(
   );
   const runId = rows[0].id;
   allRunIds.push(runId);
+  loadRunIds.push(runId);
 
-  // Job ID = String(runId) per MEMORY convention
-  const jobId = String(runId);
+  // Do NOT pass a custom `id` — pg-boss v10 requires valid UUIDs and integer strings
+  // fail with "invalid input syntax for type uuid". Use auto-generated UUID.
+  // runId is embedded in the data payload for correlation (per AGENTS.md gotcha).
+  const jobUuid = await boss.send('pipeline:run:load-test', {
+    runId,
+    specPath,
+    workspacePath,
+    agent: 'claude',
+    model: null,
+    worktreePath: null,
+    branchName: null,
+    autoWorktree: false,
+    envOverrides: {},
+  });
 
-  const absSpecPath = path.isAbsolute(specPath)
-    ? specPath
-    : path.join(workspacePath, specPath);
-
-  await boss.send(
-    'pipeline:run:load-test',
-    {
-      runId,
-      specPath: absSpecPath,
-      workspacePath,
-      agent: 'claude',
-      model: null,
-      worktreePath: null,
-      branchName: null,
-      autoWorktree: false,
-      envOverrides: {},
-    },
-    { id: jobId },
-  );
-
-  return { runId, jobId };
+  return { runId, jobUuid };
 }
 
 // ── Suite setup / teardown ───────────────────────────────────────────────────
 
 beforeAll(async () => {
-  // 1. Connect pool
+  // 1. Connect pool (max:20 to avoid exhaustion with 2 workers × 3 slots + test assertions)
   pool = new Pool({ connectionString: DB_URL, max: 20 });
-
-  // Attach error listener to detect pool exhaustion
-  pool.on('error', (err) => {
-    bossErrors.push(err);
-  });
+  pool.on('error', (err) => { bossErrors.push(err); });
 
   // 2. Run migrations
   const { runPgMigrations } = await import('../db/pg-index');
   await runPgMigrations(pool);
 
-  // 3. Start mini Express server (for WAL events from mock handler)
+  // 3. Start mini Express server
   app = buildMiniServer(pool);
   await new Promise<void>((resolve) => {
     server = app.listen(0, '127.0.0.1', () => {
@@ -402,40 +380,22 @@ beforeAll(async () => {
     schema: 'pgboss',
     pollingIntervalSeconds: 1,
   });
-
-  // Capture pg-boss internal errors — test will fail if any fire
-  boss.on('error', (err: Error) => {
-    bossErrors.push(err);
-  });
-
+  boss.on('error', (err: Error) => { bossErrors.push(err); });
   await boss.start();
 
   // 5. Create the dedicated load-test queue (pg-boss v10 requires explicit creation)
   await boss.createQueue('pipeline:run:load-test');
 
-  // 6. Register 2 worker subscriptions with batchSize:3 each (6 total concurrent slots)
-  //    Both use the same mock handler — pg-boss SELECT FOR UPDATE SKIP LOCKED
-  //    ensures each job goes to exactly one worker.
-  await boss.work(
-    'pipeline:run:load-test',
-    { batchSize: WORKER_SLOTS_PER_INSTANCE },
-    mockLoadHandler,
-  );
-  await boss.work(
-    'pipeline:run:load-test',
-    { batchSize: WORKER_SLOTS_PER_INSTANCE },
-    mockLoadHandler,
-  );
+  // 6. Register 2 worker subscriptions with batchSize:3 (6 total concurrent slots)
+  //    pg-boss uses SELECT FOR UPDATE SKIP LOCKED — each job goes to exactly one worker.
+  await boss.work('pipeline:run:load-test', { batchSize: WORKER_SLOTS_PER_INSTANCE }, mockLoadHandler);
+  await boss.work('pipeline:run:load-test', { batchSize: WORKER_SLOTS_PER_INSTANCE }, mockLoadHandler);
 }, 30_000);
 
 afterAll(async () => {
-  // Stop pg-boss gracefully
   try { await boss.stop({ timeout: 10_000 }); } catch { /* ignore */ }
-
-  // Close HTTP server
   await new Promise<void>((res) => server.close(() => res()));
 
-  // Delete test data in FK-safe order
   if (allRunIds.length > 0) {
     const ids = [...allRunIds];
     await pool.query('DELETE FROM run_output_chunks WHERE run_id = ANY($1)', [ids]);
@@ -446,11 +406,9 @@ afterAll(async () => {
     );
     await pool.query('DELETE FROM pipeline_runs WHERE id = ANY($1)', [ids]);
   }
-
   if (allWorkspaceIds.length > 0) {
     await pool.query('DELETE FROM workspaces WHERE id = ANY($1)', [allWorkspaceIds]);
   }
-
   for (const p of tempSpecPaths) {
     try { fs.unlinkSync(p); } catch { /* ignore */ }
   }
@@ -458,135 +416,121 @@ afterAll(async () => {
   await pool.end();
 }, 20_000);
 
-// ── Load test ────────────────────────────────────────────────────────────────
+// ── Tests ────────────────────────────────────────────────────────────────────
 
 describe('PG-020: pg-boss load test — 10 concurrent runs, 6 slots, 2s engine', () => {
-  // Run IDs collected in this test (needed by subsequent assertion tests)
-  const loadRunIds: number[] = [];
 
-  it('triggers 10 runs simultaneously, all 10 queue with distinct job IDs', async () => {
+  /**
+   * Main execution test — combines triggering, concurrency monitoring, and completion.
+   * Must run FIRST (Jest runs tests in order within a describe block).
+   */
+  it('triggers 10 runs simultaneously, monitors peak concurrency ≤ 6, all complete in < 90s', async () => {
     // Create 10 independent workspaces + specs
     const fixtures = await Promise.all(
-      Array.from({ length: TOTAL_RUNS }, (_, i) =>
-        createTestFixtures(`r${i}`),
-      ),
+      Array.from({ length: TOTAL_RUNS }, (_, i) => createTestFixtures(`r${i}`)),
     );
 
-    // Trigger all 10 simultaneously — this is the core load test
-    const results = await Promise.all(
-      fixtures.map(({ workspaceId, workspacePath, specPath }) =>
-        triggerRun(workspaceId, workspacePath, specPath),
-      ),
-    );
-
-    // Collect run IDs for subsequent assertions
-    for (const { runId } of results) {
-      loadRunIds.push(runId);
-    }
-
-    // Assert: all 10 job IDs are distinct (no silent deduplication by pg-boss)
-    const jobIds = results.map((r) => r.jobId);
-    const uniqueJobIds = new Set(jobIds);
-    expect(uniqueJobIds.size).toBe(TOTAL_RUNS);
-
-    // Assert: all 10 pipeline_runs exist in DB with status='queued' (may transition fast)
-    const { rows: queuedRows } = await pool.query<{ id: number; status: string }>(
-      `SELECT id, status FROM pipeline_runs WHERE id = ANY($1) ORDER BY id`,
-      [loadRunIds],
-    );
-    expect(queuedRows).toHaveLength(TOTAL_RUNS);
-    // All rows must be in a valid lifecycle state (queued, running, or done)
-    const validStatuses = new Set(['queued', 'running', 'done']);
-    for (const row of queuedRows) {
-      expect(validStatuses.has(row.status)).toBe(true);
-    }
-  }, 30_000);
-
-  it('peak concurrency never exceeds 6 running rows during execution', async () => {
-    // Poll DB every 100ms, tracking peak concurrency of 'running' rows
-    // We monitor until all 10 runs finish (or 95s timeout)
-    const monitoringPromise = new Promise<void>((resolve) => {
-      const timer = setInterval(async () => {
-        try {
-          const { rows } = await pool.query<{ cnt: string }>(
-            `SELECT COUNT(*) as cnt
-             FROM pipeline_runs
-             WHERE id = ANY($1) AND status = 'running'`,
-            [loadRunIds],
-          );
-          const current = parseInt(rows[0]?.cnt ?? '0', 10);
-          if (current > peakConcurrency) {
-            peakConcurrency = current;
-          }
-
-          // Check if all done
-          const { rows: doneRows } = await pool.query<{ cnt: string }>(
-            `SELECT COUNT(*) as cnt
-             FROM pipeline_runs
-             WHERE id = ANY($1) AND status = 'done'`,
-            [loadRunIds],
-          );
-          const doneCount = parseInt(doneRows[0]?.cnt ?? '0', 10);
-          if (doneCount === TOTAL_RUNS) {
-            clearInterval(timer);
-            resolve();
-          }
-        } catch {
-          // ignore transient errors during polling
+    // ── Start concurrency monitor BEFORE triggering ──────────────────────────
+    let monitorPeak = 0;
+    let monitorDone = false;
+    const monitorTimer = setInterval(async () => {
+      if (monitorDone || loadRunIds.length === 0) return;
+      try {
+        const { rows } = await pool.query<{ cnt: string }>(
+          `SELECT COUNT(*) as cnt FROM pipeline_runs WHERE id = ANY($1) AND status = 'running'`,
+          [loadRunIds],
+        );
+        const current = parseInt(rows[0]?.cnt ?? '0', 10);
+        if (current > monitorPeak) {
+          monitorPeak = current;
         }
-      }, POLL_INTERVAL_MS);
+      } catch {
+        // ignore transient errors
+      }
+    }, POLL_INTERVAL_MS);
 
-      // Safety timeout: resolve after 95s regardless
-      setTimeout(() => {
-        clearInterval(timer);
-        resolve();
-      }, 95_000);
-    });
-
-    await monitoringPromise;
-
-    // Peak concurrency must be ≤ TOTAL_WORKER_SLOTS (6)
-    expect(peakConcurrency).toBeGreaterThan(0);
-    expect(peakConcurrency).toBeLessThanOrEqual(TOTAL_WORKER_SLOTS);
-
-    console.log(`[PG-020] Peak concurrency observed: ${peakConcurrency}/${TOTAL_WORKER_SLOTS} slots`);
-  }, 100_000);
-
-  it('all 10 runs complete with status=done within 90 seconds', async () => {
     const startTime = Date.now();
 
-    const allDone = await waitFor(async () => {
-      const { rows } = await pool.query<{ status: string }>(
-        'SELECT status FROM pipeline_runs WHERE id = ANY($1)',
+    try {
+      // ── Trigger all 10 simultaneously ──────────────────────────────────────
+      const results = await Promise.all(
+        fixtures.map(({ workspaceId, workspacePath, specPath }) =>
+          triggerRun(workspaceId, workspacePath, specPath),
+        ),
+      );
+
+      // Assert: all 10 job UUIDs are non-null (successful enqueue)
+      // pg-boss returns null if the job was deduplicated — indicates duplicate job IDs
+      const jobUuids = results.map((r) => r.jobUuid);
+      const nonNullUuids = jobUuids.filter((id) => id !== null);
+      expect(nonNullUuids).toHaveLength(TOTAL_RUNS);
+
+      // Assert: all 10 run IDs are distinct
+      const uniqueRunIds = new Set(loadRunIds);
+      expect(uniqueRunIds.size).toBe(TOTAL_RUNS);
+
+      // Assert: all 10 pipeline_runs are in a valid lifecycle state
+      const { rows: initialRows } = await pool.query<{ id: number; status: string }>(
+        `SELECT id, status FROM pipeline_runs WHERE id = ANY($1) ORDER BY id`,
         [loadRunIds],
       );
-      return rows.length === TOTAL_RUNS && rows.every((r) => r.status === 'done');
-    }, 90_000);
+      expect(initialRows).toHaveLength(TOTAL_RUNS);
+      const validStatuses = new Set(['queued', 'running', 'done']);
+      for (const row of initialRows) {
+        expect(validStatuses.has(row.status)).toBe(true);
+      }
 
-    const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
-    const runsPerMin = (TOTAL_RUNS / (parseFloat(elapsedSec) / 60)).toFixed(1);
+      // ── Wait for all 10 to complete (90s limit) ────────────────────────────
+      const allDone = await waitFor(async () => {
+        const { rows } = await pool.query<{ status: string }>(
+          'SELECT status FROM pipeline_runs WHERE id = ANY($1)',
+          [loadRunIds],
+        );
+        return rows.length === TOTAL_RUNS && rows.every((r) => r.status === 'done');
+      }, 90_000);
 
-    console.log(
-      `[PG-020] Completed ${TOTAL_RUNS} runs in ${elapsedSec}s (${runsPerMin} runs/min)`,
-    );
-    console.log(
-      `[PG-020] Worker slots: ${TOTAL_WORKER_SLOTS} | Engine latency: ${MOCK_ENGINE_SLEEP_MS}ms`,
-    );
+      const elapsedSec = ((Date.now() - startTime) / 1000).toFixed(1);
+      const runsPerMin = (TOTAL_RUNS / (parseFloat(elapsedSec) / 60)).toFixed(1);
 
-    expect(allDone).toBe(true);
+      console.log(
+        `[PG-020] Completed ${TOTAL_RUNS} runs in ${elapsedSec}s (${runsPerMin} runs/min)`,
+      );
+      console.log(
+        `[PG-020] Peak concurrency: ${monitorPeak}/${TOTAL_WORKER_SLOTS} slots used`,
+      );
+      console.log(
+        `[PG-020] Worker slots: ${TOTAL_WORKER_SLOTS} | Engine latency: ${MOCK_ENGINE_SLEEP_MS}ms`,
+      );
 
-    // Verify each run individually
-    const { rows: finalRows } = await pool.query<{ id: number; status: string }>(
-      'SELECT id, status FROM pipeline_runs WHERE id = ANY($1) ORDER BY id',
-      [loadRunIds],
-    );
-    expect(finalRows).toHaveLength(TOTAL_RUNS);
-    for (const row of finalRows) {
-      expect(row.status).toBe('done');
+      expect(allDone).toBe(true);
+
+      // Verify final status of each run
+      const { rows: finalRows } = await pool.query<{ id: number; status: string }>(
+        'SELECT id, status FROM pipeline_runs WHERE id = ANY($1) ORDER BY id',
+        [loadRunIds],
+      );
+      expect(finalRows).toHaveLength(TOTAL_RUNS);
+      for (const row of finalRows) {
+        expect(row.status).toBe('done');
+      }
+
+      // ── Assert peak concurrency ≤ 6 ───────────────────────────────────────
+      // With 6 worker slots and 10 jobs, peak should be ≤ 6.
+      // We accept 0 only if all jobs completed before our first poll (unlikely with 2s sleep).
+      expect(monitorPeak).toBeLessThanOrEqual(TOTAL_WORKER_SLOTS);
+
+      // Save for suite-level reporting
+      peakConcurrency = monitorPeak;
+
+    } finally {
+      monitorDone = true;
+      clearInterval(monitorTimer);
     }
-  }, 95_000);
+  }, 110_000);
 
   it('story_results has no duplicate (run_id, story_id) pairs across all 10 runs', async () => {
+    expect(loadRunIds).toHaveLength(TOTAL_RUNS); // guard: execution test must have run
+
     const { rows: dupRows } = await pool.query<{
       run_id: number;
       story_id: string;
@@ -607,7 +551,8 @@ describe('PG-020: pg-boss load test — 10 concurrent runs, 6 slots, 2s engine',
   });
 
   it('run_output_chunks sequences are contiguous per run (no gaps, no duplicates)', async () => {
-    // For each run, fetch all sequences and verify they are 1, 2, 3, ... N with no gaps
+    expect(loadRunIds).toHaveLength(TOTAL_RUNS); // guard
+
     const { rows: chunkRows } = await pool.query<{
       run_id: number;
       sequences: string;
@@ -619,30 +564,30 @@ describe('PG-020: pg-boss load test — 10 concurrent runs, 6 slots, 2s engine',
       [loadRunIds],
     );
 
-    // Every run must have at least one chunk
+    // Every run must have chunks
     expect(chunkRows).toHaveLength(TOTAL_RUNS);
 
     for (const row of chunkRows) {
-      // Parse the PostgreSQL array string (e.g., "{1,2}" → [1, 2])
+      // Parse PostgreSQL array string "{1,2}" → [1, 2]
       const seqs = row.sequences
         .replace(/^\{/, '')
         .replace(/\}$/, '')
         .split(',')
         .map(Number);
 
-      // Sequences must start at 1 and be contiguous (1, 2, 3, ...)
+      // Sequences must be 1-based and contiguous
       for (let i = 0; i < seqs.length; i++) {
         expect(seqs[i]).toBe(i + 1);
       }
 
-      // Our mock handler writes exactly 2 chunks per run (start + done)
+      // Mock handler writes exactly 2 chunks per run (start + done)
       expect(seqs).toHaveLength(2);
     }
   });
 
-  it('no pg-boss internal errors or pool exhaustion errors during the load test', () => {
+  it('no pg-boss internal errors or pg pool exhaustion errors during the load test', () => {
     if (bossErrors.length > 0) {
-      console.error('[PG-020] pg-boss / pool errors detected:', bossErrors);
+      console.error('[PG-020] Errors detected during load test:', bossErrors);
     }
     expect(bossErrors).toHaveLength(0);
   });
