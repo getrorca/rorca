@@ -678,6 +678,8 @@ interface PipelineRunRow {
   total_cost_usd: number | null;
   queued_at: string | null;
   queue_position: number | null;
+  merge_status: string | null;
+  merge_commit_sha: string | null;
 }
 
 interface StoryResultRow {
@@ -782,6 +784,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               specPath: { type: string, example: "forge/specs/approved/my-spec.json" }
  *               workspaceId: { type: string }
  *               autoWorktree: { type: boolean, default: false, description: "Create git worktree for isolated run" }
+ *               autoMerge: { type: boolean, default: false, description: "Auto-merge worktree branch to main on successful run" }
  *               dryRun: { type: boolean, default: false }
  *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
  *     responses:
@@ -808,6 +811,7 @@ const PipelineTriggerSchema = z.object({
   specPath: z.string().min(1),
   workspaceId: z.union([z.string().min(1), z.number()]),
   autoWorktree: z.boolean().optional(),
+  autoMerge: z.boolean().optional(),
   dryRun: z.boolean().optional(),
   triggerType: z.enum(['manual', 'scheduled']).optional(),
   forceSequential: z.boolean().optional(),
@@ -820,7 +824,7 @@ const PipelineTriggerSchema = z.object({
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, dryRun, triggerType, forceSequential, queuedRunId } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId } = req.body;
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1338,6 +1342,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       worktreePath: worktreePath ?? null,
       branchName: branchName ?? null,
       autoWorktree: needsWorktree,
+      autoMerge: !!(autoMerge && needsWorktree),
       envOverrides,
     };
 
@@ -4877,6 +4882,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       worktreePath: originalRun.worktree_path ?? null,
       branchName: originalRun.branch_name ?? null,
       autoWorktree: false,
+      autoMerge: false,
       envOverrides: {},
     };
 

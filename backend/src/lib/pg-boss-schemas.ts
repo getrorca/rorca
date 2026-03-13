@@ -27,6 +27,7 @@ export const PipelineRunJobPayload = z.object({
   worktreePath: z.string().nullable(),
   branchName: z.string().nullable(),
   autoWorktree: z.boolean().optional().default(false),
+  autoMerge: z.boolean().optional().default(false),
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
 }).strict();
 
