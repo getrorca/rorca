@@ -211,7 +211,7 @@ async function writeOpenCodeSkillFile(workspaceCwd: string, workspaceId: string,
   const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
 
   // Fetch auto-hydrated context
-  const ctx = await queryOne(`SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`, [workspaceId]) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+  const ctx = await queryOne(`SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`, [workspaceId]) as { schema_snapshot: string | null } | undefined;
 
   // Fetch team layers
   const access = await queryOne('SELECT team_id FROM workspace_access WHERE workspace_id = $1 LIMIT 1', [workspaceId]) as { team_id: string } | undefined;
@@ -232,7 +232,6 @@ async function writeOpenCodeSkillFile(workspaceCwd: string, workspaceId: string,
     teamL1,
     teamL2,
     schemaSnapshot: ctx?.schema_snapshot || undefined,
-    gitMemory: ctx?.git_memory || undefined,
     specBrief,
   });
 
@@ -318,7 +317,7 @@ async function writeCodexAgentsMd(workspaceCwd: string, workspaceId: string, spe
   const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
 
   // Fetch auto-hydrated context
-  const ctx = await queryOne(`SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`, [workspaceId]) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+  const ctx = await queryOne(`SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`, [workspaceId]) as { schema_snapshot: string | null } | undefined;
 
   // Fetch team layers
   const access = await queryOne('SELECT team_id FROM workspace_access WHERE workspace_id = $1 LIMIT 1', [workspaceId]) as { team_id: string } | undefined;
@@ -339,7 +338,6 @@ async function writeCodexAgentsMd(workspaceCwd: string, workspaceId: string, spe
     teamL1,
     teamL2,
     schemaSnapshot: ctx?.schema_snapshot || undefined,
-    gitMemory: ctx?.git_memory || undefined,
     specBrief,
   });
 
