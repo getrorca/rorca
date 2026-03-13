@@ -22,6 +22,8 @@ import { generateScaffoldPreview, writeScaffoldFiles } from '../lib/workspace-sc
 import type { ScaffoldFile } from '../lib/workspace-scaffold';
 import { logger } from '../lib/logger';
 import { requirePlan } from '../lib/require-plan';
+import { hydrateGitMemory } from '../lib/auto-hydrate';
+import { broadcastAll } from '../lib/sse-hub';
 
 const router = Router();
 
@@ -172,6 +174,49 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
 
     const needsBootstrap = (health?.score ?? 0) < 40;
     res.status(201).json({ workspace: parseWorkspace(row!), health, needsBootstrap });
+
+    // US-003: Fire-and-forget background hydration — runs after response is sent
+    setImmediate(async () => {
+      try {
+        // Emit WAL event to signal hydration is starting
+        const walRow = await queryOne<{ id: number; ts: string }>(
+          "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workspace_hydration_started', $1, $2) RETURNING id, ts",
+          [id, JSON.stringify({ types: ['schema', 'git'] })]
+        );
+        broadcastAll({
+          id: walRow?.id ?? 0,
+          ts: walRow?.ts ?? new Date().toISOString(),
+          event_type: 'workspace_hydration_started',
+          workspace_id: id,
+          spec_id: null,
+          story_id: null,
+          actor: 'system',
+          payload: JSON.stringify({ types: ['schema', 'git'] }),
+        });
+
+        // Schema hydration: extract CREATE TABLE blocks from migration files
+        const schemaResult = hydrateSchema(path);
+        const snapshotAt = new Date().toISOString();
+        await execute(
+          `INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_table_count, schema_snapshot_at)
+           VALUES ($1, $2, $3, $4)
+           ON CONFLICT(workspace_id) DO UPDATE SET
+             schema_snapshot = EXCLUDED.schema_snapshot,
+             schema_table_count = EXCLUDED.schema_table_count,
+             schema_snapshot_at = EXCLUDED.schema_snapshot_at`,
+          [id, schemaResult.snapshot || null, schemaResult.tableNames.length, snapshotAt]
+        );
+        await execute(
+          "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('hydrate_schema', $1, $2)",
+          [id, JSON.stringify({ tableCount: schemaResult.tableNames.length })]
+        );
+
+        // Git memory hydration: fire-and-forget safe (hydrateGitMemory catches all errors internally)
+        await hydrateGitMemory(id);
+      } catch (bgErr) {
+        logger.error(`[Workspace] Background hydration failed for ${id}:`, bgErr);
+      }
+    });
   } catch (err) {
     next(err);
   }
