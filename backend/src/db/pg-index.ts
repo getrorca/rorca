@@ -64,7 +64,7 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     // PG-019: Migrations that create extensions may fail on managed services
     // (e.g., Supabase pre-installs pgvector, Neon doesn't support AGE).
     // Extension migration filenames contain these keywords for detection.
-    const EXTENSION_MIGRATION_PATTERNS = ['pgvector', 'pgcrypto', 'knowledge_graph', 'age'];
+    const EXTENSION_MIGRATION_PATTERNS = ['pgvector', 'pgcrypto', 'knowledge_graph', 'age', 'vector', 'enrich_spec_logs'];
 
     function isExtensionMigration(filename: string): boolean {
       const lower = filename.toLowerCase();
