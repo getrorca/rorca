@@ -7,7 +7,7 @@
     "rorca": "./bin/rorca.js"
   },
   "scripts": {
-    "dev": "concurrently \"vite\" \"cd backend && npx tsx src/server.ts\"",
+    "dev": "concurrently \"vite\" \"cd backend && npx tsx src/server.ts\" \"cd backend && npm run worker\"",
     "build": "vite build && cd backend && tsc && cd .. && npx tsc --project bin/tsconfig.json",
     "typecheck": "tsc --noEmit && cd backend && tsc --noEmit",
     "lint": "npx eslint src/",

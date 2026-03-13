@@ -1265,21 +1265,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-02-27 [Convention] Spec ID vs specName
-> Rule: spec.id is the filename slug (use for API calls and path construction). spec.specName is the human-readable title (display only).
-
-## 2026-03-10 [Gotcha] pg is async — always await DB calls
-> Rule: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
-
-## 2026-02-27 [Convention] chatComplete returns ChatResult
-> Rule: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
-
-## 2026-02-27 [Gotcha] Backend requires restart after changes
-> Rule: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
-
-## 2026-02-28 [Architecture] Context Router uses virtual file assembly
-> Rule: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
-
 ## 2026-02-28 [Architecture] Episodic Memory is structured Markdown
 > Rule: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
 
@@ -1324,6 +1309,21 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 ## 2026-03-12 [Pattern] MCP tools vs prompts — tools are Claude-callable, prompts are user slash commands
 > Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
+
+## 2026-03-12 [Decision] GitHub org is getrorca — repo is github.com/getrorca/rorca (private)
+> Rule: The canonical remote for the Rorca codebase is https://github.com/getrorca/rorca (private repo). The old remote was sysgazer/rorcha — that is dead. All pushes go to getrorca/rorca. The repo is permanently closed source — never suggest open sourcing, BSL, or source-available licensing.
+
+## 2026-03-12 [Gotcha] Merging old SQLite-era branches with "take theirs" clobbers modern PostgreSQL files
+> Rule: NEVER merge old pre-postgres-migration branches (rorca-convention-agents, rorca-frontend-routing, and any branch with timestamp ~1772...) using "git checkout --theirs" on code conflicts. These branches were built on SQLite and will revert db/index.ts to the SQLite version, revert App.tsx/Sidebar.tsx/routes.tsx to the old multi-panel UI, and truncate server.ts. Always restore from a known-good modern commit (e.g. git show <pre-merge-sha>:path/to/file) after any such merge.
+
+## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
+> Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
+
+## 2026-03-12 [Decision] rorca-ensure-postgres completed — zero-prereq Postgres provisioning in bin/rorca.ts
+> Rule: bin/rorca.ts now includes a full ensurePostgres() function. On first run, it downloads Postgres 16 binaries from zonkyio/embedded-postgres-binaries, extracts, runs initdb, starts pg_ctl on port 5433, creates rorca user and database. No Docker required. DATABASE_URL env var bypasses this entirely (preserves Docker workflow). --no-postgres flag also skips it. Postgres is stopped on SIGINT/SIGTERM via stopManagedPostgres().
+
+## 2026-03-12 [Bug Fix] tsx watch restarts backend during parallel runs → resilient-post retries exhaust
+> Rule: When a fast worktree run auto-merges into main, tsx watch detects the file changes and restarts the backend (5-10s TypeScript recompile). If resilient-post.ts retry window is shorter than the restart time, execution engine can't report story results and the run shows as failed. Fix: raise POST_MAX_RETRIES to 10 and POST_RETRY_DELAY_MS to 3000 (30s coverage) in backend/src/lib/resilient-post.ts.
 
 Follow this workflow for implementation:
 ## Agent Role: Backend Routes
@@ -1479,11 +1479,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-002):
-Register a new rorca_edit_spec MCP tool in backend/src/mcp/server.ts following the exact pattern of the existing rorca_edit_story tool at line 713. The tool accepts workspaceId (required), specId (required), model (optional string), title (optional string), and notes (optional string). The implementation must use server.registerTool with a Zod input schema, wrapToolCall, and timedFetch to the PUT /api/specs/:specId endpoint created in US-001. Only fields that are not undefined are included in the PUT request body. On HTTP error, call httpError. The tool should also register a corresponding slash-command prompt following the pattern of existing prompts in the prompts section.
+Add a PostgreSQL migration (next available after 049, e.g. 050) to extend `spec_generation_logs` with enrichment-specific columns needed by the enrich route: `enriched BOOLEAN NOT NULL DEFAULT false`, `retrieval_method TEXT CHECK (retrieval_method IN ('pgvector','graph','fulltext','direction-only'))`, `context_summary JSONB`. If the table does not yet exist (it was introduced in migration 046 per MEMORY.md), create it in full. Use `ADD COLUMN IF NOT EXISTS` guards so the migration is idempotent. Also ensure the `memories` table and `direction_layers` table have an `embedding vector(1536)` column (add with `IF NOT EXISTS` guard) so pgvector queries in US-001 have a target column to search. The migration must track in `schema_migrations`. Verify `pg-index.ts` migration runner picks up the new file automatically (it reads `pg-migrations/` directory numerically).
 
 Acceptance Criteria:
-- server.registerTool('rorca_edit_spec', ...) call exists in backend/src/mcp/server.ts with a Zod inputSchema containing: workspaceId (z.string()), specId (z.string()), model (z.string().optional()), title (z.string().optional()), notes (z.string().optional())
-- Implementation uses wrapToolCall and timedFetch(token, `${base}/api/specs/${specId}`, { method: 'PUT', body: ... }) matching the rorca_edit_story pattern
-- Only fields that are not undefined are included in the PUT body (e.g. { ...(model !== undefined && { model }), ...(title !== undefined && { title }), ...(notes !== undefined && { notes }) })
-- httpError is called when the fetch response is not ok, consistent with other MCP tool error handling
-- Tool returns a human-readable confirmation string including the updated id, title, model, and storyCount from the endpoint response
+- Migration file `backend/src/db/pg-migrations/050_enrich_spec_logs.sql` exists and runs without error in a transaction
+- spec_generation_logs gains columns enriched (BOOLEAN DEFAULT false) and retrieval_method (TEXT with CHECK constraint) and context_summary (JSONB) via ADD COLUMN IF NOT EXISTS guards
+- memories table gains column embedding vector(1536) IF NOT EXISTS (requires pgvector extension — migration uses CREATE EXTENSION IF NOT EXISTS vector before the ALTER TABLE)
+- direction_layers table gains column embedding vector(1536) IF NOT EXISTS with the same extension guard
+- Migration is tracked in schema_migrations table after pg-index.ts runs it — subsequent backend restarts do not re-run it

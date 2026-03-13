@@ -3062,21 +3062,16 @@ server.registerTool(
       });
       if (!res.ok) return httpError('rorca_enrich_spec', res);
       const data = await res.json() as {
-        specId: string;
-        method: string;
+        retrieval_method: string;
         storiesEnriched: number;
-        usage?: { input?: number; output?: number };
       };
-      const input = data.usage?.input ?? 0;
-      const output = data.usage?.output ?? 0;
       return {
         content: [{
           type: 'text' as const,
           text: [
-            `Spec ${data.specId} enriched`,
-            `Retrieval method: ${data.method}`,
+            `Spec ${specId} enriched`,
+            `Retrieval method: ${data.retrieval_method}`,
             `Stories enriched: ${data.storiesEnriched}`,
-            `Tokens used: ${input}in / ${output}out`,
           ].join('\n'),
         }],
       };

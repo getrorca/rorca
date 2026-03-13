@@ -8,7 +8,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Start everything (recommended)
-npm run dev                # Frontend :5210 + Backend :3030 concurrently
+npm run dev                # Frontend :5210 + Backend :3030 + pg-boss Worker concurrently
 
 # Frontend (root)
 npm run dev                # Vite dev server (:5210)
@@ -18,6 +18,7 @@ npx tsc --noEmit           # Frontend type check
 
 # Backend (backend/)
 cd backend && npm run dev  # Express server (:3030) — auto-restarts on file save (tsx watch)
+cd backend && npm run worker  # pg-boss worker (required — picks up queued pipeline runs)
 cd backend && npm run mcp  # Run MCP server standalone (for debugging)
 cd backend && npm test     # Jest test suite
 cd backend && npx tsc --noEmit   # Backend type check

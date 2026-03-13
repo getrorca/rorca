@@ -610,7 +610,11 @@ async function start(): Promise<void> {
   }
 
   // 3. Register job queue handlers
+  // pg-boss v10: queues must be explicitly created before work() or send() can use them.
   const boss = getBoss();
+  await boss.createQueue('pipeline:run');
+  await boss.createQueue('pipeline:retry');
+  await boss.createQueue('pipeline:cancel');
   await boss.work('pipeline:run', handlePipelineRun);
   await boss.work('pipeline:retry', handlePipelineRetry);
   await boss.work('pipeline:cancel', handlePipelineCancel);

@@ -654,51 +654,58 @@ function spawnClaude(
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
-    // Real-time stream-json token parsing
+    // Real-time stream-json token parsing + human-readable terminal output
     let stdoutLineBuf = '';
     let cumulativeInput = 0;
     let cumulativeOutput = 0;
     let turnCount = 0;
 
     child.stdout?.on('data', (chunk: Buffer) => {
+      // Always write raw stream-json to the log file for debugging
       logStream.write(chunk);
-      process.stdout.write(chunk);
 
-      // Parse stream-json lines for token usage if callback registered
-      if (onTokenUpdate) {
-        stdoutLineBuf += chunk.toString('utf8');
-        const lines = stdoutLineBuf.split('\n');
-        // Keep the last incomplete line in the buffer
-        stdoutLineBuf = lines.pop() ?? '';
+      // Parse stream-json: extract readable text for terminal, parse usage for token counting
+      stdoutLineBuf += chunk.toString('utf8');
+      const lines = stdoutLineBuf.split('\n');
+      stdoutLineBuf = lines.pop() ?? '';
 
-        for (const line of lines) {
-          const trimmed = line.trim();
-          if (!trimmed) continue;
-          try {
-            const event = JSON.parse(trimmed);
-            // Claude stream-json emits `result` events with usage at end of each turn
-            if (event.type === 'result' && event.usage) {
-              const input = (event.usage.input_tokens ?? 0) as number;
-              const output = (event.usage.output_tokens ?? 0) as number;
-              if (input > 0 || output > 0) {
-                // usage fields are cumulative per-session in stream-json
-                const turnInput = input - cumulativeInput;
-                const turnOutput = output - cumulativeOutput;
-                cumulativeInput = input;
-                cumulativeOutput = output;
-                turnCount++;
-                onTokenUpdate({
-                  inputTokens: turnInput > 0 ? turnInput : input,
-                  outputTokens: turnOutput > 0 ? turnOutput : output,
-                  turn: turnCount,
-                  cumulativeInput,
-                  cumulativeOutput,
-                });
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const event = JSON.parse(trimmed);
+
+          // Extract human-readable text from assistant messages
+          if (event.type === 'assistant' && event.message?.content) {
+            for (const block of event.message.content as { type: string; text?: string }[]) {
+              if (block.type === 'text' && block.text) {
+                process.stdout.write(block.text);
               }
             }
-          } catch {
-            // Not valid JSON — skip
           }
+
+          // Token usage from result events
+          if (event.type === 'result' && event.usage && onTokenUpdate) {
+            const input = (event.usage.input_tokens ?? 0) as number;
+            const output = (event.usage.output_tokens ?? 0) as number;
+            if (input > 0 || output > 0) {
+              const turnInput = input - cumulativeInput;
+              const turnOutput = output - cumulativeOutput;
+              cumulativeInput = input;
+              cumulativeOutput = output;
+              turnCount++;
+              onTokenUpdate({
+                inputTokens: turnInput > 0 ? turnInput : input,
+                outputTokens: turnOutput > 0 ? turnOutput : output,
+                turn: turnCount,
+                cumulativeInput,
+                cumulativeOutput,
+              });
+            }
+          }
+        } catch {
+          // Not valid JSON — write as-is (plain text output from non-json mode)
+          process.stdout.write(line + '\n');
         }
       }
     });
