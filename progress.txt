@@ -3,7 +3,8 @@
 Spec: rorca-context-autohydrate
 Run ID: 95
 Started: 2026-03-13T08:59:00.708Z
-Last Updated: 2026-03-13T09:01:09.343Z
+Last Updated: 2026-03-13T09:09:33.097Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-005: Frontend domain pass-through in spec generation request — DONE (claude, claude-sonnet-4-6, 128s)
+- US-006: Domain inference during scan-direction from codebase analysis — DONE (claude, claude-sonnet-4-6, 487s)
