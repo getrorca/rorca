@@ -45,6 +45,24 @@ const PipelineRunJobPayload = z.object({
 
 type PipelineRunJobPayloadType = z.infer<typeof PipelineRunJobPayload>;
 
+// ── Zod schema for pipeline:retry job payload ─────────────────────────────
+
+const PipelineRetryJobPayload = z.object({
+  runId: z.number().int().positive(),           // new run ID (already created by route handler)
+  originalRunId: z.number().int().positive(),   // original failed run
+  storyIds: z.array(z.string()),                // story IDs being retried
+  workspacePath: z.string().min(1),
+  specPath: z.string().min(1),                  // relative spec path (forge/specs/approved/...)
+  retrySpecPath: z.string().min(1),             // absolute path to temp retry spec file
+  agent: z.enum(['claude', 'opencode', 'codex']),
+  model: z.string().nullable(),
+  worktreePath: z.string().nullable(),
+  sequenceOffset: z.number().int().min(0),      // start new chunks at sequenceOffset + 1
+  envOverrides: z.record(z.string(), z.string()).optional().default({}),
+});
+
+type PipelineRetryJobPayloadType = z.infer<typeof PipelineRetryJobPayload>;
+
 // ── Active process map (runId → ChildProcess) ────────────────────────────
 // Used for cancellation. Cleaned up when the process exits.
 
@@ -265,8 +283,188 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
 async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
   for (const job of jobs) {
-    logger.info({ jobId: job.id, data: job.data }, '[worker] pipeline:retry received');
-    // TODO: retry logic — delegate to pipeline:run handler with retry spec in future story
+    const jobId = job.id;
+    logger.info({ jobId, data: job.data }, '[worker] pipeline:retry received');
+
+    // 1. Validate payload via Zod
+    const parsed = PipelineRetryJobPayload.safeParse(job.data);
+    if (!parsed.success) {
+      logger.error({ jobId, errors: parsed.error.format() }, '[worker] pipeline:retry invalid payload — failing job');
+      throw new Error(`Invalid pipeline:retry payload: ${parsed.error.message}`);
+    }
+
+    const payload: PipelineRetryJobPayloadType = parsed.data;
+    const { runId, originalRunId, workspacePath, retrySpecPath, agent, model, worktreePath, sequenceOffset, envOverrides } = payload;
+
+    // Effective working directory (worktree or main workspace)
+    const cwd = worktreePath ?? workspacePath;
+
+    // 2. Look up workspace_id and parallelism from the NEW run row (created by route handler)
+    const runRow = await queryOne<{ workspace_id: string; parallelism: number }>(
+      'SELECT workspace_id, parallelism FROM pipeline_runs WHERE id = $1',
+      [runId],
+    );
+    if (!runRow) {
+      logger.error({ jobId, runId }, '[worker] pipeline:retry run row not found — skipping');
+      return;
+    }
+    const { workspace_id: workspaceId, parallelism } = runRow;
+
+    // 3. Mark the new run as running (route handler set status='running' but worker confirms)
+    await execute(
+      `UPDATE pipeline_runs SET status = 'running', started_at = NOW() WHERE id = $1`,
+      [runId],
+    );
+
+    await emitWalEvent('run_started', workspaceId, {
+      run_id: runId,
+      original_run_id: originalRunId,
+      source: 'worker_retry',
+    });
+
+    // 4. Build execution-engine args with the temp retry spec
+    const executionEngineTs = path.join(__dirname, 'lib', 'execution-engine.ts');
+    const tsxBin = path.join(__dirname, '..', 'node_modules', '.bin', 'tsx');
+    const backendPort = process.env.PORT ?? '3030';
+
+    // Verify the temp retry spec file still exists (route handler should have written it)
+    if (!fs.existsSync(retrySpecPath)) {
+      logger.error({ jobId, runId, retrySpecPath }, '[worker] retry spec file not found — failing run');
+      await execute(
+        `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`,
+        [runId],
+      );
+      await emitWalEvent('run_finished', workspaceId, { run_id: runId, status: 'failed', reason: 'retry_spec_missing' });
+      return;
+    }
+
+    const engineArgs = [
+      executionEngineTs,
+      '--json', retrySpecPath,
+      '--cwd', cwd,
+      '--run-id', String(runId),
+      '--port', backendPort,
+      '--parallelism', String(parallelism ?? 1),
+      '--agent', agent,
+    ];
+    if (model) {
+      engineArgs.push('--model', model);
+    }
+
+    // 5. Spawn execution-engine with pipe stdio for chunk capture
+    const env = { ...envOverrides, RORCA_PROCESS_ROLE: 'engine' };
+
+    logger.info({ runId, agent, model, cwd }, '[worker] Spawning execution-engine.ts for retry');
+
+    const child = spawn(tsxBin, engineArgs, {
+      cwd,
+      stdio: ['ignore', 'pipe', 'pipe'],
+      env,
+    });
+
+    if (child.pid) {
+      await execute('UPDATE pipeline_runs SET pid = $1 WHERE id = $2', [child.pid, runId]);
+    }
+
+    activeProcesses.set(runId, child);
+
+    // 6. Pipe stdout/stderr to run_output_chunks, continuing sequence from sequenceOffset
+    const sequenceRef = { value: sequenceOffset + 1 };
+    let pending = Buffer.alloc(0);
+
+    const flushPending = async (): Promise<void> => {
+      if (pending.length === 0) return;
+      await writeBufferAsChunks(runId, pending, sequenceRef);
+      pending = Buffer.alloc(0);
+    };
+
+    const handleData = async (data: Buffer): Promise<void> => {
+      pending = Buffer.concat([pending, data]);
+      while (pending.length >= CHUNK_SIZE) {
+        const slice = pending.slice(0, CHUNK_SIZE);
+        await writeChunk(runId, sequenceRef.value, slice);
+        sequenceRef.value += 1;
+        pending = pending.slice(CHUNK_SIZE);
+      }
+    };
+
+    child.stdout?.on('data', (data: Buffer) => { void handleData(data); });
+    child.stderr?.on('data', (data: Buffer) => { void handleData(data); });
+
+    // 7. Wait for exit, flush remaining bytes, update run status
+    await new Promise<void>((resolve) => {
+      child.on('exit', async (code) => {
+        // Flush bytes < CHUNK_SIZE remaining in the buffer before marking done
+        await flushPending();
+
+        activeProcesses.delete(runId);
+
+        // Derive final status from story_results (same logic as original retry handler)
+        let finalStatus: string;
+        try {
+          const currentStories = await query<{ story_id: string; status: string }>(
+            'SELECT story_id, status FROM story_results WHERE run_id = $1 ORDER BY id ASC',
+            [runId],
+          );
+          const latest = new Map<string, string>();
+          for (const s of currentStories) latest.set(s.story_id, s.status);
+          const hasFailures = Array.from(latest.values()).some(st => st === 'fail');
+          finalStatus = hasFailures ? 'partial_failure' : (code === 0 ? 'done' : 'partial_failure');
+        } catch {
+          finalStatus = code === 0 ? 'done' : 'failed';
+        }
+
+        logger.info({ runId, code, finalStatus }, '[worker] retry execution-engine exited');
+
+        try {
+          await execute(
+            `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
+            [finalStatus, runId],
+          );
+
+          await emitWalEvent('run_finished', workspaceId, {
+            run_id: runId,
+            original_run_id: originalRunId,
+            status: finalStatus,
+            exit_code: code,
+            source: 'worker_retry',
+          });
+        } catch (err) {
+          logger.error({ err, runId }, '[worker] Failed to update retry run status on exit');
+        }
+
+        // Clean up the temporary retry spec file
+        try { fs.unlinkSync(retrySpecPath); } catch { /* best-effort */ }
+
+        resolve();
+      });
+
+      child.on('error', async (err) => {
+        logger.error({ err, runId }, '[worker] retry execution-engine spawn error');
+        await flushPending();
+        activeProcesses.delete(runId);
+
+        try {
+          await execute(
+            `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`,
+            [runId],
+          );
+          await emitWalEvent('run_finished', workspaceId, {
+            run_id: runId,
+            original_run_id: originalRunId,
+            status: 'failed',
+            error: (err as Error).message,
+            source: 'worker_retry',
+          });
+        } catch (dbErr) {
+          logger.error({ dbErr, runId }, '[worker] Failed to update retry run status after spawn error');
+        }
+
+        try { fs.unlinkSync(retrySpecPath); } catch { /* best-effort */ }
+
+        resolve();
+      });
+    });
   }
 }
 
