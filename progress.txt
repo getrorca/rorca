@@ -1,18 +1,9 @@
 # Run State Summary
 
-Spec: rorca-pg-boss-job-queue
-Run ID: 90
-Started: 2026-03-13T06:40:11.238Z
-Last Updated: 2026-03-13T07:01:04.450Z
+Spec: rorca-context-autohydrate
+Run ID: 93
+Started: 2026-03-13T08:00:22.295Z
+Last Updated: 2026-03-13T08:11:36.125Z
 
-## Completed Stories (10)
-- PG-017: Scheduler integration test: exactly-once cron with multiple worker instances — DONE (claude, claude-sonnet-4-6, 31s)
-- PG-018: Dead letter queue test: exhaust retries, verify DLQ entry, retry from DLQ — DONE (claude, claude-sonnet-4-6, 700s)
-- PG-019: Zero-downtime deploy test: rolling worker restart with no job loss — DONE (claude, claude-sonnet-4-6, 1632s)
-- PG-019: Zero-downtime deploy test: rolling worker restart with no job loss — DONE (claude, claude-sonnet-4-6, 1783s)
-- PG-019: Zero-downtime deploy test: rolling worker restart with no job loss — DONE (claude, claude-sonnet-4-6, 1057s)
-- PG-020: Load test: 10 concurrent jobs, throughput validation, no race conditions — DONE (claude, claude-sonnet-4-6, 604s)
-- PG-020: Load test: 10 concurrent jobs, throughput validation, no race conditions — DONE (claude, claude-sonnet-4-6, 214s)
-- PG-021: Update npm run dev and rorca start to launch worker alongside server — DONE (claude, claude-sonnet-4-6, 419s)
-- PG-022: CLAUDE.md architecture update: document pg-boss worker process and job queue — DONE (claude, claude-sonnet-4-6, 154s)
-- PG-021: Update npm run dev and rorca start to launch worker alongside server — DONE (claude, claude-sonnet-4-6, 878s)
+## Completed Stories (1)
+- US-001: Add source column to memories table and git YAML parser utility — DONE (claude, claude-sonnet-4-6, 663s)
