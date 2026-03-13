@@ -15,7 +15,7 @@ const JWT_EXPIRES_IN = '15m';
 const REFRESH_TOKEN_EXPIRES_DAYS = 7;
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
-const BCRYPT_COST = 12;
+const BCRYPT_COST = process.env.NODE_ENV === 'test' ? 4 : 12;
 
 // Email verification constants
 const VERIFICATION_TOKEN_EXPIRES_HOURS = 24;

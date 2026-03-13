@@ -3,8 +3,9 @@
 Spec: add copy paste photo as attachment (meaning someone can screen capture with whatever tool they want and attach it to the new spec description screen here where i am typing now) and also an upload file so that users can upload PRD, SDD or whatever they want as context.
 Run ID: 103
 Started: 2026-03-13T18:26:57.439Z
-Last Updated: 2026-03-13T18:29:04.560Z
+Last Updated: 2026-03-13T18:39:27.031Z
 
-## Completed Stories (2)
+## Completed Stories (3)
 - US-002: rorca_assign_story_models MCP tool in backend/src/mcp/server.ts — DONE (claude, claude-sonnet-4-6, 936s)
 - US-019: Add attachment context extraction unit tests — DONE (claude, claude-sonnet-4-6, 104s)
+- US-020: Add attachment upload E2E tests — DONE (claude, claude-sonnet-4-6, 576s)

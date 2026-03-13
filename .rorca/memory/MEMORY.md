@@ -139,3 +139,23 @@
 > Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
 > Context: Discovered while writing pg-boss-dlq.test.ts (PG-018). The test confirmed the correct column names by querying information_schema.columns for pgboss schema.
 > Source: pg-boss-dlq.test.ts implementation
+
+## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
+> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
+> Context: Discovered 2026-03-13: rorca-worker-production-ready ran on feat/rorca-worker-production-ready-1773414782894, all 10 stories passed, but worker-supervisor.ts and all WR fixes were missing from main for days. Kill button was broken, worker had no supervisor — all because the branch was never merged. This is a known process gap; auto-merge spec is not yet built.
+> Source: debugging session 2026-03-13
+
+## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
+> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
+> Context: 2026-03-13: 069_add_source_to_memories.sql was in main; feature branch created 069_worker_heartbeat_active_jobs.sql. The active_jobs column was never added, causing worker heartbeat writes to fail on every startup. Renamed to 071, applied manually.
+> Source: debugging session 2026-03-13
+
+## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
+> Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
+> Context: WR-004 (stale job recovery) passed acceptance criteria but had this typo in worker.ts line 643. Fixed 2026-03-13. The story passed because the error was non-fatal — a cautionary example of acceptance criteria not testing pg-boss internal schema column names.
+> Source: debugging session 2026-03-13
+
+## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
+> Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
+> Context: Run 104 was stuck for 38+ minutes; kill button appeared to work (200 OK) but did nothing. Root cause identified 2026-03-13. Fix was in the unmerged WR branch — once merged, the cancel endpoint works correctly even after worker restarts.
+> Source: debugging session 2026-03-13
