@@ -69,6 +69,12 @@ type PipelineRetryJobPayloadType = z.infer<typeof PipelineRetryJobPayload>;
 
 const activeProcesses = new Map<number, ChildProcess>();
 
+// ── Cancelling runs set (runId) ───────────────────────────────────────────
+// Tracks which runs are being intentionally cancelled so the exit handler
+// writes status='cancelled' (not 'failed') and emits run_cancelled WAL event.
+
+const cancellingRuns = new Set<number>();
+
 // ── Chunk size constant ───────────────────────────────────────────────────
 
 const CHUNK_SIZE = 4 * 1024; // 4 KB
@@ -232,8 +238,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
         activeProcesses.delete(runId);
 
-        const status = code === 0 ? 'done' : 'failed';
-        logger.info({ runId, code, status }, '[worker] execution-engine exited');
+        const wasCancelled = cancellingRuns.delete(runId);
+        const status = wasCancelled ? 'cancelled' : (code === 0 ? 'done' : 'failed');
+        logger.info({ runId, code, status, wasCancelled }, '[worker] execution-engine exited');
 
         try {
           await execute(
@@ -241,12 +248,20 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             [status, runId],
           );
 
-          await emitWalEvent('run_finished', workspaceId, {
-            run_id: runId,
-            status,
-            exit_code: code,
-            source: 'worker',
-          });
+          if (wasCancelled) {
+            await emitWalEvent('run_cancelled', workspaceId, {
+              run_id: runId,
+              cancelledAt: new Date().toISOString(),
+              source: 'worker',
+            });
+          } else {
+            await emitWalEvent('run_finished', workspaceId, {
+              run_id: runId,
+              status,
+              exit_code: code,
+              source: 'worker',
+            });
+          }
         } catch (err) {
           logger.error({ err, runId }, '[worker] Failed to update run status on exit');
         }
@@ -258,6 +273,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         logger.error({ err, runId }, '[worker] execution-engine spawn error');
         await flushPending();
         activeProcesses.delete(runId);
+        cancellingRuns.delete(runId);
 
         try {
           await execute(
@@ -400,22 +416,28 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
         activeProcesses.delete(runId);
 
-        // Derive final status from story_results (same logic as original retry handler)
+        const wasCancelled = cancellingRuns.delete(runId);
+
+        // Derive final status
         let finalStatus: string;
-        try {
-          const currentStories = await query<{ story_id: string; status: string }>(
-            'SELECT story_id, status FROM story_results WHERE run_id = $1 ORDER BY id ASC',
-            [runId],
-          );
-          const latest = new Map<string, string>();
-          for (const s of currentStories) latest.set(s.story_id, s.status);
-          const hasFailures = Array.from(latest.values()).some(st => st === 'fail');
-          finalStatus = hasFailures ? 'partial_failure' : (code === 0 ? 'done' : 'partial_failure');
-        } catch {
-          finalStatus = code === 0 ? 'done' : 'failed';
+        if (wasCancelled) {
+          finalStatus = 'cancelled';
+        } else {
+          try {
+            const currentStories = await query<{ story_id: string; status: string }>(
+              'SELECT story_id, status FROM story_results WHERE run_id = $1 ORDER BY id ASC',
+              [runId],
+            );
+            const latest = new Map<string, string>();
+            for (const s of currentStories) latest.set(s.story_id, s.status);
+            const hasFailures = Array.from(latest.values()).some(st => st === 'fail');
+            finalStatus = hasFailures ? 'partial_failure' : (code === 0 ? 'done' : 'partial_failure');
+          } catch {
+            finalStatus = code === 0 ? 'done' : 'failed';
+          }
         }
 
-        logger.info({ runId, code, finalStatus }, '[worker] retry execution-engine exited');
+        logger.info({ runId, code, finalStatus, wasCancelled }, '[worker] retry execution-engine exited');
 
         try {
           await execute(
@@ -423,13 +445,21 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
             [finalStatus, runId],
           );
 
-          await emitWalEvent('run_finished', workspaceId, {
-            run_id: runId,
-            original_run_id: originalRunId,
-            status: finalStatus,
-            exit_code: code,
-            source: 'worker_retry',
-          });
+          if (wasCancelled) {
+            await emitWalEvent('run_cancelled', workspaceId, {
+              run_id: runId,
+              cancelledAt: new Date().toISOString(),
+              source: 'worker_retry',
+            });
+          } else {
+            await emitWalEvent('run_finished', workspaceId, {
+              run_id: runId,
+              original_run_id: originalRunId,
+              status: finalStatus,
+              exit_code: code,
+              source: 'worker_retry',
+            });
+          }
         } catch (err) {
           logger.error({ err, runId }, '[worker] Failed to update retry run status on exit');
         }
@@ -444,6 +474,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         logger.error({ err, runId }, '[worker] retry execution-engine spawn error');
         await flushPending();
         activeProcesses.delete(runId);
+        cancellingRuns.delete(runId);
 
         try {
           await execute(
@@ -526,12 +557,18 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
       return;
     }
 
-    const child = activeProcesses.get(data.runId);
+    const runId = data.runId;
+    const child = activeProcesses.get(runId);
     if (child) {
+      // Mark as intentionally cancelled so the exit handler sets status='cancelled'
+      cancellingRuns.add(runId);
       child.kill('SIGTERM');
       setTimeout(() => {
-        if (activeProcesses.has(data.runId!)) child.kill('SIGKILL');
+        // Only SIGKILL if the process is still in the active map (not yet exited)
+        if (activeProcesses.has(runId)) child.kill('SIGKILL');
       }, 10_000);
+    } else {
+      logger.warn({ jobId: job.id, runId }, '[worker] pipeline:cancel — no active process found for runId');
     }
   }
 }

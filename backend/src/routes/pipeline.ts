@@ -34,6 +34,7 @@ import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftRepo
 import { synthesizeRunMemory } from '../lib/auto-memory';
 import { logger } from '../lib/logger';
 import { getBoss } from '../lib/pg-boss';
+import { ConflictError } from '../lib/errors';
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
 function autoSelectOrchestration(userStories: WaveUserStory[]): {
@@ -3094,27 +3095,33 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
   }
 });
 
-// ─── POST /api/pipeline/runs/:runId/cancel — Cancel a running/paused pipeline ─
-// Sends SIGTERM to the process group. If the process doesn't exit within 5s,
-// escalates to SIGKILL. Idempotent: if the PID is already dead, still marks
-// the run as cancelled.
+// ─── POST /api/pipeline/runs/:runId/cancel — Cancel a queued or running pipeline ─
+// Queued path: calls getBoss().cancel(String(runId)) to remove the pg-boss job
+//   before the worker picks it up, then marks the run as cancelled immediately.
+// Running path: sends a 'pipeline:cancel' job to the worker, returns 200 immediately.
+//   The worker owns SIGTERM → SIGKILL sequencing and DB/WAL updates for this path.
+// Completed/cancelled: returns 409 Conflict.
 
 /**
  * @swagger
  * /api/pipeline/runs/{runId}/cancel:
  *   post:
  *     tags: [Pipeline]
- *     summary: Cancel a running or paused pipeline
+ *     summary: Cancel a queued or running pipeline run
  *     operationId: cancelPipelineRun
- *     description: Sends SIGTERM (escalating to SIGKILL after 5 seconds) to the pipeline process group and marks the run as cancelled.
+ *     description: >
+ *       For queued runs: removes the pg-boss job and marks the run as cancelled immediately.
+ *       For running runs: delivers a pipeline:cancel job to the worker (which sends SIGTERM then SIGKILL after 10s) and returns 200 immediately — DB and WAL updates happen asynchronously in the worker.
+ *       Returns 409 if the run is already completed or cancelled.
  *     parameters:
  *       - in: path
  *         name: runId
  *         required: true
  *         schema: { type: integer }
  *     responses:
- *       200: { description: "Cancelled", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer }, status: { type: string } } } } } }
+ *       200: { description: "Cancelled (or cancel delivered to worker)", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer }, status: { type: string } } } } } }
  *       404: { description: "Run not found" }
+ *       409: { description: "Run is already completed or cancelled" }
  */
 router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
   try {
@@ -3124,70 +3131,77 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
+    const run = await queryOne<{ id: number; status: string; workspace_id: string; started_at: string }>(
+      'SELECT id, status, workspace_id, started_at FROM pipeline_runs WHERE id = $1',
+      [runId],
+    );
 
     if (!run) {
       res.status(404).json({ error: 'Run not found' });
       return;
     }
 
-    if (run.status !== 'running' && run.status !== 'paused') {
-      res.status(409).json({ error: `Cannot cancel run with status '${run.status}'` });
+    const { status } = run;
+
+    // Already done — conflict
+    if (status !== 'queued' && status !== 'running' && status !== 'paused') {
+      throw new ConflictError(`Run is already ${status} and cannot be cancelled`);
+    }
+
+    if (status === 'queued') {
+      // ── Queued path ──────────────────────────────────────────────────────
+      // Attempt to remove the pg-boss job before the worker picks it up.
+      // cancel(queueName, jobId) — job ID convention is String(runId).
+      await getBoss().cancel('pipeline:run', String(runId));
+
+      // Re-read status: if the worker picked up the job between our check and
+      // cancel, the run may have already transitioned to 'running'. Fall through.
+      const refreshed = await queryOne<{ status: string }>(
+        'SELECT status FROM pipeline_runs WHERE id = $1',
+        [runId],
+      );
+
+      if (refreshed && (refreshed.status === 'running' || refreshed.status === 'paused')) {
+        // Worker picked it up — delegate to the running path
+        await getBoss().send('pipeline:cancel', { runId });
+        res.json({ ok: true, runId, status: 'cancelling' });
+        return;
+      }
+
+      // Mark run as cancelled in DB (it's still queued or the job was removed)
+      await execute(
+        `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), queue_position = NULL WHERE id = $1`,
+        [runId],
+      );
+
+      // Recalculate queue positions for remaining queued runs
+      const { recalculateQueuePositions } = require('../lib/run-queue') as typeof import('../lib/run-queue');
+      recalculateQueuePositions(run.workspace_id);
+
+      // Emit WAL event
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', $1, $2) RETURNING *`,
+        [run.workspace_id, JSON.stringify({ run_id: runId, cancelledAt: new Date().toISOString() })],
+      );
+      if (walEvent) broadcastAll(walEvent);
+
+      res.json({ ok: true, runId, status: 'cancelled' });
       return;
     }
 
-    const pidAlive = run.pid != null && isPidAlive(run.pid);
+    // ── Running / paused path ─────────────────────────────────────────────
+    // Deliver cancel job to the worker. The worker owns SIGTERM/SIGKILL sequencing,
+    // DB status update, and WAL event emission. We return 200 immediately.
+    await getBoss().send('pipeline:cancel', { runId });
 
-    if (pidAlive) {
-      // Send SIGTERM to process group (negative pid)
-      try {
-        process.kill(-run.pid!, 'SIGTERM');
-      } catch {
-        // Process may have died between check and kill — that's OK
-      }
-
-      // Schedule SIGKILL after 5s if still alive
-      setTimeout(() => {
-        try {
-          if (isPidAlive(run.pid!)) {
-            process.kill(-run.pid!, 'SIGKILL');
-          }
-        } catch {
-          // Already dead — ignore
-        }
-      }, 5000);
+    res.json({ ok: true, runId, status: 'cancelling' });
+  } catch (error: unknown) {
+    if (error instanceof ConflictError) {
+      res.status(409).json({ error: (error as ConflictError).message });
+      return;
     }
-
-    // Mark run as cancelled
-    await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW() WHERE id = $1`, [runId]);
-
-    // Append [Run cancelled] message to the output buffer
-    const buf = outputBuffers.get(runId);
-    if (buf) {
-      const cancelMsg = '\r\n\x1b[1;33m[Run cancelled]\x1b[0m\r\n';
-      buf.chunks.push(cancelMsg);
-      for (const sub of buf.subscribers) sub(cancelMsg);
-      buf.done = true;
-      buf.subscribers.clear();
-    }
-
-    // Compute elapsed time and completed story count for the WAL event
-    const elapsedMs = Date.now() - new Date(run.started_at + 'Z').getTime();
-    const elapsedSeconds = Math.floor(elapsedMs / 1000);
-    const completedStories = await queryOne(`SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1 AND status IN ('pass', 'fail')`, [runId]) as { cnt: number };
-
-    // Emit WAL event
-    const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', $1, $2)` + ' RETURNING *', [run.workspace_id, JSON.stringify({
-      run_id: runId,
-      elapsed_seconds: elapsedSeconds,
-      completed_stories: completedStories.cnt,
-    })]);
-    broadcastAll(walEvent!);
-
-    res.json({ ok: true, runId, status: 'cancelled' });
-  } catch (error: any) {
-    logger.error('[Pipeline] Cancel error:', error);
-    res.status(500).json({ error: error.message });
+    logger.error({ err: error }, '[Pipeline] Cancel error');
+    res.status(500).json({ error: (error as Error).message });
   }
 });
 
@@ -3233,8 +3247,11 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
       return;
     }
 
-    // Mark as failed
-    await execute(`UPDATE pipeline_runs SET status = 'failed', finished_at = NOW(), queued_at = NULL, queue_position = NULL WHERE id = $1`, [runId]);
+    // Remove the pg-boss job before the worker picks it up
+    await getBoss().cancel('pipeline:run', String(runId));
+
+    // Mark as cancelled
+    await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), queued_at = NULL, queue_position = NULL WHERE id = $1`, [runId]);
 
     // Recalculate positions for remaining queued runs
     const { recalculateQueuePositions } = require('../lib/run-queue') as typeof import('../lib/run-queue');
