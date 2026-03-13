@@ -2190,25 +2190,25 @@ router.get('/:id/context-health', async (req, res, next) => {
       return;
     }
 
-    // L3 direction layer present
-    const l3Row = await queryOne<{ content: string | null }>(
-      "SELECT content FROM direction_layers WHERE workspace_id = $1 AND layer = 3 LIMIT 1",
-      [req.params.id]
-    );
+    // Fetch all DB data in parallel
+    const [l3Row, ctxRow, skillsRow] = await Promise.all([
+      queryOne<{ content: string | null }>(
+        "SELECT content FROM direction_layers WHERE workspace_id = $1 AND layer = 3 LIMIT 1",
+        [req.params.id]
+      ),
+      queryOne<{ schema_snapshot: string | null; git_memory: string | null; git_commit_count: number }>(
+        'SELECT schema_snapshot, git_memory, git_commit_count FROM workspace_context WHERE workspace_id = $1',
+        [req.params.id]
+      ),
+      queryOne<{ cnt: string }>(
+        'SELECT COUNT(*)::text AS cnt FROM installed_skills',
+        []
+      ),
+    ]);
+
     const l3Present = !!(l3Row?.content);
-
-    // Git memory count from memories table (source='git_hydration')
-    const gitMemRow = await queryOne<{ cnt: string }>(
-      "SELECT COUNT(*)::text AS cnt FROM memories WHERE workspace_id = $1 AND source = 'git_hydration' AND deleted_at IS NULL",
-      [req.params.id]
-    );
-    const gitMemoryCount = parseInt(gitMemRow?.cnt ?? '0', 10);
-
-    // Schema snapshot present
-    const ctxRow = await queryOne<{ schema_snapshot: string | null }>(
-      'SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1',
-      [req.params.id]
-    );
+    // gitMemoryCount: number of commits ingested (git_commit_count in workspace_context)
+    const gitMemoryCount = ctxRow?.git_commit_count ?? 0;
     const schemaPresent = !!(ctxRow?.schema_snapshot);
 
     // CLAUDE.md exists in workspace root
@@ -2217,11 +2217,6 @@ router.get('/:id/context-health', async (req, res, next) => {
       claudeMdPresent = fs.existsSync(path.join(workspace.path, 'CLAUDE.md'));
     } catch { /* non-fatal */ }
 
-    // Skills count (workspace-scoped + global)
-    const skillsRow = await queryOne<{ cnt: string }>(
-      "SELECT COUNT(*)::text AS cnt FROM skills WHERE (workspace_id = $1 OR workspace_id IS NULL) AND deleted_at IS NULL",
-      [req.params.id]
-    );
     const skillsCount = parseInt(skillsRow?.cnt ?? '0', 10);
 
     res.json({ l3Present, gitMemoryCount, schemaPresent, claudeMdPresent, skillsCount });
