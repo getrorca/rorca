@@ -59,7 +59,7 @@ process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
 // Seed workspace
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', $1)`, [tmpDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', $1) ON CONFLICT (id) DO NOTHING`, [tmpDir]);
 
   // Create spec file on disk
   const pendingDir = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'pending');

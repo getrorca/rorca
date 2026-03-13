@@ -1600,14 +1600,13 @@ router.get('/roi', async (req: Request, res: Response) => {
     const passedResult = await queryOne<{ total_stories_passed: number }>(`
       SELECT COUNT(*) AS total_stories_passed
       FROM (
-        SELECT sr.story_id, sr.status
+        SELECT DISTINCT ON (pr.id, sr.story_id) sr.story_id, sr.status
         FROM story_results sr
         JOIN pipeline_runs pr ON sr.run_id = pr.id
         WHERE pr.workspace_id = $1
           AND sr.finished_at >= $2 AND sr.finished_at <= $3
           AND sr.status IN ('pass', 'fail', 'skip', 'retry', 'timeout')
-        GROUP BY pr.id, sr.story_id
-        HAVING sr.id = MAX(sr.id)
+        ORDER BY pr.id, sr.story_id, sr.id DESC
       ) latest
       WHERE latest.status = 'pass'
     `, [workspaceId, from, to]);

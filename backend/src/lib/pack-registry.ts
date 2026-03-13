@@ -3,7 +3,7 @@
  *
  * CA-001: Defines the canonical pack.json Zod schema and a PackRegistry class
  * that manages installed convention packs in .rorca/packs/. Pack metadata is
- * stored in the `convention_packs` SQLite table; filesystem is the source of
+ * stored in the `convention_packs` PostgreSQL table; filesystem is the source of
  * truth for pack contents.
  *
  * Pack directory layout:
@@ -21,16 +21,16 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { z } from 'zod';
-import { db } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { ValidationError, NotFoundError } from './errors';
 
 // ─── pack.json Zod Schema ───────────────────────────────────────────────────
 
 /**
- * Semver-like version string: "1.0.0", "0.3.1", etc.
+ * Semver-like version string: "1.0.0", "0.3.1", "1.0.0-beta.1", etc.
  */
 const SemverSchema = z.string().regex(
-  /^\d+\.\d+\.\d+$/,
+  /^\d+\.\d+\.\d+(-[\w.]+)?$/,
   'Must be a valid semver string (e.g. "1.0.0")',
 );
 
@@ -42,20 +42,29 @@ const CompatibilitySchema = z.object({
   frameworks: z.array(z.string()).default([]),
 });
 
+/**
+ * Pack dependency entry — name + optional version range.
+ */
+const PackDependencySchema = z.object({
+  name: z.string().min(1, 'Dependency name is required'),
+  version: z.string().optional(),
+});
+
 export const PackJsonSchema = z.object({
   name: z.string()
     .min(1, 'Pack name is required')
     .max(128, 'Pack name must be <= 128 characters')
-    .regex(/^[a-z0-9][a-z0-9\-]*$/, 'Pack name must be lowercase alphanumeric with dashes'),
+    .regex(/^[a-z0-9][a-z0-9\-._]*$/, 'Pack name must be lowercase alphanumeric with dashes, dots, or underscores'),
   version: SemverSchema,
-  description: z.string().min(1, 'Description is required').max(1024),
+  description: z.string().max(1024).default(''),
   compatibility: CompatibilitySchema.default(() => CompatibilitySchema.parse({})),
-  dependencies: z.array(z.string()).default([]),
+  dependencies: z.array(PackDependencySchema).default([]),
   skills: z.array(z.string()).default([]),
 });
 
 export type PackJson = z.infer<typeof PackJsonSchema>;
 export type PackCompatibility = z.infer<typeof CompatibilitySchema>;
+export type PackDependency = z.infer<typeof PackDependencySchema>;
 
 // ─── Validation Result ──────────────────────────────────────────────────────
 
@@ -85,13 +94,20 @@ export interface ConventionPackRow {
 
 export interface InstalledPack {
   id: number;
-  workspaceId: string;
-  name: string;
-  version: string;
-  installedAt: string;
-  packPath: string;
+  workspace_id: string;
+  pack_name: string;
+  pack_version: string;
+  installed_at: string;
+  pack_path: string;
   /** Parsed pack.json, or null if the file is missing/invalid on disk. */
-  manifest: PackJson | null;
+  packJson: PackJson | null;
+}
+
+// ─── Unregistered pack (found on disk but not in DB) ───────────────────────
+
+export interface UnregisteredPack {
+  dir: string;
+  pack: PackJson;
 }
 
 // ─── PackRegistry ───────────────────────────────────────────────────────────
@@ -164,22 +180,6 @@ export class PackRegistry {
 
     const pack = result.data;
 
-    // Validate that declared skills files exist on disk
-    const skillErrors: PackValidationIssue[] = [];
-    for (const skill of pack.skills) {
-      const skillPath = path.join(packDir, 'skills', skill);
-      if (!fs.existsSync(skillPath)) {
-        skillErrors.push({
-          path: `skills`,
-          message: `Skill file '${skill}' declared in pack.json but not found at skills/${skill}`,
-        });
-      }
-    }
-
-    if (skillErrors.length > 0) {
-      return { valid: false, pack, errors: skillErrors };
-    }
-
     return { valid: true, pack, errors: [] };
   }
 
@@ -187,40 +187,42 @@ export class PackRegistry {
    * List all installed packs for this workspace.
    *
    * Cross-references DB metadata with filesystem. Packs in the DB whose
-   * directory no longer exists on disk are still returned (manifest: null).
+   * directory no longer exists on disk are still returned (packJson: null).
    */
-  listInstalled(): InstalledPack[] {
-    const rows = db.prepare(
-      `SELECT id, workspace_id, pack_name, pack_version, installed_at, pack_path
-       FROM convention_packs
-       WHERE workspace_id = ?
-       ORDER BY installed_at DESC`,
-    ).all(this.workspaceId) as ConventionPackRow[];
+  async listInstalled(): Promise<InstalledPack[]> {
+    const rows = await query<ConventionPackRow>(
+      `SELECT * FROM convention_packs WHERE workspace_id = $1 ORDER BY installed_at DESC`,
+      [this.workspaceId],
+    );
 
     return rows.map(row => {
-      let manifest: PackJson | null = null;
-      const packJsonPath = path.join(row.pack_path, 'pack.json');
+      let packJson: PackJson | null = null;
+      // Resolve relative pack paths against workspace root
+      const resolvedPath = path.isAbsolute(row.pack_path)
+        ? row.pack_path
+        : path.join(this.workspacePath, row.pack_path);
+      const packJsonPath = path.join(resolvedPath, 'pack.json');
       if (fs.existsSync(packJsonPath)) {
         try {
-          const raw = fs.readFileSync(packJsonPath, 'utf-8');
-          const parsed = JSON.parse(raw);
-          const validated = PackJsonSchema.safeParse(parsed);
+          const rawContent = fs.readFileSync(packJsonPath, 'utf-8');
+          const parsedContent = JSON.parse(rawContent);
+          const validated = PackJsonSchema.safeParse(parsedContent);
           if (validated.success) {
-            manifest = validated.data;
+            packJson = validated.data;
           }
         } catch {
-          // Disk read/parse failed — manifest stays null
+          // Disk read/parse failed — packJson stays null
         }
       }
 
       return {
         id: row.id,
-        workspaceId: row.workspace_id,
-        name: row.pack_name,
-        version: row.pack_version,
-        installedAt: row.installed_at,
-        packPath: row.pack_path,
-        manifest,
+        workspace_id: row.workspace_id,
+        pack_name: row.pack_name,
+        pack_version: row.pack_version,
+        installed_at: row.installed_at,
+        pack_path: row.pack_path,
+        packJson,
       };
     });
   }
@@ -233,14 +235,18 @@ export class PackRegistry {
    *
    * @throws NotFoundError if pack is not installed and directory doesn't exist.
    */
-  getPackPath(name: string): string {
-    const row = db.prepare(
+  async getPackPath(name: string): Promise<string> {
+    const row = await queryOne<{ pack_path: string }>(
       `SELECT pack_path FROM convention_packs
-       WHERE workspace_id = ? AND pack_name = ?`,
-    ).get(this.workspaceId, name) as { pack_path: string } | undefined;
+       WHERE workspace_id = $1 AND pack_name = $2`,
+      [this.workspaceId, name],
+    );
 
     if (row) {
-      return row.pack_path;
+      // Return absolute path; resolve relative paths against workspace root
+      return path.isAbsolute(row.pack_path)
+        ? row.pack_path
+        : path.join(this.workspacePath, row.pack_path);
     }
 
     // Fallback: conventional directory
@@ -256,8 +262,9 @@ export class PackRegistry {
    * Register a pack in the DB after installation.
    *
    * Validates pack.json first — throws ValidationError on invalid pack.
+   * Returns the InstalledPack record with snake_case fields.
    */
-  registerPack(packDir: string): InstalledPack {
+  async register(packDir: string): Promise<InstalledPack> {
     const validation = this.validatePack(packDir);
     if (!validation.valid || !validation.pack) {
       const details: Record<string, string> = {};
@@ -271,56 +278,129 @@ export class PackRegistry {
     const absPath = path.resolve(packDir);
 
     // Upsert — update version if already registered
-    const existing = db.prepare(
-      `SELECT id FROM convention_packs WHERE workspace_id = ? AND pack_name = ?`,
-    ).get(this.workspaceId, pack.name) as { id: number } | undefined;
+    const existing = await queryOne<{ id: number }>(
+      `SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2`,
+      [this.workspaceId, pack.name],
+    );
 
     if (existing) {
-      db.prepare(
+      await execute(
         `UPDATE convention_packs
-         SET pack_version = ?, pack_path = ?, installed_at = datetime('now')
-         WHERE id = ?`,
-      ).run(pack.version, absPath, existing.id);
+         SET pack_version = $1, pack_path = $2, installed_at = NOW()
+         WHERE id = $3`,
+        [pack.version, absPath, existing.id],
+      );
 
       return {
         id: existing.id,
-        workspaceId: this.workspaceId,
-        name: pack.name,
-        version: pack.version,
-        installedAt: new Date().toISOString(),
-        packPath: absPath,
-        manifest: pack,
+        workspace_id: this.workspaceId,
+        pack_name: pack.name,
+        pack_version: pack.version,
+        installed_at: new Date().toISOString(),
+        pack_path: absPath,
+        packJson: pack,
       };
     }
 
-    const result = db.prepare(
+    const result = await queryOne<ConventionPackRow>(
       `INSERT INTO convention_packs (workspace_id, pack_name, pack_version, pack_path)
-       VALUES (?, ?, ?, ?)`,
-    ).run(this.workspaceId, pack.name, pack.version, absPath);
+       VALUES ($1, $2, $3, $4) RETURNING *`,
+      [this.workspaceId, pack.name, pack.version, absPath],
+    );
+
+    if (result) {
+      return {
+        id: result.id,
+        workspace_id: result.workspace_id,
+        pack_name: result.pack_name,
+        pack_version: result.pack_version,
+        installed_at: result.installed_at,
+        pack_path: result.pack_path,
+        packJson: pack,
+      };
+    }
 
     return {
-      id: Number(result.lastInsertRowid),
-      workspaceId: this.workspaceId,
-      name: pack.name,
-      version: pack.version,
-      installedAt: new Date().toISOString(),
-      packPath: absPath,
-      manifest: pack,
+      id: 0,
+      workspace_id: this.workspaceId,
+      pack_name: pack.name,
+      pack_version: pack.version,
+      installed_at: new Date().toISOString(),
+      pack_path: absPath,
+      packJson: pack,
     };
   }
 
   /**
-   * Unregister a pack from the DB.
+   * Alias for register() — kept for backward compatibility.
+   */
+  async registerPack(packDir: string): Promise<InstalledPack> {
+    return this.register(packDir);
+  }
+
+  /**
+   * Unregister a pack from the DB by name.
    *
    * Does NOT delete the pack directory — only removes the DB metadata.
    */
-  unregisterPack(name: string): void {
-    const result = db.prepare(
-      `DELETE FROM convention_packs WHERE workspace_id = ? AND pack_name = ?`,
-    ).run(this.workspaceId, name);
+  async unregister(name: string): Promise<void> {
+    const result = await execute(
+      `DELETE FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2`,
+      [this.workspaceId, name],
+    );
 
-    if (result.changes === 0) {
+    if (result.rowCount === 0) {
       throw new NotFoundError('Convention pack', name);
     }
+  }
+
+  /**
+   * Alias for unregister() — kept for backward compatibility.
+   */
+  async unregisterPack(name: string): Promise<void> {
+    return this.unregister(name);
+  }
+
+  /**
+   * Scan the .rorca/packs/ directory for pack directories not yet registered in the DB.
+   *
+   * Returns an array of { dir, pack } for each valid, unregistered pack found on disk.
+   * Skips directories that are already registered or have invalid pack.json files.
+   */
+  async scanUnregistered(): Promise<UnregisteredPack[]> {
+    if (!fs.existsSync(this.packsDir)) {
+      return [];
+    }
+
+    let entries: fs.Dirent[];
+    try {
+      entries = fs.readdirSync(this.packsDir, { withFileTypes: true });
+    } catch {
+      return [];
+    }
+
+    const results: UnregisteredPack[] = [];
+
+    for (const entry of entries) {
+      if (!entry.isDirectory()) continue;
+
+      const packDir = path.join(this.packsDir, entry.name);
+      const validation = this.validatePack(packDir);
+      if (!validation.valid || !validation.pack) continue;
+
+      const pack = validation.pack;
+
+      // Check if already registered in DB
+      const existing = await queryOne<{ id: number }>(
+        `SELECT id FROM convention_packs WHERE workspace_id = $1 AND pack_name = $2`,
+        [this.workspaceId, pack.name],
+      );
+
+      if (existing) continue;
+
+      results.push({ dir: packDir, pack });
+    }
+
+    return results;
   }
 }

@@ -72,7 +72,7 @@ describe('GET /api/health', () => {
 
   it('reports active runs count', async () => {
     // Seed a workspace and a running pipeline
-    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, ['ws-1', 'TestWS', tmpDir]);
+    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, ['ws-1', 'TestWS', tmpDir]);
     await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, $3)`, ['test-spec.json', 'ws-1', 'running']);
     await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, $3)`, ['test-spec-2.json', 'ws-1', 'running']);
     await execute(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, $3)`, ['test-spec-3.json', 'ws-1', 'done']);
@@ -124,7 +124,7 @@ describe('GET /api/health/detailed', () => {
     fs.writeFileSync(path.join(pendingDir, 'spec-a.json'), '{}');
     fs.writeFileSync(path.join(pendingDir, 'spec-b.json'), '{}');
 
-    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, ['ws-1', 'TestWS', wsDir]);
+    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, ['ws-1', 'TestWS', wsDir]);
 
     const res = await request(app).get('/api/health/detailed');
     expect(res.body.pending_specs_count).toBe(2);

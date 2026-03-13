@@ -23,7 +23,7 @@ process.env.NODE_ENV = 'test';
   workspacePath = path.join(tmpDir, 'test-project');
   fs.mkdirSync(path.join(workspacePath, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
   fs.mkdirSync(path.join(workspacePath, 'scripts', 'ralph', 'specs', 'pending'), { recursive: true });
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, ['ws-1', 'Test', workspacePath]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, ['ws-1', 'Test', workspacePath]);
   authToken = await getAuthToken(app);
 });
 

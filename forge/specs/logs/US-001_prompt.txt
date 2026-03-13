@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Start everything (recommended)
-npm run dev                # Frontend :5210 + Backend :3030 concurrently
+npm run dev                # Frontend :5210 + Backend :3030 + pg-boss Worker concurrently
 
 # Frontend (root)
 npm run dev                # Vite dev server (:5210)
@@ -20,6 +20,7 @@ npx tsc --noEmit           # Frontend type check
 
 # Backend (backend/)
 cd backend && npm run dev  # Express server (:3030) — auto-restarts on file save (tsx watch)
+cd backend && npm run worker  # pg-boss worker (required — picks up queued pipeline runs)
 cd backend && npm run mcp  # Run MCP server standalone (for debugging)
 cd backend && npm test     # Jest test suite
 cd backend && npx tsc --noEmit   # Backend type check
@@ -45,11 +46,14 @@ npm run self-register
 
 ```
 Browser (React :5210)  ←→  Express API (:3030)  ←→  PostgreSQL 16
-                                    ↓
-                            Execution Engine (per-story subprocess)
-                            ├── claude --print      (Claude subscription)
-                            ├── opencode run        (75+ providers via API key)
-                            └── codex               (ChatGPT subscription)
+                                                           ↑
+                                                   Worker Process
+                                                   (npm run worker)
+                                                           ↓
+                                                   execution-engine subprocesses
+                                                   ├── claude --print
+                                                   ├── opencode run
+                                                   └── codex
 
 Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 ```
@@ -141,8 +145,37 @@ Spec files live in the **project workspace** (not Rorca):
 ```
 ⚠️ Key field is `userStories` (NOT `stories`). `id` is always the slug (filename without `.json`), NOT the human-readable title.
 
+### Job Queue Architecture (pg-boss)
+
+Pipeline runs are no longer spawned synchronously by `pipeline.ts`. The flow is:
+
+1. `POST /api/pipeline/trigger` inserts a `pipeline:run` job into pg-boss and returns `{ runId, queued: true, queuePosition }` in ~200ms
+2. The **Worker process** (`backend/src/worker.ts`, `npm run worker`) polls pg-boss and picks up the job ~500ms later (default polling interval, configurable via `pollingIntervalSeconds`)
+3. Worker spawns `execution-engine.ts` as a child process with `RORCA_PROCESS_ROLE=engine`
+
+**Job types**:
+| Queue | Purpose |
+|-------|---------|
+| `pipeline:run` | Trigger a new pipeline run (specPath, workspaceId, runId, options) |
+| `pipeline:retry` | Retry failed stories in a completed run (runId, storyIds) |
+| `pipeline:cancel` | Cancel an active run by sending SIGTERM to the child process |
+| `pipeline:cron` | Meta-cron tick — checks `pipeline_schedules` for due runs |
+| `pipeline:cron:<id>` | Per-schedule cron job — fires a specific scheduled run |
+
+**Worker process** (`backend/src/worker.ts`):
+- Standalone process — completely independent of Express API
+- Connects to the same `DATABASE_URL` as the API
+- Writes heartbeat to `worker_heartbeat` table every 30s (`worker_id`, `pid`, `hostname`, `last_seen`)
+- Graceful shutdown on `SIGTERM` — drains in-flight jobs up to 30s before exiting
+- `RORCA_PROCESS_ROLE=engine` is set in the child process env to prevent nested worker spawning
+
+**Terminal output streaming** (`run_output_chunks`):
+- Worker writes stdout/stderr to `run_output_chunks` table in 4KB chunks with monotonically increasing sequence numbers
+- DB-backed streaming survives backend restarts and enables late-join SSE replay
+- `GET /api/pipeline/runs/:runId/output` SSE endpoint replays all chunks since sequence 0, then streams live
+
 ### The Ralph Loop (`backend/src/lib/execution-engine.ts`)
-The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by `pipeline.ts` via `npx tsx`. The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — `pipeline.ts` uses it only if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all three agent types. **Always edit `execution-engine.ts` for all execution behavior.**
+The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by the **Worker process** (not directly by `pipeline.ts`). The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — only used if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all three agent types. **Always edit `execution-engine.ts` for all execution behavior.**
 
 **Flags**: `--json <path>` (spec file), `--cwd <path>` (workspace root), `--run-id <number>` (required for WAL events), `--story <ID>` (single story), `--dry-run` (preview only), `--port <number>` (default 3030), `--agent <claude|opencode|codex>`, `--model <model>`
 
@@ -185,11 +218,12 @@ rorca/
 │       ├── routes/           # Express route handlers (32 route files)
 │       ├── lib/              # Core services (sse-hub, direction-stack, llm-client,
 │       │                     # errors, scheduler, agent-hook-runner, etc.)
+│       ├── worker.ts         # pg-boss worker process (pipeline job consumer)
 │       ├── mcp/              # MCP stdio server (5 tools)
 │       └── db/
 │           ├── index.ts      # PostgreSQL Pool + async query helpers
 │           ├── pg-index.ts   # Migration runner (schema_migrations tracking)
-│           └── pg-migrations/ # PostgreSQL migration files (001–049)
+│           └── pg-migrations/ # PostgreSQL migration files (001–062)
 ├── forge/
 │   ├── run-loop.sh           # Ralph Loop execution engine
 │   ├── self-register.ts      # Self-hosting bootstrap
@@ -225,7 +259,7 @@ rorca/
 
 ## Database Tables
 
-49 migrations (`backend/src/db/pg-migrations/001-049`). Key tables:
+62 migrations (`backend/src/db/pg-migrations/001-062`). Key tables:
 
 | Table | Purpose |
 |-------|---------|
@@ -258,6 +292,8 @@ rorca/
 | `user_settings` | Per-user preferences |
 | `billing` | Stripe subscription tracking |
 | `provider_defaults` | Default model configs per provider |
+| `run_output_chunks` | DB-backed terminal output streaming — `(run_id, sequence, data)`, monotonically increasing, survives restarts, enables late-join SSE replay |
+| `worker_heartbeat` | Worker liveness — `(worker_id, pid, hostname, started_at, last_seen)`, updated every 30s; stale if `last_seen` > 90s ago |
 
 **WAL event types**: `generate`, `spec_approved`, `spec_rejected`, `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `worktree_created`, `worktree_merged`, `run_blocked` (HITL pause), `context_file_changed` (CIE file watcher), `story_escalated` (CIE model escalation), `skill_installed` (skill added), `skill_removed` (skill deleted), `skill_matched` (LLM skill-to-spec matching)
 
@@ -375,12 +411,13 @@ When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the buil
 
 ## Critical Gotchas
 
-### Top 5
+### Top 6
 1. **`chatComplete` returns `ChatResult { text, usage }`** — always use `.text` accessor. Never treat result as a string.
 2. **pg is async — always `await` DB calls**. `await queryOne<T>(sql, params)` returns T|undefined, `await query<T>(sql, params)` returns T[], `await execute(sql, params)` returns `{ rowCount }`. Use `$1, $2, ...` numbered placeholders (not `?`).
 3. **spec `id` ≠ spec `specName`** — `id` is the filename slug (`rorca-feature-enhancements`), `specName` is the human title. Use `spec.id` to construct file paths.
 4. **run-loop.sh is a bash fallback only** — lives at `workspace.path/forge/run-loop.sh`. Only used if `execution-engine.ts` is missing. Claude-only, no multi-agent support. Do not rely on it.
 5. **Backend auto-restarts** — `tsx watch` detects file changes and restarts automatically. Manual restart only needed if the process itself crashes: `lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev`.
+6. **Worker must be running** — pipeline triggers insert a pg-boss job and return immediately; runs only execute if the worker process is live. Check `GET /api/pipeline/worker/health` before triggering runs. Start with `cd backend && npm run worker` or `npm run dev` (starts both). Stale if `worker_heartbeat.last_seen` > 90s.
 
 ### Auth Middleware — Intentionally Bypassed
 `app.use(authRequired)` in `backend/src/server.ts` line ~78 is **commented out**. This is intentional — Rorca is a local single-user tool and the login wall blocks workspaces API causing onboarding to show incorrectly. Do NOT re-enable globally. Auth routes (`/api/auth/*`) still work for the registered user (`admin@rorca.local` / `rorca123`). If authRequired reappears as a global middleware, comment it out again.
@@ -558,6 +595,9 @@ CODEX_BIN=/path/to/codex        # Auto-detected if in PATH
 SPEC_PROVIDER=claude          # Options: claude (default), anthropic, openrouter
 ANTHROPIC_API_KEY=sk-ant-...  # Required if SPEC_PROVIDER=anthropic
 OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
+
+# Process role (set automatically by worker — do not set manually)
+RORCA_PROCESS_ROLE=engine     # Set to 'engine' by worker.ts when spawning execution-engine subprocesses
 ```
 
 ### Execution Engine: Claude vs OpenCode vs Codex
@@ -693,10 +733,11 @@ Codex CLI auto-discovers `AGENTS.md` files from the Git root directory and injec
 
 ## Performance Targets
 - Spec generation: < 60s (LLM call)
-- Archive search: < 100ms (SQLite full-text scan)
+- Archive search: < 100ms (pg full-text scan)
 - SSE heartbeat: 15s
 - WAL poll: 3s
 - Story timeout: 45 min (gtimeout --foreground)
+- pg-boss job pickup: ~500ms latency (default polling interval; configurable via `pollingIntervalSeconds` in pg-boss options)
 
 ## CI
 E2E tests: `npm run test:e2e` (Playwright — configured in `rorca-e2e-testing` spec, not yet built).
@@ -1155,9 +1196,12 @@ Rorca is an AI spec orchestration and pipeline management platform for autonomou
 - **Rules**:
   - PostgreSQL 16 via `pg` Pool — all DB calls are **async** (always `await`)
   - `query<T>()` → `T[]`, `queryOne<T>()` → `T | undefined`, `execute()` → `{ rowCount }`
-  - Migrations are SQL in `pg-migrations/`, numbered sequentially (001–049+), tracked via `schema_migrations` table
+  - Migrations are SQL in `pg-migrations/`, numbered sequentially (001–062+), tracked via `schema_migrations` table
   - Use `$1, $2, ...` numbered placeholders (NOT `?`)
   - FK constraints always on, connection pooling (max 20)
+  - **pgboss schema is NOT hand-managed** — `pgboss.*` tables (job, archive, subscription, version) are created and upgraded automatically by `boss.start()`. Never write migrations that touch `pgboss.*`. Migration 062 is a no-op placeholder that documents this.
+  - **pg-boss v10 requires explicit queue creation** — `boss.work('queue:name', handler)` does NOT create the queue or its partition table. You MUST call `await boss.createQueue('queue:name')` before calling `boss.send('queue:name', ...)`, otherwise `send()` returns `null` silently. The `job` table is partitioned by queue name (one partition per queue). In tests, call `createQueue` in `beforeAll` after `boss.start()`.
+  - **pg-boss job `id` must be a valid UUID** — passing an integer string (e.g., `String(runId)`) to the `id` option of `boss.send()` causes a PostgreSQL UUID cast error. Use auto-generated UUIDs (omit the `id` option) and embed `runId` in the job's data payload for correlation.
 
 ### Execution Engine (`backend/src/lib/execution-engine.ts`)
 - **Owner**: Architect
@@ -1265,12 +1309,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-02-28 [Architecture] Episodic Memory is structured Markdown
-> Rule: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
-
-## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure
-> Rule: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
-
 ## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution
 > Rule: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
 
@@ -1325,8 +1363,14 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-12 [Bug Fix] tsx watch restarts backend during parallel runs → resilient-post retries exhaust
 > Rule: When a fast worktree run auto-merges into main, tsx watch detects the file changes and restarts the backend (5-10s TypeScript recompile). If resilient-post.ts retry window is shorter than the restart time, execution engine can't report story results and the run shows as failed. Fix: raise POST_MAX_RETRIES to 10 and POST_RETRY_DELAY_MS to 3000 (30s coverage) in backend/src/lib/resilient-post.ts.
 
+## 2026-03-12 [Decision] Distribution format: curl|sh for launch, native installers deferred
+> Rule: Use `curl -fsSL https://get.rorca.app | sh` (macOS/Linux) + PowerShell equivalent (Windows) for launch distribution. Do NOT build .pkg (macOS) or .exe (Windows) installers yet — they require code signing certs (~$400/yr) and unsigned installers trigger OS security warnings (Gatekeeper, SmartScreen) which is worse UX than curl|sh. Native installers and Homebrew tap (`brew install getrorca/tap/rorca`) are deferred until there's user demand.
+
+## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
+> Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
+
 Follow this workflow for implementation:
-## Agent Role: Backend Routes
+## Agent Role: Execution Engine
 
 ---
 name: rorca
@@ -1479,12 +1523,12 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-001):
-Implement the backend API route `POST /api/specs/:id/enrich` that retroactively enriches a spec's user stories with contextual annotations. The route orchestrates a 4-layer retrieval cascade with graceful degradation: (1) pgvector cosine similarity search over `memories` and `direction_layers` embedding columns if the `vector` extension is available; (2) Apache AGE graph traversal (Story→File→Decision→Convention via Cypher) if pgvector is unavailable; (3) tsvector full-text BM25 hybrid RRF search as tertiary fallback; (4) `synthesize()` from `direction-stack.ts` as the always-available baseline that reads L1–L5 direction layers. For each UserStory in the spec JSON, the route calls `chatComplete()` with the story text plus retrieved context, generating an L5 annotation block. Annotations are injected into each story's `description` field as a fenced `## Context` section. The route writes a `spec_generation_logs` row with `enriched: true` and `retrieval_method: 'pgvector'|'graph'|'fulltext'|'direction-only'`. It emits a WAL event `spec_enriched` via `POST /api/wal`. Returns `{ success: true, retrieval_method, storiesEnriched: N }`. Responds 404 if spec not found, 409 if spec is currently running.
+Implement the backend API route `POST /api/specs/:id/assign-models` in `backend/src/routes/specs.ts`. The route reads the spec JSON from disk, detects the active execution engine (RORCA_AGENT) and model (RORCA_MODEL) from the `workspace_env_vars` table for the spec's workspace, then scores each story for complexity using logic extracted from `execution-engine.ts` (story text length + AC count + dependsOn depth + keyword matching: 'architecture','security','payments','migration' → high; 'copy','config','CRUD','label' → low). Maps complexity tier to model strings per agent: claude (low=claude-haiku-4-5-20251001, medium=claude-sonnet-4-6, high=claude-opus-4-6), opencode (reads RORCA_MODEL provider prefix: openai low=gpt-4o-mini/high=o3, anthropic low=claude-haiku-4-5-20251001/high=claude-opus-4-6, google low=gemini-2.0-flash/high=gemini-2.0-pro), codex (returns skipped=true with reason). Unless `dryRun=true`, writes `story.model` field to each UserStory in the spec JSON file on disk. Returns `{ storiesAssigned: N, skipped: boolean, reason?: string, breakdown: [{ storyId, complexity, model, reason }] }`.
 
 Acceptance Criteria:
-- POST /api/specs/:id/enrich returns 200 with { success: true, retrieval_method: string, storiesEnriched: number } when spec exists and is not running
-- Retrieval cascade attempts pgvector first: SELECT embedding <=> $1 FROM memories ORDER BY ... LIMIT 10, falls back to AGE Cypher if pg_catalog.pg_extension.extname = 'age' query succeeds, falls back to tsvector ts_rank_cd RRF, always runs synthesize() as baseline — retrieval_method reflects highest-tier method that returned results
-- Each story's description in the spec JSON file is updated to append a '## Context\n<annotation>' block generated by chatComplete() using { text, usage } — never treats ChatResult as a string
-- A row is inserted into spec_generation_logs with columns: spec_id, enriched=true, retrieval_method, model, duration_ms, tokens (input+output from usage), context_summary JSON
-- WAL event spec_enriched is emitted via fetch to /api/wal with payload { spec_id, workspace_id, retrieval_method, stories_enriched: N }
-- Returns 404 AppError if spec file not found at forge/specs/{pending|approved}/<id>.json, returns 409 AppError if a pipeline_run with status='running' exists for this spec
+- POST /api/specs/:id/assign-models returns 200 with { storiesAssigned, breakdown } when RORCA_AGENT=claude; each breakdown entry has storyId, complexity ('low'|'medium'|'high'), model (one of claude-haiku-4-5-20251001/claude-sonnet-4-6/claude-opus-4-6), and reason string
+- When RORCA_AGENT=opencode and RORCA_MODEL=openai/gpt-4o, low-complexity stories get gpt-4o-mini and high-complexity stories get o3 in breakdown
+- When RORCA_AGENT=codex, route returns { storiesAssigned: 0, skipped: true, reason: 'Codex CLI does not support per-story model selection — model is fixed to your ChatGPT subscription' } and does NOT write story.model to spec JSON
+- When dryRun=true query param is set, spec JSON on disk is NOT modified but breakdown is still returned with correct model assignments
+- Stories containing keywords 'architecture', 'security', 'payments', or 'migration' in title+description+acceptanceCriteria are scored high complexity; stories containing 'copy', 'config', 'CRUD', or 'label' score low; others score medium
+- RORCA_AGENT and RORCA_MODEL are read from workspace_env_vars table (workspace derived from spec's workspace_id); falls back to process.env.RORCA_AGENT / RORCA_MODEL if not found in DB

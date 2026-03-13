@@ -25,13 +25,13 @@ export default async function globalTeardown(): Promise<void> {
     const pool = new Pool({ connectionString: TEST_DB_URL });
     try {
       const { rows } = await pool.query(`
-        SELECT tablename FROM pg_tables
-        WHERE schemaname = 'public'
+        SELECT schemaname, tablename FROM pg_tables
+        WHERE schemaname IN ('public', 'rorca')
           AND tablename != 'schema_migrations'
         ORDER BY tablename
       `);
       if (rows.length > 0) {
-        const tableNames = rows.map(r => `"${r.tablename}"`).join(', ');
+        const tableNames = rows.map(r => `"${r.schemaname}"."${r.tablename}"`).join(', ');
         await pool.query(`TRUNCATE ${tableNames} CASCADE`);
       }
       console.log(`[jest-teardown] Truncated ${rows.length} tables (KEEP_TEST_DB=true)`);
