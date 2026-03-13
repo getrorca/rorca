@@ -624,7 +624,7 @@
       "dependsOn": [
         "PG-018"
       ],
-      "passes": false,
+      "passes": true,
       "suggestedSkills": [
         {
           "name": "incident-response",
@@ -636,7 +636,8 @@
           "relevance": 7,
           "reason": "Rolling deploy requires orchestrating multiple workers with state transitions (graceful shutdown, startup, pickup)."
         }
-      ]
+      ],
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-020",
