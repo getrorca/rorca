@@ -576,6 +576,108 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
   }
 }
 
+// ── Stale job recovery ───────────────────────────────────────────────────
+// Called once at startup, before boss.work() registers handlers.
+// Finds any pgboss.job rows that were left in state='active' by a previous
+// worker that crashed (or was SIGKILL'd before draining). These jobs will
+// never be retried because pg-boss only expires them after expireInSeconds
+// (set to 7200s / 2hr by WR-003), meaning new jobs would be blocked by the
+// occupied teamSize slots until expiry.
+//
+// Safe cutoff: we use WORKER_STARTED_AT as the boundary. Any job whose
+// startedon < WORKER_STARTED_AT could not have been started by this process
+// instance, so it is definitively orphaned.
+//
+// We do NOT re-queue — a partially-executed run may have committed code;
+// re-running it would create duplicate commits.
+
+async function recoverStaleJobs(): Promise<void> {
+  type StaleJobRow = {
+    id: string;
+    name: string;
+    data: Record<string, unknown>;
+  };
+
+  let staleJobs: StaleJobRow[];
+  try {
+    staleJobs = await query<StaleJobRow>(
+      `SELECT id, name, data
+       FROM pgboss.job
+       WHERE name IN ('pipeline:run', 'pipeline:retry')
+         AND state = 'active'
+         AND startedon < $1`,
+      [WORKER_STARTED_AT],
+    );
+  } catch (err) {
+    // pgboss schema may not exist yet on a completely fresh DB — safe to skip
+    logger.warn({ err }, '[worker] recoverStaleJobs — pgboss.job query failed, skipping');
+    return;
+  }
+
+  if (staleJobs.length === 0) {
+    logger.info('[worker] recoverStaleJobs — no stale active jobs found');
+    return;
+  }
+
+  logger.warn({ count: staleJobs.length }, '[worker] recoverStaleJobs — found stale active jobs from crashed worker');
+
+  for (const job of staleJobs) {
+    const runId = typeof job.data?.runId === 'number' ? job.data.runId : undefined;
+
+    // 1. Fail the pg-boss job so the slot is freed
+    try {
+      await execute(
+        `UPDATE pgboss.job
+         SET state = 'failed', completedon = NOW()
+         WHERE id = $1 AND state = 'active'`,
+        [job.id],
+      );
+    } catch (err) {
+      logger.warn({ err, jobId: job.id }, '[worker] recoverStaleJobs — failed to update pgboss.job state');
+      continue;
+    }
+
+    if (!runId) {
+      logger.warn({ jobId: job.id, jobName: job.name }, '[worker] recoverStaleJobs — job has no runId in data, skipping pipeline_runs update');
+      continue;
+    }
+
+    // 2. Look up workspaceId before updating the run
+    const runRow = await queryOne<{ workspace_id: number | string }>(
+      `SELECT workspace_id FROM pipeline_runs WHERE id = $1`,
+      [runId],
+    ).catch(() => undefined);
+
+    // 3. Mark pipeline_runs as failed
+    try {
+      await execute(
+        `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1 AND status = 'running'`,
+        [runId],
+      );
+    } catch (err) {
+      logger.warn({ err, runId }, '[worker] recoverStaleJobs — failed to update pipeline_runs');
+    }
+
+    // 4. Emit WAL event for UI notification
+    if (runRow) {
+      await emitWalEvent('run_finished', runRow.workspace_id, {
+        run_id: runId,
+        status: 'failed',
+        reason: 'worker_crash_recovery',
+        pgboss_job_id: job.id,
+        recovered_at: new Date().toISOString(),
+      });
+    }
+
+    logger.warn(
+      { pgbossJobId: job.id, jobName: job.name, runId },
+      '[worker] recoverStaleJobs — stale job failed, pipeline_runs updated',
+    );
+  }
+
+  logger.info({ recovered: staleJobs.length }, '[worker] recoverStaleJobs — recovery complete');
+}
+
 // ── Graceful shutdown ────────────────────────────────────────────────────
 
 let stopping = false;
@@ -616,14 +718,19 @@ async function start(): Promise<void> {
     process.exit(1);
   }
 
-  // 3. Register job queue handlers.
+  // 3. Recover stale jobs left by a previously crashed worker instance.
+  // Must run after initBoss() (pg-boss schema exists) but before boss.work()
+  // (so freed slots are available when handlers start polling).
+  await recoverStaleJobs();
+
+  // 4. Register job queue handlers.
   // Queues are already created by ensureQueues() inside initBoss() — just register handlers.
   const boss = getBoss();
   await boss.work('pipeline:run', handlePipelineRun);
   await boss.work('pipeline:retry', handlePipelineRetry);
   await boss.work('pipeline:cancel', handlePipelineCancel);
 
-  // 3b. DLQ polling — pg-boss does not emit a 'failed' event for job exhaustion.
+  // 4b. DLQ polling — pg-boss does not emit a 'failed' event for job exhaustion.
   // Instead, poll pgboss.archive every 60 s for newly-failed pipeline jobs and emit
   // run_dlq WAL events. Seen job IDs are tracked in a Set to avoid duplicate events.
   const seenDlqJobIds = new Set<string>();
