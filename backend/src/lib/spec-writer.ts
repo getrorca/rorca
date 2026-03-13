@@ -30,7 +30,7 @@ export interface ContextUsedMeta {
   standards: boolean;     // L1 was present
   conventions: boolean;   // L2 was present
   project: boolean;       // L3 was present
-  memory: boolean;        // gitMemory was present
+  memory: boolean;        // memory entries were present
   schema: boolean;        // schemaSnapshot was present
   scopesMatched: string[];
   totalTokens: number;

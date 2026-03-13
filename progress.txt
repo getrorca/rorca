@@ -3,9 +3,9 @@
 Spec: rorca-context-autohydrate
 Run ID: 95
 Started: 2026-03-13T09:53:41.522Z
-Last Updated: 2026-03-13T09:59:59.862Z
+Last Updated: 2026-03-13T10:37:34.088Z
 
-## Completed Stories (10)
+## Completed Stories (11)
 - US-005: Frontend domain pass-through in spec generation request — DONE (claude, claude-sonnet-4-6, 128s)
 - US-006: Domain inference during scan-direction from codebase analysis — DONE (claude, claude-sonnet-4-6, 487s)
 - US-007: Re-hydrate git memory on spec generation if stale (7-day threshold) — DONE (claude, claude-sonnet-4-6, 184s)
@@ -16,3 +16,4 @@ Last Updated: 2026-03-13T09:59:59.862Z
 - US-009: Context health score in Spec Forge (0-100 score with circular progress indicator) — DONE (claude, claude-sonnet-4-6, 685s)
 - US-008: Context enrichment nudge UI in Spec Forge — DONE (claude, claude-sonnet-4-6, 2333s)
 - US-009: Context health score in Spec Forge (0-100 score with circular progress indicator) — DONE (claude, claude-sonnet-4-6, 377s)
+- US-010: Remove workspace_context.git_memory injection path from direction-stack, context-cache, and specs — DONE (claude, claude-sonnet-4-6, 2253s)
