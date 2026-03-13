@@ -642,6 +642,58 @@ async function start(): Promise<void> {
   await boss.work('pipeline:retry', handlePipelineRetry);
   await boss.work('pipeline:cancel', handlePipelineCancel);
 
+  // 3b. DLQ polling — pg-boss does not emit a 'failed' event for job exhaustion.
+  // Instead, poll pgboss.archive every 60 s for newly-failed pipeline jobs and emit
+  // run_dlq WAL events. Seen job IDs are tracked in a Set to avoid duplicate events.
+  const seenDlqJobIds = new Set<string>();
+
+  async function pollDlq(): Promise<void> {
+    try {
+      type DlqRow = { id: string; name: string; output: unknown; retrycount: number; archivedon: string; data: Record<string, unknown> };
+      const rows = await query<DlqRow>(
+        `SELECT id, name, output, retrycount, archivedon, data
+         FROM pgboss.archive
+         WHERE name IN ('pipeline:run', 'pipeline:retry')
+           AND state = 'failed'
+           AND archivedon > NOW() - INTERVAL '1 day'
+         ORDER BY archivedon DESC`,
+      ).catch(() => [] as DlqRow[]);
+
+      for (const row of rows) {
+        if (seenDlqJobIds.has(row.id)) continue;
+        seenDlqJobIds.add(row.id);
+
+        const runId = typeof row.data?.runId === 'number' ? row.data.runId : undefined;
+        if (!runId) continue;
+
+        const run = await queryOne<{ workspace_id: string }>(
+          `SELECT workspace_id FROM pipeline_runs WHERE id = $1`,
+          [runId],
+        ).catch(() => undefined);
+        if (!run) continue;
+
+        const lastError = typeof row.output === 'string'
+          ? row.output
+          : (row.output != null ? JSON.stringify(row.output) : null);
+
+        logger.warn({ jobId: row.id, name: row.name, runId }, '[worker] DLQ poll — emitting run_dlq WAL event');
+
+        await emitWalEvent('run_dlq', run.workspace_id, {
+          runId,
+          jobId: row.id,
+          jobName: row.name,
+          lastError,
+          attempts: row.retrycount,
+        });
+      }
+    } catch (err) {
+      logger.warn({ err }, '[worker] DLQ poll error');
+    }
+  }
+
+  void pollDlq();
+  setInterval(() => { void pollDlq(); }, 60_000);
+
   // 4. Bulk-register all enabled pipeline_schedules with pg-boss native scheduling.
   // Also registers the meta-cron (pipeline:cron, every minute) and per-schedule
   // boss.work() subscriptions (pipeline:cron:<id>). Re-registration is idempotent.

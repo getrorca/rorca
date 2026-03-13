@@ -1,10 +1,10 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight, Sparkles, Files, Cpu } from 'lucide-react';
+import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight, Sparkles, Files, Cpu, MailWarning } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
 import { apiFetch } from '../lib/apiFetch';
-import { pauseRun, resumeRun, cancelRun, injectContext, retryRun } from '../api/pipeline';
+import { pauseRun, resumeRun, cancelRun, injectContext, retryRun, getRunDlq, retryRunFromDlq, type DlqEntry } from '../api/pipeline';
 import RunTerminal from '../components/RunTerminal';
 import type { RunTerminalHandle } from '../components/RunTerminal';
 import MultiPaneTerminal from '../components/MultiPaneTerminal';
@@ -628,6 +628,12 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   const [hitlSending, setHitlSending] = useState(false);
   const [retryLoading, setRetryLoading] = useState(false);
 
+  // DLQ state — checked once when run transitions to 'failed'
+  const [dlqEntry, setDlqEntry] = useState<DlqEntry | null>(null);
+  const [showDlqModal, setShowDlqModal] = useState(false);
+  const [dlqRetryLoading, setDlqRetryLoading] = useState(false);
+  const dlqCheckedRef = useRef(false);
+
   const [specModel, setSpecModel] = useState<string | null>(null);
   const [tokenSummary, setTokenSummary] = useState({ inputTokens: 0, outputTokens: 0 });
   const [contextComparison, setContextComparison] = useState<ContextComparisonData | null>(null);
@@ -732,6 +738,29 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   useEffect(() => {
     fetchRun();
   }, [fetchRun]);
+
+  // Check DLQ once when run transitions to 'failed' (terminal state — no polling needed)
+  useEffect(() => {
+    if (effectiveStatus !== 'failed' || dlqCheckedRef.current) return;
+    dlqCheckedRef.current = true;
+    getRunDlq(runId).then(entry => setDlqEntry(entry)).catch(() => { /* 404 = not in DLQ */ });
+  }, [effectiveStatus, runId]);
+
+  const handleDlqRetry = useCallback(async () => {
+    setDlqRetryLoading(true);
+    try {
+      const result = await retryRunFromDlq(runId);
+      if (result.runId) {
+        setShowDlqModal(false);
+        // Navigate to new run
+        window.location.href = `/runs/${result.runId}`;
+      }
+    } catch (err) {
+      console.error('[RunView] DLQ retry failed:', err);
+    } finally {
+      setDlqRetryLoading(false);
+    }
+  }, [runId]);
 
   const isActive = effectiveStatus === 'running' || effectiveStatus === 'paused' || effectiveStatus === 'blocked';
 
@@ -1012,6 +1041,17 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                 ? run.agentModel?.split('/').pop() || 'OpenCode'
                 : 'Claude'}
             </span>
+            {/* DLQ badge — shown when run's pg-boss job exhausted all retries */}
+            {dlqEntry && (
+              <button
+                onClick={() => setShowDlqModal(true)}
+                title="Job exhausted all retries — click for details"
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 bg-amber-500/10 text-amber-500 hover:bg-amber-500/20 transition-colors"
+              >
+                <MailWarning size={10} />
+                DLQ
+              </button>
+            )}
           </div>
         }
         actions={
@@ -1072,6 +1112,65 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
           onConfirm={handleKill}
           onCancel={() => setShowKillConfirm(false)}
         />
+      )}
+
+      {/* DLQ detail modal */}
+      {showDlqModal && dlqEntry && (
+        <div
+          className="fixed inset-0 z-50 flex items-center justify-center bg-black/50"
+          onClick={() => setShowDlqModal(false)}
+        >
+          <div
+            className="relative bg-[var(--bg-elevated)] border border-border rounded-xl shadow-2xl w-full max-w-lg mx-4 p-6 flex flex-col gap-4"
+            onClick={e => e.stopPropagation()}
+          >
+            <div className="flex items-center gap-2">
+              <MailWarning size={18} className="text-amber-500 shrink-0" />
+              <h2 className="text-sm font-semibold text-[var(--text)]">Dead-Letter Queue</h2>
+              <span className="ml-auto text-[10px] font-mono text-muted">Job {dlqEntry.jobId.slice(0, 8)}…</span>
+              <button onClick={() => setShowDlqModal(false)} className="p-1 rounded hover:bg-bg text-muted hover:text-[var(--text)]">
+                <X size={14} />
+              </button>
+            </div>
+
+            <div className="text-xs text-muted space-y-1">
+              <div className="flex gap-2">
+                <span className="text-[var(--text)] font-medium w-20 shrink-0">Attempts</span>
+                <span>{dlqEntry.attempts}</span>
+              </div>
+              <div className="flex gap-2">
+                <span className="text-[var(--text)] font-medium w-20 shrink-0">Failed at</span>
+                <span>{new Date(dlqEntry.failedAt).toLocaleString()}</span>
+              </div>
+            </div>
+
+            {dlqEntry.lastError && (
+              <div className="rounded-lg bg-red-500/5 border border-red-500/20 p-3">
+                <p className="text-[10px] font-semibold text-red-400 mb-1">Last error</p>
+                <pre className="text-[10px] text-red-300 whitespace-pre-wrap break-all font-mono leading-relaxed max-h-40 overflow-y-auto">
+                  {dlqEntry.lastError}
+                </pre>
+              </div>
+            )}
+
+            <div className="flex justify-end gap-2 pt-1">
+              <button
+                onClick={() => setShowDlqModal(false)}
+                className="px-3 py-1.5 text-xs rounded border border-border text-muted hover:text-[var(--text)] hover:bg-bg transition-colors"
+              >
+                Dismiss
+              </button>
+              <button
+                onClick={handleDlqRetry}
+                disabled={dlqRetryLoading}
+                className="px-3 py-1.5 text-xs rounded bg-amber-500/10 border border-amber-500/30 text-amber-400 hover:bg-amber-500/20 transition-colors flex items-center gap-1.5 disabled:opacity-50"
+              >
+                {dlqRetryLoading ? <Loader2 size={12} className="animate-spin" /> : <RotateCcw size={12} />}
+                Retry from DLQ
+              </button>
+            </div>
+          </div>
+        </div>
       )}
 
       {/* Context usage summary bar */}
