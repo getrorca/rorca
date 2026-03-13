@@ -1344,8 +1344,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     };
 
     await getBoss().send('pipeline:run', jobPayload, {
-      retryLimit: 3,
-      retryDelay: 10,
+      retryLimit: 0,
+      expireInSeconds: 7200, // 2 hours — pipeline runs can take 30–60 min; never expire mid-run
     });
 
     logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
@@ -2824,7 +2824,10 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     });
 
     // 13. Enqueue via pg-boss (let pg-boss generate a UUID job ID).
-    await getBoss().send('pipeline:retry', jobPayload);
+    await getBoss().send('pipeline:retry', jobPayload, {
+      retryLimit: 0,
+      expireInSeconds: 7200, // 2 hours — retry runs can take as long as fresh runs
+    });
 
     logger.info(`[Pipeline] Enqueued pipeline:retry job for newRunId=${newRunId} (originalRunId=${originalRunId})`);
 
@@ -2894,7 +2897,11 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
     try {
       process.kill(-run.pid, 'SIGTSTP');
     } catch (err: any) {
-      res.status(500).json({ error: `Failed to send SIGTSTP: ${err.message}` });
+      if (err.code === 'ESRCH') {
+        res.status(409).json({ error: 'Process is no longer running' });
+      } else {
+        res.status(500).json({ error: `Failed to send SIGTSTP: ${err.message}` });
+      }
       return;
     }
 
@@ -3128,8 +3135,8 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne<{ id: number; status: string; workspace_id: string; started_at: string }>(
-      'SELECT id, status, workspace_id, started_at FROM pipeline_runs WHERE id = $1',
+    const run = await queryOne<{ id: number; status: string; workspace_id: string; started_at: string; pid: number | null }>(
+      'SELECT id, status, workspace_id, started_at, pid FROM pipeline_runs WHERE id = $1',
       [runId],
     );
 
@@ -3166,7 +3173,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
 
       if (refreshed && (refreshed.status === 'running' || refreshed.status === 'paused')) {
         // Worker picked it up — delegate to the running path
-        await getBoss().send('pipeline:cancel', { runId });
+        await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
         res.json({ ok: true, runId, status: 'cancelling' });
         return;
       }
@@ -3193,9 +3200,36 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     }
 
     // ── Running / paused path ─────────────────────────────────────────────
-    // Deliver cancel job to the worker. The worker owns SIGTERM/SIGKILL sequencing,
-    // DB status update, and WAL event emission. We return 200 immediately.
-    await getBoss().send('pipeline:cancel', { runId });
+    // Deliver cancel job to the worker for SIGTERM/SIGKILL sequencing.
+    await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
+
+    // Best-effort: if the PID is already dead (worker crashed, process exited),
+    // mark the run cancelled immediately rather than waiting for the worker.
+    const pidAlive = run.pid ? isPidAlive(run.pid) : false;
+
+    if (!pidAlive) {
+      // Process is already gone — handle cancellation inline
+      await execute(
+        `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW() WHERE id = $1`,
+        [runId],
+      );
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', $1, $2) RETURNING *`,
+        [run.workspace_id, JSON.stringify({ run_id: runId, cancelledAt: new Date().toISOString(), reason: 'pid_not_alive' })],
+      );
+      if (walEvent) broadcastAll(walEvent);
+      res.json({ ok: true, runId, status: 'cancelled' });
+      return;
+    }
+
+    // PID is alive — send SIGTERM directly as a best-effort fallback alongside the worker job
+    if (run.pid) {
+      try {
+        process.kill(run.pid, 'SIGTERM');
+      } catch {
+        // ESRCH (already dead) or EPERM (no permission) — ignore, worker will handle it
+      }
+    }
 
     res.json({ ok: true, runId, status: 'cancelling' });
   } catch (error: unknown) {
@@ -4423,6 +4457,19 @@ router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
 // marks runs as failed. Called once at server startup.
 
 export async function cleanupOrphanRuns(): Promise<number> {
+  // Guard: if any worker has checked in within the last 90s, it owns lifecycle management — skip entirely
+  try {
+    const activeWorker = await queryOne<{ worker_id: string }>(
+      `SELECT worker_id FROM worker_heartbeat WHERE last_seen > NOW() - INTERVAL '90 seconds' LIMIT 1`
+    );
+    if (activeWorker) {
+      logger.info(`[Cleanup] Active worker detected (${activeWorker.worker_id}), skipping orphan cleanup`);
+      return 0;
+    }
+  } catch {
+    // worker_heartbeat table may not exist on first startup — proceed with cleanup
+  }
+
   const staleRuns = await query(`SELECT id, pid, opencode_server_pid, workspace_id, agent_type FROM pipeline_runs WHERE status IN ('running', 'paused')`) as Array<{
     id: number;
     pid: number | null;
@@ -4436,10 +4483,10 @@ export async function cleanupOrphanRuns(): Promise<number> {
   let cleaned = 0;
 
   for (const run of staleRuns) {
-    // Skip runs managed by pg-boss worker — the worker will handle lifecycle
+    // Skip runs with an active or queued pg-boss job — includes 'retry' state which was previously missed
     try {
       const pgBossJob = await queryOne<{ id: string }>(
-        `SELECT id FROM pgboss.job WHERE name IN ('pipeline:run', 'pipeline:retry') AND data->>'runId' = $1 AND state IN ('created', 'active') LIMIT 1`,
+        `SELECT id FROM pgboss.job WHERE name IN ('pipeline:run', 'pipeline:retry') AND data->>'runId' = $1 AND state IN ('created', 'active', 'retry') LIMIT 1`,
         [String(run.id)]
       );
       if (pgBossJob) {
@@ -4450,18 +4497,15 @@ export async function cleanupOrphanRuns(): Promise<number> {
       // pgboss schema may not exist yet — treat as no active job, proceed with cleanup
     }
 
-    // Kill execution engine process (if alive)
+    // Only clean up runs whose PID is no longer alive
     if (run.pid) {
       try {
-        process.kill(run.pid, 0); // Check alive
-        try {
-          process.kill(-run.pid, 'SIGTERM'); // Kill process group
-          logger.info(`[Cleanup] Sent SIGTERM to engine PID ${run.pid} (run ${run.id})`);
-        } catch {
-          try { process.kill(run.pid, 'SIGTERM'); } catch { /* already dead */ }
-        }
+        process.kill(run.pid, 0); // Throws if process is dead
+        // Process is still alive — skip, it may be legitimately running without a worker
+        logger.info(`[Cleanup] Skipping run ${run.id} — PID ${run.pid} is still alive`);
+        continue;
       } catch {
-        // Process already dead — expected after backend restart
+        // Process is dead — safe to clean up
       }
     }
 
@@ -4483,7 +4527,7 @@ export async function cleanupOrphanRuns(): Promise<number> {
 
     // Emit WAL event
     try {
-      const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [run.workspace_id, JSON.stringify({
+      const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('orphan_cleanup', $1, $2)` + ' RETURNING *', [run.workspace_id, JSON.stringify({
         run_id: run.id,
         status: 'failed',
         reason: 'orphan_cleanup',
@@ -4838,7 +4882,10 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       envOverrides: {},
     };
 
-    await getBoss().send('pipeline:run', jobPayload);
+    await getBoss().send('pipeline:run', jobPayload, {
+      retryLimit: 0,
+      expireInSeconds: 7200, // 2 hours — DLQ-retried runs can take as long as fresh runs
+    });
 
     // Emit WAL event
     await execute(
@@ -4895,6 +4942,8 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
  *                 workerActive: { type: boolean }
  *                 workerPid: { type: integer, nullable: true }
  *                 workerStartedAt: { type: string, nullable: true, format: date-time }
+ *                 activeChildProcesses: { type: integer, description: "Number of active execution-engine child processes (from latest heartbeat)" }
+ *                 lastReconciliationErrors: { type: integer, description: "Number of state mismatches fixed in last reconcile cycle (last 90s)" }
  *                 activeJobs:
  *                   type: array
  *                   items:
@@ -4923,7 +4972,8 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       pid: number;
       started_at: string;
       last_seen: string;
-    }>('SELECT pid, started_at, last_seen FROM worker_heartbeat ORDER BY last_seen DESC LIMIT 1');
+      active_jobs: number;
+    }>('SELECT pid, started_at, last_seen, active_jobs FROM worker_heartbeat ORDER BY last_seen DESC LIMIT 1');
 
     const workerActive = heartbeat
       ? Date.now() - new Date(heartbeat.last_seen).getTime() < 60_000
@@ -4986,15 +5036,30 @@ router.get('/worker/health', async (req: Request, res: Response) => {
     ).catch(() => undefined);
     const pgBossVersion = versionRow?.version ?? 'unknown';
 
+    // ── 7. Last reconciliation errors (WAL events from last reconcile cycle) ─
+    // Count run_finished events with reason='state_reconciliation' or
+    // reason='worker_crash_recovery' emitted in the past 90s (covers one full
+    // reconcile interval + one heartbeat interval).
+    const reconRow = await queryOne<{ cnt: string }>(
+      `SELECT COUNT(*)::text AS cnt
+       FROM wal_events
+       WHERE event_type = 'run_finished'
+         AND payload->>'reason' IN ('state_reconciliation', 'worker_crash_recovery')
+         AND ts > NOW() - INTERVAL '90 seconds'`,
+    ).catch(() => ({ cnt: '0' }));
+    const lastReconciliationErrors = parseInt(reconRow?.cnt ?? '0', 10);
+
     res.json({
       workerActive,
       workerPid: heartbeat?.pid ?? null,
       workerStartedAt: heartbeat?.started_at ?? null,
+      activeChildProcesses: heartbeat?.active_jobs ?? 0,
       activeJobs,
       queueDepth,
       scheduledJobs,
       dlqDepth,
       pgBossVersion,
+      lastReconciliationErrors,
     });
   } catch (error: unknown) {
     logger.error({ err: error }, '[Pipeline] worker health check error');
