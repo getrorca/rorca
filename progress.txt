@@ -3,9 +3,9 @@
 Spec: rorca-pg-boss-job-queue
 Run ID: 90
 Started: 2026-03-13T06:40:11.238Z
-Last Updated: 2026-03-13T06:46:43.114Z
+Last Updated: 2026-03-13T06:57:56.623Z
 
-## Completed Stories (7)
+## Completed Stories (8)
 - PG-017: Scheduler integration test: exactly-once cron with multiple worker instances — DONE (claude, claude-sonnet-4-6, 31s)
 - PG-018: Dead letter queue test: exhaust retries, verify DLQ entry, retry from DLQ — DONE (claude, claude-sonnet-4-6, 700s)
 - PG-019: Zero-downtime deploy test: rolling worker restart with no job loss — DONE (claude, claude-sonnet-4-6, 1632s)
@@ -13,3 +13,4 @@ Last Updated: 2026-03-13T06:46:43.114Z
 - PG-019: Zero-downtime deploy test: rolling worker restart with no job loss — DONE (claude, claude-sonnet-4-6, 1057s)
 - PG-020: Load test: 10 concurrent jobs, throughput validation, no race conditions — DONE (claude, claude-sonnet-4-6, 604s)
 - PG-020: Load test: 10 concurrent jobs, throughput validation, no race conditions — DONE (claude, claude-sonnet-4-6, 214s)
+- PG-021: Update npm run dev and rorca start to launch worker alongside server — DONE (claude, claude-sonnet-4-6, 419s)
