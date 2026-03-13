@@ -44,7 +44,7 @@ async function createWorkspace(id = 'ws-retry-1') {
   };
   fs.writeFileSync(path.join(scriptsDir, 'test-spec.json'), JSON.stringify(spec));
 
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [id, 'Retry Test Workspace', tmpDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [id, 'Retry Test Workspace', tmpDir]);
 }
 
 async function createRunWithStories(workspaceId = 'ws-retry-1') {

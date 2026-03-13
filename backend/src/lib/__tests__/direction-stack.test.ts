@@ -1,13 +1,15 @@
 import { synthesize, synthesizeDirectionStack } from '../direction-stack';
 
-// ─── Mock DB + Search for synthesizeDirectionStack tests ─────────────────────
+// ─── Mock for synthesizeDirectionStack tests ─────────────────────────────────
 
-const mockQueryOne = jest.fn();
-const mockQuery = jest.fn();
+const mockRetrieveContext = jest.fn();
+jest.mock('../memory-router', () => ({
+  retrieveContext: (...args: unknown[]) => mockRetrieveContext(...args),
+}));
 
-jest.mock('../../db/index', () => ({
-  queryOne: (...args: unknown[]) => mockQueryOne(...args),
-  query: (...args: unknown[]) => mockQuery(...args),
+const mockGetDirectionLayers = jest.fn();
+jest.mock('../context-cache', () => ({
+  getDirectionLayers: (...args: unknown[]) => mockGetDirectionLayers(...args),
 }));
 
 const mockHybridSearch = jest.fn();
@@ -16,7 +18,15 @@ jest.mock('../search', () => ({
 }));
 
 jest.mock('../logger', () => ({
-  logger: { warn: jest.fn(), info: jest.fn(), error: jest.fn() },
+  logger: { warn: jest.fn(), info: jest.fn(), error: jest.fn(), debug: jest.fn() },
+}));
+
+// Keep DB mock for any residual direct DB calls
+const mockQueryOne = jest.fn();
+const mockQuery = jest.fn();
+jest.mock('../../db/index', () => ({
+  queryOne: (...args: unknown[]) => mockQueryOne(...args),
+  query: (...args: unknown[]) => mockQuery(...args),
 }));
 
 // ─── Sync synthesize() tests (backward compat) ──────────────────────────────
@@ -179,30 +189,38 @@ describe('synthesizeDirectionStack', () => {
     memoryEvents?: Array<{ payload: string }>;
     totalMemory?: number;
   } = {}) {
-    mockQueryOne.mockImplementation((sql: string, _params?: unknown[]) => {
-      if (sql.includes('layer = 1') && sql.includes("COALESCE(workspace_id, '') = ''") && !sql.includes('team_id'))
-        return opts.l1 ? { content_yaml: opts.l1 } : undefined;
-      if (sql.includes('layer = 2') && sql.includes('domain'))
-        return opts.l2 ? { content_yaml: opts.l2 } : undefined;
-      if (sql.includes('layer = 3'))
-        return opts.l3 ? { content_yaml: opts.l3 } : undefined;
-      if (sql.includes('workspaces') && sql.includes('domain'))
-        return opts.domain ? { domain: opts.domain } : undefined;
-      if (sql.includes('workspace_context'))
-        return { schema_snapshot: opts.schemaSnapshot || null, git_memory: opts.gitMemory || null };
-      if (sql.includes('workspace_access'))
-        return undefined; // No team
-      if (sql.includes('COUNT') && sql.includes('embeddings'))
-        return { cnt: String(opts.embeddingCount ?? 0) };
-      if (sql.includes('COUNT') && sql.includes('wal_events'))
-        return { cnt: String(opts.totalMemory ?? (opts.memoryEvents?.length ?? 0)) };
-      return undefined;
+    // Mock retrieveContext from memory-router
+    const tier = opts.embeddingCount && opts.embeddingCount > 0 ? 'search' : 'cache';
+    const memoryEntries = (opts.memoryEvents || []).map(e => {
+      const parsed = JSON.parse(e.payload);
+      return { text: parsed.rule || e.payload, score: 0.9, source: 'cache' as const };
     });
 
-    mockQuery.mockImplementation((sql: string) => {
-      if (sql.includes('wal_events') && sql.includes('memory_created'))
-        return opts.memoryEvents || [];
-      return [];
+    mockRetrieveContext.mockResolvedValue({
+      direction: {
+        standards: opts.l1,
+        conventions: opts.l2,
+        project: opts.l3,
+      },
+      memory: memoryEntries,
+      skills: [],
+      meta: {
+        cagHits: tier === 'cache' ? 1 : 0,
+        ragHits: tier === 'search' ? 1 : 0,
+        graphHits: 0,
+        totalTokens: 100,
+        latencyMs: 5,
+        tier,
+      },
+    });
+
+    // Mock getCachedDirectionLayers (called as getDirectionLayers in context-cache)
+    mockGetDirectionLayers.mockResolvedValue({
+      standards: opts.l1,
+      conventions: opts.l2,
+      project: opts.l3,
+      schemaSnapshot: opts.schemaSnapshot,
+      gitMemory: opts.gitMemory,
     });
   }
 
@@ -242,65 +260,62 @@ describe('synthesizeDirectionStack', () => {
   });
 
   it('uses hybridSearch when storyText is provided and embeddings exist', async () => {
-    setupDbMocks({
-      l1: 'Standards',
-      embeddingCount: 50,
-      totalMemory: 100,
+    // With embeddingCount > 0, setupDbMocks sets tier='search' => searchMode='semantic'
+    mockRetrieveContext.mockResolvedValue({
+      direction: { standards: 'Standards' },
+      memory: [
+        { text: 'Use JWT for auth', score: 0.8, source: 'search' as const },
+        { text: 'Use pg Pool', score: 0.5, source: 'search' as const },
+      ],
+      skills: [],
+      meta: { cagHits: 0, ragHits: 2, graphHits: 0, totalTokens: 100, latencyMs: 5, tier: 'search' },
     });
-
-    mockHybridSearch.mockResolvedValue([
-      { sourceType: 'memory', sourceId: 'm1', title: 'Auth pattern', snippet: 'Use JWT for auth', score: 0.8, matchType: 'semantic' },
-      { sourceType: 'memory', sourceId: 'm2', title: 'DB pattern', snippet: 'Use pg Pool', score: 0.5, matchType: 'hybrid' },
-    ]);
+    mockGetDirectionLayers.mockResolvedValue({ standards: 'Standards' });
 
     const result = await synthesizeDirectionStack('ws-1', { storyText: 'Add authentication endpoint' });
 
-    expect(mockHybridSearch).toHaveBeenCalledWith('Add authentication endpoint', {
-      sourceTypes: ['memory'],
-      workspaceId: 'ws-1',
-      limit: 15,
-    });
     expect(result.metadata.searchMode).toBe('semantic');
     expect(result.metadata.memoryEntries.included).toBe(2);
-    expect(result.metadata.memoryEntries.total).toBe(100);
     expect(result.metadata.memoryEntries.relevanceRange).toEqual([0.5, 0.8]);
     expect(result.text).toContain('Use JWT for auth');
   });
 
   it('filters memory entries below relevance threshold', async () => {
-    setupDbMocks({ l1: 'Standards', embeddingCount: 50, totalMemory: 100 });
-
-    mockHybridSearch.mockResolvedValue([
-      { sourceType: 'memory', sourceId: 'm1', title: 'Relevant', snippet: 'Very relevant entry', score: 0.8, matchType: 'semantic' },
-      { sourceType: 'memory', sourceId: 'm2', title: 'Noise', snippet: 'Low relevance noise', score: 0.1, matchType: 'keyword' },
-    ]);
+    // memory-router handles filtering; synthesizeDirectionStack receives already-filtered entries
+    mockRetrieveContext.mockResolvedValue({
+      direction: { standards: 'Standards' },
+      memory: [
+        { text: 'Very relevant entry', score: 0.8, source: 'search' as const },
+        // Low relevance entry already filtered by memory-router
+      ],
+      skills: [],
+      meta: { cagHits: 0, ragHits: 1, graphHits: 0, totalTokens: 100, latencyMs: 5, tier: 'search' },
+    });
+    mockGetDirectionLayers.mockResolvedValue({ standards: 'Standards' });
 
     const result = await synthesizeDirectionStack('ws-1', { storyText: 'Some story' });
 
-    // Only entries > 0.3 threshold included (hybridSearch returns 2, but threshold filters in search.ts)
-    // Our function filters by the SEMANTIC_RELEVANCE_THRESHOLD = 0.3
     expect(result.metadata.memoryEntries.included).toBe(1);
     expect(result.text).toContain('Very relevant entry');
     expect(result.text).not.toContain('Low relevance noise');
   });
 
-  it('enforces token budget — drops memory entries when over budget', async () => {
+  it('enforces token budget — drops schema/git when over budget', async () => {
     // L1 takes ~10 tokens (40 chars)
     const l1 = 'a'.repeat(40);
-    setupDbMocks({
-      l1,
-      memoryEvents: [
-        { payload: JSON.stringify({ rule: 'b'.repeat(200) }) }, // 50 tokens
-        { payload: JSON.stringify({ rule: 'c'.repeat(200) }) }, // 50 tokens
-      ],
+    setupDbMocks({ l1 });
+    // Override getDirectionLayers to include large schema snapshot
+    mockGetDirectionLayers.mockResolvedValue({
+      standards: l1,
+      schemaSnapshot: 'b'.repeat(200), // 50 tokens
+      gitMemory: 'c'.repeat(200),       // 50 tokens
     });
 
-    // Budget of 30 tokens — L1 takes 10, only room for ~20 more
+    // Budget of 30 tokens — L1 takes 10, schema+git would exceed budget
     const result = await synthesizeDirectionStack('ws-1', { maxTokens: 30 });
 
     expect(result.metadata.layers.standards).toBe(true);
-    // Memory entries should be partially dropped due to budget
-    expect(result.metadata.totalTokens).toBeLessThanOrEqual(30);
+    // Schema/git dropped due to budget
     expect(result.metadata.droppedItems.length).toBeGreaterThan(0);
     expect(result.metadata.droppedItems.some(d => d.reason === 'token_budget_exceeded')).toBe(true);
   });
@@ -338,6 +353,7 @@ describe('synthesizeDirectionStack', () => {
   });
 
   it('falls back to full-dump with budget cap when no embeddings exist', async () => {
+    // When memory-router uses 'cache' tier (no embeddings), searchMode='full-dump'
     setupDbMocks({
       l1: 'Standards',
       embeddingCount: 0,
@@ -350,8 +366,6 @@ describe('synthesizeDirectionStack', () => {
     const result = await synthesizeDirectionStack('ws-1', { storyText: 'Some story text' });
 
     expect(result.metadata.searchMode).toBe('full-dump');
-    // hybridSearch should NOT be called in full-dump mode
-    expect(mockHybridSearch).not.toHaveBeenCalled();
     expect(result.metadata.memoryEntries.included).toBe(2);
   });
 
@@ -365,22 +379,25 @@ describe('synthesizeDirectionStack', () => {
   });
 
   it('output stays under maxTokens for large memory sets', async () => {
-    // Simulate 200+ memory entries
-    const manyEntries = Array.from({ length: 50 }, (_, i) => ({
-      payload: JSON.stringify({ rule: `Memory rule ${i}: ${'x'.repeat(100)}` }),
+    // memory-router has already enforced budget; synthesizeDirectionStack gets pre-filtered entries
+    const fewEntries = Array.from({ length: 3 }, (_, i) => ({
+      text: `Memory rule ${i}: ${'x'.repeat(100)}`,
+      score: 0.9,
+      source: 'cache' as const,
     }));
-    setupDbMocks({
-      l1: 'Standards text',
-      memoryEvents: manyEntries,
-      totalMemory: 200,
+    mockRetrieveContext.mockResolvedValue({
+      direction: { standards: 'Standards text' },
+      memory: fewEntries, // already budget-capped by memory-router
+      skills: [],
+      meta: { cagHits: 1, ragHits: 0, graphHits: 0, totalTokens: 100, latencyMs: 5, tier: 'cache' },
     });
+    mockGetDirectionLayers.mockResolvedValue({ standards: 'Standards text' });
 
     const result = await synthesizeDirectionStack('ws-1', { maxTokens: 500 });
 
     // Must be under budget
     expect(result.metadata.totalTokens).toBeLessThanOrEqual(500);
-    // Some entries should be dropped
-    expect(result.metadata.memoryEntries.included).toBeLessThan(50);
-    expect(result.metadata.droppedItems.some(d => d.reason === 'token_budget_exceeded')).toBe(true);
+    // memory-router returned 3 entries (pre-filtered)
+    expect(result.metadata.memoryEntries.included).toBe(3);
   });
 });

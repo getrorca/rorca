@@ -2838,7 +2838,7 @@ async function main(): Promise<void> {
       logger.info(`[persona] Discovered ${personaCount} active persona(s)`);
     }
     for (const w of personaRegistry.getWarnings()) {
-      logger.warn(`[persona] Warning: ${w.filePath}: ${w.reason}`);
+      logger.warn(`[persona] Warning: ${w.filePath}: ${w.message}`);
     }
   }
 

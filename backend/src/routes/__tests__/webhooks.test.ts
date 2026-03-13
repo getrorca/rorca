@@ -42,7 +42,7 @@ _authToken = await getAuthToken(app);
   await execute(`DELETE FROM wal_events`);
 
   // Create a workspace
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [WORKSPACE_ID, 'Webhook Test', tmpDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, 'Webhook Test', tmpDir]);
 
   // Store encrypted webhook secret — use encryptToken from auth module
   const authMod = require('../auth');

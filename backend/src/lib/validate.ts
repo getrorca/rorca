@@ -6,7 +6,7 @@
  *   router.get('/bar/:id', validateParams(ParamsSchema), (req, res) => { ... });
  *   router.get('/baz', validateQuery(QuerySchema), (req, res) => { ... });
  *
- * On failure returns 422 with { error: 'Validation failed', details: zodError.issues }.
+ * On failure returns 400 with { error: firstIssueMessage, details: zodError.issues }.
  */
 
 import { Request, Response, NextFunction } from 'express';
@@ -14,14 +14,15 @@ import { z } from 'zod';
 
 /**
  * Validate req.body against a Zod schema.
- * Returns 422 with structured Zod issues on failure.
+ * Returns 400 with the first Zod issue message in `error` field.
  */
 export function validateBody<T extends z.ZodType>(schema: T) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const result = schema.safeParse(req.body);
     if (!result.success) {
-      res.status(422).json({
-        error: 'Validation failed',
+      const firstIssue = result.error.issues[0];
+      res.status(400).json({
+        error: firstIssue?.message || 'Validation failed',
         details: result.error.issues,
       });
       return;
@@ -39,8 +40,9 @@ export function validateQuery<T extends z.ZodType>(schema: T) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const result = schema.safeParse(req.query);
     if (!result.success) {
-      res.status(422).json({
-        error: 'Validation failed',
+      const firstIssue = result.error.issues[0];
+      res.status(400).json({
+        error: firstIssue?.message || 'Validation failed',
         details: result.error.issues,
       });
       return;
@@ -58,8 +60,9 @@ export function validateParams<T extends z.ZodType>(schema: T) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const result = schema.safeParse(req.params);
     if (!result.success) {
-      res.status(422).json({
-        error: 'Validation failed',
+      const firstIssue = result.error.issues[0];
+      res.status(400).json({
+        error: firstIssue?.message || 'Validation failed',
         details: result.error.issues,
       });
       return;

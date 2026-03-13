@@ -19,7 +19,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { execute, queryOne } from '../db/index';
 import { PackLoader, type Pack, type ScaffoldEntry } from './convention-packs';
-import { PackRegistry, type InstalledPackRow } from './pack-registry';
+import { PackRegistry, type InstalledPack } from './pack-registry';
 import { SkillRegistry } from './skill-registry';
 import { ValidationError, ConflictError } from './errors';
 import { broadcastAll, type WalEvent } from './sse-hub';
@@ -46,7 +46,7 @@ export interface PackInstallResult {
   conventionsCopied: string[];
   skillsCopied: string[];
   agentsMdAction: 'created' | 'appended' | 'skipped';
-  dbRow: InstalledPackRow;
+  dbRow: InstalledPack;
 }
 
 // ─── Installer ──────────────────────────────────────────────────────────────

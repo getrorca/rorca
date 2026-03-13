@@ -28,6 +28,8 @@ import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
 import { loadRorcaConfig } from '../lib/rorca-config';
+import { getWorkspaceEnvVars } from './env-vars';
+import { score as scoreStory, resolveModelId, type ScorerStory } from '../lib/complexity-scorer';
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 
@@ -3632,8 +3634,8 @@ router.get('/archive', async (req: Request, res: Response) => {
     // Paginate
     res.json(paginateArray(filtered, pagination, { cursorKey: (s) => s.id }));
   } catch (error: any) {
-    logger.error('[Specs] Archive error:', error);
-    res.status(500).json({ error: error.message });
+    logger.error({ err: error }, '[Specs] Archive error');
+    res.status(500).json({ error: 'Internal server error' });
   }
 });
 
@@ -10217,7 +10219,7 @@ router.delete('/:specId/attachments/:attachmentId', async (req: Request, res: Re
  */
 router.put('/:specId', async (req: Request, res: Response) => {
   try {
-    const { specId } = req.params;
+    const specId = req.params.specId as string;
     const { workspaceId, model, title, _notes } = req.body;
 
     if (!workspaceId) {
@@ -10322,7 +10324,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
 router.post('/:specId/enrich', async (req: Request, res: Response) => {
   const start = Date.now();
   try {
-    const { specId } = req.params;
+    const specId = req.params.specId as string;
     const { workspaceId, model: modelOverride } = req.body;
 
     if (!workspaceId) {
@@ -10384,7 +10386,7 @@ router.post('/:specId/enrich', async (req: Request, res: Response) => {
     }
 
     // ── Fetch direction stack (always-available baseline L1–L3) ────────────
-    const workspaceDomain = (workspace as Record<string, unknown>).domain as string | undefined;
+    const workspaceDomain = (workspace as unknown as Record<string, unknown>).domain as string | undefined;
     const [l1Row, l2Row, l3Row] = await Promise.all([
       queryOne<{ content_yaml: string }>(
         `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`,
@@ -10632,6 +10634,136 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     if (walEvent) broadcastAll(walEvent);
 
     res.json({ success: true, retrieval_method: retrievalMethod, storiesEnriched });
+  } catch (error: unknown) {
+    const msg = error instanceof Error ? error.message : String(error);
+    res.status(500).json({ error: msg });
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/{id}/assign-models:
+ *   post:
+ *     summary: Assign per-story model tiers based on complexity scoring
+ *     tags: [Specs]
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               dryRun: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Model assignments with breakdown
+ */
+router.post('/:id/assign-models', async (req: Request, res: Response) => {
+  try {
+    const specId = req.params.id;
+    const { workspaceId, dryRun = false } = req.body;
+
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      return;
+    }
+
+    const workspace = await getWorkspace(workspaceId);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Find spec file (pending or approved)
+    const { pendingDir, approvedDir } = specsDirs(workspace.path as string);
+    const approvedPath = path.join(approvedDir, `${specId}.json`);
+    const pendingPath = path.join(pendingDir, `${specId}.json`);
+    const specFile = fs.existsSync(approvedPath) ? approvedPath : fs.existsSync(pendingPath) ? pendingPath : null;
+
+    if (!specFile) {
+      res.status(404).json({ error: `Spec '${specId}' not found in pending or approved` });
+      return;
+    }
+
+    const specContent = JSON.parse(fs.readFileSync(specFile, 'utf8'));
+    const userStories: Array<Record<string, unknown>> = specContent.userStories ?? [];
+
+    if (userStories.length === 0) {
+      res.json({ storiesAssigned: 0, skipped: false, breakdown: [] });
+      return;
+    }
+
+    // Resolve agent type and model — workspace env vars take priority over process.env
+    const wsEnvVars = await getWorkspaceEnvVars(workspaceId);
+    const agent = (wsEnvVars['RORCA_AGENT'] ?? process.env.RORCA_AGENT ?? 'claude').toLowerCase();
+    const modelEnv = wsEnvVars['RORCA_MODEL'] ?? process.env.RORCA_MODEL ?? '';
+
+    // Codex does not support per-story model selection
+    if (agent === 'codex') {
+      res.json({
+        storiesAssigned: 0,
+        skipped: true,
+        reason: 'Codex CLI does not support per-story model selection — model is fixed to your ChatGPT subscription',
+        breakdown: [],
+      });
+      return;
+    }
+
+    // Determine provider prefix for model resolution
+    // For claude agent: always anthropic cascade
+    // For opencode: parse provider from RORCA_MODEL (e.g. "openai/gpt-4o" → "openai")
+    let provider = 'anthropic';
+    if (agent === 'opencode' && modelEnv.includes('/')) {
+      provider = modelEnv.split('/')[0].toLowerCase();
+    }
+
+    // Score each story and build breakdown
+    const scorerStories: ScorerStory[] = userStories.map(s => ({
+      id: String(s.id ?? ''),
+      title: String(s.title ?? ''),
+      description: String(s.description ?? ''),
+      acceptanceCriteria: Array.isArray(s.acceptanceCriteria) ? s.acceptanceCriteria.map(String) : [],
+      dependsOn: Array.isArray(s.dependsOn) ? s.dependsOn.map(String) : [],
+    }));
+
+    const breakdown: Array<{ storyId: string; complexity: 'low' | 'medium' | 'high'; model: string; reason: string }> = [];
+
+    for (const story of scorerStories) {
+      const result = scoreStory(story, scorerStories, workspace.path as string);
+      const complexity: 'low' | 'medium' | 'high' = result.tier === 'haiku' ? 'low' : result.tier === 'sonnet' ? 'medium' : 'high';
+      const model = resolveModelId(result.tier, provider, workspace.path as string);
+      breakdown.push({
+        storyId: story.id,
+        complexity,
+        model,
+        reason: result.signals.join('; ') || 'default scoring',
+      });
+    }
+
+    // Write story.model to spec JSON unless dryRun
+    if (!dryRun) {
+      for (let i = 0; i < userStories.length; i++) {
+        const entry = breakdown[i];
+        if (entry) {
+          userStories[i].model = entry.model;
+        }
+      }
+      specContent.userStories = userStories;
+      fs.writeFileSync(specFile, JSON.stringify(specContent, null, 2), 'utf8');
+    }
+
+    res.json({
+      storiesAssigned: breakdown.length,
+      skipped: false,
+      breakdown,
+    });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: msg });

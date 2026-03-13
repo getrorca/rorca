@@ -61,7 +61,7 @@ const llmClient = require('../../lib/llm-client');
   mockChatComplete = llmClient.chatComplete;
 
   // Seed a workspace
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', $1)`, [os.tmpdir()]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test WS', $1) ON CONFLICT (id) DO NOTHING`, [os.tmpdir()]);
 
   authToken = await getAuthToken(app);
 });

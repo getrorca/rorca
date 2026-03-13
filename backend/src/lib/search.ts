@@ -189,8 +189,21 @@ async function semanticSearch(
   workspaceId?: number | string,
 ): Promise<SemanticHit[]> {
   // Check if embeddings table has any rows
-  const countRow = await queryOne<{ cnt: string }>('SELECT COUNT(*)::text AS cnt FROM embeddings');
-  const embeddingCount = parseInt(countRow?.cnt || '0', 10);
+  let embeddingCount = 0;
+  try {
+    const countRow = await queryOne<{ cnt: string }>('SELECT COUNT(*)::text AS cnt FROM embeddings');
+    embeddingCount = parseInt(countRow?.cnt || '0', 10);
+  } catch (err: any) {
+    // 42P01 = relation does not exist (pgvector extension not installed or embeddings table missing)
+    if (err.code === '42P01') {
+      if (!_noEmbeddingsWarned) {
+        logger.warn('[Search] embeddings table not found — falling back to keyword-only search');
+        _noEmbeddingsWarned = true;
+      }
+      return [];
+    }
+    throw err;
+  }
 
   if (embeddingCount === 0) {
     if (!_noEmbeddingsWarned) {

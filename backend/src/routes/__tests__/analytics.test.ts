@@ -39,6 +39,7 @@ beforeEach(async () => {
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-analytics-test-'));
   const _dbPath = path.join(tmpDir, 'test.db');
 process.env.NODE_ENV = 'test';
+process.env.AUTH_REQUIRED = 'true';
 
   const serverMod = require('../../server');
   app = serverMod.default;
@@ -47,12 +48,15 @@ authToken = await getAuthToken(app);
   // Create workspace directory and DB record
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(path.join(wsDir, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Analytics WS', $2)`, [WS_ID, wsDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Analytics WS', $2) ON CONFLICT (id) DO NOTHING`, [WS_ID, wsDir]);
 });
 
-afterEach(() => {
+afterEach(async () => {
 fs.rmSync(tmpDir, { recursive: true, force: true });
 delete process.env.NODE_ENV;
+delete process.env.AUTH_REQUIRED;
+// Clean up auth user to prevent duplicate key on next test
+await execute('TRUNCATE users CASCADE').catch(() => { /* ignore */ });
 });
 
 function get(urlPath: string) {

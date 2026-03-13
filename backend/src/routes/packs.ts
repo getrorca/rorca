@@ -340,14 +340,14 @@ router.get('/', async (req: Request, res: Response) => {
   const installed = await registry.listInstalled();
 
   res.json({
-    packs: installed.map(row => ({
+    packs: (installed as any[]).map(row => ({
       id: row.id,
-      packName: row.pack_name,
-      packVersion: row.pack_version,
-      installedAt: row.installed_at,
-      packPath: row.pack_path,
-      forkedFrom: row.forked_from || null,
-      valid: row.packJson !== null,
+      packName: row.pack_name ?? row.name,
+      packVersion: row.pack_version ?? row.version,
+      installedAt: row.installed_at ?? row.installedAt,
+      packPath: row.pack_path ?? row.packPath,
+      forkedFrom: null,
+      valid: (row.packJson ?? row.manifest) !== null,
     })),
   });
 });
@@ -422,12 +422,13 @@ router.get('/catalog', async (req: Request, res: Response) => {
       if (!result.success) continue;
 
       const pack = result.data;
+      const rawPack = raw as Record<string, unknown>;
       packs.push({
         name: pack.name,
         version: pack.version,
         description: pack.description,
-        author: pack.author,
-        license: pack.license,
+        author: typeof rawPack.author === 'string' ? rawPack.author : undefined,
+        license: typeof rawPack.license === 'string' ? rawPack.license : undefined,
         frameworks: pack.compatibility.frameworks,
         skills: pack.skills,
         packPath: packDir,

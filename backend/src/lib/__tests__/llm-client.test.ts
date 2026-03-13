@@ -153,7 +153,7 @@ describe('llm-client', () => {
   test('isValidModel validates all registered models', () => {
     const { isValidModel } = require('../llm-client');
     // Anthropic models
-    expect(isValidModel('claude-sonnet-4-5-20250929')).toBe(true);
+    expect(isValidModel('claude-sonnet-4-6')).toBe(true);
     expect(isValidModel('claude-opus-4-6')).toBe(true);
     expect(isValidModel('claude-haiku-4-5-20251001')).toBe(true);
     // OpenAI-compat models
@@ -171,7 +171,7 @@ describe('llm-client', () => {
   test('SUPPORTED_MODELS contains Anthropic models (backward compat)', () => {
     const { SUPPORTED_MODELS } = require('../llm-client');
     expect(SUPPORTED_MODELS).toHaveLength(3);
-    expect(SUPPORTED_MODELS).toContain('claude-sonnet-4-5-20250929');
+    expect(SUPPORTED_MODELS).toContain('claude-sonnet-4-6');
     expect(SUPPORTED_MODELS).toContain('claude-opus-4-6');
     expect(SUPPORTED_MODELS).toContain('claude-haiku-4-5-20251001');
   });
@@ -410,7 +410,7 @@ describe('llm-client', () => {
 
     test('MODEL_INFO backward compat contains Anthropic models', () => {
       const { MODEL_INFO } = require('../llm-client');
-      expect(MODEL_INFO['claude-sonnet-4-5-20250929']).toBeDefined();
+      expect(MODEL_INFO['claude-sonnet-4-6']).toBeDefined();
       expect(MODEL_INFO['claude-opus-4-6']).toBeDefined();
       expect(MODEL_INFO['claude-haiku-4-5-20251001']).toBeDefined();
     });

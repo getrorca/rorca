@@ -44,7 +44,7 @@ process.env.NODE_ENV = 'test';
   app = serverMod.default;
 authToken = await getAuthToken(app);
 
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [WORKSPACE_ID, 'PR Body Test', tmpDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, 'PR Body Test', tmpDir]);
 });
 
 afterEach(async () => {

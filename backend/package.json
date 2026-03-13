@@ -4,9 +4,9 @@
   "version": "0.0.1",
   "license": "BSL-1.1",
   "scripts": {
-    "dev": "npx tsx watch src/server.ts",
-    "dev:server": "npx tsx watch src/server.ts",
-    "dev:worker": "npx tsx watch src/worker.ts",
+    "dev": "npx tsx src/server.ts",
+    "dev:server": "npx tsx src/server.ts",
+    "dev:worker": "npx tsx src/worker.ts",
     "build": "tsc",
     "test": "jest",
     "mcp": "npx tsx src/mcp/server.ts",

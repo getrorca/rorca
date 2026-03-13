@@ -1364,7 +1364,7 @@ describe('parseFrontmatter', () => {
     const content = '---\nname: test\ncategory: primary\n---\nThis is the body.';
     const result = parseFrontmatter(content);
     expect(result).not.toBeNull();
-    expect(result!.yaml).toContain('name: test');
+    expect(result!.attrs['name']).toBe('test');
     expect(result!.body).toBe('This is the body.');
   });
 
