@@ -2078,6 +2078,13 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Skills count
   const [skillsCount, setSkillsCount] = useState<number | null>(null);
 
+  // Context health checklist
+  interface ContextHealth { l3Present: boolean; gitMemoryCount: number; schemaPresent: boolean; claudeMdPresent: boolean; skillsCount: number; }
+  const [contextHealth, setContextHealth] = useState<ContextHealth | null>(null);
+  const [contextHealthLoading, setContextHealthLoading] = useState(false);
+  const [contextHealthOpen, setContextHealthOpen] = useState(false);
+  const [hydratingGit, setHydratingGit] = useState(false);
+
   // Auto-match/suggest loading state
   const [autoMatchStatus, setAutoMatchStatus] = useState<'idle' | 'matching' | 'suggesting' | 'done'>('idle');
   const [modelSuggestions, setModelSuggestions] = useState<Array<{ storyId: string; suggestedModel: string; reason: string; confidence: number }> | null>(null);
@@ -2250,6 +2257,27 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       .then(res => setSkillsCount(Array.isArray(res.skills) ? res.skills.length : (Array.isArray(res) ? (res as unknown[]).length : 0)))
       .catch(() => setSkillsCount(0));
   }, [workspaceId]);
+
+  // Fetch context health
+  useEffect(() => {
+    if (!workspaceId) { setContextHealth(null); return; }
+    setContextHealthLoading(true);
+    apiFetch<ContextHealth>(`/api/workspaces/${workspaceId}/context-health`)
+      .then(res => setContextHealth(res))
+      .catch(() => setContextHealth(null))
+      .finally(() => setContextHealthLoading(false));
+  }, [workspaceId]);
+
+  const handleHydrateGit = useCallback(async () => {
+    if (!workspaceId || hydratingGit) return;
+    setHydratingGit(true);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/hydrate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ types: ['git'] }) });
+      const res = await apiFetch<ContextHealth>(`/api/workspaces/${workspaceId}/context-health`);
+      setContextHealth(res);
+    } catch { /* silent */ }
+    finally { setHydratingGit(false); }
+  }, [workspaceId, hydratingGit]);
 
   const validateSpecName = useCallback((value: string) => {
     if (!value) { setSpecNameError(''); return; }
@@ -2614,6 +2642,132 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       {/* Context summary card — shown during generation (once result arrives) */}
       {isGenerating && generatedSpec?.contextSummary && (
         <ContextSummaryCard summary={generatedSpec.contextSummary} isGenerating />
+      )}
+
+      {/* Context readiness checklist — shown before generation */}
+      {!generatedSpec && !isGenerating && workspaceId && (
+        <div className="border border-border rounded-lg overflow-hidden">
+          {/* Summary header — always visible, click to expand */}
+          <button
+            type="button"
+            onClick={() => setContextHealthOpen(v => !v)}
+            className="w-full flex items-center justify-between px-3 py-2 text-xs text-muted hover:bg-accent/5 transition-colors"
+          >
+            <span className="flex items-center gap-1.5">
+              {contextHealthLoading ? (
+                <Loader2 size={12} className="animate-spin" />
+              ) : contextHealth ? (
+                (() => {
+                  const ready = [contextHealth.l3Present, contextHealth.gitMemoryCount > 0, contextHealth.schemaPresent, contextHealth.claudeMdPresent, contextHealth.skillsCount > 0].filter(Boolean).length;
+                  return ready === 5
+                    ? <CheckCircle2 size={12} className="text-emerald-500" />
+                    : <AlertTriangle size={12} className="text-amber-500" />;
+                })()
+              ) : null}
+              {contextHealthLoading ? 'Checking context...' : contextHealth ? (() => {
+                const ready = [contextHealth.l3Present, contextHealth.gitMemoryCount > 0, contextHealth.schemaPresent, contextHealth.claudeMdPresent, contextHealth.skillsCount > 0].filter(Boolean).length;
+                return `${ready}/5 context items ready`;
+              })() : 'Context readiness'}
+            </span>
+            <ChevronDown size={12} className={`transition-transform ${contextHealthOpen ? 'rotate-180' : ''}`} />
+          </button>
+
+          {/* Expanded checklist rows */}
+          {contextHealthOpen && (
+            <div className="border-t border-border divide-y divide-border/50">
+              {contextHealthLoading ? (
+                <div className="px-3 py-3 space-y-2">
+                  {[1,2,3,4,5].map(i => (
+                    <div key={i} className="flex items-center gap-2">
+                      <div className="w-3 h-3 rounded-full bg-border animate-pulse" />
+                      <div className="h-3 bg-border rounded animate-pulse flex-1" />
+                    </div>
+                  ))}
+                </div>
+              ) : contextHealth ? (
+                <>
+                  {/* L3 direction */}
+                  <div className="flex items-center gap-2 px-3 py-2">
+                    {contextHealth.l3Present
+                      ? <CheckCircle2 size={13} className="text-emerald-500 shrink-0" />
+                      : <AlertTriangle size={13} className="text-amber-500 shrink-0" />}
+                    <span className="text-xs text-text flex-1">L3 project direction</span>
+                    {!contextHealth.l3Present && (
+                      <button type="button" onClick={() => { onNavigate?.('direction'); onClose(); }}
+                        className="text-[10px] text-accent hover:text-accent-hover transition-colors shrink-0">
+                        Configure &rarr;
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Git memory */}
+                  <div className="flex items-center gap-2 px-3 py-2">
+                    {contextHealth.gitMemoryCount > 0
+                      ? <CheckCircle2 size={13} className="text-emerald-500 shrink-0" />
+                      : <AlertTriangle size={13} className="text-amber-500 shrink-0" />}
+                    <span className="text-xs text-text flex-1">
+                      {contextHealth.gitMemoryCount > 0
+                        ? `Git memory (${contextHealth.gitMemoryCount} commits)`
+                        : 'No git memory'}
+                    </span>
+                    {contextHealth.gitMemoryCount === 0 && (
+                      <button type="button" onClick={handleHydrateGit} disabled={hydratingGit}
+                        className="text-[10px] text-accent hover:text-accent-hover disabled:opacity-50 transition-colors shrink-0 flex items-center gap-1">
+                        {hydratingGit && <Loader2 size={10} className="animate-spin" />}
+                        {hydratingGit ? 'Hydrating...' : 'Hydrate \u2192'}
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Schema snapshot */}
+                  <div className="flex items-center gap-2 px-3 py-2">
+                    {contextHealth.schemaPresent
+                      ? <CheckCircle2 size={13} className="text-emerald-500 shrink-0" />
+                      : <AlertTriangle size={13} className="text-amber-500 shrink-0" />}
+                    <span className="text-xs text-text flex-1">Schema snapshot</span>
+                    {!contextHealth.schemaPresent && (
+                      <button type="button" onClick={async () => {
+                        try { await apiFetch(`/api/workspaces/${workspaceId}/hydrate`, { method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ types: ['schema'] }) }); const res = await apiFetch<ContextHealth>(`/api/workspaces/${workspaceId}/context-health`); setContextHealth(res); } catch { /* silent */ }
+                      }} className="text-[10px] text-accent hover:text-accent-hover transition-colors shrink-0">
+                        Hydrate &rarr;
+                      </button>
+                    )}
+                  </div>
+
+                  {/* CLAUDE.md */}
+                  <div className="flex items-center gap-2 px-3 py-2">
+                    {contextHealth.claudeMdPresent
+                      ? <CheckCircle2 size={13} className="text-emerald-500 shrink-0" />
+                      : <AlertTriangle size={13} className="text-amber-500 shrink-0" />}
+                    <span className="text-xs text-text flex-1">CLAUDE.md</span>
+                    {!contextHealth.claudeMdPresent && (
+                      <button type="button" onClick={() => { onNavigate?.('settings'); onClose(); }}
+                        className="text-[10px] text-accent hover:text-accent-hover transition-colors shrink-0">
+                        Settings &rarr;
+                      </button>
+                    )}
+                  </div>
+
+                  {/* Skills */}
+                  <div className="flex items-center gap-2 px-3 py-2">
+                    {contextHealth.skillsCount > 0
+                      ? <CheckCircle2 size={13} className="text-emerald-500 shrink-0" />
+                      : <AlertTriangle size={13} className="text-amber-500 shrink-0" />}
+                    <span className="text-xs text-text flex-1">
+                      {contextHealth.skillsCount > 0 ? `${contextHealth.skillsCount} skill${contextHealth.skillsCount !== 1 ? 's' : ''} installed` : 'No skills installed'}
+                    </span>
+                    {contextHealth.skillsCount === 0 && (
+                      <button type="button" onClick={() => { onNavigate?.('marketplace' as PanelId); onClose(); }}
+                        className="text-[10px] text-accent hover:text-accent-hover transition-colors shrink-0">
+                        Marketplace &rarr;
+                      </button>
+                    )}
+                  </div>
+                </>
+              ) : null}
+            </div>
+          )}
+        </div>
       )}
 
       {/* Generate + Quick Run buttons */}
