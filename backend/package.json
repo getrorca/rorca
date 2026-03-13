@@ -11,7 +11,7 @@
     "test": "jest",
     "mcp": "npx tsx src/mcp/server.ts",
     "lint": "npx eslint src/",
-    "worker": "npx tsx src/worker.ts"
+    "worker": "npx tsx src/worker-supervisor.ts"
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
