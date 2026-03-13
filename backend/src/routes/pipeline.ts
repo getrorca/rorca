@@ -2567,9 +2567,9 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
  * /api/pipeline/runs/{runId}/retry:
  *   post:
  *     tags: [Pipeline]
- *     summary: Retry failed stories in a pipeline run
+ *     summary: Retry failed stories in a pipeline run via pg-boss job queue
  *     operationId: retryPipelineRun
- *     description: Re-executes failed stories from a completed or partially failed pipeline run, optionally filtering to specific story IDs.
+ *     description: Re-executes failed stories from a completed or partially failed pipeline run, optionally filtering to specific story IDs. Enqueues a pipeline:retry pg-boss job; worker handles the actual spawn.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -2586,8 +2586,9 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
  *                 items: { type: string }
  *                 description: Specific story IDs to retry (all failed if omitted)
  *     responses:
- *       200: { description: "Retry started", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer } } } } } }
+ *       201: { description: "Retry job enqueued", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, queued: { type: boolean }, jobId: { type: string }, runId: { type: integer } } } } } }
  *       404: { description: "Run not found" }
+ *       409: { description: "Retry job already queued for this run" }
  */
 router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
   try {
@@ -2677,23 +2678,32 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       return;
     }
 
-    // 5. Verify run-loop engine is available
-    const cwd = originalRun.worktree_path || workspace.path;
-    const retryRunLoopSh = path.join(cwd, 'forge', 'run-loop.sh');
-    const retryRunLoopTs = path.join(__dirname, '..', 'lib', 'run-loop.ts');
-    const retryExecutionEngineTs = path.join(__dirname, '..', 'lib', 'execution-engine.ts');
-    const retryHasExecutionEngine = fs.existsSync(retryExecutionEngineTs);
-    const retryHasBash = fs.existsSync(retryRunLoopSh);
-    const retryHasTs = fs.existsSync(retryRunLoopTs);
-    if (!retryHasExecutionEngine && !retryHasBash && !retryHasTs) {
-      res.status(422).json({ error: `No execution engine found` });
+    // 5. Duplicate-job guard — check for an active pipeline:retry job for this runId.
+    //    Job IDs are retry-<runId>-<timestamp> so uniqueness alone won't block duplicates.
+    //    We query pgboss.job directly to find any active/created job for this runId.
+    const existingJob = await queryOne<{ id: string }>(
+      `SELECT id FROM pgboss.job WHERE name = 'pipeline:retry' AND data->>'runId' = $1 AND state IN ('created', 'active') LIMIT 1`,
+      [String(originalRunId)],
+    ).catch(() => undefined); // pgboss schema might not exist yet in test envs
+
+    if (existingJob) {
+      res.status(409).json({
+        error: 'A retry job for this run is already queued or active',
+        code: 'CONFLICT',
+        activeJobId: existingJob.id,
+      });
       return;
     }
-    // Prefer execution-engine.ts (same as regular trigger), fall back to legacy loops
-    const retryUseExecutionEngine = retryHasExecutionEngine;
-    const retryUseTs = !retryUseExecutionEngine && !retryHasBash && retryHasTs;
 
-    // 6. Create a NEW pipeline_run linked to the original via retried_from_run_id
+    // 6. Capture sequenceOffset BEFORE creating the new run row to avoid race conditions
+    //    between two simultaneous retry requests. The worker starts chunks at sequenceOffset + 1.
+    const seqRow = await queryOne<{ max_seq: number | null }>(
+      `SELECT MAX(sequence) AS max_seq FROM run_output_chunks WHERE run_id = $1`,
+      [originalRunId],
+    );
+    const sequenceOffset = seqRow?.max_seq ?? 0;
+
+    // 7. Create a NEW pipeline_run linked to the original via retried_from_run_id
     const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id)
        VALUES ($1, $2, 'running', 'retry', $3, $4, $5) RETURNING id`, [originalRun.spec_path,
       originalRun.workspace_id,
@@ -2702,7 +2712,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       originalRunId,]);
     const newRunId = newRunResult!.id;
 
-    // 7. Copy successful story results from the original run to the new run
+    // 8. Copy successful story results from the original run to the new run
     for (const passed of passedStories) {
       await execute(
         `INSERT INTO story_results (run_id, story_id, status, retries, log_path, started_at, finished_at, elapsed_seconds, input_tokens, output_tokens)
@@ -2722,7 +2732,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       );
     }
 
-    // 8. Insert 'retry' placeholder rows for stories being retried + emit WAL events
+    // 9. Insert 'retry' placeholder rows for stories being retried + emit WAL events
     const retriedStoryInfo: Array<{ storyId: string; attempt: number }> = [];
 
     for (const story of storiesToRetry) {
@@ -2754,7 +2764,9 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     })]);
     broadcastAll(runStartEvent!);
 
-    // 9. Read the original spec and create a filtered version with only retry stories
+    // 10. Read the original spec and write a temporary retry spec.
+    //     Include all stories so dependency resolution works correctly — passed stories
+    //     (passes:true) are skipped naturally by the engine.
     const absSpecPath = path.join(workspace.path, originalRun.spec_path);
     if (!fs.existsSync(absSpecPath)) {
       res.status(422).json({ error: `Spec file not found at ${absSpecPath}` });
@@ -2762,211 +2774,68 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     }
 
     const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
-    const retryStoryIds = new Set(storiesToRetry.map(s => s.story_id));
-    // Include all stories (not just failed ones) so dependency resolution works correctly.
-    // Passed stories (passes:true) are skipped naturally by the engine. Filtering them out
-    // breaks dep checks — stories that depend on a passed-but-filtered story get stuck blocked.
-    const retrySpec = {
-      ...specJson,
-    };
-
-    // Write temporary retry spec
     const retrySpecName = `retry-${newRunId}-${Date.now()}.json`;
     const retrySpecDir = path.join(workspace.path, 'forge', 'specs', 'approved');
     const retrySpecPath = path.join(retrySpecDir, retrySpecName);
     fs.mkdirSync(retrySpecDir, { recursive: true });
-    fs.writeFileSync(retrySpecPath, JSON.stringify(retrySpec, null, 2));
+    fs.writeFileSync(retrySpecPath, JSON.stringify(specJson, null, 2));
 
-    // 10. Build clean env
-    const env: Record<string, string> = {};
+    // 11. Build env overrides (same logic as pipeline trigger)
+    const envOverrides: Record<string, string> = {};
     for (const [k, v] of Object.entries(process.env)) {
       if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
-        env[k] = v;
+        envOverrides[k] = v;
       }
     }
-    env['RORCA_PROCESS_ROLE'] = 'engine';
-
+    envOverrides['RORCA_PROCESS_ROLE'] = 'engine';
     const wsEnvVars = getWorkspaceEnvVars(originalRun.workspace_id);
     for (const [k, v] of Object.entries(wsEnvVars)) {
-      env[k] = v;
+      envOverrides[k] = v;
     }
 
-    // 11. Spawn execution engine with the retry spec — detached, output to log file
-    const retryLogPath = workspaceLogPath(workspace.path, newRunId);
-    await execute('UPDATE pipeline_runs SET log_path = $1 WHERE id = $2', [retryLogPath, newRunId]);
-    const retryLogFd = fs.openSync(retryLogPath, 'a');
-    let child: ReturnType<typeof spawn>;
-    if (retryUseExecutionEngine) {
-      // Universal execution engine (same priority as regular trigger)
-      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
-      const backendPort = process.env.PORT || '3030';
-      const engineArgs = [
-        retryExecutionEngineTs,
-        '--json', retrySpecPath,
-        '--cwd', cwd,
-        '--run-id', String(newRunId),
-        '--port', backendPort,
-        '--parallelism', '1',
-        '--agent', agentConfig.agentType,
-      ];
-      if (agentConfig.agentModel) {
-        engineArgs.push('--model', agentConfig.agentModel);
-      }
-      child = spawn(tsxBin, engineArgs, {
-        cwd,
-        stdio: ['ignore', retryLogFd, retryLogFd],
-        detached: true,
-        env,
-      });
-    } else if (retryUseTs) {
-      const tsxBin = path.join(__dirname, '..', '..', 'node_modules', '.bin', 'tsx');
-      const backendPort = process.env.PORT || '3030';
-      child = spawn(tsxBin, [
-        retryRunLoopTs,
-        '--json', retrySpecPath,
-        '--cwd', cwd,
-        '--run-id', String(newRunId),
-        '--port', backendPort,
-        '--parallelism', '1',
-      ], {
-        cwd,
-        stdio: ['ignore', retryLogFd, retryLogFd],
-        detached: true,
-        env,
-      });
-    } else {
-      child = spawn('bash', [retryRunLoopSh, '--json', retrySpecPath], {
-        cwd,
-        stdio: ['ignore', retryLogFd, retryLogFd],
-        detached: true,
-        env,
-      });
-    }
-    fs.closeSync(retryLogFd);
-    child.unref();
-
-    if (child.pid) {
-      await execute(`UPDATE pipeline_runs SET pid = $1 WHERE id = $2`, [child.pid, newRunId]);
-    }
-
-    // 12. Set up output buffer — tail log file for live streaming
-    const buf: OutputBuffer = { chunks: [], done: false, subscribers: new Set() };
-    outputBuffers.set(newRunId, buf);
-
-    let retryTailPos = 0;
-    const retryTailInterval = setInterval(() => {
-      try {
-        const stat = fs.statSync(retryLogPath);
-        if (stat.size > retryTailPos) {
-          const fd = fs.openSync(retryLogPath, 'r');
-          const newBytes = Buffer.alloc(stat.size - retryTailPos);
-          fs.readSync(fd, newBytes, 0, newBytes.length, retryTailPos);
-          fs.closeSync(fd);
-          retryTailPos = stat.size;
-          const text = newBytes.toString('utf8');
-          buf.chunks.push(text);
-          buf.subscribers.forEach(cb => cb(text));
-        }
-      } catch { /* ignore */ }
-    }, 200);
-
-    // 13. Handle process exit — determine final status based on all story outcomes in new run
-    child.on('exit', async (code) => {
-      clearInterval(retryTailInterval);
-      try {
-        const stat = fs.statSync(retryLogPath);
-        if (stat.size > retryTailPos) {
-          const fd = fs.openSync(retryLogPath, 'r');
-          const remaining = Buffer.alloc(stat.size - retryTailPos);
-          fs.readSync(fd, remaining, 0, remaining.length, retryTailPos);
-          fs.closeSync(fd);
-          buf.chunks.push(remaining.toString('utf8'));
-          buf.subscribers.forEach(cb => cb(remaining.toString('utf8')));
-        }
-      } catch { /* ignore */ }
-
-      if (false /* pg pool always available */) {
-        buf.done = true;
-        buf.subscribers.clear();
-        return;
-      }
-
-      // Check all stories in the new run (copied passes + retried stories)
-      const currentStories = await query('SELECT * FROM story_results WHERE run_id = $1 ORDER BY id ASC', [newRunId]) as StoryResultRow[];
-
-      // Build latest status per story_id (last row wins)
-      const latest = new Map<string, string>();
-      for (const s of currentStories) {
-        latest.set(s.story_id, s.status);
-      }
-
-      const hasFailures = Array.from(latest.values()).some(st => st === 'fail');
-      const finalStatus = hasFailures ? 'partial_failure' : (code === 0 ? 'done' : 'partial_failure');
-
-      await execute(`UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`, [finalStatus, newRunId]);
-
-      // FR-005: Mark spec as completed when retry succeeds
-      if (finalStatus === 'done') markSpecCompleted(originalRun.spec_path);
-
-      // PG-021: Synthesize run-level memory (non-blocking, best-effort)
-      synthesizeRunMemory(newRunId, originalRun.workspace_id).catch(() => {});
-
-      const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [originalRun.workspace_id, JSON.stringify({
-        run_id: newRunId,
-        retried_from_run_id: originalRunId,
-        status: finalStatus,
-        exit_code: code,
-      })]);
-      broadcastAll(walEvent!);
-
-      // PR-RQ-1: Advance run queue — promote next queued run if any
-      advanceQueue(originalRun.workspace_id);
-
-      // Notify terminal that the retry process exited
-      const retryExitMsg = `\r\n\x1b[90m[Retry process exited with code ${code}]\x1b[0m\r\n`;
-      buf.chunks.push(retryExitMsg);
-      buf.subscribers.forEach(cb => cb(retryExitMsg));
-      try { fs.appendFileSync(retryLogPath, retryExitMsg); } catch { /* best-effort */ }
-
-      // Clean up temporary retry spec
-      try { fs.unlinkSync(retrySpecPath); } catch { /* ignore */ }
-
-      // Close the buffer — handles both worktree and non-worktree paths
-      const closeRetryBuffer = () => {
-        buf.done = true;
-        buf.subscribers.clear();
-        setTimeout(() => { outputBuffers.delete(newRunId); }, 30 * 60 * 1000);
-      };
-
-      // Auto-merge worktree if run used one — safety pre-check included
-      const retryWorktreePath = originalRun.worktree_path as string | null;
-      const retryBranchName = originalRun.branch_name as string | null;
-      if (retryWorktreePath && retryBranchName) {
-        autoMergeWorktree(
-          workspace.path,
-          retryWorktreePath,
-          retryBranchName,
-          originalRun.workspace_id,
-          newRunId,
-          buf,
-          retryLogPath,
-        )
-          .then(closeRetryBuffer)
-          .catch((err: Error) => {
-            const errMsg = `\r\n\x1b[31m[auto-merge] Unexpected error: ${err.message}\x1b[0m\r\n`;
-            buf.chunks.push(errMsg);
-            try { fs.appendFileSync(retryLogPath, errMsg); } catch { /* best-effort */ }
-            closeRetryBuffer();
-          });
-      } else {
-        closeRetryBuffer();
-      }
+    // 12. Validate job payload with Zod before sending to pg-boss.
+    //     Invalid payloads must throw here — pg-boss failure handling is not a substitute.
+    const PipelineRetryJobPayloadSchema = z.object({
+      runId: z.number().int().positive(),
+      originalRunId: z.number().int().positive(),
+      storyIds: z.array(z.string()),
+      workspacePath: z.string().min(1),
+      specPath: z.string().min(1),
+      retrySpecPath: z.string().min(1),
+      agent: z.enum(['claude', 'opencode', 'codex']),
+      model: z.string().nullable(),
+      worktreePath: z.string().nullable(),
+      sequenceOffset: z.number().int().min(0),
+      envOverrides: z.record(z.string(), z.string()),
     });
+
+    const jobPayload = PipelineRetryJobPayloadSchema.parse({
+      runId: newRunId,
+      originalRunId,
+      storyIds: storiesToRetry.map(s => s.story_id),
+      workspacePath: workspace.path,
+      specPath: originalRun.spec_path,
+      retrySpecPath,
+      agent: agentConfig.agentType,
+      model: agentConfig.agentModel ?? null,
+      worktreePath: originalRun.worktree_path ?? null,
+      sequenceOffset,
+      envOverrides,
+    });
+
+    // 13. Enqueue via pg-boss. Job ID includes timestamp to allow sequential retries.
+    const jobId = `retry-${originalRunId}-${Date.now()}`;
+    await getBoss().send('pipeline:retry', jobPayload, { id: jobId });
+
+    logger.info(`[Pipeline] Enqueued pipeline:retry job ${jobId} for newRunId=${newRunId} (originalRunId=${originalRunId})`);
 
     res.status(201).json({
       ok: true,
+      queued: true,
+      jobId,
       runId: newRunId,
-      originalRunId: originalRunId,
+      originalRunId,
+      queuePosition: 1,
       retriedStories: retriedStoryInfo,
       copiedStories: passedStories.map(s => s.story_id),
     });
