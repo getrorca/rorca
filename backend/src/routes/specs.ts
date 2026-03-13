@@ -8,7 +8,7 @@ import simpleGit from 'simple-git';
 import { z } from 'zod';
 import { query, queryOne, execute, transaction, pool } from '../db/index';
 import { validateBody } from '../lib/validate';
-import { synthesize, synthesizeWithMeta } from '../lib/direction-stack';
+import { synthesize, synthesizeWithMeta, synthesizeWithDomainLookup } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
 import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, getModelInfo, ALL_MODELS } from '../lib/llm-client';
 import { writeSpec } from '../lib/spec-writer';
@@ -3825,8 +3825,8 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
     const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
 
-    const { synthesize } = await import('../lib/direction-stack');
-    const synthesized = synthesize({ l1: l1Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: specContent.title ?? specId });
+    const synthResult = await synthesizeWithDomainLookup(workspaceId, { l1: l1Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: specContent.title ?? specId });
+    const synthesized = synthResult.text;
 
     const existingList = existingStories.map(s => `- ${s.id}: ${s.title}`).join('\n');
 
@@ -8666,7 +8666,8 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
     const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
     const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
 
-    const synthesized = synthesize({ l1: l1Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: specContent.title ?? specId });
+    const synthResult8 = await synthesizeWithDomainLookup(workspaceId, { l1: l1Row?.content_yaml, l3: l3Row?.content_yaml, specBrief: specContent.title ?? specId });
+    const synthesized = synthResult8.text;
 
     const fullPrompt = [
       '=== INSTRUCTIONS: READ THIS FIRST ===',

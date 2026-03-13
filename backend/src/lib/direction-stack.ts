@@ -1,6 +1,7 @@
 import { logger } from './logger';
 import { getDirectionLayers as getCachedDirectionLayers } from './context-cache';
 import { retrieveContext } from './memory-router';
+import { queryOne } from '../db';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -118,6 +119,46 @@ export function synthesizeLayersWithMeta(params: SynthesizeParams): SynthesizeRe
 // Backward-compatible aliases
 export const synthesize = synthesizeLayers;
 export const synthesizeWithMeta = synthesizeLayersWithMeta;
+
+// ─── Async Synthesis with Automatic Domain Lookup ────────────────────────────
+
+/**
+ * Async variant of synthesizeLayersWithMeta that auto-fetches the workspace domain
+ * and the corresponding L2 direction layer from the DB when `l2` is not provided
+ * in `params`.
+ *
+ * The domain lookup is scoped to this call — no process-level cache that could
+ * serve stale values. If the workspace row is not found or its domain is null,
+ * synthesis continues without L2 (no error thrown).
+ *
+ * @param workspaceId - DB primary key of the workspace (used only for domain lookup)
+ * @param params      - Same as SynthesizeParams; `l2` is optional (auto-resolved if absent)
+ */
+export async function synthesizeWithDomainLookup(
+  workspaceId: string | number,
+  params: Omit<SynthesizeParams, 'l2'> & { l2?: string },
+): Promise<SynthesizeResult> {
+  let l2 = params.l2;
+
+  if (!l2) {
+    // Per-request domain lookup — not cached at process level
+    const wsRow = await queryOne<{ domain: string | null }>(
+      'SELECT domain FROM workspaces WHERE id = $1',
+      [String(workspaceId)],
+    );
+    const domain = wsRow?.domain ?? null;
+
+    if (domain) {
+      const l2Row = await queryOne<{ content_yaml: string }>(
+        `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`,
+        [domain],
+      );
+      l2 = l2Row?.content_yaml;
+    }
+  }
+
+  return synthesizeLayersWithMeta({ ...params, l2 });
+}
 
 // ─── PG-012 + PG-014: Semantic-Aware Synthesis via Memory Router ────────────
 
