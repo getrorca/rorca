@@ -255,7 +255,8 @@ function spawnWorker(): { proc: ChildProcess; logs: string[] } {
   const capture = (data: Buffer): void => {
     const text = data.toString();
     logs.push(text);
-    process.stderr.write(`[worker] ${text}`);
+    // Uncomment for debugging:
+    // process.stderr.write(`[worker] ${text}`);
   };
 
   proc.stdout?.on('data', capture);
@@ -335,31 +336,33 @@ describe('pg-boss rolling deploy — zero-downtime worker handoff', () => {
     // ── Phase 1: Create shared workspace + spec ───────────────────────────────
     const { workspaceId, workspacePath, specPath } = await createTestFixtures();
 
-    // ── Phase 2: Start worker-v1 ──────────────────────────────────────────────
-    const { proc: workerV1, logs: v1Logs } = spawnWorker();
-
-    // Wait for worker-v1 to be ready before sending jobs
-    const v1Ready = await waitForWorkerReady(v1Logs, 15_000);
-    expect(v1Ready).toBe(true);
-
-    // ── Phase 3: Trigger 3 runs (worker-v1 will pick them up) ────────────────
+    // ── Phase 2: Enqueue 3 runs BEFORE starting worker-v1 ───────────────────
+    // All 3 must be in the pg-boss queue before the first worker poll so that
+    // batchSize:5 can fetch all 3 in a single poll cycle → all 3 in-flight
+    // simultaneously → valid drain test when SIGTERM is sent.
     const run1 = await insertAndEnqueueRun(workspaceId, workspacePath, specPath);
     const run2 = await insertAndEnqueueRun(workspaceId, workspacePath, specPath);
     const run3 = await insertAndEnqueueRun(workspaceId, workspacePath, specPath);
     const firstThreeRunIds = [run1, run2, run3];
 
-    // Wait until all 3 runs are 'running' (worker-v1 picked them up)
-    // pg-boss polls every 1s; give up to 25s to pick up 3 jobs (tsx + pg-boss startup overhead)
+    // ── Phase 3: Start worker-v1 (all 3 jobs already in queue) ───────────────
+    const { proc: workerV1, logs: v1Logs } = spawnWorker();
+
+    // Wait for worker-v1 to be ready before waiting for jobs to run
+    const v1Ready = await waitForWorkerReady(v1Logs, 15_000);
+    expect(v1Ready).toBe(true);
+
+    // Wait until all 3 runs are 'running' (worker-v1 picked them up in one batch)
+    // pg-boss polls every 1s; batchSize:5 should grab all 3 in the first poll.
+    // Give 15s for pg-boss startup + first poll + 3x DB updates.
     const allRunning = await waitFor(async () => {
       const { rows } = await pool.query<{ status: string; id: number }>(
         `SELECT id, status FROM pipeline_runs WHERE id = ANY($1)`,
         [firstThreeRunIds],
       );
-      process.stderr.write(`[test-debug] allRunning check: ${JSON.stringify(rows)}\n`);
       return rows.length === 3 && rows.every((r) => r.status === 'running');
-    }, 25_000);
+    }, 15_000);
 
-    process.stderr.write(`[test-debug] allRunning=${allRunning}, v1Logs=${v1Logs.join('')}\n`);
     expect(allRunning).toBe(true);
 
     // ── Phase 4: SIGTERM worker-v1 + simultaneously start worker-v2 ──────────
