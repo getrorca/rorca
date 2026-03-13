@@ -3,9 +3,10 @@
 Spec: rorca-worker-production-ready
 Run ID: 100
 Started: 2026-03-13T15:13:06.212Z
-Last Updated: 2026-03-13T15:21:13.796Z
+Last Updated: 2026-03-13T15:23:09.511Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - WR-001: Fix child process environment inheritance — DONE (claude, claude-sonnet-4-6, 70s)
 - WR-002: Create all queues in both server and worker, including pipeline:cron — DONE (claude, claude-sonnet-4-6, 119s)
 - WR-003: Set proper expireInSeconds and disable pg-boss retries for pipeline jobs — DONE (claude, claude-sonnet-4-6, 259s)
+- WR-004: Stale job recovery on worker startup — DONE (claude, claude-sonnet-4-6, 101s)
