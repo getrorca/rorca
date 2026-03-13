@@ -156,8 +156,11 @@ export async function registerSchedulesWithBoss(
   boss: PgBoss,
   cronJobHandler: CronJobHandler,
 ): Promise<void> {
-  // 1. Register the meta-cron: fires every minute, handler checks all due schedules
+  // 1. Register the meta-cron: fires every minute, handler checks all due schedules.
+  // pipeline:cron queue is already created by ensureQueues() in initBoss(), but
+  // createQueue() is idempotent — safe to call again for explicit documentation.
   try {
+    await boss.createQueue(PIPELINE_CRON_QUEUE);
     await boss.schedule(PIPELINE_CRON_QUEUE, '* * * * *', {});
     await boss.work(PIPELINE_CRON_QUEUE, cronJobHandler);
     logger.info('[Scheduler] Registered meta-cron pipeline:cron (every minute)');
@@ -183,6 +186,8 @@ export async function registerSchedulesWithBoss(
       };
 
       try {
+        // pg-boss v10: createQueue() must precede schedule() and work() — idempotent
+        await boss.createQueue(name);
         await boss.schedule(name, schedule.cron_expression, data);
         // Each per-schedule queue needs its own worker subscription
         await boss.work(name, cronJobHandler);
