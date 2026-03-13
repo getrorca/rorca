@@ -723,7 +723,7 @@
       "dependsOn": [
         "PG-021"
       ],
-      "passes": false,
+      "passes": true,
       "suggestedSkills": [
         {
           "name": "api-documentation",
@@ -735,7 +735,8 @@
           "relevance": 7,
           "reason": "Documentation should establish best practices for worker process deployment, configuration, scaling, and troubleshooting."
         }
-      ]
+      ],
+      "notes": "Completed by Rorca engine"
     }
   ]
 }
