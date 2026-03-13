@@ -690,7 +690,7 @@
       "dependsOn": [
         "PG-020"
       ],
-      "passes": false,
+      "passes": true,
       "suggestedSkills": [
         {
           "name": "logging-fundamentals",
@@ -702,7 +702,8 @@
           "relevance": 6,
           "reason": "Orchestrating concurrent server + worker startup in dev mode requires process management coordination."
         }
-      ]
+      ],
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-022",

@@ -14,6 +14,13 @@ import { fileURLToPath } from 'url';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// NOTE: Both the Express server AND the worker process must be running before
+// executing this script. The server handles API requests; the worker processes
+// pipeline jobs via pg-boss. Start both with:
+//   npm run dev              (development — starts frontend + server + worker)
+//   cd backend && npm run dev:server  (server only)
+//   cd backend && npm run worker      (worker — required for pipeline execution)
+// Or in production: rorca start (spawns both server and worker automatically)
 const API_BASE = process.env.RORCA_API_URL || 'http://localhost:3030';
 const RORCA_PATH = path.resolve(__dirname, '..');
 
