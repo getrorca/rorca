@@ -663,7 +663,7 @@ async function recoverStaleJobs(): Promise<void> {
     try {
       await execute(
         `UPDATE pgboss.job
-         SET state = 'failed', completedon = NOW()
+         SET state = 'failed', completed_on = NOW()
          WHERE id = $1 AND state = 'active'`,
         [job.id],
       );
@@ -824,7 +824,7 @@ async function reconcileState(): Promise<void> {
     try {
       await execute(
         `UPDATE pgboss.job
-         SET state = 'failed', completedon = NOW()
+         SET state = 'failed', completed_on = NOW()
          WHERE id = $1 AND state = 'active'`,
         [job.id],
       );
