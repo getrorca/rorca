@@ -4911,6 +4911,8 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
  *                 workerActive: { type: boolean }
  *                 workerPid: { type: integer, nullable: true }
  *                 workerStartedAt: { type: string, nullable: true, format: date-time }
+ *                 activeChildProcesses: { type: integer, description: "Number of active execution-engine child processes (from latest heartbeat)" }
+ *                 lastReconciliationErrors: { type: integer, description: "Number of state mismatches fixed in last reconcile cycle (last 90s)" }
  *                 activeJobs:
  *                   type: array
  *                   items:
@@ -4939,7 +4941,8 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       pid: number;
       started_at: string;
       last_seen: string;
-    }>('SELECT pid, started_at, last_seen FROM worker_heartbeat ORDER BY last_seen DESC LIMIT 1');
+      active_jobs: number;
+    }>('SELECT pid, started_at, last_seen, active_jobs FROM worker_heartbeat ORDER BY last_seen DESC LIMIT 1');
 
     const workerActive = heartbeat
       ? Date.now() - new Date(heartbeat.last_seen).getTime() < 60_000
@@ -5002,15 +5005,30 @@ router.get('/worker/health', async (req: Request, res: Response) => {
     ).catch(() => undefined);
     const pgBossVersion = versionRow?.version ?? 'unknown';
 
+    // ── 7. Last reconciliation errors (WAL events from last reconcile cycle) ─
+    // Count run_finished events with reason='state_reconciliation' or
+    // reason='worker_crash_recovery' emitted in the past 90s (covers one full
+    // reconcile interval + one heartbeat interval).
+    const reconRow = await queryOne<{ cnt: string }>(
+      `SELECT COUNT(*)::text AS cnt
+       FROM wal_events
+       WHERE event_type = 'run_finished'
+         AND payload->>'reason' IN ('state_reconciliation', 'worker_crash_recovery')
+         AND ts > NOW() - INTERVAL '90 seconds'`,
+    ).catch(() => ({ cnt: '0' }));
+    const lastReconciliationErrors = parseInt(reconRow?.cnt ?? '0', 10);
+
     res.json({
       workerActive,
       workerPid: heartbeat?.pid ?? null,
       workerStartedAt: heartbeat?.started_at ?? null,
+      activeChildProcesses: heartbeat?.active_jobs ?? 0,
       activeJobs,
       queueDepth,
       scheduledJobs,
       dlqDepth,
       pgBossVersion,
+      lastReconciliationErrors,
     });
   } catch (error: unknown) {
     logger.error({ err: error }, '[Pipeline] worker health check error');

@@ -40,13 +40,59 @@ const WORKER_STARTED_AT: Date = new Date();
 
 const HEARTBEAT_INTERVAL_MS = 30_000; // 30 s
 
+// ── Active process map (runId → ChildProcess) ────────────────────────────
+// Declared early so writeHeartbeat() can read .size before activeProcesses
+// is mutated by job handlers. Cleaned up when the process exits.
+
+const activeProcesses = new Map<number, ChildProcess>();
+
+// ── Cancelling runs set (runId) ───────────────────────────────────────────
+// Tracks which runs are being intentionally cancelled so the exit handler
+// writes status='cancelled' (not 'failed') and emits run_cancelled WAL event.
+
+const cancellingRuns = new Set<number>();
+
+// ── Reconciliation error counter (updated by reconcileState) ─────────────────
+// Surfaced on the health endpoint as lastReconciliationErrors.
+
+let lastReconciliationErrors = 0;
+
+// ── pg-boss self-check (consecutive failure counter) ─────────────────────────
+// If boss.getQueueSize throws 3 consecutive times the pg-boss connection is
+// considered dead; we log FATAL and exit(1) so the supervisor restarts us.
+
+let pgBossHealthFailures = 0;
+const PG_BOSS_HEALTH_MAX_FAILURES = 3;
+
+async function pgBossHealthCheck(): Promise<void> {
+  try {
+    const boss = getBoss();
+    await boss.getQueueSize('pipeline:run');
+    // Success — reset the counter
+    pgBossHealthFailures = 0;
+  } catch (err) {
+    pgBossHealthFailures += 1;
+    logger.warn(
+      { err, consecutiveFailures: pgBossHealthFailures },
+      '[worker] pg-boss getQueueSize failed',
+    );
+    if (pgBossHealthFailures >= PG_BOSS_HEALTH_MAX_FAILURES) {
+      logger.fatal(
+        { consecutiveFailures: pgBossHealthFailures },
+        '[worker] FATAL — pg-boss connection dead (3 consecutive getQueueSize failures) — exiting for supervisor restart',
+      );
+      process.exit(1);
+    }
+  }
+}
+
 async function writeHeartbeat(): Promise<void> {
   try {
     await execute(
-      `INSERT INTO worker_heartbeat (worker_id, pid, hostname, started_at, last_seen)
-       VALUES ($1, $2, $3, $4, NOW())
-       ON CONFLICT (worker_id) DO UPDATE SET last_seen = NOW(), pid = EXCLUDED.pid`,
-      [WORKER_ID, process.pid, WORKER_HOSTNAME, WORKER_STARTED_AT],
+      `INSERT INTO worker_heartbeat (worker_id, pid, hostname, started_at, last_seen, active_jobs)
+       VALUES ($1, $2, $3, $4, NOW(), $5)
+       ON CONFLICT (worker_id) DO UPDATE SET last_seen = NOW(), pid = EXCLUDED.pid, active_jobs = EXCLUDED.active_jobs`,
+      [WORKER_ID, process.pid, WORKER_HOSTNAME, WORKER_STARTED_AT, activeProcesses.size],
     );
   } catch (err) {
     logger.warn({ err }, '[worker] heartbeat write failed');
@@ -59,17 +105,6 @@ if (!process.env.DATABASE_URL) {
   logger.error('[worker] DATABASE_URL is not set — exiting');
   process.exit(1);
 }
-
-// ── Active process map (runId → ChildProcess) ────────────────────────────
-// Used for cancellation. Cleaned up when the process exits.
-
-const activeProcesses = new Map<number, ChildProcess>();
-
-// ── Cancelling runs set (runId) ───────────────────────────────────────────
-// Tracks which runs are being intentionally cancelled so the exit handler
-// writes status='cancelled' (not 'failed') and emits run_cancelled WAL event.
-
-const cancellingRuns = new Set<number>();
 
 // ── Chunk size constant ───────────────────────────────────────────────────
 
@@ -804,6 +839,8 @@ async function reconcileState(): Promise<void> {
   }
 
   const totalFixed = stuckRuns.length + orphanJobs.length;
+  lastReconciliationErrors = totalFixed;
+
   if (totalFixed > 0) {
     logger.warn({ caseA: stuckRuns.length, caseB: orphanJobs.length }, '[worker] reconcileState — mismatches resolved');
   } else {
@@ -997,8 +1034,12 @@ async function start(): Promise<void> {
   await registerSchedulesWithBoss(boss, handlePipelineCron);
 
   // 5. Start heartbeat — write immediately, then every 30 s.
+  // Also runs pg-boss connection self-check on each tick; exits on 3 consecutive failures.
   await writeHeartbeat();
-  setInterval(() => { void writeHeartbeat(); }, HEARTBEAT_INTERVAL_MS);
+  setInterval(() => {
+    void writeHeartbeat();
+    void pgBossHealthCheck();
+  }, HEARTBEAT_INTERVAL_MS);
 
   logger.info('[worker] ready — listening for pipeline:run, pipeline:retry, pipeline:cancel, pipeline:cron');
 }
