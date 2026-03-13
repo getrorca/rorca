@@ -108,9 +108,38 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       } : {}),
       embeddings: getQueueStats(),
       cache: cacheStats(),
+      activeJobs: await getActiveJobs(),
     });
   } catch (err) { next(err); }
 });
+
+/**
+ * getActiveJobs — query pgboss.job for active and created pipeline jobs.
+ * Returns a summary list visible in the health endpoint.
+ */
+async function getActiveJobs(): Promise<Array<{ id: string; name: string; state: string; runId: number | null; createdOn: string }>> {
+  try {
+    const rows = await query<{ id: string; name: string; state: string; data: Record<string, unknown>; createdon: string }>(
+      `SELECT id, name, state, data, createdon
+       FROM pgboss.job
+       WHERE name IN ('pipeline:run', 'pipeline:retry', 'pipeline:cancel')
+         AND state IN ('created', 'active')
+       ORDER BY createdon ASC
+       LIMIT 50`,
+      [],
+    );
+    return rows.map(r => ({
+      id: r.id,
+      name: r.name,
+      state: r.state,
+      runId: typeof r.data?.runId === 'number' ? r.data.runId : null,
+      createdOn: String(r.createdon),
+    }));
+  } catch {
+    // pgboss schema may not be initialised yet (e.g. fresh DB, tests)
+    return [];
+  }
+}
 
 /**
  * @swagger
