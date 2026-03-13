@@ -2677,9 +2677,17 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
             const score = contextHealth.contextScore;
             const radius = 28;
             const circumference = 2 * Math.PI * radius;
+            const finalOffset = circumference - (score / 100) * circumference;
             const strokeColor = score >= 70 ? '#10b981' : score >= 40 ? '#f59e0b' : '#ef4444';
+            const animId = `ctx-score-anim-${score}`;
             return (
               <div className="border-t border-border flex flex-col items-center py-3 gap-1">
+                <style>{`
+                  @keyframes ${animId} {
+                    from { stroke-dashoffset: ${circumference}; }
+                    to   { stroke-dashoffset: ${finalOffset}; }
+                  }
+                `}</style>
                 <svg width="80" height="80" viewBox="0 0 80 80">
                   {/* Track */}
                   <circle
@@ -2696,9 +2704,9 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                     strokeWidth="6"
                     strokeLinecap="round"
                     strokeDasharray={circumference}
-                    strokeDashoffset={circumference - (score / 100) * circumference}
+                    strokeDashoffset={finalOffset}
                     transform="rotate(-90 40 40)"
-                    style={{ transition: 'stroke-dashoffset 600ms ease-out, stroke 300ms ease' }}
+                    style={{ animation: `${animId} 600ms ease-out` }}
                   />
                   {/* Score number */}
                   <text
