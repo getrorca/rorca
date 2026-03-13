@@ -533,8 +533,22 @@ server.registerTool(
         body: JSON.stringify(body),
       });
       if (!res.ok) return httpError('rorca_retry_story', res);
-      const data = await res.json() as { ok: boolean; runId: number; retriedStories: Array<{ storyId: string; attempt: number }> };
-      return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, runId: data.runId, retriedStories: data.retriedStories }, null, 2) }] };
+      const data = await res.json() as {
+        ok: boolean;
+        queued?: boolean;
+        jobId?: string;
+        runId: number;
+        queuePosition?: number;
+        retriedStories?: Array<{ storyId: string; attempt: number }>;
+      };
+      return { content: [{ type: 'text' as const, text: JSON.stringify({
+        ok: true,
+        queued: data.queued ?? false,
+        jobId: data.jobId,
+        runId: data.runId,
+        queuePosition: data.queuePosition ?? 1,
+        retriedStories: data.retriedStories ?? [],
+      }, null, 2) }] };
     });
   }
 );
