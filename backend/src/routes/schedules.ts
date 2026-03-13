@@ -143,6 +143,8 @@ router.post('/', async (req: Request, res: Response) => {
     if (schedule!.enabled) {
       try {
         const name = scheduleName(schedule!.id);
+        // pg-boss v10: createQueue() must precede schedule() — idempotent
+        await getBoss().createQueue(name);
         await getBoss().schedule(name, schedule!.cron_expression, {
           scheduleId: schedule!.id,
           specId: schedule!.spec_id,
@@ -244,6 +246,8 @@ router.patch('/:id', async (req: Request, res: Response) => {
       const name = scheduleName(id);
       await getBoss().unschedule(name);
       if (updated!.enabled) {
+        // pg-boss v10: createQueue() must precede schedule() — idempotent
+        await getBoss().createQueue(name);
         await getBoss().schedule(name, updated!.cron_expression, {
           scheduleId: updated!.id,
           specId: updated!.spec_id,
