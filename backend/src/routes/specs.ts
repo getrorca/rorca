@@ -30,8 +30,64 @@ import { route as routeContext } from '../lib/context-router';
 import { loadRorcaConfig } from '../lib/rorca-config';
 import { getWorkspaceEnvVars } from './env-vars';
 import { score as scoreStory, resolveModelId, type ScorerStory } from '../lib/complexity-scorer';
+import { gitMapStep, gitReduceStep, getLatestHash } from '../lib/git-hydrator';
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
+
+/** Fire-and-forget git memory hydration for a workspace.
+ *  Called from POST /api/specs/generate when workspace git memory is stale.
+ *  Updates workspace_context.git_memory, last_ingested_commit_hash, git_memory_hydrated_at.
+ *  Errors are swallowed — spec generation must not be blocked by background hydration.
+ */
+async function hydrateGitMemory(workspaceId: string): Promise<void> {
+  try {
+    const workspace = await queryOne<{ path: string; label: string }>('SELECT path, label FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) return;
+
+    const existingCtx = await queryOne<{
+      git_memory: string | null;
+      last_ingested_commit_hash: string | null;
+      git_commit_count: number;
+      git_memory_updated_at: string | null;
+    }>('SELECT git_memory, last_ingested_commit_hash, git_commit_count, git_memory_updated_at FROM workspace_context WHERE workspace_id = $1', [workspaceId]);
+
+    const lastHash = existingCtx?.last_ingested_commit_hash ?? undefined;
+
+    const summaries = await gitMapStep({ workspacePath: workspace.path, fromHash: lastHash });
+    const newCommits = summaries.reduce((acc, s) => acc + s.commitCount, 0);
+
+    let gitMemory: string;
+    if (newCommits > 0) {
+      const reduced = await gitReduceStep({ summaries, workspaceLabel: workspace.label });
+      gitMemory = lastHash && existingCtx?.git_memory
+        ? existingCtx.git_memory + '\n\n' + reduced
+        : reduced;
+    } else {
+      gitMemory = existingCtx?.git_memory ?? '';
+    }
+
+    const latestHash = getLatestHash(summaries) ?? existingCtx?.last_ingested_commit_hash ?? null;
+    const totalCommitCount = (existingCtx?.git_commit_count ?? 0) + newCommits;
+    const now = new Date().toISOString();
+    const memoryUpdatedAt = newCommits > 0 ? now : (existingCtx?.git_memory_updated_at ?? null);
+
+    await execute(
+      `INSERT INTO workspace_context (workspace_id, git_memory, last_ingested_commit_hash, git_memory_updated_at, git_commit_count, git_memory_hydrated_at)
+       VALUES ($1, $2, $3, $4, $5, $6)
+       ON CONFLICT(workspace_id) DO UPDATE SET
+         git_memory = EXCLUDED.git_memory,
+         last_ingested_commit_hash = EXCLUDED.last_ingested_commit_hash,
+         git_memory_updated_at = COALESCE(EXCLUDED.git_memory_updated_at, workspace_context.git_memory_updated_at),
+         git_commit_count = EXCLUDED.git_commit_count,
+         git_memory_hydrated_at = EXCLUDED.git_memory_hydrated_at`,
+      [workspaceId, gitMemory || null, latestHash, memoryUpdatedAt, totalCommitCount, now]
+    );
+
+    logger.info({ workspaceId, newCommits }, '[Specs] Background git hydration completed');
+  } catch (err) {
+    logger.warn({ err, workspaceId }, '[Specs] Background git hydration failed (ignored)');
+  }
+}
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -847,11 +903,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // 5. Fetch L3: project brief
     const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
 
-    // 5b. Fetch auto-hydrated context from workspace_context
-    const ctx = await queryOne(`SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`, [workspaceId]) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+    // 5b. Fetch auto-hydrated schema context from workspace_context
+    const ctx = await queryOne(
+      `SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`,
+      [workspaceId]
+    ) as { schema_snapshot: string | null } | undefined;
 
     const schemaSnapshot = ctx?.schema_snapshot || undefined;
-    const gitMemory = ctx?.git_memory || undefined;
 
     // 6. Synthesize direction stack
     const synthResult = synthesizeWithMeta({
@@ -859,7 +917,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       l2: l2Row?.content_yaml,
       l3: l3Row?.content_yaml,
       schemaSnapshot,
-      gitMemory,
       specBrief: brief,
       storyAnnotations,
     });
@@ -964,7 +1021,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       agentsMd: !!catalogs.agentsMd,
       template: templateId || null,
       schemaSnapshot: synthResult.meta.schema,
-      gitMemory: synthResult.meta.memory,
       estimatedTokens,
       modelContextWindow,
       ...(retrievalMeta ? {
@@ -2064,6 +2120,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     }
 
     // 16. Return response
+    res.set('X-Git-Hydration', hydrationTriggered ? 'triggered' : 'fresh');
     res.json({
       slug,
       title: effectiveTitle,

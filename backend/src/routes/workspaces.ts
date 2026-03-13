@@ -22,6 +22,7 @@ import { generateScaffoldPreview, writeScaffoldFiles } from '../lib/workspace-sc
 import type { ScaffoldFile } from '../lib/workspace-scaffold';
 import { logger } from '../lib/logger';
 import { requirePlan } from '../lib/require-plan';
+import { inferDomain } from '../lib/domain-inference';
 
 const router = Router();
 
@@ -1020,6 +1021,37 @@ router.post('/:id/scan-direction', async (req, res, next) => {
       return;
     }
 
+    // Infer domain from codebase before running direction scan
+    let inferredDomain: string | null = null;
+    try {
+      inferredDomain = await inferDomain(workspace.path);
+      if (inferredDomain) {
+        // Update workspaces.domains to include inferred domain (deduplicated)
+        const existingDomains: string[] = JSON.parse(workspace.domains ?? '[]');
+        if (!existingDomains.includes(inferredDomain)) {
+          const updatedDomains = [...existingDomains, inferredDomain];
+          await execute('UPDATE workspaces SET domains = $1 WHERE id = $2', [JSON.stringify(updatedDomains), req.params.id]);
+        }
+        // Associate existing L2 direction layer for this domain with the workspace (upsert)
+        const existingL2 = await queryOne<{ id: number; content_yaml: string }>(
+          `SELECT id, content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND workspace_id IS NULL LIMIT 1`,
+          [inferredDomain]
+        );
+        if (existingL2) {
+          await execute(
+            `INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, updated_at)
+             VALUES (2, $1, $2, $3, NOW())
+             ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''))
+             DO UPDATE SET content_yaml = EXCLUDED.content_yaml, updated_at = NOW()`,
+            [req.params.id, inferredDomain, existingL2.content_yaml]
+          );
+        }
+      }
+    } catch (domainErr: any) {
+      logger.warn('[scan-direction] domain inference failed:', domainErr.message);
+      // Non-fatal — continue with scan
+    }
+
     try {
       // 1. Scan key files from the workspace
       const scannedFiles: Record<string, string> = {};
@@ -1138,6 +1170,7 @@ Infer the tech stack, project purpose, coding conventions, and domain from the s
         l3Valid: l3Validation.valid,
         l3Errors: l3Validation.errors,
         usage: result.usage,
+        inferredDomain,
       });
     } catch (err: any) {
       logger.error('[scan-direction] error:', err.message);
@@ -2121,6 +2154,88 @@ ${dirListing.join('\n') || '(empty)'}
     project: parsed.l3 || '',
   };
 }
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/context-health:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: Get context readiness indicators for the Spec Forge pre-flight checklist
+ *     operationId: getWorkspaceContextHealth
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Context health indicators
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 l3Present: { type: boolean }
+ *                 gitMemoryCount: { type: integer }
+ *                 schemaPresent: { type: boolean }
+ *                 claudeMdPresent: { type: boolean }
+ *                 skillsCount: { type: integer }
+ *                 contextScore: { type: integer, description: "0-100 composite context readiness score" }
+ *       404: { description: "Workspace not found" }
+ */
+router.get('/:id/context-health', async (req, res, next) => {
+  try {
+    const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Fetch all DB data in parallel
+    const [l3Row, ctxRow, skillsRow] = await Promise.all([
+      queryOne<{ content: string | null }>(
+        "SELECT content FROM direction_layers WHERE workspace_id = $1 AND layer = 3 LIMIT 1",
+        [req.params.id]
+      ),
+      queryOne<{ schema_snapshot: string | null; git_memory: string | null; git_commit_count: number }>(
+        'SELECT schema_snapshot, git_memory, git_commit_count FROM workspace_context WHERE workspace_id = $1',
+        [req.params.id]
+      ),
+      queryOne<{ cnt: string }>(
+        'SELECT COUNT(*)::text AS cnt FROM installed_skills',
+        []
+      ),
+    ]);
+
+    const l3Present = !!(l3Row?.content);
+    // gitMemoryCount: number of commits ingested (git_commit_count in workspace_context)
+    const gitMemoryCount = ctxRow?.git_commit_count ?? 0;
+    const schemaPresent = !!(ctxRow?.schema_snapshot);
+
+    // CLAUDE.md exists in workspace root
+    let claudeMdPresent = false;
+    try {
+      claudeMdPresent = fs.existsSync(path.join(workspace.path, 'CLAUDE.md'));
+    } catch { /* non-fatal */ }
+
+    const skillsCount = parseInt(skillsRow?.cnt ?? '0', 10);
+
+    // Compute composite contextScore (0-100)
+    // L3=25, gitMemory=20 (partial: gitMemoryCount*4 up to 20), schema=20, claudeMd=20, skills=15
+    const contextScore = Math.min(
+      (l3Present ? 25 : 0) +
+      Math.min(gitMemoryCount * 4, 20) +
+      (schemaPresent ? 20 : 0) +
+      (claudeMdPresent ? 20 : 0) +
+      (skillsCount >= 1 ? 15 : 0),
+      100
+    );
+
+    res.json({ l3Present, gitMemoryCount, schemaPresent, claudeMdPresent, skillsCount, contextScore });
+  } catch (err) {
+    next(err);
+  }
+});
 
 // DELETE /api/workspaces/:id
 router.delete('/:id', async (req, res, next) => {
