@@ -1060,12 +1060,78 @@ interface GenerationLog {
   input_tokens: number | null;
   output_tokens: number | null;
   context_summary: string;
+  context_summary_json?: string | null;
   error: string | null;
   error_category: string | null;
   status: string;
   created_at: string;
   retrieval_method?: string | null;
   enriched?: boolean;
+}
+
+/**
+ * Parse a context summary from a generation log row.
+ * Priority: context_summary_json > context_summary (JSON parse).
+ * Handles two shapes:
+ *   - Standard generate shape: { directionLayers: { l1, l2, l3 }, skills, retrieval, ... }
+ *   - Enrich shape: { directionLayers: [...], memory: { cagHits, ragHits, graphHits, tier, latencyMs }, tokenBudget, flags }
+ * Returns null if neither field is parseable or contains meaningful data.
+ */
+function parseContextSummary(log: GenerationLog): ContextSummary | null {
+  // Try context_summary_json first (richer, used by enrich and newer generate)
+  const jsonStr = log.context_summary_json ?? log.context_summary;
+  if (!jsonStr) return null;
+
+  let parsed: any;
+  try {
+    parsed = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr;
+  } catch {
+    return null;
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Object.keys(parsed).length === 0) return null;
+
+  // Already in standard ContextSummary shape (has { l1, l2, l3 } object)
+  if (parsed.directionLayers && !Array.isArray(parsed.directionLayers)) {
+    return parsed as ContextSummary;
+  }
+
+  // Enrich shape: directionLayers is an array, memory holds retrieval metrics
+  if (Array.isArray(parsed.directionLayers) && parsed.memory) {
+    const mem = parsed.memory as {
+      cagHits?: number; ragHits?: number; graphHits?: number;
+      tier?: string; latencyMs?: number; count?: number;
+    };
+    const layerPresent = (lyr: string) => {
+      const found = (parsed.directionLayers as any[]).find((d: any) => d.layer === lyr);
+      return found?.present ?? false;
+    };
+    const normalized: ContextSummary = {
+      directionLayers: {
+        l1: layerPresent('L1'),
+        l2: { present: layerPresent('L2'), domain: null },
+        l3: layerPresent('L3'),
+      },
+      skills: parsed.skills ?? [],
+      memoryEntries: mem.count ?? 0,
+      agentsMd: parsed.flags?.agent ?? false,
+      template: null,
+      schemaSnapshot: parsed.flags?.schema ?? false,
+      gitMemory: parsed.flags?.gitMemory ?? false,
+      estimatedTokens: parsed.tokenBudget?.used ?? 0,
+      modelContextWindow: parsed.tokenBudget?.limit ?? 200000,
+      retrieval: {
+        cagHits: mem.cagHits ?? 0,
+        ragHits: mem.ragHits ?? 0,
+        graphHits: mem.graphHits ?? 0,
+        tier: (mem.tier as 'cache' | 'search' | 'hybrid') ?? 'cache',
+        latencyMs: mem.latencyMs ?? 0,
+      },
+    };
+    return normalized;
+  }
+
+  return null;
 }
 
 /** Rough per-1K-token cost estimates by model family (input/output). */
@@ -1172,27 +1238,15 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
           ? estimateCost(log.model, log.input_tokens, log.output_tokens)
           : null;
 
-        // Parse context_summary from JSON string (may be "{}" for pre-migration specs)
-        let contextSummary: ContextSummary | null = null;
-        if (log.context_summary) {
-          try {
-            const parsed = typeof log.context_summary === 'string'
-              ? JSON.parse(log.context_summary)
-              : log.context_summary;
-            if (parsed && typeof parsed === 'object' && Object.keys(parsed).length > 0) {
-              contextSummary = parsed as ContextSummary;
-            }
-          } catch {
-            // ignore parse errors
-          }
-        }
+        const contextSummary = parseContextSummary(log);
+        const isEnriched = !!log.enriched;
 
         return (
           <div key={log.id} className="border border-border rounded-lg bg-panel overflow-hidden">
             {/* Context summary card — PRIMARY content, shown above generation header */}
             {contextSummary && (
               <div className="px-4 pt-3 pb-0">
-                <ContextSummaryCard summary={contextSummary} skillDetails={skillDetails.length > 0 ? skillDetails : undefined} />
+                <ContextSummaryCard summary={contextSummary} skillDetails={!isEnriched && skillDetails.length > 0 ? skillDetails : undefined} />
               </div>
             )}
 
@@ -1206,8 +1260,15 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
                     <XCircle size={14} className="text-error" />
                   )}
                   <span className="text-xs font-medium text-text">
-                    {log.status === 'completed' ? 'Generation Succeeded' : 'Generation Failed'}
+                    {log.status === 'completed'
+                      ? (isEnriched ? 'Enrichment Succeeded' : 'Generation Succeeded')
+                      : (isEnriched ? 'Enrichment Failed' : 'Generation Failed')}
                   </span>
+                  {isEnriched ? (
+                    <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">Enriched</span>
+                  ) : (
+                    <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-success/15 text-success border border-success/30">Generated</span>
+                  )}
                   {i === 0 && logs.length > 1 && (
                     <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">Latest</span>
                   )}
