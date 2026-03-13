@@ -10385,147 +10385,26 @@ router.post('/:specId/enrich', async (req: Request, res: Response) => {
       return;
     }
 
-    // ── Fetch direction stack (always-available baseline L1–L3) ────────────
-    const workspaceDomain = (workspace as unknown as Record<string, unknown>).domain as string | undefined;
-    const [l1Row, l2Row, l3Row] = await Promise.all([
-      queryOne<{ content_yaml: string }>(
-        `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`,
-      ),
-      queryOne<{ content_yaml: string }>(
-        `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`,
-        [workspaceDomain ?? ''],
-      ),
-      queryOne<{ content_yaml: string }>(
-        `SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
-        [workspaceId],
-      ),
-    ]);
-
-    const baselineContext = synthesize({
-      l1: l1Row?.content_yaml,
-      l2: l2Row?.content_yaml,
-      l3: l3Row?.content_yaml,
-      specBrief: specContent.title ?? specId,
-    });
-
-    // ── 4-layer retrieval cascade ─────────────────────────────────────────
-    // Track which tier actually returned context
-    let retrievalMethod: 'pgvector' | 'graph' | 'fulltext' | 'direction-only' = 'direction-only';
-    let retrievedContext = baselineContext;
-
-    // Tier 1: pgvector cosine similarity on memories
-    const vectorExtRow = await queryOne<{ extname: string }>(
-      `SELECT extname FROM pg_extension WHERE extname = 'vector'`,
-    );
-    if (vectorExtRow) {
-      try {
-        // Use the first story text as the query vector proxy (a lightweight representative embedding)
-        // We query by text similarity via tsvector first to find candidates, then rank by embedding
-        // Note: generating an actual embedding requires an embedding model call; instead we do
-        // a pure cosine query on existing embeddings using the memories with non-null embeddings,
-        // selecting the most recent high-confidence ones related to this workspace.
-        const vectorRows = await query<{ category: string; content: string }>(
-          `SELECT category, content
-           FROM memories
-           WHERE workspace_id = $1 AND deleted_at IS NULL AND embedding IS NOT NULL
-           ORDER BY created_at DESC
-           LIMIT 10`,
-          [workspaceId],
-        );
-        if (vectorRows.length > 0) {
-          const memBlock = vectorRows.map(r => `[${r.category}] ${r.content}`).join('\n');
-          retrievedContext = `${baselineContext}\n\n=== WORKSPACE MEMORIES (pgvector) ===\n${memBlock}`;
-          retrievalMethod = 'pgvector';
-        }
-      } catch (vecErr) {
-        logger.warn({ err: vecErr }, '[specs/enrich] pgvector query failed — falling through to graph tier');
-      }
-    }
-
-    // Tier 2: Apache AGE graph traversal (Story→File→Decision→Convention)
-    if (retrievalMethod === 'direction-only' && await isGraphAvailable()) {
-      const client = await pool.connect();
-      try {
-        await client.query("LOAD 'age'");
-        await client.query("SET search_path = ag_catalog, \"$user\", public");
-        // Traverse: Match Story nodes in this spec and follow TOUCHES/LEARNED_FROM/APPLIES_TO edges
-        const escapedSpecId = specId.replace(/\\/g, '\\\\').replace(/'/g, "\\'");
-        const graphSql = `
-          SELECT * FROM cypher('rorca', $$
-            MATCH (s:Story)-[:BELONGS_TO]->(sp:Spec {id: '${escapedSpecId}'})
-            OPTIONAL MATCH (s)-[:TOUCHES]->(f:File)
-            OPTIONAL MATCH (m:Memory)-[:LEARNED_FROM]->(s)
-            OPTIONAL MATCH (c:Convention)-[:APPLIES_TO]->(s)
-            RETURN s.id AS story_id, f.path AS file_path, m.category AS mem_cat, c.name AS convention
-            LIMIT 30
-          $$) AS (story_id agtype, file_path agtype, mem_cat agtype, convention agtype)
-        `;
-        const graphResult = await client.query(graphSql);
-        const lines: string[] = [];
-        for (const row of graphResult.rows) {
-          const parts: string[] = [];
-          if (row.story_id) parts.push(`story:${String(row.story_id).replace(/^"|"$/g, '')}`);
-          if (row.file_path) parts.push(`file:${String(row.file_path).replace(/^"|"$/g, '')}`);
-          if (row.mem_cat) parts.push(`memory:${String(row.mem_cat).replace(/^"|"$/g, '')}`);
-          if (row.convention) parts.push(`convention:${String(row.convention).replace(/^"|"$/g, '')}`);
-          if (parts.length > 0) lines.push(parts.join(' | '));
-        }
-        if (lines.length > 0) {
-          retrievedContext = `${baselineContext}\n\n=== KNOWLEDGE GRAPH CONTEXT (AGE) ===\n${lines.join('\n')}`;
-          retrievalMethod = 'graph';
-        }
-      } catch (graphErr) {
-        logger.warn({ err: graphErr }, '[specs/enrich] AGE graph traversal failed — falling through to fulltext tier');
-      } finally {
-        client.release();
-      }
-    }
-
-    // Tier 3: tsvector full-text BM25 hybrid RRF on memories + spec_search_index
-    if (retrievalMethod === 'direction-only') {
-      try {
-        const queryTerms = (specContent.title ?? specId).replace(/[^\w\s]/g, ' ').trim();
-        if (queryTerms.length > 2) {
-          const [memRows, specRows] = await Promise.all([
-            query<{ category: string; content: string; rank: number }>(
-              `SELECT category, content, ts_rank_cd(tsv, plainto_tsquery('english', $1), 32) AS rank
-               FROM memories
-               WHERE workspace_id = $2 AND deleted_at IS NULL AND tsv @@ plainto_tsquery('english', $1)
-               ORDER BY rank DESC
-               LIMIT 8`,
-              [queryTerms, workspaceId],
-            ),
-            query<{ spec_title: string; story_titles: string; rank: number }>(
-              `SELECT spec_title, story_titles, ts_rank_cd(search_vector, plainto_tsquery('english', $1), 32) AS rank
-               FROM spec_search_index
-               WHERE workspace_id = $2 AND search_vector @@ plainto_tsquery('english', $1) AND spec_slug != $3
-               ORDER BY rank DESC
-               LIMIT 5`,
-              [queryTerms, workspaceId, specId],
-            ),
-          ]);
-
-          const ftLines: string[] = [];
-          for (const r of memRows) ftLines.push(`[${r.category}] ${r.content}`);
-          for (const r of specRows) ftLines.push(`[Related spec: ${r.spec_title}] ${r.story_titles}`);
-
-          if (ftLines.length > 0) {
-            retrievedContext = `${baselineContext}\n\n=== FULL-TEXT CONTEXT (tsvector RRF) ===\n${ftLines.join('\n')}`;
-            retrievalMethod = 'fulltext';
-          }
-        }
-      } catch (ftErr) {
-        logger.warn({ err: ftErr }, '[specs/enrich] Full-text search failed — using direction-only baseline');
-      }
-    }
-
-    // ── Per-story annotation via chatComplete() ───────────────────────────
+    // ── Per-story retrieval via memory-router.ts + annotation via chatComplete() ──
     const annotationModel = modelOverride ?? specContent.model ?? DEFAULT_MODEL;
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let storiesEnriched = 0;
 
-    const buildPromptForStory = (story: typeof userStories[0]) => {
+    // Aggregate retrieval metrics across all per-story calls
+    let totalCagHits = 0;
+    let totalRagHits = 0;
+    let totalGraphHits = 0;
+    let totalRetrievalLatencyMs = 0;
+    // Track highest tier used: graph > rag > cag > direction_only
+    type RetrievalTier = 'graph' | 'rag' | 'cag' | 'direction_only';
+    const tierRank: Record<RetrievalTier, number> = { direction_only: 0, cag: 1, rag: 2, graph: 3 };
+    let highestTier: RetrievalTier = 'direction_only';
+
+    const buildPromptForStory = (
+      story: typeof userStories[0],
+      ctx: import('../lib/memory-router').RetrievedContext,
+    ) => {
       const storyText = [
         `Story ID: ${story.id}`,
         `Title: ${story.title}`,
@@ -10535,6 +10414,22 @@ router.post('/:specId/enrich', async (req: Request, res: Response) => {
           : '',
       ].filter(Boolean).join('\n');
 
+      // Build context sections from RetrievedContext
+      const sections: string[] = [];
+      if (ctx.direction.standards) sections.push(`=== ENGINEERING STANDARDS ===\n${ctx.direction.standards}`);
+      if (ctx.direction.conventions) sections.push(`=== CONVENTIONS ===\n${ctx.direction.conventions}`);
+      if (ctx.direction.project) sections.push(`=== PROJECT CONTEXT ===\n${ctx.direction.project}`);
+      if (ctx.memory.length > 0) {
+        const memLines = ctx.memory.map(m => m.text).join('\n');
+        sections.push(`=== RELEVANT MEMORIES ===\n${memLines}`);
+      }
+      if (ctx.skills.length > 0) {
+        const skillLines = ctx.skills.map(s => `[${s.name}] ${s.content}`).join('\n');
+        sections.push(`=== SKILLS ===\n${skillLines}`);
+      }
+      if (ctx.graphSection) sections.push(`=== KNOWLEDGE GRAPH ===\n${ctx.graphSection}`);
+      const contextBlock = sections.join('\n\n');
+
       return `You are a spec enrichment agent. Your job is to generate a concise L5 context annotation for the following user story, drawing on the retrieved project context.
 
 The annotation should:
@@ -10543,7 +10438,7 @@ The annotation should:
 - Be concise (3–8 bullet points)
 - Be written as actionable guidance, not prose
 
-${retrievedContext}
+${contextBlock}
 
 User Story:
 ${storyText}
@@ -10551,20 +10446,43 @@ ${storyText}
 Respond with ONLY the annotation content (no preamble). Format as a markdown bulleted list.`;
     };
 
-    // Run all story annotations in parallel (not sequential) to stay within MCP client timeout
+    // Retrieve per-story context via memory-router.ts, then annotate in parallel
     const results = await Promise.allSettled(
-      userStories.map(story =>
-        chatComplete([{ role: 'user', content: buildPromptForStory(story) }], annotationModel)
-          .then(result => ({ story, result }))
-      )
+      userStories.map(async story => {
+        const storyText = `${story.title} ${story.description ?? ''}`;
+        const ctx = await retrieveContext(workspaceId, storyText, { maxTokens: 2000, includeGraph: true });
+        const prompt = buildPromptForStory(story, ctx);
+        const result = await chatComplete([{ role: 'user', content: prompt }], annotationModel);
+        return { story, result, ctx };
+      })
     );
 
     for (const outcome of results) {
       if (outcome.status === 'fulfilled') {
-        const { story, result } = outcome.value;
+        const { story, result, ctx } = outcome.value;
         const annotation = result.text.trim();
         totalInputTokens += result.usage.inputTokens;
         totalOutputTokens += result.usage.outputTokens;
+
+        // Aggregate retrieval metrics
+        totalCagHits += ctx.meta.cagHits;
+        totalRagHits += ctx.meta.ragHits;
+        totalGraphHits += ctx.meta.graphHits;
+        totalRetrievalLatencyMs += ctx.meta.latencyMs;
+
+        // Determine tier for this story
+        let storyTier: RetrievalTier = 'direction_only';
+        if (ctx.meta.graphHits > 0) {
+          storyTier = 'graph';
+        } else if (ctx.meta.ragHits > 0) {
+          storyTier = 'rag';
+        } else if (ctx.meta.cagHits > 0) {
+          storyTier = 'cag';
+        }
+        if (tierRank[storyTier] > tierRank[highestTier]) {
+          highestTier = storyTier;
+        }
+
         const descWithoutOldContext = (story.description ?? '').replace(/\n\n## Context\n[\s\S]*$/, '');
         story.description = `${descWithoutOldContext}\n\n## Context\n${annotation}`;
         storiesEnriched++;
@@ -10580,18 +10498,18 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     const durationMs = Date.now() - start;
     const contextSummaryJson = {
       directionLayers: [
-        { layer: 'L1', present: !!l1Row },
-        { layer: 'L2', domain: workspaceDomain ?? undefined, present: !!l2Row },
-        { layer: 'L3', present: !!l3Row },
+        { layer: 'L1', present: totalCagHits > 0 || totalRagHits > 0 || totalGraphHits > 0 },
+        { layer: 'L2', present: totalCagHits > 0 || totalRagHits > 0 || totalGraphHits > 0 },
+        { layer: 'L3', present: totalCagHits > 0 || totalRagHits > 0 || totalGraphHits > 0 },
       ],
       skills: [],
       memory: {
         count: storiesEnriched,
-        tier: retrievalMethod,
-        cagHits: 0,
-        ragHits: retrievalMethod === 'pgvector' || retrievalMethod === 'fulltext' ? storiesEnriched : 0,
-        graphHits: retrievalMethod === 'graph' ? storiesEnriched : 0,
-        latencyMs: durationMs,
+        tier: highestTier,
+        cagHits: totalCagHits,
+        ragHits: totalRagHits,
+        graphHits: totalGraphHits,
+        latencyMs: totalRetrievalLatencyMs,
       },
       tokenBudget: {
         used: totalInputTokens + totalOutputTokens,
@@ -10614,8 +10532,8 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
         durationMs,
         totalInputTokens,
         totalOutputTokens,
-        `Enriched ${storiesEnriched}/${userStories.length} stories via ${retrievalMethod}`,
-        retrievalMethod,
+        `Enriched ${storiesEnriched}/${userStories.length} stories via ${highestTier}`,
+        highestTier,
         JSON.stringify(contextSummaryJson),
       ],
     );
@@ -10624,7 +10542,7 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     const walPayload = {
       spec_id: specId,
       workspace_id: workspaceId,
-      retrieval_method: retrievalMethod,
+      retrieval_method: highestTier,
       stories_enriched: storiesEnriched,
     };
     const walEvent = await queryOne<WalEvent>(
@@ -10633,7 +10551,7 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     );
     if (walEvent) broadcastAll(walEvent);
 
-    res.json({ success: true, retrieval_method: retrievalMethod, storiesEnriched });
+    res.json({ success: true, retrieval_method: highestTier, storiesEnriched });
   } catch (error: unknown) {
     const msg = error instanceof Error ? error.message : String(error);
     res.status(500).json({ error: msg });
