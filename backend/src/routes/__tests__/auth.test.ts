@@ -12,6 +12,12 @@ global.fetch = mockFetch as unknown as typeof fetch;
 let app: Express;
 let tmpDir: string;
 
+beforeAll(async () => {
+  // Clean auth-related tables at start to remove any leftovers from previous test runs
+  await execute('TRUNCATE users CASCADE');
+  await execute('DELETE FROM wal_events');
+});
+
 beforeEach(() => {
   jest.resetModules();
   mockFetch.mockReset();
@@ -25,8 +31,11 @@ beforeEach(() => {
   app = require('../../server').default;
 });
 
-afterEach(() => {
-fs.rmSync(tmpDir, { recursive: true, force: true });
+afterEach(async () => {
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  // Clean auth-related tables after each test to prevent state leakage
+  await execute('TRUNCATE users CASCADE');
+  await execute('DELETE FROM wal_events');
 });
 
 const validPayload = {

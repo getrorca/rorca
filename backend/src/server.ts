@@ -203,7 +203,26 @@ app.use('/api/mcp/tools', mcpToolsRouter);
 if (process.env.AUTH_REQUIRED === 'true') {
   app.use(authRequired);
 } else {
-  app.use((req: any, _res: any, next: any) => {
+  // Local single-user mode: use JWT if provided, otherwise inject local admin.
+  // This allows tests that create real users and generate JWTs to work correctly.
+  app.use(async (req: any, _res: any, next: any) => {
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
+    if (token) {
+      try {
+        const jwt = require('jsonwebtoken');
+        const { JWT_SECRET: secret } = require('./routes/auth');
+        const decoded = jwt.verify(token, secret) as { sub: string; email: string };
+        const { queryOne: qo } = require('./db/index');
+        const user = await qo('SELECT id, email, role FROM users WHERE id = $1', [decoded.sub]);
+        if (user) {
+          req.user = { id: user.id, email: user.email, role: user.role };
+          return next();
+        }
+      } catch {
+        // Invalid JWT — fall through to local admin
+      }
+    }
     req.user = { id: 'local-admin', email: 'admin@rorca.local', displayName: 'Admin', role: 'admin' };
     next();
   });

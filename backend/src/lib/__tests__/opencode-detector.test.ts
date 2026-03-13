@@ -4,6 +4,12 @@ jest.mock('child_process');
 
 const mockedExecSync = execSync as jest.MockedFunction<typeof execSync>;
 
+const mockLoggerError = jest.fn();
+const mockLoggerInfo = jest.fn();
+jest.mock('../logger', () => ({
+  logger: { error: (...args: unknown[]) => mockLoggerError(...args), info: (...args: unknown[]) => mockLoggerInfo(...args), warn: jest.fn(), debug: jest.fn() },
+}));
+
 // Import semverGte directly — it's a pure function, no module state issues
 import { semverGte } from '../opencode-detector';
 
@@ -108,19 +114,15 @@ describe('opencode-detector', () => {
   describe('requireOpenCode', () => {
     const { requireOpenCode, MIN_OPENCODE_VERSION } = require('../opencode-detector');
     let mockExit: jest.SpyInstance;
-    let mockConsoleError: jest.SpyInstance;
-    let mockConsoleLog: jest.SpyInstance;
 
     beforeEach(() => {
       mockExit = jest.spyOn(process, 'exit').mockImplementation(() => undefined as never);
-      mockConsoleError = jest.spyOn(console, 'error').mockImplementation();
-      mockConsoleLog = jest.spyOn(console, 'log').mockImplementation();
+      mockLoggerError.mockClear();
+      mockLoggerInfo.mockClear();
     });
 
     afterEach(() => {
       mockExit.mockRestore();
-      mockConsoleError.mockRestore();
-      mockConsoleLog.mockRestore();
     });
 
     it('exits with code 1 when opencode not installed', () => {
@@ -131,7 +133,7 @@ describe('opencode-detector', () => {
       requireOpenCode();
 
       expect(mockExit).toHaveBeenCalledWith(1);
-      expect(mockConsoleError).toHaveBeenCalledWith(
+      expect(mockLoggerError).toHaveBeenCalledWith(
         expect.stringContaining('OpenCode not installed. Run: npm i -g opencode')
       );
     });
@@ -144,7 +146,7 @@ describe('opencode-detector', () => {
       requireOpenCode();
 
       expect(mockExit).toHaveBeenCalledWith(1);
-      expect(mockConsoleError).toHaveBeenCalledWith(
+      expect(mockLoggerError).toHaveBeenCalledWith(
         expect.stringContaining(`below minimum required ${MIN_OPENCODE_VERSION}`)
       );
     });
@@ -157,7 +159,7 @@ describe('opencode-detector', () => {
       const result = requireOpenCode();
 
       expect(mockExit).not.toHaveBeenCalled();
-      expect(mockConsoleLog).toHaveBeenCalledWith(
+      expect(mockLoggerInfo).toHaveBeenCalledWith(
         expect.stringContaining('Detected opencode 0.1.0')
       );
       expect(result.opencodeInstalled).toBe(true);

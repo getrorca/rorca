@@ -181,9 +181,9 @@ async function generateAndStoreVerificationToken(userId: string, email: string):
  *       409: { description: "Email already registered" }
  */
 const RegisterSchema = z.object({
-  email: z.string().min(1, 'Email is required').regex(/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Invalid email format'),
-  password: z.string().min(8, 'Password must be at least 8 characters'),
-  displayName: z.string().min(1, 'Display name is required'),
+  email: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Email is required').regex(/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Invalid email format')),
+  password: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Password is required').min(8, 'Password must be at least 8 characters')),
+  displayName: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Display name is required')),
 });
 
 router.post('/register', validateBody(RegisterSchema), async (req: Request, res: Response) => {
@@ -273,8 +273,8 @@ router.post('/register', validateBody(RegisterSchema), async (req: Request, res:
  *       401: { description: "Invalid email or password" }
  */
 const LoginSchema = z.object({
-  email: z.string().min(1, 'Email is required'),
-  password: z.string().min(1, 'Password is required'),
+  email: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Email is required')),
+  password: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Password is required')),
 });
 
 router.post('/login', validateBody(LoginSchema), async (req: Request, res: Response) => {

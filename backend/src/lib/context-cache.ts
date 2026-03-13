@@ -207,12 +207,13 @@ export async function getDirectionLayers(workspaceId: string): Promise<Direction
     `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`,
   );
 
-  // Get workspace domain
-  const wsRow = await queryOne<{ domain: string | null }>(
-    'SELECT domain FROM workspaces WHERE id = $1',
+  // Get workspace domain (domains is a JSON array — use first element for L2 matching)
+  const wsRow = await queryOne<{ domains: string | null }>(
+    'SELECT domains FROM workspaces WHERE id = $1',
     [workspaceId],
   );
-  const domain = wsRow?.domain;
+  const domainsArr: string[] = wsRow?.domains ? JSON.parse(wsRow.domains) : [];
+  const domain = domainsArr[0] ?? null;
 
   // L2: domain conventions
   const l2Row = domain
@@ -310,8 +311,7 @@ export async function getInstalledSkills(workspaceId: string): Promise<Array<{ n
   }
 
   const rows = await query<{ name: string; content: string }>(
-    `SELECT name, content FROM installed_skills WHERE workspace_id = $1`,
-    [workspaceId],
+    `SELECT name, content FROM installed_skills`,
   );
 
   set(cacheKey, rows, 'warm');

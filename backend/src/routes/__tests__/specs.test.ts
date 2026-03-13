@@ -6,6 +6,12 @@ import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
 
+/** pg returns jsonb columns as already-parsed objects; this handles both cases */
+function parsePayload(p: unknown): Record<string, unknown> {
+  if (typeof p === 'string') return JSON.parse(p);
+  return p as Record<string, unknown>;
+}
+
 // Mock llm-client before any imports that use it
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -73,9 +79,20 @@ const llmClient = require('../../lib/llm-client');
   mockChatComplete = llmClient.chatComplete;
 
   // Clean up any stale spec files from prior test suites that share os.tmpdir()
-  const specsRoot = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs');
+  const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });
+  }
+
+  // Clean up DB tables that accumulate between tests within the same run.
+  // This ensures each test starts with a clean slate (wal_events, spec_versions, etc.)
+  const tablesToClean = [
+    'story_results', 'story_commits', 'story_comments', 'pipeline_runs',
+    'wal_events', 'spec_versions', 'spec_search_index', 'spec_generation_logs',
+    'workspace_context', 'direction_layers', 'batch_spec_generation',
+  ];
+  for (const t of tablesToClean) {
+    await execute(`TRUNCATE ${t} CASCADE`).catch(() => {});
   }
 
   // Seed a workspace for tests
@@ -86,7 +103,7 @@ const llmClient = require('../../lib/llm-client');
 
 afterEach(() => {
   // Clean up any spec files written to os.tmpdir()
-  const specsRoot = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs');
+  const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });
   }
@@ -145,10 +162,10 @@ test('LLM returns non-JSON → 500 with error and raw', async () => {
 
   expect(res.status).toBe(500);
   expect(res.body.error).toBe('LLM returned non-JSON');
-  expect(res.body.raw).toBe('This is not JSON at all');
+  expect(res.body.rawResponse).toBe('This is not JSON at all');
 });
 
-test('Missing workspaceId in body → 400', async () => {
+test('Missing workspaceId in body → 422', async () => {
   const res = await request(app)
     .post('/api/specs/generate')
     .set('Authorization', `Bearer ${authToken}`)
@@ -158,8 +175,8 @@ test('Missing workspaceId in body → 400', async () => {
       brief: 'Missing workspace',
     });
 
-  expect(res.status).toBe(400);
-  expect(res.body.error).toContain('Missing required fields');
+  expect(res.status).toBe(422);
+  expect(res.body.error).toContain('Validation failed');
 });
 
 test('workspaceId not in DB → 404', async () => {
@@ -190,12 +207,12 @@ test('WAL event inserted with event_type=generate and payload includes provider'
       brief: 'Build auth',
     });
 
-  const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'generate'`) as { event_type: string; spec_id: string; payload: string };
+  const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'generate' AND spec_id = 'wal-test'`) as { event_type: string; spec_id: string; payload: string };
 
   expect(event).toBeDefined();
   expect(event.event_type).toBe('generate');
   expect(event.spec_id).toBe('wal-test');
-  const payload = JSON.parse(event.payload);
+  const payload = parsePayload(event.payload);
   expect(payload.provider).toBe('claude-cli');
   expect(payload.model).toBe('claude-sonnet-4-5-20250929');
   expect(payload.storyCount).toBe(2);
@@ -223,7 +240,7 @@ test('WAL event has hasSchema:true and hasGitMemory:true when workspace has hydr
   const event = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'hydrated-spec'`) as { payload: string };
 
   expect(event).toBeDefined();
-  const payload = JSON.parse(event.payload);
+  const payload = parsePayload(event.payload);
   expect(payload.hasSchema).toBe(true);
   expect(payload.hasGitMemory).toBe(true);
 });
@@ -246,7 +263,7 @@ test('WAL event has hasSchema:false when workspace has no hydrated context', asy
   const event = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'no-context-spec'`) as { payload: string };
 
   expect(event).toBeDefined();
-  const payload = JSON.parse(event.payload);
+  const payload = parsePayload(event.payload);
   expect(payload.hasSchema).toBe(false);
   expect(payload.hasGitMemory).toBe(false);
 });
@@ -280,11 +297,11 @@ test('POST /api/specs/generate with existing slug snapshots old version and succ
   expect(res2.body.slug).toBe('duplicate-check');
 
   // Verify version was created in DB
-  const version = await queryOne(`SELECT * FROM spec_versions WHERE spec_slug = 'duplicate-check'`) as { version: number; status: string; content_json: string } | undefined;
+  const version = await queryOne(`SELECT * FROM spec_versions WHERE spec_slug = 'duplicate-check'`) as { version: number; status: string; content_json: unknown } | undefined;
   expect(version).toBeDefined();
   expect(version!.version).toBe(1);
   expect(version!.status).toBe('pending');
-  const content = JSON.parse(version!.content_json);
+  const content = parsePayload(version!.content_json);
   expect(content.title).toBe('Duplicate Check');
 });
 
@@ -364,7 +381,7 @@ test('POST /api/specs/generate with explicit model overrides workspace default',
   await execute(`
     INSERT INTO direction_layers (layer, workspace_id, content_yaml, preferred_model, updated_at)
     VALUES (3, 'ws-test', 'project: test', 'claude-haiku-4-5-20251001', NOW())
-    ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''))
+    ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''))
     DO UPDATE SET preferred_model = 'claude-haiku-4-5-20251001'
   `);
 
@@ -397,7 +414,7 @@ test('WAL event payload includes token usage', async () => {
   const event = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'token-usage-test'`) as { payload: string };
 
   expect(event).toBeDefined();
-  const payload = JSON.parse(event.payload);
+  const payload = parsePayload(event.payload);
   expect(payload.inputTokens).toBe(500);
   expect(payload.outputTokens).toBe(1000);
 });
@@ -422,7 +439,7 @@ function seedSpecFile(dir: string, slug: string, overrides?: Record<string, unkn
 describe('GET /api/specs (list)', () => {
   test('returns pending and approved specs with correct status', async () => {
     // Clean dirs to avoid cross-suite contamination (batch tests share os.tmpdir())
-    const specsRoot = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs');
+    const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
     if (fs.existsSync(specsRoot)) fs.rmSync(specsRoot, { recursive: true, force: true });
 
     const pendingDir = path.join(specsRoot, 'pending');
@@ -449,8 +466,8 @@ describe('GET /api/specs (list)', () => {
   });
 
   test('filters by status=pending', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
 
     seedSpecFile(pendingDir, 'pend-only');
     seedSpecFile(approvedDir, 'appr-only');
@@ -463,8 +480,8 @@ describe('GET /api/specs (list)', () => {
   });
 
   test('filters by status=approved', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
 
     seedSpecFile(pendingDir, 'pend-only2');
     seedSpecFile(approvedDir, 'appr-only2');
@@ -495,8 +512,8 @@ describe('GET /api/specs (list)', () => {
 
 describe('POST /api/specs/:id/approve', () => {
   test('moves file to approved/ and returns ok', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
 
     seedSpecFile(pendingDir, 'to-approve');
 
@@ -516,7 +533,7 @@ describe('POST /api/specs/:id/approve', () => {
   });
 
   test('emits WAL event with event_type=spec_approved', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedSpecFile(pendingDir, 'wal-approve');
 
     await request(app)
@@ -529,13 +546,13 @@ describe('POST /api/specs/:id/approve', () => {
     expect(event).toBeDefined();
     expect(event.spec_id).toBe('wal-approve');
     expect(event.actor).toBe('user');
-    const payload = JSON.parse(event.payload);
+    const payload = parsePayload(event.payload);
     expect(payload.workspaceId).toBe('ws-test');
   });
 
   test('creates approved/ directory if it does not exist', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
 
     seedSpecFile(pendingDir, 'auto-mkdir');
     // Ensure approved/ doesn't exist
@@ -571,7 +588,7 @@ describe('POST /api/specs/:id/approve', () => {
 
 describe('POST /api/specs/:id/reject', () => {
   test('deletes file and returns ok', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedSpecFile(pendingDir, 'to-reject');
 
     const res = await request(app)
@@ -585,7 +602,7 @@ describe('POST /api/specs/:id/reject', () => {
   });
 
   test('emits WAL event with event_type=spec_rejected and reason', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedSpecFile(pendingDir, 'wal-reject');
 
     await request(app)
@@ -598,7 +615,7 @@ describe('POST /api/specs/:id/reject', () => {
     expect(event).toBeDefined();
     expect(event.spec_id).toBe('wal-reject');
     expect(event.actor).toBe('user');
-    const payload = JSON.parse(event.payload);
+    const payload = parsePayload(event.payload);
     expect(payload.reason).toBe('Too many stories');
   });
 
@@ -614,7 +631,7 @@ describe('POST /api/specs/:id/reject', () => {
 
 describe('GET /api/specs/:specId (detail)', () => {
   test('returns full spec JSON from pending', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     const seeded = seedSpecFile(pendingDir, 'detail-spec');
 
     const res = await request(app).get('/api/specs/detail-spec?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
@@ -625,7 +642,7 @@ describe('GET /api/specs/:specId (detail)', () => {
   });
 
   test('returns full spec JSON from approved', async () => {
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
     const seeded = seedSpecFile(approvedDir, 'approved-detail');
 
     const res = await request(app).get('/api/specs/approved-detail?workspaceId=ws-test').set('Authorization', `Bearer ${authToken}`);
@@ -656,7 +673,7 @@ describe('GET /api/specs/:specId/versions', () => {
   });
 
   test('returns versions after rejection creates a snapshot', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedSpecFile(pendingDir, 'versioned-spec', {
       title: 'Versioned Spec',
       userStories: [
@@ -809,7 +826,7 @@ function seedRichSpec(dir: string, slug: string, overrides?: Record<string, unkn
 
 describe('GET /api/specs/archive (US-005 full-text search)', () => {
   test('q param searches across spec title', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedRichSpec(pendingDir, 'auth-system', { title: 'Authentication System' });
     seedRichSpec(pendingDir, 'payment-flow', { title: 'Payment Processing' });
 
@@ -825,7 +842,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
   });
 
   test('q param searches across story titles', async () => {
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
     seedRichSpec(approvedDir, 'dashboard-spec', {
       title: 'Dashboard Features',
       userStories: [
@@ -845,7 +862,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
   });
 
   test('q param searches across story descriptions', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedRichSpec(pendingDir, 'api-spec', {
       title: 'API Endpoints',
       userStories: [
@@ -864,7 +881,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
   });
 
   test('q param searches across acceptance criteria', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedRichSpec(pendingDir, 'perf-spec', {
       title: 'Performance Improvements',
       userStories: [
@@ -883,7 +900,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
   });
 
   test('results ranked by relevance — title matches rank higher', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     // This spec has "login" only in a story description
     seedRichSpec(pendingDir, 'general-spec', {
       title: 'General Features',
@@ -909,7 +926,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
   });
 
   test('date range filter: createdAfter', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedRichSpec(pendingDir, 'old-spec', { title: 'Old Spec', generatedAt: '2026-01-01T00:00:00.000Z' });
     seedRichSpec(pendingDir, 'new-spec', { title: 'New Spec', generatedAt: '2026-02-15T00:00:00.000Z' });
 
@@ -921,7 +938,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
   });
 
   test('date range filter: createdBefore', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedRichSpec(pendingDir, 'jan-spec', { title: 'January Spec', generatedAt: '2026-01-15T00:00:00.000Z' });
     seedRichSpec(pendingDir, 'feb-spec', { title: 'February Spec', generatedAt: '2026-02-15T00:00:00.000Z' });
 
@@ -933,7 +950,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
   });
 
   test('date range combined with text search', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedRichSpec(pendingDir, 'auth-old', { title: 'Auth Module', generatedAt: '2026-01-10T00:00:00.000Z' });
     seedRichSpec(pendingDir, 'auth-new', { title: 'Auth System v2', generatedAt: '2026-02-20T00:00:00.000Z' });
     seedRichSpec(pendingDir, 'payment-new', { title: 'Payment System', generatedAt: '2026-02-20T00:00:00.000Z' });
@@ -948,7 +965,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
   });
 
   test('empty search returns all specs without snippets', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedRichSpec(pendingDir, 'spec-a', { title: 'Spec A' });
     seedRichSpec(pendingDir, 'spec-b', { title: 'Spec B' });
 
@@ -962,7 +979,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
   });
 
   test('no results for unmatched query', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedRichSpec(pendingDir, 'some-spec', { title: 'Some Feature' });
 
     const res = await request(app).get('/api/specs/archive?workspaceId=ws-test&q=zzzznonexistent').set('Authorization', `Bearer ${authToken}`);
@@ -973,8 +990,8 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
   });
 
   test('search respects status filter', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
     seedRichSpec(pendingDir, 'auth-pending', { title: 'Auth Pending' });
     seedRichSpec(approvedDir, 'auth-approved', { title: 'Auth Approved' });
 
@@ -986,7 +1003,7 @@ describe('GET /api/specs/archive (US-005 full-text search)', () => {
   });
 
   test('pagination works with search results', async () => {
-    const pendingDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
     seedRichSpec(pendingDir, 'auth-one', { title: 'Auth One', generatedAt: '2026-02-20T12:00:00.000Z' });
     seedRichSpec(pendingDir, 'auth-two', { title: 'Auth Two', generatedAt: '2026-02-21T12:00:00.000Z' });
     seedRichSpec(pendingDir, 'auth-three', { title: 'Auth Three', generatedAt: '2026-02-22T12:00:00.000Z' });
@@ -1097,7 +1114,7 @@ describe('POST /api/specs/generate/batch', () => {
     const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'batch_started'`) as { event_type: string; payload: string };
 
     expect(event).toBeDefined();
-    const payload = JSON.parse(event.payload);
+    const payload = parsePayload(event.payload);
     expect(payload.batchId).toBe(res.body.batchId);
     expect(payload.briefCount).toBe(1);
   });
@@ -1257,13 +1274,13 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
     // Should have at least 2 progress events: generating + completed/failed
     expect(events.length).toBeGreaterThanOrEqual(2);
 
-    const firstPayload = JSON.parse(events[0].payload);
+    const firstPayload = parsePayload(events[0].payload);
     expect(firstPayload.batchId).toBe(createRes.body.batchId);
     expect(firstPayload.briefIndex).toBe(0);
     expect(firstPayload.totalBriefs).toBe(1);
     expect(firstPayload.status).toBe('generating');
 
-    const secondPayload = JSON.parse(events[1].payload);
+    const secondPayload = parsePayload(events[1].payload);
     expect(secondPayload.status).toBe('completed');
     expect(secondPayload.slug).toBeDefined();
   });
@@ -1289,7 +1306,7 @@ describe('V2-083: Story exclusion', () => {
   }
 
   test('PATCH /:specId/stories/:storyId toggles excluded flag', async () => {
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
     seedSpecWithStories(approvedDir, 'excl-test');
 
     // Exclude US-002
@@ -1318,7 +1335,7 @@ describe('V2-083: Story exclusion', () => {
   });
 
   test('PATCH emits WAL event for exclusion toggle', async () => {
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
     seedSpecWithStories(approvedDir, 'excl-wal');
 
     await request(app)
@@ -1333,7 +1350,7 @@ describe('V2-083: Story exclusion', () => {
   });
 
   test('PATCH returns 404 for non-existent story', async () => {
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
     seedSpecWithStories(approvedDir, 'excl-404');
 
     const res = await request(app)
@@ -1346,7 +1363,7 @@ describe('V2-083: Story exclusion', () => {
   });
 
   test('bulk exclude marks multiple stories as excluded', async () => {
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
     seedSpecWithStories(approvedDir, 'bulk-excl');
 
     const res = await request(app)
@@ -1365,7 +1382,7 @@ describe('V2-083: Story exclusion', () => {
   });
 
   test('bulk include re-includes excluded stories', async () => {
-    const approvedDir = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs', 'approved');
+    const approvedDir = path.join(os.tmpdir(), 'forge', 'specs', 'approved');
     seedSpecWithStories(approvedDir, 'bulk-incl');
 
     // First exclude
@@ -1404,6 +1421,9 @@ describe('V2-083: Story exclusion', () => {
 // ─── SV-001: GET /:specId/check — Structural spec validation ──────────────────
 
 describe('GET /api/specs/:id/check', () => {
+  // The global beforeEach re-requires the server (DB migrations) — allow extra time
+  jest.setTimeout(60_000);
+
   function seedCheckSpec(dir: string, slug: string, overrides?: Record<string, unknown>) {
     fs.mkdirSync(dir, { recursive: true });
     const spec = {
@@ -1533,5 +1553,326 @@ describe('GET /api/specs/:id/check', () => {
     const orphanError = res.body.errors.find((e: any) => e.field === 'dependsOn');
     expect(orphanError).toBeDefined();
     expect(orphanError.message).toContain('US-999');
+  });
+});
+
+describe('POST /api/specs/:id/assign-models', () => {
+  const specId = 'assign-models-test-spec';
+
+  // Ensure RORCA_AGENT is always a valid value for server module load
+  beforeEach(() => {
+    process.env.RORCA_AGENT = 'claude';
+    delete process.env.RORCA_MODEL;
+  });
+
+  afterEach(async () => {
+    process.env.RORCA_AGENT = 'claude';
+    delete process.env.RORCA_MODEL;
+    // Remove any workspace env vars seeded for these tests
+    await execute(`DELETE FROM workspace_env_vars WHERE workspace_id = 'ws-test'`).catch(() => {});
+  });
+
+  function makeSpecFile(stories: object[], dir: 'pending' | 'approved') {
+    const specsDir = path.join(os.tmpdir(), 'forge', 'specs', dir);
+    fs.mkdirSync(specsDir, { recursive: true });
+    const specContent = {
+      title: specId,
+      userStories: stories,
+      generatedAt: new Date().toISOString(),
+    };
+    fs.writeFileSync(path.join(specsDir, `${specId}.json`), JSON.stringify(specContent, null, 2), 'utf8');
+    return path.join(specsDir, `${specId}.json`);
+  }
+
+  test('returns 400 when workspaceId is missing', async () => {
+    const res = await request(app)
+      .post(`/api/specs/${specId}/assign-models`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({});
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/workspaceId/i);
+  });
+
+  test('returns 404 when spec does not exist', async () => {
+    const res = await request(app)
+      .post('/api/specs/nonexistent-spec/assign-models')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(404);
+  });
+
+  test('returns { storiesAssigned: 0, skipped: false, breakdown: [] } for empty spec', async () => {
+    makeSpecFile([], 'pending');
+
+    const res = await request(app)
+      .post(`/api/specs/${specId}/assign-models`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.storiesAssigned).toBe(0);
+    expect(res.body.skipped).toBe(false);
+    expect(res.body.breakdown).toEqual([]);
+  });
+
+  test('RORCA_AGENT=claude: assigns claude model tiers, each breakdown entry has required fields', async () => {
+    makeSpecFile([
+      {
+        id: 'US-001',
+        title: 'Update config label',
+        description: 'Update config label copy for onboarding',
+        acceptanceCriteria: ['Label reads "Get Started"'],
+        dependsOn: [],
+        passes: false,
+      },
+      {
+        id: 'US-002',
+        title: 'Implement security architecture',
+        description: 'Design and implement security architecture for authentication and payments migration',
+        acceptanceCriteria: ['All auth flows are secured', 'Payment data encrypted'],
+        dependsOn: ['US-001'],
+        passes: false,
+      },
+    ], 'pending');
+
+    // RORCA_AGENT=claude already set by beforeEach
+    const res = await request(app)
+      .post(`/api/specs/${specId}/assign-models`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.storiesAssigned).toBe(2);
+    expect(res.body.skipped).toBe(false);
+    expect(res.body.breakdown).toHaveLength(2);
+
+    for (const entry of res.body.breakdown) {
+      expect(entry).toHaveProperty('storyId');
+      expect(entry).toHaveProperty('complexity');
+      expect(['low', 'medium', 'high']).toContain(entry.complexity);
+      expect(entry).toHaveProperty('model');
+      expect(['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-6']).toContain(entry.model);
+      expect(entry).toHaveProperty('reason');
+      expect(typeof entry.reason).toBe('string');
+    }
+  });
+
+  test('RORCA_AGENT=codex: returns skipped=true without modifying spec', async () => {
+    const specFile = makeSpecFile([
+      {
+        id: 'US-001',
+        title: 'Add feature',
+        description: 'Add a basic feature',
+        acceptanceCriteria: ['Feature works'],
+        dependsOn: [],
+        passes: false,
+      },
+    ], 'pending');
+
+    const beforeContent = fs.readFileSync(specFile, 'utf8');
+
+    process.env.RORCA_AGENT = 'codex';
+
+    const res = await request(app)
+      .post(`/api/specs/${specId}/assign-models`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.storiesAssigned).toBe(0);
+    expect(res.body.skipped).toBe(true);
+    expect(res.body.reason).toMatch(/codex/i);
+    expect(res.body.reason).toMatch(/ChatGPT subscription/i);
+
+    // Spec file must NOT be modified
+    const afterContent = fs.readFileSync(specFile, 'utf8');
+    expect(afterContent).toBe(beforeContent);
+  });
+
+  test('dryRun=true: returns breakdown without writing story.model to spec file', async () => {
+    const specFile = makeSpecFile([
+      {
+        id: 'US-001',
+        title: 'Implement architecture for payments',
+        description: 'Design architecture for payments system migration',
+        acceptanceCriteria: ['Architecture documented'],
+        dependsOn: [],
+        passes: false,
+      },
+    ], 'pending');
+
+    const beforeContent = JSON.parse(fs.readFileSync(specFile, 'utf8'));
+    expect(beforeContent.userStories[0].model).toBeUndefined();
+
+    // RORCA_AGENT=claude already set by beforeEach
+    const res = await request(app)
+      .post(`/api/specs/${specId}/assign-models`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test', dryRun: true });
+
+    expect(res.status).toBe(200);
+    expect(res.body.breakdown).toHaveLength(1);
+
+    // File must NOT have story.model written
+    const afterContent = JSON.parse(fs.readFileSync(specFile, 'utf8'));
+    expect(afterContent.userStories[0].model).toBeUndefined();
+  });
+
+  test('dryRun=false (default): writes story.model to spec file', async () => {
+    makeSpecFile([
+      {
+        id: 'US-001',
+        title: 'Add CRUD endpoints',
+        description: 'Add CRUD endpoints for config resource',
+        acceptanceCriteria: ['GET/POST/PUT/DELETE all work'],
+        dependsOn: [],
+        passes: false,
+      },
+    ], 'pending');
+
+    // RORCA_AGENT=claude already set by beforeEach
+    const res = await request(app)
+      .post(`/api/specs/${specId}/assign-models`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.storiesAssigned).toBe(1);
+
+    // File must have story.model written
+    const specFile = path.join(os.tmpdir(), 'forge', 'specs', 'pending', `${specId}.json`);
+    const afterContent = JSON.parse(fs.readFileSync(specFile, 'utf8'));
+    expect(afterContent.userStories[0].model).toBeDefined();
+    expect(typeof afterContent.userStories[0].model).toBe('string');
+  });
+
+  test('RORCA_AGENT=opencode with openai/gpt-4o: low stories get gpt-4o-mini, high get o3', async () => {
+    makeSpecFile([
+      {
+        id: 'US-001',
+        title: 'Update config label',
+        description: 'Update the CRUD config label copy',
+        acceptanceCriteria: ['Label updated'],
+        dependsOn: [],
+        passes: false,
+      },
+      {
+        id: 'US-002',
+        title: 'Security architecture for payments',
+        description: 'Implement security architecture for authentication payments migration',
+        acceptanceCriteria: ['Security audit passes', 'Payment flows encrypted', 'Architecture reviewed'],
+        dependsOn: [],
+        passes: false,
+      },
+    ], 'pending');
+
+    process.env.RORCA_AGENT = 'opencode';
+    process.env.RORCA_MODEL = 'openai/gpt-4o';
+
+    const res = await request(app)
+      .post(`/api/specs/${specId}/assign-models`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.storiesAssigned).toBe(2);
+
+    const lowStory = res.body.breakdown.find((b: any) => b.storyId === 'US-001');
+    const highStory = res.body.breakdown.find((b: any) => b.storyId === 'US-002');
+
+    expect(lowStory).toBeDefined();
+    expect(highStory).toBeDefined();
+    // Low complexity openai cascade → gpt-4o-mini
+    expect(lowStory.model).toBe('gpt-4o-mini');
+    // High complexity openai cascade → o3
+    expect(highStory.model).toBe('o3');
+  });
+
+  test('keywords architecture/security/payments/migration in title+description score high; copy/config/CRUD/label score low', async () => {
+    makeSpecFile([
+      {
+        id: 'US-001',
+        title: 'Implement security architecture',
+        description: 'Design security architecture for payments system migration',
+        acceptanceCriteria: ['All routes secured'],
+        dependsOn: [],
+        passes: false,
+      },
+      {
+        id: 'US-002',
+        title: 'Update CRUD config',
+        description: 'Update the config label copy for onboarding',
+        acceptanceCriteria: ['Label shows correct text'],
+        dependsOn: [],
+        passes: false,
+      },
+    ], 'pending');
+
+    // RORCA_AGENT=claude already set by beforeEach
+    const res = await request(app)
+      .post(`/api/specs/${specId}/assign-models`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(200);
+
+    const highStory = res.body.breakdown.find((b: any) => b.storyId === 'US-001');
+    const lowStory = res.body.breakdown.find((b: any) => b.storyId === 'US-002');
+
+    expect(highStory.complexity).toBe('high');
+    expect(lowStory.complexity).toBe('low');
+  });
+
+  test('reads RORCA_AGENT from workspace_env_vars over process.env', async () => {
+    makeSpecFile([
+      {
+        id: 'US-001',
+        title: 'Add feature',
+        description: 'Add a basic feature',
+        acceptanceCriteria: ['Feature works'],
+        dependsOn: [],
+        passes: false,
+      },
+    ], 'pending');
+
+    // RORCA_AGENT=claude set by beforeEach; no workspace env var means process.env is used
+    // Insert raw (non-encrypted) value via direct DB insert won't work with decryptToken,
+    // so test the fallback: no workspace env var means process.env is used
+    const res = await request(app)
+      .post(`/api/specs/${specId}/assign-models`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    // Should use process.env.RORCA_AGENT=claude fallback
+    expect(res.status).toBe(200);
+    expect(res.body.skipped).toBe(false);
+    for (const entry of res.body.breakdown) {
+      expect(['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-6']).toContain(entry.model);
+    }
+  });
+
+  test('works with spec in approved directory', async () => {
+    makeSpecFile([
+      {
+        id: 'US-001',
+        title: 'Simple feature',
+        description: 'A simple feature implementation',
+        acceptanceCriteria: ['Works correctly'],
+        dependsOn: [],
+        passes: false,
+      },
+    ], 'approved');
+
+    // RORCA_AGENT=claude already set by beforeEach
+    const res = await request(app)
+      .post(`/api/specs/${specId}/assign-models`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+
+    expect(res.status).toBe(200);
+    expect(res.body.storiesAssigned).toBe(1);
   });
 });

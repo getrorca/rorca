@@ -76,7 +76,7 @@ authToken = await getAuthToken(app);
 
   await execute(`DELETE FROM wal_events`);
 
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [WORKSPACE_ID, 'Commit Test', tmpDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, 'Commit Test', tmpDir]);
 
   const authMod = require('../auth');
   const encryptedSecret = authMod.encryptToken(WEBHOOK_SECRET);

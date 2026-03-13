@@ -471,7 +471,7 @@ describe('POST /api/specs/generate with templateId', () => {
     mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 10, outputTokens: 20 } });
 
     // Seed workspace
-    await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-tpl', 'TPL WS', $1)`, [os.tmpdir()]);
+    await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-tpl', 'TPL WS', $1) ON CONFLICT (id) DO NOTHING`, [os.tmpdir()]);
 
     // Create a template
     const tplRes = await request(app).post('/api/templates').set('Authorization', `Bearer ${authToken}`).send({

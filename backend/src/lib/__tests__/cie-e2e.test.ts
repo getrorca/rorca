@@ -72,6 +72,9 @@ const mockDbPrepare = jest.fn().mockReturnValue({
 
 jest.mock('../../db/index', () => ({
   db: { prepare: (...args: unknown[]) => mockDbPrepare(...args) },
+  execute: jest.fn().mockResolvedValue({ rowCount: 1 }),
+  query: jest.fn().mockResolvedValue([]),
+  queryOne: jest.fn().mockResolvedValue(undefined),
 }));
 
 jest.mock('../sse-hub', () => ({
@@ -807,7 +810,7 @@ describe('CIE E2E: .rorca/config.json Schema Validation', () => {
     const result = RorcaConfigSchema.safeParse({});
     expect(result.success).toBe(true);
     if (result.success) {
-      expect(result.data.routing.tokenBudget).toBe(8000);
+      expect(result.data.routing.tokenBudget).toBe(32000);
       expect(result.data.routing.global).toEqual(['CLAUDE.md', 'AGENTS.md']);
       expect(result.data.execution.waveParallelism).toBe(false);
       expect(result.data.execution.storyTimeoutMin).toBe(45);
@@ -835,7 +838,7 @@ describe('CIE E2E: .rorca/config.json Schema Validation', () => {
 
   it('loadRorcaConfig returns defaults for missing file', () => {
     const config = loadRorcaConfig(tmpDir);
-    expect(config.routing.tokenBudget).toBe(8000);
+    expect(config.routing.tokenBudget).toBe(32000);
     expect(config.routing.global).toEqual(['CLAUDE.md', 'AGENTS.md']);
   });
 
@@ -855,7 +858,7 @@ describe('CIE E2E: .rorca/config.json Schema Validation', () => {
 
     // Should not throw, just returns defaults with a console warning
     const config = loadRorcaConfig(tmpDir);
-    expect(config.routing.tokenBudget).toBe(8000);
+    expect(config.routing.tokenBudget).toBe(32000);
   });
 
   it('writeRorcaConfig creates .rorca/ dir structure and invalidates cache', () => {

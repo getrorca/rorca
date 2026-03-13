@@ -75,7 +75,7 @@ process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
 // Seed workspace
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test Workspace', $1)`, [tmpDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test', 'Test Workspace', $1) ON CONFLICT (id) DO NOTHING`, [tmpDir]);
 
   // Create spec files on disk
   const pendingDir = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'pending');
@@ -193,7 +193,7 @@ test('pagination works correctly', async () => {
 test('search across all workspaces when workspaceId is omitted', async () => {
   // Add a second workspace
   const tmpDir2 = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-stories-ws2-'));
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test-2', 'Second Workspace', $1)`, [tmpDir2]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-test-2', 'Second Workspace', $1) ON CONFLICT (id) DO NOTHING`, [tmpDir2]);
 
   const pendingDir2 = path.join(tmpDir2, 'scripts', 'ralph', 'specs', 'pending');
   fs.mkdirSync(pendingDir2, { recursive: true });

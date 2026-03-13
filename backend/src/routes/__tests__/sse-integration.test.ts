@@ -26,7 +26,7 @@ delete process.env.NODE_ENV;
 });
 
 async function createWorkspace(id = 'ws-sse-1') {
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [id, 'SSE Test Workspace', tmpDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [id, 'SSE Test Workspace', tmpDir]);
 }
 
 // ─── Test 1: POST /api/pipeline/runs creates run → triggers broadcastAll ────

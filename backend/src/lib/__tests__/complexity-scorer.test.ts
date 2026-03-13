@@ -422,7 +422,7 @@ describe('complexity-scorer', () => {
   describe('resolveModelId()', () => {
     it('resolves anthropic tier to model IDs', () => {
       expect(resolveModelId('haiku', 'anthropic')).toBe('claude-haiku-4-5-20251001');
-      expect(resolveModelId('sonnet', 'anthropic')).toBe('claude-sonnet-4-5-20250929');
+      expect(resolveModelId('sonnet', 'anthropic')).toBe('claude-sonnet-4-6');
       expect(resolveModelId('opus', 'anthropic')).toBe('claude-opus-4-6');
     });
 
@@ -692,7 +692,7 @@ describe('complexity-scorer', () => {
     it('returns default task cascades when no config', () => {
       const config = loadOrchestrationConfig();
       expect(config.taskCascades.echolocation).toBe('claude-haiku-4-5-20251001');
-      expect(config.taskCascades.coding).toBe('claude-sonnet-4-5-20250929');
+      expect(config.taskCascades.coding).toBe('claude-sonnet-4-6');
       expect(config.taskCascades.documentation).toBe('claude-haiku-4-5-20251001');
     });
 
