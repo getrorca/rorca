@@ -3102,6 +3102,81 @@ server.registerPrompt(
   }
 );
 
+// ─── Story Model Assignment MCP Tool (US-002) ────────────────────────────────
+
+server.registerTool(
+  'rorca_assign_story_models',
+  {
+    description: 'Assign per-story model tiers to a spec based on complexity scoring. Each story is scored (low/medium/high) and assigned the appropriate model (haiku→sonnet→opus for claude/opencode). When dryRun=true the spec JSON is NOT modified — only the breakdown is returned, useful for previewing assignments before committing. Codex agent skips assignment entirely (model is fixed to your ChatGPT subscription).',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID'),
+      specId: z.string().describe('Spec slug (filename without .json, e.g. "rorca-feature-enhancements")'),
+      dryRun: z.boolean().optional().describe('If true, returns breakdown without writing to spec file (default: false)'),
+    },
+  },
+  async ({ workspaceId, specId, dryRun }) => {
+    return wrapToolCall('rorca_assign_story_models', async () => {
+      const body: Record<string, unknown> = { workspaceId };
+      if (dryRun !== undefined) body.dryRun = dryRun;
+      const url = `${RORCA_API}/api/specs/${encodeURIComponent(specId)}/assign-models`;
+      const res = await timedFetch(url, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(body),
+      });
+      if (!res.ok) return httpError('rorca_assign_story_models', res);
+      const data = await res.json() as {
+        storiesAssigned: number;
+        skipped?: boolean;
+        reason?: string;
+        breakdown: Array<{ storyId: string; complexity: string; model: string; reason: string }>;
+      };
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({
+            ok: true,
+            specId,
+            workspaceId,
+            dryRun: dryRun ?? false,
+            storiesAssigned: data.storiesAssigned,
+            skipped: data.skipped ?? false,
+            ...(data.reason !== undefined ? { reason: data.reason } : {}),
+            breakdown: data.breakdown,
+          }, null, 2),
+        }],
+      };
+    });
+  }
+);
+
+server.registerPrompt(
+  'assign_story_models',
+  {
+    title: 'Assign Story Models',
+    description: 'Assign per-story model tiers based on complexity scoring. Usage: /mcp__rorca__assign_story_models <specId> [dryRun]',
+    argsSchema: {
+      specId: z.string().describe('Spec slug (filename without .json)'),
+      dryRun: z.string().optional().describe('Pass "true" to preview assignments without writing to spec file'),
+    },
+  },
+  async ({ specId, dryRun }) => {
+    const isDryRun = dryRun === 'true';
+    const dryRunNote = isDryRun
+      ? ' Use dryRun=true so the spec file is NOT modified — return only the breakdown.'
+      : ' Write the assigned model to each story (dryRun=false).';
+    return {
+      messages: [{
+        role: 'user' as const,
+        content: {
+          type: 'text' as const,
+          text: `Call the rorca_assign_story_models tool with specId="${specId}" and workspaceId="rorcha" and dryRun=${isDryRun}.${dryRunNote} Show the full breakdown table (storyId, complexity, model, reason) and a summary of how many stories were assigned.`,
+        },
+      }],
+    };
+  }
+);
+
 async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
