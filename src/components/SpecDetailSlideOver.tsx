@@ -11,7 +11,7 @@ import {
   X, Clock, CheckCircle2, XCircle, AlertCircle,
   Download, Copy, Check, Play, GitFork,
   Loader2, Plus, Sparkles, Trash2, History, FileSearch, Paperclip,
-  FileText, FileImage, File, ZoomIn,
+  FileText, FileImage, File, ZoomIn, Cpu,
 } from 'lucide-react';
 import type { Attachment } from '../types/attachment';
 import { BASE_URL } from '../lib/apiFetch';
@@ -832,6 +832,96 @@ function SpecDetailContent({
 
 /* ─── Stories Tab Content ──────────────────────────────────────────── */
 
+/** Compact chip showing a story's assigned model (or 'auto' if none). */
+function ModelBadge({ story, specId, workspaceId, onModelChanged }: {
+  story: Story;
+  specId: string;
+  workspaceId: string;
+  onModelChanged: (updated: Story) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const [saving, setSaving] = useState(false);
+  const [models, setModels] = useState<string[]>([]);
+  const containerRef = useRef<HTMLDivElement>(null);
+
+  // Close on outside click or Escape
+  useEffect(() => {
+    if (!open) return;
+    const onKey = (e: KeyboardEvent) => { if (e.key === 'Escape') setOpen(false); };
+    const onClick = (e: MouseEvent) => {
+      if (containerRef.current && !containerRef.current.contains(e.target as Node)) setOpen(false);
+    };
+    document.addEventListener('keydown', onKey);
+    document.addEventListener('mousedown', onClick);
+    return () => { document.removeEventListener('keydown', onKey); document.removeEventListener('mousedown', onClick); };
+  }, [open]);
+
+  // Lazy-load model list when popover opens
+  useEffect(() => {
+    if (!open || models.length > 0) return;
+    apiFetch<{ models: string[] }>('/api/direction/models')
+      .then(d => setModels(d.models ?? []))
+      .catch(() => setModels(['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001']));
+  }, [open, models.length]);
+
+  const patchModel = async (model: string | null) => {
+    setSaving(true);
+    try {
+      const result = await apiFetch<{ ok: boolean; story: Story }>(`/api/specs/${specId}/stories/${story.id}`, {
+        method: 'PUT',
+        body: JSON.stringify({ workspaceId, model: model ?? '' }),
+      });
+      onModelChanged(result.story);
+      setOpen(false);
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const label = story.model ?? 'auto';
+  const isAuto = !story.model;
+
+  return (
+    <div ref={containerRef} className="relative inline-block">
+      <button
+        onClick={(e) => { e.stopPropagation(); setOpen(o => !o); }}
+        className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono border transition-colors ${
+          isAuto
+            ? 'bg-muted/10 text-muted border-border'
+            : 'bg-accent/10 text-accent border-accent/30'
+        }`}
+        title={isAuto ? 'Auto-assigned model — click to override' : `Model: ${story.model}`}
+      >
+        <Cpu size={9} />
+        {label}
+      </button>
+
+      {open && (
+        <div className="absolute left-0 top-full mt-1 z-50 w-64 bg-panel border border-border rounded-md shadow-lg p-2 space-y-2">
+          <p className="text-[10px] text-muted px-1">Model override for this story</p>
+          <select
+            className="w-full text-xs bg-bg border border-border rounded px-2 py-1.5 text-text overflow-y-auto max-h-40"
+            size={Math.min(models.length + 1, 6)}
+            value={story.model ?? ''}
+            onChange={e => patchModel(e.target.value || null)}
+            disabled={saving}
+          >
+            <option value="">auto (let pipeline decide)</option>
+            {models.map(m => <option key={m} value={m}>{m}</option>)}
+          </select>
+          <button
+            onClick={() => patchModel(null)}
+            disabled={saving || isAuto}
+            className="w-full text-xs px-2 py-1 rounded border border-border text-muted hover:text-text disabled:opacity-40 transition-colors"
+          >
+            {saving ? <Loader2 size={10} className="animate-spin mx-auto" /> : 'Clear override'}
+          </button>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onStoryUpdated }: {
   stories: Story[];
   specId: string;
@@ -839,14 +929,41 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
   onToggleExclude?: (storyId: string) => void;
   onStoryUpdated?: (story: Story) => void;
 }) {
+  const toast = useGlobalToast();
   const [editingStoryId, setEditingStoryId] = useState<string | null>(null);
   const [commentCounts, setCommentCounts] = useState<Record<string, number>>({});
   const [commentsOpenFor, setCommentsOpenFor] = useState<string | null>(null);
+  const [assigningModels, setAssigningModels] = useState(false);
 
   useEffect(() => {
     apiFetch<{ counts: Record<string, number> }>(`/api/specs/${specId}/comments/counts`)
       .then(data => setCommentCounts(data.counts)).catch(() => { });
   }, [specId]);
+
+  const handleAutoAssign = async () => {
+    setAssigningModels(true);
+    try {
+      const result = await apiFetch<{ storiesAssigned: number; skipped: boolean; reason?: string }>(
+        `/api/specs/${specId}/assign-models`,
+        { method: 'POST', body: JSON.stringify({ workspaceId }) },
+      );
+      if (result.skipped) {
+        toast.show(result.reason ?? 'Codex does not support per-story model selection', 'warning');
+      } else {
+        toast.show(`${result.storiesAssigned} ${result.storiesAssigned === 1 ? 'story' : 'stories'} assigned optimal models`, 'success');
+        // Refresh stories by re-fetching spec detail — signal parent
+        // Parent will pick it up via onStoryUpdated on individual edits;
+        // for bulk refresh we reload the page data by refetching the spec
+        const fresh = await apiFetch<{ userStories?: Story[]; stories?: Story[] }>(`/api/specs/${specId}?workspaceId=${workspaceId}`).catch(() => null);
+        const freshStories = fresh?.userStories ?? fresh?.stories ?? [];
+        freshStories.forEach(s => onStoryUpdated?.(s));
+      }
+    } catch (err: unknown) {
+      toast.show((err as Error).message ?? 'Failed to assign models', 'error');
+    } finally {
+      setAssigningModels(false);
+    }
+  };
 
   if (stories.length === 0) {
     return <div className="flex items-center justify-center h-full text-muted text-sm">No stories found in this spec</div>;
@@ -857,10 +974,22 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
 
   return (
     <div className="p-4 space-y-2">
-      <span className="text-xs text-muted">
-        {stories.length} {stories.length === 1 ? 'story' : 'stories'}
-        {deferredCount > 0 && <span className="ml-2 text-muted/60">&middot; {deferredCount} deferred</span>}
-      </span>
+      <div className="flex items-center justify-between">
+        <span className="text-xs text-muted">
+          {stories.length} {stories.length === 1 ? 'story' : 'stories'}
+          {deferredCount > 0 && <span className="ml-2 text-muted/60">&middot; {deferredCount} deferred</span>}
+        </span>
+        <button
+          onClick={handleAutoAssign}
+          disabled={assigningModels}
+          className="inline-flex items-center gap-1.5 px-2 py-1 rounded text-xs border border-border text-muted hover:text-text hover:border-text/30 disabled:opacity-50 transition-colors"
+          title="Auto-assign optimal model per story based on complexity"
+        >
+          {assigningModels
+            ? <><Loader2 size={11} className="animate-spin" /> Assigning…</>
+            : <><Cpu size={11} /> Auto-assign All</>}
+        </button>
+      </div>
       {stories.map(story =>
         editingStoryId === story.id ? (
           <InlineStoryEditor key={story.id} story={story} specId={specId} workspaceId={workspaceId}
@@ -868,11 +997,21 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
             onCancel={() => setEditingStoryId(null)} />
         ) : (
           <div key={story.id}>
-            <StoryCard story={story} allStoryIds={allStoryIds} onEdit={() => setEditingStoryId(story.id)}
-              onToggleExclude={onToggleExclude ? () => onToggleExclude(story.id) : undefined}
-              specId={specId} workspaceId={workspaceId}
-              commentCount={commentCounts[story.id] ?? 0}
-              onOpenComments={() => setCommentsOpenFor(commentsOpenFor === story.id ? null : story.id)} />
+            <div className="relative">
+              <StoryCard story={story} allStoryIds={allStoryIds} onEdit={() => setEditingStoryId(story.id)}
+                onToggleExclude={onToggleExclude ? () => onToggleExclude(story.id) : undefined}
+                specId={specId} workspaceId={workspaceId}
+                commentCount={commentCounts[story.id] ?? 0}
+                onOpenComments={() => setCommentsOpenFor(commentsOpenFor === story.id ? null : story.id)} />
+              <div className="absolute top-2 right-10 z-10">
+                <ModelBadge
+                  story={story}
+                  specId={specId}
+                  workspaceId={workspaceId}
+                  onModelChanged={(updated) => onStoryUpdated?.(updated)}
+                />
+              </div>
+            </div>
             {commentsOpenFor === story.id && (
               <StoryComments specId={specId} storyId={story.id} onClose={() => setCommentsOpenFor(null)}
                 onCountChange={(count) => setCommentCounts(prev => { const next = { ...prev }; if (count > 0) next[story.id] = count; else delete next[story.id]; return next; })} />

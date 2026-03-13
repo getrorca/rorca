@@ -78,11 +78,11 @@ function getConfigSync(): RateLimitConfig[] {
 }
 
 /** Invalidate the config cache (e.g. after admin changes limits) */
-export function invalidateRateLimitCache(): void {
+export function invalidateRateLimitCache(): Promise<void> {
   configCache = null;
   configCacheTime = 0;
-  // Trigger async reload
-  loadConfigAsync().catch(() => {});
+  // Trigger async reload and return promise (callers can await for test synchronization)
+  return loadConfigAsync().then(() => {}).catch(() => {});
 }
 
 /**

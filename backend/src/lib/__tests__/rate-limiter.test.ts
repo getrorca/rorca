@@ -5,6 +5,9 @@ import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from '../../routes/__tests__/helpers/auth-helper';
 
+// Server initialization + migrations can take > 30s on first run
+jest.setTimeout(90_000);
+
 let app: Express;
 let query: typeof import('../../db/index').query;
 let execute: typeof import('../../db/index').execute;
@@ -23,10 +26,22 @@ process.env.NODE_ENV = 'test';
   query = dbMod.query;
   execute = dbMod.execute;
 
+  // Re-seed rate_limits defaults (truncated by global teardown; migrations skip re-seed)
+  await execute(
+    `INSERT INTO rate_limits (endpoint_pattern, tier, max_requests, window_seconds) VALUES
+      ('*', 'authenticated', 100, 60),
+      ('*', 'unauthenticated', 20, 60),
+      ('POST /api/specs/generate', 'authenticated', 10, 60),
+      ('POST /api/specs/generate', 'unauthenticated', 3, 60),
+      ('POST /api/pipeline/trigger', 'authenticated', 10, 60),
+      ('POST /api/pipeline/trigger', 'unauthenticated', 3, 60)
+    ON CONFLICT (endpoint_pattern, tier) DO NOTHING`,
+  );
+
   // Reset in-memory windows between tests
   const { resetRateLimitWindows, invalidateRateLimitCache } = require('../rate-limiter');
   resetRateLimitWindows();
-  invalidateRateLimitCache();
+  await invalidateRateLimitCache();
 
   authToken = await getAuthToken(app);
 });
@@ -80,7 +95,7 @@ describe('rate limiter middleware', () => {
       ['*', 'authenticated'],
     );
     const { invalidateRateLimitCache } = require('../rate-limiter');
-    invalidateRateLimitCache();
+    await invalidateRateLimitCache();
 
     // Make 3 requests (should succeed)
     for (let i = 0; i < 3; i++) {
@@ -109,7 +124,7 @@ describe('rate limiter middleware', () => {
       ['*', 'authenticated'],
     );
     const { invalidateRateLimitCache } = require('../rate-limiter');
-    invalidateRateLimitCache();
+    await invalidateRateLimitCache();
 
     // Register a second user
     const res2 = await request(app).post('/api/auth/register').send({
@@ -146,7 +161,7 @@ describe('rate limiter middleware', () => {
       ['*', 'unauthenticated'],
     );
     const { invalidateRateLimitCache } = require('../rate-limiter');
-    invalidateRateLimitCache();
+    await invalidateRateLimitCache();
 
     // Auth endpoints are public — make requests without token
     for (let i = 0; i < 2; i++) {
@@ -171,7 +186,7 @@ describe('rate limiter middleware', () => {
       ['GET /api/workspaces', 'authenticated', 2, 60],
     );
     const { invalidateRateLimitCache } = require('../rate-limiter');
-    invalidateRateLimitCache();
+    await invalidateRateLimitCache();
 
     for (let i = 0; i < 2; i++) {
       const res = await request(app)
@@ -216,7 +231,7 @@ describe('rate limiter middleware', () => {
       ['*', 'authenticated'],
     );
     const { invalidateRateLimitCache } = require('../rate-limiter');
-    invalidateRateLimitCache();
+    await invalidateRateLimitCache();
 
     // Normal endpoint should be rate limited after 1 request
     await request(app)

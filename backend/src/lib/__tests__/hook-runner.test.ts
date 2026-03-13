@@ -40,9 +40,9 @@ process.env.NODE_ENV = 'test';
   const hookRunnerMod = require('../hook-runner');
   runHooks = hookRunnerMod.runHooks;
 
-  // Seed workspace
+  // Seed workspace (ON CONFLICT to handle repeated beforeEach in same test process)
   await execute(
-    "INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)",
+    "INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path",
     ['ws-hr', 'Hook Runner WS', tmpDir],
   );
 });
