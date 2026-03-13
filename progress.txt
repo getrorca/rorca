@@ -1,9 +1,6 @@
 # Run State Summary
 
 Spec: rorca-story-model-assignment
-Run ID: 105
-Started: 2026-03-13T18:42:07.504Z
-Last Updated: 2026-03-13T18:44:00.291Z
-
-## Completed Stories (1)
-- US-003: Per-story model badge and Auto-assign All UI in SpecDetailSlideOver Stories tab — DONE (claude, claude-sonnet-4-6, 218s)
+Run ID: 102
+Started: 2026-03-13T18:44:17.661Z
+Last Updated: 2026-03-13T18:44:17.661Z
