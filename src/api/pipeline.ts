@@ -199,6 +199,33 @@ export function fetchStoryOutput(
   });
 }
 
+// ─── DLQ ──────────────────────────────────────────────────────────────────────
+
+export interface DlqEntry {
+  jobId: string;
+  lastError: string | null;
+  attempts: number;
+  failedAt: string;
+  originalPayload: unknown;
+}
+
+export function getRunDlq(
+  runId: number,
+  opts?: ApiOptions,
+): Promise<DlqEntry> {
+  return apiFetch(`/api/pipeline/runs/${runId}/dlq`, { signal: opts?.signal });
+}
+
+export function retryRunFromDlq(
+  runId: number,
+  opts?: ApiOptions,
+): Promise<{ ok: true; runId: number; originalRunId: number; jobId: string }> {
+  return apiFetch(`/api/pipeline/runs/${runId}/dlq/retry`, {
+    method: 'POST',
+    signal: opts?.signal,
+  });
+}
+
 // ─── Token tracking ───────────────────────────────────────────────────────────
 
 export function reportStoryTokens(
