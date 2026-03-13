@@ -2,9 +2,10 @@
 
 Spec: rorca-pg-boss-job-queue
 Run ID: 90
-Started: 2026-03-13T05:54:41.070Z
-Last Updated: 2026-03-13T06:08:05.184Z
+Started: 2026-03-13T06:25:01.174Z
+Last Updated: 2026-03-13T06:35:38.824Z
 
-## Completed Stories (2)
+## Completed Stories (3)
 - PG-017: Scheduler integration test: exactly-once cron with multiple worker instances — DONE (claude, claude-sonnet-4-6, 31s)
 - PG-018: Dead letter queue test: exhaust retries, verify DLQ entry, retry from DLQ — DONE (claude, claude-sonnet-4-6, 700s)
+- PG-019: Zero-downtime deploy test: rolling worker restart with no job loss — DONE (claude, claude-sonnet-4-6, 1632s)
