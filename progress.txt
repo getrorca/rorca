@@ -2,10 +2,10 @@
 
 Spec: rorca-worker-production-ready
 Run ID: 100
-Started: 2026-03-13T15:13:06.212Z
-Last Updated: 2026-03-13T15:41:26.521Z
+Started: 2026-03-13T15:43:10.147Z
+Last Updated: 2026-03-13T15:46:52.677Z
 
-## Completed Stories (9)
+## Completed Stories (10)
 - WR-001: Fix child process environment inheritance — DONE (claude, claude-sonnet-4-6, 70s)
 - WR-002: Create all queues in both server and worker, including pipeline:cron — DONE (claude, claude-sonnet-4-6, 119s)
 - WR-003: Set proper expireInSeconds and disable pg-boss retries for pipeline jobs — DONE (claude, claude-sonnet-4-6, 259s)
@@ -15,3 +15,4 @@ Last Updated: 2026-03-13T15:41:26.521Z
 - WR-007: Graceful shutdown — kill child processes and clean up heartbeat — DONE (claude, claude-sonnet-4-6, 83s)
 - WR-008: Worker auto-restart supervisor with exponential backoff — DONE (claude, claude-sonnet-4-6, 59s)
 - WR-009: Worker health self-check and enhanced health endpoint — DONE (claude, claude-sonnet-4-6, 664s)
+- WR-010: Fix pause endpoint ESRCH error and cancel endpoint dead-PID fallback — DONE (claude, claude-sonnet-4-6, 303s)
