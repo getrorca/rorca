@@ -22,6 +22,7 @@ import { generateScaffoldPreview, writeScaffoldFiles } from '../lib/workspace-sc
 import type { ScaffoldFile } from '../lib/workspace-scaffold';
 import { logger } from '../lib/logger';
 import { requirePlan } from '../lib/require-plan';
+import { inferDomain } from '../lib/domain-inference';
 
 const router = Router();
 
@@ -1020,6 +1021,37 @@ router.post('/:id/scan-direction', async (req, res, next) => {
       return;
     }
 
+    // Infer domain from codebase before running direction scan
+    let inferredDomain: string | null = null;
+    try {
+      inferredDomain = await inferDomain(workspace.path);
+      if (inferredDomain) {
+        // Update workspaces.domains to include inferred domain (deduplicated)
+        const existingDomains: string[] = JSON.parse(workspace.domains ?? '[]');
+        if (!existingDomains.includes(inferredDomain)) {
+          const updatedDomains = [...existingDomains, inferredDomain];
+          await execute('UPDATE workspaces SET domains = $1 WHERE id = $2', [JSON.stringify(updatedDomains), req.params.id]);
+        }
+        // Associate existing L2 direction layer for this domain with the workspace (upsert)
+        const existingL2 = await queryOne<{ id: number; content_yaml: string }>(
+          `SELECT id, content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND workspace_id IS NULL LIMIT 1`,
+          [inferredDomain]
+        );
+        if (existingL2) {
+          await execute(
+            `INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, updated_at)
+             VALUES (2, $1, $2, $3, NOW())
+             ON CONFLICT (layer, COALESCE(workspace_id,''), COALESCE(domain,''), COALESCE(team_id,''))
+             DO UPDATE SET content_yaml = EXCLUDED.content_yaml, updated_at = NOW()`,
+            [req.params.id, inferredDomain, existingL2.content_yaml]
+          );
+        }
+      }
+    } catch (domainErr: any) {
+      logger.warn('[scan-direction] domain inference failed:', domainErr.message);
+      // Non-fatal — continue with scan
+    }
+
     try {
       // 1. Scan key files from the workspace
       const scannedFiles: Record<string, string> = {};
@@ -1138,6 +1170,7 @@ Infer the tech stack, project purpose, coding conventions, and domain from the s
         l3Valid: l3Validation.valid,
         l3Errors: l3Validation.errors,
         usage: result.usage,
+        inferredDomain,
       });
     } catch (err: any) {
       logger.error('[scan-direction] error:', err.message);
