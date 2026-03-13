@@ -819,13 +819,71 @@ let reconcileIntervalHandle: ReturnType<typeof setInterval> | undefined;
 async function shutdown(signal: string): Promise<void> {
   if (stopping) return;
   stopping = true;
+
   if (reconcileIntervalHandle !== undefined) {
     clearInterval(reconcileIntervalHandle);
     reconcileIntervalHandle = undefined;
   }
-  logger.info(`[worker] received ${signal} — stopping pg-boss (waiting up to 30s for in-flight jobs)`);
+
+  logger.info(`[worker] received ${signal} — starting graceful shutdown`);
+
+  // 1. SIGTERM all active child processes
+  const activeRunIds = Array.from(activeProcesses.keys());
+  if (activeRunIds.length > 0) {
+    logger.info({ count: activeRunIds.length, runIds: activeRunIds }, '[worker] shutdown — sending SIGTERM to active child processes');
+    for (const [, child] of activeProcesses) {
+      try { child.kill('SIGTERM'); } catch { /* best-effort */ }
+    }
+  }
+
+  // 2. Wait up to 15s for child processes to exit (poll every 500ms)
+  const DRAIN_TIMEOUT_MS = 15_000;
+  const DRAIN_POLL_MS = 500;
+  const drainDeadline = Date.now() + DRAIN_TIMEOUT_MS;
+
+  while (activeProcesses.size > 0 && Date.now() < drainDeadline) {
+    await new Promise<void>((resolve) => setTimeout(resolve, DRAIN_POLL_MS));
+  }
+
+  // 3. SIGKILL any remaining child processes that did not exit in time
+  if (activeProcesses.size > 0) {
+    const remaining = Array.from(activeProcesses.keys());
+    logger.warn({ remaining }, '[worker] shutdown — children did not exit in 15s, sending SIGKILL');
+    for (const [, child] of activeProcesses) {
+      try { child.kill('SIGKILL'); } catch { /* best-effort */ }
+    }
+    // Give SIGKILL a moment to land before we proceed
+    await new Promise<void>((resolve) => setTimeout(resolve, 200));
+  }
+
+  // 4. Mark any still-running pipeline_runs as failed
+  const inflightRunIds = Array.from(activeProcesses.keys());
+  if (inflightRunIds.length > 0) {
+    logger.warn({ runIds: inflightRunIds }, '[worker] shutdown — marking in-flight runs as failed');
+    for (const runId of inflightRunIds) {
+      try {
+        await execute(
+          `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1 AND status = 'running'`,
+          [runId],
+        );
+      } catch (err) {
+        logger.warn({ err, runId }, '[worker] shutdown — failed to update pipeline_run status');
+      }
+    }
+  }
+
+  // 5. Delete this worker's heartbeat row so the health endpoint shows no stale data
   try {
-    await getBoss().stop({ timeout: 30_000 });
+    await execute('DELETE FROM worker_heartbeat WHERE worker_id = $1', [WORKER_ID]);
+    logger.info('[worker] shutdown — heartbeat row deleted');
+  } catch (err) {
+    logger.warn({ err }, '[worker] shutdown — failed to delete heartbeat row');
+  }
+
+  // 6. Stop pg-boss (drains any remaining queued work up to 15s)
+  logger.info('[worker] shutdown — stopping pg-boss (timeout: 15s)');
+  try {
+    await getBoss().stop({ timeout: 15_000 });
     logger.info('[worker] pg-boss stopped cleanly — exiting');
     process.exit(0);
   } catch (err) {
@@ -836,6 +894,14 @@ async function shutdown(signal: string): Promise<void> {
 
 process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
 process.on('SIGINT', () => { void shutdown('SIGINT'); });
+process.on('uncaughtException', (err) => {
+  logger.error({ err }, '[worker] uncaughtException — triggering shutdown');
+  void shutdown('uncaughtException');
+});
+process.on('unhandledRejection', (reason) => {
+  logger.error({ reason }, '[worker] unhandledRejection — triggering shutdown');
+  void shutdown('unhandledRejection');
+});
 
 // ── Startup ──────────────────────────────────────────────────────────────
 
@@ -880,14 +946,14 @@ async function start(): Promise<void> {
 
   async function pollDlq(): Promise<void> {
     try {
-      type DlqRow = { id: string; name: string; output: unknown; retrycount: number; archivedon: string; data: Record<string, unknown> };
+      type DlqRow = { id: string; name: string; output: unknown; retry_count: number; archived_on: string; data: Record<string, unknown> };
       const rows = await query<DlqRow>(
-        `SELECT id, name, output, retrycount, archivedon, data
+        `SELECT id, name, output, retry_count, archived_on, data
          FROM pgboss.archive
          WHERE name IN ('pipeline:run', 'pipeline:retry')
            AND state = 'failed'
-           AND archivedon > NOW() - INTERVAL '1 day'
-         ORDER BY archivedon DESC`,
+           AND archived_on > NOW() - INTERVAL '1 day'
+         ORDER BY archived_on DESC`,
       ).catch(() => [] as DlqRow[]);
 
       for (const row of rows) {
@@ -914,7 +980,7 @@ async function start(): Promise<void> {
           jobId: row.id,
           jobName: row.name,
           lastError,
-          attempts: row.retrycount,
+          attempts: (row.retry_count ?? 0) + 1,
         });
       }
     } catch (err) {
