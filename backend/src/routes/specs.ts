@@ -901,42 +901,13 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // 5. Fetch L3: project brief
     const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
 
-    // 5b. Fetch auto-hydrated context from workspace_context + check staleness
+    // 5b. Fetch auto-hydrated schema context from workspace_context
     const ctx = await queryOne(
-      `SELECT schema_snapshot, git_memory, last_ingested_commit_hash, git_memory_hydrated_at FROM workspace_context WHERE workspace_id = $1`,
+      `SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`,
       [workspaceId]
-    ) as { schema_snapshot: string | null; git_memory: string | null; last_ingested_commit_hash: string | null; git_memory_hydrated_at: string | null } | undefined;
+    ) as { schema_snapshot: string | null } | undefined;
 
     const schemaSnapshot = ctx?.schema_snapshot || undefined;
-    const gitMemory = ctx?.git_memory || undefined;
-
-    // 5c. Background git hydration if workspace memory is stale
-    let hydrationTriggered = false;
-    try {
-      const workspacePath = (workspace as { path: string }).path;
-      let currentHead: string | null = null;
-      try {
-        currentHead = execSync('git rev-parse HEAD', { cwd: workspacePath, timeout: 5000, stdio: 'pipe' })
-          .toString().trim();
-      } catch {
-        // Not a git repo or git unavailable — skip staleness check
-      }
-
-      if (currentHead !== null) {
-        const neverHydrated = ctx?.last_ingested_commit_hash === null || ctx?.last_ingested_commit_hash === undefined;
-        const hashMismatch = ctx?.last_ingested_commit_hash !== currentHead;
-        const sevenDaysAgo = new Date(Date.now() - 7 * 24 * 60 * 60 * 1000);
-        const hydratedAt = ctx?.git_memory_hydrated_at ? new Date(ctx.git_memory_hydrated_at) : null;
-        const hydrationStale = hydratedAt === null || hydratedAt < sevenDaysAgo;
-
-        if (neverHydrated || (hashMismatch && hydrationStale)) {
-          hydrationTriggered = true;
-          hydrateGitMemory(workspaceId); // fire-and-forget — intentionally no await
-        }
-      }
-    } catch {
-      // Staleness check must never block spec generation
-    }
 
     // 6. Synthesize direction stack
     const synthResult = synthesizeWithMeta({
@@ -944,7 +915,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       l2: l2Row?.content_yaml,
       l3: l3Row?.content_yaml,
       schemaSnapshot,
-      gitMemory,
       specBrief: brief,
       storyAnnotations,
     });
@@ -1049,7 +1019,6 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       agentsMd: !!catalogs.agentsMd,
       template: templateId || null,
       schemaSnapshot: synthResult.meta.schema,
-      gitMemory: synthResult.meta.memory,
       estimatedTokens,
       modelContextWindow,
       ...(retrievalMeta ? {
