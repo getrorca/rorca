@@ -1,28 +1,18 @@
 {
-  "specId": "Rorca Context Usage Visibility — Spec Generation & Run View",
-  "runId": 70,
-  "startedAt": "2026-03-12T20:40:16.346Z",
-  "lastUpdatedAt": "2026-03-13T19:03:03.655Z",
+  "specId": "rorca-auto-merge",
+  "runId": 107,
+  "startedAt": "2026-03-13T20:55:03.668Z",
+  "lastUpdatedAt": "2026-03-13T20:58:30.466Z",
   "completedStories": [
     {
-      "storyId": "CU-007",
-      "title": "End-to-end verification: context visibility in spec generation and run view",
+      "storyId": "US-001",
+      "title": "Add autoMerge column to pipeline_runs and wire trigger payload",
       "status": "passed",
-      "startedAt": "2026-03-12T20:45:14.349Z",
-      "finishedAt": "2026-03-12T20:49:56.694Z",
+      "startedAt": "2026-03-13T20:55:05.368Z",
+      "finishedAt": "2026-03-13T20:58:30.465Z",
       "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 282345
-    },
-    {
-      "storyId": "US-002",
-      "title": "Show ContextSummaryCard in Context tab for enriched specs",
-      "status": "passed",
-      "startedAt": "2026-03-13T18:56:26.273Z",
-      "finishedAt": "2026-03-13T19:03:03.655Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 397382
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 205097
     }
   ],
   "failedStories": [],

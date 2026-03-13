@@ -1,10 +1,9 @@
 # Run State Summary
 
-Spec: Rorca Context Usage Visibility — Spec Generation & Run View
-Run ID: 70
-Started: 2026-03-12T20:40:16.346Z
-Last Updated: 2026-03-13T19:03:03.655Z
+Spec: rorca-auto-merge
+Run ID: 107
+Started: 2026-03-13T20:55:03.668Z
+Last Updated: 2026-03-13T20:58:30.466Z
 
-## Completed Stories (2)
-- CU-007: End-to-end verification: context visibility in spec generation and run view — DONE (claude, claude-sonnet-4-6, 282s)
-- US-002: Show ContextSummaryCard in Context tab for enriched specs — DONE (claude, claude-sonnet-4-6, 397s)
+## Completed Stories (1)
+- US-001: Add autoMerge column to pipeline_runs and wire trigger payload — DONE (claude, claude-haiku-4-5-20251001, 205s)
