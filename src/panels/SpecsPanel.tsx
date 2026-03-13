@@ -2079,7 +2079,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   const [skillsCount, setSkillsCount] = useState<number | null>(null);
 
   // Context health checklist
-  interface ContextHealth { l3Present: boolean; gitMemoryCount: number; schemaPresent: boolean; claudeMdPresent: boolean; skillsCount: number; }
+  interface ContextHealth { l3Present: boolean; gitMemoryCount: number; schemaPresent: boolean; claudeMdPresent: boolean; skillsCount: number; contextScore: number; }
   const [contextHealth, setContextHealth] = useState<ContextHealth | null>(null);
   const [contextHealthLoading, setContextHealthLoading] = useState(false);
   const [contextHealthOpen, setContextHealthOpen] = useState(false);
@@ -2672,6 +2672,57 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
             <ChevronDown size={12} className={`transition-transform ${contextHealthOpen ? 'rotate-180' : ''}`} />
           </button>
 
+          {/* Circular score indicator — shown when expanded and data loaded */}
+          {contextHealthOpen && contextHealth && !contextHealthLoading && (() => {
+            const score = contextHealth.contextScore;
+            const radius = 28;
+            const circumference = 2 * Math.PI * radius;
+            const strokeColor = score >= 70 ? '#10b981' : score >= 40 ? '#f59e0b' : '#ef4444';
+            return (
+              <div className="border-t border-border flex flex-col items-center py-3 gap-1">
+                <svg width="80" height="80" viewBox="0 0 80 80">
+                  {/* Track */}
+                  <circle
+                    cx="40" cy="40" r={radius}
+                    fill="none"
+                    stroke="var(--color-border, #e5e7eb)"
+                    strokeWidth="6"
+                  />
+                  {/* Progress arc */}
+                  <circle
+                    cx="40" cy="40" r={radius}
+                    fill="none"
+                    stroke={strokeColor}
+                    strokeWidth="6"
+                    strokeLinecap="round"
+                    strokeDasharray={circumference}
+                    strokeDashoffset={circumference - (score / 100) * circumference}
+                    transform="rotate(-90 40 40)"
+                    style={{ transition: 'stroke-dashoffset 600ms ease-out, stroke 300ms ease' }}
+                  />
+                  {/* Score number */}
+                  <text
+                    x="40" y="37"
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    fontSize="15"
+                    fontWeight="600"
+                    fill={strokeColor}
+                  >{score}</text>
+                  {/* /100 label */}
+                  <text
+                    x="40" y="52"
+                    textAnchor="middle"
+                    dominantBaseline="middle"
+                    fontSize="8"
+                    fill="var(--color-muted, #6b7280)"
+                  >/ 100</text>
+                </svg>
+                <span className="text-[10px] text-muted">Context Score</span>
+              </div>
+            );
+          })()}
+
           {/* Expanded checklist rows */}
           {contextHealthOpen && (
             <div className="border-t border-border divide-y divide-border/50">
@@ -2701,22 +2752,18 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                   </div>
 
                   {/* Git memory */}
-                  <div className="flex items-center gap-2 px-3 py-2">
+                  <div
+                    className={`flex items-center gap-2 px-3 py-2 ${contextHealth.gitMemoryCount === 0 && !hydratingGit ? 'cursor-pointer hover:bg-accent/5 transition-colors' : ''}`}
+                    onClick={contextHealth.gitMemoryCount === 0 && !hydratingGit ? handleHydrateGit : undefined}
+                  >
                     {contextHealth.gitMemoryCount > 0
                       ? <CheckCircle2 size={13} className="text-emerald-500 shrink-0" />
                       : <AlertTriangle size={13} className="text-amber-500 shrink-0" />}
-                    <span className="text-xs text-text flex-1">
+                    <span className="text-xs text-text flex-1 flex items-center gap-1">
                       {contextHealth.gitMemoryCount > 0
                         ? `Git memory (${contextHealth.gitMemoryCount} commits)`
-                        : 'No git memory'}
+                        : <>No git memory &mdash; click to hydrate{hydratingGit && <Loader2 size={10} className="animate-spin ml-1" />}</>}
                     </span>
-                    {contextHealth.gitMemoryCount === 0 && (
-                      <button type="button" onClick={handleHydrateGit} disabled={hydratingGit}
-                        className="text-[10px] text-accent hover:text-accent-hover disabled:opacity-50 transition-colors shrink-0 flex items-center gap-1">
-                        {hydratingGit && <Loader2 size={10} className="animate-spin" />}
-                        {hydratingGit ? 'Hydrating...' : 'Hydrate \u2192'}
-                      </button>
-                    )}
                   </div>
 
                   {/* Schema snapshot */}
