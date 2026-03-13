@@ -678,13 +678,151 @@ async function recoverStaleJobs(): Promise<void> {
   logger.info({ recovered: staleJobs.length }, '[worker] recoverStaleJobs — recovery complete');
 }
 
+// ── State reconciliation ─────────────────────────────────────────────────
+// Detects and repairs mismatches between pipeline_runs and pgboss.job.
+//
+// Case A: pipeline_runs.status IN ('running', 'queued') but no matching
+//   pgboss.job in state ('created', 'active', 'retry'). The job is gone
+//   (completed, failed, or manually deleted) but the run row is stuck.
+//   Fix: mark the run 'failed', emit WAL.
+//
+// Case B: pgboss.job state='active' for pipeline:run/pipeline:retry but
+//   pipeline_runs.status is NOT 'running'. The run row was already resolved
+//   (e.g. manually via SQL) but the job is still consuming a worker slot.
+//   Fix: fail the pgboss job so the slot is freed.
+//
+// Runs at startup (after recoverStaleJobs) and every 60s.
+
+const RECONCILE_INTERVAL_MS = 60_000;
+
+async function reconcileState(): Promise<void> {
+  logger.info('[worker] reconcileState — starting check');
+
+  // ── Case A: pipeline_runs stuck in running/queued with no live pgboss job ──
+
+  type StuckRunRow = {
+    id: number;
+    workspace_id: number | string;
+  };
+
+  let stuckRuns: StuckRunRow[];
+  try {
+    stuckRuns = await query<StuckRunRow>(
+      `SELECT pr.id, pr.workspace_id
+       FROM pipeline_runs pr
+       WHERE pr.status IN ('running', 'queued')
+         AND NOT EXISTS (
+           SELECT 1 FROM pgboss.job j
+           WHERE j.name IN ('pipeline:run', 'pipeline:retry')
+             AND j.state IN ('created', 'active', 'retry')
+             AND (j.data->>'runId')::int = pr.id
+         )`,
+    );
+  } catch (err) {
+    logger.warn({ err }, '[worker] reconcileState — Case A query failed, skipping');
+    stuckRuns = [];
+  }
+
+  for (const run of stuckRuns) {
+    logger.warn(
+      { runId: run.id, currentStatus: 'running/queued' },
+      '[worker] reconcileState — Case A: pipeline_run has no live pgboss job, marking failed',
+    );
+
+    try {
+      await execute(
+        `UPDATE pipeline_runs
+         SET status = 'failed', finished_at = NOW()
+         WHERE id = $1 AND status IN ('running', 'queued')`,
+        [run.id],
+      );
+
+      await emitWalEvent('run_finished', run.workspace_id, {
+        run_id: run.id,
+        status: 'failed',
+        reason: 'state_reconciliation',
+        reconciled_at: new Date().toISOString(),
+      });
+
+      logger.warn(
+        { runId: run.id, workspaceId: run.workspace_id },
+        '[worker] reconcileState — Case A: run marked failed, WAL emitted',
+      );
+    } catch (err) {
+      logger.warn({ err, runId: run.id }, '[worker] reconcileState — Case A: failed to update run');
+    }
+  }
+
+  // ── Case B: pgboss.job active but pipeline_run already resolved ──
+
+  type OrphanJobRow = {
+    id: string;
+    name: string;
+    run_id: number | null;
+  };
+
+  let orphanJobs: OrphanJobRow[];
+  try {
+    orphanJobs = await query<OrphanJobRow>(
+      `SELECT j.id, j.name, (j.data->>'runId')::int AS run_id
+       FROM pgboss.job j
+       WHERE j.name IN ('pipeline:run', 'pipeline:retry')
+         AND j.state = 'active'
+         AND (j.data->>'runId') IS NOT NULL
+         AND NOT EXISTS (
+           SELECT 1 FROM pipeline_runs pr
+           WHERE pr.id = (j.data->>'runId')::int
+             AND pr.status = 'running'
+         )`,
+    );
+  } catch (err) {
+    logger.warn({ err }, '[worker] reconcileState — Case B query failed, skipping');
+    orphanJobs = [];
+  }
+
+  for (const job of orphanJobs) {
+    logger.warn(
+      { jobId: job.id, jobName: job.name, runId: job.run_id },
+      '[worker] reconcileState — Case B: active pgboss job has no running pipeline_run, failing job',
+    );
+
+    try {
+      await execute(
+        `UPDATE pgboss.job
+         SET state = 'failed', completedon = NOW()
+         WHERE id = $1 AND state = 'active'`,
+        [job.id],
+      );
+
+      logger.warn(
+        { jobId: job.id, jobName: job.name, runId: job.run_id },
+        '[worker] reconcileState — Case B: pgboss job failed to free slot',
+      );
+    } catch (err) {
+      logger.warn({ err, jobId: job.id }, '[worker] reconcileState — Case B: failed to update pgboss.job');
+    }
+  }
+
+  const totalFixed = stuckRuns.length + orphanJobs.length;
+  if (totalFixed > 0) {
+    logger.warn({ caseA: stuckRuns.length, caseB: orphanJobs.length }, '[worker] reconcileState — mismatches resolved');
+  } else {
+    logger.info('[worker] reconcileState — no mismatches found');
+  }
+}
+
 // ── Graceful shutdown ────────────────────────────────────────────────────
 
 let stopping = false;
+let reconcileIntervalHandle: ReturnType<typeof setInterval> | undefined;
 
 async function shutdown(signal: string): Promise<void> {
   if (stopping) return;
   stopping = true;
+  if (reconcileIntervalHandle !== undefined) {
+    clearInterval(reconcileIntervalHandle);
+    reconcileIntervalHandle = undefined;
+  }
   logger.info(`[worker] received ${signal} — stopping pg-boss (waiting up to 30s for in-flight jobs)`);
   try {
     await getBoss().stop({ timeout: 30_000 });
@@ -722,6 +860,11 @@ async function start(): Promise<void> {
   // Must run after initBoss() (pg-boss schema exists) but before boss.work()
   // (so freed slots are available when handlers start polling).
   await recoverStaleJobs();
+
+  // 3b. Reconcile state between pipeline_runs and pgboss.job.
+  // Runs once at startup, then every 60s during normal operation.
+  await reconcileState();
+  reconcileIntervalHandle = setInterval(() => { void reconcileState(); }, RECONCILE_INTERVAL_MS);
 
   // 4. Register job queue handlers.
   // Queues are already created by ensureQueues() inside initBoss() — just register handlers.
