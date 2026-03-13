@@ -1344,8 +1344,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     };
 
     await getBoss().send('pipeline:run', jobPayload, {
-      retryLimit: 3,
-      retryDelay: 10,
+      retryLimit: 0,
+      expireInSeconds: 7200, // 2 hours — pipeline runs can take 30–60 min; never expire mid-run
     });
 
     logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
@@ -2824,7 +2824,10 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     });
 
     // 13. Enqueue via pg-boss (let pg-boss generate a UUID job ID).
-    await getBoss().send('pipeline:retry', jobPayload);
+    await getBoss().send('pipeline:retry', jobPayload, {
+      retryLimit: 0,
+      expireInSeconds: 7200, // 2 hours — retry runs can take as long as fresh runs
+    });
 
     logger.info(`[Pipeline] Enqueued pipeline:retry job for newRunId=${newRunId} (originalRunId=${originalRunId})`);
 
@@ -3166,7 +3169,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
 
       if (refreshed && (refreshed.status === 'running' || refreshed.status === 'paused')) {
         // Worker picked it up — delegate to the running path
-        await getBoss().send('pipeline:cancel', { runId });
+        await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
         res.json({ ok: true, runId, status: 'cancelling' });
         return;
       }
@@ -3195,7 +3198,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     // ── Running / paused path ─────────────────────────────────────────────
     // Deliver cancel job to the worker. The worker owns SIGTERM/SIGKILL sequencing,
     // DB status update, and WAL event emission. We return 200 immediately.
-    await getBoss().send('pipeline:cancel', { runId });
+    await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
 
     res.json({ ok: true, runId, status: 'cancelling' });
   } catch (error: unknown) {
@@ -4838,7 +4841,10 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       envOverrides: {},
     };
 
-    await getBoss().send('pipeline:run', jobPayload);
+    await getBoss().send('pipeline:run', jobPayload, {
+      retryLimit: 0,
+      expireInSeconds: 7200, // 2 hours — DLQ-retried runs can take as long as fresh runs
+    });
 
     // Emit WAL event
     await execute(
