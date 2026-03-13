@@ -10645,12 +10645,18 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
  * /api/specs/{id}/assign-models:
  *   post:
  *     summary: Assign per-story model tiers based on complexity scoring
+ *     description: >
+ *       Scores each story via the complexity scorer and assigns a model tier
+ *       (haiku/sonnet/opus for claude/opencode, skipped for codex).
+ *       When dryRun=true the spec JSON is NOT modified — only the breakdown is returned.
+ *       When dryRun=false (default) each story.model field is written to the spec file.
  *     tags: [Specs]
  *     parameters:
  *       - in: path
  *         name: id
  *         required: true
  *         schema: { type: string }
+ *         description: Spec slug (filename without .json)
  *     requestBody:
  *       required: true
  *       content:
@@ -10659,11 +10665,41 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
  *             type: object
  *             required: [workspaceId]
  *             properties:
- *               workspaceId: { type: string }
- *               dryRun: { type: boolean }
+ *               workspaceId:
+ *                 type: string
+ *                 description: Rorca workspace ID
+ *               dryRun:
+ *                 type: boolean
+ *                 default: false
+ *                 description: If true, returns breakdown without writing to spec file
  *     responses:
  *       200:
- *         description: Model assignments with breakdown
+ *         description: Model assignments with per-story breakdown
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 storiesAssigned:
+ *                   type: integer
+ *                   description: Number of stories assigned a model (0 when skipped)
+ *                 skipped:
+ *                   type: boolean
+ *                   description: True when model assignment is not applicable (e.g. codex agent)
+ *                 reason:
+ *                   type: string
+ *                   description: Explanation when skipped=true
+ *                 breakdown:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       storyId: { type: string }
+ *                       complexity: { type: string, enum: [low, medium, high] }
+ *                       model: { type: string, description: "Resolved model ID (e.g. claude-haiku-4-5-20251001)" }
+ *                       reason: { type: string, description: "Signals that drove the complexity score" }
+ *       404:
+ *         description: Workspace or spec not found
  */
 router.post('/:id/assign-models', async (req: Request, res: Response) => {
   try {

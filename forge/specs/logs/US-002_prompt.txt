@@ -1370,104 +1370,7 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
 
 Follow this workflow for implementation:
-## Agent Role: Database
-
-
-## Skill: logging-fundamentals (relevance: 8)
----
-name: logging-fundamentals
-description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers, SREs, DevOps engineers
-  category: observability
----
-
-# Logging Fundamentals
-
-Establish proper logging practices including log levels, structured logging, context propagation, and comprehensive logging strategies for applications, services, and infrastructure.
-
-## When to use me
-
-Use this skill when:
-- Setting up logging for new applications or services
-- Reviewing existing logging implementations
-- Establishing logging standards for teams or projects
-- Debugging issues with incomplete or poor logging
-- Implementing structured logging for better observability
-- Configuring log levels and verbosity for different environments
-- Ensuring logs contain sufficient context for troubleshooting
-
-## What I do
-
-### 1. Log Level Management
-- **Define appropriate log levels** (DEBUG, INFO, WARN, ERROR, FATAL)
-- **Configure level filtering** per environment (development, staging, production)
-- **Implement dynamic level adjustment** without application restarts
-- **Establish level usage guidelines** for different types of information
-
-### 2. Structured Logging Implementation
-- **Design log schema** with consistent field naming and types
-- **Implement structured formats** (JSON, key-value pairs, structured text)
-- **Include mandatory context fields** (timestamp, service, trace_id, user_id, etc.)
-- **Handle nested structures and arrays** appropriately in logs
-
-### 3. Context Propagation
-- **Implement correlation IDs** for request tracing across services
-- **Propagate context through async operations** (queues, background jobs)
-- **Maintain user/session context** throughout request lifecycle
-- **Include business context** (order_id, transaction_id, etc.) in logs
-
-### 4. Log Content Best Practices
-- **Include sufficient context** for debugging without external systems
-- **Balance detail with noise** - log enough but not too much
-- **Use consistent message formats** across the codebase
-- **Log before and after significant operations**
-- **Include error details** (stack traces, error codes, recovery suggestions)
-- **Avoid logging secrets, passwords, or sensitive data**
-
-## Logging Principles
-
-### The 5 Ws of Logging
-1. **WHO** - Which user/service/process generated the log?
-2. **WHAT** - What action/event is being logged?
-3. **WHEN** - Precise timestamp with timezone information
-4. **WHERE** - Which component/function/file generated the log?
-5. **WHY** - What is the significance/severity of the logged event?
-
-### Structured Logging Fields
-```json
-{
-  "timestamp": "2026-02-26T18:00:00Z",
-  "level": "INFO",
-  "service": "spec-generator",
-  "component": "chatComplete",
-  "trace_id": "gen-abc123",
-  "message": "LLM call completed",
-  "duration_ms": 5123,
-  "context": {
-    "model": "claude-sonnet-4-5-20250929",
-    "input_tokens": 12000,
-    "output_tokens": 4500
-  }
-}
-```
-
-### Log Level Guidelines
-- **DEBUG**: Detailed information for debugging, typically disabled in production
-- **INFO**: Routine information about normal operation
-- **WARN**: Warning conditions that might require attention but don't indicate failure
-- **ERROR**: Error conditions that indicate failure of a specific operation
-- **FATAL**: Critical errors that cause application termination
-
-## Notes
-
-- **Structured logging is essential** for modern log analysis and observability
-- **Context is more important than message content** - ensure logs can be correlated
-- **Log levels should reflect operational importance**, not developer convenience
-- **Consider log volume** - too many logs can overwhelm systems and teams
-- **Balance human readability with machine parsability** in log formats
+## Agent Role: Backend Routes
 
 ---
 name: rorca
@@ -1620,11 +1523,10 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-002):
-Implement `hydrateGitMemory(workspaceId: string): Promise<void>` in `backend/src/lib/auto-hydrate.ts`. This function calls the existing `gitReduceStep()` to produce YAML, then calls `parseGitReduceYaml()` from US-001 to get individual entries. For each entry, generate a pgvector embedding via the existing embedding pipeline, check cosine similarity against existing memories for the workspace (threshold 0.92 — skip if duplicate), and insert new entries into the `memories` table with `source='git_hydration'` and the workspace's `workspace_id`. Track progress using the existing `workspace_context.last_ingested_commit_hash` column to support delta hydration later. The function must be fire-and-forget safe (catch all errors, never throw to caller).
+Register a new MCP tool `rorca_assign_story_models` in `backend/src/mcp/server.ts`. Input schema: `{ workspaceId: string, specId: string, dryRun?: boolean }`. The tool calls `POST /api/specs/:id/assign-models?dryRun=<bool>` on the local backend (same pattern as other MCP tools that call the Express API). Returns the JSON response directly. Also register a corresponding MCP prompt (slash command `/mcp__rorca__assign_story_models`) with argsSchema `{ specId: string, dryRun?: string }` that formats a user-message instructing Claude to call the tool. The tool description must explain the dryRun flag and codex skipping behavior. Add JSDoc `@swagger` annotation to the backend route.
 
 Acceptance Criteria:
-- `hydrateGitMemory(workspaceId)` exported from `backend/src/lib/auto-hydrate.ts` — calls gitReduceStep(), parses YAML via parseGitReduceYaml(), inserts deduplicated entries into memories table with source='git_hydration'
-- Deduplication: before inserting each entry, query existing memories for the workspace using cosine similarity (`<=>` operator on embedding vector) — skip insert if similarity >= 0.92
-- After successful hydration, update `workspace_context.last_ingested_commit_hash` to the current HEAD commit SHA (via `git rev-parse HEAD` in workspace path)
-- Function is fire-and-forget safe: all errors are caught and logged via backend logger (never propagates thrown errors to callers)
-- Integration test in `backend/src/tests/auto-hydrate.test.ts` verifies: (a) entries are inserted, (b) duplicate entries are skipped at 0.92 threshold, (c) last_ingested_commit_hash is updated
+- Tool `rorca_assign_story_models` appears in MCP tool list with inputSchema requiring workspaceId (string) and specId (string), and optional dryRun (boolean)
+- Calling the tool with a valid workspaceId and specId returns the same response shape as the underlying API route: { storiesAssigned, skipped?, reason?, breakdown }
+- Slash command `/mcp__rorca__assign_story_models` is registered as an MCP prompt and produces a user message instructing Claude to call the tool with the provided specId (and optional dryRun)
+- The `POST /api/specs/:id/assign-models` route has a JSDoc `@swagger` annotation documenting request body (dryRun boolean), response schema (storiesAssigned, skipped, reason, breakdown array), and 200/404 response codes
