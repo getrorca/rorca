@@ -4426,6 +4426,19 @@ router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
 // marks runs as failed. Called once at server startup.
 
 export async function cleanupOrphanRuns(): Promise<number> {
+  // Guard: if any worker has checked in within the last 90s, it owns lifecycle management — skip entirely
+  try {
+    const activeWorker = await queryOne<{ worker_id: string }>(
+      `SELECT worker_id FROM worker_heartbeat WHERE last_seen > NOW() - INTERVAL '90 seconds' LIMIT 1`
+    );
+    if (activeWorker) {
+      logger.info(`[Cleanup] Active worker detected (${activeWorker.worker_id}), skipping orphan cleanup`);
+      return 0;
+    }
+  } catch {
+    // worker_heartbeat table may not exist on first startup — proceed with cleanup
+  }
+
   const staleRuns = await query(`SELECT id, pid, opencode_server_pid, workspace_id, agent_type FROM pipeline_runs WHERE status IN ('running', 'paused')`) as Array<{
     id: number;
     pid: number | null;
@@ -4439,10 +4452,10 @@ export async function cleanupOrphanRuns(): Promise<number> {
   let cleaned = 0;
 
   for (const run of staleRuns) {
-    // Skip runs managed by pg-boss worker — the worker will handle lifecycle
+    // Skip runs with an active or queued pg-boss job — includes 'retry' state which was previously missed
     try {
       const pgBossJob = await queryOne<{ id: string }>(
-        `SELECT id FROM pgboss.job WHERE name IN ('pipeline:run', 'pipeline:retry') AND data->>'runId' = $1 AND state IN ('created', 'active') LIMIT 1`,
+        `SELECT id FROM pgboss.job WHERE name IN ('pipeline:run', 'pipeline:retry') AND data->>'runId' = $1 AND state IN ('created', 'active', 'retry') LIMIT 1`,
         [String(run.id)]
       );
       if (pgBossJob) {
@@ -4453,18 +4466,15 @@ export async function cleanupOrphanRuns(): Promise<number> {
       // pgboss schema may not exist yet — treat as no active job, proceed with cleanup
     }
 
-    // Kill execution engine process (if alive)
+    // Only clean up runs whose PID is no longer alive
     if (run.pid) {
       try {
-        process.kill(run.pid, 0); // Check alive
-        try {
-          process.kill(-run.pid, 'SIGTERM'); // Kill process group
-          logger.info(`[Cleanup] Sent SIGTERM to engine PID ${run.pid} (run ${run.id})`);
-        } catch {
-          try { process.kill(run.pid, 'SIGTERM'); } catch { /* already dead */ }
-        }
+        process.kill(run.pid, 0); // Throws if process is dead
+        // Process is still alive — skip, it may be legitimately running without a worker
+        logger.info(`[Cleanup] Skipping run ${run.id} — PID ${run.pid} is still alive`);
+        continue;
       } catch {
-        // Process already dead — expected after backend restart
+        // Process is dead — safe to clean up
       }
     }
 
@@ -4486,7 +4496,7 @@ export async function cleanupOrphanRuns(): Promise<number> {
 
     // Emit WAL event
     try {
-      const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_finished', $1, $2)` + ' RETURNING *', [run.workspace_id, JSON.stringify({
+      const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('orphan_cleanup', $1, $2)` + ' RETURNING *', [run.workspace_id, JSON.stringify({
         run_id: run.id,
         status: 'failed',
         reason: 'orphan_cleanup',
