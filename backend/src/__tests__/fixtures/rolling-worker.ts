@@ -225,6 +225,17 @@ async function shutdown(): Promise<void> {
   if (stopping) return;
   stopping = true;
 
+  // Stop accepting new jobs immediately by calling offWork() before the graceful
+  // boss.stop(). This prevents the worker from picking up new jobs in the window
+  // between this SIGTERM handler firing and boss.stop()'s internal manager.stop()
+  // setting worker.stopping=true. Without this, there's a 1-2 event loop tick
+  // window where the worker can pick up new jobs after logging the drain message.
+  try {
+    await boss.offWork('pipeline:run');
+  } catch {
+    // best-effort — if offWork fails, boss.stop() will still stop everything
+  }
+
   // Log the drain message — verified by test
   process.stdout.write(`[worker] draining, waiting for ${inFlightCount} in-flight jobs...\n`);
   process.stderr.write(`[worker] draining, waiting for ${inFlightCount} in-flight jobs...\n`);
