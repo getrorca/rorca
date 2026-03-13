@@ -4619,6 +4619,232 @@ router.post('/queue', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/pipeline/runs/:id/dlq — Check if run's job is in DLQ ──────────
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{id}/dlq:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Get DLQ entry for a run
+ *     operationId: getRunDlq
+ *     description: >
+ *       Returns the dead-letter-queue entry for a pipeline run's job if it
+ *       exhausted all pg-boss retries. Returns 404 if the run's job is not in
+ *       the DLQ. Wraps pgboss.archive queries in try/catch — returns 404 on
+ *       fresh installs where pgboss.archive may not yet exist.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: DLQ entry
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 jobId: { type: string }
+ *                 lastError: { type: string, nullable: true }
+ *                 attempts: { type: integer }
+ *                 failedAt: { type: string, format: date-time }
+ *                 originalPayload: { type: object }
+ *       404:
+ *         description: Run not in DLQ
+ */
+router.get('/runs/:id/dlq', async (req: Request, res: Response) => {
+  const runId = parseInt(req.params.id as string, 10);
+  if (isNaN(runId)) {
+    res.status(400).json({ error: 'Invalid run ID' });
+    return;
+  }
+
+  try {
+    // Query pgboss.archive for any pipeline job tied to this runId.
+    // Guard: pgboss.archive may not exist on fresh install — catch and return 404.
+    const row = await queryOne<{
+      id: string;
+      output: unknown;
+      retrycount: number;
+      archivedon: string;
+      data: unknown;
+    }>(
+      `SELECT id, output, retrycount, archivedon, data
+       FROM pgboss.archive
+       WHERE name IN ('pipeline:run', 'pipeline:retry')
+         AND state = 'failed'
+         AND data->>'runId' = $1
+       ORDER BY archivedon DESC
+       LIMIT 1`,
+      [String(runId)],
+    ).catch(() => undefined);
+
+    if (!row) {
+      res.status(404).json({ error: 'Run not in DLQ' });
+      return;
+    }
+
+    const lastError = typeof row.output === 'string'
+      ? row.output
+      : (row.output != null ? JSON.stringify(row.output) : null);
+
+    res.json({
+      jobId: row.id,
+      lastError,
+      attempts: row.retrycount ?? 0,
+      failedAt: row.archivedon,
+      originalPayload: row.data,
+    });
+  } catch (err) {
+    logger.error({ err, runId }, '[Pipeline] DLQ lookup error');
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
+// ─── POST /api/pipeline/runs/:id/dlq/retry — Retry a DLQ run ─────────────────
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{id}/dlq/retry:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Retry a run from the DLQ
+ *     operationId: retryRunFromDlq
+ *     description: >
+ *       Creates a new pipeline_runs row (retried_from_run_id = originalId)
+ *       and sends a fresh pg-boss pipeline:run job. The original run remains
+ *       in 'failed' status — this creates a new linked run.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       201:
+ *         description: New retry run created
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean }
+ *                 runId: { type: integer }
+ *                 originalRunId: { type: integer }
+ *                 jobId: { type: string }
+ *       404:
+ *         description: Original run not found
+ *       409:
+ *         description: Run not in failed state
+ */
+router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
+  const originalRunId = parseInt(req.params.id as string, 10);
+  if (isNaN(originalRunId)) {
+    res.status(400).json({ error: 'Invalid run ID' });
+    return;
+  }
+
+  try {
+    // Fetch original run
+    const originalRun = await queryOne<{
+      id: number;
+      spec_path: string;
+      workspace_id: string;
+      status: string;
+      agent: string;
+      agent_type: string;
+      agent_model: string | null;
+      branch_name: string | null;
+      worktree_path: string | null;
+    }>(
+      `SELECT id, spec_path, workspace_id, status, agent, agent_type, agent_model, branch_name, worktree_path
+       FROM pipeline_runs WHERE id = $1`,
+      [originalRunId],
+    );
+
+    if (!originalRun) {
+      res.status(404).json({ error: 'Run not found' });
+      return;
+    }
+
+    if (originalRun.status !== 'failed') {
+      res.status(409).json({ error: `Run is in '${originalRun.status}' state — only 'failed' runs can be retried from DLQ` });
+      return;
+    }
+
+    // Fetch workspace path
+    const workspace = await queryOne<{ path: string }>(
+      `SELECT path FROM workspaces WHERE id = $1`,
+      [originalRun.workspace_id],
+    );
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // Create new pipeline_run linked to original
+    const newRunRow = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs
+         (spec_path, workspace_id, status, trigger_type, retried_from_run_id, agent, agent_type, agent_model, queued_at)
+       VALUES ($1, $2, 'queued', 'dlq-retry', $3, $4, $5, $6, NOW())
+       RETURNING id`,
+      [
+        originalRun.spec_path,
+        originalRun.workspace_id,
+        originalRunId,
+        originalRun.agent,
+        originalRun.agent_type,
+        originalRun.agent_model,
+      ],
+    );
+    if (!newRunRow) throw new Error('Failed to create new run row');
+    const newRunId = newRunRow.id;
+
+    // Build the job payload (mirrors pipeline:trigger payload shape)
+    const jobPayload = {
+      runId: newRunId,
+      specPath: originalRun.spec_path,
+      workspacePath: workspace.path,
+      agent: (originalRun.agent_type ?? originalRun.agent ?? 'claude') as 'claude' | 'opencode' | 'codex',
+      model: originalRun.agent_model ?? null,
+      worktreePath: originalRun.worktree_path ?? null,
+      branchName: originalRun.branch_name ?? null,
+      autoWorktree: false,
+      envOverrides: {},
+    };
+
+    const jobId = String(newRunId);
+    await getBoss().send('pipeline:run', jobPayload, { id: jobId });
+
+    // Emit WAL event
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, run_id, payload) VALUES ($1, $2, $3, $4)`,
+      [
+        'run_started',
+        originalRun.workspace_id,
+        newRunId,
+        JSON.stringify({ runId: newRunId, originalRunId, trigger: 'dlq-retry', specPath: originalRun.spec_path }),
+      ],
+    ).catch(() => {
+      // wal_events may not have run_id column on older migrations — fall back to without it
+      return execute(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ($1, $2, $3)`,
+        [
+          'run_started',
+          originalRun.workspace_id,
+          JSON.stringify({ runId: newRunId, originalRunId, trigger: 'dlq-retry', specPath: originalRun.spec_path }),
+        ],
+      );
+    });
+
+    res.status(201).json({ ok: true, runId: newRunId, originalRunId, jobId });
+  } catch (err) {
+    logger.error({ err, originalRunId }, '[Pipeline] DLQ retry error');
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 // ─── GET /api/pipeline/worker/health — Worker health check ───────────────────
 // Queries Postgres directly — no IPC with the worker process.
 // Accessible without authentication (health checks must be unauthenticated).
