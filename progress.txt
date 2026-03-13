@@ -2,8 +2,9 @@
 
 Spec: rorca-context-autohydrate
 Run ID: 93
-Started: 2026-03-13T08:00:22.295Z
-Last Updated: 2026-03-13T08:11:36.125Z
+Started: 2026-03-13T08:30:29.746Z
+Last Updated: 2026-03-13T08:39:54.774Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Add source column to memories table and git YAML parser utility — DONE (claude, claude-sonnet-4-6, 663s)
+- US-002: Auto-hydrate git memory as individual memories table entries — DONE (claude, claude-sonnet-4-6, 1669s)
