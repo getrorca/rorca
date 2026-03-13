@@ -2180,6 +2180,7 @@ ${dirListing.join('\n') || '(empty)'}
  *                 schemaPresent: { type: boolean }
  *                 claudeMdPresent: { type: boolean }
  *                 skillsCount: { type: integer }
+ *                 contextScore: { type: integer, description: "0-100 composite context readiness score" }
  *       404: { description: "Workspace not found" }
  */
 router.get('/:id/context-health', async (req, res, next) => {
@@ -2219,7 +2220,18 @@ router.get('/:id/context-health', async (req, res, next) => {
 
     const skillsCount = parseInt(skillsRow?.cnt ?? '0', 10);
 
-    res.json({ l3Present, gitMemoryCount, schemaPresent, claudeMdPresent, skillsCount });
+    // Compute composite contextScore (0-100)
+    // L3=25, gitMemory=20 (partial: gitMemoryCount*4 up to 20), schema=20, claudeMd=20, skills=15
+    const contextScore = Math.min(
+      (l3Present ? 25 : 0) +
+      Math.min(gitMemoryCount * 4, 20) +
+      (schemaPresent ? 20 : 0) +
+      (claudeMdPresent ? 20 : 0) +
+      (skillsCount >= 1 ? 15 : 0),
+      100
+    );
+
+    res.json({ l3Present, gitMemoryCount, schemaPresent, claudeMdPresent, skillsCount, contextScore });
   } catch (err) {
     next(err);
   }
