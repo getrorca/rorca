@@ -1,28 +1,18 @@
 {
-  "specId": "Rorca Context Usage Visibility — Spec Generation & Run View",
-  "runId": 70,
-  "startedAt": "2026-03-12T20:40:16.346Z",
-  "lastUpdatedAt": "2026-03-13T19:03:03.655Z",
+  "specId": "rorca-auto-merge",
+  "runId": 110,
+  "startedAt": "2026-03-13T21:24:57.932Z",
+  "lastUpdatedAt": "2026-03-13T21:39:04.532Z",
   "completedStories": [
     {
-      "storyId": "CU-007",
-      "title": "End-to-end verification: context visibility in spec generation and run view",
+      "storyId": "US-004",
+      "title": "Implement post-run auto-merge in the worker",
       "status": "passed",
-      "startedAt": "2026-03-12T20:45:14.349Z",
-      "finishedAt": "2026-03-12T20:49:56.694Z",
+      "startedAt": "2026-03-13T21:25:41.276Z",
+      "finishedAt": "2026-03-13T21:39:04.530Z",
       "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 282345
-    },
-    {
-      "storyId": "US-002",
-      "title": "Show ContextSummaryCard in Context tab for enriched specs",
-      "status": "passed",
-      "startedAt": "2026-03-13T18:56:26.273Z",
-      "finishedAt": "2026-03-13T19:03:03.655Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 397382
+      "model": "claude-opus-4-6",
+      "elapsedMs": 803254
     }
   ],
   "failedStories": [],
