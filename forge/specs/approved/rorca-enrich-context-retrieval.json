@@ -72,7 +72,8 @@
         "ux-designer",
         "qa"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ],
   "mermaidDiagram": "graph TD\n  US-001[\"US-001: Replace enrich route inline retrieval with retrieveContext()\"]\n  US-002[\"US-002: Show ContextSummaryCard in Context tab for enriched specs\"]\n  US-001 --> US-002",
