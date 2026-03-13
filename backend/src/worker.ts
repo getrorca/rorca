@@ -640,7 +640,7 @@ async function recoverStaleJobs(): Promise<void> {
        FROM pgboss.job
        WHERE name IN ('pipeline:run', 'pipeline:retry')
          AND state = 'active'
-         AND startedon < $1`,
+         AND started_on < $1`,
       [WORKER_STARTED_AT],
     );
   } catch (err) {
