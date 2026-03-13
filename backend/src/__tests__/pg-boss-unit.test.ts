@@ -187,7 +187,7 @@ describe('(2) triggerPipelineRun() payload', () => {
     delete process.env.RORCA_PROCESS_ROLE;
   });
 
-  test('boss.send called with queue="pipeline:run", all required fields, retryLimit=3', async () => {
+  test('boss.send called with queue="pipeline:run", all required fields, retryLimit=0, expireInSeconds=7200', async () => {
     // Simulate the payload construction from pipeline.ts (lines 1334–1350)
     const jobPayload = {
       runId: 42,
@@ -202,9 +202,8 @@ describe('(2) triggerPipelineRun() payload', () => {
     };
 
     await mockBossInstance.send('pipeline:run', jobPayload, {
-      id: String(jobPayload.runId),
-      retryLimit: 3,
-      retryDelay: 10,
+      retryLimit: 0,
+      expireInSeconds: 7200,
     });
 
     expect(mockBossSend).toHaveBeenCalledTimes(1);
@@ -227,21 +226,22 @@ describe('(2) triggerPipelineRun() payload', () => {
       envOverrides: {},
     });
 
-    // Retry options
+    // Retry/expire options — retryLimit=0 prevents pg-boss from re-enqueueing on failure
+    // (execution-engine handles per-story retries internally); expireInSeconds=7200 prevents
+    // expiry mid-run for long-running pipelines.
     expect(options).toMatchObject({
-      id: '42',
-      retryLimit: 3,
-      retryDelay: 10,
+      retryLimit: 0,
+      expireInSeconds: 7200,
     });
   });
 
-  test('job ID is String(runId) as expected by cancellation routing', async () => {
+  test('job uses auto-generated UUID (no explicit id option)', async () => {
     const runId = 99;
-    await mockBossInstance.send('pipeline:run', { runId }, { id: String(runId), retryLimit: 3, retryDelay: 10 });
+    await mockBossInstance.send('pipeline:run', { runId }, { retryLimit: 0, expireInSeconds: 7200 });
 
     const [, , options] = mockBossSend.mock.calls[0];
-    expect(options.id).toBe('99');
-    expect(typeof options.id).toBe('string');
+    // No explicit id — pg-boss generates a valid UUID automatically
+    expect(options.id).toBeUndefined();
   });
 });
 
