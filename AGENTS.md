@@ -49,6 +49,8 @@ Rorca is an AI spec orchestration and pipeline management platform for autonomou
   - Use `$1, $2, ...` numbered placeholders (NOT `?`)
   - FK constraints always on, connection pooling (max 20)
   - **pgboss schema is NOT hand-managed** — `pgboss.*` tables (job, archive, subscription, version) are created and upgraded automatically by `boss.start()`. Never write migrations that touch `pgboss.*`. Migration 062 is a no-op placeholder that documents this.
+  - **pg-boss v10 requires explicit queue creation** — `boss.work('queue:name', handler)` does NOT create the queue or its partition table. You MUST call `await boss.createQueue('queue:name')` before calling `boss.send('queue:name', ...)`, otherwise `send()` returns `null` silently. The `job` table is partitioned by queue name (one partition per queue). In tests, call `createQueue` in `beforeAll` after `boss.start()`.
+  - **pg-boss job `id` must be a valid UUID** — passing an integer string (e.g., `String(runId)`) to the `id` option of `boss.send()` causes a PostgreSQL UUID cast error. Use auto-generated UUIDs (omit the `id` option) and embed `runId` in the job's data payload for correlation.
 
 ### Execution Engine (`backend/src/lib/execution-engine.ts`)
 - **Owner**: Architect
