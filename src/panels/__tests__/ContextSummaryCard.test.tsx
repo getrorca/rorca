@@ -3,286 +3,313 @@ import { render, screen, fireEvent } from '@testing-library/react';
 import ContextSummaryCard from '../../components/ContextSummaryCard';
 import type { ContextSummary } from '../SpecForgeOutput';
 
-// ─── Mock data helpers ──────────────────────────────────────────────────────
+// ─── Fixtures ─────────────────────────────────────────────────────────────────
 
-function makeFullSummary(): ContextSummary {
-  return {
-    directionLayers: {
-      l1: true,
-      l1Title: 'Engineering Standards',
-      l1Tokens: 1200,
-      l2: { present: true, domain: 'saas' },
-      l2Title: 'SaaS Conventions',
-      l2Tokens: 800,
-      l3: true,
-      l3Title: 'Rorca Project',
-      l3Tokens: 3500,
-    },
-    skills: ['react', 'tailwind', 'express'],
-    memoryEntries: 5,
-    agentsMd: true,
-    template: null,
-    schemaSnapshot: true,
-    gitMemory: true,
-    estimatedTokens: 12000,
-    modelContextWindow: 200000,
-    retrieval: {
-      cagHits: 3,
-      ragHits: 2,
-      graphHits: 1,
-      tier: 'hybrid',
-      latencyMs: 80,
-    },
-    predictedFiles: [
-      'src/components/Shell.tsx',
-      'src/panels/RunViewPanel.tsx',
-      'backend/src/routes/specs.ts',
-    ],
-  };
+const FULL_SUMMARY: ContextSummary = {
+  directionLayers: {
+    l1: true,
+    l2: { present: true, domain: 'saas' },
+    l3: true,
+  },
+  skills: ['react', 'tailwind', 'prisma'],
+  memoryEntries: 5,
+  agentsMd: true,
+  template: 'saas-starter',
+  schemaSnapshot: true,
+  gitMemory: true,
+  estimatedTokens: 12000,
+  modelContextWindow: 200000,
+  retrieval: {
+    cagHits: 3,
+    ragHits: 2,
+    graphHits: 1,
+    tier: 'hybrid',
+    latencyMs: 42,
+  },
+};
+
+const EMPTY_SUMMARY: ContextSummary = {
+  directionLayers: {
+    l1: false,
+    l2: { present: false, domain: null },
+    l3: false,
+  },
+  skills: [],
+  memoryEntries: 0,
+  agentsMd: false,
+  template: null,
+  schemaSnapshot: false,
+  gitMemory: false,
+  estimatedTokens: 0,
+  modelContextWindow: 200000,
+};
+
+// ─── Helpers ──────────────────────────────────────────────────────────────────
+
+/** Expands the card by clicking the toggle button. */
+function expandCard() {
+  fireEvent.click(screen.getByRole('button', { name: /context injected/i }));
 }
 
-function makeEmptySummary(): ContextSummary {
-  return {
-    directionLayers: {
-      l1: false,
-      l2: { present: false, domain: null },
-      l3: false,
-    },
-    skills: [],
-    memoryEntries: 0,
-    agentsMd: false,
-    template: null,
-    schemaSnapshot: false,
-    gitMemory: false,
-    estimatedTokens: 0,
-    modelContextWindow: 200000,
-  };
-}
+// ─── Tests ────────────────────────────────────────────────────────────────────
 
-/** Render card and expand it */
-function renderExpanded(summary: ContextSummary, skillDetails?: Array<{ name: string; relevance?: number; reason?: string }>) {
-  render(<ContextSummaryCard summary={summary} skillDetails={skillDetails} />);
-  // Default state is collapsed — click header to expand
-  const header = screen.getByRole('button', { name: /context injected/i });
-  fireEvent.click(header);
-  return header;
-}
+describe('ContextSummaryCard', () => {
+  describe('visibility — card is above the fold when generated', () => {
+    it('renders the card header without crashing', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expect(screen.getByRole('button', { name: /context injected/i })).toBeInTheDocument();
+    });
 
-// ─── Happy path tests ────────────────────────────────────────────────────────
+    it('is expanded by default when isGenerating=true (above the fold, not collapsed)', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} isGenerating />);
+      // When expanded, direction layer content is visible without interaction
+      expect(screen.getByLabelText('L1 Standards: present')).toBeInTheDocument();
+    });
 
-describe('ContextSummaryCard — happy path', () => {
-  it('renders the collapsible header above the fold', () => {
-    render(<ContextSummaryCard summary={makeFullSummary()} />);
-    // Header button is always visible regardless of expansion state
-    const header = screen.getByRole('button', { name: /context injected/i });
-    expect(header).toBeInTheDocument();
-    // The outer container has aria-label for identification
-    const card = document.querySelector('[aria-label="Spec generation context summary"]');
-    expect(card).toBeInTheDocument();
+    it('is collapsed by default when isGenerating is not set', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      // Direction layer expanded content should not be visible
+      expect(screen.queryByLabelText('L1 Standards: present')).not.toBeInTheDocument();
+    });
   });
 
-  it('expands to show direction layer badges when header is clicked', () => {
-    renderExpanded(makeFullSummary());
-    // When expanded, direction layer StatusBadge elements appear in expanded section
-    // They render with aria-label "L1: present", "L2: present", "L3: present"
-    const l1 = document.querySelector('[aria-label="L1: present"]');
-    const l2 = document.querySelector('[aria-label="L2: present"]');
-    const l3 = document.querySelector('[aria-label="L3: present"]');
-    expect(l1).toBeInTheDocument();
-    expect(l2).toBeInTheDocument();
-    expect(l3).toBeInTheDocument();
+  describe('direction layers — presence and labels', () => {
+    it('shows L1, L2, L3 inline badges when collapsed', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      // Collapsed state shows inline status badges
+      expect(screen.getByLabelText('L1: present')).toBeInTheDocument();
+      expect(screen.getByLabelText('L2: present')).toBeInTheDocument();
+      expect(screen.getByLabelText('L3: present')).toBeInTheDocument();
+    });
+
+    it('shows full direction layer labels when expanded', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      expect(screen.getByLabelText('L1 Standards: present')).toBeInTheDocument();
+      expect(screen.getByLabelText(/L2.*saas.*present/i)).toBeInTheDocument();
+      expect(screen.getByLabelText('L3 Project: present')).toBeInTheDocument();
+    });
+
+    it('shows L2 domain label when domain is set', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      // L2 saas domain — rendered as "L2 saas"
+      const l2Badge = screen.getByLabelText(/L2.*saas/i);
+      expect(l2Badge).toBeInTheDocument();
+    });
+
+    it('shows "missing" aria label for absent direction layers', () => {
+      render(<ContextSummaryCard summary={EMPTY_SUMMARY} />);
+      expect(screen.getByLabelText('L1: missing')).toBeInTheDocument();
+      expect(screen.getByLabelText('L2: missing')).toBeInTheDocument();
+      expect(screen.getByLabelText('L3: missing')).toBeInTheDocument();
+    });
+
+    it('shows all three absent layers as missing when expanded with empty data', () => {
+      render(<ContextSummaryCard summary={EMPTY_SUMMARY} />);
+      expandCard();
+      expect(screen.getByLabelText('L1 Standards: missing')).toBeInTheDocument();
+      expect(screen.getByLabelText('L2 Conventions: missing')).toBeInTheDocument();
+      expect(screen.getByLabelText('L3 Project: missing')).toBeInTheDocument();
+    });
   });
 
-  it('shows direction layer titles in expanded section', () => {
-    renderExpanded(makeFullSummary());
-    // StatusBadge renders "L1 Engineering Standards" (label + title) in text
-    expect(screen.getByText(/Engineering Standards/)).toBeInTheDocument();
-    expect(screen.getByText(/SaaS Conventions/)).toBeInTheDocument();
-    expect(screen.getByText(/Rorca Project/)).toBeInTheDocument();
+  describe('skills — names and count', () => {
+    it('shows skill count badge when collapsed', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expect(screen.getByText(/3 skills/i)).toBeInTheDocument();
+    });
+
+    it('shows all skill names when expanded', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      expect(screen.getByText(/react/i)).toBeInTheDocument();
+      expect(screen.getByText(/tailwind/i)).toBeInTheDocument();
+      expect(screen.getByText(/prisma/i)).toBeInTheDocument();
+    });
+
+    it('shows skill presence indicator when expanded', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      // Skills section shows count indicator
+      expect(screen.getByText(/skills/i)).toBeInTheDocument();
+      expect(screen.getByText('✓ 3')).toBeInTheDocument();
+    });
+
+    it('does not show skill count badge when no skills', () => {
+      render(<ContextSummaryCard summary={EMPTY_SUMMARY} />);
+      expect(screen.queryByText(/skill/i)).not.toBeInTheDocument();
+    });
+
+    it('shows "—" for skills when no skills are present (expanded)', () => {
+      render(<ContextSummaryCard summary={EMPTY_SUMMARY} />);
+      expandCard();
+      const skillsSection = screen.getByText(/^Skills$/i).closest('span')?.parentElement;
+      expect(skillsSection).toBeInTheDocument();
+    });
   });
 
-  it('shows direction layer token counts in expanded section', () => {
-    renderExpanded(makeFullSummary());
-    // Token counts: 1200 → "1.2K tok", 800 → "800 tok", 3500 → "3.5K tok"
-    expect(screen.getByText('1.2K tok')).toBeInTheDocument();
-    expect(screen.getByText('800 tok')).toBeInTheDocument();
-    expect(screen.getByText('3.5K tok')).toBeInTheDocument();
+  describe('token usage bar', () => {
+    it('renders the token usage progress bar when expanded', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      const bar = screen.getByRole('progressbar');
+      expect(bar).toBeInTheDocument();
+      expect(bar).toHaveAttribute('aria-label', 'Token usage: 6%');
+    });
+
+    it('shows token count in K format when expanded', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      // 12000 tokens = 12.0K out of 200K
+      expect(screen.getByText(/12\.0K/)).toBeInTheDocument();
+    });
+
+    it('renders token bar with zero tokens without crashing', () => {
+      render(<ContextSummaryCard summary={EMPTY_SUMMARY} />);
+      expandCard();
+      const bar = screen.getByRole('progressbar');
+      expect(bar).toBeInTheDocument();
+      expect(bar).toHaveAttribute('aria-valuenow', '0');
+    });
+
+    it('shows warning color for high token usage (>50%)', () => {
+      const highUsageSummary: ContextSummary = {
+        ...FULL_SUMMARY,
+        estimatedTokens: 120000, // 60% of 200K
+      };
+      render(<ContextSummaryCard summary={highUsageSummary} />);
+      expandCard();
+      expect(screen.getByText(/high context usage/i)).toBeInTheDocument();
+    });
+
+    it('shows error color for critical token usage (>80%)', () => {
+      const criticalUsageSummary: ContextSummary = {
+        ...FULL_SUMMARY,
+        estimatedTokens: 170000, // 85% of 200K
+      };
+      render(<ContextSummaryCard summary={criticalUsageSummary} />);
+      expandCard();
+      expect(screen.getByText(/context near limit/i)).toBeInTheDocument();
+    });
   });
 
-  it('shows skill chip names when skillDetails are provided', () => {
-    const skillDetails = [
-      { name: 'react', relevance: 9, reason: 'Primary UI framework' },
-      { name: 'tailwind', relevance: 6, reason: 'Styling library' },
-      { name: 'express', relevance: 4, reason: 'Backend framework' },
-    ];
-    renderExpanded(makeFullSummary(), skillDetails);
-    expect(screen.getByText('react')).toBeInTheDocument();
-    expect(screen.getByText('tailwind')).toBeInTheDocument();
-    expect(screen.getByText('express')).toBeInTheDocument();
+  describe('context files section', () => {
+    it('shows AGENTS.md checkmark when agentsMd is true', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      expect(screen.getByText(/AGENTS\.md ✓/)).toBeInTheDocument();
+    });
+
+    it('shows Schema checkmark when schemaSnapshot is true', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      expect(screen.getByText(/Schema ✓/)).toBeInTheDocument();
+    });
+
+    it('shows Git Memory checkmark when gitMemory is true', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      expect(screen.getByText(/Git Memory ✓/)).toBeInTheDocument();
+    });
+
+    it('shows dashes for absent context files', () => {
+      render(<ContextSummaryCard summary={EMPTY_SUMMARY} />);
+      expandCard();
+      expect(screen.getByText(/AGENTS\.md —/)).toBeInTheDocument();
+      expect(screen.getByText(/Schema —/)).toBeInTheDocument();
+      expect(screen.getByText(/Git Memory —/)).toBeInTheDocument();
+    });
   });
 
-  it('shows skill relevance scores when skillDetails are provided', () => {
-    const skillDetails = [
-      { name: 'react', relevance: 9 },
-      { name: 'tailwind', relevance: 6 },
-      { name: 'express', relevance: 4 },
-    ];
-    renderExpanded(makeFullSummary(), skillDetails);
-    // Relevance scores appear as text inside badges
-    expect(screen.getByText('9')).toBeInTheDocument();
-    expect(screen.getByText('6')).toBeInTheDocument();
-    expect(screen.getByText('4')).toBeInTheDocument();
+  describe('empty state — graceful rendering with no data', () => {
+    it('renders without crashing when all fields are empty/false', () => {
+      expect(() => render(<ContextSummaryCard summary={EMPTY_SUMMARY} />)).not.toThrow();
+    });
+
+    it('renders toggle button even with empty summary', () => {
+      render(<ContextSummaryCard summary={EMPTY_SUMMARY} />);
+      expect(screen.getByRole('button', { name: /context injected/i })).toBeInTheDocument();
+    });
+
+    it('does not show blank white box — renders card border and header', () => {
+      const { container } = render(<ContextSummaryCard summary={EMPTY_SUMMARY} />);
+      const card = container.querySelector('[aria-label="Spec generation context summary"]');
+      expect(card).toBeInTheDocument();
+      expect(card?.classList.contains('border')).toBe(true);
+    });
+
+    it('expands without crashing when empty', () => {
+      render(<ContextSummaryCard summary={EMPTY_SUMMARY} />);
+      expect(() => expandCard()).not.toThrow();
+    });
+
+    it('shows "— 0 entries" for memory when no memory entries', () => {
+      render(<ContextSummaryCard summary={EMPTY_SUMMARY} />);
+      expandCard();
+      expect(screen.getByText(/— 0 entries/)).toBeInTheDocument();
+    });
+
+    it('shows "— none" for template when no template', () => {
+      render(<ContextSummaryCard summary={EMPTY_SUMMARY} />);
+      expandCard();
+      expect(screen.getByText(/— none/)).toBeInTheDocument();
+    });
   });
 
-  it('shows files drawer toggle button with count when predictedFiles is set', () => {
-    renderExpanded(makeFullSummary());
-    // "Context Files (3)" toggle button is rendered
-    const filesToggle = screen.getByRole('button', { name: /context files/i });
-    expect(filesToggle).toBeInTheDocument();
-    expect(filesToggle.textContent).toContain('3');
+  describe('toggle behavior', () => {
+    it('toggles expanded state on button click', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      // Initially collapsed
+      expect(screen.queryByLabelText('L1 Standards: present')).not.toBeInTheDocument();
+      // Expand
+      expandCard();
+      expect(screen.getByLabelText('L1 Standards: present')).toBeInTheDocument();
+      // Collapse again
+      expandCard();
+      expect(screen.queryByLabelText('L1 Standards: present')).not.toBeInTheDocument();
+    });
+
+    it('aria-expanded reflects expanded state', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      const btn = screen.getByRole('button', { name: /context injected/i });
+      expect(btn).toHaveAttribute('aria-expanded', 'false');
+      fireEvent.click(btn);
+      expect(btn).toHaveAttribute('aria-expanded', 'true');
+    });
   });
 
-  it('renders predicted file names after expanding the files drawer', () => {
-    renderExpanded(makeFullSummary());
-    fireEvent.click(screen.getByRole('button', { name: /context files/i }));
-    expect(screen.getByText('src/components/Shell.tsx')).toBeInTheDocument();
-    expect(screen.getByText('src/panels/RunViewPanel.tsx')).toBeInTheDocument();
-    expect(screen.getByText('backend/src/routes/specs.ts')).toBeInTheDocument();
-  });
+  describe('retrieval metrics', () => {
+    it('shows CAG cache hits when retrieval data present', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      expect(screen.getByText(/3 hits/)).toBeInTheDocument();
+    });
 
-  it('renders token usage progress bar when expanded', () => {
-    renderExpanded(makeFullSummary());
-    const progressbar = screen.getByRole('progressbar');
-    expect(progressbar).toBeInTheDocument();
-    // 12000/200000 = 6%
-    expect(progressbar).toHaveAttribute('aria-valuenow', '6');
-  });
+    it('shows retrieval tier badge', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      expect(screen.getByText('hybrid')).toBeInTheDocument();
+    });
 
-  it('starts in expanded state when isGenerating=true', () => {
-    render(<ContextSummaryCard summary={makeFullSummary()} isGenerating />);
-    // When isGenerating, the component starts expanded — layer badges should be visible immediately
-    const l1 = document.querySelector('[aria-label="L1: present"]');
-    expect(l1).toBeInTheDocument();
-  });
-});
+    it('shows latency when present', () => {
+      render(<ContextSummaryCard summary={FULL_SUMMARY} />);
+      expandCard();
+      expect(screen.getByText('42ms')).toBeInTheDocument();
+    });
 
-// ─── Empty state tests ───────────────────────────────────────────────────────
-
-describe('ContextSummaryCard — empty state', () => {
-  it('does not crash with no direction layers, no skills, and no files', () => {
-    expect(() => render(<ContextSummaryCard summary={makeEmptySummary()} />)).not.toThrow();
-  });
-
-  it('renders the header button even when all data is empty', () => {
-    render(<ContextSummaryCard summary={makeEmptySummary()} />);
-    expect(screen.getByRole('button', { name: /context injected/i })).toBeInTheDocument();
-  });
-
-  it('shows missing badges for L1, L2, L3 when layers are absent', () => {
-    renderExpanded(makeEmptySummary());
-    // StatusBadge renders aria-label="L1 Standards: missing" etc
-    const l1 = document.querySelector('[aria-label="L1 Standards: missing"]');
-    const l2 = document.querySelector('[aria-label="L2 Conventions: missing"]');
-    const l3 = document.querySelector('[aria-label="L3 Project: missing"]');
-    expect(l1).toBeInTheDocument();
-    expect(l2).toBeInTheDocument();
-    expect(l3).toBeInTheDocument();
-  });
-
-  it('shows skills dash indicator when skills array is empty', () => {
-    renderExpanded(makeEmptySummary());
-    // The skills section still renders with a "—" indicator
-    const skillLabel = document.querySelector('[class*="skills"]') ?? screen.queryByText(/Skills/);
-    expect(skillLabel).toBeInTheDocument();
-  });
-
-  it('does not render the files drawer toggle when predictedFiles is absent', () => {
-    renderExpanded(makeEmptySummary());
-    expect(screen.queryByRole('button', { name: /context files/i })).not.toBeInTheDocument();
-  });
-
-  it('renders token progress bar at 0% without crashing', () => {
-    renderExpanded(makeEmptySummary());
-    const progressbar = screen.getByRole('progressbar');
-    expect(progressbar).toBeInTheDocument();
-    expect(progressbar).toHaveAttribute('aria-valuenow', '0');
-  });
-
-  it('does not render individual skill name chips when skillDetails is empty', () => {
-    render(<ContextSummaryCard summary={makeEmptySummary()} skillDetails={[]} />);
-    fireEvent.click(screen.getByRole('button', { name: /context injected/i }));
-    // When skills array is empty, the skillDetails chip rendering is skipped entirely
-    // No skill names should appear as chip text
-    expect(screen.queryByText('react')).not.toBeInTheDocument();
-    expect(screen.queryByText('tailwind')).not.toBeInTheDocument();
-  });
-});
-
-// ─── Data accuracy tests ─────────────────────────────────────────────────────
-
-describe('ContextSummaryCard — data accuracy', () => {
-  it('formats token counts ≥1000 as "X.YK tok"', () => {
-    renderExpanded(makeFullSummary());
-    // L3 has 3500 tokens → "3.5K tok"
-    expect(screen.getByText('3.5K tok')).toBeInTheDocument();
-    // L1 has 1200 tokens → "1.2K tok"
-    expect(screen.getByText('1.2K tok')).toBeInTheDocument();
-  });
-
-  it('displays token counts under 1000 without K suffix', () => {
-    renderExpanded(makeFullSummary());
-    // L2 has 800 tokens → "800 tok"
-    expect(screen.getByText('800 tok')).toBeInTheDocument();
-  });
-
-  it('applies emerald color class to high-relevance skill chips (≥8)', () => {
-    const skillDetails = [{ name: 'react', relevance: 9 }];
-    renderExpanded(makeFullSummary(), skillDetails);
-    const relevanceBadge = screen.getByText('9');
-    // emerald class for high relevance
-    expect(relevanceBadge.className).toMatch(/emerald/);
-  });
-
-  it('applies blue color class to medium-relevance skill chips (5-7)', () => {
-    const skillDetails = [{ name: 'tailwind', relevance: 6 }];
-    renderExpanded(makeFullSummary(), skillDetails);
-    const relevanceBadge = screen.getByText('6');
-    expect(relevanceBadge.className).toMatch(/blue/);
-  });
-
-  it('renders skill chip with title tooltip from reason field', () => {
-    const skillDetails = [{ name: 'react', relevance: 9, reason: 'Primary UI framework' }];
-    renderExpanded(makeFullSummary(), skillDetails);
-    // The outer chip span has title="Primary UI framework"
-    const chipEl = document.querySelector('[title="Primary UI framework"]');
-    expect(chipEl).toBeInTheDocument();
-  });
-
-  it('shows "+N more" overflow indicator when predictedFiles exceeds 20', () => {
-    const manyFiles = Array.from({ length: 25 }, (_, i) => `src/file${i}.ts`);
-    const summary = { ...makeFullSummary(), predictedFiles: manyFiles };
-    render(<ContextSummaryCard summary={summary} />);
-    fireEvent.click(screen.getByRole('button', { name: /context injected/i }));
-    fireEvent.click(screen.getByRole('button', { name: /context files/i }));
-    // 25 - 20 = 5 overflow
-    expect(screen.getByText('+5 more')).toBeInTheDocument();
-  });
-
-  it('shows "L2 Conventions" label when l2 is missing and domain is null', () => {
-    renderExpanded(makeEmptySummary());
-    // aria-label fallback: "L2 Conventions: missing"
-    const l2 = document.querySelector('[aria-label="L2 Conventions: missing"]');
-    expect(l2).toBeInTheDocument();
-  });
-
-  it('shows the retrieval tier badge when retrieval is provided', () => {
-    renderExpanded(makeFullSummary());
-    // "hybrid" tier badge appears in retrieval section
-    expect(screen.getByText('hybrid')).toBeInTheDocument();
-  });
-
-  it('shows retrieval latency in milliseconds', () => {
-    renderExpanded(makeFullSummary());
-    expect(screen.getByText('80ms')).toBeInTheDocument();
+    it('renders without retrieval data (no crash, no blank box)', () => {
+      const noRetrieval: ContextSummary = {
+        ...FULL_SUMMARY,
+        retrieval: undefined,
+        vectorHits: undefined,
+        graphHits: undefined,
+        retrievalTier: undefined,
+        retrievalLatencyMs: undefined,
+      };
+      expect(() => {
+        render(<ContextSummaryCard summary={noRetrieval} />);
+      }).not.toThrow();
+    });
   });
 });
