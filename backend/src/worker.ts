@@ -181,7 +181,11 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     // 4. Spawn execution-engine.ts with pipe stdio so we can capture chunks
+    // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
+    // Then strip the 4 Claude vars that must not propagate to nested invocations.
+    const { CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, CLAUDE_AGENT_SDK_VERSION, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING, ...inheritedEnv } = process.env as Record<string, string>;
     const env: Record<string, string> = {
+      ...inheritedEnv,
       ...envOverrides,
       RORCA_PROCESS_ROLE: 'engine',
     };
@@ -365,7 +369,10 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
 
     // 5. Spawn execution-engine with pipe stdio for chunk capture
-    const env = { ...envOverrides, RORCA_PROCESS_ROLE: 'engine' };
+    // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
+    // Strip the 4 Claude vars that must not propagate to nested invocations.
+    const { CLAUDECODE: _a, CLAUDE_CODE_ENTRYPOINT: _b, CLAUDE_AGENT_SDK_VERSION: _c, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: _d, ...inheritedEnvRetry } = process.env as Record<string, string>;
+    const env = { ...inheritedEnvRetry, ...envOverrides, RORCA_PROCESS_ROLE: 'engine' };
 
     logger.info({ runId, agent, model, cwd }, '[worker] Spawning execution-engine.ts for retry');
 
