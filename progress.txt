@@ -1,9 +1,10 @@
 # Run State Summary
 
-Spec: rorca-enrich-context-retrieval
-Run ID: 106
-Started: 2026-03-13T18:52:16.701Z
-Last Updated: 2026-03-13T18:55:39.925Z
+Spec: Rorca Context Usage Visibility — Spec Generation & Run View
+Run ID: 70
+Started: 2026-03-12T20:40:16.346Z
+Last Updated: 2026-03-13T19:03:03.655Z
 
-## Completed Stories (1)
-- US-001: Replace enrich route inline retrieval cascade with retrieveContext() per story — DONE (claude, claude-sonnet-4-6, 194s)
+## Completed Stories (2)
+- CU-007: End-to-end verification: context visibility in spec generation and run view — DONE (claude, claude-sonnet-4-6, 282s)
+- US-002: Show ContextSummaryCard in Context tab for enriched specs — DONE (claude, claude-sonnet-4-6, 397s)
