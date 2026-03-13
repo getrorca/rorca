@@ -1,4 +1,5 @@
 import { Router, Request, Response, NextFunction } from 'express';
+import { CronExpressionParser } from 'cron-parser';
 import { query, queryOne, dbHealthCheck } from '../db/index';
 import { listBackups } from '../lib/backup';
 import { agentType } from '../lib/config';
@@ -109,6 +110,7 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       embeddings: getQueueStats(),
       cache: cacheStats(),
       activeJobs: await getActiveJobs(),
+      scheduledJobs: await getScheduledJobs(),
     });
   } catch (err) { next(err); }
 });
@@ -137,6 +139,57 @@ async function getActiveJobs(): Promise<Array<{ id: string; name: string; state:
     }));
   } catch {
     // pgboss schema may not be initialised yet (e.g. fresh DB, tests)
+    return [];
+  }
+}
+
+// ── Scheduled jobs cache (30s TTL) ───────────────────────────────────────
+
+interface ScheduledJobInfo {
+  name: string;
+  nextFireAt: string | null;
+}
+
+let scheduledJobsCache: ScheduledJobInfo[] | null = null;
+let scheduledJobsCacheAt = 0;
+const SCHEDULED_JOBS_CACHE_TTL_MS = 30_000;
+
+function computeNextFireAt(cron: string): string | null {
+  try {
+    return CronExpressionParser.parse(cron).next().toISOString();
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * getScheduledJobs — return the list of pg-boss registered schedules with
+ * computed nextFireAt. Uses a 30s in-memory cache to avoid re-parsing on
+ * every health poll.
+ */
+async function getScheduledJobs(): Promise<ScheduledJobInfo[]> {
+  const now = Date.now();
+  if (scheduledJobsCache && now - scheduledJobsCacheAt < SCHEDULED_JOBS_CACHE_TTL_MS) {
+    return scheduledJobsCache;
+  }
+
+  try {
+    // pgboss.schedule table: columns name, cron, data, timezone
+    const rows = await query<{ name: string; cron: string }>(
+      `SELECT name, cron FROM pgboss.schedule WHERE name LIKE 'pipeline:cron:%' ORDER BY name ASC`,
+      [],
+    );
+
+    const result: ScheduledJobInfo[] = rows.map(r => ({
+      name: r.name,
+      nextFireAt: computeNextFireAt(r.cron),
+    }));
+
+    scheduledJobsCache = result;
+    scheduledJobsCacheAt = now;
+    return result;
+  } catch {
+    // pgboss schema may not be initialised yet (e.g. fresh DB, no worker running)
     return [];
   }
 }

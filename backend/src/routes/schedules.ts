@@ -2,6 +2,8 @@ import { Router, Request, Response } from 'express';
 import { CronExpressionParser } from 'cron-parser';
 import { query, queryOne, execute } from '../db/index';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
+import { getBoss } from '../lib/pg-boss';
+import { scheduleName } from '../lib/scheduler';
 import { logger } from '../lib/logger';
 
 const router = Router();
@@ -137,6 +139,23 @@ router.post('/', async (req: Request, res: Response) => {
       [workspaceId, specId, cronExpression, isEnabled]
     );
 
+    // Register with pg-boss native scheduling if enabled
+    if (schedule!.enabled) {
+      try {
+        const name = scheduleName(schedule!.id);
+        await getBoss().schedule(name, schedule!.cron_expression, {
+          scheduleId: schedule!.id,
+          specId: schedule!.spec_id,
+          workspaceId: schedule!.workspace_id,
+          agent: null,
+          model: null,
+        });
+        logger.info(`[Schedules] Registered pg-boss schedule ${name}`);
+      } catch (bossErr) {
+        logger.warn({ err: bossErr, scheduleId: schedule!.id }, '[Schedules] pg-boss schedule registration failed (non-fatal)');
+      }
+    }
+
     res.status(201).json({
       schedule: {
         ...schedule,
@@ -220,6 +239,26 @@ router.patch('/:id', async (req: Request, res: Response) => {
       [newCron, newEnabled, newSpecId, id]
     );
 
+    // Sync pg-boss schedule: always unschedule first, then re-register if enabled
+    try {
+      const name = scheduleName(id);
+      await getBoss().unschedule(name);
+      if (updated!.enabled) {
+        await getBoss().schedule(name, updated!.cron_expression, {
+          scheduleId: updated!.id,
+          specId: updated!.spec_id,
+          workspaceId: updated!.workspace_id,
+          agent: null,
+          model: null,
+        });
+        logger.info(`[Schedules] Updated pg-boss schedule ${name}`);
+      } else {
+        logger.info(`[Schedules] Unregistered pg-boss schedule ${name} (disabled)`);
+      }
+    } catch (bossErr) {
+      logger.warn({ err: bossErr, scheduleId: id }, '[Schedules] pg-boss schedule sync failed (non-fatal)');
+    }
+
     res.json({
       schedule: {
         ...updated,
@@ -278,6 +317,16 @@ router.delete('/:id', async (req: Request, res: Response) => {
     }
 
     await execute('DELETE FROM pipeline_schedules WHERE id = $1', [id]);
+
+    // Remove from pg-boss scheduling
+    try {
+      const name = scheduleName(id);
+      await getBoss().unschedule(name);
+      logger.info(`[Schedules] Unregistered pg-boss schedule ${name}`);
+    } catch (bossErr) {
+      logger.warn({ err: bossErr, scheduleId: id }, '[Schedules] pg-boss unschedule failed (non-fatal)');
+    }
+
     res.json({ ok: true });
   } catch (error: any) {
     logger.error('[Schedules] Delete error:', error);

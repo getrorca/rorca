@@ -20,6 +20,7 @@ import { z } from 'zod';
 import PgBoss from 'pg-boss';
 import { initDb, query, queryOne, execute } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
+import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { logger } from './lib/logger';
 
 // ── Validate environment ─────────────────────────────────────────────────
@@ -468,6 +469,51 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
   }
 }
 
+// ── Job handler: pipeline:cron ────────────────────────────────────────────
+// Handles two variants:
+//
+//  a) Meta-cron (queue: pipeline:cron, data: {}):
+//     Fires every minute via pg-boss native schedule. Calls
+//     checkAndFireDueSchedules() which checks all enabled pipeline_schedules
+//     against their cron expressions and triggers due ones. pg-boss distributed
+//     lock ensures exactly one fire per minute across all worker instances.
+//
+//  b) Per-schedule (queue: pipeline:cron:<id>, data: { scheduleId, specId, ... }):
+//     Fires directly for a specific schedule. Delegates to triggerScheduledRun().
+//     Per-schedule distributed lock ensures exactly one trigger per schedule interval.
+
+const PipelineCronJobData = z.object({
+  scheduleId: z.number().int().positive(),
+  specId: z.string().min(1),
+  workspaceId: z.string().min(1),
+  agent: z.string().nullable().optional(),
+  model: z.string().nullable().optional(),
+});
+
+async function handlePipelineCron(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
+  for (const job of jobs) {
+    logger.info({ jobId: job.id, name: job.name, data: job.data }, '[worker] pipeline:cron received');
+
+    // Detect variant: if data has scheduleId it's a per-schedule direct fire
+    const parsed = PipelineCronJobData.safeParse(job.data);
+    if (parsed.success) {
+      // Per-schedule direct fire
+      const { scheduleId, specId, workspaceId, agent, model } = parsed.data;
+      await triggerScheduledRun({
+        id: scheduleId,
+        spec_id: specId,
+        workspace_id: workspaceId,
+        agent: agent ?? null,
+        model: model ?? null,
+      });
+    } else {
+      // Meta-cron: check all enabled schedules for due entries
+      logger.info({ jobId: job.id }, '[worker] pipeline:cron meta-tick — checking all due schedules');
+      await checkAndFireDueSchedules();
+    }
+  }
+}
+
 // ── Job handler: pipeline:cancel ──────────────────────────────────────────
 
 async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
@@ -536,7 +582,12 @@ async function start(): Promise<void> {
   await boss.work('pipeline:retry', handlePipelineRetry);
   await boss.work('pipeline:cancel', handlePipelineCancel);
 
-  logger.info('[worker] ready — listening for pipeline:run, pipeline:retry, pipeline:cancel');
+  // 4. Bulk-register all enabled pipeline_schedules with pg-boss native scheduling.
+  // Also registers the meta-cron (pipeline:cron, every minute) and per-schedule
+  // boss.work() subscriptions (pipeline:cron:<id>). Re-registration is idempotent.
+  await registerSchedulesWithBoss(boss, handlePipelineCron);
+
+  logger.info('[worker] ready — listening for pipeline:run, pipeline:retry, pipeline:cancel, pipeline:cron');
 }
 
 start().catch((err) => {
