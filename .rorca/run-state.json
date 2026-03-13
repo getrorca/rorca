@@ -1,0 +1,23 @@
+{
+  "specId": "Rorca Context Usage Visibility — Spec Generation & Run View",
+  "runId": 70,
+  "startedAt": "2026-03-12T20:40:16.346Z",
+  "lastUpdatedAt": "2026-03-12T20:49:56.694Z",
+  "completedStories": [
+    {
+      "storyId": "CU-007",
+      "title": "End-to-end verification: context visibility in spec generation and run view",
+      "status": "passed",
+      "startedAt": "2026-03-12T20:45:14.349Z",
+      "finishedAt": "2026-03-12T20:49:56.694Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 282345
+    }
+  ],
+  "failedStories": [],
+  "skippedStories": [],
+  "currentStory": null,
+  "decisions": [],
+  "resumedFromStory": null
+}
