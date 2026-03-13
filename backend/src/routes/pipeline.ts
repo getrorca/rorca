@@ -1344,7 +1344,6 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     };
 
     await getBoss().send('pipeline:run', jobPayload, {
-      id: String(runId),
       retryLimit: 3,
       retryDelay: 10,
     });
@@ -2824,16 +2823,14 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       envOverrides,
     });
 
-    // 13. Enqueue via pg-boss. Job ID includes timestamp to allow sequential retries.
-    const jobId = `retry-${originalRunId}-${Date.now()}`;
-    await getBoss().send('pipeline:retry', jobPayload, { id: jobId });
+    // 13. Enqueue via pg-boss (let pg-boss generate a UUID job ID).
+    await getBoss().send('pipeline:retry', jobPayload);
 
-    logger.info(`[Pipeline] Enqueued pipeline:retry job ${jobId} for newRunId=${newRunId} (originalRunId=${originalRunId})`);
+    logger.info(`[Pipeline] Enqueued pipeline:retry job for newRunId=${newRunId} (originalRunId=${originalRunId})`);
 
     res.status(201).json({
       ok: true,
       queued: true,
-      jobId,
       runId: newRunId,
       originalRunId,
       queuePosition: 1,
@@ -3151,8 +3148,14 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     if (status === 'queued') {
       // ── Queued path ──────────────────────────────────────────────────────
       // Attempt to remove the pg-boss job before the worker picks it up.
-      // cancel(queueName, jobId) — job ID convention is String(runId).
-      await getBoss().cancel('pipeline:run', String(runId));
+      // pg-boss requires UUID job IDs — look up by payload runId.
+      const jobRow = await queryOne<{ id: string }>(
+        `SELECT id FROM pgboss.job WHERE name = 'pipeline:run' AND data->>'runId' = $1 AND state IN ('created', 'active') LIMIT 1`,
+        [String(runId)]
+      );
+      if (jobRow) {
+        await getBoss().cancel('pipeline:run', jobRow.id);
+      }
 
       // Re-read status: if the worker picked up the job between our check and
       // cancel, the run may have already transitioned to 'running'. Fall through.
@@ -3247,8 +3250,15 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
       return;
     }
 
-    // Remove the pg-boss job before the worker picks it up
-    await getBoss().cancel('pipeline:run', String(runId));
+    // Remove the pg-boss job before the worker picks it up.
+    // pg-boss requires UUID job IDs — look up by payload runId.
+    const jobRow = await queryOne<{ id: string }>(
+      `SELECT id FROM pgboss.job WHERE name = 'pipeline:run' AND data->>'runId' = $1 AND state IN ('created', 'active') LIMIT 1`,
+      [String(runId)]
+    );
+    if (jobRow) {
+      await getBoss().cancel('pipeline:run', jobRow.id);
+    }
 
     // Mark as cancelled
     await execute(`UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW(), queued_at = NULL, queue_position = NULL WHERE id = $1`, [runId]);
@@ -4426,6 +4436,20 @@ export async function cleanupOrphanRuns(): Promise<number> {
   let cleaned = 0;
 
   for (const run of staleRuns) {
+    // Skip runs managed by pg-boss worker — the worker will handle lifecycle
+    try {
+      const pgBossJob = await queryOne<{ id: string }>(
+        `SELECT id FROM pgboss.job WHERE name IN ('pipeline:run', 'pipeline:retry') AND data->>'runId' = $1 AND state IN ('created', 'active') LIMIT 1`,
+        [String(run.id)]
+      );
+      if (pgBossJob) {
+        logger.info(`[Cleanup] Skipping run ${run.id} — active pg-boss job ${pgBossJob.id} found`);
+        continue;
+      }
+    } catch {
+      // pgboss schema may not exist yet — treat as no active job, proceed with cleanup
+    }
+
     // Kill execution engine process (if alive)
     if (run.pid) {
       try {
@@ -4814,8 +4838,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       envOverrides: {},
     };
 
-    const jobId = String(newRunId);
-    await getBoss().send('pipeline:run', jobPayload, { id: jobId });
+    await getBoss().send('pipeline:run', jobPayload);
 
     // Emit WAL event
     await execute(
@@ -4838,7 +4861,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       );
     });
 
-    res.status(201).json({ ok: true, runId: newRunId, originalRunId, jobId });
+    res.status(201).json({ ok: true, runId: newRunId, originalRunId });
   } catch (err) {
     logger.error({ err, originalRunId }, '[Pipeline] DLQ retry error');
     res.status(500).json({ error: (err as Error).message });

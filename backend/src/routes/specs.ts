@@ -2840,11 +2840,16 @@ router.get('/kanban', async (req: Request, res: Response) => {
     }
 
     const approvedSpecs: KanbanSpec[] = [];
+    // Track which approved specs have ALL stories passing (passes: true in spec JSON)
+    const allStoriesPassedBySlug = new Map<string, boolean>();
     for (const file of safeReaddir(approvedDir)) {
       try {
         const filePath = path.join(approvedDir, file);
         const content = parseSpecFile(filePath);
         const s = await buildSummary(filePath, file, 'approved', workspace.path, workspaceId);
+        const stories = (content.userStories ?? []) as { passes?: boolean }[];
+        const allPassed = stories.length > 0 && stories.every(st => st.passes === true);
+        allStoriesPassedBySlug.set(s.id, allPassed);
         approvedSpecs.push({
           id: s.id,
           title: s.specName,
@@ -2881,7 +2886,11 @@ router.get('/kanban', async (req: Request, res: Response) => {
       `SELECT spec_id FROM kanban_manual_done WHERE workspace_id = $1`,
       [workspaceId]
     );
-    for (const row of manualDone) completedSlugs.add(row.spec_id);
+    const manualDoneSlugs = new Set<string>();
+    for (const row of manualDone) {
+      completedSlugs.add(row.spec_id);
+      manualDoneSlugs.add(row.spec_id);
+    }
 
     // Fetch story pass/fail counts for approved specs with runs
     const approvedSlugs = approvedSpecs.map(s => s.id);
@@ -2919,7 +2928,11 @@ router.get('/kanban', async (req: Request, res: Response) => {
       const passed = storyProgress.get(spec.id);
 
       const failed = storyFailed.get(spec.id);
-      if (isCompleted && !activeRun) {
+      // A spec goes to Done if:
+      // 1. All stories have passes: true in spec JSON (automatic — execution-engine sets this), OR
+      // 2. User manually dragged it to Done (kanban_manual_done) — user's explicit choice
+      const allPassed = (allStoriesPassedBySlug.get(spec.id) ?? false) || manualDoneSlugs.has(spec.id);
+      if (isCompleted && !activeRun && allPassed) {
         done.push({ ...spec, passedStories: passed, failedStories: failed });
       } else {
         inProgress.push({
@@ -5204,18 +5217,27 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
       return;
     }
 
-    const { pendingDir } = specsDirs(workspace.path);
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
     const pendingFile = path.join(pendingDir, `${specId}.json`);
+    const approvedFile = path.join(approvedDir, `${specId}.json`);
 
-    if (!fs.existsSync(pendingFile)) {
-      res.status(404).json({ error: `Spec '${specId}' not found in pending` });
+    if (fs.existsSync(approvedFile)) {
+      // Approved spec dragged back to Draft — move it back to pending/ (unapprove)
+      fs.mkdirSync(pendingDir, { recursive: true });
+      fs.renameSync(approvedFile, pendingFile);
+      await execute(`INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_rejected', $1, 'user', $2)`, [specId, JSON.stringify({ workspaceId, reason: reason ?? null, from: 'approved' })]);
+      res.json({ ok: true });
       return;
     }
 
-    // Snapshot the spec content before deletion so it appears in version history
+    if (!fs.existsSync(pendingFile)) {
+      res.status(404).json({ error: `Spec '${specId}' not found` });
+      return;
+    }
+
+    // Pending spec rejected — snapshot and delete
     const content = fs.readFileSync(pendingFile, 'utf8');
     await snapshotVersion(specId as string, content, 'rejected', (reason as string) ?? undefined);
-
     fs.unlinkSync(pendingFile);
 
     // Emit WAL event
@@ -10501,7 +10523,7 @@ router.post('/:specId/enrich', async (req: Request, res: Response) => {
     let totalOutputTokens = 0;
     let storiesEnriched = 0;
 
-    for (const story of userStories) {
+    const buildPromptForStory = (story: typeof userStories[0]) => {
       const storyText = [
         `Story ID: ${story.id}`,
         `Title: ${story.title}`,
@@ -10511,7 +10533,7 @@ router.post('/:specId/enrich', async (req: Request, res: Response) => {
           : '',
       ].filter(Boolean).join('\n');
 
-      const annotationPrompt = `You are a spec enrichment agent. Your job is to generate a concise L5 context annotation for the following user story, drawing on the retrieved project context.
+      return `You are a spec enrichment agent. Your job is to generate a concise L5 context annotation for the following user story, drawing on the retrieved project context.
 
 The annotation should:
 - Summarize which existing conventions, memories, or codebase patterns are most relevant to this story
@@ -10525,26 +10547,27 @@ User Story:
 ${storyText}
 
 Respond with ONLY the annotation content (no preamble). Format as a markdown bulleted list.`;
+    };
 
-      try {
-        const result = await chatComplete(
-          [{ role: 'user', content: annotationPrompt }],
-          annotationModel,
-        );
+    // Run all story annotations in parallel (not sequential) to stay within MCP client timeout
+    const results = await Promise.allSettled(
+      userStories.map(story =>
+        chatComplete([{ role: 'user', content: buildPromptForStory(story) }], annotationModel)
+          .then(result => ({ story, result }))
+      )
+    );
+
+    for (const outcome of results) {
+      if (outcome.status === 'fulfilled') {
+        const { story, result } = outcome.value;
         const annotation = result.text.trim();
         totalInputTokens += result.usage.inputTokens;
         totalOutputTokens += result.usage.outputTokens;
-
-        // Inject annotation into description as a fenced ## Context section
-        // Remove any pre-existing ## Context block before appending fresh one
-        const descWithoutOldContext = (story.description ?? '').replace(
-          /\n\n## Context\n[\s\S]*$/,
-          '',
-        );
+        const descWithoutOldContext = (story.description ?? '').replace(/\n\n## Context\n[\s\S]*$/, '');
         story.description = `${descWithoutOldContext}\n\n## Context\n${annotation}`;
         storiesEnriched++;
-      } catch (annotErr) {
-        logger.warn({ err: annotErr, storyId: story.id }, '[specs/enrich] Annotation failed for story — skipping');
+      } else {
+        logger.warn({ err: outcome.reason }, '[specs/enrich] Annotation failed for a story — skipping');
       }
     }
 
@@ -10554,13 +10577,29 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     // Insert spec_generation_logs row
     const durationMs = Date.now() - start;
     const contextSummaryJson = {
-      retrieval_method: retrievalMethod,
-      stories_total: userStories.length,
-      stories_enriched: storiesEnriched,
-      direction_layers: {
-        l1: !!l1Row,
-        l2: !!l2Row,
-        l3: !!l3Row,
+      directionLayers: [
+        { layer: 'L1', present: !!l1Row },
+        { layer: 'L2', domain: workspaceDomain ?? undefined, present: !!l2Row },
+        { layer: 'L3', present: !!l3Row },
+      ],
+      skills: [],
+      memory: {
+        count: storiesEnriched,
+        tier: retrievalMethod,
+        cagHits: 0,
+        ragHits: retrievalMethod === 'pgvector' || retrievalMethod === 'fulltext' ? storiesEnriched : 0,
+        graphHits: retrievalMethod === 'graph' ? storiesEnriched : 0,
+        latencyMs: durationMs,
+      },
+      tokenBudget: {
+        used: totalInputTokens + totalOutputTokens,
+        limit: 200000,
+        percentage: Math.round(((totalInputTokens + totalOutputTokens) / 200000) * 100),
+      },
+      flags: {
+        agent: false,
+        schema: false,
+        gitMemory: false,
       },
     };
     await execute(
