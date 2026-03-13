@@ -2,7 +2,7 @@
   "specId": "rorca-auto-merge",
   "runId": 107,
   "startedAt": "2026-03-13T20:55:03.668Z",
-  "lastUpdatedAt": "2026-03-13T20:58:30.466Z",
+  "lastUpdatedAt": "2026-03-13T21:04:42.686Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-haiku-4-5-20251001",
       "elapsedMs": 205097
+    },
+    {
+      "storyId": "US-002",
+      "title": "Add autoMerge toggle to pipeline trigger dialog UI",
+      "status": "passed",
+      "startedAt": "2026-03-13T20:59:33.184Z",
+      "finishedAt": "2026-03-13T21:04:42.683Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 309499
     }
   ],
   "failedStories": [],
