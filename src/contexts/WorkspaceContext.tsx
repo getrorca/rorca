@@ -5,6 +5,7 @@ export interface Workspace {
   id: string;
   name: string;
   git_path: string;
+  domain?: string;
 }
 
 export interface WorkspaceSettings {
@@ -28,7 +29,7 @@ interface WorkspaceRow {
 }
 
 function toWorkspace(row: WorkspaceRow): Workspace {
-  return { id: row.id, name: row.label, git_path: row.path };
+  return { id: row.id, name: row.label, git_path: row.path, domain: row.domains?.[0] };
 }
 
 interface WorkspaceContextValue {
