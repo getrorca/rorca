@@ -590,7 +590,7 @@
       "dependsOn": [
         "PG-017"
       ],
-      "passes": false,
+      "passes": true,
       "suggestedSkills": [
         {
           "name": "database-optimization",
@@ -602,7 +602,8 @@
           "relevance": 7,
           "reason": "DLQ is the ultimate incident response mechanism — jobs exhausted all retries end up here for manual intervention."
         }
-      ]
+      ],
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "PG-019",
