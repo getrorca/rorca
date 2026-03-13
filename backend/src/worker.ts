@@ -20,6 +20,13 @@ import * as crypto from 'crypto';
 import { spawn, type ChildProcess } from 'child_process';
 import { z } from 'zod';
 import PgBoss from 'pg-boss';
+import {
+  PipelineRunJobPayload,
+  type PipelineRunJobPayloadType,
+  PipelineRetryJobPayload,
+  type PipelineRetryJobPayloadType,
+  PipelineCancelJobPayload,
+} from './lib/pg-boss-schemas';
 import { initDb, query, queryOne, execute } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
@@ -52,40 +59,6 @@ if (!process.env.DATABASE_URL) {
   logger.error('[worker] DATABASE_URL is not set — exiting');
   process.exit(1);
 }
-
-// ── Zod schema for pipeline:run job payload ───────────────────────────────
-
-const PipelineRunJobPayload = z.object({
-  runId: z.number().int().positive(),
-  specPath: z.string().min(1),
-  workspacePath: z.string().min(1),
-  agent: z.enum(['claude', 'opencode', 'codex']),
-  model: z.string().nullable(),
-  worktreePath: z.string().nullable(),
-  branchName: z.string().nullable(),
-  autoWorktree: z.boolean().optional().default(false),
-  envOverrides: z.record(z.string(), z.string()).optional().default({}),
-});
-
-type PipelineRunJobPayloadType = z.infer<typeof PipelineRunJobPayload>;
-
-// ── Zod schema for pipeline:retry job payload ─────────────────────────────
-
-const PipelineRetryJobPayload = z.object({
-  runId: z.number().int().positive(),           // new run ID (already created by route handler)
-  originalRunId: z.number().int().positive(),   // original failed run
-  storyIds: z.array(z.string()),                // story IDs being retried
-  workspacePath: z.string().min(1),
-  specPath: z.string().min(1),                  // relative spec path (forge/specs/approved/...)
-  retrySpecPath: z.string().min(1),             // absolute path to temp retry spec file
-  agent: z.enum(['claude', 'opencode', 'codex']),
-  model: z.string().nullable(),
-  worktreePath: z.string().nullable(),
-  sequenceOffset: z.number().int().min(0),      // start new chunks at sequenceOffset + 1
-  envOverrides: z.record(z.string(), z.string()).optional().default({}),
-});
-
-type PipelineRetryJobPayloadType = z.infer<typeof PipelineRetryJobPayload>;
 
 // ── Active process map (runId → ChildProcess) ────────────────────────────
 // Used for cancellation. Cleaned up when the process exits.
@@ -574,13 +547,13 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
   for (const job of jobs) {
     logger.info({ jobId: job.id, data: job.data }, '[worker] pipeline:cancel received');
 
-    const data = job.data as { runId?: number };
-    if (typeof data.runId !== 'number') {
-      logger.warn({ jobId: job.id }, '[worker] pipeline:cancel missing runId — skipping');
+    const parsed = PipelineCancelJobPayload.safeParse(job.data);
+    if (!parsed.success) {
+      logger.warn({ jobId: job.id, errors: parsed.error.format() }, '[worker] pipeline:cancel invalid payload — skipping');
       return;
     }
 
-    const runId = data.runId;
+    const runId = parsed.data.runId;
     const child = activeProcesses.get(runId);
     if (child) {
       // Mark as intentionally cancelled so the exit handler sets status='cancelled'
