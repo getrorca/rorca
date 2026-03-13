@@ -2155,6 +2155,81 @@ ${dirListing.join('\n') || '(empty)'}
   };
 }
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/context-health:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: Get context readiness indicators for the Spec Forge pre-flight checklist
+ *     operationId: getWorkspaceContextHealth
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Context health indicators
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 l3Present: { type: boolean }
+ *                 gitMemoryCount: { type: integer }
+ *                 schemaPresent: { type: boolean }
+ *                 claudeMdPresent: { type: boolean }
+ *                 skillsCount: { type: integer }
+ *       404: { description: "Workspace not found" }
+ */
+router.get('/:id/context-health', async (req, res, next) => {
+  try {
+    const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
+    if (!workspace) {
+      res.status(404).json({ error: 'Workspace not found' });
+      return;
+    }
+
+    // L3 direction layer present
+    const l3Row = await queryOne<{ content: string | null }>(
+      "SELECT content FROM direction_layers WHERE workspace_id = $1 AND layer = 3 LIMIT 1",
+      [req.params.id]
+    );
+    const l3Present = !!(l3Row?.content);
+
+    // Git memory count from memories table (source='git_hydration')
+    const gitMemRow = await queryOne<{ cnt: string }>(
+      "SELECT COUNT(*)::text AS cnt FROM memories WHERE workspace_id = $1 AND source = 'git_hydration' AND deleted_at IS NULL",
+      [req.params.id]
+    );
+    const gitMemoryCount = parseInt(gitMemRow?.cnt ?? '0', 10);
+
+    // Schema snapshot present
+    const ctxRow = await queryOne<{ schema_snapshot: string | null }>(
+      'SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1',
+      [req.params.id]
+    );
+    const schemaPresent = !!(ctxRow?.schema_snapshot);
+
+    // CLAUDE.md exists in workspace root
+    let claudeMdPresent = false;
+    try {
+      claudeMdPresent = fs.existsSync(path.join(workspace.path, 'CLAUDE.md'));
+    } catch { /* non-fatal */ }
+
+    // Skills count (workspace-scoped + global)
+    const skillsRow = await queryOne<{ cnt: string }>(
+      "SELECT COUNT(*)::text AS cnt FROM skills WHERE (workspace_id = $1 OR workspace_id IS NULL) AND deleted_at IS NULL",
+      [req.params.id]
+    );
+    const skillsCount = parseInt(skillsRow?.cnt ?? '0', 10);
+
+    res.json({ l3Present, gitMemoryCount, schemaPresent, claudeMdPresent, skillsCount });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // DELETE /api/workspaces/:id
 router.delete('/:id', async (req, res, next) => {
   try {
