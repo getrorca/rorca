@@ -3,7 +3,8 @@
 Spec: rorca-auto-merge
 Run ID: 107
 Started: 2026-03-13T20:55:03.668Z
-Last Updated: 2026-03-13T20:58:30.466Z
+Last Updated: 2026-03-13T21:04:42.686Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Add autoMerge column to pipeline_runs and wire trigger payload — DONE (claude, claude-haiku-4-5-20251001, 205s)
+- US-002: Add autoMerge toggle to pipeline trigger dialog UI — DONE (claude, claude-sonnet-4-6, 309s)
