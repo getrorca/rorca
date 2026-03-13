@@ -48,7 +48,6 @@ export interface DirectionLayers {
   teamL1?: string;
   teamL2?: string;
   schemaSnapshot?: string;
-  gitMemory?: string;
 }
 
 // ─── Singleton Cache ────────────────────────────────────────────────────────
@@ -230,8 +229,8 @@ export async function getDirectionLayers(workspaceId: string): Promise<Direction
   );
 
   // Auto-hydrated context
-  const ctx = await queryOne<{ schema_snapshot: string | null; git_memory: string | null }>(
-    `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`,
+  const ctx = await queryOne<{ schema_snapshot: string | null }>(
+    `SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`,
     [workspaceId],
   );
 
@@ -263,7 +262,6 @@ export async function getDirectionLayers(workspaceId: string): Promise<Direction
     teamL1,
     teamL2,
     schemaSnapshot: ctx?.schema_snapshot || undefined,
-    gitMemory: ctx?.git_memory || undefined,
   };
 
   set(cacheKey, result, 'hot');

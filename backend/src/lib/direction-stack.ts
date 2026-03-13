@@ -15,7 +15,6 @@ export interface SynthesizeParams {
   teamL2?: string;       // Team-level L2 override
   // Auto-injected by hydration engine:
   schemaSnapshot?: string;  // Raw CREATE TABLE blocks
-  gitMemory?: string;       // Synthesized memory.yaml
 }
 
 export interface SynthesizeMeta {
@@ -93,9 +92,6 @@ export function synthesizeLayersWithMeta(params: SynthesizeParams): SynthesizeRe
   if (params.schemaSnapshot?.trim()) {
     sections.push(`=== DATABASE SCHEMA (Auto-Hydrated) ===\n${params.schemaSnapshot.trim()}`);
   }
-  if (params.gitMemory?.trim()) {
-    sections.push(`=== PROJECT MEMORY (Git History) ===\n${params.gitMemory.trim()}`);
-  }
   sections.push(`=== SPEC BRIEF (L4) ===\n${params.specBrief.trim()}`);
   if (params.storyAnnotations?.trim()) sections.push(`=== STORY ANNOTATIONS (L5) ===\n${params.storyAnnotations.trim()}`);
 
@@ -108,7 +104,7 @@ export function synthesizeLayersWithMeta(params: SynthesizeParams): SynthesizeRe
       standards: !!effectiveL1,
       conventions: !!effectiveL2,
       project: !!params.l3?.trim(),
-      memory: !!params.gitMemory?.trim(),
+      memory: false,
       schema: !!params.schemaSnapshot?.trim(),
       totalTokens,
     },
@@ -175,17 +171,6 @@ export async function synthesizeDirectionStack(
       usedTokens += schemaTokens;
     } else {
       droppedItems.push({ type: 'schema_snapshot', reason: 'token_budget_exceeded' });
-    }
-  }
-
-  // Include git memory if budget allows
-  if (layers.gitMemory?.trim()) {
-    const gitTokens = estimateTokens(layers.gitMemory);
-    if (usedTokens + gitTokens <= maxTokens) {
-      sections.push(`=== PROJECT MEMORY (Git History) ===\n${layers.gitMemory.trim()}`);
-      usedTokens += gitTokens;
-    } else {
-      droppedItems.push({ type: 'git_memory', reason: 'token_budget_exceeded' });
     }
   }
 

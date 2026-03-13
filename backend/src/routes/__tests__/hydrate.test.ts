@@ -222,8 +222,8 @@ test('delta sync: uses last_ingested_commit_hash from workspace_context', async 
   await createWorkspace();
 
   // Pre-seed workspace_context with a previous hash
-  await execute(`INSERT INTO workspace_context (workspace_id, last_ingested_commit_hash, git_commit_count, git_memory)
-     VALUES ($1, $2, $3, $4)`, ['ws-hydrate', 'prev_hash_abc', 20, 'existing:\n  - old memory']);
+  await execute(`INSERT INTO workspace_context (workspace_id, last_ingested_commit_hash, git_commit_count)
+     VALUES ($1, $2, $3)`, ['ws-hydrate', 'prev_hash_abc', 20]);
 
   mockGitMapStep.mockResolvedValue([
     { fromHash: 'n1', toHash: 'n2', commitCount: 3, summary: '- New feature' },
@@ -245,10 +245,10 @@ test('delta sync: uses last_ingested_commit_hash from workspace_context', async 
   expect(res.body.git.commitCount).toBe(23);
   expect(res.body.git.newCommits).toBe(3);
 
-  // Git memory should be appended (delta mode)
-  const ctx = await queryOne('SELECT git_memory FROM workspace_context WHERE workspace_id = $1', ['ws-hydrate']) as { git_memory: string };
-  expect(ctx.git_memory).toContain('existing:');
-  expect(ctx.git_memory).toContain('new rule');
+  // Git memory is now written to the memories table (source='git_hydration')
+  const memRow = await queryOne('SELECT content FROM memories WHERE workspace_id = $1 AND source = $2 ORDER BY created_at DESC LIMIT 1', ['ws-hydrate', 'git_hydration']) as { content: string } | undefined;
+  expect(memRow).toBeDefined();
+  expect(memRow?.content).toContain('new rule');
 });
 
 // --- WAL events ---
