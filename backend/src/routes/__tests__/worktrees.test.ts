@@ -47,7 +47,7 @@ process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
 // Seed a workspace for tests
-  await execute(`INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4)`, ['ws-1', 'Test Workspace', tmpDir, '["frontend"]']);
+  await execute(`INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`, ['ws-1', 'Test Workspace', tmpDir, '["frontend"]']);
 
   authToken = await getAuthToken(app);
 

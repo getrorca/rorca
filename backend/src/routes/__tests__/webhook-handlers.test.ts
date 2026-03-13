@@ -50,7 +50,7 @@ process.env.NODE_ENV = 'test';
 
   // Initialize DB by requiring it
 workspaceId = 'ws-webhook-handlers-' + Date.now();
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [workspaceId,
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [workspaceId,
     'Webhook Handlers Test',
     tmpDir,]);
 });

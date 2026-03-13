@@ -146,7 +146,7 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
 
     await execute(
       `INSERT INTO agent_profiles (workspace_id, name, system_prompt_override, allowed_tools, is_active)
-       VALUES ($1, 'Default', $2, '[]', 1)
+       VALUES ($1, 'Default', $2, '[]', true)
        ON CONFLICT DO NOTHING`,
       [id, l3Row?.content_yaml || null]
     );

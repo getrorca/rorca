@@ -196,20 +196,12 @@ export class PackLoader {
         continue;
       }
 
-      let rawYaml: Record<string, unknown> = {};
-      try {
-        const loaded = yaml.load(parsed.yaml);
-        if (typeof loaded === 'object' && loaded !== null && !Array.isArray(loaded)) {
-          rawYaml = loaded as Record<string, unknown>;
-        }
-      } catch {
-        // Fall through with empty metadata
-      }
+      const rawYaml: Record<string, unknown> = parsed.attrs;
 
       files.push({
         meta: {
           layer: typeof rawYaml['layer'] === 'string' ? rawYaml['layer'] : this.inferLayer(entry.name),
-          priority: typeof rawYaml['priority'] === 'number' ? rawYaml['priority'] : 0,
+          priority: Number(rawYaml['priority']) || 0,
           scope: typeof rawYaml['scope'] === 'string' ? rawYaml['scope'] : 'global',
         },
         content: parsed.body.trim(),
@@ -243,15 +235,7 @@ export class PackLoader {
       const parsed = parseFrontmatter(content);
       if (!parsed) continue;
 
-      let rawYaml: Record<string, unknown> = {};
-      try {
-        const loaded = yaml.load(parsed.yaml);
-        if (typeof loaded === 'object' && loaded !== null && !Array.isArray(loaded)) {
-          rawYaml = loaded as Record<string, unknown>;
-        }
-      } catch {
-        continue;
-      }
+      const rawYaml: Record<string, unknown> = parsed.attrs;
 
       const category = rawYaml['category'];
       if (typeof category !== 'string' || !(PERSONA_CATEGORIES as readonly string[]).includes(category)) {
@@ -270,8 +254,9 @@ export class PackLoader {
       }
 
       let reviewPriority = 50;
-      if (typeof rawYaml['reviewPriority'] === 'number' && Number.isFinite(rawYaml['reviewPriority'])) {
-        reviewPriority = rawYaml['reviewPriority'];
+      const rp = Number(rawYaml['reviewPriority']);
+      if (Number.isFinite(rp)) {
+        reviewPriority = rp;
       }
 
       personas.push({
@@ -320,15 +305,7 @@ export class PackLoader {
         continue;
       }
 
-      let rawYaml: Record<string, unknown> = {};
-      try {
-        const loaded = yaml.load(parsed.yaml);
-        if (typeof loaded === 'object' && loaded !== null && !Array.isArray(loaded)) {
-          rawYaml = loaded as Record<string, unknown>;
-        }
-      } catch {
-        // Fall through with defaults
-      }
+      const rawYaml: Record<string, unknown> = parsed.attrs;
 
       let globs: string[] = [];
       if (Array.isArray(rawYaml['globs'])) {
@@ -340,7 +317,7 @@ export class PackLoader {
           name: typeof rawYaml['name'] === 'string' ? rawYaml['name'] : path.basename(entry.name, '.md'),
           description: typeof rawYaml['description'] === 'string' ? rawYaml['description'] : '',
           globs,
-          alwaysApply: rawYaml['alwaysApply'] === true,
+          alwaysApply: rawYaml['alwaysApply'] === true || rawYaml['alwaysApply'] === 'true',
         },
         content: parsed.body.trim(),
         filename: entry.name,

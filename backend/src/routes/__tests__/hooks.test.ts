@@ -40,7 +40,7 @@ process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
 // Seed a workspace
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-hooks', 'Hooks WS', $1)`, [tmpDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-hooks', 'Hooks WS', $1) ON CONFLICT (id) DO NOTHING`, [tmpDir]);
 
   authToken = await getAuthToken(app);
 });

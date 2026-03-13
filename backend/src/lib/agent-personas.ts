@@ -55,35 +55,73 @@ export interface Persona {
 
 export interface PersonaValidationWarning {
   filePath: string;
-  reason: string;
+  message: string;
 }
 
 // ─── Frontmatter Parser ─────────────────────────────────────────────────────
 
-const FRONTMATTER_RE = /^---\r?\n([\s\S]*?)\r?\n---\r?\n?([\s\S]*)$/;
-
 /**
- * Split a markdown file into YAML frontmatter and body.
+ * Split a markdown file into parsed YAML frontmatter attrs and body.
  * Returns null if no valid frontmatter delimiter found.
+ *
+ * Uses js-yaml FAILSAFE_SCHEMA so scalar values are always strings (e.g.
+ * reviewPriority: 10 → '10'). Arrays are still parsed as arrays of strings.
  */
-export function parseFrontmatter(content: string): { yaml: string; body: string } | null {
-  const match = content.match(FRONTMATTER_RE);
-  if (!match) return null;
-  return { yaml: match[1], body: match[2] };
+export function parseFrontmatter(content: string): { attrs: Record<string, unknown>; body: string } | null {
+  // Must start with ---
+  if (!content.startsWith('---')) return null;
+
+  // Find the closing ---
+  const afterOpen = content.slice(3); // strip leading ---
+  // The closing --- must be on its own line
+  const closeMatch = afterOpen.match(/\r?\n---(?:\r?\n|$)/);
+  if (!closeMatch || closeMatch.index === undefined) return null;
+
+  const yamlText = afterOpen.slice(0, closeMatch.index);
+  const bodyStart = closeMatch.index + closeMatch[0].length;
+  const bodyText = afterOpen.slice(bodyStart).trim();
+
+  let attrs: unknown;
+  try {
+    attrs = yaml.load(yamlText, { schema: yaml.FAILSAFE_SCHEMA });
+  } catch {
+    return null;
+  }
+
+  // Empty frontmatter produces null from yaml.load — normalize to {}
+  if (attrs === null || attrs === undefined) {
+    attrs = {};
+  }
+
+  if (typeof attrs !== 'object' || Array.isArray(attrs)) {
+    return null;
+  }
+
+  return {
+    attrs: attrs as Record<string, unknown>,
+    body: bodyText,
+  };
 }
 
 /**
  * Validate and normalize parsed YAML into PersonaMetadata.
+ * Infers category from directory name if not present in frontmatter.
  * Returns the metadata or null + reason string on failure.
  */
 function validateMetadata(
   raw: Record<string, unknown>,
-  _filePath: string,
+  inferredCategory: PersonaCategory | null,
 ): { metadata: PersonaMetadata } | { error: string } {
-  // category
-  const category = raw['category'];
-  if (typeof category !== 'string' || !(PERSONA_CATEGORIES as readonly string[]).includes(category)) {
-    return { error: `Invalid or missing category (got: ${JSON.stringify(category)}). Must be one of: ${PERSONA_CATEGORIES.join(', ')}` };
+  // category — use frontmatter value or inferred from directory
+  let category: PersonaCategory | null = null;
+  if (typeof raw['category'] === 'string' && (PERSONA_CATEGORIES as readonly string[]).includes(raw['category'])) {
+    category = raw['category'] as PersonaCategory;
+  } else if (inferredCategory) {
+    category = inferredCategory;
+  }
+
+  if (!category) {
+    return { error: `Invalid or missing category (got: ${JSON.stringify(raw['category'])}). Must be one of: ${PERSONA_CATEGORIES.join(', ')}` };
   }
 
   // name
@@ -92,10 +130,13 @@ function validateMetadata(
     return { error: `Invalid or missing name (got: ${JSON.stringify(name)})` };
   }
 
-  // description
-  const description = raw['description'];
-  if (typeof description !== 'string' || description.trim().length === 0) {
-    return { error: `Invalid or missing description (got: ${JSON.stringify(description)})` };
+  // description — optional, default ''
+  let description = '';
+  if (raw['description'] !== undefined) {
+    if (typeof raw['description'] !== 'string') {
+      return { error: `Invalid description (got: ${typeof raw['description']})` };
+    }
+    description = raw['description'].trim();
   }
 
   // triggers — optional, default []
@@ -115,17 +156,19 @@ function validateMetadata(
   // reviewPriority — optional, default 50
   let reviewPriority = 50;
   if (raw['reviewPriority'] !== undefined) {
-    if (typeof raw['reviewPriority'] !== 'number' || !Number.isFinite(raw['reviewPriority'])) {
+    const rp = raw['reviewPriority'];
+    const rpNum = typeof rp === 'number' ? rp : (typeof rp === 'string' ? Number(rp) : NaN);
+    if (!Number.isFinite(rpNum)) {
       return { error: `reviewPriority must be a number (got: ${JSON.stringify(raw['reviewPriority'])})` };
     }
-    reviewPriority = raw['reviewPriority'];
+    reviewPriority = rpNum;
   }
 
   return {
     metadata: {
-      category: category as PersonaCategory,
+      category,
       name: name.trim(),
-      description: description.trim(),
+      description,
       triggers,
       reviewPriority,
     },
@@ -180,13 +223,35 @@ export class PersonaRegistry {
 
   /**
    * Compact catalog for LLM prompt injection.
-   * Format: "[category] name: description" per line.
+   * Returns a markdown-formatted catalog grouped by category.
+   * Returns empty string if no personas discovered.
    */
   getPersonaCatalogForPrompt(): string {
-    return this.personas
-      .filter(p => this.isEnabled(p.metadata.name))
-      .map(p => `[${p.metadata.category}] ${p.metadata.name}: ${p.metadata.description}`)
-      .join('\n');
+    const enabled = this.personas.filter(p => this.isEnabled(p.metadata.name));
+    if (enabled.length === 0) return '';
+
+    const lines: string[] = ['## Available Agent Personas', ''];
+
+    const categoryLabels: Record<PersonaCategory, string> = {
+      primary: 'Primary',
+      adversarial: 'Adversarial',
+      specialist: 'Specialist',
+      review: 'Review',
+    };
+
+    for (const cat of PERSONA_CATEGORIES) {
+      const inCat = (this.byCategory.get(cat) ?? []).filter(p => this.isEnabled(p.metadata.name));
+      if (inCat.length === 0) continue;
+
+      lines.push(`### ${categoryLabels[cat]}`);
+      for (const p of inCat) {
+        const desc = p.metadata.description || 'No description';
+        lines.push(`- **${p.metadata.name}**: ${desc}`);
+      }
+      lines.push('');
+    }
+
+    return lines.join('\n').trimEnd();
   }
 
   /**
@@ -223,13 +288,13 @@ export class PersonaRegistry {
   }
 
   /**
-   * Scan .rorca/personas/ recursively for .md files, parse frontmatter,
+   * Scan <workspaceDir>/personas/ recursively for .md files, parse frontmatter,
    * and populate the registry.
    *
-   * @param rorcaDir - Path to the .rorca/ directory.
+   * @param workspaceDir - Path to the workspace root (contains personas/ subdirectory).
    * @returns This registry instance (for chaining).
    */
-  discover(rorcaDir: string): PersonaRegistry {
+  discover(workspaceDir: string): PersonaRegistry {
     this.personas = [];
     this.byName = new Map();
     this.byCategory = new Map();
@@ -239,25 +304,29 @@ export class PersonaRegistry {
       this.byCategory.set(cat, []);
     }
 
-    const personasDir = path.join(rorcaDir, 'personas');
+    const personasDir = path.join(workspaceDir, 'personas');
     if (!fs.existsSync(personasDir)) {
       return this;
     }
 
-    const mdFiles = this.findMdFiles(personasDir);
+    const mdFiles = this.findMdFilesWithCategory(personasDir, null);
 
-    for (const filePath of mdFiles) {
-      this.loadPersonaFile(filePath);
+    for (const { filePath, inferredCategory } of mdFiles) {
+      this.loadPersonaFile(filePath, inferredCategory);
     }
 
     return this;
   }
 
   /**
-   * Recursively find all .md files under a directory.
+   * Recursively find all .md files under a directory, inferring category
+   * from the immediate subdirectory name (strips leading underscore).
    */
-  private findMdFiles(dir: string): string[] {
-    const results: string[] = [];
+  private findMdFilesWithCategory(
+    dir: string,
+    category: PersonaCategory | null,
+  ): { filePath: string; inferredCategory: PersonaCategory | null }[] {
+    const results: { filePath: string; inferredCategory: PersonaCategory | null }[] = [];
 
     let entries: fs.Dirent[];
     try {
@@ -269,9 +338,11 @@ export class PersonaRegistry {
     for (const entry of entries) {
       const fullPath = path.join(dir, entry.name);
       if (entry.isDirectory()) {
-        results.push(...this.findMdFiles(fullPath));
+        // Infer category from directory name (e.g. _specialist → specialist)
+        const dirCat = this.inferCategoryFromDirName(entry.name);
+        results.push(...this.findMdFilesWithCategory(fullPath, dirCat ?? category));
       } else if (entry.isFile() && entry.name.endsWith('.md')) {
-        results.push(fullPath);
+        results.push({ filePath: fullPath, inferredCategory: category });
       }
     }
 
@@ -279,17 +350,29 @@ export class PersonaRegistry {
   }
 
   /**
+   * Infer PersonaCategory from a directory name like "_specialist".
+   * Returns null if the name doesn't match any category.
+   */
+  private inferCategoryFromDirName(dirName: string): PersonaCategory | null {
+    const stripped = dirName.replace(/^_/, '');
+    if ((PERSONA_CATEGORIES as readonly string[]).includes(stripped)) {
+      return stripped as PersonaCategory;
+    }
+    return null;
+  }
+
+  /**
    * Load and parse a single persona markdown file.
    * Invalid files are logged as warnings but don't crash.
    */
-  private loadPersonaFile(filePath: string): void {
+  private loadPersonaFile(filePath: string, inferredCategory: PersonaCategory | null): void {
     let content: string;
     try {
       content = fs.readFileSync(filePath, 'utf-8');
     } catch (err) {
       this.warnings.push({
         filePath,
-        reason: `Failed to read file: ${err instanceof Error ? err.message : String(err)}`,
+        message: `Failed to read file: ${err instanceof Error ? err.message : String(err)}`,
       });
       return;
     }
@@ -298,39 +381,20 @@ export class PersonaRegistry {
     if (!parsed) {
       this.warnings.push({
         filePath,
-        reason: 'No valid YAML frontmatter found (missing --- delimiters)',
+        message: 'No valid YAML frontmatter found (missing --- delimiters)',
       });
       return;
     }
 
-    let rawYaml: unknown;
-    try {
-      rawYaml = yaml.load(parsed.yaml);
-    } catch (err) {
-      this.warnings.push({
-        filePath,
-        reason: `Invalid YAML in frontmatter: ${err instanceof Error ? err.message : String(err)}`,
-      });
-      return;
-    }
-
-    if (typeof rawYaml !== 'object' || rawYaml === null || Array.isArray(rawYaml)) {
-      this.warnings.push({
-        filePath,
-        reason: 'Frontmatter YAML must be an object',
-      });
-      return;
-    }
-
-    const result = validateMetadata(rawYaml as Record<string, unknown>, filePath);
+    const result = validateMetadata(parsed.attrs, inferredCategory);
     if ('error' in result) {
-      this.warnings.push({ filePath, reason: result.error });
+      this.warnings.push({ filePath, message: result.error });
       return;
     }
 
     const persona: Persona = {
       metadata: result.metadata,
-      promptText: parsed.body.trim(),
+      promptText: parsed.body,
       filePath,
     };
 
@@ -339,7 +403,7 @@ export class PersonaRegistry {
     if (this.byName.has(key)) {
       this.warnings.push({
         filePath,
-        reason: `Duplicate persona name "${persona.metadata.name}" — already registered from ${this.byName.get(key)!.filePath}`,
+        message: `Duplicate persona name "${persona.metadata.name}" — already registered from ${this.byName.get(key)!.filePath}`,
       });
       return;
     }

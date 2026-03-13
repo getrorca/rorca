@@ -62,7 +62,7 @@ process.env.NODE_ENV = 'test';
 authToken = await getAuthToken(app);
 
   workspaceId = 'ws-skills-test-' + Date.now();
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [workspaceId,
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [workspaceId,
     'Skills Test Workspace',
     tmpDir,]);
 });

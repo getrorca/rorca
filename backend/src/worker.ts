@@ -615,9 +615,10 @@ async function start(): Promise<void> {
   await boss.createQueue('pipeline:run');
   await boss.createQueue('pipeline:retry');
   await boss.createQueue('pipeline:cancel');
-  await boss.work('pipeline:run', handlePipelineRun);
-  await boss.work('pipeline:retry', handlePipelineRetry);
-  await boss.work('pipeline:cancel', handlePipelineCancel);
+  const maxConcurrent = parseInt(process.env.RORCA_MAX_CONCURRENT_RUNS ?? '5', 10);
+  await boss.work('pipeline:run', { batchSize: maxConcurrent }, handlePipelineRun);
+  await boss.work('pipeline:retry', { batchSize: maxConcurrent }, handlePipelineRetry);
+  await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
 
   // 3b. DLQ polling — pg-boss does not emit a 'failed' event for job exhaustion.
   // Instead, poll pgboss.archive every 60 s for newly-failed pipeline jobs and emit

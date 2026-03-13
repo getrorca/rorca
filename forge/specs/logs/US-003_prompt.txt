@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Start everything (recommended)
-npm run dev                # Frontend :5210 + Backend :3030 concurrently
+npm run dev                # Frontend :5210 + Backend :3030 + pg-boss Worker concurrently
 
 # Frontend (root)
 npm run dev                # Vite dev server (:5210)
@@ -20,6 +20,7 @@ npx tsc --noEmit           # Frontend type check
 
 # Backend (backend/)
 cd backend && npm run dev  # Express server (:3030) — auto-restarts on file save (tsx watch)
+cd backend && npm run worker  # pg-boss worker (required — picks up queued pipeline runs)
 cd backend && npm run mcp  # Run MCP server standalone (for debugging)
 cd backend && npm test     # Jest test suite
 cd backend && npx tsc --noEmit   # Backend type check
@@ -45,11 +46,14 @@ npm run self-register
 
 ```
 Browser (React :5210)  ←→  Express API (:3030)  ←→  PostgreSQL 16
-                                    ↓
-                            Execution Engine (per-story subprocess)
-                            ├── claude --print      (Claude subscription)
-                            ├── opencode run        (75+ providers via API key)
-                            └── codex               (ChatGPT subscription)
+                                                           ↑
+                                                   Worker Process
+                                                   (npm run worker)
+                                                           ↓
+                                                   execution-engine subprocesses
+                                                   ├── claude --print
+                                                   ├── opencode run
+                                                   └── codex
 
 Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 ```
@@ -141,8 +145,37 @@ Spec files live in the **project workspace** (not Rorca):
 ```
 ⚠️ Key field is `userStories` (NOT `stories`). `id` is always the slug (filename without `.json`), NOT the human-readable title.
 
+### Job Queue Architecture (pg-boss)
+
+Pipeline runs are no longer spawned synchronously by `pipeline.ts`. The flow is:
+
+1. `POST /api/pipeline/trigger` inserts a `pipeline:run` job into pg-boss and returns `{ runId, queued: true, queuePosition }` in ~200ms
+2. The **Worker process** (`backend/src/worker.ts`, `npm run worker`) polls pg-boss and picks up the job ~500ms later (default polling interval, configurable via `pollingIntervalSeconds`)
+3. Worker spawns `execution-engine.ts` as a child process with `RORCA_PROCESS_ROLE=engine`
+
+**Job types**:
+| Queue | Purpose |
+|-------|---------|
+| `pipeline:run` | Trigger a new pipeline run (specPath, workspaceId, runId, options) |
+| `pipeline:retry` | Retry failed stories in a completed run (runId, storyIds) |
+| `pipeline:cancel` | Cancel an active run by sending SIGTERM to the child process |
+| `pipeline:cron` | Meta-cron tick — checks `pipeline_schedules` for due runs |
+| `pipeline:cron:<id>` | Per-schedule cron job — fires a specific scheduled run |
+
+**Worker process** (`backend/src/worker.ts`):
+- Standalone process — completely independent of Express API
+- Connects to the same `DATABASE_URL` as the API
+- Writes heartbeat to `worker_heartbeat` table every 30s (`worker_id`, `pid`, `hostname`, `last_seen`)
+- Graceful shutdown on `SIGTERM` — drains in-flight jobs up to 30s before exiting
+- `RORCA_PROCESS_ROLE=engine` is set in the child process env to prevent nested worker spawning
+
+**Terminal output streaming** (`run_output_chunks`):
+- Worker writes stdout/stderr to `run_output_chunks` table in 4KB chunks with monotonically increasing sequence numbers
+- DB-backed streaming survives backend restarts and enables late-join SSE replay
+- `GET /api/pipeline/runs/:runId/output` SSE endpoint replays all chunks since sequence 0, then streams live
+
 ### The Ralph Loop (`backend/src/lib/execution-engine.ts`)
-The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by `pipeline.ts` via `npx tsx`. The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — `pipeline.ts` uses it only if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all three agent types. **Always edit `execution-engine.ts` for all execution behavior.**
+The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by the **Worker process** (not directly by `pipeline.ts`). The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — only used if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all three agent types. **Always edit `execution-engine.ts` for all execution behavior.**
 
 **Flags**: `--json <path>` (spec file), `--cwd <path>` (workspace root), `--run-id <number>` (required for WAL events), `--story <ID>` (single story), `--dry-run` (preview only), `--port <number>` (default 3030), `--agent <claude|opencode|codex>`, `--model <model>`
 
@@ -185,11 +218,12 @@ rorca/
 │       ├── routes/           # Express route handlers (32 route files)
 │       ├── lib/              # Core services (sse-hub, direction-stack, llm-client,
 │       │                     # errors, scheduler, agent-hook-runner, etc.)
+│       ├── worker.ts         # pg-boss worker process (pipeline job consumer)
 │       ├── mcp/              # MCP stdio server (5 tools)
 │       └── db/
 │           ├── index.ts      # PostgreSQL Pool + async query helpers
 │           ├── pg-index.ts   # Migration runner (schema_migrations tracking)
-│           └── pg-migrations/ # PostgreSQL migration files (001–049)
+│           └── pg-migrations/ # PostgreSQL migration files (001–062)
 ├── forge/
 │   ├── run-loop.sh           # Ralph Loop execution engine
 │   ├── self-register.ts      # Self-hosting bootstrap
@@ -225,7 +259,7 @@ rorca/
 
 ## Database Tables
 
-49 migrations (`backend/src/db/pg-migrations/001-049`). Key tables:
+62 migrations (`backend/src/db/pg-migrations/001-062`). Key tables:
 
 | Table | Purpose |
 |-------|---------|
@@ -258,6 +292,8 @@ rorca/
 | `user_settings` | Per-user preferences |
 | `billing` | Stripe subscription tracking |
 | `provider_defaults` | Default model configs per provider |
+| `run_output_chunks` | DB-backed terminal output streaming — `(run_id, sequence, data)`, monotonically increasing, survives restarts, enables late-join SSE replay |
+| `worker_heartbeat` | Worker liveness — `(worker_id, pid, hostname, started_at, last_seen)`, updated every 30s; stale if `last_seen` > 90s ago |
 
 **WAL event types**: `generate`, `spec_approved`, `spec_rejected`, `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `worktree_created`, `worktree_merged`, `run_blocked` (HITL pause), `context_file_changed` (CIE file watcher), `story_escalated` (CIE model escalation), `skill_installed` (skill added), `skill_removed` (skill deleted), `skill_matched` (LLM skill-to-spec matching)
 
@@ -375,12 +411,13 @@ When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the buil
 
 ## Critical Gotchas
 
-### Top 5
+### Top 6
 1. **`chatComplete` returns `ChatResult { text, usage }`** — always use `.text` accessor. Never treat result as a string.
 2. **pg is async — always `await` DB calls**. `await queryOne<T>(sql, params)` returns T|undefined, `await query<T>(sql, params)` returns T[], `await execute(sql, params)` returns `{ rowCount }`. Use `$1, $2, ...` numbered placeholders (not `?`).
 3. **spec `id` ≠ spec `specName`** — `id` is the filename slug (`rorca-feature-enhancements`), `specName` is the human title. Use `spec.id` to construct file paths.
 4. **run-loop.sh is a bash fallback only** — lives at `workspace.path/forge/run-loop.sh`. Only used if `execution-engine.ts` is missing. Claude-only, no multi-agent support. Do not rely on it.
 5. **Backend auto-restarts** — `tsx watch` detects file changes and restarts automatically. Manual restart only needed if the process itself crashes: `lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev`.
+6. **Worker must be running** — pipeline triggers insert a pg-boss job and return immediately; runs only execute if the worker process is live. Check `GET /api/pipeline/worker/health` before triggering runs. Start with `cd backend && npm run worker` or `npm run dev` (starts both). Stale if `worker_heartbeat.last_seen` > 90s.
 
 ### Auth Middleware — Intentionally Bypassed
 `app.use(authRequired)` in `backend/src/server.ts` line ~78 is **commented out**. This is intentional — Rorca is a local single-user tool and the login wall blocks workspaces API causing onboarding to show incorrectly. Do NOT re-enable globally. Auth routes (`/api/auth/*`) still work for the registered user (`admin@rorca.local` / `rorca123`). If authRequired reappears as a global middleware, comment it out again.
@@ -558,6 +595,9 @@ CODEX_BIN=/path/to/codex        # Auto-detected if in PATH
 SPEC_PROVIDER=claude          # Options: claude (default), anthropic, openrouter
 ANTHROPIC_API_KEY=sk-ant-...  # Required if SPEC_PROVIDER=anthropic
 OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
+
+# Process role (set automatically by worker — do not set manually)
+RORCA_PROCESS_ROLE=engine     # Set to 'engine' by worker.ts when spawning execution-engine subprocesses
 ```
 
 ### Execution Engine: Claude vs OpenCode vs Codex
@@ -693,10 +733,11 @@ Codex CLI auto-discovers `AGENTS.md` files from the Git root directory and injec
 
 ## Performance Targets
 - Spec generation: < 60s (LLM call)
-- Archive search: < 100ms (SQLite full-text scan)
+- Archive search: < 100ms (pg full-text scan)
 - SSE heartbeat: 15s
 - WAL poll: 3s
 - Story timeout: 45 min (gtimeout --foreground)
+- pg-boss job pickup: ~500ms latency (default polling interval; configurable via `pollingIntervalSeconds` in pg-boss options)
 
 ## CI
 E2E tests: `npm run test:e2e` (Playwright — configured in `rorca-e2e-testing` spec, not yet built).
@@ -1155,9 +1196,12 @@ Rorca is an AI spec orchestration and pipeline management platform for autonomou
 - **Rules**:
   - PostgreSQL 16 via `pg` Pool — all DB calls are **async** (always `await`)
   - `query<T>()` → `T[]`, `queryOne<T>()` → `T | undefined`, `execute()` → `{ rowCount }`
-  - Migrations are SQL in `pg-migrations/`, numbered sequentially (001–049+), tracked via `schema_migrations` table
+  - Migrations are SQL in `pg-migrations/`, numbered sequentially (001–062+), tracked via `schema_migrations` table
   - Use `$1, $2, ...` numbered placeholders (NOT `?`)
   - FK constraints always on, connection pooling (max 20)
+  - **pgboss schema is NOT hand-managed** — `pgboss.*` tables (job, archive, subscription, version) are created and upgraded automatically by `boss.start()`. Never write migrations that touch `pgboss.*`. Migration 062 is a no-op placeholder that documents this.
+  - **pg-boss v10 requires explicit queue creation** — `boss.work('queue:name', handler)` does NOT create the queue or its partition table. You MUST call `await boss.createQueue('queue:name')` before calling `boss.send('queue:name', ...)`, otherwise `send()` returns `null` silently. The `job` table is partitioned by queue name (one partition per queue). In tests, call `createQueue` in `beforeAll` after `boss.start()`.
+  - **pg-boss job `id` must be a valid UUID** — passing an integer string (e.g., `String(runId)`) to the `id` option of `boss.send()` causes a PostgreSQL UUID cast error. Use auto-generated UUIDs (omit the `id` option) and embed `runId` in the job's data payload for correlation.
 
 ### Execution Engine (`backend/src/lib/execution-engine.ts`)
 - **Owner**: Architect
@@ -1265,12 +1309,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-02-28 [Architecture] Episodic Memory is structured Markdown
-> Rule: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
-
-## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure
-> Rule: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
-
 ## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution
 > Rule: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
 
@@ -1325,8 +1363,186 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-12 [Bug Fix] tsx watch restarts backend during parallel runs → resilient-post retries exhaust
 > Rule: When a fast worktree run auto-merges into main, tsx watch detects the file changes and restarts the backend (5-10s TypeScript recompile). If resilient-post.ts retry window is shorter than the restart time, execution engine can't report story results and the run shows as failed. Fix: raise POST_MAX_RETRIES to 10 and POST_RETRY_DELAY_MS to 3000 (30s coverage) in backend/src/lib/resilient-post.ts.
 
+## 2026-03-12 [Decision] Distribution format: curl|sh for launch, native installers deferred
+> Rule: Use `curl -fsSL https://get.rorca.app | sh` (macOS/Linux) + PowerShell equivalent (Windows) for launch distribution. Do NOT build .pkg (macOS) or .exe (Windows) installers yet — they require code signing certs (~$400/yr) and unsigned installers trigger OS security warnings (Gatekeeper, SmartScreen) which is worse UX than curl|sh. Native installers and Homebrew tap (`brew install getrorca/tap/rorca`) are deferred until there's user demand.
+
+## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
+> Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
+
 Follow this workflow for implementation:
 ## Agent Role: Backend Routes
+
+
+## Skill: logging-fundamentals (relevance: 7)
+---
+name: logging-fundamentals
+description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers, SREs, DevOps engineers
+  category: observability
+---
+
+# Logging Fundamentals
+
+Establish proper logging practices including log levels, structured logging, context propagation, and comprehensive logging strategies for applications, services, and infrastructure.
+
+## When to use me
+
+Use this skill when:
+- Setting up logging for new applications or services
+- Reviewing existing logging implementations
+- Establishing logging standards for teams or projects
+- Debugging issues with incomplete or poor logging
+- Implementing structured logging for better observability
+- Configuring log levels and verbosity for different environments
+- Ensuring logs contain sufficient context for troubleshooting
+
+## What I do
+
+### 1. Log Level Management
+- **Define appropriate log levels** (DEBUG, INFO, WARN, ERROR, FATAL)
+- **Configure level filtering** per environment (development, staging, production)
+- **Implement dynamic level adjustment** without application restarts
+- **Establish level usage guidelines** for different types of information
+
+### 2. Structured Logging Implementation
+- **Design log schema** with consistent field naming and types
+- **Implement structured formats** (JSON, key-value pairs, structured text)
+- **Include mandatory context fields** (timestamp, service, trace_id, user_id, etc.)
+- **Handle nested structures and arrays** appropriately in logs
+
+### 3. Context Propagation
+- **Implement correlation IDs** for request tracing across services
+- **Propagate context through async operations** (queues, background jobs)
+- **Maintain user/session context** throughout request lifecycle
+- **Include business context** (order_id, transaction_id, etc.) in logs
+
+### 4. Log Content Best Practices
+- **Include sufficient context** for debugging without external systems
+- **Balance detail with noise** - log enough but not too much
+- **Use consistent message formats** across the codebase
+- **Log before and after significant operations**
+- **Include error details** (stack traces, error codes, recovery suggestions)
+- **Avoid logging secrets, passwords, or sensitive data**
+
+## Logging Principles
+
+### The 5 Ws of Logging
+1. **WHO** - Which user/service/process generated the log?
+2. **WHAT** - What action/event is being logged?
+3. **WHEN** - Precise timestamp with timezone information
+4. **WHERE** - Which component/function/file generated the log?
+5. **WHY** - What is the significance/severity of the logged event?
+
+### Structured Logging Fields
+```json
+{
+  "timestamp": "2026-02-26T18:00:00Z",
+  "level": "INFO",
+  "service": "spec-generator",
+  "component": "chatComplete",
+  "trace_id": "gen-abc123",
+  "message": "LLM call completed",
+  "duration_ms": 5123,
+  "context": {
+    "model": "claude-sonnet-4-5-20250929",
+    "input_tokens": 12000,
+    "output_tokens": 4500
+  }
+}
+```
+
+### Log Level Guidelines
+- **DEBUG**: Detailed information for debugging, typically disabled in production
+- **INFO**: Routine information about normal operation
+- **WARN**: Warning conditions that might require attention but don't indicate failure
+- **ERROR**: Error conditions that indicate failure of a specific operation
+- **FATAL**: Critical errors that cause application termination
+
+## Notes
+
+- **Structured logging is essential** for modern log analysis and observability
+- **Context is more important than message content** - ensure logs can be correlated
+- **Log levels should reflect operational importance**, not developer convenience
+- **Consider log volume** - too many logs can overwhelm systems and teams
+- **Balance human readability with machine parsability** in log formats
+
+## Skill: workflow-orchestrator (relevance: 6)
+---
+name: workflow-orchestrator
+description: Build and orchestrate AI-driven development workflows that iterate until success using configurable patterns and multi-agent coordination
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers, AI agents, team leads
+  category: workflow
+---
+
+# Workflow Orchestrator
+
+Design, configure, and execute AI-driven development workflows that iterate until tasks complete successfully using configurable patterns, multi-agent coordination, and intelligent stop conditions.
+
+## When to use me
+
+Use this skill when:
+- Building complex features requiring multiple AI agent passes
+- Implementing automated development workflows with verification steps
+- Coordinating parallel AI agents for different aspects of a task
+- Creating self-correcting loops that iterate until success criteria met
+- Need to orchestrate multiple AI agents in sequence or parallel
+
+## What I do
+
+### 1. Workflow Pattern Selection
+- **Analyze task requirements** to recommend optimal workflow patterns
+- **Match complexity levels** with appropriate workflow types
+- **Compare trade-offs** between speed, cost, control, and quality
+
+### 2. Multi-Agent Coordination
+- **Sequence agents** for linear workflows (build → verify → plan)
+- **Parallelize agents** for concurrent execution
+- **Handle failures and retries** with intelligent routing
+- **Implement steering patterns** (linear, conditional, parallel, unblocking)
+
+### 3. SSE Event Streaming
+- **Real-time monitoring** via Server-Sent Events
+- **Progress tracking** across workflow stages
+- **Live output streaming** from subprocess execution
+- **Late-joiner replay** from in-memory buffers
+
+### 4. Integration & Tooling
+- **Subprocess management** for isolated agent execution
+- **Output buffer management** with subscriber patterns
+- **Structured event emission** for semantic log parsing
+- **Git integration** for automated quality gates
+
+## Key Patterns
+
+### Subprocess → SSE → Terminal Pattern
+```
+Backend spawns subprocess (claude --print, opencode run)
+  → stdout/stderr piped to in-memory buffer
+  → buffer broadcasts to SSE subscribers
+  → SSE endpoint replays buffer + live chunks
+  → Frontend EventSource connects, writes to xterm.js
+  → Late joiners get full replay automatically
+```
+
+### Buffer Management
+- In-memory circular buffer per generation/run ID
+- Subscribers added/removed on SSE connect/disconnect
+- Auto-cleanup after TTL (30 min default)
+- Base64 encoding for binary-safe transport
+
+## Notes
+
+- **Start simple** — single agent pattern before scaling to multi-agent
+- **Monitor costs** — parallel agents increase expense
+- **Implement escape hatches** — always have manual stop conditions
+- **Use structured events** alongside raw output for dual-mode rendering
+- **Buffer management is critical** — memory leaks from uncleaned buffers
 
 ---
 name: rorca
@@ -1479,11 +1695,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-003):
-Register a new MCP tool `rorca_enrich_spec` in `backend/src/mcp/server.ts` (alongside the existing 24 hand-written tools). The tool calls `POST /api/specs/:id/enrich` on the running Express server (same pattern as other MCP tools that call the local API). Input schema: `{ workspaceId: z.string(), specId: z.string() }`. The tool constructs the request URL as `http://localhost:${PORT}/api/specs/${specId}/enrich` where PORT defaults to 3030. It sends `{ workspaceId }` as the JSON body. On success it formats and returns a human-readable summary: spec ID, retrieval method used, number of stories enriched, and token usage. On error it surfaces the AppError message. Also register a corresponding MCP prompt `rorca_enrich_spec` as a slash command (pattern: `server.registerPrompt`) so users can invoke it as `/mcp__rorca__enrich_spec <workspaceId> <specId>` — consistent with the pattern established for other 20 prompt slash commands in the file (per MEMORY.md 2026-03-12 entry on MCP tools vs prompts).
+Modify `POST /api/workspaces` route in `backend/src/routes/workspaces.ts` to trigger both schema hydration AND git memory hydration as fire-and-forget background tasks immediately after workspace registration succeeds. After the workspace row is inserted and the 201 response is sent, call `hydrateGitMemory(workspace.id)` (from US-002) and the existing schema hydration function without awaiting them. Add a WAL event `workspace_hydration_started` after triggering. The registration response must return in under 500ms regardless of hydration duration.
 
 Acceptance Criteria:
-- server.registerTool('rorca_enrich_spec', ...) exists in backend/src/mcp/server.ts with inputSchema { workspaceId: z.string(), specId: z.string() }
-- Tool handler calls fetch(`http://localhost:${PORT}/api/specs/${specId}/enrich`, { method: 'POST', body: JSON.stringify({ workspaceId }), headers: {'Content-Type':'application/json'} }) and awaits the response
-- Successful response formats output as: 'Spec <specId> enriched\nRetrieval method: <method>\nStories enriched: <N>\nTokens used: <input>in / <output>out'
-- server.registerPrompt('rorca_enrich_spec', ...) exists with argsSchema { workspaceId: z.string(), specId: z.string() } and returns { messages: [{ role: 'user', content: { type: 'text', text: 'Enrich spec ...' } }] }
-- The tool appears in the MCP tool list when the stdio server is connected (verified via /mcp command showing rorca_enrich_spec in tool list)
+- `POST /api/workspaces` returns HTTP 201 with workspace data in under 500ms — hydration tasks run in background after response is sent
+- After workspace creation, `hydrateGitMemory(workspaceId)` is called without `await` (fire-and-forget) — errors from hydration do not affect the registration response
+- Schema hydration (existing `POST /api/workspaces/:id/hydrate` logic) is also triggered as fire-and-forget after registration
+- WAL event `workspace_hydration_started` is emitted via sse-hub after both hydration tasks are initiated
+- If the workspace git path does not exist or is not a git repo, hydrateGitMemory silently exits without error and no WAL event is emitted for git hydration

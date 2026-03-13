@@ -230,19 +230,19 @@ router.post('/', async (req: Request, res: Response) => {
   }
   const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
 
-  await queryOne<{ id: string }>(
-    `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
-     VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
-    [
-      workspaceId,
-      category,
-      `${title}: ${rule}`,
-      'high',
-      '[]',
-      embeddingStr,
-      resolvedSourceType,
-    ],
-  );
+  if (embeddingStr) {
+    await queryOne<{ id: string }>(
+      `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
+       VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
+      [workspaceId, category, `${title}: ${rule}`, 'high', '[]', embeddingStr, resolvedSourceType],
+    );
+  } else {
+    await queryOne<{ id: string }>(
+      `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type)
+       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+      [workspaceId, category, `${title}: ${rule}`, 'high', '[]', resolvedSourceType],
+    );
+  }
 
   invalidateMemory(workspaceId); // PG-013
   res.status(201).json({ entry, total: entries.length });
@@ -566,11 +566,19 @@ router.post('/proposals', async (req: Request, res: Response) => {
         // Embedding failure is non-fatal
       }
       const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
-      await queryOne<{ id: string }>(
-        `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
-         VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
-        [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', embeddingStr, 'synthesis'],
-      );
+      if (embeddingStr) {
+        await queryOne<{ id: string }>(
+          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
+           VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
+          [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', embeddingStr, 'synthesis'],
+        );
+      } else {
+        await queryOne<{ id: string }>(
+          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', 'synthesis'],
+        );
+      }
 
       results.push({ proposalId: p.proposalId, action: 'approve', success: true });
     } else if (p.action === 'reject') {
@@ -602,11 +610,19 @@ router.post('/proposals', async (req: Request, res: Response) => {
         // Embedding failure is non-fatal
       }
       const editEmbeddingStr = editEmbedding ? `[${editEmbedding.join(',')}]` : null;
-      await queryOne<{ id: string }>(
-        `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
-         VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
-        [workspaceId, edited.category, `${edited.title}: ${edited.rule}`, 'high', '[]', editEmbeddingStr, 'synthesis'],
-      );
+      if (editEmbeddingStr) {
+        await queryOne<{ id: string }>(
+          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
+           VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
+          [workspaceId, edited.category, `${edited.title}: ${edited.rule}`, 'high', '[]', editEmbeddingStr, 'synthesis'],
+        );
+      } else {
+        await queryOne<{ id: string }>(
+          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type)
+           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
+          [workspaceId, edited.category, `${edited.title}: ${edited.rule}`, 'high', '[]', 'synthesis'],
+        );
+      }
 
       results.push({ proposalId: p.proposalId, action: 'edit', success: true });
     }

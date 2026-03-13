@@ -101,6 +101,6 @@ describe('writeSpec', () => {
     const result = writeSpec(deepDir, spec);
 
     expect(fs.existsSync(result.specPath)).toBe(true);
-    expect(result.specPath).toContain(path.join('some', 'nested', 'workspace', 'scripts', 'ralph', 'specs', 'pending'));
+    expect(result.specPath).toContain(path.join('some', 'nested', 'workspace', 'forge', 'specs', 'pending'));
   });
 });

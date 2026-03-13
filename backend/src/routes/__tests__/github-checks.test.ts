@@ -80,15 +80,16 @@ beforeEach(async () => {
   jest.resetModules();
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-checks-test-'));
   const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
+  process.env.NODE_ENV = 'test';
+  process.env.AUTH_REQUIRED = 'true';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-authToken = await getAuthToken(app);
+  authToken = await getAuthToken(app);
 
   await execute(`DELETE FROM wal_events`);
 
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3)`, [WORKSPACE_ID, 'Checks Test', tmpDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, 'Checks Test', tmpDir]);
 
   const authMod = require('../auth');
   const encryptedSecret = authMod.encryptToken(WEBHOOK_SECRET);
@@ -99,8 +100,10 @@ authToken = await getAuthToken(app);
 afterEach(async () => {
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 100));
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
+  delete process.env.AUTH_REQUIRED;
+  await execute('TRUNCATE users CASCADE').catch(() => {});
 });
 
 // ─── checkCriteriaCoverage unit tests ────────────────────────────────────────
