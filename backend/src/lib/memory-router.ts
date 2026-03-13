@@ -262,8 +262,7 @@ export async function retrieveContext(
   const directionTokens = estimateTokens(direction.standards || '')
     + estimateTokens(direction.conventions || '')
     + estimateTokens(direction.project || '')
-    + estimateTokens(layers.schemaSnapshot || '')
-    + estimateTokens(layers.gitMemory || '');
+    + estimateTokens(layers.schemaSnapshot || '');
 
   const remainingTokens = maxTokens - directionTokens;
   const budgets = calculateBudgets(remainingTokens, includeGraph);

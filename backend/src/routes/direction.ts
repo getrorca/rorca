@@ -537,7 +537,6 @@ router.get('/preview', async (req: Request, res: Response, next: NextFunction) =
 
     // Fetch auto-hydrated context from workspace_context
     let schemaSnapshot: string | undefined;
-    let gitMemory: string | undefined;
     let schemaTableCount: number | null = null;
     let gitCommitCount: number | null = null;
 
@@ -545,17 +544,15 @@ router.get('/preview', async (req: Request, res: Response, next: NextFunction) =
       const ctx = await queryOne<{
         schema_snapshot: string | null;
         schema_table_count: number | null;
-        git_memory: string | null;
         git_commit_count: number | null;
       }>(
-        `SELECT schema_snapshot, schema_table_count, git_memory, git_commit_count
+        `SELECT schema_snapshot, schema_table_count, git_commit_count
          FROM workspace_context WHERE workspace_id = $1`,
         [String(workspaceId)]
       );
 
       if (ctx) {
         schemaSnapshot = ctx.schema_snapshot || undefined;
-        gitMemory = ctx.git_memory || undefined;
         schemaTableCount = ctx.schema_table_count;
         gitCommitCount = ctx.git_commit_count;
       }
@@ -592,7 +589,6 @@ router.get('/preview', async (req: Request, res: Response, next: NextFunction) =
       teamL2: teamLayers.teamL2,
       l3: l3Row?.content_yaml,
       schemaSnapshot,
-      gitMemory,
       specBrief: String(brief),
     });
 
@@ -651,17 +647,15 @@ router.post('/synthesize', async (req: Request, res: Response, next: NextFunctio
 
     // Fetch auto-hydrated context
     let schemaSnapshot: string | undefined;
-    let gitMemory: string | undefined;
 
     if (workspaceId) {
-      const ctx = await queryOne<{ schema_snapshot: string | null; git_memory: string | null }>(
-        `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`,
+      const ctx = await queryOne<{ schema_snapshot: string | null }>(
+        `SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`,
         [String(workspaceId)]
       );
 
       if (ctx) {
         schemaSnapshot = ctx.schema_snapshot || undefined;
-        gitMemory = ctx.git_memory || undefined;
       }
     }
 
@@ -675,7 +669,6 @@ router.post('/synthesize', async (req: Request, res: Response, next: NextFunctio
       teamL2: teamLayers.teamL2,
       l3: l3Row?.content_yaml,
       schemaSnapshot,
-      gitMemory,
       specBrief: l4SpecBrief || '',
       storyAnnotations: l5Annotations || undefined,
     });

@@ -231,7 +231,6 @@ export async function autoSynthesizeSpecMemory(
       if (dl.l3) ctxParts.push('L3 project brief');
     }
     if (contextSummary.schemaSnapshot) ctxParts.push(`schema snapshot`);
-    if (contextSummary.gitMemory) ctxParts.push(`git memory`);
     const skills = contextSummary.skills as string[] | undefined;
     if (skills?.length) ctxParts.push(`${skills.length} skills`);
     if (contextSummary.memoryEntries) ctxParts.push(`${contextSummary.memoryEntries} memory entries`);
