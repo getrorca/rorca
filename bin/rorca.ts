@@ -206,19 +206,43 @@ async function runStart(startArgs: string[]): Promise<void> {
 
   const backendDir = join(rootDir, 'backend');
   const backendEntry = join(backendDir, 'dist', 'server.js');
+  const workerEntry = join(backendDir, 'dist', 'worker.js');
   const backendTsEntry = join(backendDir, 'src', 'server.ts');
+  const workerTsEntry = join(backendDir, 'src', 'worker.ts');
 
-  let child: ReturnType<typeof fork> | ReturnType<typeof spawn>;
+  type Child = ReturnType<typeof fork> | ReturnType<typeof spawn>;
+
+  /** Spawn a process and prefix each line of its stdout/stderr with a label. */
+  function spawnLabeled(label: string, cmd: string, args: string[], opts: Parameters<typeof spawn>[2]): ReturnType<typeof spawn> {
+    const child = spawn(cmd, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
+    const prefix = `[${label}] `;
+    const printLine = (stream: NodeJS.WriteStream, line: string) => stream.write(prefix + line + '\n');
+    let buf = '';
+    const onData = (stream: NodeJS.WriteStream) => (chunk: Buffer) => {
+      buf += chunk.toString();
+      const lines = buf.split('\n');
+      buf = lines.pop() ?? '';
+      for (const line of lines) printLine(stream, line);
+    };
+    child.stdout?.on('data', onData(process.stdout));
+    child.stderr?.on('data', onData(process.stderr));
+    child.on('close', () => {
+      if (buf.length > 0) { process.stdout.write(prefix + buf + '\n'); buf = ''; }
+    });
+    return child;
+  }
+
+  let serverChild: Child;
+  let workerChild: Child | null = null;
 
   if (existsSync(backendEntry)) {
-    // Production: compiled JS
-    child = fork(backendEntry, [], { env, cwd: backendDir, stdio: 'inherit' });
+    // Production: compiled JS — server
+    serverChild = fork(backendEntry, [], { env, cwd: backendDir, stdio: 'inherit' });
   } else if (existsSync(backendTsEntry)) {
-    // Development: run TypeScript source via tsx
-    child = spawn('npx', ['tsx', backendTsEntry], {
+    // Development: run TypeScript source via tsx — server
+    serverChild = spawnLabeled('server', 'npx', ['tsx', backendTsEntry], {
       env,
       cwd: backendDir,
-      stdio: 'inherit',
       shell: true,
     });
   } else {
@@ -228,20 +252,54 @@ async function runStart(startArgs: string[]): Promise<void> {
     return; // unreachable — satisfies TypeScript
   }
 
+  // Spawn worker sibling process
+  if (existsSync(workerEntry)) {
+    // Production: compiled JS — worker
+    workerChild = fork(workerEntry, [], { env, cwd: backendDir, stdio: 'inherit' });
+  } else if (existsSync(workerTsEntry)) {
+    // Development: run TypeScript source via tsx — worker
+    workerChild = spawnLabeled('worker', 'npx', ['tsx', workerTsEntry], {
+      env,
+      cwd: backendDir,
+      shell: true,
+    });
+  } else {
+    console.warn('[startup] worker.ts not found — worker will not start. Pipeline jobs will not be processed.');
+  }
+
   console.log(`Rorca running at http://localhost:${portNum}`);
 
-  child.on('error', (err: Error) => {
-    console.error('Failed to start server:', err.message);
+  const killAll = (sig: NodeJS.Signals) => {
+    serverChild.kill(sig);
+    workerChild?.kill(sig);
     if (managedPostgresStarted) stopManagedPostgres();
+  };
+
+  serverChild.on('error', (err: Error) => {
+    console.error('[server] Failed to start:', err.message);
+    killAll('SIGTERM');
     process.exit(1);
   });
 
-  child.on('exit', (code: number | null) => {
+  serverChild.on('exit', (code: number | null) => {
     if (code !== 0 && code !== null) {
-      console.error(`Server exited with code ${code}`);
+      console.error(`[server] exited with code ${code}`);
     }
+    workerChild?.kill('SIGTERM');
     if (managedPostgresStarted) stopManagedPostgres();
     process.exit(code ?? 1);
+  });
+
+  workerChild?.on('error', (err: Error) => {
+    console.error('[worker] Failed to start:', err.message);
+    // Worker failure is non-fatal — server keeps running but warn the operator
+    console.error('[worker] Pipeline jobs will not be processed until worker is restarted.');
+  });
+
+  workerChild?.on('exit', (code: number | null) => {
+    if (code !== 0 && code !== null) {
+      console.error(`[worker] exited with code ${code} — pipeline jobs will not be processed`);
+    }
   });
 
   // Open browser after short delay to let server bind
@@ -252,11 +310,27 @@ async function runStart(startArgs: string[]): Promise<void> {
     }, 1500);
   }
 
-  // Graceful shutdown: stop managed Postgres before exiting
+  // Worker health check: warn once if worker hasn't registered a heartbeat after 10 s
+  setTimeout(() => {
+    void (async () => {
+      try {
+        const res = await fetch(`http://localhost:${portNum}/api/pipeline/worker/health`);
+        if (res.ok) {
+          const data = await res.json() as { workerActive?: boolean };
+          if (!data.workerActive) {
+            console.warn('[startup] Warning: worker not yet active — pipeline jobs may be delayed');
+          }
+        }
+      } catch {
+        // Server may not be ready yet — not an error worth surfacing
+      }
+    })();
+  }, 10_000);
+
+  // Graceful shutdown: stop all child processes + managed Postgres
   for (const sig of ['SIGINT', 'SIGTERM'] as const) {
     process.on(sig, () => {
-      child.kill(sig);
-      if (managedPostgresStarted) stopManagedPostgres();
+      killAll(sig);
       process.exit(0);
     });
   }
