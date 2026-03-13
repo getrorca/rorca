@@ -2897,7 +2897,11 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
     try {
       process.kill(-run.pid, 'SIGTSTP');
     } catch (err: any) {
-      res.status(500).json({ error: `Failed to send SIGTSTP: ${err.message}` });
+      if (err.code === 'ESRCH') {
+        res.status(409).json({ error: 'Process is no longer running' });
+      } else {
+        res.status(500).json({ error: `Failed to send SIGTSTP: ${err.message}` });
+      }
       return;
     }
 
@@ -3131,8 +3135,8 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne<{ id: number; status: string; workspace_id: string; started_at: string }>(
-      'SELECT id, status, workspace_id, started_at FROM pipeline_runs WHERE id = $1',
+    const run = await queryOne<{ id: number; status: string; workspace_id: string; started_at: string; pid: number | null }>(
+      'SELECT id, status, workspace_id, started_at, pid FROM pipeline_runs WHERE id = $1',
       [runId],
     );
 
@@ -3196,9 +3200,36 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     }
 
     // ── Running / paused path ─────────────────────────────────────────────
-    // Deliver cancel job to the worker. The worker owns SIGTERM/SIGKILL sequencing,
-    // DB status update, and WAL event emission. We return 200 immediately.
+    // Deliver cancel job to the worker for SIGTERM/SIGKILL sequencing.
     await getBoss().send('pipeline:cancel', { runId }, { expireInSeconds: 120 });
+
+    // Best-effort: if the PID is already dead (worker crashed, process exited),
+    // mark the run cancelled immediately rather than waiting for the worker.
+    const pidAlive = run.pid ? isPidAlive(run.pid) : false;
+
+    if (!pidAlive) {
+      // Process is already gone — handle cancellation inline
+      await execute(
+        `UPDATE pipeline_runs SET status = 'cancelled', finished_at = NOW() WHERE id = $1`,
+        [runId],
+      );
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_cancelled', $1, $2) RETURNING *`,
+        [run.workspace_id, JSON.stringify({ run_id: runId, cancelledAt: new Date().toISOString(), reason: 'pid_not_alive' })],
+      );
+      if (walEvent) broadcastAll(walEvent);
+      res.json({ ok: true, runId, status: 'cancelled' });
+      return;
+    }
+
+    // PID is alive — send SIGTERM directly as a best-effort fallback alongside the worker job
+    if (run.pid) {
+      try {
+        process.kill(run.pid, 'SIGTERM');
+      } catch {
+        // ESRCH (already dead) or EPERM (no permission) — ignore, worker will handle it
+      }
+    }
 
     res.json({ ok: true, runId, status: 'cancelling' });
   } catch (error: unknown) {
