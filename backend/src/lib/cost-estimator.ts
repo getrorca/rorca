@@ -110,8 +110,8 @@ export async function estimateDryRunCost(
     [workspaceId]
   );
 
-  const ctx = await queryOne<{ schema_snapshot: string | null; git_memory: string | null }>(
-    `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`,
+  const ctx = await queryOne<{ schema_snapshot: string | null }>(
+    `SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`,
     [workspaceId]
   );
 
@@ -121,7 +121,6 @@ export async function estimateDryRunCost(
     l2: l2Row?.content_yaml,
     l3: l3Row?.content_yaml,
     schemaSnapshot: ctx?.schema_snapshot || undefined,
-    gitMemory: ctx?.git_memory || undefined,
     specBrief: '',
   });
 

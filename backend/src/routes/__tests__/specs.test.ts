@@ -203,12 +203,12 @@ test('WAL event inserted with event_type=generate and payload includes provider'
   expect(payload.outputTokens).toBe(200);
 });
 
-test('WAL event has hasSchema:true and hasGitMemory:true when workspace has hydrated context', async () => {
+test('WAL event has hasSchema:true when workspace has hydrated context', async () => {
   mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
 
-  // Seed workspace_context with schema + git
-  await execute(`INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_table_count, git_memory, git_commit_count)
-     VALUES ($1, $2, $3, $4, $5)`, ['ws-test', 'CREATE TABLE users (id TEXT);', 1, 'conventions:\n  - use snake_case', 10]);
+  // Seed workspace_context with schema
+  await execute(`INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_table_count, git_commit_count)
+     VALUES ($1, $2, $3, $4)`, ['ws-test', 'CREATE TABLE users (id TEXT);', 1, 10]);
 
   await request(app)
     .post('/api/specs/generate')
@@ -225,7 +225,6 @@ test('WAL event has hasSchema:true and hasGitMemory:true when workspace has hydr
   expect(event).toBeDefined();
   const payload = JSON.parse(event.payload);
   expect(payload.hasSchema).toBe(true);
-  expect(payload.hasGitMemory).toBe(true);
 });
 
 test('WAL event has hasSchema:false when workspace has no hydrated context', async () => {
@@ -248,7 +247,8 @@ test('WAL event has hasSchema:false when workspace has no hydrated context', asy
   expect(event).toBeDefined();
   const payload = JSON.parse(event.payload);
   expect(payload.hasSchema).toBe(false);
-  expect(payload.hasGitMemory).toBe(false);
+  // hasGitMemory is no longer emitted — git_memory column was dropped (migration 070)
+  expect(payload.hasGitMemory).toBeUndefined();
 });
 
 test('POST /api/specs/generate with existing slug snapshots old version and succeeds', async () => {
