@@ -15,6 +15,8 @@
 import 'dotenv/config';
 import * as path from 'path';
 import * as fs from 'fs';
+import * as os from 'os';
+import * as crypto from 'crypto';
 import { spawn, type ChildProcess } from 'child_process';
 import { z } from 'zod';
 import PgBoss from 'pg-boss';
@@ -22,6 +24,27 @@ import { initDb, query, queryOne, execute } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { logger } from './lib/logger';
+
+// ── Worker identity (stable for the lifetime of this process) ────────────────
+
+const WORKER_ID: string = crypto.randomUUID();
+const WORKER_HOSTNAME: string = os.hostname();
+const WORKER_STARTED_AT: Date = new Date();
+
+const HEARTBEAT_INTERVAL_MS = 30_000; // 30 s
+
+async function writeHeartbeat(): Promise<void> {
+  try {
+    await execute(
+      `INSERT INTO worker_heartbeat (worker_id, pid, hostname, started_at, last_seen)
+       VALUES ($1, $2, $3, $4, NOW())
+       ON CONFLICT (worker_id) DO UPDATE SET last_seen = NOW(), pid = EXCLUDED.pid`,
+      [WORKER_ID, process.pid, WORKER_HOSTNAME, WORKER_STARTED_AT],
+    );
+  } catch (err) {
+    logger.warn({ err }, '[worker] heartbeat write failed');
+  }
+}
 
 // ── Validate environment ─────────────────────────────────────────────────
 
@@ -623,6 +646,10 @@ async function start(): Promise<void> {
   // Also registers the meta-cron (pipeline:cron, every minute) and per-schedule
   // boss.work() subscriptions (pipeline:cron:<id>). Re-registration is idempotent.
   await registerSchedulesWithBoss(boss, handlePipelineCron);
+
+  // 5. Start heartbeat — write immediately, then every 30 s.
+  await writeHeartbeat();
+  setInterval(() => { void writeHeartbeat(); }, HEARTBEAT_INTERVAL_MS);
 
   logger.info('[worker] ready — listening for pipeline:run, pipeline:retry, pipeline:cancel, pipeline:cron');
 }
