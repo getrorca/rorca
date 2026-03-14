@@ -1309,12 +1309,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model
-> Rule: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
-
-## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution
-> Rule: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
-
 ## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
 > Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
 
@@ -1368,6 +1362,12 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 ## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
 > Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
+
+## 2026-03-13 [Gotcha] 150+ unmerged feat/ branches accumulate — audit regularly
+> Rule: Worktree spec runs create feat/ branches that never auto-merge. After several months of development, 150+ branches can accumulate. Most are stale (superseded by later runs of the same spec). When auditing: (1) check remote feat/ branches with commits not in main using `git branch -r | grep feat/ | while read b; do count=$(git log --oneline main.."$b" 2>/dev/null | wc -l | tr -d ' '); if [ "$count" -gt "0" ]; then echo "$count | $b"; fi; done`, (2) skip old pg-boss/scaffolding branches — their work is superseded by WR spec, (3) merge the most recent run of each spec (highest timestamp suffix = most complete), (4) skip convention-agents branches (old stubs, superseded by future spec).
+
+## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
+> Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
 
 Follow this workflow for implementation:
 ## Agent Role: Backend Routes
@@ -1523,11 +1523,20 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-001):
-The POST /api/specs/:id/enrich route in backend/src/routes/specs.ts currently implements its own inline 4-layer retrieval cascade that is disconnected from memory-router.ts. This story replaces that inline logic with per-story calls to retrieveContext(workspaceId, story.title + ' ' + story.description, { maxTokens: 2000, includeGraph: true }) from backend/src/lib/memory-router.ts. Each story in the spec gets its own semantically matched context via cosine similarity instead of the same 10 recency-ordered memories. Aggregate cagHits, ragHits, graphHits, and latencyMs across all per-story calls. After all stories are processed, write a context_summary_json entry to spec_generation_logs using the canonical ContextSummary schema: { directionLayers: [...], skills: [...], memory: { count, tier, cagHits, ragHits, graphHits, latencyMs }, tokenBudget, flags }. Set the retrieval_method column to the highest tier used across all story calls (graph > rag > cag > direction_only). The existing inline pgvector/AGE/tsvector/direction-only code block must be fully removed from the enrich route handler — no dead code left behind.
+Add an `auto_merge` boolean column (default true) to the `pipeline_runs` table via a new PostgreSQL migration. Update `POST /api/pipeline/trigger` to accept `autoMerge` in the request body and persist it to the new column. Update the pg-boss job payload for `pipeline:run` to include the `autoMerge` flag so the worker can read it when picking up the job. The trigger route should only store `autoMerge=true` when `autoWorktree=true` — if the run is not in a worktree, `auto_merge` is stored as `false` regardless of the request payload.
+
+## Context
+- **Migration numbering**: Highest existing migration is `073_fix_retrieval_method_constraint.sql` — use `074_add_auto_merge_to_pipeline_runs.sql`. Never reuse a number; parallel branches have caused collisions before (duplicate 069 incident).
+- **Column convention**: `auto_merge BOOLEAN NOT NULL DEFAULT true` with snake_case. Map to camelCase `autoMerge` in API responses. Use `$1, $2, ...` numbered placeholders in all queries.
+- **Trigger route location**: `POST /api/pipeline/trigger` is in `backend/src/routes/pipeline.ts`. Destructure `autoMerge` from `req.body` alongside existing `autoWorktree`. Enforce constraint: `const autoMerge = autoWorktree && (bodyAutoMerge !== false)` — never store `auto_merge=true` for non-worktree runs.
+- **pg-boss payload**: Add `autoMerge` to the existing job data object passed to `boss.send()`. Do NOT change the UUID-based job ID generation pattern — pg-boss requires UUIDs (past bug: using `String(runId)` broke job pickup).
+- **INSERT/SELECT updates**: Add `auto_merge` to the `INSERT INTO pipeline_runs` column list in the trigger route, and to `SELECT` queries in `GET /api/pipeline/runs/:id` and any list routes. Alias as `auto_merge AS "autoMerge"` or map in JS.
+- **Tests**: Backend tests in `backend/src/routes/__tests__/pipeline.test.ts` (Jest). Cover three cases: (1) default true when `autoWorktree=true`, (2) forced false when `autoWorktree=false`, (3) explicit `autoMerge=false` with `autoWorktree=true` respected. Watch for conflict detection from leftover `status='running'` rows in test DB — clean up or mock accordingly.
+- **DB access is async**: Always `await` all `query()`, `queryOne()`, `execute()` calls. `queryOne<T>()` returns `T | undefined`.
 
 Acceptance Criteria:
-- POST /api/specs/:id/enrich no longer contains any inline SQL queries against pgvector, tsvector, or AGE — all retrieval is delegated to memory-router.ts retrieveContext()
-- Each userStory in the spec receives its own retrieveContext(workspaceId, story.title + ' ' + story.description, { maxTokens: 2000, includeGraph: true }) call, producing semantically different context per story based on cosine similarity
-- cagHits in the aggregated context_summary_json is non-zero when memory-router.ts CAG cache contains relevant entries (i.e., the cache is actually consulted via memory-router.ts, not bypassed)
-- After enrichment, a row is inserted into spec_generation_logs with context_summary_json matching the ContextSummary schema shape used by the generate route: { directionLayers, skills, memory: { count, tier, cagHits, ragHits, graphHits, latencyMs }, tokenBudget, flags }
-- retrieval_method column in spec_generation_logs is set to 'graph' if any story call used AGE traversal, 'rag' if pgvector/tsvector was used, 'cag' if only cache was used, or 'direction_only' as fallback — reflecting the highest tier actually used across all per-story calls
+- A new migration file adds `auto_merge BOOLEAN NOT NULL DEFAULT true` to `pipeline_runs` table
+- POST /api/pipeline/trigger accepts `autoMerge` boolean in the request body (defaults to true)
+- When `autoWorktree=false`, `auto_merge` is stored as `false` regardless of the `autoMerge` request value
+- The pg-boss `pipeline:run` job data payload includes the `autoMerge` field
+- GET /api/pipeline/runs/:id response includes the `autoMerge` field in the run object

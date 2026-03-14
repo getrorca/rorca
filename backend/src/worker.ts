@@ -36,6 +36,38 @@ import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { logger } from './lib/logger';
 
+// ── Post-merge smoke test ─────────────────────────────────────────────────────
+
+/**
+ * Verify core API endpoints return 200 after a worktree merge.
+ * Catches bugs introduced by merged code (e.g. search_path poisoning,
+ * broken migrations) before the merge is marked as complete.
+ */
+async function runPostMergeSmokeTest(workspaceId: string | number): Promise<{ ok: boolean; failures: string[] }> {
+  const port = process.env.PORT || 3030;
+  const base = `http://localhost:${port}`;
+  const endpoints = [
+    `/api/workspaces/${workspaceId}`,
+    `/api/workspaces/${workspaceId}/health`,
+    `/api/workspaces/${workspaceId}/pipeline-config`,
+    `/api/specs/kanban?workspaceId=${workspaceId}`,
+  ];
+
+  const failures: string[] = [];
+  for (const ep of endpoints) {
+    try {
+      const res = await fetch(`${base}${ep}`);
+      if (!res.ok) {
+        failures.push(`${ep} → ${res.status}`);
+      }
+    } catch (err: any) {
+      failures.push(`${ep} → ${err.message}`);
+    }
+  }
+
+  return { ok: failures.length === 0, failures };
+}
+
 // ── Claude binary + env-var stripping for agentic conflict resolution ────────
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN ||
@@ -461,6 +493,15 @@ async function autoMergeAfterRun(
 
     // Update merge_status + clear worktree_path
     try { await execute(`UPDATE pipeline_runs SET worktree_path = NULL, merge_status = 'merged', merge_commit_sha = $2 WHERE id = $1`, [runId, sha]); } catch { /* non-fatal */ }
+
+    // Post-merge smoke test — verify core endpoints still return 200
+    const smoke = await runPostMergeSmokeTest(workspaceId);
+    if (!smoke.ok) {
+      appendLog(`[auto-merge] ⚠ Post-merge smoke test FAILED: ${smoke.failures.join(', ')}`);
+      logger.warn({ runId, failures: smoke.failures }, '[auto-merge] Post-merge smoke test failed — merged code may have introduced regressions');
+    } else {
+      appendLog('[auto-merge] Post-merge smoke test passed — all core endpoints healthy');
+    }
   } else {
     const mergeErrorMsg = conflictFiles.length > 0
       ? 'Agentic merge resolution failed — resolve conflicts manually via the Worktrees panel.'

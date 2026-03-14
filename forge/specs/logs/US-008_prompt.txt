@@ -1309,24 +1309,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution
-> Rule: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
-
-## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern
-> Rule: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
-
-## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization
-> Rule: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
-
-## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table
-> Rule: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
-
-## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model
-> Rule: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
-
-## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution
-> Rule: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
-
 ## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
 > Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
 
@@ -1369,69 +1351,26 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
 > Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
 
+## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
+> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
+
+## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
+> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
+
+## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
+> Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
+
+## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
+> Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
+
+## 2026-03-13 [Gotcha] 150+ unmerged feat/ branches accumulate — audit regularly
+> Rule: Worktree spec runs create feat/ branches that never auto-merge. After several months of development, 150+ branches can accumulate. Most are stale (superseded by later runs of the same spec). When auditing: (1) check remote feat/ branches with commits not in main using `git branch -r | grep feat/ | while read b; do count=$(git log --oneline main.."$b" 2>/dev/null | wc -l | tr -d ' '); if [ "$count" -gt "0" ]; then echo "$count | $b"; fi; done`, (2) skip old pg-boss/scaffolding branches — their work is superseded by WR spec, (3) merge the most recent run of each spec (highest timestamp suffix = most complete), (4) skip convention-agents branches (old stubs, superseded by future spec).
+
+## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
+> Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
+
 Follow this workflow for implementation:
-## Agent Role: Frontend
-
-
-## Skill: react-review (relevance: 8)
----
-name: react-review
-description: Review React components for best practices and performance issues
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers
-  category: development
----
-
-# React Review Skill
-
-Review React components for best practices, performance issues, and common patterns.
-
-## When to use me
-
-Use this skill when:
-- Reviewing React component code
-- Optimizing component performance
-- Checking for React best practices
-- Refactoring legacy components
-- Auditing component architecture
-
-## What I do
-
-- Analyze React components for performance issues (unnecessary re-renders, large bundles)
-- Check for React best practices (hooks usage, prop patterns, state management)
-- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
-- Suggest optimizations (memoization, code splitting, lazy loading)
-- Review TypeScript usage and type safety
-
-## Key Patterns
-
-### Performance
-- Use `React.memo` for components receiving object/function props from parent
-- Memoize expensive calculations with `useMemo`
-- Stabilize callback references with `useCallback`
-- Avoid inline object/array creation in JSX props
-- Use `React.lazy` + `Suspense` for code splitting
-
-### Hooks
-- Always include all dependencies in `useEffect` dependency arrays
-- Never call hooks conditionally or inside loops
-- Extract complex logic into custom hooks
-- Clean up subscriptions and timers in useEffect return
-
-### TypeScript
-- Define explicit interfaces for all component props
-- Use discriminated unions for variant components
-- Prefer `interface` over `type` for component props
-- Use `React.FC` sparingly — prefer explicit return types
-
-## Notes
-
-- Focuses on React 18+ patterns and best practices
-- Considers both class and function components
-- Includes TypeScript and JavaScript variants
-- References official React documentation and community patterns
+## Agent Role: Backend Routes
 
 ---
 name: rorca
@@ -1584,11 +1523,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-008):
-Add a context health checklist to the Spec Forge panel (`src/panels/SpecsPanel.tsx` or the Forge modal/slide-over). Before the user submits a spec brief, display 5 context readiness indicators fetched from `GET /api/workspaces/:id/context-health` (new endpoint): (1) L3 direction layer present, (2) git-derived memory count (from memories table WHERE source='git_hydration' AND workspace_id=$1), (3) schema snapshot present (workspace_context.schema_snapshot is not null), (4) CLAUDE.md exists in workspace, (5) at least 1 skill installed. Each indicator shows a green check or amber warning icon. A collapsed summary shows the count (e.g. '4/5 context items ready'). The checklist is informational only — user can proceed regardless.
+Add comprehensive Jest integration tests covering the full auto-merge backend pipeline. Tests must verify the complete merge workflow: post-run merge trigger activation when autoMerge=true, WAL event emission for merge lifecycle events (merge_started, merge_completed, merge_failed), merge_status column transitions (pending→merging→merged and pending→merging→failed), the retry-merge endpoint returning 404 for unknown runs, 409 when a merge is already in progress, and 200 on successful retry initiation, performMerge() function extraction and unit testability, and pg-boss pipeline:merge job enqueue with correct payload. Tests must be engine-agnostic since merge logic runs in the worker independently of claude --print, opencode run, or codex agent.
 
 Acceptance Criteria:
-- New route `GET /api/workspaces/:id/context-health` returns JSON: `{ l3Present: boolean, gitMemoryCount: number, schemaPresent: boolean, claudeMdPresent: boolean, skillsCount: number }`
-- Spec Forge UI renders a collapsible context readiness checklist with 5 rows — each shows green CheckCircle or amber AlertTriangle icon based on the API response
-- Summary line shows `N/5 context items ready` — collapsed by default, expands on click
-- Checklist fetches from context-health API when workspace is selected — loading skeleton shown during fetch
-- If `gitMemoryCount === 0`, the git memory row shows amber warning with text 'No git memory — click to hydrate' which triggers `POST /api/workspaces/:id/hydrate` on click
+- POST /api/pipeline/runs/:runId/retry-merge returns 404 when runId does not exist, 409 when merge_status is already 'merging', and 200 with { queued: true } when merge can be initiated
+- WAL event emission tests verify merge_started event fires when autoMerge job is picked up by worker, merge_completed fires on successful git merge, and merge_failed fires when performMerge() throws
+- merge_status column transition tests use a test pipeline_run row and assert transitions: null→merging on job pickup, merging→merged on success, merging→failed on error, with finished_at timestamp set on terminal states
+- pg-boss enqueue test mocks boss.send() and asserts pipeline:merge job payload contains { runId, specPath, workspaceId, branchName } with correct types
+- performMerge() unit tests mock child_process.spawn to simulate successful merge, conflict detection, and SIGTERM/SIGKILL timeout paths without touching the filesystem

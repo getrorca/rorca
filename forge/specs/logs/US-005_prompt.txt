@@ -1309,24 +1309,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution
-> Rule: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
-
-## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern
-> Rule: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
-
-## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization
-> Rule: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
-
-## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table
-> Rule: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
-
-## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model
-> Rule: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
-
-## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution
-> Rule: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
-
 ## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
 > Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
 
@@ -1369,69 +1351,102 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
 > Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
 
+## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
+> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
+
+## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
+> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
+
+## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
+> Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
+
+## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
+> Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
+
+## 2026-03-13 [Gotcha] 150+ unmerged feat/ branches accumulate — audit regularly
+> Rule: Worktree spec runs create feat/ branches that never auto-merge. After several months of development, 150+ branches can accumulate. Most are stale (superseded by later runs of the same spec). When auditing: (1) check remote feat/ branches with commits not in main using `git branch -r | grep feat/ | while read b; do count=$(git log --oneline main.."$b" 2>/dev/null | wc -l | tr -d ' '); if [ "$count" -gt "0" ]; then echo "$count | $b"; fi; done`, (2) skip old pg-boss/scaffolding branches — their work is superseded by WR spec, (3) merge the most recent run of each spec (highest timestamp suffix = most complete), (4) skip convention-agents branches (old stubs, superseded by future spec).
+
+## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
+> Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
+
 Follow this workflow for implementation:
-## Agent Role: Frontend
+## Agent Role: Backend Routes
 
 
-## Skill: react-review (relevance: 6)
+## Skill: workflow-orchestrator (relevance: 9)
 ---
-name: react-review
-description: Review React components for best practices and performance issues
+name: workflow-orchestrator
+description: Build and orchestrate AI-driven development workflows that iterate until success using configurable patterns and multi-agent coordination
 license: MIT
 compatibility: opencode
 metadata:
-  audience: developers
-  category: development
+  audience: developers, AI agents, team leads
+  category: workflow
 ---
 
-# React Review Skill
+# Workflow Orchestrator
 
-Review React components for best practices, performance issues, and common patterns.
+Design, configure, and execute AI-driven development workflows that iterate until tasks complete successfully using configurable patterns, multi-agent coordination, and intelligent stop conditions.
 
 ## When to use me
 
 Use this skill when:
-- Reviewing React component code
-- Optimizing component performance
-- Checking for React best practices
-- Refactoring legacy components
-- Auditing component architecture
+- Building complex features requiring multiple AI agent passes
+- Implementing automated development workflows with verification steps
+- Coordinating parallel AI agents for different aspects of a task
+- Creating self-correcting loops that iterate until success criteria met
+- Need to orchestrate multiple AI agents in sequence or parallel
 
 ## What I do
 
-- Analyze React components for performance issues (unnecessary re-renders, large bundles)
-- Check for React best practices (hooks usage, prop patterns, state management)
-- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
-- Suggest optimizations (memoization, code splitting, lazy loading)
-- Review TypeScript usage and type safety
+### 1. Workflow Pattern Selection
+- **Analyze task requirements** to recommend optimal workflow patterns
+- **Match complexity levels** with appropriate workflow types
+- **Compare trade-offs** between speed, cost, control, and quality
+
+### 2. Multi-Agent Coordination
+- **Sequence agents** for linear workflows (build → verify → plan)
+- **Parallelize agents** for concurrent execution
+- **Handle failures and retries** with intelligent routing
+- **Implement steering patterns** (linear, conditional, parallel, unblocking)
+
+### 3. SSE Event Streaming
+- **Real-time monitoring** via Server-Sent Events
+- **Progress tracking** across workflow stages
+- **Live output streaming** from subprocess execution
+- **Late-joiner replay** from in-memory buffers
+
+### 4. Integration & Tooling
+- **Subprocess management** for isolated agent execution
+- **Output buffer management** with subscriber patterns
+- **Structured event emission** for semantic log parsing
+- **Git integration** for automated quality gates
 
 ## Key Patterns
 
-### Performance
-- Use `React.memo` for components receiving object/function props from parent
-- Memoize expensive calculations with `useMemo`
-- Stabilize callback references with `useCallback`
-- Avoid inline object/array creation in JSX props
-- Use `React.lazy` + `Suspense` for code splitting
+### Subprocess → SSE → Terminal Pattern
+```
+Backend spawns subprocess (claude --print, opencode run)
+  → stdout/stderr piped to in-memory buffer
+  → buffer broadcasts to SSE subscribers
+  → SSE endpoint replays buffer + live chunks
+  → Frontend EventSource connects, writes to xterm.js
+  → Late joiners get full replay automatically
+```
 
-### Hooks
-- Always include all dependencies in `useEffect` dependency arrays
-- Never call hooks conditionally or inside loops
-- Extract complex logic into custom hooks
-- Clean up subscriptions and timers in useEffect return
-
-### TypeScript
-- Define explicit interfaces for all component props
-- Use discriminated unions for variant components
-- Prefer `interface` over `type` for component props
-- Use `React.FC` sparingly — prefer explicit return types
+### Buffer Management
+- In-memory circular buffer per generation/run ID
+- Subscribers added/removed on SSE connect/disconnect
+- Auto-cleanup after TTL (30 min default)
+- Base64 encoding for binary-safe transport
 
 ## Notes
 
-- Focuses on React 18+ patterns and best practices
-- Considers both class and function components
-- Includes TypeScript and JavaScript variants
-- References official React documentation and community patterns
+- **Start simple** — single agent pattern before scaling to multi-agent
+- **Monitor costs** — parallel agents increase expense
+- **Implement escape hatches** — always have manual stop conditions
+- **Use structured events** alongside raw output for dual-mode rendering
+- **Buffer management is critical** — memory leaks from uncleaned buffers
 
 ---
 name: rorca
@@ -1584,11 +1599,21 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-005):
-Modify the spec generation flow in the frontend to include the workspace's domain in the `POST /api/specs/generate` request body. In `WorkspaceContext` (or wherever workspace data is stored), ensure the `domain` field from the workspace API response is available. In the Spec Forge panel's generate handler, include `domain: workspace.domain` in the request payload. On the backend, `POST /api/specs/generate` in `backend/src/routes/specs.ts` must read `domain` from the request body and pass it through to `synthesize()` — this ensures the L2 domain-specific direction layers are included in the spec generation context.
+When `git merge --no-ff` in US-004 fails with merge conflicts, implement an agentic resolution step. The sequence: (1) Capture the conflict diff via `git diff` (this shows the conflict markers in the working tree after a failed merge). (2) Spawn `claude --print --dangerously-skip-permissions` with a prompt that includes the conflict diff and instructions: 'You are resolving git merge conflicts. The feature branch <branch> is being merged into main for run #<runId>. Resolve each conflict intelligently — understand the intent of both sides. Do not blindly take one side. After resolving, stage all files and commit.' The claude session has access to bash, edit, read tools to navigate the workspace and resolve conflicts. (3) Set a timeout of 5 minutes for the resolution session. (4) After claude exits: if exit code 0 and `git diff --check` shows no remaining conflict markers, run `git commit --no-edit` (the merge commit message was already set), capture SHA, emit `worktree_merged`, set `merge_status='merged'`. (5) If claude fails or timeout or conflicts remain: run `git merge --abort` to restore clean state, emit `worktree_merge_failed` with the original conflict diff excerpt as `conflictSummary`, set `merge_status='failed'`. Strip the same 4 Claude env vars before spawning as execution-engine does. Use CLAUDE_BIN for the binary path.
+
+## Context
+- **Claude subprocess spawning**: Follow the exact env-var stripping pattern from `execution-engine.ts` — destructure `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_AGENT_SDK_VERSION`, `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` using aliased names (`_a, _b, _c, _d`) to avoid TS unused-variable warnings, then spread the rest into `cleanEnv`. Use `CLAUDE_BIN` full path (not bare `claude`) since NVM PATH isn't inherited by Node child processes.
+- **Timeout pattern**: Do NOT rely on `child_process.spawn({ timeout })` — it only sends SIGTERM. Implement the same two-stage pattern as execution-engine: 5-min `setTimeout` → `SIGTERM`, then a second 10s timer → `SIGKILL`. Clear both timers on normal exit to avoid dangling handles.
+- **Conflict diff capture**: After `git merge --no-ff` exits non-zero, run `git diff` (NOT `git diff --cached`) in the workspace `cwd` to get conflict markers in the working tree. Truncate to 50KB before injecting into the claude prompt to avoid prompt bloat.
+- **Post-resolution verification**: `git diff --check` returns non-zero if `<<<<<<<`/`=======`/`>>>>>>>` markers remain. Only commit (via `git commit --no-edit` — merge message already staged by the failed merge) when exit code is 0. If markers remain, treat as failure → `git merge --abort`.
+- **Abort safety**: `git merge --abort` must execute in the workspace `cwd` (not the rorca backend dir). After abort, verify clean state via `git status` before emitting `worktree_merge_failed`. If abort itself fails, log the error but still emit the WAL event.
+- **WAL events**: Emit via `fetch` to `http://localhost:${port}/api/wal` — same pattern as execution-engine. `worktree_merged` payload: `{ sha, branch, runId, resolvedBy: 'agentic' }`. `worktree_merge_failed` payload: `{ branch, runId, conflictSummary }` where `conflictSummary` is first 2KB of conflict diff.
+- **Orphan process risk**: Write the claude resolution PID somewhere recoverable (e.g. `pipeline_runs.pid` or a transient column) so the WR-010 dead-PID fallback can clean it up if the worker is killed mid-resolution. See memory: old execution-engine processes from test runs survive indefinitely.
+- **Testing**: Backend tests use Jest (not Vitest). Mock `child_process.spawn` to simulate claude exit codes 0 and non-zero, timeout scenarios, and verify the full flow: conflict diff → spawn → verify → commit/abort → WAL event.
 
 Acceptance Criteria:
-- `WorkspaceContext` exposes `domain` field from the workspace API response — TypeScript type includes `domain?: string`
-- Spec Forge generate handler sends `{ ..., domain: workspace.domain }` in POST /api/specs/generate request body
-- `POST /api/specs/generate` route reads `domain` from `req.body` and passes it to `synthesize(workspaceId, { domain })`
-- When `domain` is omitted from request body, the US-004 fallback in direction-stack.ts takes over — no 500 error
-- `npx tsc --noEmit` passes in both frontend and backend after changes
+- On merge conflict, claude --print is spawned with the conflict diff and resolution instructions
+- Claude session has a 5-minute timeout enforced via SIGTERM then SIGKILL after 10s
+- On successful resolution: no conflict markers remain (verified by git diff --check), merge_status='merged', worktree_merged WAL event emitted with SHA
+- On failed resolution: git merge --abort restores clean main branch, merge_status='failed', worktree_merge_failed WAL event emitted with conflict summary
+- The 4 Claude env vars (CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, CLAUDE_AGENT_SDK_VERSION, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING) are stripped from the spawned process

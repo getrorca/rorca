@@ -1309,24 +1309,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution
-> Rule: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
-
-## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern
-> Rule: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
-
-## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization
-> Rule: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
-
-## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table
-> Rule: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
-
-## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model
-> Rule: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
-
-## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution
-> Rule: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
-
 ## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
 > Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
 
@@ -1369,8 +1351,198 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
 > Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
 
+## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
+> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
+
+## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
+> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
+
+## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
+> Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
+
+## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
+> Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
+
+## 2026-03-13 [Gotcha] 150+ unmerged feat/ branches accumulate — audit regularly
+> Rule: Worktree spec runs create feat/ branches that never auto-merge. After several months of development, 150+ branches can accumulate. Most are stale (superseded by later runs of the same spec). When auditing: (1) check remote feat/ branches with commits not in main using `git branch -r | grep feat/ | while read b; do count=$(git log --oneline main.."$b" 2>/dev/null | wc -l | tr -d ' '); if [ "$count" -gt "0" ]; then echo "$count | $b"; fi; done`, (2) skip old pg-boss/scaffolding branches — their work is superseded by WR spec, (3) merge the most recent run of each spec (highest timestamp suffix = most complete), (4) skip convention-agents branches (old stubs, superseded by future spec).
+
+## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
+> Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
+
 Follow this workflow for implementation:
-## Agent Role: Database
+## Agent Role: Backend Routes
+
+
+## Skill: workflow-orchestrator (relevance: 8)
+---
+name: workflow-orchestrator
+description: Build and orchestrate AI-driven development workflows that iterate until success using configurable patterns and multi-agent coordination
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers, AI agents, team leads
+  category: workflow
+---
+
+# Workflow Orchestrator
+
+Design, configure, and execute AI-driven development workflows that iterate until tasks complete successfully using configurable patterns, multi-agent coordination, and intelligent stop conditions.
+
+## When to use me
+
+Use this skill when:
+- Building complex features requiring multiple AI agent passes
+- Implementing automated development workflows with verification steps
+- Coordinating parallel AI agents for different aspects of a task
+- Creating self-correcting loops that iterate until success criteria met
+- Need to orchestrate multiple AI agents in sequence or parallel
+
+## What I do
+
+### 1. Workflow Pattern Selection
+- **Analyze task requirements** to recommend optimal workflow patterns
+- **Match complexity levels** with appropriate workflow types
+- **Compare trade-offs** between speed, cost, control, and quality
+
+### 2. Multi-Agent Coordination
+- **Sequence agents** for linear workflows (build → verify → plan)
+- **Parallelize agents** for concurrent execution
+- **Handle failures and retries** with intelligent routing
+- **Implement steering patterns** (linear, conditional, parallel, unblocking)
+
+### 3. SSE Event Streaming
+- **Real-time monitoring** via Server-Sent Events
+- **Progress tracking** across workflow stages
+- **Live output streaming** from subprocess execution
+- **Late-joiner replay** from in-memory buffers
+
+### 4. Integration & Tooling
+- **Subprocess management** for isolated agent execution
+- **Output buffer management** with subscriber patterns
+- **Structured event emission** for semantic log parsing
+- **Git integration** for automated quality gates
+
+## Key Patterns
+
+### Subprocess → SSE → Terminal Pattern
+```
+Backend spawns subprocess (claude --print, opencode run)
+  → stdout/stderr piped to in-memory buffer
+  → buffer broadcasts to SSE subscribers
+  → SSE endpoint replays buffer + live chunks
+  → Frontend EventSource connects, writes to xterm.js
+  → Late joiners get full replay automatically
+```
+
+### Buffer Management
+- In-memory circular buffer per generation/run ID
+- Subscribers added/removed on SSE connect/disconnect
+- Auto-cleanup after TTL (30 min default)
+- Base64 encoding for binary-safe transport
+
+## Notes
+
+- **Start simple** — single agent pattern before scaling to multi-agent
+- **Monitor costs** — parallel agents increase expense
+- **Implement escape hatches** — always have manual stop conditions
+- **Use structured events** alongside raw output for dual-mode rendering
+- **Buffer management is critical** — memory leaks from uncleaned buffers
+
+## Skill: logging-fundamentals (relevance: 5)
+---
+name: logging-fundamentals
+description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers, SREs, DevOps engineers
+  category: observability
+---
+
+# Logging Fundamentals
+
+Establish proper logging practices including log levels, structured logging, context propagation, and comprehensive logging strategies for applications, services, and infrastructure.
+
+## When to use me
+
+Use this skill when:
+- Setting up logging for new applications or services
+- Reviewing existing logging implementations
+- Establishing logging standards for teams or projects
+- Debugging issues with incomplete or poor logging
+- Implementing structured logging for better observability
+- Configuring log levels and verbosity for different environments
+- Ensuring logs contain sufficient context for troubleshooting
+
+## What I do
+
+### 1. Log Level Management
+- **Define appropriate log levels** (DEBUG, INFO, WARN, ERROR, FATAL)
+- **Configure level filtering** per environment (development, staging, production)
+- **Implement dynamic level adjustment** without application restarts
+- **Establish level usage guidelines** for different types of information
+
+### 2. Structured Logging Implementation
+- **Design log schema** with consistent field naming and types
+- **Implement structured formats** (JSON, key-value pairs, structured text)
+- **Include mandatory context fields** (timestamp, service, trace_id, user_id, etc.)
+- **Handle nested structures and arrays** appropriately in logs
+
+### 3. Context Propagation
+- **Implement correlation IDs** for request tracing across services
+- **Propagate context through async operations** (queues, background jobs)
+- **Maintain user/session context** throughout request lifecycle
+- **Include business context** (order_id, transaction_id, etc.) in logs
+
+### 4. Log Content Best Practices
+- **Include sufficient context** for debugging without external systems
+- **Balance detail with noise** - log enough but not too much
+- **Use consistent message formats** across the codebase
+- **Log before and after significant operations**
+- **Include error details** (stack traces, error codes, recovery suggestions)
+- **Avoid logging secrets, passwords, or sensitive data**
+
+## Logging Principles
+
+### The 5 Ws of Logging
+1. **WHO** - Which user/service/process generated the log?
+2. **WHAT** - What action/event is being logged?
+3. **WHEN** - Precise timestamp with timezone information
+4. **WHERE** - Which component/function/file generated the log?
+5. **WHY** - What is the significance/severity of the logged event?
+
+### Structured Logging Fields
+```json
+{
+  "timestamp": "2026-02-26T18:00:00Z",
+  "level": "INFO",
+  "service": "spec-generator",
+  "component": "chatComplete",
+  "trace_id": "gen-abc123",
+  "message": "LLM call completed",
+  "duration_ms": 5123,
+  "context": {
+    "model": "claude-sonnet-4-5-20250929",
+    "input_tokens": 12000,
+    "output_tokens": 4500
+  }
+}
+```
+
+### Log Level Guidelines
+- **DEBUG**: Detailed information for debugging, typically disabled in production
+- **INFO**: Routine information about normal operation
+- **WARN**: Warning conditions that might require attention but don't indicate failure
+- **ERROR**: Error conditions that indicate failure of a specific operation
+- **FATAL**: Critical errors that cause application termination
+
+## Notes
+
+- **Structured logging is essential** for modern log analysis and observability
+- **Context is more important than message content** - ensure logs can be correlated
+- **Log levels should reflect operational importance**, not developer convenience
+- **Consider log volume** - too many logs can overwhelm systems and teams
+- **Balance human readability with machine parsability** in log formats
 
 ---
 name: rorca
@@ -1523,11 +1695,22 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-004):
-Modify `synthesize()` in `backend/src/lib/direction-stack.ts` to accept an optional `domain` parameter. When `domain` is not provided or is undefined/null, look it up from the `workspaces` table using the `workspace_id` parameter (`SELECT domain FROM workspaces WHERE id = $1`). This ensures L2 domain-scoped direction layers are always resolved correctly even when callers omit the domain. Update all internal calls within direction-stack.ts that currently pass undefined domain to use the fallback. The DB lookup should be cached per request (not per process) to avoid redundant queries within a single synthesize() call.
+After the execution-engine subprocess exits in the worker's `pipeline:run` handler, add a post-run merge step. The merge executes only when ALL of: (1) the run status is 'done' (all stories passed), (2) `autoWorktree` was true for the run, (3) `autoMerge` is true in the job data / pipeline_runs row, (4) a worktree branch name exists. The merge sequence: emit `worktree_merge_started` WAL event → `git checkout main` → `git pull --ff-only origin main` (to sync with remote, skip if no remote) → `git merge --no-ff <branch> -m 'chore: merge <branch> (run #<runId>)'` → if merge succeeds: capture the merge commit SHA from `git rev-parse HEAD`, emit `worktree_merged` with SHA, update `pipeline_runs.merge_status = 'merged'` and `pipeline_runs.merge_commit_sha = <sha>` → if merge fails (exit code != 0): do NOT abort yet, proceed to US-005 agentic resolution. Add two new columns to `pipeline_runs` via migration: `merge_status VARCHAR(20) DEFAULT NULL` (values: null, 'pending', 'merging', 'merged', 'failed') and `merge_commit_sha VARCHAR(64) DEFAULT NULL`. All git commands execute in the workspace root directory (not the worktree directory). After successful merge, clean up the worktree with `git worktree remove <worktree-path> --force`.
+
+## Context
+- **Worker handler location**: Post-run merge logic goes after the execution-engine subprocess exits in `backend/src/worker.ts` `pipeline:run` handler. Run synchronously (not detached) to avoid orphan processes — memory notes execution-engine subprocesses can survive worker restarts.
+- **Migration numbering**: Check highest existing migration number in `backend/src/db/pg-migrations/` before creating — memory documents a duplicate migration 069 collision from parallel branches. Currently migrations go up to 073, so use `074_pipeline_runs_merge_columns.sql`. Use `ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS` (PostgreSQL-safe).
+- **WAL event emission**: Use `fetch('http://localhost:${port}/api/wal', ...)` pattern matching `execution-engine.ts`. Timestamp column is `ts` NOT `created_at`. Add event types `worktree_merge_started` and `worktree_merged` (with merge commit SHA in payload).
+- **Git commands CWD**: All git operations (`checkout`, `pull`, `merge`, `worktree remove`) must use `cwd: workspace.path` (the workspace root), NOT the worktree subdirectory. Worktree path comes from job data or `pipeline_runs` row.
+- **pg-boss column names are snake_case**: Memory documents `completed_on`, `started_on` etc. — NOT `completedon`. Any direct pgboss.job queries in reconciliation or logging must use underscored column names.
+- **DB placeholders**: Use `$1, $2, ...` numbered placeholders (PostgreSQL), not `?`. `merge_status VARCHAR(20)` values: `null | 'pending' | 'merging' | 'merged' | 'failed'`. `merge_commit_sha VARCHAR(64)` for 40-char hex SHA.
+- **Merge failure path**: On `git merge` exit code ≠ 0, set `merge_status = 'failed'` but do NOT run `git merge --abort` — US-005 agentic resolution expects conflict markers in the working tree. Only call `git worktree remove --force` on successful merge.
+- **Addresses documented process gap**: "No post-run auto-merge" is listed in MEMORY.md Process Gaps — this feature directly fixes the 150+ unmerged feat/ branches accumulation problem. Test end-to-end with a real worktree run to verify branch cleanup.
 
 Acceptance Criteria:
-- `synthesize(workspaceId, options?)` in direction-stack.ts accepts optional `domain` in options — when omitted, executes `SELECT domain FROM workspaces WHERE id = $1` and uses the result
-- If workspace row not found or domain is null in DB, synthesize() continues without L2 domain layers (no error thrown)
-- Domain DB lookup result is used only for the duration of the synthesize() call — no process-level caching that could serve stale domain values
-- All existing callers of synthesize() that pass `domain: undefined` or omit domain now correctly receive L2 domain layers without code changes
-- `npx tsc --noEmit` passes in backend after changes
+- Auto-merge only triggers when run status is 'done' AND autoWorktree=true AND autoMerge=true AND branch name exists
+- git merge --no-ff is used (creates a merge commit, not fast-forward)
+- On successful merge: merge_status is set to 'merged', merge_commit_sha is populated, worktree_merged WAL event is emitted
+- On merge conflict: merge is not aborted, control passes to agentic conflict resolution (US-005)
+- Two new columns (merge_status, merge_commit_sha) are added to pipeline_runs via migration
+- Worktree directory is cleaned up with git worktree remove after successful merge

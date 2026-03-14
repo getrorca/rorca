@@ -905,11 +905,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     // 5b. Fetch auto-hydrated schema context from workspace_context
     const ctx = await queryOne(
-      `SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`,
+      `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`,
       [workspaceId]
-    ) as { schema_snapshot: string | null } | undefined;
+    ) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
 
     const schemaSnapshot = ctx?.schema_snapshot || undefined;
+    const gitMemory = ctx?.git_memory || undefined;
 
     // 6. Synthesize direction stack
     const synthResult = synthesizeWithMeta({
@@ -2060,7 +2061,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     const model = resolvedModel;
     await execute(`INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', $1, $2)`, [slug, JSON.stringify({
       title: effectiveTitle, domain, storyCount: parsed.stories.length, provider: usedProvider, model,
-      hasSchema: !!schemaSnapshot, hasGitMemory: !!gitMemory,
+      hasSchema: !!schemaSnapshot,
       inputTokens: tokenUsage.inputTokens, outputTokens: tokenUsage.outputTokens,
       multiPass,
     })]);
@@ -2120,7 +2121,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     }
 
     // 16. Return response
-    res.set('X-Git-Hydration', hydrationTriggered ? 'triggered' : 'fresh');
+    res.set('X-Git-Hydration', 'fresh');
     res.json({
       slug,
       title: effectiveTitle,
@@ -2231,7 +2232,6 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     l2: l2Row?.content_yaml,
     l3: l3Row?.content_yaml,
     schemaSnapshot: ctx?.schema_snapshot || undefined,
-    gitMemory: ctx?.git_memory || undefined,
     specBrief: item.brief,
   });
 
@@ -2348,7 +2348,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   const provider = getActiveProvider();
   await execute(`INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', $1, $2)`, [slug, JSON.stringify({
     title, domain: item.domain, storyCount: parsed.stories.length, provider, model: resolvedModel,
-    hasSchema: !!ctx?.schema_snapshot, hasGitMemory: !!ctx?.git_memory,
+    hasSchema: !!ctx?.schema_snapshot,
     inputTokens: llmResult.usage.inputTokens, outputTokens: llmResult.usage.outputTokens,
   })]);
 

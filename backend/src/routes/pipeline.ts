@@ -1070,7 +1070,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         }
       }
 
-      const estimate = estimateDryRunCost(specJson, workspaceId, model);
+      const estimate = await estimateDryRunCost(specJson, workspaceId, model);
       res.json({ dryRun: true, estimate });
       return;
     }

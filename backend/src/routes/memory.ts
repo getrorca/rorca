@@ -230,18 +230,26 @@ router.post('/', async (req: Request, res: Response) => {
   }
   const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
 
+  let insertedId: string | undefined;
   if (embeddingStr) {
-    await queryOne<{ id: string }>(
-      `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
-       VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
-      [workspaceId, category, `${title}: ${rule}`, 'high', '[]', embeddingStr, resolvedSourceType],
-    );
-  } else {
-    await queryOne<{ id: string }>(
+    try {
+      const row = await queryOne<{ id: string }>(
+        `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
+         VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
+        [workspaceId, category, `${title}: ${rule}`, 'high', '[]', embeddingStr, resolvedSourceType],
+      );
+      insertedId = row?.id;
+    } catch {
+      // embedding column may not exist (pgvector not installed) — fall through to non-embedding insert
+    }
+  }
+  if (!insertedId) {
+    const row = await queryOne<{ id: string }>(
       `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type)
        VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
       [workspaceId, category, `${title}: ${rule}`, 'high', '[]', resolvedSourceType],
     );
+    insertedId = row?.id;
   }
 
   invalidateMemory(workspaceId); // PG-013
@@ -566,13 +574,20 @@ router.post('/proposals', async (req: Request, res: Response) => {
         // Embedding failure is non-fatal
       }
       const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
+      let proposalInserted = false;
       if (embeddingStr) {
-        await queryOne<{ id: string }>(
-          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
-           VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
-          [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', embeddingStr, 'synthesis'],
-        );
-      } else {
+        try {
+          await queryOne<{ id: string }>(
+            `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
+             VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
+            [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', embeddingStr, 'synthesis'],
+          );
+          proposalInserted = true;
+        } catch {
+          // embedding column may not exist (pgvector not installed) — fall through
+        }
+      }
+      if (!proposalInserted) {
         await queryOne<{ id: string }>(
           `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type)
            VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
