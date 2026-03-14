@@ -2,7 +2,7 @@
   "specId": "rorca-auto-merge",
   "runId": 112,
   "startedAt": "2026-03-14T00:55:18.275Z",
-  "lastUpdatedAt": "2026-03-14T01:27:30.832Z",
+  "lastUpdatedAt": "2026-03-14T01:51:42.973Z",
   "completedStories": [
     {
       "storyId": "US-005",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 1931023
+    },
+    {
+      "storyId": "US-006",
+      "title": "Merge status indicator in Run View UI",
+      "status": "passed",
+      "startedAt": "2026-03-14T01:28:30.842Z",
+      "finishedAt": "2026-03-14T01:51:42.972Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 1392130
     }
   ],
   "failedStories": [],
