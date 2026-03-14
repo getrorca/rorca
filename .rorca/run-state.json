@@ -2,7 +2,7 @@
   "specId": "rorca-auto-merge",
   "runId": 113,
   "startedAt": "2026-03-14T04:51:02.467Z",
-  "lastUpdatedAt": "2026-03-14T05:32:45.443Z",
+  "lastUpdatedAt": "2026-03-14T05:39:06.721Z",
   "completedStories": [
     {
       "storyId": "US-007",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 1261218
+    },
+    {
+      "storyId": "US-009",
+      "title": "Frontend Vitest tests for merge status indicator component",
+      "status": "passed",
+      "startedAt": "2026-03-14T05:33:06.731Z",
+      "finishedAt": "2026-03-14T05:39:06.721Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 359990
     }
   ],
   "failedStories": [],

@@ -3,8 +3,9 @@
 Spec: rorca-auto-merge
 Run ID: 113
 Started: 2026-03-14T04:51:02.467Z
-Last Updated: 2026-03-14T05:32:45.443Z
+Last Updated: 2026-03-14T05:39:06.721Z
 
-## Completed Stories (2)
+## Completed Stories (3)
 - US-007: Retry merge endpoint and manual merge trigger — DONE (claude, claude-opus-4-6, 1213s)
 - US-008: Backend Jest tests for auto-merge pipeline — DONE (claude, claude-opus-4-6, 1261s)
+- US-009: Frontend Vitest tests for merge status indicator component — DONE (claude, claude-opus-4-6, 360s)
