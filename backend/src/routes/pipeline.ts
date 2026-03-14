@@ -34,7 +34,7 @@ import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftRepo
 import { synthesizeRunMemory } from '../lib/auto-memory';
 import { logger } from '../lib/logger';
 import { getBoss } from '../lib/pg-boss';
-import { ConflictError } from '../lib/errors';
+import { ConflictError, NotFoundError } from '../lib/errors';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
 // Same pattern as execution-engine.ts — strips nested-session detection vars.
@@ -3048,6 +3048,95 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
   } catch (error: any) {
     logger.error('[Pipeline] Retry error:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /api/pipeline/runs/:runId/retry-merge — Retry a failed worktree merge ─
+// Re-enqueues the merge job for a run whose merge_status is 'failed'.
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/retry-merge:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Retry a failed worktree auto-merge
+ *     operationId: retryMerge
+ *     description: Re-enqueues a pipeline:merge pg-boss job for a run whose merge_status is 'failed'. Resets merge_status to 'merging'.
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: "Merge job enqueued", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, runId: { type: integer }, queued: { type: boolean } } } } } }
+ *       404: { description: "Run not found" }
+ *       409: { description: "merge_status is not failed" }
+ */
+router.post('/runs/:runId/retry-merge', async (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      res.status(400).json({ error: 'Invalid runId' });
+      return;
+    }
+
+    const run = await queryOne<{
+      id: number;
+      merge_status: string | null;
+      branch_name: string | null;
+      worktree_path: string | null;
+      workspace_id: string;
+    }>(
+      'SELECT id, merge_status, branch_name, worktree_path, workspace_id FROM pipeline_runs WHERE id = $1',
+      [runId],
+    );
+
+    if (!run) {
+      throw new NotFoundError('Run', String(runId));
+    }
+
+    if (run.merge_status !== 'failed') {
+      throw new ConflictError(
+        `Cannot retry merge: merge_status is '${run.merge_status ?? 'null'}', expected 'failed'`,
+      );
+    }
+
+    if (!run.branch_name) {
+      throw new ConflictError('Cannot retry merge: run has no branch_name (not a worktree run)');
+    }
+
+    // Reset merge_status to 'merging' — use rowCount to detect race condition
+    const { rowCount } = await execute(
+      `UPDATE pipeline_runs SET merge_status = 'merging' WHERE id = $1 AND merge_status = 'failed'`,
+      [runId],
+    );
+
+    if (rowCount === 0) {
+      throw new ConflictError('Merge status was already changed by another request');
+    }
+
+    // Enqueue pipeline:merge job
+    await getBoss().send('pipeline:merge', {
+      runId,
+      branch: run.branch_name,
+      workspaceId: run.workspace_id,
+    }, {
+      retryLimit: 0,
+      expireInSeconds: 3600, // 1 hour
+    });
+
+    logger.info({ runId, branch: run.branch_name }, '[Pipeline] Enqueued pipeline:merge retry job');
+
+    res.status(200).json({ ok: true, runId, queued: true });
+  } catch (error: any) {
+    if (error instanceof NotFoundError) {
+      res.status(404).json(error.toJSON());
+    } else if (error instanceof ConflictError) {
+      res.status(409).json(error.toJSON());
+    } else {
+      logger.error({ error }, '[Pipeline] retry-merge error');
+      res.status(500).json({ error: error.message });
+    }
   }
 });
 
