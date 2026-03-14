@@ -939,3 +939,143 @@ describe('POST /api/pipeline/queue', () => {
     expect(res.body.error).toContain('Spec not found');
   });
 });
+
+// ─── Auto-merge functionality tests ────────────────────────────────
+
+describe('auto_merge column in pipeline_runs', () => {
+  test('defaults auto_merge to true when autoWorktree=true', async () => {
+    createRunLoopStub();
+    seedSpec('approved', 'auto-merge-default');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/auto-merge-default.json',
+        workspaceId: 'ws-pipe',
+        autoWorktree: true,
+      });
+
+    expect(res.status).toBe(201);
+    const runId = res.body.runId;
+
+    // Fetch the run and verify auto_merge = true
+    const run = await queryOne(
+      `SELECT auto_merge FROM pipeline_runs WHERE id = $1`,
+      [runId]
+    ) as { auto_merge: boolean } | undefined;
+
+    expect(run).toBeDefined();
+    expect(run!.auto_merge).toBe(true);
+  });
+
+  test('forces auto_merge to false when autoWorktree=false', async () => {
+    createRunLoopStub();
+    seedSpec('approved', 'auto-merge-no-worktree');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/auto-merge-no-worktree.json',
+        workspaceId: 'ws-pipe',
+        autoWorktree: false,
+      });
+
+    expect(res.status).toBe(201);
+    const runId = res.body.runId;
+
+    // Fetch the run and verify auto_merge = false
+    const run = await queryOne(
+      `SELECT auto_merge FROM pipeline_runs WHERE id = $1`,
+      [runId]
+    ) as { auto_merge: boolean } | undefined;
+
+    expect(run).toBeDefined();
+    expect(run!.auto_merge).toBe(false);
+  });
+
+  test('respects explicit autoMerge=false when autoWorktree=true', async () => {
+    createRunLoopStub();
+    seedSpec('approved', 'auto-merge-explicit-false');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/auto-merge-explicit-false.json',
+        workspaceId: 'ws-pipe',
+        autoWorktree: true,
+        autoMerge: false,
+      });
+
+    expect(res.status).toBe(201);
+    const runId = res.body.runId;
+
+    // Fetch the run and verify auto_merge = false (explicit request honored)
+    const run = await queryOne(
+      `SELECT auto_merge FROM pipeline_runs WHERE id = $1`,
+      [runId]
+    ) as { auto_merge: boolean } | undefined;
+
+    expect(run).toBeDefined();
+    expect(run!.auto_merge).toBe(false);
+  });
+
+  test('includes autoMerge in pg-boss job payload', async () => {
+    createRunLoopStub();
+    seedSpec('approved', 'auto-merge-payload');
+
+    // Mock getBoss to capture the job payload
+    const { getBoss } = require('../../lib/pg-boss');
+    const mockBoss = getBoss();
+    mockBoss.send.mockClear();
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/auto-merge-payload.json',
+        workspaceId: 'ws-pipe',
+        autoWorktree: true,
+        autoMerge: true,
+      });
+
+    expect(res.status).toBe(201);
+
+    // Verify boss.send was called with autoMerge in payload
+    expect(mockBoss.send).toHaveBeenCalled();
+    const callArgs = mockBoss.send.mock.calls[0];
+    const jobPayload = callArgs[1];
+    expect(jobPayload).toHaveProperty('autoMerge');
+    expect(jobPayload.autoMerge).toBe(true);
+  });
+
+  test('GET /api/pipeline/runs/:id includes auto_merge field', async () => {
+    createRunLoopStub();
+    seedSpec('approved', 'auto-merge-response');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/auto-merge-response.json',
+        workspaceId: 'ws-pipe',
+        autoWorktree: true,
+        autoMerge: true,
+      });
+
+    expect(res.status).toBe(201);
+    const runId = res.body.runId;
+
+    // Fetch the run via GET endpoint
+    const getRes = await request(app)
+      .get(`/api/pipeline/runs/${runId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(getRes.status).toBe(200);
+    expect(getRes.body.run).toBeDefined();
+    expect(getRes.body.run).toHaveProperty('auto_merge');
+    expect(getRes.body.run.auto_merge).toBe(true);
+  });
+});

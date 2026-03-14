@@ -678,6 +678,7 @@ interface PipelineRunRow {
   total_cost_usd: number | null;
   queued_at: string | null;
   queue_position: number | null;
+  auto_merge: boolean;
 }
 
 interface StoryResultRow {
@@ -808,6 +809,7 @@ const PipelineTriggerSchema = z.object({
   specPath: z.string().min(1),
   workspaceId: z.union([z.string().min(1), z.number()]),
   autoWorktree: z.boolean().optional(),
+  autoMerge: z.boolean().optional(),
   dryRun: z.boolean().optional(),
   triggerType: z.enum(['manual', 'scheduled']).optional(),
   forceSequential: z.boolean().optional(),
@@ -820,7 +822,7 @@ const PipelineTriggerSchema = z.object({
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, dryRun, triggerType, forceSequential, queuedRunId } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId } = req.body;
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1186,16 +1188,18 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     // 6. Create pipeline_runs record (with agent_type and agent_model)
     //    If queuedRunId is provided, promote the existing queued row instead of inserting
     const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
+    // Enforce constraint: auto_merge is only true when autoWorktree is true
+    const computedAutoMerge = needsWorktree && (autoMerge !== false);
     let runId: number;
 
     if (queuedRunId) {
       // Promote queued run to running — worker will actually execute it
       await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
-         branch_name = $5, worktree_path = $6 WHERE id = $7 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, queuedRunId]);
+         branch_name = $5, worktree_path = $6, auto_merge = $7 WHERE id = $8 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, queuedRunId]);
       runId = queuedRunId;
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge]);
       runId = runResult!.id;
     }
 
@@ -1338,6 +1342,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       worktreePath: worktreePath ?? null,
       branchName: branchName ?? null,
       autoWorktree: needsWorktree,
+      autoMerge: computedAutoMerge,
       envOverrides,
     };
 
