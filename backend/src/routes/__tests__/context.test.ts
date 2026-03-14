@@ -53,7 +53,9 @@ process.env.NODE_ENV = 'test';
 authToken = await getAuthToken(app);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
+  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
 fs.rmSync(tmpDir, { recursive: true, force: true });
 delete process.env.NODE_ENV;
 });
@@ -527,8 +529,8 @@ describe('validation', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ targetLayer: 3 });
 
-    expect(res.status).toBe(400);
-    expect(res.body.error).toContain('mode');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain('Validation failed');
   });
 
   test('rejects invalid targetLayer', async () => {
@@ -537,8 +539,8 @@ describe('validation', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ mode: 'paste', text: 'hello', targetLayer: 5 });
 
-    expect(res.status).toBe(400);
-    expect(res.body.error).toContain('targetLayer');
+    expect(res.status).toBe(422);
+    expect(res.body.error).toContain('Validation failed');
   });
 
   test('layer 1 prompt contains Global Brain instructions', async () => {

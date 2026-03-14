@@ -8,7 +8,7 @@
     "dev:server": "npx tsx src/server.ts",
     "dev:worker": "npx tsx src/worker.ts",
     "build": "tsc",
-    "test": "jest",
+    "test": "node --max-old-space-size=8192 node_modules/.bin/jest",
     "mcp": "npx tsx src/mcp/server.ts",
     "lint": "npx eslint src/",
     "worker": "npx tsx src/worker-supervisor.ts"

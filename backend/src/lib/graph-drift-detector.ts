@@ -75,6 +75,7 @@ async function cypherRead<T = Record<string, unknown>>(
       return parsed as T;
     });
   } finally {
+    await client.query('SET search_path = rorca, public');
     client.release();
   }
 }
@@ -89,6 +90,7 @@ async function _cypherMutate(cypher: string): Promise<void> {
     await setupAgeSession(client);
     await client.query(sql);
   } finally {
+    await client.query('SET search_path = rorca, public');
     client.release();
   }
 }

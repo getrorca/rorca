@@ -14,15 +14,14 @@ import { z } from 'zod';
 
 /**
  * Validate req.body against a Zod schema.
- * Returns 400 with the first Zod issue message in `error` field.
+ * Returns 422 with 'Validation failed' and details on failure.
  */
 export function validateBody<T extends z.ZodType>(schema: T) {
   return (req: Request, res: Response, next: NextFunction): void => {
     const result = schema.safeParse(req.body);
     if (!result.success) {
-      const firstIssue = result.error.issues[0];
-      res.status(400).json({
-        error: firstIssue?.message || 'Validation failed',
+      res.status(422).json({
+        error: 'Validation failed',
         details: result.error.issues,
       });
       return;

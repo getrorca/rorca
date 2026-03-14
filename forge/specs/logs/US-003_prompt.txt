@@ -1309,12 +1309,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model
-> Rule: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
-
-## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution
-> Rule: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
-
 ## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
 > Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
 
@@ -1369,69 +1363,111 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
 > Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
 
+## 2026-03-13 [Gotcha] 150+ unmerged feat/ branches accumulate — audit regularly
+> Rule: Worktree spec runs create feat/ branches that never auto-merge. After several months of development, 150+ branches can accumulate. Most are stale (superseded by later runs of the same spec). When auditing: (1) check remote feat/ branches with commits not in main using `git branch -r | grep feat/ | while read b; do count=$(git log --oneline main.."$b" 2>/dev/null | wc -l | tr -d ' '); if [ "$count" -gt "0" ]; then echo "$count | $b"; fi; done`, (2) skip old pg-boss/scaffolding branches — their work is superseded by WR spec, (3) merge the most recent run of each spec (highest timestamp suffix = most complete), (4) skip convention-agents branches (old stubs, superseded by future spec).
+
+## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
+> Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
+
 Follow this workflow for implementation:
 ## Agent Role: Frontend
 
 
-## Skill: react-review (relevance: 9)
+## Skill: logging-fundamentals (relevance: 6)
 ---
-name: react-review
-description: Review React components for best practices and performance issues
+name: logging-fundamentals
+description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
 license: MIT
 compatibility: opencode
 metadata:
-  audience: developers
-  category: development
+  audience: developers, SREs, DevOps engineers
+  category: observability
 ---
 
-# React Review Skill
+# Logging Fundamentals
 
-Review React components for best practices, performance issues, and common patterns.
+Establish proper logging practices including log levels, structured logging, context propagation, and comprehensive logging strategies for applications, services, and infrastructure.
 
 ## When to use me
 
 Use this skill when:
-- Reviewing React component code
-- Optimizing component performance
-- Checking for React best practices
-- Refactoring legacy components
-- Auditing component architecture
+- Setting up logging for new applications or services
+- Reviewing existing logging implementations
+- Establishing logging standards for teams or projects
+- Debugging issues with incomplete or poor logging
+- Implementing structured logging for better observability
+- Configuring log levels and verbosity for different environments
+- Ensuring logs contain sufficient context for troubleshooting
 
 ## What I do
 
-- Analyze React components for performance issues (unnecessary re-renders, large bundles)
-- Check for React best practices (hooks usage, prop patterns, state management)
-- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
-- Suggest optimizations (memoization, code splitting, lazy loading)
-- Review TypeScript usage and type safety
+### 1. Log Level Management
+- **Define appropriate log levels** (DEBUG, INFO, WARN, ERROR, FATAL)
+- **Configure level filtering** per environment (development, staging, production)
+- **Implement dynamic level adjustment** without application restarts
+- **Establish level usage guidelines** for different types of information
 
-## Key Patterns
+### 2. Structured Logging Implementation
+- **Design log schema** with consistent field naming and types
+- **Implement structured formats** (JSON, key-value pairs, structured text)
+- **Include mandatory context fields** (timestamp, service, trace_id, user_id, etc.)
+- **Handle nested structures and arrays** appropriately in logs
 
-### Performance
-- Use `React.memo` for components receiving object/function props from parent
-- Memoize expensive calculations with `useMemo`
-- Stabilize callback references with `useCallback`
-- Avoid inline object/array creation in JSX props
-- Use `React.lazy` + `Suspense` for code splitting
+### 3. Context Propagation
+- **Implement correlation IDs** for request tracing across services
+- **Propagate context through async operations** (queues, background jobs)
+- **Maintain user/session context** throughout request lifecycle
+- **Include business context** (order_id, transaction_id, etc.) in logs
 
-### Hooks
-- Always include all dependencies in `useEffect` dependency arrays
-- Never call hooks conditionally or inside loops
-- Extract complex logic into custom hooks
-- Clean up subscriptions and timers in useEffect return
+### 4. Log Content Best Practices
+- **Include sufficient context** for debugging without external systems
+- **Balance detail with noise** - log enough but not too much
+- **Use consistent message formats** across the codebase
+- **Log before and after significant operations**
+- **Include error details** (stack traces, error codes, recovery suggestions)
+- **Avoid logging secrets, passwords, or sensitive data**
 
-### TypeScript
-- Define explicit interfaces for all component props
-- Use discriminated unions for variant components
-- Prefer `interface` over `type` for component props
-- Use `React.FC` sparingly — prefer explicit return types
+## Logging Principles
+
+### The 5 Ws of Logging
+1. **WHO** - Which user/service/process generated the log?
+2. **WHAT** - What action/event is being logged?
+3. **WHEN** - Precise timestamp with timezone information
+4. **WHERE** - Which component/function/file generated the log?
+5. **WHY** - What is the significance/severity of the logged event?
+
+### Structured Logging Fields
+```json
+{
+  "timestamp": "2026-02-26T18:00:00Z",
+  "level": "INFO",
+  "service": "spec-generator",
+  "component": "chatComplete",
+  "trace_id": "gen-abc123",
+  "message": "LLM call completed",
+  "duration_ms": 5123,
+  "context": {
+    "model": "claude-sonnet-4-5-20250929",
+    "input_tokens": 12000,
+    "output_tokens": 4500
+  }
+}
+```
+
+### Log Level Guidelines
+- **DEBUG**: Detailed information for debugging, typically disabled in production
+- **INFO**: Routine information about normal operation
+- **WARN**: Warning conditions that might require attention but don't indicate failure
+- **ERROR**: Error conditions that indicate failure of a specific operation
+- **FATAL**: Critical errors that cause application termination
 
 ## Notes
 
-- Focuses on React 18+ patterns and best practices
-- Considers both class and function components
-- Includes TypeScript and JavaScript variants
-- References official React documentation and community patterns
+- **Structured logging is essential** for modern log analysis and observability
+- **Context is more important than message content** - ensure logs can be correlated
+- **Log levels should reflect operational importance**, not developer convenience
+- **Consider log volume** - too many logs can overwhelm systems and teams
+- **Balance human readability with machine parsability** in log formats
 
 ---
 name: rorca
@@ -1584,11 +1620,21 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-003):
-In `src/components/SpecDetailSlideOver.tsx` (Stories tab), add a per-story model badge next to each story's title. The badge shows the story's `model` field value (e.g. 'claude-opus-4-6') or 'auto' in gray if `story.model` is undefined. Clicking the badge opens a small Popover (use the existing Popover/Portal pattern in the codebase or a simple absolute-positioned dropdown) containing: (1) a model selector `<select>` dropdown whose options are scoped to the valid models for the currently detected agent (fetched from `GET /api/specs/:id/assign-models/options` or derived from the kanban/spec data), and (2) a 'Clear' button that sets `story.model` to undefined and PATCHes `PUT /api/specs/:id/stories/:storyId` (or the existing edit-story endpoint). Add an 'Auto-assign All' button in the Stories tab header row (right side); clicking it calls `POST /api/specs/:id/assign-models` and refreshes the story list. Show a spinner on the button while the request is in flight. Display a toast on success ('N stories assigned optimal models') and on error ('Codex does not support per-story model selection' if skipped=true).
+Register three new WAL event types: `worktree_merge_started`, `worktree_merged`, and `worktree_merge_failed`. Create a helper function `emitMergeEvent(runId, eventType, payload)` in the worker or a shared lib that writes these events to the `wal_events` table via the existing `POST /api/wal` endpoint or direct DB insert. Payloads: `worktree_merge_started` includes `{ runId, branch, targetBranch: 'main' }`. `worktree_merged` includes `{ runId, branch, targetBranch: 'main', mergeCommitSha }`. `worktree_merge_failed` includes `{ runId, branch, targetBranch: 'main', conflictSummary }` where `conflictSummary` is a truncated (max 2000 chars) excerpt of the conflict diff. The SSE hub (`/api/pipeline/stream`) already broadcasts all WAL events — no changes needed there.
+
+## Context
+- **WAL table column is `ts`, not `created_at`** — any INSERT into `wal_events` must use `ts` for the timestamp column. Using `created_at` will throw a "no such column" error.
+- **Reuse `emitWalEvent` pattern from `execution-engine.ts`** — it POSTs to `POST /api/wal` with `{ event_type, spec_id, workspace_id, payload }`. Since this helper runs from the worker context (not execution-engine), prefer direct DB insert via `execute(sql, params)` to avoid HTTP round-trip and potential port/auth issues.
+- **Check `backend/src/routes/wal.ts` for Zod allowlist** — the WAL route may validate `event_type` against a whitelist. If so, add `worktree_merge_started`, `worktree_merged`, `worktree_merge_failed` to it. Previously `z.string()` was too strict (`.optional()` vs `.nullish()` bug on 2026-03-12).
+- **PostgreSQL numbered placeholders `$1, $2, ...`** — never use `?`. All DB calls must be `await`ed. Use `execute(sql, params)` for INSERTs. Payload column is JSON/JSONB — pass `JSON.stringify(payload)` as the parameter value.
+- **Truncate `conflictSummary` with `.slice(0, 2000)`** before insert — conflict diffs can be massive. Test boundary cases: exactly 2000 chars, over 2000, empty string, and undefined/null.
+- **SSE hub broadcasts all WAL events automatically** — `sse-hub.ts` `broadcastAll()` fans out everything, no filter changes needed. Verify `usePipelineSSE` on the frontend doesn't filter out unknown event types (it's WAL-generic, so new types should pass through).
+- **Tests required** — write Jest tests in `backend/src/routes/__tests__/` covering: correct insertion of each event type, payload schema validation, conflictSummary truncation at boundary, and that the helper function can be imported and called from worker context.
+- **pg-boss column naming gotcha** — if querying `pgboss.job` or `pgboss.archive` tables for any reason, use snake_case with underscores (`started_on`, `completed_on`), NOT camelCase. This burned the team on 2026-03-13 with `startedon` typo.
 
 Acceptance Criteria:
-- Each story row in the Stories tab of SpecDetailSlideOver shows a model badge: displays the story.model string (e.g. 'claude-opus-4-6') in a colored chip, or 'auto' in a gray chip if story.model is undefined/null
-- Clicking the model badge opens a dropdown/popover with a model selector showing valid models for the active agent (claude models for RORCA_AGENT=claude, openai models for openai provider, etc.) and a 'Clear' button; selecting a model or clicking Clear calls the edit-story API endpoint and refreshes the story
-- An 'Auto-assign All' button appears in the Stories tab header; clicking it calls POST /api/specs/:id/assign-models, shows a spinner during the request, and on success shows a toast: '<N> stories assigned optimal models'
-- When the API returns skipped=true (codex agent), the 'Auto-assign All' button shows an amber toast with the reason text instead of a success toast, and no story badges are updated
-- The model badge popover closes on outside click or Escape key; the dropdown is scrollable if the model list exceeds 6 items
+- Three new WAL event types are defined: worktree_merge_started, worktree_merged, worktree_merge_failed
+- emitMergeEvent helper writes events to wal_events table with correct event_type and JSON payload
+- worktree_merged payload includes mergeCommitSha string
+- worktree_merge_failed payload includes conflictSummary truncated to max 2000 characters
+- Events appear in the SSE stream at /api/pipeline/stream without additional SSE hub changes

@@ -48,7 +48,9 @@ authToken = await getAuthToken(app);
     tmpDir,]);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
+  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
 fs.rmSync(tmpDir, { recursive: true, force: true });
 delete process.env.NODE_ENV;
 });

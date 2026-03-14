@@ -25,7 +25,7 @@ import analyticsRouter from './routes/analytics';
 import budgetRouter from './routes/budget';
 import vaultRouter from './routes/vault';
 import usersRouter from './routes/users';
-import authRouter, { authRequired } from './routes/auth';
+import authRouter, { authRequired, LOCAL_ADMIN } from './routes/auth';
 import onboardingRouter from './routes/onboarding';
 import backupsRouter from './routes/backups';
 import healthRouter from './routes/health';
@@ -89,6 +89,14 @@ if (agentType === 'opencode') {
 
 const app = express();
 const PORT = process.env.PORT || 3030;
+
+// Disable ETags on API responses — prevents browsers from caching 404s and replaying
+// stale error responses after backend state changes (workspace renames, schema fixes, etc.).
+app.set('etag', false);
+app.use((_req, res, next) => {
+  res.set('Cache-Control', 'no-store');
+  next();
+});
 
 // PR-008: Structured request/response logging — method, url, statusCode, responseTime
 app.use(pinoHttp({ logger }));
@@ -223,7 +231,7 @@ if (process.env.AUTH_REQUIRED === 'true') {
         // Invalid JWT — fall through to local admin
       }
     }
-    req.user = { id: 'local-admin', email: 'admin@rorca.local', displayName: 'Admin', role: 'admin' };
+    req.user = LOCAL_ADMIN;
     next();
   });
 }
@@ -358,6 +366,11 @@ if (process.env.NODE_ENV !== 'test') {
     startFileWatcher();
     // PG-004: Initialise pg-boss so the Express process can send jobs
     initBoss().catch(err => logger.error({ err }, '[pg-boss] startup init failed'));
+    // Startup self-test: verify workspace queries resolve against rorca schema (not ag_catalog)
+    queryOne('SELECT id FROM workspaces LIMIT 1').then(row => {
+      if (!row) logger.warn('[StartupCheck] No workspaces found — onboarding will show');
+      else logger.info({ id: (row as any).id }, '[StartupCheck] Workspace query OK — search_path verified');
+    }).catch(err => logger.error({ err }, '[StartupCheck] Workspace query FAILED — search_path may be wrong'));
   });
 }
 

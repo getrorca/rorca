@@ -115,6 +115,11 @@ function buildPoolConfig(): PoolConfig {
   const configuredPoolSize = parseInt(process.env.PG_POOL_SIZE || String(DEFAULT_POOL_SIZE), 10);
   const ssl = buildSslConfig(databaseUrl);
 
+  // Explicitly pin search_path so all queries and migrations consistently hit the
+  // rorca schema (where pg-boss and app tables live) before falling back to public.
+  // Without this, $user resolution is implicit and migrations may land in the wrong schema.
+  const searchPathOption = '--search_path=rorca,public';
+
   if (databaseUrl) {
     const urlParams = parseConnectionParams(databaseUrl);
     return {
@@ -123,6 +128,7 @@ function buildPoolConfig(): PoolConfig {
       idleTimeoutMillis: 30_000,
       connectionTimeoutMillis: urlParams.connectionTimeout || 5_000,
       statement_timeout: urlParams.statementTimeout || 30_000,
+      options: searchPathOption,
       ...(ssl ? { ssl } : {}),
     };
   }
@@ -137,6 +143,7 @@ function buildPoolConfig(): PoolConfig {
     idleTimeoutMillis: 30_000,
     connectionTimeoutMillis: 5_000,
     statement_timeout: 30_000,
+    options: searchPathOption,
     ...(ssl ? { ssl } : {}),
   };
 }
@@ -150,6 +157,12 @@ let _migrationsRunning: Promise<void> | null = null;
 function getPool(): Pool {
   if (!_pool) {
     _pool = new Pool(buildPoolConfig());
+
+    // Guarantee search_path on every new connection — guards against AGE graph
+    // queries that SET search_path to ag_catalog and poison the pool connection.
+    _pool.on('connect', (client) => {
+      client.query('SET search_path TO rorca, public').catch(() => {});
+    });
 
     _pool.on('error', (err) => {
       logger.error({ err }, '[db] Unexpected pool error');
@@ -413,6 +426,17 @@ export async function dbHealthCheck(): Promise<DbHealthResult> {
 export async function initDb(): Promise<void> {
   await ensureMigrations();
   await seedDefaultAdmin();
+  await seedWorkerSettings();
+}
+
+// ── Seed Worker Settings ─────────────────────────────────────────────────
+
+async function seedWorkerSettings(): Promise<void> {
+  await execute(
+    `INSERT INTO worker_settings (key, value)
+     VALUES ('max_concurrent_runs', '3')
+     ON CONFLICT (key) DO NOTHING`,
+  );
 }
 
 // ── Seed Default Admin ───────────────────────────────────────────────────
@@ -447,6 +471,9 @@ async function shutdown(): Promise<void> {
     logger.info('[db] Pool closed');
   }
 }
+
+// Exported for tests that need to close the pool to release connections
+export const closePool = shutdown;
 
 // Only register shutdown handlers in the Express server process.
 // execution-engine.ts subprocesses set RORCA_PROCESS_ROLE=engine and manage

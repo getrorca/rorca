@@ -69,11 +69,20 @@ const upload = multer({
  *       400: { description: "Missing mode or invalid targetLayer" }
  */
 const ContextExtractSchema = z.object({
-  mode: z.enum(['paste', 'url', 'qa']),
+  mode: z.enum(['paste', 'url', 'qa', 'filepath', 'multi']),
   targetLayer: z.number().int().refine(v => [1, 2, 3].includes(v), { message: 'targetLayer must be 1, 2, or 3' }),
+  // paste mode
+  text: z.string().optional(),
   content: z.string().optional(),
+  // url mode
   url: z.string().optional(),
+  // qa mode
   questions: z.record(z.string(), z.unknown()).optional(),
+  answers: z.record(z.string(), z.unknown()).optional(),
+  // filepath mode
+  filePath: z.string().optional(),
+  // multi mode
+  sources: z.array(z.any()).optional(),
   workspaceId: z.union([z.string(), z.number()]).optional(),
 });
 

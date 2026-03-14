@@ -53,30 +53,22 @@ const validLlmResponse = JSON.stringify({
   },
 });
 
-beforeEach(async () => {
-  jest.resetModules();
-
-  // Keep the mock across resets
-  jest.mock('../../lib/llm-client', () => ({
-    chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-    isValidModel: jest.fn().mockImplementation((m: string) =>
-      ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'].includes(m)
-    ),
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
-  }));
-
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-specs-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
+// Load the server ONCE per test file to avoid 87 separate DB connection pools
+// (one per jest.resetModules() + require('../../server') call).
+// PG_POOL_SIZE=1 in jest.env.ts caps each pool at 1 connection; 87 pools = 87 conns
+// plus TRUNCATE deadlocks between module-0 cleanup queries and module-N migrations.
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
-const llmClient = require('../../lib/llm-client');
+  const llmClient = require('../../lib/llm-client');
   mockChatComplete = llmClient.chatComplete;
+});
+
+beforeEach(async () => {
+  jest.clearAllMocks();
+
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-specs-test-'));
 
   // Clean up any stale spec files from prior test suites that share os.tmpdir()
   const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
@@ -85,7 +77,6 @@ const llmClient = require('../../lib/llm-client');
   }
 
   // Clean up DB tables that accumulate between tests within the same run.
-  // This ensures each test starts with a clean slate (wal_events, spec_versions, etc.)
   const tablesToClean = [
     'story_results', 'story_commits', 'story_comments', 'pipeline_runs',
     'wal_events', 'spec_versions', 'spec_search_index', 'spec_generation_logs',
@@ -101,14 +92,13 @@ const llmClient = require('../../lib/llm-client');
   authToken = await getAuthToken(app);
 });
 
-afterEach(() => {
+afterEach(async () => {
   // Clean up any spec files written to os.tmpdir()
   const specsRoot = path.join(os.tmpdir(), 'forge', 'specs');
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });
   }
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+  fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
 test('POST /api/specs/generate with valid body returns slug, stories, diagrams, provider, model', async () => {
@@ -1120,6 +1110,17 @@ describe('POST /api/specs/generate/batch', () => {
   });
 });
 
+/** Poll batch status until finishedAt is set or timeout expires */
+async function waitForBatch(batchId: string, timeoutMs = 10_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (Date.now() < deadline) {
+    const res = await request(app).get(`/api/specs/generate/batch/${batchId}`).set('Authorization', `Bearer ${authToken}`);
+    if (res.status === 200 && res.body.finishedAt) return;
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error(`Batch ${batchId} did not finish within ${timeoutMs}ms`);
+}
+
 describe('GET /api/specs/generate/batch/:batchId', () => {
   test('returns batch status with per-brief progress', async () => {
     mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
@@ -1138,7 +1139,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
     const { batchId } = createRes.body;
 
     // Wait for processing to complete
-    await new Promise(resolve => setTimeout(resolve, 500));
+    await waitForBatch(batchId);
 
     const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`).set('Authorization', `Bearer ${authToken}`);
 
@@ -1176,7 +1177,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
     const { batchId } = createRes.body;
 
     // Wait for processing to complete
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await waitForBatch(batchId);
 
     const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`).set('Authorization', `Bearer ${authToken}`);
 
@@ -1208,7 +1209,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
     const { batchId } = createRes.body;
 
     // Wait for both to process
-    await new Promise(resolve => setTimeout(resolve, 1500));
+    await waitForBatch(batchId);
 
     const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`).set('Authorization', `Bearer ${authToken}`);
 
@@ -1242,7 +1243,7 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
       });
 
     const { batchId } = createRes.body;
-    await new Promise(resolve => setTimeout(resolve, 1000));
+    await waitForBatch(batchId);
 
     const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`).set('Authorization', `Bearer ${authToken}`);
 
@@ -1267,15 +1268,19 @@ describe('GET /api/specs/generate/batch/:batchId', () => {
         ],
       });
 
-    await new Promise(resolve => setTimeout(resolve, 1000));
-
-    const events = await query(`SELECT * FROM wal_events WHERE event_type = 'batch_progress' ORDER BY id ASC`) as { payload: string }[];
+    const batchId = createRes.body.batchId;
+    await waitForBatch(batchId);
+    const allEvents = await query(`SELECT * FROM wal_events WHERE event_type = 'batch_progress' ORDER BY id ASC`) as { payload: string }[];
+    // Filter to only events from this batch (avoids cross-test contamination)
+    const events = allEvents.filter(e => {
+      try { return parsePayload(e.payload).batchId === batchId; } catch { return false; }
+    });
 
     // Should have at least 2 progress events: generating + completed/failed
     expect(events.length).toBeGreaterThanOrEqual(2);
 
     const firstPayload = parsePayload(events[0].payload);
-    expect(firstPayload.batchId).toBe(createRes.body.batchId);
+    expect(firstPayload.batchId).toBe(batchId);
     expect(firstPayload.briefIndex).toBe(0);
     expect(firstPayload.totalBriefs).toBe(1);
     expect(firstPayload.status).toBe('generating');

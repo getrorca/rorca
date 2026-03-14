@@ -17,6 +17,10 @@ export function errorHandler(
   res: Response,
   _next: NextFunction,
 ): void {
+  // Error responses must not be cached — prevents browser from serving stale 4xx
+  // from a previous backend state (e.g., cached "workspace not found" after rename).
+  res.set('Cache-Control', 'no-store');
+
   // Known AppError subclass — use its status code and structured body
   if (err instanceof AppError) {
     const body = err.toJSON();
