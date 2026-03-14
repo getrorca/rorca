@@ -487,8 +487,20 @@ try {
 
 Three schemas have a `workspaces` table: `rorca.workspaces` (app data), `ag_catalog.workspaces` (AGE system, empty), `public.workspaces` (legacy, empty). The pool has an `on('connect')` safety net in `db/index.ts`, but it does NOT replace proper cleanup in graph code.
 
-### PostgreSQL Migration Pattern
-Migrations are SQL files in `backend/src/db/pg-migrations/` (49 files, 001–049). They run in numeric order on first startup via `pg-index.ts`, tracked in `schema_migrations` table. Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively — no workarounds needed. New migrations: create `NNN_description.sql` in `pg-migrations/`.
+### PostgreSQL Migration Pattern — Timestamp Format (CRITICAL)
+Migrations are SQL files in `backend/src/db/pg-migrations/`. They run in numeric prefix order on first startup via `pg-index.ts`, tracked in `schema_migrations` table (BIGINT version column). Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively.
+
+**New migrations MUST use timestamp format**: `YYYYMMDDHHMMSS_description.sql`
+```bash
+# Example: creating a migration on 2026-03-14 at 15:00:00
+20260314150000_add_user_preferences.sql
+```
+
+**Why**: Sequential numbers (001, 002, ...) collide when parallel branches create migrations simultaneously — common with Rorca's worktree-per-spec architecture. Timestamps are structurally unique (two developers/agents can't commit at the exact same second).
+
+**Hybrid coexistence**: Existing sequential migrations (001–079) stay as-is. New timestamp migrations sort after them automatically (numeric sort: `79 < 20260314150000`). The runner supports both formats indefinitely — no renaming needed.
+
+**Duplicate prefix detection**: `pg-index.ts` calls `checkDuplicatePrefixes()` at startup and fails loudly if two files share the same numeric prefix. This catches collisions before any SQL runs.
 
 ### Skills Install Chain (install-from-sh)
 `POST /api/skills/install-from-sh` does NOT shell out to `npx skills add`. It fetches directly:
