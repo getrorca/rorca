@@ -48,15 +48,23 @@ authToken = await getAuthToken(app);
   // Create workspace directory and DB record
   wsDir = path.join(tmpDir, 'workspace');
   fs.mkdirSync(path.join(wsDir, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Analytics WS', $2) ON CONFLICT (id) DO NOTHING`, [WS_ID, wsDir]);
+  // Clean analytics-specific tables so tests run against a clean state regardless of prior test files
+  await execute(`DELETE FROM token_usage WHERE workspace_id = $1`, [WS_ID]);
+  await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)`, [WS_ID]);
+  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = $1`, [WS_ID]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Analytics WS', $2) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [WS_ID, wsDir]);
 });
 
 afterEach(async () => {
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
-delete process.env.AUTH_REQUIRED;
-// Clean up auth user to prevent duplicate key on next test
-await execute('TRUNCATE users CASCADE').catch(() => { /* ignore */ });
+  // Use require() to get the CURRENT module instance (post-resetModules) for cleanup
+  try {
+    const db = require('../../db/index');
+    await db.execute('TRUNCATE token_usage, story_results, pipeline_runs, workspaces, users CASCADE');
+    await db.closePool();
+  } catch { /* ignore */ }
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
+  delete process.env.AUTH_REQUIRED;
 });
 
 function get(urlPath: string) {
@@ -74,7 +82,7 @@ function del(urlPath: string) {
 /** Seed a pipeline run + token_usage + story_results for analytics */
 async function seedAnalyticsData() {
   const result = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, started_at, finished_at)
-     VALUES ('ralph/specs/approved/test-analytics.json', $1, 'done', NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day') RETURNING id`, [WS_ID]);
+     VALUES ('forge/specs/approved/test-analytics.json', $1, 'done', NOW() - INTERVAL '2 days', NOW() - INTERVAL '1 day') RETURNING id`, [WS_ID]);
   const runId = result!.id;
 
   // Insert token_usage rows

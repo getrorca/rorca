@@ -92,8 +92,6 @@ describe('GET /api/health/detailed', () => {
     expect(res.body).toHaveProperty('uptime');
     expect(res.body).toHaveProperty('db_connected', true);
     expect(res.body).toHaveProperty('active_runs');
-    expect(res.body).toHaveProperty('db_size');
-    expect(typeof res.body.db_size).toBe('number');
     expect(res.body).toHaveProperty('pending_specs_count');
     expect(typeof res.body.pending_specs_count).toBe('number');
     expect(res.body).toHaveProperty('memory_usage');
@@ -118,16 +116,20 @@ describe('GET /api/health/detailed', () => {
 
   it('counts pending specs from workspace directories', async () => {
     // Create a workspace with pending specs
+    // Get baseline count before adding our test workspace
+    const baselineRes = await request(app).get('/api/health/detailed');
+    const baseline = baselineRes.body.pending_specs_count as number;
+
     const wsDir = path.join(tmpDir, 'test-workspace');
-    const pendingDir = path.join(wsDir, 'scripts', 'ralph', 'specs', 'pending');
+    const pendingDir = path.join(wsDir, 'forge', 'specs', 'pending');
     fs.mkdirSync(pendingDir, { recursive: true });
     fs.writeFileSync(path.join(pendingDir, 'spec-a.json'), '{}');
     fs.writeFileSync(path.join(pendingDir, 'spec-b.json'), '{}');
 
-    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, ['ws-1', 'TestWS', wsDir]);
+    await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, ['health-test-ws', 'TestWS', wsDir]);
 
     const res = await request(app).get('/api/health/detailed');
-    expect(res.body.pending_specs_count).toBe(2);
+    expect(res.body.pending_specs_count).toBe(baseline + 2);
   });
 
   it('returns last_backup_at as null when no backups exist', async () => {

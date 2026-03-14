@@ -1309,24 +1309,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution
-> Rule: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
-
-## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern
-> Rule: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
-
-## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization
-> Rule: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
-
-## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table
-> Rule: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
-
-## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model
-> Rule: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
-
-## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution
-> Rule: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
-
 ## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
 > Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
 
@@ -1369,8 +1351,87 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
 > Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
 
+## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
+> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
+
+## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
+> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
+
+## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
+> Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
+
+## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
+> Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
+
+## 2026-03-13 [Gotcha] 150+ unmerged feat/ branches accumulate — audit regularly
+> Rule: Worktree spec runs create feat/ branches that never auto-merge. After several months of development, 150+ branches can accumulate. Most are stale (superseded by later runs of the same spec). When auditing: (1) check remote feat/ branches with commits not in main using `git branch -r | grep feat/ | while read b; do count=$(git log --oneline main.."$b" 2>/dev/null | wc -l | tr -d ' '); if [ "$count" -gt "0" ]; then echo "$count | $b"; fi; done`, (2) skip old pg-boss/scaffolding branches — their work is superseded by WR spec, (3) merge the most recent run of each spec (highest timestamp suffix = most complete), (4) skip convention-agents branches (old stubs, superseded by future spec).
+
+## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
+> Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
+
 Follow this workflow for implementation:
 ## Agent Role: Frontend
+
+
+## Skill: react-review (relevance: 8)
+---
+name: react-review
+description: Review React components for best practices and performance issues
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers
+  category: development
+---
+
+# React Review Skill
+
+Review React components for best practices, performance issues, and common patterns.
+
+## When to use me
+
+Use this skill when:
+- Reviewing React component code
+- Optimizing component performance
+- Checking for React best practices
+- Refactoring legacy components
+- Auditing component architecture
+
+## What I do
+
+- Analyze React components for performance issues (unnecessary re-renders, large bundles)
+- Check for React best practices (hooks usage, prop patterns, state management)
+- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
+- Suggest optimizations (memoization, code splitting, lazy loading)
+- Review TypeScript usage and type safety
+
+## Key Patterns
+
+### Performance
+- Use `React.memo` for components receiving object/function props from parent
+- Memoize expensive calculations with `useMemo`
+- Stabilize callback references with `useCallback`
+- Avoid inline object/array creation in JSX props
+- Use `React.lazy` + `Suspense` for code splitting
+
+### Hooks
+- Always include all dependencies in `useEffect` dependency arrays
+- Never call hooks conditionally or inside loops
+- Extract complex logic into custom hooks
+- Clean up subscriptions and timers in useEffect return
+
+### TypeScript
+- Define explicit interfaces for all component props
+- Use discriminated unions for variant components
+- Prefer `interface` over `type` for component props
+- Use `React.FC` sparingly — prefer explicit return types
+
+## Notes
+
+- Focuses on React 18+ patterns and best practices
+- Considers both class and function components
+- Includes TypeScript and JavaScript variants
+- References official React documentation and community patterns
 
 ---
 name: rorca
@@ -1523,11 +1584,21 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-006):
-Extend `POST /api/workspaces/:id/scan-direction` in `backend/src/routes/workspaces.ts` to infer the workspace domain from its codebase before running the existing direction scan. Implement `inferDomain(workspacePath: string): Promise<string | null>` in `backend/src/lib/domain-inference.ts`. The function reads: `package.json` (dependencies/devDependencies for framework clues), top-level directory names (`apps/`, `services/`, `mobile/`, `landing-page/`), and `README.md` (first 500 chars). It classifies into one of: `saas`, `cli`, `mobile`, `ecommerce`, `fintech`, `data`, `devtools`, `web`. If domain is inferred, update the `workspaces` table with the inferred domain AND update the existing L2 direction layer for that domain. If no domain can be inferred with confidence, leave domain null.
+In the Run View panel (`src/panels/RunViewPanel.tsx` or equivalent), add a merge status section below the run summary. This section is only visible when `autoWorktree=true` AND `autoMerge=true` for the run. The section shows: (1) A status badge with icon that transitions through states: 'Pending' (gray clock icon, shown while run is still executing), 'Merging' (amber spinner, shown when worktree_merge_started WAL event received), 'Merged' (green check icon, shown when worktree_merged received — displays branch name and short SHA as a clickable monospace chip), 'Failed' (red X icon, shown when worktree_merge_failed received — displays a truncated conflict summary and a 'Retry Merge' button). (2) The section subscribes to the existing SSE stream at `/api/pipeline/stream` and filters for `worktree_merge_*` events matching the current `runId`. (3) The 'Retry Merge' button calls `POST /api/pipeline/runs/:runId/retry-merge` (implemented in US-007). (4) Initial state on page load is derived from `pipeline_runs.merge_status` returned by `GET /api/pipeline/runs/:id` — the SSE stream only provides live transitions.
+
+## Context
+- **RunViewPanel SSE pattern**: The run view already subscribes to `/api/pipeline/stream` via `usePipelineSSE` hook or inline `EventSource`. Piggyback on the existing connection — filter for `worktree_merge_started`, `worktree_merged`, `worktree_merge_failed` events matching `runId`. Do NOT open a second SSE connection.
+- **WAL column gotcha**: Any direct queries against `wal_events` must use `ts` not `created_at` — the table uses `ts` as timestamp column. Route handlers may alias it for API consumers, but raw SQL must reference `ts`.
+- **pipeline_runs.merge_status**: Verify this column exists before coding — check `backend/src/db/pg-migrations/` for the migration that adds it (should come from US-005 or earlier in this spec). Do not create a duplicate migration. Check for migration number collisions — parallel branches have caused duplicate numbers before (e.g., the 069 collision).
+- **Badge styling consistency**: Match existing run status badge patterns in `RunViewPanel.tsx` (e.g., "Running", "Failed", "Done" badges). Check `src/components/` for reusable badge/chip components before creating new ones. Use Tailwind utility classes consistent with the codebase.
+- **Monospace SHA chip**: Use `font-mono text-xs` for branch name + short SHA (first 7 chars). On click, copy to clipboard rather than navigating away — or link to GitHub commit if `github_connections` exists for the workspace.
+- **Conflict summary truncation**: `.slice(0, 500)` with ellipsis is sufficient — no word-boundary library needed. Consider an expandable "Show full" toggle if the full conflict text is available in the WAL event payload.
+- **Frontend tests required (`test: true`)**: Write a Vitest test (not Playwright) with manual DOM assertions per project convention. Mock SSE events and verify badge state transitions through Pending → Merging → Merged and Pending → Merging → Failed paths. Reference existing panel tests in `src/panels/__tests__/` for patterns. See `src/panels/__tests__/SpecAttachments.test.tsx` for mock/assertion reference.
+- **Initial state on page load**: Derive from `pipeline_runs.merge_status` returned by `GET /api/pipeline/runs/:id` — SSE only provides live transitions. Ensure the component handles all states on mount (including `null`/undefined when `autoMerge` is false).
 
 Acceptance Criteria:
-- `inferDomain(workspacePath)` exported from `backend/src/lib/domain-inference.ts` — reads package.json + directory structure + README.md, returns one of 8 domain strings or null
-- `POST /api/workspaces/:id/scan-direction` calls `inferDomain()` before existing scan logic — if domain returned, executes `UPDATE workspaces SET domain = $1 WHERE id = $2`
-- When domain is newly inferred and a matching L2 direction layer exists in `direction_layers`, it is associated with the workspace (upsert with `workspace_id` + `layer_number=2` + `domain` key)
-- Response from `POST /api/workspaces/:id/scan-direction` includes `inferredDomain: string | null` field
-- Unit test in `backend/src/tests/domain-inference.test.ts` covers: React SaaS project → 'saas', CLI tool (commander.js) → 'cli', mobile (react-native) → 'mobile', unrecognizable → null
+- Merge status section is visible only when the run has autoWorktree=true AND autoMerge=true
+- Status badge shows correct icon and label for each state: Pending (gray clock), Merging (amber spinner), Merged (green check with branch + SHA), Failed (red X with conflict summary)
+- Real-time transitions from SSE worktree_merge_* events update the badge without page reload
+- Merged state displays branch name and short commit SHA (first 7 chars) in monospace
+- Failed state shows a 'Retry Merge' button and a truncated conflict summary (max 500 chars displayed)

@@ -97,6 +97,7 @@ async function cypherQuery<T = Record<string, unknown>>(
       return parsed as T;
     });
   } finally {
+    await client.query('SET search_path = rorca, public');
     client.release();
   }
 }

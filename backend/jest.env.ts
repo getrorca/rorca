@@ -10,3 +10,8 @@ process.env.DATABASE_URL = process.env.DATABASE_URL_TEST
   || 'postgres://rorca:rorca@localhost:5432/rorca_test';
 
 process.env.NODE_ENV = 'test';
+
+// Limit pool size in tests: each jest.resetModules() + require('../../server') creates a new
+// pg Pool. With 54 tests in pipeline.test.ts, PG_POOL_SIZE=1 keeps total connections ~60,
+// safely under PostgreSQL's default max_connections=100.
+process.env.PG_POOL_SIZE = '1';

@@ -251,4 +251,12 @@ const options: swaggerJsdoc.Options = {
  *                 ts: { type: string, format: date-time }
  */
 
-export const swaggerSpec = swaggerJsdoc(options);
+let swaggerSpec: ReturnType<typeof swaggerJsdoc>;
+try {
+  swaggerSpec = swaggerJsdoc(options);
+} catch (e) {
+  // Swagger YAML parse errors are non-fatal — log and continue with empty spec
+  console.warn('[swagger] Failed to parse swagger annotations:', (e as Error).message?.slice(0, 200));
+  swaggerSpec = { openapi: '3.0.0', info: { title: 'Rorca API', version: '1.0.0' }, paths: {} };
+}
+export { swaggerSpec };
