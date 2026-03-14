@@ -3,7 +3,8 @@
 Spec: rorca-auto-merge
 Run ID: 112
 Started: 2026-03-14T00:55:18.275Z
-Last Updated: 2026-03-14T01:27:30.832Z
+Last Updated: 2026-03-14T01:51:42.973Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-005: Agentic conflict resolution via claude --print — DONE (claude, claude-sonnet-4-6, 1931s)
+- US-006: Merge status indicator in Run View UI — DONE (claude, claude-opus-4-6, 1392s)
