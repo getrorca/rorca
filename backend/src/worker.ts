@@ -17,7 +17,7 @@ import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as crypto from 'crypto';
-import { spawn, type ChildProcess } from 'child_process';
+import { spawn, execSync, type ChildProcess } from 'child_process';
 import { z } from 'zod';
 import PgBoss from 'pg-boss';
 import {
@@ -27,10 +27,38 @@ import {
   type PipelineRetryJobPayloadType,
   PipelineCancelJobPayload,
 } from './lib/pg-boss-schemas';
+import simpleGit from 'simple-git';
 import { initDb, query, queryOne, execute } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { logger } from './lib/logger';
+
+// ── Claude binary + env-var stripping for agentic conflict resolution ────────
+
+const CLAUDE_BIN = process.env.CLAUDE_BIN ||
+  (() => {
+    try { return execSync('which claude', { encoding: 'utf8' }).trim(); } catch { return 'claude'; }
+  })();
+
+const CLAUDE_ENV_VARS_TO_REMOVE = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_AGENT_SDK_VERSION',
+  'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
+];
+
+function buildCleanEnv(): Record<string, string> {
+  const env: Record<string, string> = {};
+  for (const [k, v] of Object.entries(process.env)) {
+    if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
+      env[k] = v;
+    }
+  }
+  return env;
+}
+
+const AGENTIC_RESOLVE_TIMEOUT_MS = 5 * 60 * 1000; // 5 minutes
+const AGENTIC_RESOLVE_SIGKILL_DELAY_MS = 10_000;   // 10s after SIGTERM
 
 // ── Worker identity (stable for the lifetime of this process) ────────────────
 
@@ -155,6 +183,289 @@ async function emitWalEvent(
     );
   } catch (err) {
     logger.warn({ err, eventType }, '[worker] Failed to emit WAL event');
+  }
+}
+
+// ── Agentic conflict resolution (US-005) ─────────────────────────────────
+// Spawns claude --print to resolve git merge conflicts.
+// Returns true if all conflicts were resolved and committed, false otherwise.
+
+async function attemptAgenticConflictResolution(
+  workspacePath: string,
+  branchName: string,
+  runId: number,
+  appendLog: (msg: string) => void,
+): Promise<boolean> {
+  const git = simpleGit(workspacePath);
+
+  // Enter conflicted merge state (--no-ff --no-commit)
+  appendLog(`[auto-merge] Starting merge of ${branchName} for agentic resolution...`);
+  try {
+    await git.merge([branchName, '--no-ff', '--no-commit']);
+    // Clean merge — commit directly
+    await git.commit(`merge: ${branchName} (auto)`);
+    appendLog('[auto-merge] Merged cleanly without conflicts.');
+    return true;
+  } catch (mergeErr: any) {
+    const msg: string = mergeErr?.message ?? String(mergeErr);
+    if (!msg.includes('CONFLICT') && !msg.includes('Automatic merge failed') && !msg.includes('fix conflicts')) {
+      appendLog(`[auto-merge] Unexpected merge error: ${msg}`);
+      try { await git.merge(['--abort']); } catch { /* best-effort */ }
+      return false;
+    }
+    // We're in conflicted state — proceed with agentic resolution
+  }
+
+  // Capture conflict diff (working tree)
+  let conflictDiff = '';
+  try { conflictDiff = await git.raw(['diff']); } catch { /* non-fatal */ }
+  if (conflictDiff.length > 50_000) {
+    conflictDiff = conflictDiff.slice(0, 50_000) + '\n... (diff truncated at 50KB)';
+  }
+
+  const prompt = [
+    `You are resolving git merge conflicts. The feature branch "${branchName}" is being merged into main for run #${runId}.`,
+    '',
+    'Here is the current conflict diff (conflict markers in working tree):',
+    '```diff',
+    conflictDiff || '(no diff output available)',
+    '```',
+    '',
+    'Your task:',
+    '1. Examine the conflicted files using the bash and read tools.',
+    '2. Resolve each conflict intelligently — understand the intent of both sides. Do NOT blindly take one side.',
+    '3. After resolving ALL conflicts, stage all files with: git add -A',
+    '4. Commit the merge with: git commit --no-edit',
+    '   (The merge commit message is already staged — --no-edit preserves it.)',
+    '',
+    `Working directory: ${workspacePath}`,
+    '',
+    'Critical: Do not exit until all conflict markers (<<<<<<<, =======, >>>>>>>) have been removed from ALL files and the merge has been committed.',
+  ].join('\n');
+
+  appendLog('[auto-merge] Spawning claude to resolve conflicts...');
+  const env = buildCleanEnv();
+
+  return new Promise<boolean>((resolve) => {
+    const child = spawn(
+      CLAUDE_BIN,
+      ['--print', '--dangerously-skip-permissions', '--output-format', 'stream-json'],
+      { cwd: workspacePath, env, stdio: ['pipe', 'pipe', 'pipe'] },
+    );
+
+    child.stdin?.write(prompt);
+    child.stdin?.end();
+
+    let timedOut = false;
+    let sigkillTimer: ReturnType<typeof setTimeout> | null = null;
+
+    const sigtermTimer = setTimeout(() => {
+      timedOut = true;
+      appendLog('[auto-merge] Agentic resolution timed out (5 min) — sending SIGTERM');
+      child.kill('SIGTERM');
+      sigkillTimer = setTimeout(() => {
+        appendLog('[auto-merge] Claude did not exit — sending SIGKILL');
+        child.kill('SIGKILL');
+      }, AGENTIC_RESOLVE_SIGKILL_DELAY_MS);
+    }, AGENTIC_RESOLVE_TIMEOUT_MS);
+
+    child.on('exit', async (code) => {
+      clearTimeout(sigtermTimer);
+      if (sigkillTimer) clearTimeout(sigkillTimer);
+
+      if (timedOut) {
+        appendLog('[auto-merge] Agentic resolution timed out — aborting merge');
+        try { await git.merge(['--abort']); } catch { /* best-effort */ }
+        resolve(false);
+        return;
+      }
+
+      if (code !== 0) {
+        appendLog(`[auto-merge] Claude exited with code ${code} — aborting merge`);
+        try { await git.merge(['--abort']); } catch { /* best-effort */ }
+        resolve(false);
+        return;
+      }
+
+      // Verify no conflict markers remain
+      try {
+        await git.raw(['diff', '--check']);
+        appendLog('[auto-merge] Agentic resolution succeeded — no conflict markers remain');
+        resolve(true);
+      } catch {
+        appendLog('[auto-merge] Conflict markers still present after claude resolution — aborting');
+        try { await git.merge(['--abort']); } catch { /* best-effort */ }
+        resolve(false);
+      }
+    });
+
+    child.on('error', async (err) => {
+      clearTimeout(sigtermTimer);
+      if (sigkillTimer) clearTimeout(sigkillTimer);
+      appendLog(`[auto-merge] Claude spawn error: ${err.message} — aborting merge`);
+      try { await git.merge(['--abort']); } catch { /* best-effort */ }
+      resolve(false);
+    });
+  });
+}
+
+// ── Auto-merge worktree after run completion (US-004 + US-005) ───────────────
+// Called from handlePipelineRun exit handler when worktreePath is set.
+// Strategy: try ff-only → fall back to --no-ff → if conflicts: agentic resolution.
+
+const TRACKING_PATTERNS = ['.rorca/run-state.json', 'progress.txt', '.rorca/memory/runs/'];
+
+async function autoMergeAfterRun(
+  workspacePath: string,
+  worktreePath: string,
+  branchName: string,
+  workspaceId: number | string,
+  runId: number,
+  appendLog: (msg: string) => void,
+): Promise<void> {
+  if (!fs.existsSync(worktreePath)) {
+    appendLog('[auto-merge] Worktree already removed — skipping auto-merge');
+    return;
+  }
+
+  const git = simpleGit(workspacePath);
+
+  // Stash uncommitted changes
+  let stashed = false;
+  try {
+    const status = await git.status();
+    if (status.files.length > 0) {
+      await git.stash(['push', '--include-untracked', '-m', `rorca-autostash-before-merge-${branchName}`]);
+      stashed = true;
+      appendLog('[auto-merge] Stashed uncommitted workspace changes');
+    }
+  } catch (err: any) {
+    appendLog(`[auto-merge] Stash failed — proceeding without stash: ${err.message}`);
+  }
+
+  let mergeSuccess = false;
+  let resolvedByAgentic = false;
+  let conflictDiff = '';
+  let conflictFiles: string[] = [];
+
+  try {
+    appendLog(`[auto-merge] Merging ${branchName} into workspace...`);
+
+    // Try fast-forward first (cleanest)
+    try {
+      await git.merge([branchName, '--ff-only']);
+      appendLog('[auto-merge] Merged via fast-forward — no conflicts');
+      mergeSuccess = true;
+    } catch {
+      // ff-only failed — try no-ff
+      try {
+        await git.merge([branchName, '--no-ff', '--no-commit']);
+        // Clean no-ff merge
+        await git.commit(`merge: ${branchName} (auto)`);
+        appendLog('[auto-merge] Merged (no-ff) — no conflicts');
+        mergeSuccess = true;
+      } catch (noFfErr: any) {
+        const noFfMsg: string = noFfErr?.message ?? String(noFfErr);
+
+        if (noFfMsg.includes('CONFLICT') || noFfMsg.includes('Automatic merge failed') || noFfMsg.includes('fix conflicts')) {
+          // Collect conflicting files
+          try {
+            const diffOut = await git.raw(['diff', '--name-only', '--diff-filter=U']);
+            conflictFiles = diffOut.trim().split('\n').filter(Boolean);
+          } catch { /* continue */ }
+
+          const realConflicts = conflictFiles.filter(f => !TRACKING_PATTERNS.some(tp => f.includes(tp)));
+
+          if (realConflicts.length === 0) {
+            // Only tracking files — auto-resolve with --theirs
+            for (const file of conflictFiles) {
+              try {
+                await git.raw(['checkout', '--theirs', '--', file]);
+                await git.add(file);
+                appendLog(`[auto-merge] Auto-resolved tracking file: ${file}`);
+              } catch { /* best-effort */ }
+            }
+            try {
+              await git.commit(`merge: ${branchName} (auto)`);
+              appendLog('[auto-merge] Merged with tracking-file auto-resolution');
+              mergeSuccess = true;
+            } catch (commitErr: any) {
+              if (commitErr.message?.includes('nothing to commit') || commitErr.message?.includes('nothing added')) {
+                mergeSuccess = true;
+              } else {
+                try { await git.merge(['--abort']); } catch { /* best-effort */ }
+              }
+            }
+          } else {
+            // Real code conflicts — abort and try agentic resolution
+            try { await git.merge(['--abort']); } catch { /* best-effort */ }
+            appendLog(`[auto-merge] Code conflicts in: ${realConflicts.join(', ')} — attempting agentic resolution`);
+
+            const resolved = await attemptAgenticConflictResolution(workspacePath, branchName, runId, appendLog);
+            if (resolved) {
+              mergeSuccess = true;
+              resolvedByAgentic = true;
+            } else {
+              // Capture conflict diff for WAL event payload
+              try { conflictDiff = (await git.raw(['diff'])).slice(0, 2048); } catch { /* non-fatal */ }
+            }
+          }
+        } else if (noFfMsg.includes('Already up to date')) {
+          appendLog('[auto-merge] Already up to date — nothing to merge');
+          mergeSuccess = true;
+        } else {
+          try { await git.merge(['--abort']); } catch { /* best-effort */ }
+          appendLog(`[auto-merge] Unexpected merge error: ${noFfMsg}`);
+        }
+      }
+    }
+  } catch (unexpectedErr: any) {
+    try { await git.merge(['--abort']); } catch { /* best-effort */ }
+    appendLog(`[auto-merge] Unexpected error: ${unexpectedErr.message}`);
+  } finally {
+    if (stashed) {
+      try {
+        await git.stash(['pop']);
+        appendLog('[auto-merge] Restored stashed workspace changes');
+      } catch (popErr: any) {
+        appendLog(`[auto-merge] Stash pop conflict — run 'git stash pop' manually: ${popErr.message}`);
+      }
+    }
+  }
+
+  if (mergeSuccess) {
+    let sha = '';
+    try { sha = (await git.raw(['rev-parse', 'HEAD'])).trim(); } catch { /* non-fatal */ }
+
+    await emitWalEvent('worktree_merged', workspaceId, {
+      run_id: runId,
+      branchName,
+      mergeCommitSha: sha,
+      ...(resolvedByAgentic ? { resolvedBy: 'agentic' } : {}),
+    });
+
+    // Remove worktree directory
+    try {
+      await git.raw(['worktree', 'remove', '--force', worktreePath]);
+      appendLog(`[auto-merge] Worktree removed: ${path.basename(worktreePath)}`);
+    } catch (rmErr: any) {
+      appendLog(`[auto-merge] Worktree removal skipped: ${rmErr.message}`);
+    }
+
+    // Clear worktree_path from pipeline_runs
+    try { await execute(`UPDATE pipeline_runs SET worktree_path = NULL WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+  } else {
+    await emitWalEvent('worktree_merge_failed', workspaceId, {
+      run_id: runId,
+      branchName,
+      worktreePath,
+      conflictFiles,
+      conflictSummary: conflictDiff,
+      message: conflictFiles.length > 0
+        ? 'Agentic merge resolution failed — resolve conflicts manually via the Worktrees panel.'
+        : 'Auto-merge failed — resolve manually via the Worktrees panel.',
+    });
+    appendLog('[auto-merge] Auto-merge failed — worktree preserved for manual resolution');
   }
 }
 
@@ -296,6 +607,24 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               exit_code: code,
               source: 'worker',
             });
+
+            // Auto-merge worktree into main after run completes (US-004 + US-005)
+            // Only attempt if the run succeeded (status='done') and a worktree was created
+            if (status === 'done' && worktreePath && payload.branchName) {
+              const mergeLog = (msg: string) => logger.info({ runId }, msg);
+              try {
+                await autoMergeAfterRun(
+                  workspacePath,
+                  worktreePath,
+                  payload.branchName,
+                  workspaceId,
+                  runId,
+                  mergeLog,
+                );
+              } catch (mergeErr: any) {
+                logger.error({ err: mergeErr, runId }, '[worker] autoMergeAfterRun threw unexpectedly');
+              }
+            }
           }
         } catch (err) {
           logger.error({ err, runId }, '[worker] Failed to update run status on exit');
