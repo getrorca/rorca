@@ -32,10 +32,12 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
   const client = await pool.connect();
 
   try {
-    // Ensure schema_migrations tracking table exists
+    // Ensure schema_migrations tracking table exists.
+    // version is BIGINT to support 14-digit timestamp prefixes (e.g. 20260313120000).
+    // Existing DBs are upgraded from INTEGER → BIGINT via migration 075.
     await client.query(`
       CREATE TABLE IF NOT EXISTS schema_migrations (
-        version INTEGER PRIMARY KEY,
+        version BIGINT PRIMARY KEY,
         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         filename TEXT NOT NULL
       )
@@ -52,10 +54,27 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
       process.exit(1);
     }
 
-    // Read and sort migration files
+    // Read and sort migration files by numeric prefix (ascending).
+    //
+    // Two filename formats are supported and coexist indefinitely:
+    //   Sequential:  001_init.sql        → version 1
+    //   Timestamp:   20260313120000_x.sql → version 20260313120000
+    //
+    // Timestamps naturally sort after all sequential numbers (max sequential ≈ 999,
+    // min timestamp ≈ 20000000000000). Numeric sort is mandatory — lexicographic
+    // sort would break ordering ("20260313" < "3" as strings).
+    //
+    // Timestamp format also prevents the duplicate-number collision class seen with
+    // parallel feature branches (e.g. the 069/072 collisions in this repo).
     const files = fs.readdirSync(migrationsDir)
       .filter(f => f.endsWith('.sql'))
-      .sort();
+      .sort((a, b) => {
+        const aMatch = a.match(/^(\d+)/);
+        const bMatch = b.match(/^(\d+)/);
+        const aNum = aMatch ? parseInt(aMatch[1], 10) : 0;
+        const bNum = bMatch ? parseInt(bMatch[1], 10) : 0;
+        return aNum - bNum;
+      });
 
     // Fetch already-applied versions
     const { rows: applied } = await client.query('SELECT version FROM schema_migrations');
@@ -75,7 +94,11 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     let skippedCount = 0;
 
     for (const file of files) {
-      // Extract version number from filename: "001_init.sql" → 1
+      // Extract version number from filename prefix.
+      // Accepts both 3-digit sequential ("001_init.sql" → 1) and
+      // 14-digit timestamp ("20260313120000_x.sql" → 20260313120000).
+      // parseInt() is safe for 14-digit timestamps: max ~2×10^13 < Number.MAX_SAFE_INTEGER (~9×10^15).
+      // schema_migrations.version is BIGINT (migration 075) — no overflow.
       const match = file.match(/^(\d+)/);
       if (!match) {
         console.warn(`[pg-migrate] Skipping non-numbered file: ${file}`);

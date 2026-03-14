@@ -1,38 +1,18 @@
 {
-  "specId": "rorca-auto-merge",
-  "runId": 107,
-  "startedAt": "2026-03-13T20:55:03.668Z",
-  "lastUpdatedAt": "2026-03-13T21:10:28.925Z",
+  "specId": "rorca-migration-timestamps",
+  "runId": 116,
+  "startedAt": "2026-03-14T20:24:35.747Z",
+  "lastUpdatedAt": "2026-03-14T20:28:15.668Z",
   "completedStories": [
     {
       "storyId": "US-001",
-      "title": "Add autoMerge column to pipeline_runs and wire trigger payload",
+      "title": "Update migration runner to support timestamp-format filenames",
       "status": "passed",
-      "startedAt": "2026-03-13T20:55:05.368Z",
-      "finishedAt": "2026-03-13T20:58:30.465Z",
-      "agentType": "claude",
-      "model": "claude-haiku-4-5-20251001",
-      "elapsedMs": 205097
-    },
-    {
-      "storyId": "US-002",
-      "title": "Add autoMerge toggle to pipeline trigger dialog UI",
-      "status": "passed",
-      "startedAt": "2026-03-13T20:59:33.184Z",
-      "finishedAt": "2026-03-13T21:04:42.683Z",
+      "startedAt": "2026-03-14T20:24:36.315Z",
+      "finishedAt": "2026-03-14T20:28:15.668Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 309499
-    },
-    {
-      "storyId": "US-003",
-      "title": "Add WAL event types for merge lifecycle",
-      "status": "passed",
-      "startedAt": "2026-03-13T21:05:19.508Z",
-      "finishedAt": "2026-03-13T21:10:28.923Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 309415
+      "elapsedMs": 219353
     }
   ],
   "failedStories": [],
