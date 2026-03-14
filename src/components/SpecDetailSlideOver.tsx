@@ -486,7 +486,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -498,6 +498,7 @@ function SpecDetailContent({
           specPath: `forge/specs/approved/${summary.id}.json`, workspaceId, autoWorktree,
           ...(options?.forceSequential ? { forceSequential: true } : {}),
           ...(options?.queue ? { queue: true } : {}),
+          ...(autoWorktree && options?.autoMerge !== undefined ? { autoMerge: options.autoMerge } : {}),
         }) },
       );
       if (res.conflict) setRunState('conflict');
