@@ -127,9 +127,9 @@ interface TriggerPopoverProps {
   /** Whether a trigger is currently in progress */
   loading?: boolean;
   /** Called when user clicks Run Now */
-  onTrigger: (autoWorktree: boolean, options?: { forceSequential?: boolean }) => void;
+  onTrigger: (autoWorktree: boolean, options?: { forceSequential?: boolean; autoMerge?: boolean }) => void;
   /** Called when user clicks Add to Queue */
-  onAddToQueue?: (autoWorktree: boolean, options?: { forceSequential?: boolean }) => void;
+  onAddToQueue?: (autoWorktree: boolean, options?: { forceSequential?: boolean; autoMerge?: boolean }) => void;
   /** Whether Add to Queue action is loading */
   queueLoading?: boolean;
   /** Called when popover is dismissed */
@@ -153,6 +153,7 @@ export default function TriggerPopover({
   workspaceId,
 }: TriggerPopoverProps) {
   const [autoWorktree, setAutoWorktree] = useState(false);
+  const [autoMerge, setAutoMerge] = useState(true);
   const [agentConfig, setAgentConfig] = useState<AgentConfigSummary | null>(null);
   const [capWarnings, setCapWarnings] = useState<CapabilityWarning[]>([]);
   const [capMismatchMode, setCapMismatchMode] = useState<string>('warn');
@@ -647,6 +648,8 @@ export default function TriggerPopover({
           onChange={(e) => {
             if (isWaveParallel && !forceSequential) return;
             setAutoWorktree(e.target.checked);
+            if (e.target.checked) setAutoMerge(true);
+            else setAutoMerge(false);
           }}
           disabled={isWaveParallel && !forceSequential}
           className="rounded border-border accent-[var(--accent)]"
@@ -660,13 +663,31 @@ export default function TriggerPopover({
         )}
       </label>
 
+      {/* Auto-merge checkbox — only visible when autoWorktree is on */}
+      {(autoWorktree || (isWaveParallel && !forceSequential)) && (
+        <div className="ml-5 space-y-1">
+          <label className="flex items-center gap-2 cursor-pointer">
+            <input
+              type="checkbox"
+              checked={autoMerge}
+              onChange={(e) => setAutoMerge(e.target.checked)}
+              className="rounded border-border accent-[var(--accent)]"
+            />
+            <span className="text-xs text-[var(--text)]">Merge to main after run completes</span>
+          </label>
+          <p className="text-[10px] text-muted leading-tight">
+            Automatically merges the worktree branch into main when all stories pass.
+          </p>
+        </div>
+      )}
+
       {/* Action buttons */}
       <div className="space-y-2">
         {/* Run Now — primary */}
         <button
           onClick={() => {
             const effectiveWorktree = autoWorktree || (isWaveParallel && !forceSequential);
-            onTrigger(effectiveWorktree, { forceSequential: forceSequential || undefined });
+            onTrigger(effectiveWorktree, { forceSequential: forceSequential || undefined, autoMerge: effectiveWorktree ? autoMerge : undefined });
           }}
           disabled={triggerDisabled}
           className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
@@ -683,7 +704,7 @@ export default function TriggerPopover({
           <button
             onClick={() => {
               const effectiveWorktree = autoWorktree || (isWaveParallel && !forceSequential);
-              onAddToQueue(effectiveWorktree, { forceSequential: forceSequential || undefined });
+              onAddToQueue(effectiveWorktree, { forceSequential: forceSequential || undefined, autoMerge: effectiveWorktree ? autoMerge : undefined });
             }}
             disabled={triggerDisabled}
             title="Will run after the active spec completes"
