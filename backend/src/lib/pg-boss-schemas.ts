@@ -65,3 +65,17 @@ export const PipelineCancelJobPayload = z.object({
 }).strict();
 
 export type PipelineCancelJobPayloadType = z.infer<typeof PipelineCancelJobPayload>;
+
+// ── pipeline:merge ──────────────────────────────────────────────────────────
+
+/**
+ * Payload for the `pipeline:merge` pg-boss queue.
+ * Sent by POST /api/pipeline/runs/:id/retry-merge, consumed by worker handlePipelineMerge.
+ */
+export const PipelineMergeJobPayload = z.object({
+  runId: z.number().int().positive(),
+  branch: z.string().min(1),
+  workspaceId: z.string().min(1),
+}).strict();
+
+export type PipelineMergeJobPayloadType = z.infer<typeof PipelineMergeJobPayload>;
