@@ -679,6 +679,8 @@ interface PipelineRunRow {
   queued_at: string | null;
   queue_position: number | null;
   auto_merge: boolean;
+  merge_status: string | null;
+  merge_commit_sha: string | null;
 }
 
 interface StoryResultRow {
@@ -783,6 +785,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               specPath: { type: string, example: "forge/specs/approved/my-spec.json" }
  *               workspaceId: { type: string }
  *               autoWorktree: { type: boolean, default: false, description: "Create git worktree for isolated run" }
+ *               autoMerge: { type: boolean, default: false, description: "Auto-merge worktree branch to main on successful run" }
  *               dryRun: { type: boolean, default: false }
  *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
  *     responses:
@@ -4882,6 +4885,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       worktreePath: originalRun.worktree_path ?? null,
       branchName: originalRun.branch_name ?? null,
       autoWorktree: false,
+      autoMerge: false,
       envOverrides: {},
     };
 
