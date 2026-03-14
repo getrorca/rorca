@@ -1309,12 +1309,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model
-> Rule: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
-
-## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution
-> Rule: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
-
 ## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
 > Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
 
@@ -1369,11 +1363,17 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
 > Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
 
+## 2026-03-13 [Gotcha] 150+ unmerged feat/ branches accumulate — audit regularly
+> Rule: Worktree spec runs create feat/ branches that never auto-merge. After several months of development, 150+ branches can accumulate. Most are stale (superseded by later runs of the same spec). When auditing: (1) check remote feat/ branches with commits not in main using `git branch -r | grep feat/ | while read b; do count=$(git log --oneline main.."$b" 2>/dev/null | wc -l | tr -d ' '); if [ "$count" -gt "0" ]; then echo "$count | $b"; fi; done`, (2) skip old pg-boss/scaffolding branches — their work is superseded by WR spec, (3) merge the most recent run of each spec (highest timestamp suffix = most complete), (4) skip convention-agents branches (old stubs, superseded by future spec).
+
+## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
+> Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
+
 Follow this workflow for implementation:
 ## Agent Role: Frontend
 
 
-## Skill: react-review (relevance: 8)
+## Skill: react-review (relevance: 7)
 ---
 name: react-review
 description: Review React components for best practices and performance issues
@@ -1584,10 +1584,21 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-002):
-After US-001 writes context_summary_json to spec_generation_logs for enriched specs, the frontend SpecDetailSlideOver Context tab must render the same rich ContextSummaryCard component that is already shown for generated specs. Currently the Context tab either shows nothing or a fallback empty state for specs that were enriched rather than generated. This story ensures the Context tab fetches the spec_generation_logs entry for the enrich operation (trigger_type = 'enrich' or equivalent) and passes context_summary_json to the existing ContextSummaryCard component. The card must display: direction layers count, skills matched, memory tier (cag/rag/graph/direction_only), cagHits, ragHits, graphHits, latencyMs, tokenBudget, and flags. No new UI components should be created — reuse the existing ContextSummaryCard. If multiple log entries exist (e.g., both a generate and a later enrich), show the most recent one. Add a label or badge indicating whether the context came from 'Generated' or 'Enriched' to distinguish the source.
+In the pipeline trigger dialog (the modal shown when clicking 'Run' on an approved spec), add a checkbox labeled 'Merge to main after run completes' that is checked by default. The checkbox is only visible and enabled when the 'Run in worktree' (autoWorktree) toggle is on — when autoWorktree is off, the merge checkbox is hidden. The checkbox value is sent as `autoMerge: boolean` in the POST /api/pipeline/trigger request body alongside the existing `autoWorktree` field. Add a small helper text below the checkbox: 'Automatically merges the worktree branch into main when all stories pass.'
+
+## Context
+- **Trigger dialog location**: Search for the modal/dialog handling `POST /api/pipeline/trigger` — likely in `src/panels/SpecsPanel.tsx` (Board view Run action) or `src/components/SpecDetailSlideOver.tsx` (slide-over Run button). Look for existing `autoWorktree` state to find the exact component.
+- **Backend route**: `backend/src/routes/pipeline.ts` already destructures `autoWorktree` from the request body. Add `autoMerge` to the same destructure and thread it into the pg-boss `pipeline:run` job payload. Use `autoMerge: autoWorktree ? (autoMerge ?? true) : false` to silently normalize when `autoWorktree` is off.
+- **Tailwind checkbox styling**: Follow existing checkbox/toggle patterns in Settings panels (e.g., `SettingsPanel.tsx` sub-tabs) for consistent styling. Use Tailwind 3 utility classes — no custom CSS.
+- **Conditional visibility**: Use `{autoWorktree && (...)}` JSX guard. Reset `autoMerge` to `true` when `autoWorktree` toggles on, `false` when off — handle in the `autoWorktree` toggle's `onChange` handler.
+- **Don't implement merge logic**: This story only threads `autoMerge` through to the job payload. The actual post-run merge behavior is a separate story — do not add merge code to `execution-engine.ts` or `worker.ts`.
+- **Frontend test (Vitest)**: Add a test in `src/panels/__tests__/` verifying: (1) checkbox visible when `autoWorktree=true`, (2) checkbox hidden when `autoWorktree=false`, (3) default checked state is `true`, (4) payload sent to API includes `autoMerge`. Use existing panel test files as reference patterns. Run with `npx vitest run`, not Jest.
+- **TypeScript gotcha**: Pre-existing `tsc` errors in unrelated files may cause exit code 1 — this does not mean your test failed. Verify actual test results via `npx vitest run` output separately.
+- **pg placeholder syntax**: If adding backend validation, use `$1, $2` numbered placeholders (not `?`) for any PostgreSQL queries.
 
 Acceptance Criteria:
-- The Context tab in SpecDetailSlideOver for a spec that has been enriched (but not generated via Rorca) renders ContextSummaryCard with data from the enrich operation's spec_generation_logs row — no empty state or null render
-- ContextSummaryCard shows memory.cagHits, memory.ragHits, memory.graphHits, and memory.latencyMs sourced from the aggregated per-story retrieveContext() calls written by US-001
-- When a spec has both a 'generate' log entry and a later 'enrich' log entry, the Context tab displays the most recent entry and shows a 'Enriched' badge (e.g., amber label) next to the timestamp to distinguish it from a 'Generated' entry (green label)
-- No new ContextSummaryCard component is introduced — the existing component used by the generate flow is reused without duplication
+- A 'Merge to main after run completes' checkbox appears in the trigger dialog when autoWorktree is toggled on
+- The checkbox is checked (true) by default
+- The checkbox is hidden when autoWorktree is toggled off
+- The `autoMerge` boolean is included in the trigger POST request payload
+- Helper text 'Automatically merges the worktree branch into main when all stories pass.' is displayed below the checkbox

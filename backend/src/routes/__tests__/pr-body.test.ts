@@ -48,6 +48,8 @@ authToken = await getAuthToken(app);
 });
 
 afterEach(async () => {
+  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
+  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 100));
 fs.rmSync(tmpDir, { recursive: true, force: true });

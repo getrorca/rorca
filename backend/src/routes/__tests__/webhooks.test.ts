@@ -52,6 +52,8 @@ _authToken = await getAuthToken(app);
 });
 
 afterEach(async () => {
+  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
+  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
   // Allow any pending setImmediate callbacks to flush before closing the DB
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 50));

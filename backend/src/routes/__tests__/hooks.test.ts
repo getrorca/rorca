@@ -39,13 +39,16 @@ process.env.NODE_ENV = 'test';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-// Seed a workspace
+// Seed a workspace and clean up any leftover hooks from previous test
   await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-hooks', 'Hooks WS', $1) ON CONFLICT (id) DO NOTHING`, [tmpDir]);
+  await execute(`DELETE FROM pipeline_hooks WHERE workspace_id = 'ws-hooks'`);
 
   authToken = await getAuthToken(app);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
+  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
 fs.rmSync(tmpDir, { recursive: true, force: true });
 delete process.env.NODE_ENV;
 });
@@ -68,7 +71,7 @@ describe('POST /api/pipeline/hooks', () => {
     expect(res.body.workspace_id).toBe('ws-hooks');
     expect(res.body.hook_type).toBe('pre_run');
     expect(res.body.command).toBe('echo "hello"');
-    expect(res.body.enabled).toBe(1);
+    expect(res.body.enabled).toBe(true);
   });
 
   test('creates a disabled hook', async () => {
@@ -83,7 +86,7 @@ describe('POST /api/pipeline/hooks', () => {
       });
 
     expect(res.status).toBe(201);
-    expect(res.body.enabled).toBe(0);
+    expect(res.body.enabled).toBe(false);
   });
 
   test('rejects invalid hook type', async () => {
@@ -182,7 +185,7 @@ describe('PUT /api/pipeline/hooks/:id', () => {
       .send({ enabled: false });
 
     expect(res.status).toBe(200);
-    expect(res.body.enabled).toBe(0);
+    expect(res.body.enabled).toBe(false);
   });
 
   test('returns 404 for nonexistent hook', async () => {

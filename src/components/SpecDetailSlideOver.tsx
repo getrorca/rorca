@@ -860,8 +860,8 @@ function ModelBadge({ story, specId, workspaceId, onModelChanged }: {
   // Lazy-load model list when popover opens
   useEffect(() => {
     if (!open || models.length > 0) return;
-    apiFetch<{ models: string[] }>('/api/direction/models')
-      .then(d => setModels(d.models ?? []))
+    apiFetch<{ models: Array<{ id: string } | string> }>('/api/direction/models')
+      .then(d => setModels((d.models ?? []).map(m => (typeof m === 'string' ? m : m.id))))
       .catch(() => setModels(['claude-opus-4-6', 'claude-sonnet-4-6', 'claude-haiku-4-5-20251001']));
   }, [open, models.length]);
 

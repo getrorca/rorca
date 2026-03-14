@@ -36,74 +36,73 @@ let tmpDir: string;
 let wsDir: string;
 let authToken: string;
 
-beforeEach(async () => {
-  jest.resetModules();
-
-  jest.mock('../../lib/llm-client', () => ({
-    chatComplete: jest.fn(),
-    getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
-    isValidModel: jest.fn().mockReturnValue(true),
-    DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
-    resolveVaultProvider: jest.fn().mockReturnValue(null),
-    getModelInfo: jest.fn().mockReturnValue(undefined),
-    SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
-  }));
-
-  jest.mock('../../lib/pg-boss', () => ({
-    initBoss: jest.fn().mockResolvedValue(undefined),
-    getBoss: jest.fn().mockReturnValue({
-      send: jest.fn().mockResolvedValue('mock-job-id'),
-      work: jest.fn(),
-      stop: jest.fn().mockResolvedValue(undefined),
-    }),
-  }));
-
-  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pipeline-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
-
+// Load the server ONCE per test file to avoid creating 54 separate DB connection pools
+// (one per jest.resetModules() + require('../../server') call).
+// PG_POOL_SIZE=1 in jest.env.ts caps each pool at 1 connection, so 54 pools = 54 conns
+// which could exhaust Postgres max_connections (100). One server = one pool = safe.
+beforeAll(async () => {
+  process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
-authToken = await getAuthToken(app);
+  authToken = await getAuthToken(app);
 
-  // Set test user to a paid plan so pipeline trigger isn't blocked by V2-111 plan enforcement
   await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
-
-  // Create workspace directory with run-loop.sh and spec files
-  wsDir = path.join(tmpDir, 'workspace');
-  fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'approved'), { recursive: true });
-  fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'pending'), { recursive: true });
-
-  // Clean up data from previous tests that share the same workspace id.
-  // FK chain: token_usage → pipeline_runs, story_results → pipeline_runs
-  // Delete child tables first to avoid FK violation.
-  await execute(`DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-pipe')`);
-  await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-pipe')`);
-  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = 'ws-pipe'`);
-  await execute(`DELETE FROM wal_events WHERE workspace_id = 'ws-pipe'`);
-
-  // Ensure local-admin user exists in DB with plan='pro'.
-  // In local-single-user mode (AUTH_REQUIRED not set), req.user is always
-  // { id: 'local-admin' }, and the plan enforcement queries users WHERE id = 'local-admin'.
-  // Without this upsert the query returns undefined → plan defaults to 'free' → 403.
   await execute(
     `INSERT INTO users (id, email, display_name, password_hash, plan)
      VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'x', 'pro')
      ON CONFLICT (id) DO UPDATE SET plan = 'pro'`
   );
-
-  // Seed workspace in DB
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-pipe', 'Pipeline WS', $1) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [wsDir]);
-
-  // Seed model pricing (truncated by global teardown; migrations are skipped on re-runs)
   await execute(`INSERT INTO model_pricing (model_id, input_cost_per_1k, output_cost_per_1k, input_cost_per_1m, output_cost_per_1m)
     VALUES ('claude-sonnet-4-5-20250929', 0.003, 0.015, 3.0, 15.0)
     ON CONFLICT (model_id) DO NOTHING`);
 });
 
-afterEach(() => {
-fs.rmSync(tmpDir, { recursive: true, force: true });
-delete process.env.NODE_ENV;
+beforeEach(async () => {
+  // Reset all mocks to clear call counts from previous tests
+  jest.clearAllMocks();
+
+  // Fresh workspace directory for each test
+  tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-pipeline-test-'));
+  wsDir = path.join(tmpDir, 'workspace');
+  fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'approved'), { recursive: true });
+  fs.mkdirSync(path.join(wsDir, 'forge', 'specs', 'pending'), { recursive: true });
+
+  // Clean up DB state from previous tests (FK chain: token_usage/story_results → pipeline_runs)
+  await execute(`DELETE FROM token_usage WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-pipe')`);
+  await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = 'ws-pipe')`);
+  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = 'ws-pipe'`);
+  await execute(`DELETE FROM wal_events WHERE workspace_id = 'ws-pipe'`);
+
+  // Ensure both users exist with plan='pro' (global teardown truncates users between test files).
+  // Use ON CONFLICT DO UPDATE covering both id and email unique constraints.
+  await execute(
+    `INSERT INTO users (id, email, display_name, password_hash, plan)
+     VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'x', 'pro')
+     ON CONFLICT (id) DO UPDATE SET plan = 'pro', email = EXCLUDED.email`
+  );
+  await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
+
+  // Ensure model pricing exists (needed for dry-run cost estimate)
+  await execute(`INSERT INTO model_pricing (model_id, input_cost_per_1k, output_cost_per_1k, input_cost_per_1m, output_cost_per_1m)
+    VALUES ('claude-sonnet-4-5-20250929', 0.003, 0.015, 3.0, 15.0)
+    ON CONFLICT (model_id) DO NOTHING`);
+
+  // Point workspace at fresh tmpDir
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ('ws-pipe', 'Pipeline WS', $1) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [wsDir]);
+});
+
+afterEach(async () => {
+  // Allow fire-and-forget async ops (WAL events, DB inserts) to drain before pool cleanup.
+  // The global jest.pool-cleanup.ts afterEach calls closePool() after this local afterEach.
+  // Without a sufficient delay, async ops from trigger tests (WAL posting, run row insertion)
+  // may try to use the pool AFTER closePool() is called.
+  await new Promise((r) => setImmediate(r));
+  await new Promise((r) => setTimeout(r, 300));
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+});
+
+afterAll(async () => {
+  delete process.env.NODE_ENV;
 });
 
 /** Seed a spec JSON file in the workspace */
@@ -140,22 +139,22 @@ async function seedRun(overrides: Partial<{ status: string; workspace_id: string
 // ─── POST /api/pipeline/trigger ──────────────────────────────────────────────
 
 describe('POST /api/pipeline/trigger', () => {
-  test('returns 422 when specPath is missing', async () => {
+  test('returns 400 when specPath is missing', async () => {
     const res = await request(app)
       .post('/api/pipeline/trigger')
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-pipe' });
 
-    expect(res.status).toBe(422);
+    expect(res.status).toBe(400);
   });
 
-  test('returns 422 when workspaceId is missing', async () => {
+  test('returns 400 when workspaceId is missing', async () => {
     const res = await request(app)
       .post('/api/pipeline/trigger')
       .set('Authorization', `Bearer ${authToken}`)
       .send({ specPath: 'forge/specs/approved/test.json' });
 
-    expect(res.status).toBe(422);
+    expect(res.status).toBe(400);
   });
 
   test('returns 404 for nonexistent workspace', async () => {

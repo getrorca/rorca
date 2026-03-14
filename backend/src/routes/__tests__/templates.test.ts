@@ -68,7 +68,9 @@ const llmClient = require('../../lib/llm-client');
   authToken = await getAuthToken(app);
 });
 
-afterEach(() => {
+afterEach(async () => {
+  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
+  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
   const specsRoot = path.join(os.tmpdir(), 'scripts', 'ralph', 'specs');
   if (fs.existsSync(specsRoot)) {
     fs.rmSync(specsRoot, { recursive: true, force: true });

@@ -347,7 +347,12 @@ router.get('/costs', async (req: Request, res: Response) => {
       ORDER BY total_cost_usd DESC
     `;
 
-    const breakdown = await query<CostRow>(sql, wsParams);
+    const rawBreakdown = await query<CostRow>(sql, wsParams);
+    // Parse bigint COUNT(*) to numbers
+    const breakdown = rawBreakdown.map(r => ({
+      ...r,
+      story_count: parseInt(String(r.story_count), 10) || 0,
+    }));
 
     // Summary totals
     const totalSql = `
@@ -370,7 +375,7 @@ router.get('/costs', async (req: Request, res: Response) => {
       ${wsFilter}
     `;
 
-    const totals = await queryOne<{
+    const rawTotals = await queryOne<{
       total_input_tokens: number;
       total_output_tokens: number;
       total_input_cost_usd: number;
@@ -378,6 +383,10 @@ router.get('/costs', async (req: Request, res: Response) => {
       total_cost_usd: number;
       total_stories: number;
     }>(totalSql, wsParams);
+    const totals = rawTotals ? {
+      ...rawTotals,
+      total_stories: parseInt(String(rawTotals.total_stories), 10) || 0,
+    } : rawTotals;
 
     res.json({ groupBy, breakdown, totals, dateRange: { from, to } });
   } catch (error: any) {
@@ -719,19 +728,24 @@ router.get('/models', async (req: Request, res: Response) => {
     const rows = await query<ModelComparisonRow>(sql, params);
 
     // Enrich with pass rate and insufficient data flag
-    const models = rows.map(r => ({
-      model: r.model,
-      totalStories: r.total_stories,
-      passedStories: r.passed_stories,
-      failedStories: r.failed_stories,
-      passRate: r.total_stories > 0 ? r.passed_stories / r.total_stories : 0,
-      avgCostUsd: r.avg_cost_usd ?? 0,
-      totalCostUsd: r.total_cost_usd ?? 0,
-      avgElapsedSeconds: r.avg_elapsed_seconds ?? 0,
-      avgInputTokens: Math.round(r.avg_input_tokens ?? 0),
-      avgOutputTokens: Math.round(r.avg_output_tokens ?? 0),
-      insufficientData: r.total_stories < 5,
-    }));
+    const models = rows.map(r => {
+      const totalStories = parseInt(String(r.total_stories), 10) || 0;
+      const passedStories = parseInt(String(r.passed_stories), 10) || 0;
+      const failedStories = parseInt(String(r.failed_stories), 10) || 0;
+      return {
+        model: r.model,
+        totalStories,
+        passedStories,
+        failedStories,
+        passRate: totalStories > 0 ? passedStories / totalStories : 0,
+        avgCostUsd: parseFloat(String(r.avg_cost_usd ?? 0)) || 0,
+        totalCostUsd: parseFloat(String(r.total_cost_usd ?? 0)) || 0,
+        avgElapsedSeconds: parseFloat(String(r.avg_elapsed_seconds ?? 0)) || 0,
+        avgInputTokens: Math.round(parseFloat(String(r.avg_input_tokens ?? 0)) || 0),
+        avgOutputTokens: Math.round(parseFloat(String(r.avg_output_tokens ?? 0)) || 0),
+        insufficientData: totalStories < 5,
+      };
+    });
 
     res.json({ models, dateRange: { from, to } });
   } catch (error: any) {
@@ -876,11 +890,20 @@ router.get('/velocity', async (req: Request, res: Response) => {
       specsByWeek.set(row.week, arr);
     }
 
+    // Parse bigint/numeric DB values to numbers
+    const parsedWeeks = weeks.map(w => ({
+      ...w,
+      passed: parseInt(String(w.passed), 10) || 0,
+      failed: parseInt(String(w.failed), 10) || 0,
+      skipped: parseInt(String(w.skipped), 10) || 0,
+      total: parseInt(String(w.total), 10) || 0,
+    }));
+
     // Attach specs to each week + compute rolling 4-week average
-    const velocityData = weeks.map((w, i) => {
+    const velocityData = parsedWeeks.map((w, i) => {
       // Rolling 4-week average of total stories
       const windowStart = Math.max(0, i - 3);
-      const window = weeks.slice(windowStart, i + 1);
+      const window = parsedWeeks.slice(windowStart, i + 1);
       const rollingAvg = window.reduce((sum, wk) => sum + wk.total, 0) / window.length;
 
       return {
@@ -1611,7 +1634,7 @@ router.get('/roi', async (req: Request, res: Response) => {
       WHERE latest.status = 'pass'
     `, [workspaceId, from, to]);
 
-    const totalStoriesPassed = passedResult?.total_stories_passed ?? 0;
+    const totalStoriesPassed = parseInt(String(passedResult?.total_stories_passed ?? 0), 10) || 0;
 
     // Get total LLM cost from token_usage for this workspace + date range
     const costResult = await queryOne<{ total_llm_cost: number }>(`

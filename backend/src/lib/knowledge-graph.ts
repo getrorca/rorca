@@ -184,6 +184,7 @@ async function cypherQuery<T = Record<string, unknown>>(
     logger.debug({ rowCount: result.rowCount }, '[knowledge-graph] cypherQuery: query complete');
     return result.rows.map(row => parseAgtypeRow<T>(row));
   } finally {
+    await client.query('SET search_path = rorca, public');
     client.release();
     logger.debug('[knowledge-graph] cypherQuery: pool client released');
   }
@@ -209,6 +210,7 @@ async function cypherMutate(cypher: string): Promise<void> {
     );
     throw err;
   } finally {
+    await client.query('SET search_path = rorca, public');
     client.release();
     logger.debug('[knowledge-graph] cypherMutate: pool client released');
   }
