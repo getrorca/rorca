@@ -328,6 +328,10 @@ async function autoMergeAfterRun(
     return;
   }
 
+  // Emit merge-started event + set merge_status
+  await emitWalEvent('worktree_merge_started', workspaceId, { run_id: runId, branchName });
+  try { await execute(`UPDATE pipeline_runs SET merge_status = 'merging' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+
   const git = simpleGit(workspacePath);
 
   // Stash uncommitted changes
@@ -452,19 +456,21 @@ async function autoMergeAfterRun(
       appendLog(`[auto-merge] Worktree removal skipped: ${rmErr.message}`);
     }
 
-    // Clear worktree_path from pipeline_runs
-    try { await execute(`UPDATE pipeline_runs SET worktree_path = NULL WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+    // Update merge_status + clear worktree_path
+    try { await execute(`UPDATE pipeline_runs SET worktree_path = NULL, merge_status = 'merged', merge_commit_sha = $2 WHERE id = $1`, [runId, sha]); } catch { /* non-fatal */ }
   } else {
+    const mergeErrorMsg = conflictFiles.length > 0
+      ? 'Agentic merge resolution failed — resolve conflicts manually via the Worktrees panel.'
+      : 'Auto-merge failed — resolve manually via the Worktrees panel.';
     await emitWalEvent('worktree_merge_failed', workspaceId, {
       run_id: runId,
       branchName,
       worktreePath,
       conflictFiles,
       conflictSummary: conflictDiff,
-      message: conflictFiles.length > 0
-        ? 'Agentic merge resolution failed — resolve conflicts manually via the Worktrees panel.'
-        : 'Auto-merge failed — resolve manually via the Worktrees panel.',
+      message: mergeErrorMsg,
     });
+    try { await execute(`UPDATE pipeline_runs SET merge_status = 'failed', merge_error = $2 WHERE id = $1`, [runId, conflictDiff.slice(0, 2000) || mergeErrorMsg]); } catch { /* non-fatal */ }
     appendLog('[auto-merge] Auto-merge failed — worktree preserved for manual resolution');
   }
 }
@@ -611,6 +617,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             // Auto-merge worktree into main after run completes (US-004 + US-005)
             // Only attempt if the run succeeded (status='done') and a worktree was created
             if (status === 'done' && worktreePath && payload.branchName) {
+              try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
               const mergeLog = (msg: string) => logger.info({ runId }, msg);
               try {
                 await autoMergeAfterRun(

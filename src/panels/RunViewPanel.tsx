@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight, Sparkles, Files, Cpu, MailWarning } from 'lucide-react';
+import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight, Sparkles, Files, Cpu, MailWarning, Clock, Check, GitMerge } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -37,6 +37,9 @@ interface PipelineRun {
   parallelism?: number;
   agentType?: string;
   agentModel?: string | null;
+  merge_status?: 'pending' | 'merging' | 'merged' | 'failed' | null;
+  merge_commit_sha?: string | null;
+  merge_error?: string | null;
 }
 
 interface StoryResultSeed {
@@ -606,6 +609,114 @@ function ContextSummaryBar({
   );
 }
 
+// ─── Merge Status Types ─────────────────────────────────────────────────────
+
+type MergeState = 'pending' | 'merging' | 'merged' | 'failed';
+
+interface MergeInfo {
+  state: MergeState;
+  branchName?: string;
+  commitSha?: string;
+  conflictSummary?: string;
+}
+
+// ─── MergeStatusSection ─────────────────────────────────────────────────────
+
+function MergeStatusSection({ mergeInfo, runId, onRetry }: {
+  mergeInfo: MergeInfo;
+  runId: number;
+  onRetry: () => void;
+}) {
+  const [showFullConflict, setShowFullConflict] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  const handleCopy = useCallback((text: string) => {
+    navigator.clipboard.writeText(text).then(() => {
+      setCopied(true);
+      setTimeout(() => setCopied(false), 2000);
+    }).catch(() => {});
+  }, []);
+
+  const { state, branchName, commitSha, conflictSummary } = mergeInfo;
+  const shortSha = commitSha?.slice(0, 7) ?? '';
+
+  return (
+    <div data-testid="merge-status-section" className="shrink-0 px-3 md:px-4 py-2 border-b border-border bg-panel">
+      <div className="flex items-center gap-2 text-xs">
+        <GitMerge size={13} className="text-muted shrink-0" />
+        <span className="text-muted font-medium">Auto-Merge</span>
+
+        {state === 'pending' && (
+          <span data-testid="merge-badge-pending" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-gray-500/10 text-gray-400">
+            <Clock size={10} />
+            Pending
+          </span>
+        )}
+
+        {state === 'merging' && (
+          <span data-testid="merge-badge-merging" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-amber-500/10 text-amber-500">
+            <Loader2 size={10} className="animate-spin" />
+            Merging
+          </span>
+        )}
+
+        {state === 'merged' && (
+          <>
+            <span data-testid="merge-badge-merged" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-emerald-500/10 text-emerald-500">
+              <Check size={10} />
+              Merged
+            </span>
+            {(branchName || shortSha) && (
+              <button
+                onClick={() => handleCopy(`${branchName ?? ''}${shortSha ? ` ${shortSha}` : ''}`)}
+                title={copied ? 'Copied!' : 'Copy branch + SHA'}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono leading-none rounded bg-emerald-500/5 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10 transition-colors cursor-pointer"
+              >
+                {branchName && <span>{branchName}</span>}
+                {shortSha && <span className="text-emerald-300">{shortSha}</span>}
+              </button>
+            )}
+          </>
+        )}
+
+        {state === 'failed' && (
+          <>
+            <span data-testid="merge-badge-failed" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-red-500/10 text-red-500">
+              <XCircle size={10} />
+              Failed
+            </span>
+            <button
+              onClick={onRetry}
+              className="inline-flex items-center gap-1 px-2 py-0.5 text-[10px] font-semibold rounded bg-amber-500/10 border border-amber-500/30 text-amber-400 hover:bg-amber-500/20 transition-colors"
+            >
+              <RotateCcw size={10} />
+              Retry Merge
+            </button>
+          </>
+        )}
+      </div>
+
+      {/* Conflict summary for failed state */}
+      {state === 'failed' && conflictSummary && (
+        <div className="mt-1.5">
+          <pre className="text-[10px] text-red-300/80 font-mono whitespace-pre-wrap break-all leading-relaxed bg-red-500/5 border border-red-500/10 rounded px-2 py-1.5 max-h-20 overflow-y-auto">
+            {showFullConflict ? conflictSummary : conflictSummary.slice(0, 500)}
+            {!showFullConflict && conflictSummary.length > 500 && '...'}
+          </pre>
+          {conflictSummary.length > 500 && (
+            <button
+              onClick={() => setShowFullConflict(!showFullConflict)}
+              className="text-[10px] text-muted hover:text-[var(--text)] mt-0.5"
+            >
+              {showFullConflict ? 'Show less' : 'Show full'}
+            </button>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── RunViewPanel ───────────────────────────────────────────────────────────
 
 interface RunViewPanelProps {
@@ -643,6 +754,9 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   const [storyTokenBreakdown, setStoryTokenBreakdown] = useState<StoryTokenEntry[]>([]);
   // Seed from story_results on initial load so graph colors are correct for in-progress/historical runs
   const [seedStatuses, setSeedStatuses] = useState<Map<string, DerivedStatus>>(new Map());
+
+  // Merge status — base state seeded from pipeline_runs, derived state from SSE
+  const [mergeInfoBase, setMergeInfoBase] = useState<MergeInfo | null>(null);
 
   // Filter tabs for mobile — hide Graph (too complex for small screens)
   const visibleTabs = useMemo(() => {
@@ -700,6 +814,31 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     return map;
   }, [walEvents, seedStatuses]);
 
+  // Derive merge status: start from DB base, overlay SSE events (like effectiveStatus pattern)
+  const mergeInfo = useMemo<MergeInfo | null>(() => {
+    let info = mergeInfoBase;
+    for (const evt of walEvents) {
+      if (evt.event_type === 'worktree_merge_started') {
+        info = { ...info, state: 'merging', branchName: info?.branchName };
+      } else if (evt.event_type === 'worktree_merged') {
+        try {
+          const p = JSON.parse(evt.payload ?? '{}');
+          info = { state: 'merged', branchName: p.branchName, commitSha: p.mergeCommitSha };
+        } catch {
+          info = { ...info, state: 'merged' };
+        }
+      } else if (evt.event_type === 'worktree_merge_failed') {
+        try {
+          const p = JSON.parse(evt.payload ?? '{}');
+          info = { state: 'failed', branchName: p.branchName, conflictSummary: p.conflictSummary || p.message };
+        } catch {
+          info = { ...info, state: 'failed' };
+        }
+      }
+    }
+    return info;
+  }, [mergeInfoBase, walEvents]);
+
   const fetchRun = useCallback(async () => {
     if (!workspaceId) return;
     try {
@@ -710,6 +849,21 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         return;
       }
       setRun(data.run);
+      // Seed merge status from DB column or infer from worktree presence
+      if (data.run.merge_status) {
+        setMergeInfoBase({
+          state: data.run.merge_status as MergeState,
+          branchName: data.run.branch_name ?? undefined,
+          commitSha: data.run.merge_commit_sha ?? undefined,
+          conflictSummary: data.run.merge_error ?? undefined,
+        });
+      } else if (data.run.worktree_path || data.run.branch_name) {
+        // Worktree run without merge_status yet — show pending while running
+        setMergeInfoBase({
+          state: 'pending',
+          branchName: data.run.branch_name ?? undefined,
+        });
+      }
       if (data.specModel !== undefined) setSpecModel(data.specModel);
       if (data.tokenSummary) setTokenSummary(data.tokenSummary);
       if (data.contextComparison !== undefined) setContextComparison(data.contextComparison ?? null);
@@ -761,6 +915,18 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
       setDlqRetryLoading(false);
     }
   }, [runId]);
+
+  const handleRetryMerge = useCallback(async () => {
+    try {
+      await apiFetch(`/api/pipeline/runs/${runId}/retry-merge`, { method: 'POST' });
+      setMergeInfoBase((prev) => prev ? { ...prev, state: 'merging' } : { state: 'merging' });
+    } catch (err) {
+      console.error('[RunView] Retry merge failed:', err);
+    }
+  }, [runId]);
+
+  // Show merge section when run uses a worktree (auto-merge is always enabled for worktree runs)
+  const showMergeStatus = mergeInfo !== null;
 
   const isActive = effectiveStatus === 'running' || effectiveStatus === 'paused' || effectiveStatus === 'blocked';
 
@@ -1180,6 +1346,15 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         storyTokenBreakdown={storyTokenBreakdown}
         onSkillsClick={() => handleTabChange('skills')}
       />
+
+      {/* Merge status — visible only for worktree runs with auto-merge */}
+      {showMergeStatus && mergeInfo && (
+        <MergeStatusSection
+          mergeInfo={mergeInfo}
+          runId={run.id}
+          onRetry={handleRetryMerge}
+        />
+      )}
 
       {/* Tab bar — scrollable horizontal strip on mobile */}
       <div className="shrink-0 px-2 md:px-4 border-b border-border bg-panel flex items-center gap-0.5 overflow-x-auto scrollbar-none [-webkit-overflow-scrolling:touch]">
