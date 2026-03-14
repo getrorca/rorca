@@ -2,7 +2,7 @@
   "specId": "rorca-migration-timestamps",
   "runId": 116,
   "startedAt": "2026-03-14T20:24:35.747Z",
-  "lastUpdatedAt": "2026-03-14T20:28:15.668Z",
+  "lastUpdatedAt": "2026-03-14T20:31:01.779Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 219353
+    },
+    {
+      "storyId": "US-002",
+      "title": "Add duplicate migration prefix detection with loud failure",
+      "status": "passed",
+      "startedAt": "2026-03-14T20:28:30.241Z",
+      "finishedAt": "2026-03-14T20:31:01.779Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 151538
     }
   ],
   "failedStories": [],

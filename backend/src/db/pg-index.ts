@@ -24,6 +24,45 @@ export function createPool(): Pool {
   return new Pool({ connectionString: DATABASE_URL });
 }
 
+// ── Duplicate-prefix guard ────────────────────────────────────────────────
+/**
+ * Checks a list of migration filenames for duplicate numeric prefixes.
+ *
+ * Throws if two or more files share the same prefix number (e.g. 069_foo.sql
+ * and 069_bar.sql). Called at startup BEFORE any migrations are applied so
+ * the runner never silently skips a file due to a number collision.
+ *
+ * Zero-padded and non-padded prefixes collide (parseInt('069') === parseInt('69')).
+ *
+ * @param filenames - Array of .sql migration filenames (may include non-numbered files)
+ * @throws Error listing all conflicting filenames if any duplicate prefix is found
+ */
+export function checkDuplicatePrefixes(filenames: string[]): void {
+  const prefixMap = new Map<number, string[]>();
+
+  for (const file of filenames) {
+    const match = file.match(/^(\d+)/);
+    if (!match) continue; // non-numbered files are ignored
+    const prefix = parseInt(match[1], 10);
+    const existing = prefixMap.get(prefix) ?? [];
+    existing.push(file);
+    prefixMap.set(prefix, existing);
+  }
+
+  const duplicates: string[] = [];
+  for (const [prefix, files] of prefixMap) {
+    if (files.length > 1) {
+      duplicates.push(`  prefix ${prefix}: ${files.join(', ')}`);
+    }
+  }
+
+  if (duplicates.length > 0) {
+    throw new Error(
+      `[pg-migrate] DUPLICATE migration prefixes detected — rename conflicting files before starting:\n${duplicates.join('\n')}`
+    );
+  }
+}
+
 // ── Migration runner ──────────────────────────────────────────────────────
 export async function runPgMigrations(pool?: Pool): Promise<void> {
   const ownPool = !pool;
@@ -66,8 +105,14 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     //
     // Timestamp format also prevents the duplicate-number collision class seen with
     // parallel feature branches (e.g. the 069/072 collisions in this repo).
-    const files = fs.readdirSync(migrationsDir)
-      .filter(f => f.endsWith('.sql'))
+    const allFiles = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql'));
+
+    // Fail fast on duplicate numeric prefixes BEFORE applying any migrations.
+    // Two parallel branches creating 069_foo.sql and 069_bar.sql would otherwise
+    // silently skip one — this throws an error listing the conflicting filenames.
+    checkDuplicatePrefixes(allFiles);
+
+    const files = allFiles
       .sort((a, b) => {
         const aMatch = a.match(/^(\d+)/);
         const bMatch = b.match(/^(\d+)/);

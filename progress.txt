@@ -3,7 +3,8 @@
 Spec: rorca-migration-timestamps
 Run ID: 116
 Started: 2026-03-14T20:24:35.747Z
-Last Updated: 2026-03-14T20:28:15.668Z
+Last Updated: 2026-03-14T20:31:01.779Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Update migration runner to support timestamp-format filenames — DONE (claude, claude-sonnet-4-6, 219s)
+- US-002: Add duplicate migration prefix detection with loud failure — DONE (claude, claude-sonnet-4-6, 152s)
