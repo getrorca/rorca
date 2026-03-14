@@ -75,7 +75,8 @@ export async function ensureQueues(boss: PgBoss): Promise<void> {
   await boss.createQueue('pipeline:retry');
   await boss.createQueue('pipeline:cancel');
   await boss.createQueue('pipeline:cron');
-  logger.debug('[pg-boss] ensureQueues — pipeline:run, pipeline:retry, pipeline:cancel, pipeline:cron created');
+  await boss.createQueue('pipeline:merge');
+  logger.debug('[pg-boss] ensureQueues — pipeline:run, pipeline:retry, pipeline:cancel, pipeline:cron, pipeline:merge created');
 }
 
 /**

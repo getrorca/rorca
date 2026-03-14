@@ -26,7 +26,9 @@ import {
   PipelineRetryJobPayload,
   type PipelineRetryJobPayloadType,
   PipelineCancelJobPayload,
+  PipelineMergeJobPayload,
 } from './lib/pg-boss-schemas';
+import { performMerge } from './lib/merge-handler';
 import { initDb, query, queryOne, execute } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
@@ -611,6 +613,46 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
   }
 }
 
+// ── Job handler: pipeline:merge ──────────────────────────────────────────
+
+async function handlePipelineMerge(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
+  for (const job of jobs) {
+    logger.info({ jobId: job.id, data: job.data }, '[worker] pipeline:merge received');
+
+    const parsed = PipelineMergeJobPayload.safeParse(job.data);
+    if (!parsed.success) {
+      logger.error({ jobId: job.id, errors: parsed.error.format() }, '[worker] pipeline:merge invalid payload — failing job');
+      throw new Error(`Invalid pipeline:merge payload: ${parsed.error.message}`);
+    }
+
+    const { runId, branch, workspaceId } = parsed.data;
+
+    // Look up workspace path
+    const workspace = await queryOne<{ path: string }>(
+      'SELECT path FROM workspaces WHERE id = $1',
+      [workspaceId],
+    );
+    if (!workspace) {
+      logger.error({ jobId: job.id, workspaceId }, '[worker] pipeline:merge workspace not found — skipping');
+      await execute(
+        `UPDATE pipeline_runs SET merge_status = 'failed' WHERE id = $1`,
+        [runId],
+      );
+      return;
+    }
+
+    logger.info({ runId, branch, workspacePath: workspace.path }, '[worker] Executing performMerge');
+
+    const result = await performMerge(runId, branch, workspace.path);
+
+    if (result.success) {
+      logger.info({ runId, mergeCommitSha: result.mergeCommitSha }, '[worker] pipeline:merge completed successfully');
+    } else {
+      logger.warn({ runId, error: result.error, conflictFiles: result.conflictFiles }, '[worker] pipeline:merge failed');
+    }
+  }
+}
+
 // ── Stale job recovery ───────────────────────────────────────────────────
 // Called once at startup, before boss.work() registers handlers.
 // Finds any pgboss.job rows that were left in state='active' by a previous
@@ -976,6 +1018,7 @@ async function start(): Promise<void> {
   await boss.work('pipeline:run', { batchSize: maxConcurrent }, handlePipelineRun);
   await boss.work('pipeline:retry', { batchSize: maxConcurrent }, handlePipelineRetry);
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
+  await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
 
   // 4b. DLQ polling — pg-boss does not emit a 'failed' event for job exhaustion.
   // Instead, poll pgboss.archive every 60 s for newly-failed pipeline jobs and emit
@@ -1042,7 +1085,7 @@ async function start(): Promise<void> {
     void pgBossHealthCheck();
   }, HEARTBEAT_INTERVAL_MS);
 
-  logger.info('[worker] ready — listening for pipeline:run, pipeline:retry, pipeline:cancel, pipeline:cron');
+  logger.info('[worker] ready — listening for pipeline:run, pipeline:retry, pipeline:cancel, pipeline:cron, pipeline:merge');
 }
 
 start().catch((err) => {
