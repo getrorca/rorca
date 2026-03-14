@@ -2,7 +2,7 @@
   "specId": "rorca-auto-merge",
   "runId": 113,
   "startedAt": "2026-03-14T04:51:02.467Z",
-  "lastUpdatedAt": "2026-03-14T05:11:22.777Z",
+  "lastUpdatedAt": "2026-03-14T05:32:45.443Z",
   "completedStories": [
     {
       "storyId": "US-007",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 1213096
+    },
+    {
+      "storyId": "US-008",
+      "title": "Backend Jest tests for auto-merge pipeline",
+      "status": "passed",
+      "startedAt": "2026-03-14T05:11:44.225Z",
+      "finishedAt": "2026-03-14T05:32:45.443Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 1261218
     }
   ],
   "failedStories": [],
