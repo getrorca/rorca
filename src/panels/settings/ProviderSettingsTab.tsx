@@ -757,6 +757,10 @@ function ExecutionEngineSection() {
     id: string; name: string; provider: string; contextWindow: number; free: boolean;
   }>>>({});
 
+  // Pipeline Concurrency state
+  const [maxConcurrentRuns, setMaxConcurrentRuns] = useState<number>(3);
+  const [concurrencySaving, setConcurrencySaving] = useState(false);
+
   // Local form state
   const [selectedType, setSelectedType] = useState<'claude' | 'opencode' | 'codex'>('claude');
   const [selectedModel, setSelectedModel] = useState<string>('');
@@ -773,7 +777,8 @@ function ExecutionEngineSection() {
       apiFetch<AgentConfig>('/api/config'),
       apiFetch<{ models: OpenCodeModelEntry[]; grouped: Record<string, OpenCodeModelEntry[]>; ollamaAvailable?: boolean }>('/api/config/opencode-models'),
       apiFetch<OllamaStatus>('/api/config/ollama'),
-    ]).then(([cfg, modelData, ollama]) => {
+      apiFetch<{ max_concurrent_runs: number }>('/api/settings/worker'),
+    ]).then(([cfg, modelData, ollama, workerSettings]) => {
       setConfig(cfg);
       setSelectedType(cfg.agentType === 'opencode' ? 'opencode' : cfg.agentType === 'codex' ? 'codex' : 'claude');
       setSelectedModel(cfg.agentModel ?? '');
@@ -781,6 +786,7 @@ function ExecutionEngineSection() {
       setGrouped(modelData.grouped);
       setOllamaStatus(ollama);
       setCopilotStatus({ connected: cfg.copilotConnected, githubUsername: cfg.copilotUsername, connectedAt: null });
+      setMaxConcurrentRuns(workerSettings.max_concurrent_runs);
     }).catch(() => { })
       .finally(() => setLoading(false));
     fetchCopilotStatus();
@@ -794,6 +800,26 @@ function ExecutionEngineSection() {
       window.history.replaceState({}, '', window.location.pathname);
     }
   }, [fetchCopilotStatus]);
+
+  const handleConcurrencySave = async (value: number) => {
+    if (value < 1 || value > 10 || !Number.isInteger(value)) {
+      toast.show('Max concurrent runs must be an integer between 1 and 10', 'error');
+      return;
+    }
+    setConcurrencySaving(true);
+    try {
+      await apiFetch('/api/settings/worker', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ max_concurrent_runs: value }),
+      });
+      toast.show('Max concurrent runs updated', 'success');
+    } catch (err: any) {
+      toast.show(err.message || 'Failed to update concurrency setting', 'error');
+    } finally {
+      setConcurrencySaving(false);
+    }
+  };
 
   const handleSave = async () => {
     setSaving(true);
@@ -1291,6 +1317,45 @@ function ExecutionEngineSection() {
 
         </div>
       )}
+
+      {/* Pipeline Concurrency */}
+      <div className="border border-border rounded-lg p-4 space-y-3">
+        <h4 className="text-sm font-semibold text-[var(--text)]">Pipeline Concurrency</h4>
+        <div className="flex items-center gap-3">
+          <input
+            type="number"
+            min={1}
+            max={10}
+            step={1}
+            value={maxConcurrentRuns}
+            disabled={concurrencySaving}
+            onChange={e => {
+              const v = parseInt(e.target.value, 10);
+              if (!isNaN(v)) setMaxConcurrentRuns(v);
+            }}
+            onBlur={e => {
+              const v = parseInt(e.target.value, 10);
+              if (isNaN(v) || v < 1 || v > 10) {
+                toast.show('Max concurrent runs must be between 1 and 10', 'error');
+                return;
+              }
+              handleConcurrencySave(v);
+            }}
+            className="w-20 px-3 py-1.5 text-sm bg-bg border border-border rounded focus:border-accent/60 outline-none disabled:opacity-50"
+          />
+          <button
+            onClick={() => handleConcurrencySave(maxConcurrentRuns)}
+            disabled={concurrencySaving}
+            className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+          >
+            {concurrencySaving ? <Loader2 size={12} className="animate-spin" /> : <Save size={12} />}
+            Save
+          </button>
+        </div>
+        <p className="text-xs text-muted">
+          Claude Pro: recommended 2–3 concurrent runs. Claude Max / Max 5×: up to 10.
+        </p>
+      </div>
 
       {/* Error */}
       {error && (
