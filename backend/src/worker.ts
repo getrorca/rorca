@@ -1550,7 +1550,24 @@ async function start(): Promise<void> {
 
   // 3a. Sweep orphan processes — execution-engine subprocesses left running
   // by a previous worker that crashed without a graceful shutdown.
-  await sweepOrphanProcesses();
+  // Must complete before boss.work() — do not race sweep against new job pickup.
+  // Error-isolated: a sweep failure must NOT prevent job handler registration.
+  try {
+    const sweepResults = await sweepOrphanProcesses();
+    if (sweepResults.length === 0) {
+      logger.info('[worker] Startup orphan sweep: no orphans found');
+    } else {
+      for (const r of sweepResults) {
+        logger.info({ pid: r.pid, runId: r.runId }, `[worker] Startup orphan sweep: killed PID ${r.pid} for run ${r.runId}`);
+      }
+      logger.info(
+        { found: sweepResults.length, killed: sweepResults.filter(r => r.killed).length, runIds: sweepResults.map(r => r.runId) },
+        `[worker] Startup orphan sweep: ${sweepResults.length} orphan(s) found, ${sweepResults.filter(r => r.killed).length} killed`,
+      );
+    }
+  } catch (err) {
+    logger.error({ err }, '[worker] Startup orphan sweep failed — continuing with worker startup');
+  }
 
   // 3b. Reconcile state between pipeline_runs and pgboss.job.
   // Runs once at startup, then every 60s during normal operation.
