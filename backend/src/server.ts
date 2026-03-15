@@ -76,6 +76,7 @@ import pinoHttp from 'pino-http';
 import { startGraphPopulator } from './lib/graph-populator';
 import workspaceDriftRouter from './routes/workspace-drift';
 import { startDriftSubscriber } from './lib/drift-subscriber';
+import { startMarkerInjector } from './lib/marker-injector';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 import { initBoss } from './lib/pg-boss';
@@ -321,6 +322,9 @@ startGraphPopulator();
 
 // PG-017: Subscribe drift detector to WAL events for post-run convention drift analysis
 startDriftSubscriber();
+
+// US-008: Subscribe marker injector to write story completion markers into run_output_chunks
+startMarkerInjector();
 
 // PR-019: Auto-rotate memory after each pipeline run completion
 // PR-018: Auto-deduplicate memory after rotation (post-run)
