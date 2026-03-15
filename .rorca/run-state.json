@@ -2,7 +2,7 @@
   "specId": "rorca-queue-observability",
   "runId": 124,
   "startedAt": "2026-03-15T09:21:13.933Z",
-  "lastUpdatedAt": "2026-03-15T09:34:50.807Z",
+  "lastUpdatedAt": "2026-03-15T09:38:36.154Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -73,6 +73,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 252333
+    },
+    {
+      "storyId": "US-007",
+      "title": "Runs panel queue backlog warning banner — alert when jobs are stuck pending too long",
+      "status": "passed",
+      "startedAt": "2026-03-15T09:35:04.568Z",
+      "finishedAt": "2026-03-15T09:38:36.154Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 211586
     }
   ],
   "failedStories": [],

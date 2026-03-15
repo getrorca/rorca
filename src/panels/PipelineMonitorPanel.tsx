@@ -1,5 +1,6 @@
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Terminal, Clock, ChevronRight, List, XCircle, ArrowRight } from 'lucide-react';
+import { Terminal, Clock, ChevronRight, List, XCircle, ArrowRight, AlertTriangle, X } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
@@ -31,6 +32,59 @@ interface PipelineRun {
   worktree_path?: string | null;
   queue_position?: number | null;
   queued_at?: string | null;
+}
+
+interface WorkerHealthData {
+  workerActive: boolean;
+  queueHealth: 'healthy' | 'degraded' | 'critical';
+  queueStats: {
+    pending: number;
+    active: number;
+    failed: number;
+    failedInLast24h: number;
+    oldestPendingAgeSeconds: number | null;
+  };
+}
+
+type BannerSeverity = 'critical' | 'degraded';
+
+interface BannerInfo {
+  severity: BannerSeverity;
+  message: string;
+}
+
+function computeBanner(health: WorkerHealthData | null): BannerInfo | null {
+  if (!health) return null;
+  const { queueHealth, queueStats } = health;
+  const { active, failed, failedInLast24h, oldestPendingAgeSeconds } = queueStats;
+
+  // Priority 1: critical
+  if (queueHealth === 'critical') {
+    const count = failed + failedInLast24h;
+    return {
+      severity: 'critical',
+      message: `${count} job${count !== 1 ? 's' : ''} failed in the queue. Go to Analytics > Queue Health for details.`,
+    };
+  }
+
+  // Priority 2: worker stuck (pending too long, no active workers)
+  if ((oldestPendingAgeSeconds ?? 0) > 30 && active === 0) {
+    const pending = queueStats.pending;
+    return {
+      severity: 'degraded',
+      message: `Worker appears stuck — ${pending} job${pending !== 1 ? 's' : ''} ${pending === 1 ? 'has' : 'have'} been queued for ${oldestPendingAgeSeconds}s. Check that the worker is running.`,
+    };
+  }
+
+  // Priority 3: degraded + slow
+  if (queueHealth === 'degraded' && (oldestPendingAgeSeconds ?? 0) > 120) {
+    return {
+      severity: 'degraded',
+      message: `Jobs are processing slowly (oldest pending: ${oldestPendingAgeSeconds}s). Worker may be overloaded.`,
+    };
+  }
+
+  return null;
 }
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
@@ -93,12 +147,15 @@ interface PipelineMonitorPanelProps {
 export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonitorPanelProps) {
   const { workspaceId } = useWorkspace();
   const navigateTo = useAppNavigate();
+  const navigate = useNavigate();
   const [runs, setRuns] = useState<PipelineRun[]>([]);
   const [_showStartHelp, _setShowStartHelp] = useState(false);
   const [_copied, setCopied] = useState(false);
   const [queueEntries, setQueueEntries] = useState<QueueEntry[]>([]);
   const [specPickerOpen, setSpecPickerOpen] = useState(false);
   const [cancellingRunId, setCancellingRunId] = useState<number | null>(null);
+  const [workerHealth, setWorkerHealth] = useState<WorkerHealthData | null>(null);
+  const [bannerDismissedAt, setBannerDismissedAt] = useState<number | null>(null);
 
   const { show: showGlobalToast } = useGlobalToast();
 
@@ -177,11 +234,27 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
     if (queueEvents.length > 0) fetchQueue();
   }, [sseEvents, fetchQueue]);
 
+  // ─── Worker health polling ──────────────────────────────────────
+  const fetchWorkerHealth = useCallback(() => {
+    apiFetch<WorkerHealthData>('/api/pipeline/worker/health')
+      .then(setWorkerHealth)
+      .catch(() => {/* silent — banner just won't show */});
+  }, []);
+
+  useEffect(() => { fetchWorkerHealth(); }, [fetchWorkerHealth]);
+
+  useEffect(() => {
+    const interval = setInterval(fetchWorkerHealth, 30_000);
+    return () => clearInterval(interval);
+  }, [fetchWorkerHealth]);
+
   // Global WAL SSE — handle run_queued_promoted
   const fetchRunsRef = useRef(fetchRuns);
   fetchRunsRef.current = fetchRuns;
   const fetchQueueRef = useRef(fetchQueue);
   fetchQueueRef.current = fetchQueue;
+  const fetchWorkerHealthRef = useRef(fetchWorkerHealth);
+  fetchWorkerHealthRef.current = fetchWorkerHealth;
   const showGlobalToastRef = useRef(showGlobalToast);
   showGlobalToastRef.current = showGlobalToast;
 
@@ -196,6 +269,9 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
       showGlobalToastRef.current(`Queued run started — ${label}`, 'success');
       fetchRunsRef.current();
       fetchQueueRef.current();
+    }
+    if (event.event_type === 'queue_failed_jobs_detected') {
+      fetchWorkerHealthRef.current();
     }
   });
 
@@ -240,6 +316,21 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
     r.status !== 'running' && r.status !== 'paused' && r.status !== 'queued'
   );
 
+  // ─── Banner ──────────────────────────────────────────────────────────────
+  const banner = computeBanner(workerHealth);
+  // Dismiss expires every minute so the banner re-evaluates if condition persists
+  const dismissMinute = Math.floor(Date.now() / 60_000);
+  const isBannerDismissed =
+    banner?.severity !== 'critical' &&
+    bannerDismissedAt !== null &&
+    bannerDismissedAt === dismissMinute;
+
+  const handleDismissBanner = () => {
+    setBannerDismissedAt(dismissMinute);
+  };
+
+  const showBanner = banner !== null && !isBannerDismissed;
+
   // ─── Empty State ─────────────────────────────────────────────────────────
 
   if (!workspaceId) {
@@ -253,6 +344,37 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
   if (runs.length === 0) {
     return (
       <div className="flex flex-col items-center justify-center h-full">
+        {/* Queue warning banner — shown even in empty state */}
+        {showBanner && banner && (
+          <div
+            role="alert"
+            className="w-full max-w-md mb-4 flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-amber-800 dark:border-amber-700/50 dark:bg-amber-900/20 dark:text-amber-300"
+          >
+            <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden="true" />
+            <p className="flex-1 text-xs leading-snug">{banner.message}</p>
+            <div className="flex items-center gap-2 shrink-0">
+              <button
+                onClick={() => navigate('/analytics')}
+                className="hidden sm:inline text-[10px] font-medium underline-offset-2 hover:underline"
+              >
+                View queue →
+              </button>
+              {(banner.message.includes('worker') || banner.message.includes('Worker')) && (
+                <button
+                  onClick={() => navigate('/settings/system')}
+                  className="hidden sm:inline text-[10px] font-medium underline-offset-2 hover:underline"
+                >
+                  Check worker
+                </button>
+              )}
+              {banner.severity !== 'critical' && (
+                <button onClick={handleDismissBanner} aria-label="Dismiss banner" className="rounded p-0.5 hover:bg-amber-200/60 dark:hover:bg-amber-700/40 transition-colors">
+                  <X size={13} aria-hidden="true" />
+                </button>
+              )}
+            </div>
+          </div>
+        )}
         <EmptyState
           icon={Terminal}
           heading="No pipeline runs yet"
@@ -300,6 +422,44 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
           </div>
         }
       />
+
+      {/* Queue warning banner */}
+      {showBanner && banner && (
+        <div
+          role="alert"
+          className="mx-4 mt-3 flex items-start gap-2.5 rounded-lg border border-amber-200 bg-amber-50 px-3 py-2.5 text-amber-800 dark:border-amber-700/50 dark:bg-amber-900/20 dark:text-amber-300"
+        >
+          <AlertTriangle size={15} className="shrink-0 mt-0.5" aria-hidden="true" />
+          <p className="flex-1 text-xs leading-snug">{banner.message}</p>
+          <div className="flex items-center gap-2 shrink-0">
+            <button
+              onClick={() => navigate('/analytics')}
+              className="hidden sm:inline text-[10px] font-medium underline-offset-2 hover:underline"
+              aria-label="View queue in Analytics"
+            >
+              View queue →
+            </button>
+            {banner.message.includes('worker') || banner.message.includes('Worker') ? (
+              <button
+                onClick={() => navigate('/settings/system')}
+                className="hidden sm:inline text-[10px] font-medium underline-offset-2 hover:underline"
+                aria-label="Check worker in Settings"
+              >
+                Check worker
+              </button>
+            ) : null}
+            {banner.severity !== 'critical' && (
+              <button
+                onClick={handleDismissBanner}
+                aria-label="Dismiss banner"
+                className="rounded p-0.5 hover:bg-amber-200/60 dark:hover:bg-amber-700/40 transition-colors"
+              >
+                <X size={13} aria-hidden="true" />
+              </button>
+            )}
+          </div>
+        </div>
+      )}
 
       <div className="flex-1 overflow-y-auto p-4 space-y-4">
         {/* Active Run Summary Card */}
