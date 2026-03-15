@@ -2,7 +2,7 @@
   "specId": "rorca-run-view-streaming-fix",
   "runId": 126,
   "startedAt": "2026-03-15T20:14:13.214Z",
-  "lastUpdatedAt": "2026-03-15T20:41:26.345Z",
+  "lastUpdatedAt": "2026-03-15T20:47:39.471Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -48,6 +48,15 @@
       "finishedAt": "2026-03-15T20:41:26.345Z",
       "agentType": "claude",
       "elapsedMs": 199176
+    },
+    {
+      "storyId": "US-006",
+      "title": "Vitest integration tests for RunStoryList in Run View with live WAL data",
+      "status": "passed",
+      "startedAt": "2026-03-15T20:41:47.700Z",
+      "finishedAt": "2026-03-15T20:47:39.471Z",
+      "agentType": "claude",
+      "elapsedMs": 351771
     }
   ],
   "failedStories": [],
