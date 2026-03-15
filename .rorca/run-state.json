@@ -2,7 +2,7 @@
   "specId": "rorca-run-view-streaming-fix",
   "runId": 126,
   "startedAt": "2026-03-15T20:14:13.214Z",
-  "lastUpdatedAt": "2026-03-15T20:47:39.471Z",
+  "lastUpdatedAt": "2026-03-15T20:57:27.984Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -57,6 +57,15 @@
       "finishedAt": "2026-03-15T20:47:39.471Z",
       "agentType": "claude",
       "elapsedMs": 351771
+    },
+    {
+      "storyId": "US-007",
+      "title": "Extract handleData flush logic into testable FlushBuffer class",
+      "status": "passed",
+      "startedAt": "2026-03-15T20:48:00.106Z",
+      "finishedAt": "2026-03-15T20:57:27.984Z",
+      "agentType": "claude",
+      "elapsedMs": 567878
     }
   ],
   "failedStories": [],
