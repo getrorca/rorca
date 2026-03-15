@@ -162,6 +162,13 @@ function extractStoryId(message: string): string | null {
 
 // ─── Stories List Tab ───────────────────────────────────────────────────────
 
+/**
+ * @deprecated Replaced by RunStoryList component (src/components/RunStoryList.tsx).
+ * RunStoryList provides live elapsed timers, auto-scroll to running story,
+ * checkmark pop animation, green flash animation, WAL event integration,
+ * wave group visualization, and keyboard navigation (j/k).
+ * Kept here temporarily for rollback safety — remove once RunStoryList is confirmed stable.
+ */
 function StoriesListTab({ dbStories, specStories, liveStatuses, contextComparison, storyTokenBreakdown }: {
   dbStories: StoryResultSeed[];
   specStories: { id: string; title: string; suggestedSkills?: Array<{ name: string; relevance: number; reason: string }> }[];
@@ -1181,7 +1188,17 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
           />
         );
       case 'stories':
-        return <StoriesListTab dbStories={dbStories} specStories={specStories} liveStatuses={liveStatuses} contextComparison={contextComparison} storyTokenBreakdown={storyTokenBreakdown} />;
+        return (
+          <RunStoryList
+            runId={run.id}
+            walEvents={walEvents}
+            onStoryClick={(storyId) => {
+              handleTabChange('terminal');
+              setTimeout(() => terminalRef.current?.scrollToStory(storyId), 100);
+            }}
+            parallelism={run.parallelism}
+          />
+        );
       case 'graph':
         if (isMobile) {
           return (

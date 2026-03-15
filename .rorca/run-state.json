@@ -2,7 +2,7 @@
   "specId": "rorca-run-view-streaming-fix",
   "runId": 126,
   "startedAt": "2026-03-15T20:14:13.214Z",
-  "lastUpdatedAt": "2026-03-15T20:16:25.042Z",
+  "lastUpdatedAt": "2026-03-15T20:18:55.982Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-15T20:16:25.042Z",
       "agentType": "claude",
       "elapsedMs": 131125
+    },
+    {
+      "storyId": "US-002",
+      "title": "Replace StoriesListTab with RunStoryList in RunViewPanel",
+      "status": "passed",
+      "startedAt": "2026-03-15T20:16:45.503Z",
+      "finishedAt": "2026-03-15T20:18:55.982Z",
+      "agentType": "claude",
+      "elapsedMs": 130479
     }
   ],
   "failedStories": [],
