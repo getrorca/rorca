@@ -2741,6 +2741,12 @@ function computeBlockedStories(
 async function main(): Promise<void> {
   const config = parseArgs();
 
+  // Report our own PID to the parent worker via IPC so it can update pipeline_runs.pid
+  // with the real Node.js engine PID (tsx wrapper PID becomes stale within ~1-2s).
+  // process.send is only available when spawned with an IPC channel — the ?. guard
+  // makes this a no-op when running standalone (e.g. npx tsx execution-engine.ts ...).
+  process.send?.({ type: 'pid', pid: process.pid });
+
   logger.info(`[engine] Agent: ${config.agentType}${config.agentModel ? ` (model: ${config.agentModel})` : ''}`);
   if (config.attachAddr) logger.info(`[engine] OpenCode attach: ${config.attachAddr}`);
 

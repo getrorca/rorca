@@ -593,17 +593,38 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
     const child = spawn(tsxBin, engineArgs, {
       cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env,
     });
 
-    // 5. Record PID
+    // 5. Record PID (tsx wrapper PID — will be overwritten by IPC message with inner Node PID)
     if (child.pid) {
       await execute('UPDATE pipeline_runs SET pid = $1 WHERE id = $2', [child.pid, runId]);
     }
 
     // Register in active processes map for cancellation
     activeProcesses.set(runId, child);
+
+    // Listen for IPC message from execution-engine reporting its own PID.
+    // tsx compiles TypeScript and forks a Node.js child — the tsx wrapper PID
+    // stored above dies within ~1-2s. The engine sends its actual PID so the
+    // kill endpoint can SIGTERM the correct process.
+    child.on('message', async (msg: unknown) => {
+      if (
+        typeof msg === 'object' &&
+        msg !== null &&
+        (msg as Record<string, unknown>).type === 'pid' &&
+        typeof (msg as Record<string, unknown>).pid === 'number'
+      ) {
+        const enginePid = (msg as Record<string, unknown>).pid as number;
+        logger.info({ runId, enginePid }, '[worker] Received inner engine PID via IPC — updating pipeline_runs.pid');
+        try {
+          await execute('UPDATE pipeline_runs SET pid = $1 WHERE id = $2', [enginePid, runId]);
+        } catch (err) {
+          logger.warn({ err, runId, enginePid }, '[worker] Failed to update pipeline_runs.pid with inner engine PID');
+        }
+      }
+    });
 
     // 6. Pipe stdout/stderr to run_output_chunks in ≤4 KB chunks
     const sequenceRef = { value: 1 };
@@ -813,7 +834,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
     const child = spawn(tsxBin, engineArgs, {
       cwd,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['ignore', 'pipe', 'pipe', 'ipc'],
       env,
     });
 
@@ -822,6 +843,24 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
 
     activeProcesses.set(runId, child);
+
+    // Listen for IPC message from execution-engine reporting its own PID (same as pipeline:run handler)
+    child.on('message', async (msg: unknown) => {
+      if (
+        typeof msg === 'object' &&
+        msg !== null &&
+        (msg as Record<string, unknown>).type === 'pid' &&
+        typeof (msg as Record<string, unknown>).pid === 'number'
+      ) {
+        const enginePid = (msg as Record<string, unknown>).pid as number;
+        logger.info({ runId, enginePid }, '[worker] Received inner engine PID via IPC (retry) — updating pipeline_runs.pid');
+        try {
+          await execute('UPDATE pipeline_runs SET pid = $1 WHERE id = $2', [enginePid, runId]);
+        } catch (err) {
+          logger.warn({ err, runId, enginePid }, '[worker] Failed to update pipeline_runs.pid with inner engine PID (retry)');
+        }
+      }
+    });
 
     // 6. Pipe stdout/stderr to run_output_chunks, continuing sequence from sequenceOffset
     const sequenceRef = { value: sequenceOffset + 1 };
