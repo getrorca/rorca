@@ -1504,6 +1504,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // 9. Record excluded / already-passing stories so the UI shows them immediately.
+    let startFromStoryId: string | undefined;
     try {
       const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
       const specSlug = path.basename(specPath, '.json');
@@ -1525,12 +1526,18 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       );
       for (const s of alreadyPassing) {
         await execute(
-          `INSERT INTO story_results (run_id, story_id, status, finished_at) VALUES ($1, $2, 'skip', NOW())`,
+          `INSERT INTO story_results (run_id, story_id, status, reason, finished_at) VALUES ($1, $2, 'skip', 'previously_passed', NOW())`,
           [runId, s.id]
         );
-        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_skipped', $1, $2, $3, $4)` + ' RETURNING *', [workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId, reason: 'already_passing' })]);
+        const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ('story_skipped', $1, $2, $3, $4)` + ' RETURNING *', [workspaceId, specSlug, s.id, JSON.stringify({ run_id: runId, reason: 'previously_passed' })]);
         broadcastAll(walEvent!);
       }
+
+      // Compute startFromStoryId: first story where passes !== true and not excluded
+      const startFromStory = (specJson.userStories ?? []).find(
+        (s: { passes?: boolean; excluded?: boolean }) => s.passes !== true && s.excluded !== true
+      );
+      startFromStoryId = startFromStory?.id ?? undefined;
     } catch { /* spec read error — non-fatal, worker will handle */ }
 
     // 10. Enqueue the pipeline run via pg-boss.
@@ -1547,6 +1554,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       autoWorktree: needsWorktree,
       autoMerge: computedAutoMerge,
       envOverrides,
+      ...(startFromStoryId ? { startFromStoryId } : {}),
     };
 
     await getBoss().send('pipeline:run', jobPayload, {

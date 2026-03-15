@@ -534,7 +534,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId } = payload;
 
     // Determine effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
@@ -574,6 +574,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     ];
     if (model) {
       engineArgs.push('--model', model);
+    }
+    if (startFromStoryId) {
+      engineArgs.push('--start-from', startFromStoryId);
     }
 
     // 4. Spawn execution-engine.ts with pipe stdio so we can capture chunks
