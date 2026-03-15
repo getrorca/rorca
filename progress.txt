@@ -3,7 +3,8 @@
 Spec: rorca-orphan-process-sweep
 Run ID: 118
 Started: 2026-03-15T06:12:18.089Z
-Last Updated: 2026-03-15T06:18:44.865Z
+Last Updated: 2026-03-15T06:21:00.022Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Implement orphan process sweep core function in worker.ts — DONE (claude, claude-sonnet-4-6, 386s)
+- US-002: Add startup orphan sweep on worker initialization — DONE (claude, claude-opus-4-6, 120s)
