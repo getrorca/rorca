@@ -629,12 +629,29 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     child.stdout?.on('data', (data: Buffer) => { void handleData(data); });
     child.stderr?.on('data', (data: Buffer) => { void handleData(data); });
 
-    // 7. Wait for exit, flush remaining bytes, update run status
+    // 7. Wait for close (not exit), flush remaining bytes, update run status.
+    //
+    // Root cause fix (US-007): Node.js does NOT guarantee that all stdout/stderr
+    // data events have been emitted when the 'exit' event fires. The pipe buffer
+    // may still contain unread bytes (e.g. pino's sonic-boom flush, final log lines
+    // produced just before the child exits). Using 'exit' for flushPending() caused
+    // run_output_chunks to receive 0 rows for worktree runs where the engine emits
+    // a burst of output right before exit (merge logs, summary lines).
+    //
+    // The 'close' event fires after BOTH:
+    //   (a) the child process has exited, AND
+    //   (b) all stdio streams have been fully drained (all data events emitted).
+    // This guarantees flushPending() sees every byte the engine wrote to stdout/stderr.
     await new Promise<void>((resolve) => {
-      child.on('exit', async (code) => {
-        // Flush any remaining bytes < 4 KB
+      // Capture exit code from 'exit' event; cleanup runs on 'close'.
+      let capturedCode: number | null = null;
+      child.on('exit', (code) => { capturedCode = code; });
+
+      child.on('close', async () => {
+        // All stdout/stderr data has been received — safe to flush the tail.
         await flushPending();
 
+        const code = capturedCode;
         activeProcesses.delete(runId);
 
         const wasCancelled = cancellingRuns.delete(runId);
@@ -829,12 +846,18 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     child.stdout?.on('data', (data: Buffer) => { void handleData(data); });
     child.stderr?.on('data', (data: Buffer) => { void handleData(data); });
 
-    // 7. Wait for exit, flush remaining bytes, update run status
+    // 7. Wait for close (not exit), flush remaining bytes, update run status.
+    // Same fix as handlePipelineRun (US-007): use 'close' so all stdout/stderr
+    // data events have been emitted before we flush the pending buffer.
     await new Promise<void>((resolve) => {
-      child.on('exit', async (code) => {
+      let capturedCode: number | null = null;
+      child.on('exit', (code) => { capturedCode = code; });
+
+      child.on('close', async () => {
         // Flush bytes < CHUNK_SIZE remaining in the buffer before marking done
         await flushPending();
 
+        const code = capturedCode;
         activeProcesses.delete(runId);
 
         const wasCancelled = cancellingRuns.delete(runId);
