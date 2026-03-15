@@ -472,8 +472,37 @@ The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Q
 
 `SUPPORTED_MODELS` list is authoritative — validate before passing to `chatComplete`.
 
-### PostgreSQL Migration Pattern
-Migrations are SQL files in `backend/src/db/pg-migrations/` (49 files, 001–049). They run in numeric order on first startup via `pg-index.ts`, tracked in `schema_migrations` table. Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively — no workarounds needed. New migrations: create `NNN_description.sql` in `pg-migrations/`.
+### Apache AGE — Pool Connection Hygiene (CRITICAL)
+Apache AGE requires `LOAD 'age'` + `SET search_path = ag_catalog, "$user", public` per session before Cypher queries. This **poisons** the pool connection — subsequent queries on that connection hit `ag_catalog.workspaces` (empty) instead of `rorca.workspaces` (real data), causing intermittent "Workspace not found" 404s.
+
+**Rule**: Any code that calls `setupAgeSession()` MUST restore the search_path before releasing:
+```typescript
+const client = await pool.connect();
+try {
+  await setupAgeSession(client);  // sets search_path to ag_catalog
+  await client.query(cypherSQL);
+} finally {
+  await client.query('SET search_path = rorca, public');  // MUST restore
+  client.release();
+}
+```
+
+Three schemas have a `workspaces` table: `rorca.workspaces` (app data), `ag_catalog.workspaces` (AGE system, empty), `public.workspaces` (legacy, empty). The pool has an `on('connect')` safety net in `db/index.ts`, but it does NOT replace proper cleanup in graph code.
+
+### PostgreSQL Migration Pattern — Timestamp Format (CRITICAL)
+Migrations are SQL files in `backend/src/db/pg-migrations/`. They run in numeric prefix order on first startup via `pg-index.ts`, tracked in `schema_migrations` table (BIGINT version column). Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively.
+
+**New migrations MUST use timestamp format**: `YYYYMMDDHHMMSS_description.sql`
+```bash
+# Example: creating a migration on 2026-03-14 at 15:00:00
+20260314150000_add_user_preferences.sql
+```
+
+**Why**: Sequential numbers (001, 002, ...) collide when parallel branches create migrations simultaneously — common with Rorca's worktree-per-spec architecture. Timestamps are structurally unique (two developers/agents can't commit at the exact same second).
+
+**Hybrid coexistence**: Existing sequential migrations (001–079) stay as-is. New timestamp migrations sort after them automatically (numeric sort: `79 < 20260314150000`). The runner supports both formats indefinitely — no renaming needed.
+
+**Duplicate prefix detection**: `pg-index.ts` calls `checkDuplicatePrefixes()` at startup and fails loudly if two files share the same numeric prefix. This catches collisions before any SQL runs.
 
 ### Skills Install Chain (install-from-sh)
 `POST /api/skills/install-from-sh` does NOT shell out to `npx skills add`. It fetches directly:
@@ -1309,18 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
-> Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture
-> Rule: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-## 2026-03-10 [Convention] PostgreSQL Migration Pattern
-> Rule: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
-
-## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates
-> Rule: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-
 ## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
 > Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
 
@@ -1369,69 +1386,20 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
 > Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
 
+## 2026-03-13 [Gotcha] Old execution-engine processes from test runs survive indefinitely
+> Rule: Execution-engine subprocesses from old load test runs (WR-019, PG-020) and integration tests in temp paths can survive machine restarts and run for days, consuming CPU/memory. Check with: `ps aux | grep execution-engine | grep -v grep`. Kill PIDs associated with temp paths (/var/folders, /tmp) or old worktree paths. WR-007 graceful shutdown only helps for clean worker exits — kill -9 or machine crash still orphans children. Safe to kill any execution-engine with a temp path or a worktree path that no longer exists.
+
+## 2026-03-13 [Decision] MCP-native generation: API as context+persistence layer, LLM work in caller's session
+> Rule: Rorca's API should split LLM-heavy operations (spec generation, enrichment) into two phases: (1) context-fetch — API returns the synthesized direction stack, memory, schema, skills as a raw bundle with no LLM call; (2) save — API persists the result the caller's LLM already generated. The LLM reasoning happens IN the caller's MCP session (Claude Code, OpenCode CLI, Codex CLI), not in a server-spawned subprocess. This means: rorca_get_generation_context returns the context bundle, the calling LLM generates the spec JSON in-session using cached/warm context, then rorca_save_spec persists it. The existing server-side generation path (spawning claude --print) is kept as a fallback for browser UI users who have no MCP session. This is the correct long-term architecture for rorca_forge_and_run too — it should orchestrate tool calls that the caller's session handles, not block on a subprocess.
+
+## 2026-03-13 [Architecture] All three CLI coding assistants support MCP — Rorca tools work from any of them
+> Rule: Claude Code, OpenCode CLI, and Codex CLI all support MCP servers. A user working in any of these three can call Rorca MCP tools (rorca_generate_spec, rorca_trigger_run, etc.) from their active session. The only path that does NOT support MCP is the browser UI. This means the MCP-native generation architecture benefits all CLI users regardless of which assistant they use: Claude Code (Claude model), OpenCode CLI (any provider — GPT-4o, Gemini, etc.), Codex CLI (ChatGPT model). Architecture principle: Rorca API = context + persistence. LLM reasoning = caller's session. Browser UI = server-side subprocess fallback only.
+
+## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
+> Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
+
 Follow this workflow for implementation:
-## Agent Role: Frontend
-
-
-## Skill: react-review (relevance: 7)
----
-name: react-review
-description: Review React components for best practices and performance issues
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers
-  category: development
----
-
-# React Review Skill
-
-Review React components for best practices, performance issues, and common patterns.
-
-## When to use me
-
-Use this skill when:
-- Reviewing React component code
-- Optimizing component performance
-- Checking for React best practices
-- Refactoring legacy components
-- Auditing component architecture
-
-## What I do
-
-- Analyze React components for performance issues (unnecessary re-renders, large bundles)
-- Check for React best practices (hooks usage, prop patterns, state management)
-- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
-- Suggest optimizations (memoization, code splitting, lazy loading)
-- Review TypeScript usage and type safety
-
-## Key Patterns
-
-### Performance
-- Use `React.memo` for components receiving object/function props from parent
-- Memoize expensive calculations with `useMemo`
-- Stabilize callback references with `useCallback`
-- Avoid inline object/array creation in JSX props
-- Use `React.lazy` + `Suspense` for code splitting
-
-### Hooks
-- Always include all dependencies in `useEffect` dependency arrays
-- Never call hooks conditionally or inside loops
-- Extract complex logic into custom hooks
-- Clean up subscriptions and timers in useEffect return
-
-### TypeScript
-- Define explicit interfaces for all component props
-- Use discriminated unions for variant components
-- Prefer `interface` over `type` for component props
-- Use `React.FC` sparingly — prefer explicit return types
-
-## Notes
-
-- Focuses on React 18+ patterns and best practices
-- Considers both class and function components
-- Includes TypeScript and JavaScript variants
-- References official React documentation and community patterns
+## Agent Role: Database
 
 ---
 name: rorca
@@ -1584,21 +1552,57 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-002):
-In the pipeline trigger dialog (the modal shown when clicking 'Run' on an approved spec), add a checkbox labeled 'Merge to main after run completes' that is checked by default. The checkbox is only visible and enabled when the 'Run in worktree' (autoWorktree) toggle is on — when autoWorktree is off, the merge checkbox is hidden. The checkbox value is sent as `autoMerge: boolean` in the POST /api/pipeline/trigger request body alongside the existing `autoWorktree` field. Add a small helper text below the checkbox: 'Automatically merges the worktree branch into main when all stories pass.'
+Extend the existing `GET /api/pipeline/worker/health` endpoint in `backend/src/routes/pipeline.ts` to return a `queueStats` object alongside existing worker liveness fields. The queue stats are read directly from `pgboss.job` and `pgboss.archive` tables via the same PostgreSQL connection pool used by the rest of the app.
+
+**New `queueStats` fields to add to the response**:
+```json
+{
+  "queueStats": {
+    "pending": 3,
+    "active": 1,
+    "failed": 0,
+    "completed24h": 14,
+    "failedInLast24h": 0,
+    "failedInLast7d": 2,
+    "archiveSize": 847,
+    "oldestPendingAgeSeconds": 12,
+    "queues": [
+      { "name": "pipeline:run", "pending": 2, "active": 1, "failed": 0 },
+      { "name": "pipeline:retry", "pending": 1, "active": 0, "failed": 0 },
+      { "name": "pipeline:cancel", "pending": 0, "active": 0, "failed": 0 }
+    ]
+  }
+}
+```
+
+**SQL queries** (run in parallel with `Promise.all`):
+- `pending`: `SELECT COUNT(*) FROM pgboss.job WHERE state='created'`
+- `active`: `SELECT COUNT(*) FROM pgboss.job WHERE state='active'`
+- `failed` (in pgboss.job — not yet archived): `SELECT COUNT(*) FROM pgboss.job WHERE state='failed'`
+- `failedInLast24h`: `SELECT COUNT(*) FROM pgboss.archive WHERE state='failed' AND archived_on > NOW() - INTERVAL '24 hours'`
+- `failedInLast7d`: `SELECT COUNT(*) FROM pgboss.archive WHERE state='failed' AND archived_on > NOW() - INTERVAL '7 days'`
+- `archiveSize`: `SELECT COUNT(*) FROM pgboss.archive`
+- `oldestPendingAgeSeconds`: `SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_on))) FROM pgboss.job WHERE state='created'` (returns null if no pending jobs)
+- Per-queue breakdown: `SELECT name, COUNT(*) FILTER (WHERE state='created') AS pending, COUNT(*) FILTER (WHERE state='active') AS active, COUNT(*) FILTER (WHERE state='failed') AS failed FROM pgboss.job GROUP BY name`
+
+**Health classification**: Add a top-level `queueHealth: 'healthy' | 'degraded' | 'critical'` field to the response:
+- `critical`: any job in `failed` state in `pgboss.job` (unarchived failures = very recent or stuck), OR `failedInLast24h > 5`
+- `degraded`: `failedInLast24h > 0`, OR `oldestPendingAgeSeconds > 300` (job pending for 5+ minutes — worker may be slow/stuck)
+- `healthy`: all other cases
 
 ## Context
-- **Trigger dialog location**: Search for the modal/dialog handling `POST /api/pipeline/trigger` — likely in `src/panels/SpecsPanel.tsx` (Board view Run action) or `src/components/SpecDetailSlideOver.tsx` (slide-over Run button). Look for existing `autoWorktree` state to find the exact component.
-- **Backend route**: `backend/src/routes/pipeline.ts` already destructures `autoWorktree` from the request body. Add `autoMerge` to the same destructure and thread it into the pg-boss `pipeline:run` job payload. Use `autoMerge: autoWorktree ? (autoMerge ?? true) : false` to silently normalize when `autoWorktree` is off.
-- **Tailwind checkbox styling**: Follow existing checkbox/toggle patterns in Settings panels (e.g., `SettingsPanel.tsx` sub-tabs) for consistent styling. Use Tailwind 3 utility classes — no custom CSS.
-- **Conditional visibility**: Use `{autoWorktree && (...)}` JSX guard. Reset `autoMerge` to `true` when `autoWorktree` toggles on, `false` when off — handle in the `autoWorktree` toggle's `onChange` handler.
-- **Don't implement merge logic**: This story only threads `autoMerge` through to the job payload. The actual post-run merge behavior is a separate story — do not add merge code to `execution-engine.ts` or `worker.ts`.
-- **Frontend test (Vitest)**: Add a test in `src/panels/__tests__/` verifying: (1) checkbox visible when `autoWorktree=true`, (2) checkbox hidden when `autoWorktree=false`, (3) default checked state is `true`, (4) payload sent to API includes `autoMerge`. Use existing panel test files as reference patterns. Run with `npx vitest run`, not Jest.
-- **TypeScript gotcha**: Pre-existing `tsc` errors in unrelated files may cause exit code 1 — this does not mean your test failed. Verify actual test results via `npx vitest run` output separately.
-- **pg placeholder syntax**: If adding backend validation, use `$1, $2` numbered placeholders (not `?`) for any PostgreSQL queries.
+- **pgboss schema access**: pg-boss creates its own `pgboss` schema in the same database. Query via the existing `query<T>()` helper from `backend/src/db/index.ts`. Use numbered placeholders `$1, $2` — never `?`.
+- **pgboss.job states**: `created` (pending, not yet picked up), `retry` (queued for retry after failure), `active` (currently being processed), `completed`, `cancelled`, `failed` (exhausted retries).
+- **pgboss.archive**: Completed and failed jobs are moved here by pg-boss maintenance. Has the same columns plus `archived_on TIMESTAMPTZ`. Query `pgboss.archive` for historical failure counts.
+- **Parallel queries**: Wrap all 7 queries in `Promise.all([...])` — each is a simple count query. Do NOT run them sequentially; at 7 queries sequential would add noticeable latency.
+- **Null safety**: `oldestPendingAgeSeconds` returns `null` when no pending jobs exist. Handle with `Number(result ?? 0)` or return `null` in the response — frontend should display 'none' for null.
+- **Existing response shape**: Current `worker/health` returns `{ alive: boolean, workerId: string, pid: number, lastSeen: Date, uptimeSeconds: number }`. Append `queueStats` and `queueHealth` to this shape without breaking existing consumers.
+- **@swagger annotation**: Update the existing JSDoc for `GET /api/pipeline/worker/health` to document the new `queueStats` and `queueHealth` fields.
 
 Acceptance Criteria:
-- A 'Merge to main after run completes' checkbox appears in the trigger dialog when autoWorktree is toggled on
-- The checkbox is checked (true) by default
-- The checkbox is hidden when autoWorktree is toggled off
-- The `autoMerge` boolean is included in the trigger POST request payload
-- Helper text 'Automatically merges the worktree branch into main when all stories pass.' is displayed below the checkbox
+- GET /api/pipeline/worker/health returns queueStats object with pending, active, failed, failedInLast24h, failedInLast7d, archiveSize, oldestPendingAgeSeconds, and a queues array broken down by queue name
+- Response includes top-level queueHealth field: 'healthy', 'degraded', or 'critical' based on documented classification rules
+- All queue stat queries run in parallel (Promise.all) — no sequential query chaining
+- When pgboss.job is empty (no pending or active jobs), response returns 0 counts and null for oldestPendingAgeSeconds without error
+- Existing worker/health response fields (alive, workerId, pid, lastSeen, uptimeSeconds) are unchanged — backward compatible
+- @swagger annotation is updated to document queueStats and queueHealth in the OpenAPI spec

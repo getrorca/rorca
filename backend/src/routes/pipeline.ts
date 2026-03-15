@@ -1367,25 +1367,39 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     if (needsWorktree) {
       const specSlug = path.basename(specPath, '.json').replace(/[^a-z0-9-]/gi, '-');
-      branchName = `feat/${specSlug}-${Date.now()}`;
       const repoName = path.basename(workspace.path);
+      // Deterministic branch/path per spec — reuse across retries instead of
+      // creating a new timestamped worktree every run.
+      branchName = `feat/${specSlug}`;
       const branchSlug = branchName.replace(/\//g, '-');
       worktreePath = path.resolve(workspace.path, '..', `${repoName}-${branchSlug}`);
 
       const git = simpleGit(workspace.path);
-      await git.raw(['worktree', 'add', '-b', branchName, worktreePath, 'HEAD']);
-      cwd = worktreePath;
 
-      // Add run-tracking files to worktree's .gitignore so parallel stories
-      // don't conflict on these files during wave merges.
-      const worktreeGitignore = path.join(worktreePath, '.gitignore');
-      const trackingPatterns = '\n# Rorca run-tracking files (parallel-safe)\nprogress.txt\n.rorca/run-state.json\n.rorca/memory/health-log.json\n';
-      try {
-        const existing = fs.existsSync(worktreeGitignore) ? fs.readFileSync(worktreeGitignore, 'utf-8') : '';
-        if (!existing.includes('progress.txt')) {
-          fs.appendFileSync(worktreeGitignore, trackingPatterns);
+      if (fs.existsSync(worktreePath)) {
+        // Reuse existing worktree — engine will skip already-passed stories
+        logger.info({ specSlug, worktreePath }, '[trigger] Reusing existing worktree');
+      } else {
+        // Create fresh worktree on the deterministic branch
+        const branchExists = (await git.branchLocal()).all.includes(branchName);
+        if (branchExists) {
+          await git.raw(['worktree', 'add', worktreePath, branchName]);
+        } else {
+          await git.raw(['worktree', 'add', '-b', branchName, worktreePath, 'HEAD']);
         }
-      } catch { /* non-fatal */ }
+
+        // Add run-tracking files to .gitignore so they don't create noise in commits
+        const worktreeGitignore = path.join(worktreePath, '.gitignore');
+        const trackingPatterns = '\n# Rorca run-tracking files (parallel-safe)\nprogress.txt\n.rorca/run-state.json\n.rorca/memory/health-log.json\n';
+        try {
+          const existing = fs.existsSync(worktreeGitignore) ? fs.readFileSync(worktreeGitignore, 'utf-8') : '';
+          if (!existing.includes('progress.txt')) {
+            fs.appendFileSync(worktreeGitignore, trackingPatterns);
+          }
+        } catch { /* non-fatal */ }
+      }
+
+      cwd = worktreePath;
     }
 
     // 6. Create pipeline_runs record (with agent_type and agent_model)
@@ -5237,7 +5251,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
  *       its last_seen timestamp is within the past 60 seconds.
  *     responses:
  *       200:
- *         description: Worker health object
+ *         description: Worker health object with queue statistics
  *         content:
  *           application/json:
  *             schema:
@@ -5325,7 +5339,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
     const activeJobRows = await query<ActiveJobRow>(
       `SELECT (j.data->>'runId') AS run_id,
               pr.spec_path,
-              j.startedon::text AS started_at
+              j.created_on::text AS started_at
        FROM   pgboss.job j
        LEFT   JOIN pipeline_runs pr ON pr.id = (j.data->>'runId')::int
        WHERE  j.name = 'pipeline:run'
@@ -5501,6 +5515,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
     } else if (failedInLast24h > 0 || (oldestPendingAgeSeconds !== null && oldestPendingAgeSeconds > 300)) {
       queueHealth = 'degraded';
     }
+
 
     res.json({
       workerActive,

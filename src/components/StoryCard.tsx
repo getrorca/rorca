@@ -1,4 +1,4 @@
-import { useState, useEffect } from 'react';
+import React, { useState, useEffect } from 'react';
 import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit, GitBranch, ClipboardCopy, Check, MessageSquare, Sparkles, X, CheckCheck, Loader2 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { AssigneeDropdown } from './AssigneeDropdown';
@@ -67,6 +67,7 @@ export function StoryCard({
   onAssignStory,
   onCriteriaAccepted,
   modified,
+  rightSlot,
 }: {
   story: Story;
   onToggleExclude?: () => void;
@@ -83,6 +84,8 @@ export function StoryCard({
   onCriteriaAccepted?: () => void;
   /** Show a 'Modified' badge when this story has been edited */
   modified?: boolean;
+  /** Optional slot rendered inline in the header row, between the title area and the edit button */
+  rightSlot?: React.ReactNode;
 }) {
   const [expanded, setExpanded] = useState(false);
   const [commitsExpanded, setCommitsExpanded] = useState(false);
@@ -339,6 +342,8 @@ export function StoryCard({
               />
             </div>
           )}
+          {/* Right slot (e.g. ModelBadge) */}
+          {rightSlot && <div className="shrink-0 mt-0.5">{rightSlot}</div>}
           {/* Edit button */}
           {onEdit && (
             <button
