@@ -2,7 +2,7 @@
   "specId": "rorca-run-view-streaming-fix",
   "runId": 126,
   "startedAt": "2026-03-15T20:14:13.214Z",
-  "lastUpdatedAt": "2026-03-15T20:21:57.932Z",
+  "lastUpdatedAt": "2026-03-15T20:37:44.155Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-15T20:21:57.931Z",
       "agentType": "claude",
       "elapsedMs": 160378
+    },
+    {
+      "storyId": "US-004",
+      "title": "Jest tests for worker flush timer — mock timers, verify sub-4KB writes",
+      "status": "passed",
+      "startedAt": "2026-03-15T20:22:18.765Z",
+      "finishedAt": "2026-03-15T20:37:44.155Z",
+      "agentType": "claude",
+      "elapsedMs": 925390
     }
   ],
   "failedStories": [],
