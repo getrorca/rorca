@@ -3,9 +3,9 @@
 Spec: rorca-queue-observability
 Run ID: 124
 Started: 2026-03-15T09:21:13.933Z
-Last Updated: 2026-03-15T09:42:35.941Z
+Last Updated: 2026-03-15T09:43:02.746Z
 
-## Completed Stories (9)
+## Completed Stories (10)
 - US-001: Configure pg-boss maintenance settings — prevent unbounded table growth and enable queue monitoring — DONE (claude, claude-haiku-4-5-20251001, 58s)
 - US-002: Extend GET /api/pipeline/worker/health with queue statistics and health classification — DONE (claude, claude-haiku-4-5-20251001, 85s)
 - US-002: Extend GET /api/pipeline/worker/health with comprehensive queue stats — job counts by state, failed job count, archive size — DONE (claude, claude-haiku-4-5-20251001, 140s)
@@ -15,6 +15,7 @@ Last Updated: 2026-03-15T09:42:35.941Z
 - US-006: Analytics panel queue health widget — real-time queue depth, failed job badge, latency chart, throughput — DONE (claude, claude-sonnet-4-6, 252s)
 - US-007: Runs panel queue backlog warning banner — alert when jobs are stuck pending too long — DONE (claude, claude-sonnet-4-6, 212s)
 - US-008: Settings > System dead-letter queue panel — list failed jobs, inspect error, retry or discard — DONE (claude, claude-sonnet-4-6, 225s)
+- US-009: Jest tests for all queue observability backend endpoints — health stats, failed jobs, latency, history — DONE (claude, claude-opus-4-6, 13s)
 
 ## Decisions (2)
 - [2026-03-15T08:43:15.000Z] undefined: undefined — undefined

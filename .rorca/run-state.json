@@ -2,7 +2,7 @@
   "specId": "rorca-queue-observability",
   "runId": 124,
   "startedAt": "2026-03-15T09:21:13.933Z",
-  "lastUpdatedAt": "2026-03-15T09:42:35.941Z",
+  "lastUpdatedAt": "2026-03-15T09:43:02.746Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -93,6 +93,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 225025
+    },
+    {
+      "storyId": "US-009",
+      "title": "Jest tests for all queue observability backend endpoints — health stats, failed jobs, latency, history",
+      "status": "passed",
+      "startedAt": "2026-03-15T09:42:50.245Z",
+      "finishedAt": "2026-03-15T09:43:02.746Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 12501
     }
   ],
   "failedStories": [],
