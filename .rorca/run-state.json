@@ -2,7 +2,7 @@
   "specId": "rorca-queue-observability",
   "runId": 124,
   "startedAt": "2026-03-15T09:21:13.933Z",
-  "lastUpdatedAt": "2026-03-15T09:30:24.659Z",
+  "lastUpdatedAt": "2026-03-15T09:34:50.807Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -63,6 +63,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 249102
+    },
+    {
+      "storyId": "US-006",
+      "title": "Analytics panel queue health widget — real-time queue depth, failed job badge, latency chart, throughput",
+      "status": "passed",
+      "startedAt": "2026-03-15T09:30:38.474Z",
+      "finishedAt": "2026-03-15T09:34:50.807Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 252333
     }
   ],
   "failedStories": [],
