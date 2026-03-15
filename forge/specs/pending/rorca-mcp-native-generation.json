@@ -1,0 +1,354 @@
+{
+  "title": "rorca-mcp-native-generation",
+  "generatedAt": "2026-03-13T21:04:55.708Z",
+  "model": "claude-opus-4-6",
+  "userStories": [
+    {
+      "id": "US-001",
+      "title": "GET /api/specs/generation-context endpoint — pure data retrieval, no LLM call",
+      "description": "Create a new Express route `GET /api/specs/generation-context` that assembles and returns the full context bundle a caller needs to generate a spec. The endpoint accepts `workspaceId` (required) and optional `specBrief` (L4) and `storyAnnotations` (L5) query params. It returns a JSON object containing: (1) synthesized direction stack (L1-L5 merged via `synthesize()` from direction-stack.ts), (2) workspace context from `workspace_context` table (git memory + schema snapshot), (3) existing spec list (pending + approved filenames and titles from the filesystem), (4) memory ledger entries from the `memories` table for this workspace, (5) installed skills list from SkillRegistry. The response must complete in under 100ms for a typical workspace (no LLM calls, no subprocess spawns — pure DB queries + filesystem reads + direction stack synthesis). The route lives in `backend/src/routes/specs.ts` alongside existing spec routes. Add `@swagger` JSDoc annotation for OpenAPI doc generation.\n\n## Context\n- **Route location & pattern**: Add to `backend/src/routes/specs.ts` alongside existing spec routes. Follow the existing Express route pattern: `router.get('/generation-context', async (req, res, next) => { try { ... } catch(e) { next(e) } })`. Mount order matters — place before any `/:id` param routes to avoid conflict.\n- **Direction stack synthesis**: Import `synthesize()` from `backend/src/lib/direction-stack.ts`. Pass `workspaceId`, `specBrief` (L4), and `storyAnnotations` (L5) as optional params. This function already handles L1–L5 merge with correct priority — do not reimplement.\n- **DB queries use `$1/$2` numbered placeholders, not `?`**. Use `query<T>(sql, [param])` for arrays, `queryOne<T>` for single rows. All DB calls are async — always `await`. workspace_context table has `git_memory` and `schema_snapshot` columns. memories table: filter by `workspace_id`.\n- **Workspace validation**: Use `queryOne` to check workspace exists. On miss, throw `NotFoundError` from `backend/src/lib/errors.ts` — the global error handler serializes it to `{ error, code, details }` with 404 status automatically.\n- **Spec list from filesystem**: Use `fs.readdir` on both `path.join(workspace.path, 'forge/specs/pending')` and `forge/specs/approved` directories. Parse each `.json` file to extract `id` (filename slug without `.json`) and `title` (from JSON `title` field). Handle missing directories gracefully (ENOENT → empty array). Status is inferred from subdirectory name.\n- **SkillRegistry**: Check existing skill-loading patterns in `backend/src/routes/skills.ts` — skills are discovered from `.rorca/skills/` filesystem + DB `skills` table. Reuse the same discovery logic; return just skill names (not full content) to keep payload small.\n- **Performance constraint (< 100ms)**: No LLM calls, no subprocess spawns. Run DB queries in parallel with `Promise.all([directionStack, workspaceContext, memories, specs, skills])`. Filesystem reads (spec list, skills) should also be parallelized. Jest perf test: wrap in `performance.now()` delta check.\n- **@swagger annotation**: Follow the existing JSDoc pattern in `specs.ts` — include `@swagger`, path, method, parameters (workspaceId as required query, specBrief/storyAnnotations as optional query), response schema with the 5 top-level keys, and error responses (404). This auto-populates `/api/docs/openapi.json`.",
+      "acceptanceCriteria": [
+        "GET /api/specs/generation-context?workspaceId=rorcha returns 200 with JSON body containing keys: directionStack (string), workspaceContext (object with gitMemory and schemaSnapshot), existingSpecs (array of {id, title, status}), memories (array), installedSkills (array of skill names)",
+        "When specBrief query param is provided, the directionStack string includes L4 content merged at the correct priority position",
+        "When workspaceId does not exist or is invalid, returns 404 with AppError (NotFoundError)",
+        "Response time is under 100ms for a workspace with 10 specs, 20 memories, and 5 installed skills (measured via Jest test with performance.now())",
+        "Endpoint has @swagger JSDoc annotation and appears in /api/docs/openapi.json under /api/specs/generation-context"
+      ],
+      "dependsOn": [],
+      "complexity": 3,
+      "suggestedSkills": [
+        {
+          "name": "api-documentation",
+          "relevance": 8,
+          "reason": "New REST endpoint needs @swagger annotation and proper OpenAPI documentation"
+        },
+        {
+          "name": "performance-profiling",
+          "relevance": 6,
+          "reason": "Sub-100ms response time target requires performance validation"
+        },
+        {
+          "name": "rorca",
+          "relevance": 9,
+          "reason": "Core Rorca backend route implementation using existing direction-stack and workspace patterns"
+        }
+      ],
+      "suggestedPersona": "backend",
+      "suggestedReviewers": [
+        "architect",
+        "spec-verifier"
+      ],
+      "passes": false,
+      "model": "claude-haiku-4-5-20251001"
+    },
+    {
+      "id": "US-002",
+      "title": "Extend POST /api/specs/generate with optional storiesJson param — skip LLM if provided",
+      "description": "Modify the existing `POST /api/specs/generate` route in `backend/src/routes/specs.ts` to accept an optional `storiesJson` field in the request body. When `storiesJson` is present (a `UserStory[]` array), the endpoint skips all LLM calls and acts as a pure persistence operation: validate the stories, write the spec file to `forge/specs/pending/<slug>.json`, insert a `spec_versions` row, emit a `generate` WAL event, and return `{ id, path, storiesCount }`. When `storiesJson` is absent, behavior is entirely unchanged (existing LLM generation path). This eliminates the need for a separate `POST /api/specs/save` endpoint — one endpoint, two input modes.\n\nValidation when `storiesJson` is provided: (1) `title` field is required on the request body and becomes the slug, (2) `storiesJson` must be a non-empty array, (3) each story must have `id` (matching `/^[A-Z]+-\\d{3}$/`), `title`, `description`, `acceptanceCriteria` (non-empty array), (4) no duplicate story IDs (use a Set), (5) `dependsOn` references must resolve to IDs within the same stories array. Return 400 `ValidationError` on any violation.\n\n## Context\n- **Minimal diff principle**: The existing `POST /api/specs/generate` handler branches on `SPEC_PROVIDER` and calls LLM. Add an early-exit branch at the top: `if (req.body.storiesJson) { /* validate + persist */ return res.status(201).json(...) }`. Everything below that branch is untouched.\n- **Slug generation**: same as existing — kebab-case of `title`, filesystem-safe. `spec.id` is the slug, NOT `specName`.\n- **Spec path**: `path.join(workspace.path, 'forge/specs/pending', slug + '.json')`. Create parent dir if missing (`fs.mkdir recursive`).\n- **WAL column is `ts`, not `created_at`**: `INSERT INTO wal_events (event_type, workspace_id, payload, ts) VALUES ($1, $2, $3, NOW())`.\n- **spec_versions**: Insert `(spec_id, version, snapshot)` with `version=1` and full spec JSON. Check existing table schema for exact column names.\n- **No LLM in the storiesJson branch**: Do NOT import or call `chatComplete`. The `generatedAt` field should be set server-side to `new Date().toISOString()` if not provided in the body.\n- **@swagger annotation**: Update the existing `@swagger` block for `POST /api/specs/generate` to document the new optional `storiesJson` body field. Add a second example showing the direct-persist mode alongside the existing brief-based example.",
+      "acceptanceCriteria": [
+        "POST /api/specs/generate with { title, storiesJson: [...] } and workspaceId returns 201 with { id, path, storiesCount } and the file exists at workspace.path/forge/specs/pending/<slug>.json — no LLM call made",
+        "POST /api/specs/generate without storiesJson behaves identically to before (existing LLM generation path is unchanged)",
+        "A wal_events row with event_type='generate' is inserted on successful storiesJson persist (using ts column, not created_at)",
+        "Submitting storiesJson with duplicate story IDs returns 400 ValidationError identifying the duplicates",
+        "Submitting storiesJson with a dependsOn reference to a non-existent story ID returns 400 ValidationError identifying the orphaned reference"
+      ],
+      "dependsOn": [],
+      "complexity": 3,
+      "suggestedSkills": [
+        {
+          "name": "data-validation",
+          "relevance": 9,
+          "reason": "Core logic is validating the storiesJson array with multiple structural rules"
+        },
+        {
+          "name": "api-documentation",
+          "relevance": 6,
+          "reason": "Existing @swagger annotation needs updating for the new optional param"
+        },
+        {
+          "name": "rorca",
+          "relevance": 9,
+          "reason": "Must follow Rorca spec path conventions and WAL event patterns"
+        }
+      ],
+      "suggestedPersona": "backend",
+      "suggestedReviewers": [
+        "security",
+        "spec-verifier"
+      ],
+      "passes": false,
+      "model": "claude-haiku-4-5-20251001"
+    },
+    {
+      "id": "US-003",
+      "title": "Register rorca_get_generation_context MCP tool in stdio server",
+      "description": "Add a new MCP tool `rorca_get_generation_context` to `backend/src/mcp/server.ts` that calls the `GET /api/specs/generation-context` endpoint created in US-001. The tool accepts `workspaceId` (required, string), `specBrief` (optional, string), and `storyAnnotations` (optional, string) as input parameters. It calls the Express route via localhost fetch (same pattern as existing MCP tools like `rorca_generate_spec`), and returns the context bundle as a structured text response. The tool description must clearly state: 'Returns the full context bundle for spec generation — NO LLM call, pure data retrieval. Use this to get context, then generate the spec in your session, then call rorca_save_spec to persist it.' Also register a corresponding MCP prompt (slash command) `/mcp__rorca__get_generation_context` that takes workspaceId as an argument, following the existing prompt registration pattern.\n\n## Context\n- **MCP server file**: `backend/src/mcp/server.ts` — follow the existing tool registration pattern (see `rorca_generate_spec`, `rorca_get_context`, etc.). Tools use `server.tool(name, description, inputSchema, handler)` with Zod-like JSON Schema for params.\n- **Localhost fetch pattern**: Existing MCP tools call the Express API via `fetch(`http://localhost:${port}/api/...`)` where `port` defaults to `process.env.PORT || 3030`. Reuse this exact pattern — do NOT import route handlers directly.\n- **Input schema**: `workspaceId` is `{ type: \"string\" }` required; `specBrief` and `storyAnnotations` are `{ type: \"string\" }` optional. Match the parameter names exactly to the query params expected by `GET /api/specs/generation-context` from US-001.\n- **Response format**: Return the context bundle as a single text block via `{ content: [{ type: \"text\", text: ... }] }`. The response should be the raw structured text from the API, not JSON-wrapped — LLM callers consume it as prompt context, not as data to parse.\n- **Tool description is critical**: Must explicitly say \"NO LLM call, pure data retrieval\" — this is the architectural differentiator from `rorca_generate_spec` (which spawns a subprocess). Copy the exact wording from the AC.\n- **MCP prompt registration**: Follow the existing `server.prompt()` pattern in the same file. Prompts take `name, description, argsSchema, handler`. The handler should return a `messages` array with role/content that instructs the caller to use the tool. Check existing prompts for the exact shape.\n- **Gotcha — port resolution**: The MCP server runs as a standalone stdio process (`npx tsx backend/src/mcp/server.ts`), so `process.env.PORT` may not be set. Ensure fallback to `3030` is present, matching how other tools handle this.\n- **Test expectation**: `engineering_standards.test: true` — add or verify a test in `backend/src/routes/__tests__/` or a dedicated MCP test file. At minimum, verify the tool is registered and returns structured content for a valid workspace ID. Jest is the backend test runner (`npx jest --testPathPattern=<name>`).",
+      "acceptanceCriteria": [
+        "rorca_get_generation_context tool is registered in backend/src/mcp/server.ts with inputSchema containing workspaceId (required), specBrief (optional), storyAnnotations (optional)",
+        "Calling the tool returns a text response containing the direction stack, workspace context summary, existing spec list, memories, and installed skills in a structured format suitable for LLM consumption",
+        "Tool description explicitly states it performs no LLM call and is a pure data retrieval operation",
+        "A corresponding MCP prompt /mcp__rorca__get_generation_context is registered with argsSchema for workspaceId"
+      ],
+      "dependsOn": [
+        "US-001"
+      ],
+      "complexity": 2,
+      "suggestedSkills": [
+        {
+          "name": "rorca",
+          "relevance": 10,
+          "reason": "Direct modification of the Rorca MCP server following established tool registration patterns"
+        },
+        {
+          "name": "api-documentation",
+          "relevance": 5,
+          "reason": "Tool description serves as documentation for MCP clients"
+        }
+      ],
+      "suggestedPersona": "backend",
+      "suggestedReviewers": [
+        "architect",
+        "best-practices"
+      ],
+      "passes": false,
+      "model": "claude-sonnet-4-6"
+    },
+    {
+      "id": "US-004",
+      "title": "Extend rorca_generate_spec MCP tool with optional stories param — skip LLM if provided",
+      "description": "Modify the existing `rorca_generate_spec` tool in `backend/src/mcp/server.ts` to add an optional `stories` parameter (array of story objects). When `stories` is provided, the tool passes it as `storiesJson` to `POST /api/specs/generate` (from US-002), which persists directly without an LLM call. When `stories` is absent, behavior is unchanged (existing LLM generation path). No new MCP tool is created — this is a parameter extension on the existing tool.\n\nUpdate the tool description to document both modes: 'Generates a spec from a brief (LLM) or persists pre-formed stories directly (no LLM). When stories array is provided, skips generation and saves immediately — use after rorca_get_generation_context to complete the in-session generation workflow.' Also register a corresponding MCP prompt update.\n\n## Context\n- **MCP server file**: `backend/src/mcp/server.ts` — find the existing `rorca_generate_spec` tool handler. Add `stories` as an optional field to its `inputSchema` (`type: 'array', items: { type: 'object' }`). In the handler, if `stories` is present, POST to `/api/specs/generate` with `{ title: input.title, workspaceId: input.workspaceId, storiesJson: input.stories }`. If absent, call the existing flow unchanged.\n- **Field naming**: MCP tool uses `stories` (caller-friendly), Express endpoint uses `storiesJson` (internal). The tool handler maps between them.\n- **Spec userStories gotcha**: The spec JSON written to disk uses `userStories` (not `stories`). The Express handler (US-002) is responsible for mapping `storiesJson` → `userStories` in the written file. The MCP tool just passes the array through.\n- **Port resolution**: Use existing `process.env.PORT || 3030` pattern from the same file.\n- **Error propagation**: Catch fetch errors, return error message string (not throw) — matching existing tool error handling in the file.\n- **No new tool, no new prompt**: Extend the existing tool. Do NOT create `rorca_save_spec` as a separate registered tool — that's the redundancy we're eliminating.",
+      "acceptanceCriteria": [
+        "rorca_generate_spec tool in server.ts has an optional stories field in its inputSchema (type: array)",
+        "When stories is provided, the tool POSTs to /api/specs/generate with storiesJson and returns { id, path, storiesCount } — no LLM call made server-side",
+        "When stories is absent, the tool behaves identically to before (existing LLM generation path unchanged)",
+        "Calling the tool with an invalid stories array (e.g. missing required story fields) returns the validation error message from the API",
+        "The tool description documents both modes clearly: brief-based LLM generation and direct stories persist"
+      ],
+      "dependsOn": [
+        "US-002"
+      ],
+      "complexity": 2,
+      "suggestedSkills": [
+        {
+          "name": "rorca",
+          "relevance": 10,
+          "reason": "Direct modification of existing Rorca MCP tool following established patterns"
+        },
+        {
+          "name": "data-validation",
+          "relevance": 6,
+          "reason": "Tool must relay validation errors from the extended generate endpoint"
+        }
+      ],
+      "suggestedPersona": "backend",
+      "suggestedReviewers": [
+        "architect",
+        "best-practices"
+      ],
+      "passes": false,
+      "model": "claude-sonnet-4-6"
+    },
+    {
+      "id": "US-005",
+      "title": "Update rorca_forge_and_run to use in-session generation via new primitives",
+      "description": "Modify the existing `rorca_forge_and_run` MCP tool in `backend/src/mcp/server.ts` to use the new two-step generation flow instead of spawning a claude --print subprocess. The updated flow: (1) call rorca_get_generation_context internally to get the context bundle, (2) call `chatComplete()` from llm-client.ts with the context bundle + brief to generate the spec JSON (this happens in the MCP server process, using the same LLM client as the existing rorca_generate_spec), (3) call rorca_generate_spec internally with the generated stories array (using the extended `stories` param from US-004 — no LLM call in that leg), (4) optionally call rorca_enrich_spec if enrichment is desired, (5) call rorca_approve_spec + rorca_trigger_run to execute. The key change: generation now uses llm-client.ts chatComplete() instead of spawning a claude --print subprocess. The existing rorca_generate_spec tool remains UNCHANGED for the brief-only (LLM) path as browser-UI fallback. Add a `generationMode` field to the forge_and_run response indicating 'in-session' vs 'subprocess' (for debugging).\n\n## Context\n- **Primary file**: `backend/src/mcp/server.ts` — locate the existing `rorca_forge_and_run` tool handler. It currently calls `POST /api/specs/generate` or spawns a subprocess; replace the generation step with direct `chatComplete()` from `backend/src/lib/llm-client.ts`\n- **Context assembly**: Use the same `synthesize()` from `backend/src/lib/direction-stack.ts` that `rorca_get_generation_context` would use — merge L1–L5 with the brief as L4. Do NOT call the HTTP endpoint from within the MCP process; import the function directly to avoid a loopback fetch\n- **chatComplete returns `ChatResult { text, usage }`** — always use `.text` accessor. Parse the returned text as JSON (`JSON.parse(result.text)`) and validate it has `userStories` array before saving. Handle malformed JSON gracefully (retry once or return actionable error)\n- **Spec save path**: Persist to `forge/specs/pending/<slug>.json` using the workspace path from `workspaces` table. The `id` field in the spec JSON must be the filename slug, NOT the human-readable title. Use `spec.id` for all path construction\n- **Error handling**: Wrap `chatComplete()` in try/catch. On failure (missing API key, rate limit, malformed response), return `{ success: false, error: <message> }` without throwing — MCP tool handlers must never crash the stdio server process. Check `SUPPORTED_MODELS` list before passing model to `chatComplete`\n- **Do NOT modify `rorca_generate_spec`** — it remains the browser-UI fallback using the existing subprocess/chatComplete path. The only tool being changed is `rorca_forge_and_run`\n- **Response shape**: Add `generationMode: 'in-session'` to the tool's return object alongside existing fields (`runId`, `specId`, etc.). The old path (if kept as fallback) should return `generationMode: 'subprocess'`\n- **Test expectations**: Backend tests are Jest (`npx jest --testPathPattern=mcp`). Verify the MCP server doesn't import anything that breaks in test context (e.g., pg-boss worker module side effects). The `chatComplete` call should be mockable via `jest.mock('../lib/llm-client')`",
+      "acceptanceCriteria": [
+        "rorca_forge_and_run no longer spawns a claude --print subprocess for spec generation — it uses chatComplete() from llm-client.ts",
+        "The tool internally calls generation-context to assemble context, then chatComplete() to generate stories, then calls rorca_generate_spec with the stories array (US-004 extension) to persist — no separate save endpoint",
+        "The response includes generationMode: 'in-session' field to distinguish from the old subprocess path",
+        "The existing rorca_generate_spec brief-only (LLM) code path is NOT removed — it remains the browser-UI fallback when stories param is absent",
+        "If chatComplete() fails (e.g. API key missing, rate limit), the tool returns a clear error message without crashing the MCP server process"
+      ],
+      "dependsOn": [
+        "US-003",
+        "US-004"
+      ],
+      "complexity": 4,
+      "suggestedSkills": [
+        {
+          "name": "rorca",
+          "relevance": 10,
+          "reason": "Core Rorca MCP tool modification requiring deep understanding of forge_and_run flow"
+        },
+        {
+          "name": "workflow-orchestrator",
+          "relevance": 7,
+          "reason": "Multi-step orchestration: context fetch → generate → save → enrich → approve → run"
+        }
+      ],
+      "suggestedPersona": "architect",
+      "suggestedReviewers": [
+        "backend",
+        "red-team",
+        "assumption-buster"
+      ],
+      "passes": false,
+      "model": "claude-sonnet-4-6"
+    },
+    {
+      "id": "US-006",
+      "title": "Integration tests for generation-context endpoint and storiesJson persist mode",
+      "description": "Write Jest integration tests in `backend/src/routes/__tests__/` that verify the full lifecycle of the new MCP-native generation flow. Tests must use the existing test database setup pattern (see other route test files for pg Pool mocking). Test cases: (1) GET /api/specs/generation-context returns all 5 bundle sections with correct types, (2) response time is under 100ms, (3) POST /api/specs/generate with storiesJson creates file + WAL event + spec_versions row (no LLM call), (4) POST /api/specs/generate with storiesJson and invalid stories returns 400 with structured error, (5) round-trip test: fetch context → construct minimal stories array → POST /api/specs/generate with storiesJson → verify file exists and WAL event emitted, (6) POST /api/specs/generate with storiesJson rejects circular dependsOn references. Create two test files: `generation-context.test.ts` and `specs-generate-stories.test.ts`.\n\n## Context\n- **Follow existing test patterns exactly**: Read a few existing test files in `backend/src/routes/__tests__/` (e.g., `specs.test.ts`, `memory.test.ts`) to match the pg Pool mocking pattern, `supertest` setup, and `beforeAll`/`afterAll` lifecycle. All backend tests use Jest (not Vitest — that's frontend only).\n\n- **pg uses numbered placeholders `$1, $2`**: Any SQL assertions or mock expectations must use `$1`-style params, never `?`. The `queryOne<T>()` returns `T | undefined`, `query<T>()` returns `T[]`, `execute()` returns `{ rowCount }`.\n\n- **WAL column is `ts`, not `created_at`**: When verifying WAL event insertion, assert against the `ts` column. Using `created_at` will silently fail or error. The WAL event types for spec operations are `generate` and `spec_approved`.\n\n- **Spec `id` is the filename slug, not `specName`**: When constructing expected file paths, use `forge/specs/pending/<slug>.json` or `forge/specs/approved/<slug>.json`. The `specName` field is the human-readable title — never use it for path construction.\n\n- **Circular dependsOn detection**: The save-spec endpoint must reject cycles in `dependsOn` graphs. Test with a minimal cycle (US-001 → US-002 → US-001) and verify a 400 response with a structured error body `{ error, code, details }` matching the `AppError` hierarchy from `backend/src/lib/errors.ts`.\n\n- **Response time assertion gotcha**: The \"under 100ms\" test for generation-context should measure wall-clock time around the supertest call, not rely on response headers. Use `Date.now()` before/after or `process.hrtime()`. Be generous in CI — consider 200ms as the threshold if 100ms is flaky.\n\n- **`chatComplete` is NOT called in these endpoints**: The generation-context endpoint returns raw context bundles with zero LLM calls (that's the whole point of MCP-native generation). Do not mock `llm-client` — these routes should never touch it. If they do, the architecture is wrong.\n\n- **File system cleanup**: The save-spec round-trip test writes real files to the workspace path. Use a temp directory (`os.tmpdir()`) as the workspace path and clean up in `afterAll` to avoid polluting the repo with test artifacts.",
+      "acceptanceCriteria": [
+        "backend/src/routes/__tests__/generation-context.test.ts exists with at least 4 test cases: successful context retrieval, L4 specBrief inclusion, invalid workspace 404, response time under 100ms",
+        "backend/src/routes/__tests__/specs-generate-stories.test.ts exists with at least 5 test cases: successful storiesJson persist (file + WAL + version), duplicate story ID rejection, orphaned dependsOn rejection, circular dependsOn rejection, and missing required fields",
+        "A round-trip integration test calls generation-context then POST /api/specs/generate with storiesJson sequentially and verifies the spec file was written to the correct path",
+        "All tests pass when run with npx jest --testPathPattern='generation-context|specs-generate-stories'"
+      ],
+      "dependsOn": [
+        "US-001",
+        "US-002"
+      ],
+      "complexity": 3,
+      "suggestedSkills": [
+        {
+          "name": "rorca",
+          "relevance": 9,
+          "reason": "Tests must follow existing Rorca Jest test patterns and database mocking conventions"
+        },
+        {
+          "name": "assumption-testing",
+          "relevance": 8,
+          "reason": "Tests explicitly validate assumptions about response shape, timing, and validation rules"
+        },
+        {
+          "name": "data-validation",
+          "relevance": 7,
+          "reason": "Multiple test cases verify validation logic for spec structure"
+        }
+      ],
+      "suggestedPersona": "qa",
+      "suggestedReviewers": [
+        "backend",
+        "assumption-buster"
+      ],
+      "passes": false,
+      "model": "claude-opus-4-6"
+    },
+    {
+      "id": "US-007",
+      "title": "CLI compatibility validation — Claude Code, OpenCode CLI, and Codex CLI MCP workflows",
+      "description": "Create a documentation-and-test story that validates the MCP-native generation workflow works from all three supported CLI assistants. Write a test file `backend/src/routes/__tests__/mcp-cli-compat.test.ts` that programmatically verifies: (1) the MCP server exports both rorca_get_generation_context and rorca_save_spec tools with correct input schemas, (2) the tool input schemas use only JSON-serializable types (no Buffer, Date objects, or other non-primitive types that MCP transports may not handle), (3) the rorca_get_generation_context response is a single text block under 100KB (MCP tool responses have practical size limits). Also add a `CLI_COMPATIBILITY.md` section to the existing backend README or as an inline comment block in mcp/server.ts documenting: how to register Rorca MCP server in each CLI (`claude mcp add rorca -- npx tsx ...`, `opencode mcp add rorca ...`, `codex mcp add rorca ...`), the two-step generation workflow (get_generation_context → user LLM generates → save_spec), and the browser-UI fallback path.\n\n## Context\n- **MCP server location**: `backend/src/mcp/server.ts` — currently has 24 hand-written stdio tools. The tools `rorca_get_generation_context` and `rorca_save_spec` may not exist yet (they're part of the MCP-native generation architecture described in memories). Check whether they've been added; if not, this test validates tools that need to be created first or concurrently.\n- **MCP tool registration pattern**: Tools are registered via the MCP SDK's `server.setRequestHandler(ListToolsRequestSchema, ...)` and `server.setRequestHandler(CallToolRequestSchema, ...)`. Inspect existing tool definitions to match the registration pattern when writing assertions.\n- **Test framework**: Backend tests use **Jest** (not Vitest). Place test at `backend/src/routes/__tests__/mcp-cli-compat.test.ts`. Follow existing test patterns in that directory — they import route handlers and use supertest or direct function calls against the Express app.\n- **MCP response size limit**: The 100KB threshold is a practical MCP transport limit. `rorca_get_generation_context` calls `synthesize()` from `backend/src/lib/direction-stack.ts` which merges L1–L5 layers. For a workspace with full direction stack + schema + git memory, the output can be large — test with a realistic workspace fixture.\n- **JSON-serializable schema validation**: MCP tool `inputSchema` follows JSON Schema. Verify no `format: \"date-time\"`, no custom types. All fields should be `type: \"string\" | \"number\" | \"boolean\" | \"object\" | \"array\"`. The MCP SDK uses `zod-to-json-schema` or hand-written schemas — check which pattern `server.ts` uses.\n- **Three CLI registration commands**: `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts` (documented in CLAUDE.md). OpenCode uses `opencode mcp add`. Codex uses `codex mcp add`. All three support stdio transport. Document the exact invocation for each.\n- **Documentation preference**: CLAUDE.md already has MCP setup info. Prefer adding the CLI compatibility block as a JSDoc comment block at the top of `mcp/server.ts` rather than creating a new markdown file — the user prefers not creating unnecessary documentation files.\n- **`engineering standards: test: true`**: Tests must actually pass. Run `npx jest --testPathPattern=mcp-cli-compat` to verify. Watch for pg Pool connection cleanup in test teardown — other test files in `__tests__/` use `afterAll` to close DB connections.",
+      "acceptanceCriteria": [
+        "backend/src/routes/__tests__/mcp-cli-compat.test.ts exists and verifies rorca_get_generation_context is registered and rorca_generate_spec has the optional stories field in its inputSchema",
+        "Test verifies all inputSchema fields use JSON-primitive types only (string, number, boolean, object, array — no Date, Buffer, RegExp)",
+        "Test verifies rorca_get_generation_context response text is under 100KB for a workspace with typical context",
+        "A CLI compatibility documentation block exists (in mcp/server.ts as a comment) showing registration commands for all three CLIs and the two-step workflow: get_generation_context → caller generates → rorca_generate_spec(stories=[...])"
+      ],
+      "dependsOn": [
+        "US-003",
+        "US-004"
+      ],
+      "complexity": 2,
+      "suggestedSkills": [
+        {
+          "name": "api-documentation",
+          "relevance": 8,
+          "reason": "Documentation of MCP tool registration and workflow for three different CLI clients"
+        },
+        {
+          "name": "assumption-testing",
+          "relevance": 7,
+          "reason": "Validates assumptions about MCP transport compatibility across CLIs"
+        },
+        {
+          "name": "rorca",
+          "relevance": 8,
+          "reason": "Tests Rorca MCP server tool registration and schema validation"
+        }
+      ],
+      "suggestedPersona": "qa",
+      "suggestedReviewers": [
+        "architect",
+        "best-practices",
+        "assumption-buster"
+      ],
+      "passes": false,
+      "model": "claude-opus-4-6"
+    },
+    {
+      "id": "US-009",
+      "title": "Extend POST /api/specs/:id/add-stories and rorca_add_stories with optional stories array — skip LLM if provided",
+      "description": "Apply the same two-mode pattern established in US-002/US-004 to the add-stories flow. Modify the existing `POST /api/specs/:id/add-stories` route in `backend/src/routes/specs.ts` to accept an optional `storiesJson` field in the request body. When `storiesJson` is present (a `UserStory[]` array), skip all LLM calls: validate the stories, append them to the existing spec file at `forge/specs/pending/<slug>.json` or `forge/specs/approved/<slug>.json` (whichever exists), insert a `spec_versions` snapshot, emit an appropriate WAL event, and return the updated story count. When `storiesJson` is absent, behavior is entirely unchanged (existing LLM generation path via `rorca_add_stories` prompt).\n\nAlso modify the existing `rorca_add_stories` MCP tool in `backend/src/mcp/server.ts` to add an optional `stories` parameter (array of story objects). When `stories` is provided, pass it as `storiesJson` to `POST /api/specs/:id/add-stories`. When absent, existing LLM path unchanged. No new tool or endpoint is created — this is parameter extension on both sides.\n\nValidation when `storiesJson` is provided: (1) each story must have `id`, `title`, `description`, `acceptanceCriteria` (non-empty array), (2) no duplicate story IDs within the submitted array, (3) no collision with existing story IDs already in the spec, (4) `dependsOn` references must resolve to IDs within the submitted array OR existing spec stories. Return 400 `ValidationError` on any violation with the offending IDs in the error details.\n\n## Context\n- **Route location**: `POST /api/specs/:id/add-stories` in `backend/src/routes/specs.ts`. The `:id` param is the spec slug (filename without `.json`). Early-exit branch at the top: `if (req.body.storiesJson) { /* validate + append */ return res.status(200).json(...) }`.\n- **Spec file location**: Check both `forge/specs/pending/<slug>.json` and `forge/specs/approved/<slug>.json` — use whichever exists. Existing stories are in `spec.userStories` (NOT `spec.stories`). Append to the array and overwrite the file. Preserve all other fields.\n- **Story ID collision check**: Load existing `spec.userStories`, extract IDs into a Set, check each submitted story against it. Return 400 with `{ error: 'Duplicate story IDs', code: 'VALIDATION_ERROR', details: { collisions: [...] } }`.\n- **spec_versions insert**: Same pattern as US-002 — insert `(spec_id, version, snapshot)` where `version = (existing version count + 1)`. Check existing spec_versions insert code in `add-stories` route for the exact pattern.\n- **WAL event**: The existing add-stories route likely emits a WAL event; preserve the same `event_type`. The `ts` column (not `created_at`) must be used: `INSERT INTO wal_events (..., ts) VALUES (..., NOW())`.\n- **MCP tool**: `rorca_add_stories` in `backend/src/mcp/server.ts`. Add `stories` as an optional field in `inputSchema` (`type: 'array', items: { type: 'object' }`). In the handler, map `stories` → `storiesJson` when calling the HTTP endpoint. Update the tool description to document both modes: 'Adds new stories to an existing spec. When stories array is provided, appends directly without LLM call — use after rorca_get_generation_context to append stories in-session. When brief is provided (no stories), generates new stories via LLM.'\n- **pg numbered placeholders**: All DB queries use `$1, $2` not `?`. `queryOne<T>` returns T|undefined, `query<T>` returns T[], `execute` returns `{ rowCount }`.\n- **chatComplete returns ChatResult.text**: Do NOT call chatComplete in the `storiesJson` branch. The point is to skip LLM entirely.",
+      "acceptanceCriteria": [
+        "POST /api/specs/:id/add-stories with { storiesJson: [...] } appends stories to the existing spec file and returns updated story count — no LLM call made",
+        "POST /api/specs/:id/add-stories without storiesJson behaves identically to before (existing LLM generation path unchanged)",
+        "Submitting storiesJson with an ID that already exists in the spec returns 400 ValidationError with the colliding IDs listed in the error details",
+        "rorca_add_stories MCP tool has an optional stories field in its inputSchema; when present, passes as storiesJson to the HTTP endpoint and returns the updated story count",
+        "The rorca_add_stories tool description documents both modes: brief-based LLM generation and direct stories append"
+      ],
+      "dependsOn": [
+        "US-002",
+        "US-004"
+      ],
+      "complexity": 3,
+      "suggestedSkills": [
+        {
+          "name": "rorca",
+          "relevance": 10,
+          "reason": "Must follow existing add-stories route pattern and MCP tool registration conventions"
+        },
+        {
+          "name": "data-validation",
+          "relevance": 8,
+          "reason": "Story ID collision detection against existing spec stories requires careful set intersection logic"
+        }
+      ],
+      "suggestedPersona": "backend",
+      "suggestedReviewers": [
+        "architect",
+        "spec-verifier"
+      ],
+      "passes": false,
+      "model": "claude-haiku-4-5-20251001"
+    },
+    {
+      "id": "US-008",
+      "title": "Update OpenAPI spec for extended generate endpoint and tsc clean check",
+      "description": "Ensure the `GET /api/specs/generation-context` endpoint and the extended `POST /api/specs/generate` (with new optional `storiesJson` param from US-002) are fully documented in the OpenAPI spec at `/api/docs/openapi.json`. Update the `@swagger` annotation on `POST /api/specs/generate` to document the new optional `storiesJson` body field with an example showing a minimal 1-story direct-persist request alongside the existing brief-based example. Verify Swagger UI renders both modes. Run `npx tsc --noEmit` to confirm no type errors across all stories.\n\n## Context\n- **No new endpoints to document**: There is no `POST /api/specs/save` — that route was eliminated in favour of extending the existing generate endpoint. Update the existing `@swagger` block for `POST /api/specs/generate`, do not add a new one.\n- **Swagger pattern**: JSDoc `@swagger` annotations in `backend/src/routes/specs.ts` — the OpenAPI spec is auto-generated by `backend/src/lib/swagger.ts` at `/api/docs/openapi.json`. Annotations ARE the source of truth.\n- **storiesJson schema**: In the `@swagger` requestBody, add `storiesJson` as an optional array of story objects with a schema matching `[{ id, title, description, acceptanceCriteria, dependsOn, passes }]`. Add an `example` showing a 1-story payload.\n- **tsc --noEmit gotcha**: All prior stories (US-001–US-009) must be type-clean. `chatComplete` returns `ChatResult { text, usage }` — never treat as string. pg uses `$1, $2` placeholders, not `?`.\n- **WAL column**: timestamp column in `wal_events` is `ts` not `created_at`.",
+      "acceptanceCriteria": [
+        "GET /api/docs/openapi.json includes /api/specs/generation-context with documented query parameters (workspaceId, specBrief, storyAnnotations) and response schema",
+        "GET /api/docs/openapi.json shows /api/specs/generate with the new optional storiesJson body field documented alongside the existing brief field",
+        "Swagger UI at /api/docs renders the updated generate endpoint with a storiesJson example in the Try it out section",
+        "npx tsc --noEmit in backend/ completes with zero errors introduced by US-001 through US-009"
+      ],
+      "dependsOn": [
+        "US-001",
+        "US-002"
+      ],
+      "complexity": 2,
+      "suggestedSkills": [
+        {
+          "name": "api-documentation",
+          "relevance": 10,
+          "reason": "Primary focus is OpenAPI/Swagger documentation completeness and accuracy"
+        },
+        {
+          "name": "rorca",
+          "relevance": 7,
+          "reason": "Must follow Rorca's existing @swagger annotation patterns in route files"
+        }
+      ],
+      "suggestedPersona": "backend",
+      "suggestedReviewers": [
+        "best-practices",
+        "spec-verifier"
+      ],
+      "passes": false,
+      "model": "claude-haiku-4-5-20251001"
+    }
+  ],
+  "mermaidDiagram": "graph TD\n  US-001[\"US-001: GET generation-context endpoint\"]\n  US-002[\"US-002: Extend POST generate with storiesJson\"]\n  US-003[\"US-003: MCP rorca_get_generation_context\"]\n  US-004[\"US-004: Extend rorca_generate_spec with stories\"]\n  US-005[\"US-005: Update forge_and_run\"]\n  US-006[\"US-006: Integration tests\"]\n  US-007[\"US-007: CLI compatibility validation\"]\n  US-008[\"US-008: OpenAPI spec update\"]\n  US-009[\"US-009: Extend add-stories + rorca_add_stories\"]\n  US-001 --> US-003\n  US-002 --> US-004\n  US-003 --> US-005\n  US-004 --> US-005\n  US-001 --> US-006\n  US-002 --> US-006\n  US-003 --> US-007\n  US-004 --> US-007\n  US-001 --> US-008\n  US-002 --> US-008\n  US-002 --> US-009\n  US-004 --> US-009",
+  "contextUsed": {
+    "text": "=== GLOBAL STANDARDS (L1) ===\ntest: true\n\n=== PROJECT CONTEXT (L3) ===\nname: rorca\ntype: web-app\npurpose: >-\n  AI spec orchestration and pipeline management platform. Converts plain-English briefs\n  into structured specs (user stories with acceptance criteria), then executes each story\n  as an isolated agent subprocess with full tool access — bash, edit, read, write, glob, grep.\n  Tracks progress in real time via SSE/WAL events. Supports three execution engines:\n  claude --print (Claude subscription), opencode run (75+ providers), codex (ChatGPT subscription).\n\nstack:\n  - React 18\n  - TypeScript (strict)\n  - Vite 5\n  - Tailwind CSS 3\n  - xterm.js (@xterm/xterm)\n  - react-router-dom v7\n  - Express.js\n  - PostgreSQL 16 (pg Pool, pgvector, Apache AGE)\n  - Node.js >= 20\n  - Vitest (frontend tests)\n  - Jest (backend tests)\n  - Playwright (E2E)\n  - Docker Compose\n\nkey_modules:\n  - src/panels/ — 5 primary panels (SpecsPanel, RunsPanel, AnalyticsPanel, DirectionPanel, SettingsPanel)\n  - src/components/ — Shared UI (Shell, Sidebar, RunTerminal, SpecDetailSlideOver, CommandPalette)\n  - src/contexts/ — WorkspaceContext, AuthContext, ThemeContext, ToastContext\n  - backend/src/routes/ — 32 Express route files (specs, pipeline, workspaces, direction, skills, etc.)\n  - backend/src/lib/ — Core services (execution-engine, sse-hub, direction-stack, llm-client, context-router, workspace-echolocation)\n  - backend/src/db/ — PostgreSQL Pool, pg-index.ts migration runner, pg-migrations/ (001–049)\n  - backend/src/mcp/ — MCP stdio server (5 tools, HTTP transport target)\n  - forge/ — run-loop.sh (bash fallback), self-register.ts, spec JSON files\n  - packs/ — Convention pack directory (planned)\n\nports:\n  frontend: 5210\n  backend: 3030\n  finops_sim: 5200\n\nconstraints:\n  - Backend requires manual restart (no hot-reload via tsx)\n  - Auth middleware globally bypassed — local single-user tool\n  - WAL wal_events.ts column is ts not created_at\n  - spec.id is filename slug — never use specName for paths\n  - pg uses numbered placeholders $1/$2 not ?\n  - chatComplete returns ChatResult.text — not a plain string\n\ndeployment_target: self-hosted (npm run dev locally), Docker Compose, future binary via bun build --compile\n\nintegrations:\n  - GitHub OAuth + webhooks (partially built)\n  - Linear (planned)\n  - Vercel (planned)\n  - Slack (planned)\n  - Claude Code MCP (stdio + HTTP transport)\n  - skills.sh registry\n\n=== SPEC BRIEF (L4) ===\nRorca currently generates specs server-side via a claude --print subprocess spawned by the backend (rorca_generate_spec MCP tool and POST /api/specs/generate). This wastes the caller's own LLM session and adds subprocess overhead. The fix: split spec generation into two MCP primitives — rorca_get_generation_context (returns the full context bundle: direction stack L1-L5, workspace context, schema snapshot, existing spec list, memory ledger — NO LLM call, pure data retrieval, sub-100ms) and rorca_save_spec (accepts a spec JSON object from the caller, validates it, saves to forge/specs/pending/, emits a wal_events generate row, returns the spec ID). The caller's LLM session (Claude Code MCP, OpenCode CLI MCP, or Codex CLI MCP) does the actual generation using the context bundle returned by rorca_get_generation_context. Keep the existing server-side rorca_generate_spec as a browser-UI fallback (non-MCP clients cannot call MCP tools, so the browser UI still needs the server to do generation). Also update rorca_forge_and_run to: (1) call rorca_get_generation_context to get the context bundle, (2) do generation in-session (not via subprocess), (3) call rorca_save_spec with the result, (4) optionally enrich and run. The spec must explicitly validate that all three CLIs support this workflow: Claude Code (claude mcp add rorca), OpenCode CLI (opencode mcp add), and Codex CLI (codex mcp add). Include integration tests that verify rorca_get_generation_context returns a valid context bundle and rorca_save_spec correctly persists a spec and emits a WAL event. The rorca_generate_spec tool should remain unchanged as the browser-UI fallback path.",
+    "meta": {
+      "standards": true,
+      "conventions": false,
+      "project": true,
+      "memory": false,
+      "schema": false,
+      "totalTokens": 1024,
+      "scopesMatched": []
+    }
+  }
+}

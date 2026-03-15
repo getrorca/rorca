@@ -162,7 +162,11 @@ const PANEL_LABELS: Record<PanelId, string> = {
 
 /** Top-level route config — Shell layout wraps all panel routes */
 function AppRoutes() {
-  const { workspaces } = useWorkspace();
+  const { workspaces, workspacesLoading } = useWorkspace();
+
+  if (workspacesLoading) {
+    return <Shell><BoardSkeleton /></Shell>;
+  }
 
   if (workspaces.length === 0) {
     return (

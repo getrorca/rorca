@@ -472,8 +472,37 @@ The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Q
 
 `SUPPORTED_MODELS` list is authoritative — validate before passing to `chatComplete`.
 
-### PostgreSQL Migration Pattern
-Migrations are SQL files in `backend/src/db/pg-migrations/` (49 files, 001–049). They run in numeric order on first startup via `pg-index.ts`, tracked in `schema_migrations` table. Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively — no workarounds needed. New migrations: create `NNN_description.sql` in `pg-migrations/`.
+### Apache AGE — Pool Connection Hygiene (CRITICAL)
+Apache AGE requires `LOAD 'age'` + `SET search_path = ag_catalog, "$user", public` per session before Cypher queries. This **poisons** the pool connection — subsequent queries on that connection hit `ag_catalog.workspaces` (empty) instead of `rorca.workspaces` (real data), causing intermittent "Workspace not found" 404s.
+
+**Rule**: Any code that calls `setupAgeSession()` MUST restore the search_path before releasing:
+```typescript
+const client = await pool.connect();
+try {
+  await setupAgeSession(client);  // sets search_path to ag_catalog
+  await client.query(cypherSQL);
+} finally {
+  await client.query('SET search_path = rorca, public');  // MUST restore
+  client.release();
+}
+```
+
+Three schemas have a `workspaces` table: `rorca.workspaces` (app data), `ag_catalog.workspaces` (AGE system, empty), `public.workspaces` (legacy, empty). The pool has an `on('connect')` safety net in `db/index.ts`, but it does NOT replace proper cleanup in graph code.
+
+### PostgreSQL Migration Pattern — Timestamp Format (CRITICAL)
+Migrations are SQL files in `backend/src/db/pg-migrations/`. They run in numeric prefix order on first startup via `pg-index.ts`, tracked in `schema_migrations` table (BIGINT version column). Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively.
+
+**New migrations MUST use timestamp format**: `YYYYMMDDHHMMSS_description.sql`
+```bash
+# Example: creating a migration on 2026-03-14 at 15:00:00
+20260314150000_add_user_preferences.sql
+```
+
+**Why**: Sequential numbers (001, 002, ...) collide when parallel branches create migrations simultaneously — common with Rorca's worktree-per-spec architecture. Timestamps are structurally unique (two developers/agents can't commit at the exact same second).
+
+**Hybrid coexistence**: Existing sequential migrations (001–079) stay as-is. New timestamp migrations sort after them automatically (numeric sort: `79 < 20260314150000`). The runner supports both formats indefinitely — no renaming needed.
+
+**Duplicate prefix detection**: `pg-index.ts` calls `checkDuplicatePrefixes()` at startup and fails loudly if two files share the same numeric prefix. This catches collisions before any SQL runs.
 
 ### Skills Install Chain (install-from-sh)
 `POST /api/skills/install-from-sh` does NOT shell out to `npx skills add`. It fetches directly:
@@ -1309,18 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
-> Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture
-> Rule: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-## 2026-03-10 [Convention] PostgreSQL Migration Pattern
-> Rule: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
-
-## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates
-> Rule: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-
 ## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
 > Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
 
@@ -1369,84 +1386,81 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
 > Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
 
+## 2026-03-13 [Gotcha] Old execution-engine processes from test runs survive indefinitely
+> Rule: Execution-engine subprocesses from old load test runs (WR-019, PG-020) and integration tests in temp paths can survive machine restarts and run for days, consuming CPU/memory. Check with: `ps aux | grep execution-engine | grep -v grep`. Kill PIDs associated with temp paths (/var/folders, /tmp) or old worktree paths. WR-007 graceful shutdown only helps for clean worker exits — kill -9 or machine crash still orphans children. Safe to kill any execution-engine with a temp path or a worktree path that no longer exists.
+
+## 2026-03-13 [Decision] MCP-native generation: API as context+persistence layer, LLM work in caller's session
+> Rule: Rorca's API should split LLM-heavy operations (spec generation, enrichment) into two phases: (1) context-fetch — API returns the synthesized direction stack, memory, schema, skills as a raw bundle with no LLM call; (2) save — API persists the result the caller's LLM already generated. The LLM reasoning happens IN the caller's MCP session (Claude Code, OpenCode CLI, Codex CLI), not in a server-spawned subprocess. This means: rorca_get_generation_context returns the context bundle, the calling LLM generates the spec JSON in-session using cached/warm context, then rorca_save_spec persists it. The existing server-side generation path (spawning claude --print) is kept as a fallback for browser UI users who have no MCP session. This is the correct long-term architecture for rorca_forge_and_run too — it should orchestrate tool calls that the caller's session handles, not block on a subprocess.
+
+## 2026-03-13 [Architecture] All three CLI coding assistants support MCP — Rorca tools work from any of them
+> Rule: Claude Code, OpenCode CLI, and Codex CLI all support MCP servers. A user working in any of these three can call Rorca MCP tools (rorca_generate_spec, rorca_trigger_run, etc.) from their active session. The only path that does NOT support MCP is the browser UI. This means the MCP-native generation architecture benefits all CLI users regardless of which assistant they use: Claude Code (Claude model), OpenCode CLI (any provider — GPT-4o, Gemini, etc.), Codex CLI (ChatGPT model). Architecture principle: Rorca API = context + persistence. LLM reasoning = caller's session. Browser UI = server-side subprocess fallback only.
+
+## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
+> Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
+
 Follow this workflow for implementation:
 ## Agent Role: Frontend
 
 
-## Skill: workflow-orchestrator (relevance: 7)
+## Skill: react-review (relevance: 8)
 ---
-name: workflow-orchestrator
-description: Build and orchestrate AI-driven development workflows that iterate until success using configurable patterns and multi-agent coordination
+name: react-review
+description: Review React components for best practices and performance issues
 license: MIT
 compatibility: opencode
 metadata:
-  audience: developers, AI agents, team leads
-  category: workflow
+  audience: developers
+  category: development
 ---
 
-# Workflow Orchestrator
+# React Review Skill
 
-Design, configure, and execute AI-driven development workflows that iterate until tasks complete successfully using configurable patterns, multi-agent coordination, and intelligent stop conditions.
+Review React components for best practices, performance issues, and common patterns.
 
 ## When to use me
 
 Use this skill when:
-- Building complex features requiring multiple AI agent passes
-- Implementing automated development workflows with verification steps
-- Coordinating parallel AI agents for different aspects of a task
-- Creating self-correcting loops that iterate until success criteria met
-- Need to orchestrate multiple AI agents in sequence or parallel
+- Reviewing React component code
+- Optimizing component performance
+- Checking for React best practices
+- Refactoring legacy components
+- Auditing component architecture
 
 ## What I do
 
-### 1. Workflow Pattern Selection
-- **Analyze task requirements** to recommend optimal workflow patterns
-- **Match complexity levels** with appropriate workflow types
-- **Compare trade-offs** between speed, cost, control, and quality
-
-### 2. Multi-Agent Coordination
-- **Sequence agents** for linear workflows (build → verify → plan)
-- **Parallelize agents** for concurrent execution
-- **Handle failures and retries** with intelligent routing
-- **Implement steering patterns** (linear, conditional, parallel, unblocking)
-
-### 3. SSE Event Streaming
-- **Real-time monitoring** via Server-Sent Events
-- **Progress tracking** across workflow stages
-- **Live output streaming** from subprocess execution
-- **Late-joiner replay** from in-memory buffers
-
-### 4. Integration & Tooling
-- **Subprocess management** for isolated agent execution
-- **Output buffer management** with subscriber patterns
-- **Structured event emission** for semantic log parsing
-- **Git integration** for automated quality gates
+- Analyze React components for performance issues (unnecessary re-renders, large bundles)
+- Check for React best practices (hooks usage, prop patterns, state management)
+- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
+- Suggest optimizations (memoization, code splitting, lazy loading)
+- Review TypeScript usage and type safety
 
 ## Key Patterns
 
-### Subprocess → SSE → Terminal Pattern
-```
-Backend spawns subprocess (claude --print, opencode run)
-  → stdout/stderr piped to in-memory buffer
-  → buffer broadcasts to SSE subscribers
-  → SSE endpoint replays buffer + live chunks
-  → Frontend EventSource connects, writes to xterm.js
-  → Late joiners get full replay automatically
-```
+### Performance
+- Use `React.memo` for components receiving object/function props from parent
+- Memoize expensive calculations with `useMemo`
+- Stabilize callback references with `useCallback`
+- Avoid inline object/array creation in JSX props
+- Use `React.lazy` + `Suspense` for code splitting
 
-### Buffer Management
-- In-memory circular buffer per generation/run ID
-- Subscribers added/removed on SSE connect/disconnect
-- Auto-cleanup after TTL (30 min default)
-- Base64 encoding for binary-safe transport
+### Hooks
+- Always include all dependencies in `useEffect` dependency arrays
+- Never call hooks conditionally or inside loops
+- Extract complex logic into custom hooks
+- Clean up subscriptions and timers in useEffect return
+
+### TypeScript
+- Define explicit interfaces for all component props
+- Use discriminated unions for variant components
+- Prefer `interface` over `type` for component props
+- Use `React.FC` sparingly — prefer explicit return types
 
 ## Notes
 
-- **Start simple** — single agent pattern before scaling to multi-agent
-- **Monitor costs** — parallel agents increase expense
-- **Implement escape hatches** — always have manual stop conditions
-- **Use structured events** alongside raw output for dual-mode rendering
-- **Buffer management is critical** — memory leaks from uncleaned buffers
+- Focuses on React 18+ patterns and best practices
+- Considers both class and function components
+- Includes TypeScript and JavaScript variants
+- References official React documentation and community patterns
 
 ---
 name: rorca
@@ -1599,21 +1613,37 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-007):
-Add `POST /api/pipeline/runs/:runId/retry-merge` endpoint in the pipeline routes. This endpoint: (1) Validates that the run exists, has `merge_status='failed'`, and `autoWorktree=true`. Returns 409 if `merge_status` is not 'failed', 404 if run not found. (2) Resets `merge_status` to 'merging' in the DB. (3) Sends a `pipeline:merge` pg-boss job with `{ runId, branch, workspaceId }` in the payload. (4) The worker picks up `pipeline:merge` jobs and runs the same merge+agentic-resolution sequence from US-004/US-005 (extract the merge logic into a reusable `performMerge(runId, branch, workspacePath)` function). (5) Register the `pipeline:merge` queue in the worker startup alongside existing queues. This enables retrying failed merges from the UI without re-running the entire pipeline.
+Add a non-blocking amber warning banner at the top of the Runs panel (`src/panels/RunsPanel.tsx`) when queue conditions indicate a potential problem — specifically when jobs have been pending too long or the worker appears stuck. This is a faster, more visible alert than the analytics panel chart for the common case of 'I triggered a run and nothing is happening.'
+
+**Banner trigger conditions** (evaluated from worker/health queueStats):
+1. `oldestPendingAgeSeconds > 30` AND `active === 0`: A job has been pending for 30+ seconds with no active worker processing — likely the worker is down or stuck. Banner text: 'Worker appears stuck — N jobs have been queued for Xs. Check that the worker is running.'
+2. `queueHealth === 'critical'`: Banner text: 'N jobs failed in the queue. Go to Analytics > Queue Health for details.'
+3. `queueHealth === 'degraded'` AND `oldestPendingAgeSeconds > 120`: Banner text: 'Jobs are processing slowly (oldest pending: Xs). Worker may be overloaded.'
+
+**Banner component**:
+- Amber background (`bg-amber-50 border-amber-200`), amber icon (ExclamationTriangle)
+- Dismissible per session (localStorage key `rorca_queue_banner_dismissed_<timestamp>` — auto-clears on next condition change)
+- Not dismissible when condition is `critical` — too important
+- Shows only one banner at a time (highest severity wins)
+- 'View queue →' link navigates to Analytics panel queue section
+- 'Check worker' link opens Settings > System tab
+
+**Data source**: Reuse the worker/health API data already fetched by the Runs panel (if it already polls this endpoint) or add a 30s polling hook. Do NOT add a separate API call if the data is already available via existing polling.
+
+**SSE-driven updates**: Listen to `queue_failed_jobs_detected` SSE event — immediately show/update the banner without waiting for the next poll cycle.
 
 ## Context
-- **pg-boss queue registration**: Register `pipeline:merge` in `worker.ts` alongside `pipeline:run`, `pipeline:retry`, `pipeline:cancel`, `pipeline:cron` using `boss.work('pipeline:merge', handler)`. Follow the same error-handling and graceful-shutdown patterns as existing queues.
-- **pg-boss column naming gotcha**: Any direct queries against `pgboss.job` or `pgboss.archive` MUST use snake_case (`started_on`, `completed_on`, `expire_in`). The `startedon` typo bug (2026-03-13) silently broke stale recovery for days — triple-check column names.
-- **pg-boss send() payload**: Pass `runId` as a number, not `String(runId)`. The UUID bug (2026-03-12) caused job failures when string-coercing numeric IDs. Payload shape: `{ runId: number, branch: string, workspaceId: string }`.
-- **Extract `performMerge()` to `backend/src/lib/merge-handler.ts`**: Must be importable by both the post-run completion path (execution-engine/pipeline) and the worker's `pipeline:merge` handler. Watch for circular imports with `worker.ts` — keep the function self-contained with its own DB queries and git operations.
-- **Use `AppError` hierarchy**: `NotFoundError` (404) for missing runs, `ConflictError` (409) for `merge_status !== 'failed'`. These are auto-serialized by the global error handler in `error-handler.ts`. Don't use raw `res.status().json()`.
-- **DB query pattern**: `await queryOne<T>(sql, params)` with `$1, $2` numbered placeholders. Verify `rowCount === 1` after UPDATE to catch race conditions where another retry request beat this one.
-- **Stale merge recovery**: If worker restarts mid-merge, `merge_status` stays `'merging'` indefinitely (same pattern as the kill-button silent-fail bug). At minimum, allow re-calling retry-merge after the `merge_status` has been stuck for a configurable timeout, or add `'merging'` to the stale-job recovery sweep.
-- **Tests**: Write Jest tests in `backend/src/routes/__tests__/pipeline.test.ts` (or a new `merge.test.ts`). Cover 404, 409, and success paths. Mock `pgBoss.send()` to verify job enqueue with correct queue name and payload shape. Reference existing pipeline test patterns.
+- **Runs panel location**: `src/panels/RunsPanel.tsx`. Read the existing component before adding — it likely has a header section where the banner should appear, above the run history table.
+- **Existing worker health polling**: Check if RunsPanel or a parent context already polls `GET /api/pipeline/worker/health` for the worker liveness indicator. If so, extend the existing hook rather than adding a duplicate fetch.
+- **localStorage dismiss key**: Include a timestamp component in the key (`rorca_queue_banner_dismissed_${Math.floor(Date.now() / 60000)}`) so the dismissal expires every minute — the banner will reappear if the condition persists.
+- **Priority order**: If both `critical` and `degraded` conditions are true, show only the `critical` banner. Never stack multiple banners.
+- **Navigation links**: Use `react-router-dom` `useNavigate` to navigate to `/analytics` (queue section) and `/settings/system` (worker tab). Do not use `window.location.href` — it causes full page reload.
+- **Mobile/compact**: Banner should be responsive — on narrow viewports, drop the 'View queue →' link text to just an icon.
 
 Acceptance Criteria:
-- POST /api/pipeline/runs/:runId/retry-merge returns 409 if merge_status is not 'failed'
-- POST /api/pipeline/runs/:runId/retry-merge returns 404 if run not found
-- On valid request: merge_status is reset to 'merging', a pipeline:merge pg-boss job is enqueued
-- Worker picks up pipeline:merge jobs and executes the full merge+resolution sequence
-- The merge logic from US-004/US-005 is extracted into a reusable performMerge() function called by both the post-run handler and the retry handler
+- Amber warning banner appears in Runs panel when oldestPendingAgeSeconds > 30 AND active === 0, indicating worker may be stuck
+- Banner appears when queueHealth is 'critical' with count of failed jobs
+- Banner is dismissible per session for 'degraded' conditions, non-dismissible for 'critical'
+- Only the highest-severity banner is shown — no stacking of multiple banners
+- Banner updates immediately on queue_failed_jobs_detected SSE event without waiting for next poll
+- Navigation links in the banner use react-router-dom useNavigate (no full page reload)

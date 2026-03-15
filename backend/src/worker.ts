@@ -1121,13 +1121,22 @@ async function recoverStaleJobs(): Promise<void> {
 
   let staleJobs: StaleJobRow[];
   try {
+    // Only recover jobs started before THIS worker AND whose owning worker
+    // has no fresh heartbeat. Without the heartbeat check, a second worker
+    // would mark a first worker's legitimate active jobs as stale.
     staleJobs = await query<StaleJobRow>(
-      `SELECT id, name, data
-       FROM pgboss.job
-       WHERE name IN ('pipeline:run', 'pipeline:retry')
-         AND state = 'active'
-         AND started_on < $1`,
-      [WORKER_STARTED_AT],
+      `SELECT j.id, j.name, j.data
+       FROM pgboss.job j
+       WHERE j.name IN ('pipeline:run', 'pipeline:retry')
+         AND j.state = 'active'
+         AND j.started_on < $1
+         AND NOT EXISTS (
+           SELECT 1 FROM worker_heartbeat wh
+           WHERE wh.last_seen > NOW() - INTERVAL '90 seconds'
+             AND wh.worker_id != $2
+             AND wh.started_at <= j.started_on
+         )`,
+      [WORKER_STARTED_AT, WORKER_ID],
     );
   } catch (err) {
     // pgboss schema may not exist yet on a completely fresh DB — safe to skip
@@ -1235,11 +1244,18 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
 
   let orphanRuns: OrphanRunRow[];
   try {
+    // Only find runs whose owning worker has NO fresh heartbeat.
+    // Without this check, Worker B would kill Worker A's legitimate runs
+    // just because worker_id != B. The LEFT JOIN ensures runs with a
+    // live owning worker are excluded; only truly orphaned runs remain.
     orphanRuns = await query<OrphanRunRow>(
-      `SELECT id, pid, workspace_id
-       FROM pipeline_runs
-       WHERE status = 'running'
-         AND (worker_id != $1 OR worker_id IS NULL)`,
+      `SELECT pr.id, pr.pid, pr.workspace_id
+       FROM pipeline_runs pr
+       LEFT JOIN worker_heartbeat wh
+         ON pr.worker_id = wh.worker_id
+         AND wh.last_seen > NOW() - INTERVAL '90 seconds'
+       WHERE pr.status = 'running'
+         AND (pr.worker_id IS NULL OR (pr.worker_id != $1 AND wh.worker_id IS NULL))`,
       [WORKER_ID],
     );
   } catch (err) {
@@ -1605,6 +1621,44 @@ async function start(): Promise<void> {
   } catch (err) {
     logger.error({ err }, '[worker] database initialisation failed');
     process.exit(1);
+  }
+
+  // 1b. Singleton guard — exit if another worker has a fresh heartbeat.
+  // Prevents duplicate workers from competing for the same pg-boss queue,
+  // which causes orphan sweep / stale-job recovery to kill each other's
+  // engine processes (the root cause of runs dying mid-story).
+  try {
+    type LiveWorkerRow = { worker_id: string; pid: number; last_seen: string };
+    const liveWorkers = await query<LiveWorkerRow>(
+      `SELECT worker_id, pid, last_seen
+       FROM worker_heartbeat
+       WHERE worker_id != $1
+         AND last_seen > NOW() - INTERVAL '90 seconds'`,
+      [WORKER_ID],
+    );
+
+    if (liveWorkers.length > 0) {
+      // Check if any of them are actually alive (PID check)
+      for (const w of liveWorkers) {
+        try {
+          process.kill(w.pid, 0); // throws ESRCH if dead
+          logger.error(
+            { existingWorkerId: w.worker_id, existingPid: w.pid, lastSeen: w.last_seen },
+            '[worker] SINGLETON GUARD — another worker is alive. Exiting to prevent duplicate workers.',
+          );
+          process.exit(0);
+        } catch {
+          // PID is dead — stale heartbeat. Clean it up and continue.
+          logger.info({ stalePid: w.pid }, '[worker] Cleaning stale heartbeat from dead worker');
+          await execute(
+            `DELETE FROM worker_heartbeat WHERE worker_id = $1`,
+            [w.worker_id],
+          ).catch(() => {});
+        }
+      }
+    }
+  } catch {
+    // worker_heartbeat table might not exist yet — continue startup
   }
 
   // 2. Start pg-boss — creates/upgrades pgboss.* schema automatically

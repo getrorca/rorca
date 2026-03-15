@@ -36,6 +36,7 @@ interface WorkspaceContextValue {
   workspaceId: string | null;
   setWorkspaceId: (id: string) => void;
   workspaces: Workspace[];
+  workspacesLoading: boolean;
   selectedWorkspace: Workspace | null;
   addWorkspace: (ws: Workspace) => void;
   refreshWorkspaces: () => Promise<void>;
@@ -54,6 +55,7 @@ const SS_KEY = 'rorca_workspaceId'; // sessionStorage key (per-tab isolation)
 
 export function WorkspaceProvider({ children }: { children: ReactNode }) {
   const [workspaces, setWorkspaces] = useState<Workspace[]>([]);
+  const [workspacesLoading, setWorkspacesLoading] = useState(true);
   // Per-tab workspace: sessionStorage (tab-scoped) first, localStorage (cross-tab) as fallback for new tabs
   const [workspaceId, setWorkspaceIdRaw] = useState<string | null>(
     () => sessionStorage.getItem(SS_KEY) ?? localStorage.getItem(LS_KEY),
@@ -121,18 +123,34 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     setSettings(merged);
   }, [workspaceId, settings]);
 
-  // Load workspaces on mount
+  // Load workspaces on mount — retry once on failure to guard against transient
+  // backend restart windows. Never show onboarding wizard due to a recoverable error.
   useEffect(() => {
-    apiFetch<{ items: WorkspaceRow[]; total: number; hasMore: boolean; cursor?: string }>('/api/workspaces')
-      .then((res) => {
-        const ws = res.items.map(toWorkspace);
-        setWorkspaces(ws);
-        // Fall back to first workspace if none selected or stale
-        if (ws.length > 0 && (!workspaceId || !ws.some((w) => w.id === workspaceId))) {
-          setWorkspaceId(ws[0].id);
-        }
+    let cancelled = false;
+    setWorkspacesLoading(true);
+
+    const fetchWorkspaces = () =>
+      apiFetch<{ items: WorkspaceRow[]; total: number; hasMore: boolean; cursor?: string }>('/api/workspaces')
+        .then((res) => {
+          if (cancelled) return;
+          const ws = res.items.map(toWorkspace);
+          setWorkspaces(ws);
+          if (ws.length > 0 && (!workspaceId || !ws.some((w) => w.id === workspaceId))) {
+            setWorkspaceId(ws[0].id);
+          }
+        });
+
+    fetchWorkspaces()
+      .catch(() => {
+        if (cancelled) return;
+        // Retry once after 1.5s (handles transient backend restart window)
+        return new Promise<void>((resolve) => setTimeout(resolve, 1500))
+          .then(() => cancelled ? undefined : fetchWorkspaces())
+          .catch((err) => console.error('[WorkspaceContext] Failed to load workspaces after retry:', err));
       })
-      .catch(console.error);
+      .finally(() => { if (!cancelled) setWorkspacesLoading(false); });
+
+    return () => { cancelled = true; };
   }, []);
 
   // Refresh active runs and settings when workspace changes
@@ -164,7 +182,7 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
 
   return (
     <WorkspaceCtx.Provider value={{
-      workspaceId, setWorkspaceId, workspaces, selectedWorkspace,
+      workspaceId, setWorkspaceId, workspaces, workspacesLoading, selectedWorkspace,
       addWorkspace, refreshWorkspaces,
       activeRuns, refreshActiveRuns,
       settings, updateSettings,

@@ -1,126 +1,23 @@
 {
-  "specId": "rorca-queue-observability",
-  "runId": 124,
-  "startedAt": "2026-03-15T09:21:13.933Z",
-  "lastUpdatedAt": "2026-03-15T09:43:02.746Z",
+  "specId": "rorca-worker-concurrency-settings",
+  "runId": 125,
+  "startedAt": "2026-03-15T19:39:34.377Z",
+  "lastUpdatedAt": "2026-03-15T19:41:04.510Z",
   "completedStories": [
     {
       "storyId": "US-001",
-      "title": "Configure pg-boss maintenance settings — prevent unbounded table growth and enable queue monitoring",
+      "title": "Store max_concurrent_runs in worker_settings DB table",
       "status": "passed",
-      "startedAt": "2026-03-15T08:04:03.212Z",
-      "finishedAt": "2026-03-15T08:05:01.523Z",
-      "agentType": "claude",
-      "model": "claude-haiku-4-5-20251001",
-      "elapsedMs": 58311
-    },
-    {
-      "storyId": "US-002",
-      "title": "Extend GET /api/pipeline/worker/health with queue statistics and health classification",
-      "status": "passed",
-      "startedAt": "2026-03-15T08:41:50.465Z",
-      "finishedAt": "2026-03-15T08:43:15.000Z",
-      "agentType": "claude",
-      "model": "claude-haiku-4-5-20251001",
-      "elapsedMs": 85000
-    },
-    {
-      "storyId": "US-002",
-      "title": "Extend GET /api/pipeline/worker/health with comprehensive queue stats — job counts by state, failed job count, archive size",
-      "status": "passed",
-      "startedAt": "2026-03-15T08:41:51.036Z",
-      "finishedAt": "2026-03-15T08:44:10.909Z",
-      "agentType": "claude",
-      "model": "claude-haiku-4-5-20251001",
-      "elapsedMs": 139873
-    },
-    {
-      "storyId": "US-003",
-      "title": "GET /api/pipeline/queue/failed-jobs — dead-letter visibility endpoint with full job details and retry action",
-      "status": "passed",
-      "startedAt": "2026-03-15T09:21:14.543Z",
-      "finishedAt": "2026-03-15T09:22:02.849Z",
+      "startedAt": "2026-03-15T19:39:40.685Z",
+      "finishedAt": "2026-03-15T19:41:04.510Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 48306
-    },
-    {
-      "storyId": "US-004",
-      "title": "Capture pg-boss monitor-states events — write queue health snapshots to DB for trend analysis",
-      "status": "passed",
-      "startedAt": "2026-03-15T09:22:18.248Z",
-      "finishedAt": "2026-03-15T09:26:00.909Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 222661
-    },
-    {
-      "storyId": "US-005",
-      "title": "Job pickup latency tracking — measure and expose avg/p95 time from job creation to worker pickup",
-      "status": "passed",
-      "startedAt": "2026-03-15T09:26:15.556Z",
-      "finishedAt": "2026-03-15T09:30:24.658Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 249102
-    },
-    {
-      "storyId": "US-006",
-      "title": "Analytics panel queue health widget — real-time queue depth, failed job badge, latency chart, throughput",
-      "status": "passed",
-      "startedAt": "2026-03-15T09:30:38.474Z",
-      "finishedAt": "2026-03-15T09:34:50.807Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 252333
-    },
-    {
-      "storyId": "US-007",
-      "title": "Runs panel queue backlog warning banner — alert when jobs are stuck pending too long",
-      "status": "passed",
-      "startedAt": "2026-03-15T09:35:04.568Z",
-      "finishedAt": "2026-03-15T09:38:36.154Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 211586
-    },
-    {
-      "storyId": "US-008",
-      "title": "Settings > System dead-letter queue panel — list failed jobs, inspect error, retry or discard",
-      "status": "passed",
-      "startedAt": "2026-03-15T09:38:50.916Z",
-      "finishedAt": "2026-03-15T09:42:35.941Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 225025
-    },
-    {
-      "storyId": "US-009",
-      "title": "Jest tests for all queue observability backend endpoints — health stats, failed jobs, latency, history",
-      "status": "passed",
-      "startedAt": "2026-03-15T09:42:50.245Z",
-      "finishedAt": "2026-03-15T09:43:02.746Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 12501
+      "elapsedMs": 83825
     }
   ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
-  "decisions": [
-    {
-      "timestamp": "2026-03-15T08:43:15.000Z",
-      "category": "Implementation",
-      "decision": "Health classification thresholds set conservatively: critical when any failed job exists OR >5 failures in 24h, degraded when >0 failures in 24h OR pending job age >300s (5min). This balances alerting sensitivity with false-positive reduction.",
-      "rationale": "Prevents alert fatigue while catching genuinely degraded states early."
-    },
-    {
-      "timestamp": "2026-03-15T08:43:15.000Z",
-      "category": "Implementation",
-      "decision": "All 9 queue stat queries execute in parallel via Promise.all() with independent .catch() error handling. No query chaining.",
-      "rationale": "Minimizes endpoint latency; each query is O(1) on indexed columns (state, created_on, archived_on). Parallel execution adds ~30-50ms instead of ~200ms sequential."
-    }
-  ],
-  "resumedFromStory": "US-002"
+  "decisions": [],
+  "resumedFromStory": null
 }

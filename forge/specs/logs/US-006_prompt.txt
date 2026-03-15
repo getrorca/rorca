@@ -472,8 +472,37 @@ The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Q
 
 `SUPPORTED_MODELS` list is authoritative — validate before passing to `chatComplete`.
 
-### PostgreSQL Migration Pattern
-Migrations are SQL files in `backend/src/db/pg-migrations/` (49 files, 001–049). They run in numeric order on first startup via `pg-index.ts`, tracked in `schema_migrations` table. Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively — no workarounds needed. New migrations: create `NNN_description.sql` in `pg-migrations/`.
+### Apache AGE — Pool Connection Hygiene (CRITICAL)
+Apache AGE requires `LOAD 'age'` + `SET search_path = ag_catalog, "$user", public` per session before Cypher queries. This **poisons** the pool connection — subsequent queries on that connection hit `ag_catalog.workspaces` (empty) instead of `rorca.workspaces` (real data), causing intermittent "Workspace not found" 404s.
+
+**Rule**: Any code that calls `setupAgeSession()` MUST restore the search_path before releasing:
+```typescript
+const client = await pool.connect();
+try {
+  await setupAgeSession(client);  // sets search_path to ag_catalog
+  await client.query(cypherSQL);
+} finally {
+  await client.query('SET search_path = rorca, public');  // MUST restore
+  client.release();
+}
+```
+
+Three schemas have a `workspaces` table: `rorca.workspaces` (app data), `ag_catalog.workspaces` (AGE system, empty), `public.workspaces` (legacy, empty). The pool has an `on('connect')` safety net in `db/index.ts`, but it does NOT replace proper cleanup in graph code.
+
+### PostgreSQL Migration Pattern — Timestamp Format (CRITICAL)
+Migrations are SQL files in `backend/src/db/pg-migrations/`. They run in numeric prefix order on first startup via `pg-index.ts`, tracked in `schema_migrations` table (BIGINT version column). Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively.
+
+**New migrations MUST use timestamp format**: `YYYYMMDDHHMMSS_description.sql`
+```bash
+# Example: creating a migration on 2026-03-14 at 15:00:00
+20260314150000_add_user_preferences.sql
+```
+
+**Why**: Sequential numbers (001, 002, ...) collide when parallel branches create migrations simultaneously — common with Rorca's worktree-per-spec architecture. Timestamps are structurally unique (two developers/agents can't commit at the exact same second).
+
+**Hybrid coexistence**: Existing sequential migrations (001–079) stay as-is. New timestamp migrations sort after them automatically (numeric sort: `79 < 20260314150000`). The runner supports both formats indefinitely — no renaming needed.
+
+**Duplicate prefix detection**: `pg-index.ts` calls `checkDuplicatePrefixes()` at startup and fails loudly if two files share the same numeric prefix. This catches collisions before any SQL runs.
 
 ### Skills Install Chain (install-from-sh)
 `POST /api/skills/install-from-sh` does NOT shell out to `npx skills add`. It fetches directly:
@@ -1309,18 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
-> Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture
-> Rule: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-## 2026-03-10 [Convention] PostgreSQL Migration Pattern
-> Rule: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
-
-## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates
-> Rule: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-
 ## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
 > Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
 
@@ -1368,6 +1385,18 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 ## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
 > Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
+
+## 2026-03-13 [Gotcha] Old execution-engine processes from test runs survive indefinitely
+> Rule: Execution-engine subprocesses from old load test runs (WR-019, PG-020) and integration tests in temp paths can survive machine restarts and run for days, consuming CPU/memory. Check with: `ps aux | grep execution-engine | grep -v grep`. Kill PIDs associated with temp paths (/var/folders, /tmp) or old worktree paths. WR-007 graceful shutdown only helps for clean worker exits — kill -9 or machine crash still orphans children. Safe to kill any execution-engine with a temp path or a worktree path that no longer exists.
+
+## 2026-03-13 [Decision] MCP-native generation: API as context+persistence layer, LLM work in caller's session
+> Rule: Rorca's API should split LLM-heavy operations (spec generation, enrichment) into two phases: (1) context-fetch — API returns the synthesized direction stack, memory, schema, skills as a raw bundle with no LLM call; (2) save — API persists the result the caller's LLM already generated. The LLM reasoning happens IN the caller's MCP session (Claude Code, OpenCode CLI, Codex CLI), not in a server-spawned subprocess. This means: rorca_get_generation_context returns the context bundle, the calling LLM generates the spec JSON in-session using cached/warm context, then rorca_save_spec persists it. The existing server-side generation path (spawning claude --print) is kept as a fallback for browser UI users who have no MCP session. This is the correct long-term architecture for rorca_forge_and_run too — it should orchestrate tool calls that the caller's session handles, not block on a subprocess.
+
+## 2026-03-13 [Architecture] All three CLI coding assistants support MCP — Rorca tools work from any of them
+> Rule: Claude Code, OpenCode CLI, and Codex CLI all support MCP servers. A user working in any of these three can call Rorca MCP tools (rorca_generate_spec, rorca_trigger_run, etc.) from their active session. The only path that does NOT support MCP is the browser UI. This means the MCP-native generation architecture benefits all CLI users regardless of which assistant they use: Claude Code (Claude model), OpenCode CLI (any provider — GPT-4o, Gemini, etc.), Codex CLI (ChatGPT model). Architecture principle: Rorca API = context + persistence. LLM reasoning = caller's session. Browser UI = server-side subprocess fallback only.
+
+## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
+> Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
 
 Follow this workflow for implementation:
 ## Agent Role: Frontend
@@ -1584,21 +1613,48 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-006):
-In the Run View panel (`src/panels/RunViewPanel.tsx` or equivalent), add a merge status section below the run summary. This section is only visible when `autoWorktree=true` AND `autoMerge=true` for the run. The section shows: (1) A status badge with icon that transitions through states: 'Pending' (gray clock icon, shown while run is still executing), 'Merging' (amber spinner, shown when worktree_merge_started WAL event received), 'Merged' (green check icon, shown when worktree_merged received — displays branch name and short SHA as a clickable monospace chip), 'Failed' (red X icon, shown when worktree_merge_failed received — displays a truncated conflict summary and a 'Retry Merge' button). (2) The section subscribes to the existing SSE stream at `/api/pipeline/stream` and filters for `worktree_merge_*` events matching the current `runId`. (3) The 'Retry Merge' button calls `POST /api/pipeline/runs/:runId/retry-merge` (implemented in US-007). (4) Initial state on page load is derived from `pipeline_runs.merge_status` returned by `GET /api/pipeline/runs/:id` — the SSE stream only provides live transitions.
+Add a 'Queue Health' section to the Analytics panel (`src/panels/AnalyticsPanel.tsx`) that displays queue observability data using the new endpoints from US-002 and US-004. The section should appear only when there are active pipeline runs or queue data available — it should not clutter analytics for idle workspaces.
+
+**Widget layout** (collapsed by default in idle state, auto-expands when degraded/critical):
+
+**Top row — Status bar**:
+- Green/amber/red dot with label: `Queue: healthy | degraded | critical` (from `queueHealth` field)
+- Four stat pills: `N pending`, `N active`, `N failed (24h)`, `N completed today`
+- If `queueHealth === 'critical'`: amber pulsing banner: 'Queue alert: N failed jobs require attention'
+
+**Middle row — Per-queue breakdown table**:
+| Queue | Pending | Active | Failed |
+|-------|---------|--------|--------|
+| pipeline:run | 2 | 1 | 0 |
+| pipeline:retry | 0 | 0 | 1 |
+
+**Pickup latency card**:
+- Avg: 0.43s | P50: 0.38s | P95: 1.2s | Status: healthy
+- Small inline trend indicator: ↑ degraded vs last hour (compare current p95 to 1h ago from health-history)
+
+**Throughput chart** (line chart, last 24h from `GET /api/pipeline/queue/health-history?hours=24`):
+- Y-axis: pending + completed counts
+- X-axis: time
+- Two lines: 'Pending jobs' (amber) and 'Completed jobs' (green)
+- Data points every 60s from queue_health_snapshots
+
+**Failed jobs count with drill-down link**: If `failedInLast24h > 0`, show amber pill '2 failed jobs' with a link to Settings > System > Dead-letter Queue (US-008).
+
+**Auto-refresh**: Poll `GET /api/pipeline/worker/health` every 30 seconds. Reconnect on SSE `queue_failed_jobs_detected` event (from US-004 broadcastAll) to immediately update on new failures.
 
 ## Context
-- **RunViewPanel SSE pattern**: The run view already subscribes to `/api/pipeline/stream` via `usePipelineSSE` hook or inline `EventSource`. Piggyback on the existing connection — filter for `worktree_merge_started`, `worktree_merged`, `worktree_merge_failed` events matching `runId`. Do NOT open a second SSE connection.
-- **WAL column gotcha**: Any direct queries against `wal_events` must use `ts` not `created_at` — the table uses `ts` as timestamp column. Route handlers may alias it for API consumers, but raw SQL must reference `ts`.
-- **pipeline_runs.merge_status**: Verify this column exists before coding — check `backend/src/db/pg-migrations/` for the migration that adds it (should come from US-005 or earlier in this spec). Do not create a duplicate migration. Check for migration number collisions — parallel branches have caused duplicate numbers before (e.g., the 069 collision).
-- **Badge styling consistency**: Match existing run status badge patterns in `RunViewPanel.tsx` (e.g., "Running", "Failed", "Done" badges). Check `src/components/` for reusable badge/chip components before creating new ones. Use Tailwind utility classes consistent with the codebase.
-- **Monospace SHA chip**: Use `font-mono text-xs` for branch name + short SHA (first 7 chars). On click, copy to clipboard rather than navigating away — or link to GitHub commit if `github_connections` exists for the workspace.
-- **Conflict summary truncation**: `.slice(0, 500)` with ellipsis is sufficient — no word-boundary library needed. Consider an expandable "Show full" toggle if the full conflict text is available in the WAL event payload.
-- **Frontend tests required (`test: true`)**: Write a Vitest test (not Playwright) with manual DOM assertions per project convention. Mock SSE events and verify badge state transitions through Pending → Merging → Merged and Pending → Merging → Failed paths. Reference existing panel tests in `src/panels/__tests__/` for patterns. See `src/panels/__tests__/SpecAttachments.test.tsx` for mock/assertion reference.
-- **Initial state on page load**: Derive from `pipeline_runs.merge_status` returned by `GET /api/pipeline/runs/:id` — SSE only provides live transitions. Ensure the component handles all states on mount (including `null`/undefined when `autoMerge` is false).
+- **Analytics panel location**: `src/panels/AnalyticsPanel.tsx`. Read the existing panel structure before adding — it likely has sections for token usage, costs, velocity. Add the queue health section as a new collapsible section.
+- **Chart library**: Check what charting library is already used in the analytics panel (likely Recharts or a simple SVG-based chart). Do NOT add a new chart dependency — use what already exists.
+- **SSE event subscription**: The panel should subscribe to WAL SSE events at `GET /api/pipeline/stream` and listen for `queue_failed_jobs_detected` events. On receipt, immediately refetch worker/health. Use the existing `usePipelineSSE` hook from `src/hooks/usePipelineSSE.ts` if it supports event filtering.
+- **Collapsed/idle state**: When queue is healthy and no runs are active, show only the status bar (one line). Auto-expand on degraded/critical. This prevents the widget from dominating the analytics view.
+- **Tailwind styling**: Follow existing component styling. Use `amber-500` for degraded, `red-500` for critical, `green-500` for healthy. Pulsing animation: `animate-pulse` on critical state dot.
+- **Null handling**: If worker is offline (health endpoint returns error), show 'Worker offline — queue data unavailable' instead of empty stats. Do NOT show zero counts when data is unavailable — that's misleading.
 
 Acceptance Criteria:
-- Merge status section is visible only when the run has autoWorktree=true AND autoMerge=true
-- Status badge shows correct icon and label for each state: Pending (gray clock), Merging (amber spinner), Merged (green check with branch + SHA), Failed (red X with conflict summary)
-- Real-time transitions from SSE worktree_merge_* events update the badge without page reload
-- Merged state displays branch name and short commit SHA (first 7 chars) in monospace
-- Failed state shows a 'Retry Merge' button and a truncated conflict summary (max 500 chars displayed)
+- Analytics panel has a Queue Health section showing queueHealth status (healthy/degraded/critical), job counts by state, and per-queue breakdown table
+- When queueHealth is 'critical', an amber pulsing banner appears: 'Queue alert: N failed jobs require attention'
+- Throughput chart displays time-series data from /api/pipeline/queue/health-history for the last 24h with pending (amber) and completed (green) lines
+- Pickup latency card shows avg, P50, and P95 with a status indicator and trend comparison vs 1 hour ago
+- When failedInLast24h > 0, an amber pill with count links to Settings > System > Dead-letter Queue
+- Widget auto-refreshes every 30s and immediately updates on receipt of queue_failed_jobs_detected SSE event
+- When worker is offline, widget shows 'Worker offline — queue data unavailable' instead of misleading zero counts
