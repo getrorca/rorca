@@ -5268,6 +5268,27 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
  *                       nextFireAt: { type: string, nullable: true, format: date-time }
  *                 dlqDepth: { type: integer }
  *                 pgBossVersion: { type: string }
+ *                 queueHealth: { type: string, enum: ["healthy", "degraded", "critical"], description: "Health classification based on queue stats" }
+ *                 queueStats:
+ *                   type: object
+ *                   properties:
+ *                     pending: { type: integer, description: "Number of jobs waiting to be picked up" }
+ *                     active: { type: integer, description: "Number of jobs currently being processed" }
+ *                     failed: { type: integer, description: "Number of jobs in failed state (not yet archived)" }
+ *                     completed24h: { type: integer, description: "Number of jobs completed in the last 24 hours" }
+ *                     failedInLast24h: { type: integer, description: "Number of jobs failed in the last 24 hours" }
+ *                     failedInLast7d: { type: integer, description: "Number of jobs failed in the last 7 days" }
+ *                     archiveSize: { type: integer, description: "Total number of archived jobs" }
+ *                     oldestPendingAgeSeconds: { type: integer, nullable: true, description: "Age in seconds of the oldest pending job (null if no pending jobs)" }
+ *                     queues:
+ *                       type: array
+ *                       items:
+ *                         type: object
+ *                         properties:
+ *                           name: { type: string }
+ *                           pending: { type: integer }
+ *                           active: { type: integer }
+ *                           failed: { type: integer }
  */
 router.get('/worker/health', async (req: Request, res: Response) => {
   try {
@@ -5353,6 +5374,75 @@ router.get('/worker/health', async (req: Request, res: Response) => {
     ).catch(() => ({ cnt: '0' }));
     const lastReconciliationErrors = parseInt(reconRow?.cnt ?? '0', 10);
 
+    // ── 8. Queue statistics (run in parallel) ─────────────────────────────────
+    interface CountRow {
+      cnt: string;
+    }
+    interface AgeRow {
+      age_seconds: number | null;
+    }
+    interface QueueRow {
+      name: string;
+      pending: string;
+      active: string;
+      failed: string;
+    }
+
+    const [
+      pendingRow,
+      activeRow,
+      failedRow,
+      completed24hRow,
+      failedLast24hRow,
+      failedLast7dRow,
+      archiveSizeRow,
+      oldestAgeRow,
+      queueRows,
+    ] = await Promise.all([
+      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE state = $1', ['created']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE state = $1', ['active']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE state = $1', ['failed']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.archive WHERE state = $1 AND archived_on > NOW() - INTERVAL \'24 hours\'', ['completed']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.archive WHERE state = $1 AND archived_on > NOW() - INTERVAL \'24 hours\'', ['failed']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.archive WHERE state = $1 AND archived_on > NOW() - INTERVAL \'7 days\'', ['failed']).catch(() => ({ cnt: '0' })),
+      queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.archive').catch(() => ({ cnt: '0' })),
+      queryOne<AgeRow>('SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_on)))::integer AS age_seconds FROM pgboss.job WHERE state = $1', ['created']).catch(() => ({ age_seconds: null })),
+      query<QueueRow>(
+        `SELECT name,
+                COUNT(*) FILTER (WHERE state = 'created')::text AS pending,
+                COUNT(*) FILTER (WHERE state = 'active')::text AS active,
+                COUNT(*) FILTER (WHERE state = 'failed')::text AS failed
+         FROM pgboss.job
+         GROUP BY name
+         ORDER BY name`,
+      ).catch(() => [] as QueueRow[]),
+    ]);
+
+    const pending = parseInt(pendingRow?.cnt ?? '0', 10);
+    const active = parseInt(activeRow?.cnt ?? '0', 10);
+    const failed = parseInt(failedRow?.cnt ?? '0', 10);
+    const completed24h = parseInt(completed24hRow?.cnt ?? '0', 10);
+    const failedInLast24h = parseInt(failedLast24hRow?.cnt ?? '0', 10);
+    const failedInLast7d = parseInt(failedLast7dRow?.cnt ?? '0', 10);
+    const archiveSize = parseInt(archiveSizeRow?.cnt ?? '0', 10);
+    const oldestPendingAgeSeconds = oldestAgeRow?.age_seconds ?? null;
+
+    // Convert per-queue breakdown to typed object
+    const queues = queueRows.map(r => ({
+      name: r.name,
+      pending: parseInt(r.pending ?? '0', 10),
+      active: parseInt(r.active ?? '0', 10),
+      failed: parseInt(r.failed ?? '0', 10),
+    }));
+
+    // Determine queue health
+    let queueHealth: 'critical' | 'degraded' | 'healthy' = 'healthy';
+    if (failed > 0 || failedInLast24h > 5) {
+      queueHealth = 'critical';
+    } else if (failedInLast24h > 0 || (oldestPendingAgeSeconds !== null && oldestPendingAgeSeconds > 300)) {
+      queueHealth = 'degraded';
+    }
+
     res.json({
       workerActive,
       workerPid: heartbeat?.pid ?? null,
@@ -5364,6 +5454,18 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       dlqDepth,
       pgBossVersion,
       lastReconciliationErrors,
+      queueHealth,
+      queueStats: {
+        pending,
+        active,
+        failed,
+        completed24h,
+        failedInLast24h,
+        failedInLast7d,
+        archiveSize,
+        oldestPendingAgeSeconds,
+        queues,
+      },
     });
   } catch (error: unknown) {
     logger.error({ err: error }, '[Pipeline] worker health check error');
