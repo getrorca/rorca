@@ -1678,19 +1678,53 @@ async function start(): Promise<void> {
 
         const breakdown = Object.entries(states).map(([name, counts]) => ({ name, ...counts }));
 
+        // ── Pickup latency (24-hour rolling window, pipeline queues only) ─────
+        interface LatencyResult {
+          avg_pickup_seconds: number | null;
+          p95_pickup_seconds: number | null;
+          sample_count: string;
+        }
+        const latencyRow = await queryOne<LatencyResult>(
+          `SELECT
+             AVG(EXTRACT(EPOCH FROM (started_on - created_on)))                                                         AS avg_pickup_seconds,
+             PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (started_on - created_on)))               AS p95_pickup_seconds,
+             COUNT(*)::text                                                                                              AS sample_count
+           FROM pgboss.archive
+           WHERE started_on IS NOT NULL
+             AND created_on IS NOT NULL
+             AND archived_on > NOW() - INTERVAL '24 hours'
+             AND name IN ('pipeline:run', 'pipeline:retry')`,
+        ).catch(() => null);
+
+        const avgPickupSeconds = latencyRow?.avg_pickup_seconds ?? null;
+        const p95PickupSeconds = latencyRow?.p95_pickup_seconds ?? null;
+        const latencySampleCount = parseInt(latencyRow?.sample_count ?? '0', 10);
+
+        // Classify latency health
+        let latencyStatus: 'healthy' | 'degraded' | 'critical' = 'healthy';
+        if (p95PickupSeconds === null) {
+          latencyStatus = totals.pending > 0 ? 'critical' : 'healthy';
+        } else if (p95PickupSeconds > 10) {
+          latencyStatus = 'critical';
+        } else if (p95PickupSeconds > 2) {
+          latencyStatus = 'degraded';
+        }
+        const latencyAlert = latencyStatus === 'degraded' || latencyStatus === 'critical';
+
         await execute(
-          `INSERT INTO queue_health_snapshots (total_pending, total_active, total_failed, total_completed, queue_breakdown, worker_id)
-           VALUES ($1, $2, $3, $4, $5, $6)`,
-          [totals.pending, totals.active, totals.failed, totals.completed, JSON.stringify(breakdown), WORKER_ID],
+          `INSERT INTO queue_health_snapshots
+             (total_pending, total_active, total_failed, total_completed, queue_breakdown, worker_id, avg_pickup_seconds, p95_pickup_seconds)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`,
+          [totals.pending, totals.active, totals.failed, totals.completed, JSON.stringify(breakdown), WORKER_ID, avgPickupSeconds, p95PickupSeconds],
         );
 
         logger.debug(
-          { pending: totals.pending, active: totals.active, failed: totals.failed },
+          { pending: totals.pending, active: totals.active, failed: totals.failed, p95PickupSeconds, latencyStatus },
           '[worker] queue_health_snapshot written',
         );
 
-        // Alert: if any jobs are in failed state, broadcast for notification dispatcher / SSE clients.
-        if (totals.failed > 0) {
+        // Alert: if any jobs are in failed state OR latency is degraded/critical, broadcast.
+        if (totals.failed > 0 || latencyAlert) {
           broadcastAll({
             id: 0,
             ts: new Date().toISOString(),
@@ -1699,7 +1733,7 @@ async function start(): Promise<void> {
             spec_id: null,
             story_id: null,
             actor: 'worker',
-            payload: JSON.stringify({ count: totals.failed, breakdown }),
+            payload: JSON.stringify({ count: totals.failed, breakdown, latencyAlert, latencyStatus, p95PickupSeconds, sampleCount: latencySampleCount }),
           });
         }
       } catch (err) {
