@@ -1436,10 +1436,16 @@ async function reconcileState(): Promise<void> {
 
 let stopping = false;
 let reconcileIntervalHandle: ReturnType<typeof setInterval> | undefined;
+let sweepIntervalId: ReturnType<typeof setInterval> | undefined;
 
 async function shutdown(signal: string): Promise<void> {
   if (stopping) return;
   stopping = true;
+
+  if (sweepIntervalId !== undefined) {
+    clearInterval(sweepIntervalId);
+    sweepIntervalId = undefined;
+  }
 
   if (reconcileIntervalHandle !== undefined) {
     clearInterval(reconcileIntervalHandle);
@@ -1582,6 +1588,28 @@ async function start(): Promise<void> {
   await boss.work('pipeline:retry', { batchSize: maxConcurrent }, handlePipelineRetry);
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
+
+  // 4c. Periodic orphan sweep — runs every 5 minutes after job handlers are registered.
+  // Handles the case where a sibling worker crashes mid-run AFTER our startup sweep —
+  // those orphans would be missed by recoverStaleJobs/sweepOrphanProcesses at startup.
+  const SWEEP_INTERVAL_MS = 300_000; // 5 minutes
+  sweepIntervalId = setInterval(() => {
+    void (async () => {
+      try {
+        const results = await sweepOrphanProcesses();
+        if (results.length === 0) {
+          logger.debug('[worker] Periodic orphan sweep: no orphans found');
+        } else {
+          logger.warn(
+            { found: results.length, killed: results.filter(r => r.killed).length, runIds: results.map(r => r.runId) },
+            '[worker] Periodic orphan sweep: orphans found and killed',
+          );
+        }
+      } catch (err) {
+        logger.error({ err }, '[worker] Periodic orphan sweep: unexpected error');
+      }
+    })();
+  }, SWEEP_INTERVAL_MS);
 
   // 4b. DLQ polling — pg-boss does not emit a 'failed' event for job exhaustion.
   // Instead, poll pgboss.archive every 60 s for newly-failed pipeline jobs and emit
