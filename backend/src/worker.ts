@@ -36,6 +36,7 @@ import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
+import { FlushBuffer } from './lib/flush-buffer';
 
 // ── Post-merge smoke test ─────────────────────────────────────────────────────
 
@@ -186,22 +187,6 @@ async function writeChunk(runId: number, sequence: number, data: Buffer): Promis
     );
   } catch (err) {
     logger.warn({ err, runId, sequence }, '[worker] Failed to write output chunk');
-  }
-}
-
-// ── Helper: split a Buffer into ≤CHUNK_SIZE pieces and write them all ────
-
-async function writeBufferAsChunks(
-  runId: number,
-  buf: Buffer,
-  sequenceRef: { value: number },
-): Promise<void> {
-  let offset = 0;
-  while (offset < buf.length) {
-    const slice = buf.slice(offset, offset + CHUNK_SIZE);
-    await writeChunk(runId, sequenceRef.value, slice);
-    sequenceRef.value += 1;
-    offset += CHUNK_SIZE;
   }
 }
 
@@ -629,40 +614,17 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
     // 6. Pipe stdout/stderr to run_output_chunks in ≤4 KB chunks
     const sequenceRef = { value: 1 };
-    let pending = Buffer.alloc(0);
-
-    let flushTimer: ReturnType<typeof setTimeout> | null = null;
-    const FLUSH_TIMER_MS = 500;
-
-    const flushPending = async (): Promise<void> => {
-      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-      if (pending.length === 0) return;
-      await writeBufferAsChunks(runId, pending, sequenceRef);
-      pending = Buffer.alloc(0);
-    };
-
-    const handleData = async (data: Buffer): Promise<void> => {
-      pending = Buffer.concat([pending, data]);
-      // Write complete 4KB chunks immediately; keep the tail for next round
-      while (pending.length >= CHUNK_SIZE) {
-        const slice = pending.slice(0, CHUNK_SIZE);
-        await writeChunk(runId, sequenceRef.value, slice);
+    const outputBuffer = new FlushBuffer({
+      chunkSize: CHUNK_SIZE,
+      flushInterval: 500,
+      onFlush: async (data) => {
+        await writeChunk(runId, sequenceRef.value, data);
         sequenceRef.value += 1;
-        pending = pending.slice(CHUNK_SIZE);
-      }
-      // Debounce: flush sub-CHUNK_SIZE tail after 500ms of no new data
-      if (pending.length > 0) {
-        if (flushTimer) clearTimeout(flushTimer);
-        flushTimer = setTimeout(() => { void flushPending(); }, FLUSH_TIMER_MS);
-      } else if (flushTimer) {
-        // Size-based flush consumed everything — cancel pending timer
-        clearTimeout(flushTimer);
-        flushTimer = null;
-      }
-    };
+      },
+    });
 
-    child.stdout?.on('data', (data: Buffer) => { void handleData(data); });
-    child.stderr?.on('data', (data: Buffer) => { void handleData(data); });
+    child.stdout?.on('data', (data: Buffer) => { void outputBuffer.write(data); });
+    child.stderr?.on('data', (data: Buffer) => { void outputBuffer.write(data); });
 
     // 7. Wait for close (not exit), flush remaining bytes, update run status.
     //
@@ -684,7 +646,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
       child.on('close', async () => {
         // All stdout/stderr data has been received — safe to flush the tail.
-        await flushPending();
+        await outputBuffer.close();
 
         const code = capturedCode;
         activeProcesses.delete(runId);
@@ -741,7 +703,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
       child.on('error', async (err) => {
         logger.error({ err, runId }, '[worker] execution-engine spawn error');
-        await flushPending();
+        await outputBuffer.close();
         activeProcesses.delete(runId);
         cancellingRuns.delete(runId);
 
@@ -878,37 +840,17 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
     // 6. Pipe stdout/stderr to run_output_chunks, continuing sequence from sequenceOffset
     const sequenceRef = { value: sequenceOffset + 1 };
-    let pending = Buffer.alloc(0);
-    let flushTimer: ReturnType<typeof setTimeout> | null = null;
-    const FLUSH_TIMER_MS = 500;
-
-    const flushPending = async (): Promise<void> => {
-      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
-      if (pending.length === 0) return;
-      await writeBufferAsChunks(runId, pending, sequenceRef);
-      pending = Buffer.alloc(0);
-    };
-
-    const handleData = async (data: Buffer): Promise<void> => {
-      pending = Buffer.concat([pending, data]);
-      while (pending.length >= CHUNK_SIZE) {
-        const slice = pending.slice(0, CHUNK_SIZE);
-        await writeChunk(runId, sequenceRef.value, slice);
+    const outputBuffer = new FlushBuffer({
+      chunkSize: CHUNK_SIZE,
+      flushInterval: 500,
+      onFlush: async (data) => {
+        await writeChunk(runId, sequenceRef.value, data);
         sequenceRef.value += 1;
-        pending = pending.slice(CHUNK_SIZE);
-      }
-      // Debounce: flush sub-CHUNK_SIZE tail after 500ms of no new data
-      if (pending.length > 0) {
-        if (flushTimer) clearTimeout(flushTimer);
-        flushTimer = setTimeout(() => { void flushPending(); }, FLUSH_TIMER_MS);
-      } else if (flushTimer) {
-        clearTimeout(flushTimer);
-        flushTimer = null;
-      }
-    };
+      },
+    });
 
-    child.stdout?.on('data', (data: Buffer) => { void handleData(data); });
-    child.stderr?.on('data', (data: Buffer) => { void handleData(data); });
+    child.stdout?.on('data', (data: Buffer) => { void outputBuffer.write(data); });
+    child.stderr?.on('data', (data: Buffer) => { void outputBuffer.write(data); });
 
     // 7. Wait for close (not exit), flush remaining bytes, update run status.
     // Same fix as handlePipelineRun (US-007): use 'close' so all stdout/stderr
@@ -919,7 +861,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
       child.on('close', async () => {
         // Flush bytes < CHUNK_SIZE remaining in the buffer before marking done
-        await flushPending();
+        await outputBuffer.close();
 
         const code = capturedCode;
         activeProcesses.delete(runId);
@@ -980,7 +922,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
       child.on('error', async (err) => {
         logger.error({ err, runId }, '[worker] retry execution-engine spawn error');
-        await flushPending();
+        await outputBuffer.close();
         activeProcesses.delete(runId);
         cancellingRuns.delete(runId);
 
