@@ -1,98 +1,18 @@
 {
-  "specId": "rorca-orphan-process-sweep",
-  "runId": 118,
-  "startedAt": "2026-03-15T06:12:18.089Z",
-  "lastUpdatedAt": "2026-03-15T07:04:42.263Z",
+  "specId": "rorca-queue-observability",
+  "runId": 121,
+  "startedAt": "2026-03-15T08:04:02.390Z",
+  "lastUpdatedAt": "2026-03-15T08:05:01.524Z",
   "completedStories": [
     {
       "storyId": "US-001",
-      "title": "Implement orphan process sweep core function in worker.ts",
+      "title": "Configure pg-boss maintenance settings — prevent unbounded table growth and enable queue monitoring",
       "status": "passed",
-      "startedAt": "2026-03-15T06:12:18.703Z",
-      "finishedAt": "2026-03-15T06:18:44.864Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 386161
-    },
-    {
-      "storyId": "US-002",
-      "title": "Add startup orphan sweep on worker initialization",
-      "status": "passed",
-      "startedAt": "2026-03-15T06:19:00.403Z",
-      "finishedAt": "2026-03-15T06:21:00.022Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 119619
-    },
-    {
-      "storyId": "US-003",
-      "title": "Add periodic orphan sweep every 5 minutes",
-      "status": "passed",
-      "startedAt": "2026-03-15T06:21:14.257Z",
-      "finishedAt": "2026-03-15T06:22:20.762Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 66505
-    },
-    {
-      "storyId": "US-004",
-      "title": "Add POST /api/pipeline/orphan-sweep API endpoint",
-      "status": "passed",
-      "startedAt": "2026-03-15T06:22:35.276Z",
-      "finishedAt": "2026-03-15T06:25:00.000Z",
+      "startedAt": "2026-03-15T08:04:03.212Z",
+      "finishedAt": "2026-03-15T08:05:01.523Z",
       "agentType": "claude",
       "model": "claude-haiku-4-5-20251001",
-      "elapsedMs": 144724
-    },
-    {
-      "storyId": "US-004",
-      "title": "Add POST /api/pipeline/orphan-sweep endpoint for manual trigger",
-      "status": "passed",
-      "startedAt": "2026-03-15T06:22:35.813Z",
-      "finishedAt": "2026-03-15T06:25:26.897Z",
-      "agentType": "claude",
-      "model": "claude-haiku-4-5-20251001",
-      "elapsedMs": 171084
-    },
-    {
-      "storyId": "US-005",
-      "title": "Add Jest tests for orphan sweep function and endpoint",
-      "status": "passed",
-      "startedAt": "2026-03-15T06:25:41.177Z",
-      "finishedAt": "2026-03-15T06:28:33.649Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 172472
-    },
-    {
-      "storyId": "US-006",
-      "title": "Pre-seed story_results for already-passed stories and add UI resume badge",
-      "status": "passed",
-      "startedAt": "2026-03-15T06:28:47.957Z",
-      "finishedAt": "2026-03-15T06:44:41.248Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 953291
-    },
-    {
-      "storyId": "US-007",
-      "title": "Fix run_output_chunks terminal streaming for worktree pipeline runs",
-      "status": "passed",
-      "startedAt": "2026-03-15T06:44:55.839Z",
-      "finishedAt": "2026-03-15T07:01:33.554Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 997715
-    },
-    {
-      "storyId": "US-008",
-      "title": "Store inner Node PID in pipeline_runs.pid — fix 409 kill error caused by stale tsx wrapper PID",
-      "status": "passed",
-      "startedAt": "2026-03-15T07:01:49.927Z",
-      "finishedAt": "2026-03-15T07:04:42.263Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 172336
+      "elapsedMs": 58311
     }
   ],
   "failedStories": [],
