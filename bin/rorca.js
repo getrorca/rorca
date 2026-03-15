@@ -1,9 +1,12 @@
 #!/usr/bin/env node
-import { readFileSync, existsSync, mkdirSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, createWriteStream, unlinkSync, rmSync, readdirSync, renameSync, statSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { execSync, fork, spawn } from 'child_process';
-import { homedir } from 'os';
+import { execSync, spawnSync, fork, spawn } from 'child_process';
+import { homedir, platform, arch } from 'os';
+import { get as httpsGet } from 'https';
+import { get as httpGet } from 'http';
+import { createConnection } from 'net';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));
@@ -26,11 +29,13 @@ Usage:
 Options for start:
   --port <port>            Server port (default: 3030)
   --no-open                Don't open browser on start
+  --no-postgres            Skip managed Postgres; requires DATABASE_URL to be set
 
 Examples:
   rorca start
   rorca start --port 4040
   rorca start --no-open
+  rorca start --no-postgres
   rorca init
 `);
     process.exit(0);
@@ -102,9 +107,15 @@ async function runStart(startArgs) {
     const portIdx = startArgs.indexOf('--port');
     const port = portIdx !== -1 && startArgs[portIdx + 1] ? startArgs[portIdx + 1] : '3030';
     const noOpen = startArgs.includes('--no-open');
+    const noPostgres = startArgs.includes('--no-postgres');
     const portNum = parseInt(port, 10);
     if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
         console.error(`Invalid port: ${port}`);
+        process.exit(1);
+    }
+    // --no-postgres: skip managed Postgres, require DATABASE_URL
+    if (noPostgres && !process.env.DATABASE_URL) {
+        console.error('DATABASE_URL required when --no-postgres is set');
         process.exit(1);
     }
     // Ensure ~/.rorca/ config directory exists
@@ -113,18 +124,32 @@ async function runStart(startArgs) {
         mkdirSync(rorcaHome, { recursive: true });
         console.log(`Created config directory: ${rorcaHome}`);
     }
-    const databaseUrl = process.env.DATABASE_URL || 'postgres://rorca:rorca@localhost:5432/rorca';
-    // Check Postgres reachability before starting
-    try {
-        const { Pool: PgPool } = await import('pg');
-        const testPool = new PgPool({ connectionString: databaseUrl, connectionTimeoutMillis: 5000 });
-        await testPool.query('SELECT 1');
-        await testPool.end();
+    // ── Postgres provisioning ──
+    // If DATABASE_URL is already set and reachable, use it as-is (user-provided).
+    // Otherwise, provision and start a managed Postgres instance.
+    // --no-postgres skips provisioning entirely.
+    let managedPostgresStarted = false;
+    let databaseUrl = process.env.DATABASE_URL || '';
+    if (noPostgres || databaseUrl) {
+        // User provided DATABASE_URL (or --no-postgres requires it) — check if it's reachable
+        const urlObj = parsePostgresUrl(databaseUrl);
+        if (urlObj && await tcpReachable(urlObj.host, urlObj.port, 3000)) {
+            console.log(`Using user-provided DATABASE_URL (${urlObj.host}:${urlObj.port})`);
+        }
+        else {
+            console.error(`Cannot reach Postgres at user-provided DATABASE_URL`);
+            console.error(`  DATABASE_URL: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
+            process.exit(1);
+        }
     }
-    catch {
-        console.error('Cannot connect to PostgreSQL. Run: docker compose up -d db');
-        console.error(`  DATABASE_URL: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
-        process.exit(1);
+    else {
+        // No DATABASE_URL — provision managed Postgres
+        const pgDir = await ensurePostgres();
+        await startPostgres(pgDir);
+        managedPostgresStarted = true;
+        databaseUrl = `postgres://rorca:rorca@127.0.0.1:${MANAGED_PG_PORT}/rorca`;
+        process.env.DATABASE_URL = databaseUrl;
+        console.log(`Managed Postgres ready at 127.0.0.1:${MANAGED_PG_PORT}`);
     }
     // Auto-build frontend if dist/ is missing
     const rootDir = join(__dirname, '..');
@@ -150,36 +175,99 @@ async function runStart(startArgs) {
     };
     const backendDir = join(rootDir, 'backend');
     const backendEntry = join(backendDir, 'dist', 'server.js');
+    const workerEntry = join(backendDir, 'dist', 'worker.js');
     const backendTsEntry = join(backendDir, 'src', 'server.ts');
-    let child;
+    const workerTsEntry = join(backendDir, 'src', 'worker.ts');
+    /** Spawn a process and prefix each line of its stdout/stderr with a label. */
+    function spawnLabeled(label, cmd, args, opts) {
+        const child = spawn(cmd, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
+        const prefix = `[${label}] `;
+        const printLine = (stream, line) => stream.write(prefix + line + '\n');
+        let buf = '';
+        const onData = (stream) => (chunk) => {
+            buf += chunk.toString();
+            const lines = buf.split('\n');
+            buf = lines.pop() ?? '';
+            for (const line of lines)
+                printLine(stream, line);
+        };
+        child.stdout?.on('data', onData(process.stdout));
+        child.stderr?.on('data', onData(process.stderr));
+        child.on('close', () => {
+            if (buf.length > 0) {
+                process.stdout.write(prefix + buf + '\n');
+                buf = '';
+            }
+        });
+        return child;
+    }
+    let serverChild;
+    let workerChild = null;
     if (existsSync(backendEntry)) {
-        // Production: compiled JS
-        child = fork(backendEntry, [], { env, cwd: backendDir, stdio: 'inherit' });
+        // Production: compiled JS — server
+        serverChild = fork(backendEntry, [], { env, cwd: backendDir, stdio: 'inherit' });
     }
     else if (existsSync(backendTsEntry)) {
-        // Development: run TypeScript source via tsx
-        child = spawn('npx', ['tsx', backendTsEntry], {
+        // Development: run TypeScript source via tsx — server
+        serverChild = spawnLabeled('server', 'npx', ['tsx', backendTsEntry], {
             env,
             cwd: backendDir,
-            stdio: 'inherit',
             shell: true,
         });
     }
     else {
         console.error('Could not find backend entry point. Run "npm run build" first.');
+        if (managedPostgresStarted)
+            stopManagedPostgres();
         process.exit(1);
         return; // unreachable — satisfies TypeScript
     }
+    // Spawn worker sibling process
+    if (existsSync(workerEntry)) {
+        // Production: compiled JS — worker
+        workerChild = fork(workerEntry, [], { env, cwd: backendDir, stdio: 'inherit' });
+    }
+    else if (existsSync(workerTsEntry)) {
+        // Development: run TypeScript source via tsx — worker
+        workerChild = spawnLabeled('worker', 'npx', ['tsx', workerTsEntry], {
+            env,
+            cwd: backendDir,
+            shell: true,
+        });
+    }
+    else {
+        console.warn('[startup] worker.ts not found — worker will not start. Pipeline jobs will not be processed.');
+    }
     console.log(`Rorca running at http://localhost:${portNum}`);
-    child.on('error', (err) => {
-        console.error('Failed to start server:', err.message);
+    const killAll = (sig) => {
+        serverChild.kill(sig);
+        workerChild?.kill(sig);
+        if (managedPostgresStarted)
+            stopManagedPostgres();
+    };
+    serverChild.on('error', (err) => {
+        console.error('[server] Failed to start:', err.message);
+        killAll('SIGTERM');
         process.exit(1);
     });
-    child.on('exit', (code) => {
+    serverChild.on('exit', (code) => {
         if (code !== 0 && code !== null) {
-            console.error(`Server exited with code ${code}`);
+            console.error(`[server] exited with code ${code}`);
         }
+        workerChild?.kill('SIGTERM');
+        if (managedPostgresStarted)
+            stopManagedPostgres();
         process.exit(code ?? 1);
+    });
+    workerChild?.on('error', (err) => {
+        console.error('[worker] Failed to start:', err.message);
+        // Worker failure is non-fatal — server keeps running but warn the operator
+        console.error('[worker] Pipeline jobs will not be processed until worker is restarted.');
+    });
+    workerChild?.on('exit', (code) => {
+        if (code !== 0 && code !== null) {
+            console.error(`[worker] exited with code ${code} — pipeline jobs will not be processed`);
+        }
     });
     // Open browser after short delay to let server bind
     if (!noOpen) {
@@ -188,16 +276,492 @@ async function runStart(startArgs) {
             openBrowser(url);
         }, 1500);
     }
-    // Forward signals for clean shutdown
+    // Worker health check: warn once if worker hasn't registered a heartbeat after 10 s
+    setTimeout(() => {
+        void (async () => {
+            try {
+                const res = await fetch(`http://localhost:${portNum}/api/pipeline/worker/health`);
+                if (res.ok) {
+                    const data = await res.json();
+                    if (!data.workerActive) {
+                        console.warn('[startup] Warning: worker not yet active — pipeline jobs may be delayed');
+                    }
+                }
+            }
+            catch {
+                // Server may not be ready yet — not an error worth surfacing
+            }
+        })();
+    }, 10_000);
+    // Graceful shutdown: stop all child processes + managed Postgres
     for (const sig of ['SIGINT', 'SIGTERM']) {
         process.on(sig, () => {
-            child.kill(sig);
+            killAll(sig);
+            process.exit(0);
         });
+    }
+}
+// ────────────────────────────────────────────────────────────────
+// Embedded Postgres: detect, download, extract
+// ────────────────────────────────────────────────────────────────
+const PG_VERSION = '16.6.0';
+/** Maps Node.js os.platform()/os.arch() to the Maven artifact platform suffix */
+const PLATFORM_MAP = {
+    'darwin-arm64': 'darwin-arm64v8',
+    'darwin-x64': 'darwin-amd64',
+    'linux-x64': 'linux-amd64',
+    'linux-arm64': 'linux-arm64v8',
+    'win32-x64': 'windows-amd64',
+};
+/**
+ * Detect current OS/arch and return the platform key.
+ * Throws for unsupported combinations.
+ */
+function detectPlatform() {
+    const key = `${platform()}-${arch()}`;
+    if (!(key in PLATFORM_MAP)) {
+        throw new Error(`Unsupported platform: ${key}. ` +
+            `Supported platforms: ${Object.keys(PLATFORM_MAP).join(', ')}`);
+    }
+    return key;
+}
+/**
+ * Build the Maven Central download URL for the embedded-postgres-binaries jar.
+ */
+function buildDownloadUrl(platformKey, version) {
+    const mavenPlatform = PLATFORM_MAP[platformKey];
+    const artifact = `embedded-postgres-binaries-${mavenPlatform}`;
+    return `https://repo1.maven.org/maven2/io/zonky/test/postgres/${artifact}/${version}/${artifact}-${version}.jar`;
+}
+function formatBytes(bytes) {
+    if (bytes < 1024)
+        return `${bytes} B`;
+    if (bytes < 1024 * 1024)
+        return `${(bytes / 1024).toFixed(1)} KB`;
+    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+const DOWNLOAD_TIMEOUT_MS = 60_000; // 60s with no data = timeout
+/**
+ * Download a URL to a local file, following redirects, showing progress via \r spinner.
+ * Uses only Node.js built-in https/http modules.
+ * Times out if no data is received for DOWNLOAD_TIMEOUT_MS.
+ */
+function downloadFile(url, dest) {
+    return new Promise((resolve, reject) => {
+        let rejected = false;
+        const fail = (err) => {
+            if (rejected)
+                return;
+            rejected = true;
+            try {
+                unlinkSync(dest);
+            }
+            catch { /* ignore */ }
+            reject(err);
+        };
+        const doRequest = (requestUrl, redirectCount) => {
+            if (redirectCount > 10) {
+                fail(new Error('Too many redirects'));
+                return;
+            }
+            const getter = requestUrl.startsWith('https://') ? httpsGet : httpGet;
+            const req = getter(requestUrl, (res) => {
+                // Handle redirects
+                if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
+                    res.resume(); // Drain the response
+                    doRequest(res.headers.location, redirectCount + 1);
+                    return;
+                }
+                if (!res.statusCode || res.statusCode !== 200) {
+                    res.resume();
+                    fail(new Error(`Download failed: HTTP ${res.statusCode}`));
+                    return;
+                }
+                const totalBytes = res.headers['content-length'] ? parseInt(res.headers['content-length'], 10) : 0;
+                let downloadedBytes = 0;
+                // Inactivity timeout — fires if no data chunk arrives within 60s
+                let inactivityTimer = null;
+                const resetTimer = () => {
+                    if (inactivityTimer)
+                        clearTimeout(inactivityTimer);
+                    inactivityTimer = setTimeout(() => {
+                        res.destroy();
+                        file.close();
+                        fail(new Error('Postgres download timed out'));
+                    }, DOWNLOAD_TIMEOUT_MS);
+                };
+                const file = createWriteStream(dest);
+                resetTimer();
+                res.on('data', (chunk) => {
+                    downloadedBytes += chunk.length;
+                    resetTimer();
+                    const progress = totalBytes
+                        ? `${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`
+                        : formatBytes(downloadedBytes);
+                    process.stdout.write(`\r  Downloading Postgres ${PG_VERSION}... ${progress}`);
+                });
+                res.pipe(file);
+                file.on('finish', () => {
+                    if (inactivityTimer)
+                        clearTimeout(inactivityTimer);
+                    file.close();
+                    if (!rejected) {
+                        process.stdout.write('\n');
+                        resolve();
+                    }
+                });
+                file.on('error', (err) => {
+                    if (inactivityTimer)
+                        clearTimeout(inactivityTimer);
+                    file.close();
+                    fail(err);
+                });
+                res.on('error', (err) => {
+                    if (inactivityTimer)
+                        clearTimeout(inactivityTimer);
+                    file.close();
+                    fail(err);
+                });
+            });
+            req.on('error', (err) => fail(err));
+        };
+        doRequest(url, 0);
+    });
+}
+/** Required binaries that must exist after extraction */
+const REQUIRED_BINARIES = ['postgres', 'initdb', 'pg_ctl', 'createuser'];
+/**
+ * Ensure Postgres binaries are installed at ~/.rorca/postgres/.
+ * Downloads from Maven Central if not already present at the correct version.
+ * After extraction, verifies binaries and runs initdb if data dir is missing.
+ */
+async function ensurePostgres() {
+    const pgDir = join(homedir(), '.rorca', 'postgres');
+    const binDir = join(pgDir, 'bin');
+    const dataDir = join(pgDir, 'data');
+    const versionFile = join(pgDir, '.version');
+    // Check for corrupt install: bin/ exists but required binaries are missing
+    if (existsSync(binDir)) {
+        const ext = platform() === 'win32' ? '.exe' : '';
+        const missing = REQUIRED_BINARIES.filter(name => !existsSync(join(binDir, `${name}${ext}`)));
+        if (missing.length > 0) {
+            throw new Error('Postgres install appears corrupt — delete ~/.rorca/postgres and retry');
+        }
+    }
+    // Skip download if already installed at correct version
+    if (existsSync(versionFile)) {
+        const installed = readFileSync(versionFile, 'utf8').trim();
+        if (installed === PG_VERSION) {
+            console.log(`Postgres ${PG_VERSION} already installed`);
+            // Still ensure data directory is initialized (idempotent)
+            await initDataDir(binDir, dataDir);
+            return pgDir;
+        }
+    }
+    const platformKey = detectPlatform();
+    const url = buildDownloadUrl(platformKey, PG_VERSION);
+    console.log(`Installing Postgres ${PG_VERSION} for ${platformKey}...`);
+    // Ensure directories exist
+    mkdirSync(pgDir, { recursive: true });
+    const jarPath = join(pgDir, 'postgres.jar');
+    const extractDir = join(pgDir, '_extract');
+    try {
+        // Download the .jar (which is a zip containing a .txz)
+        await downloadFile(url, jarPath);
+        // Clean previous extraction
+        if (existsSync(extractDir)) {
+            rmSync(extractDir, { recursive: true });
+        }
+        mkdirSync(extractDir, { recursive: true });
+        // Extract the .txz from the jar (jar is a zip)
+        console.log('  Extracting jar archive...');
+        try {
+            if (platform() === 'win32') {
+                execSync(`tar -xf "${jarPath}" -C "${extractDir}"`, { stdio: 'pipe' });
+            }
+            else {
+                execSync(`unzip -o -q "${jarPath}" -d "${extractDir}"`, { stdio: 'pipe' });
+            }
+        }
+        catch (err) {
+            const stderr = err.stderr || (err instanceof Error ? err.message : String(err));
+            throw new Error(`Postgres extraction failed (jar → txz). Check disk space.\n${stderr}`);
+        }
+        // Find the .txz inside
+        const extractedFiles = readdirSync(extractDir);
+        const txzFile = extractedFiles.find(f => f.endsWith('.txz'));
+        if (!txzFile) {
+            throw new Error('No .txz archive found inside downloaded jar');
+        }
+        // Extract the .txz to a staging area first
+        const stageDir = join(pgDir, '_stage');
+        if (existsSync(stageDir)) {
+            rmSync(stageDir, { recursive: true });
+        }
+        mkdirSync(stageDir, { recursive: true });
+        const txzPath = join(extractDir, txzFile);
+        console.log('  Extracting Postgres binaries...');
+        try {
+            if (platform() === 'win32') {
+                // Windows 10+ tar supports xz via auto-detect when -a is not specified
+                // Use -xf (auto-detect compression) which works for both .txz and .tar.gz
+                execSync(`tar -xf "${txzPath}" -C "${stageDir}"`, { stdio: 'pipe' });
+            }
+            else {
+                // Unix: explicit xz decompression flag
+                execSync(`tar xJf "${txzPath}" -C "${stageDir}"`, { stdio: 'pipe' });
+            }
+        }
+        catch (err) {
+            const stderr = err.stderr || (err instanceof Error ? err.message : String(err));
+            throw new Error(`Postgres extraction failed (txz → binaries). Check disk space.\n${stderr}`);
+        }
+        // Locate the bin/ directory — may be at stage root or nested (e.g., pgsql/bin/)
+        relocateBinaries(stageDir, pgDir);
+        // Clean staging area
+        try {
+            rmSync(stageDir, { recursive: true });
+        }
+        catch { /* ignore */ }
+        // Verify required binaries exist
+        verifyBinaries(binDir);
+        // Write version marker
+        writeFileSync(versionFile, PG_VERSION);
+        console.log(`  Postgres ${PG_VERSION} installed to ${pgDir}`);
+        // Initialize data directory
+        await initDataDir(binDir, dataDir);
+        return pgDir;
+    }
+    finally {
+        // Cleanup temp files
+        try {
+            unlinkSync(jarPath);
+        }
+        catch { /* ignore */ }
+        try {
+            rmSync(extractDir, { recursive: true });
+        }
+        catch { /* ignore */ }
+    }
+}
+/**
+ * Relocate extracted Postgres files to pgDir.
+ * The .txz may extract with bin/ at the top level, or nested under a subdirectory
+ * (e.g., pgsql/). This function finds the bin/ directory and moves everything
+ * to the correct location.
+ */
+function relocateBinaries(stageDir, pgDir) {
+    const stageBin = join(stageDir, 'bin');
+    if (existsSync(stageBin) && statSync(stageBin).isDirectory()) {
+        // bin/ is at stage root — move all top-level dirs (bin, lib, share, etc.)
+        moveContents(stageDir, pgDir);
+        return;
+    }
+    // Search one level deep for a directory containing bin/
+    const entries = readdirSync(stageDir);
+    for (const entry of entries) {
+        const nestedPath = join(stageDir, entry);
+        if (statSync(nestedPath).isDirectory()) {
+            const nestedBin = join(nestedPath, 'bin');
+            if (existsSync(nestedBin) && statSync(nestedBin).isDirectory()) {
+                moveContents(nestedPath, pgDir);
+                return;
+            }
+        }
+    }
+    throw new Error(`Could not locate bin/ directory in extracted archive. Contents: ${entries.join(', ')}`);
+}
+/**
+ * Move all items from srcDir into destDir, overwriting existing.
+ */
+function moveContents(srcDir, destDir) {
+    const items = readdirSync(srcDir);
+    for (const item of items) {
+        const src = join(srcDir, item);
+        const dest = join(destDir, item);
+        // Remove existing destination to allow overwrite
+        if (existsSync(dest)) {
+            rmSync(dest, { recursive: true });
+        }
+        renameSync(src, dest);
+    }
+}
+/**
+ * Verify that all required Postgres binaries exist at binDir.
+ * Throws with a clear message listing missing binaries.
+ */
+function verifyBinaries(binDir) {
+    const ext = platform() === 'win32' ? '.exe' : '';
+    const missing = [];
+    for (const name of REQUIRED_BINARIES) {
+        const binPath = join(binDir, `${name}${ext}`);
+        if (!existsSync(binPath)) {
+            missing.push(binPath);
+        }
+    }
+    if (missing.length > 0) {
+        throw new Error(`Postgres extraction incomplete — missing binaries:\n  ${missing.join('\n  ')}`);
+    }
+    console.log(`  Verified ${REQUIRED_BINARIES.length} binaries in ${binDir}`);
+}
+/**
+ * Initialize a Postgres data directory using initdb.
+ * Only runs if the data directory does not already exist (idempotent).
+ * Uses --no-locale --encoding=UTF8 --username=rorca.
+ */
+async function initDataDir(binDir, dataDir) {
+    if (existsSync(dataDir)) {
+        console.log(`  Data directory already exists: ${dataDir}`);
+        return;
+    }
+    const ext = platform() === 'win32' ? '.exe' : '';
+    const initdbBin = join(binDir, `initdb${ext}`);
+    if (!existsSync(initdbBin)) {
+        throw new Error(`initdb not found at ${initdbBin}`);
+    }
+    console.log('  Initializing Postgres data directory...');
+    try {
+        execSync(`"${initdbBin}" --no-locale --encoding=UTF8 --username=rorca -D "${dataDir}"`, { stdio: 'pipe', encoding: 'utf8' });
+        console.log(`  Data directory initialized: ${dataDir}`);
+    }
+    catch (err) {
+        const stderr = err.stderr || (err instanceof Error ? err.message : String(err));
+        throw new Error(`initdb failed:\n${stderr}`);
+    }
+}
+/**
+ * Check if a TCP host:port is reachable within timeoutMs.
+ */
+function tcpReachable(host, port, timeoutMs = 3000) {
+    return new Promise((resolve) => {
+        const sock = createConnection({ host, port });
+        sock.setTimeout(timeoutMs);
+        sock.on('connect', () => { sock.destroy(); resolve(true); });
+        sock.on('timeout', () => { sock.destroy(); resolve(false); });
+        sock.on('error', () => { sock.destroy(); resolve(false); });
+    });
+}
+const MANAGED_PG_PORT = 5433;
+/**
+ * Start the managed Postgres instance via pg_ctl on port MANAGED_PG_PORT.
+ * Creates the 'rorca' database if it doesn't exist.
+ * Returns true if Postgres was started successfully.
+ */
+async function startPostgres(pgDir) {
+    const ext = platform() === 'win32' ? '.exe' : '';
+    const binDir = join(pgDir, 'bin');
+    const dataDir = join(pgDir, 'data');
+    const pgCtl = join(binDir, `pg_ctl${ext}`);
+    const logFile = join(pgDir, 'postgres.log');
+    // Check if already running on our port
+    if (await tcpReachable('127.0.0.1', MANAGED_PG_PORT, 1000)) {
+        // Verify it's actually our managed Postgres by checking pg_ctl status
+        const statusResult = spawnSync(pgCtl, ['status', '-D', dataDir], {
+            encoding: 'utf8',
+            timeout: 5000,
+        });
+        if (statusResult.status === 0) {
+            console.log(`Managed Postgres already running on port ${MANAGED_PG_PORT}`);
+            return;
+        }
+        // Port is occupied but it's NOT our managed Postgres
+        throw new Error(`Port ${MANAGED_PG_PORT} is already in use by another process`);
+    }
+    // Configure port in postgresql.conf if not already set
+    const confPath = join(dataDir, 'postgresql.conf');
+    if (existsSync(confPath)) {
+        const conf = readFileSync(confPath, 'utf8');
+        if (!conf.includes(`port = ${MANAGED_PG_PORT}`)) {
+            writeFileSync(confPath, conf + `\nport = ${MANAGED_PG_PORT}\n`);
+        }
+    }
+    console.log(`  Starting Postgres on port ${MANAGED_PG_PORT}...`);
+    const startResult = spawnSync(pgCtl, ['start', '-D', dataDir, '-l', logFile, '-w', '-o', `-p ${MANAGED_PG_PORT}`], { encoding: 'utf8', timeout: 30000 });
+    if (startResult.status !== 0) {
+        const errMsg = (startResult.stderr || '') + (startResult.stdout || '');
+        if (errMsg.includes('address already in use') || errMsg.includes('Address already in use')) {
+            throw new Error(`Port ${MANAGED_PG_PORT} is already in use by another process`);
+        }
+        throw new Error(`pg_ctl start failed:\n${errMsg || 'unknown error'}`);
+    }
+    console.log(`  Postgres started (port ${MANAGED_PG_PORT}, log: ${logFile})`);
+    // Create the 'rorca' database if it doesn't exist
+    const createdbBin = join(binDir, `createdb${ext}`);
+    if (existsSync(createdbBin)) {
+        const dbResult = spawnSync(createdbBin, ['-h', '127.0.0.1', '-p', String(MANAGED_PG_PORT), '-U', 'rorca', 'rorca'], { encoding: 'utf8', timeout: 10000 });
+        // Exit code 0 = created, non-zero with "already exists" = fine
+        if (dbResult.status === 0) {
+            console.log('  Created database: rorca');
+        }
+        else if (dbResult.stderr?.includes('already exists')) {
+            // Database already exists — nothing to do
+        }
+        else if (dbResult.status !== 0) {
+            console.warn(`  Warning: createdb returned code ${dbResult.status}: ${dbResult.stderr}`);
+        }
+    }
+    else {
+        // Fallback: use psql to create database
+        const psqlBin = join(binDir, `psql${ext}`);
+        if (existsSync(psqlBin)) {
+            spawnSync(psqlBin, ['-h', '127.0.0.1', '-p', String(MANAGED_PG_PORT), '-U', 'rorca', '-c',
+                "SELECT 'exists' FROM pg_database WHERE datname='rorca'" +
+                    " UNION ALL SELECT 'create' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname='rorca');"], { encoding: 'utf8', timeout: 10000 });
+            // Simple attempt — if it fails, the backend migration runner will report the error
+            spawnSync(psqlBin, ['-h', '127.0.0.1', '-p', String(MANAGED_PG_PORT), '-U', 'rorca', '-tc',
+                "CREATE DATABASE rorca;"], { encoding: 'utf8', timeout: 10000 });
+        }
+    }
+}
+/**
+ * Stop the managed Postgres instance via pg_ctl.
+ * Uses spawnSync to ensure the stop completes before process exits.
+ */
+function stopManagedPostgres() {
+    const pgDir = join(homedir(), '.rorca', 'postgres');
+    const dataDir = join(pgDir, 'data');
+    const ext = platform() === 'win32' ? '.exe' : '';
+    const pgCtl = join(pgDir, 'bin', `pg_ctl${ext}`);
+    if (!existsSync(pgCtl) || !existsSync(dataDir)) {
+        return;
+    }
+    console.log('\nStopping managed Postgres...');
+    const result = spawnSync(pgCtl, ['stop', '-D', dataDir, '-m', 'fast'], {
+        encoding: 'utf8',
+        timeout: 15000,
+    });
+    if (result.status === 0) {
+        console.log('Managed Postgres stopped.');
+    }
+    else {
+        // pg_ctl stop returns non-zero if server wasn't running — not an error
+        const msg = result.stderr || result.stdout || '';
+        if (!msg.includes('not running')) {
+            console.warn(`pg_ctl stop warning: ${msg.trim()}`);
+        }
     }
 }
 // ────────────────────────────────────────────────────────────────
 // Helpers
 // ────────────────────────────────────────────────────────────────
+/**
+ * Parse a postgres:// URL into host and port.
+ * Returns null if the URL is not parseable.
+ */
+function parsePostgresUrl(url) {
+    try {
+        // Replace postgres:// with http:// for URL parsing
+        const normalized = url.replace(/^postgres(ql)?:\/\//, 'http://');
+        const parsed = new URL(normalized);
+        return {
+            host: parsed.hostname || '127.0.0.1',
+            port: parsed.port ? parseInt(parsed.port, 10) : 5432,
+        };
+    }
+    catch {
+        return null;
+    }
+}
 function findBinary(name) {
     try {
         const result = execSync(process.platform === 'win32' ? `where ${name}` : `which ${name}`, { encoding: 'utf8' }).trim();
