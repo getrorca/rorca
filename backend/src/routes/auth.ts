@@ -14,6 +14,17 @@ export const JWT_SECRET = process.env.JWT_SECRET || 'rorca-dev-secret-change-in-
 const JWT_EXPIRES_IN = '15m';
 const REFRESH_TOKEN_EXPIRES_DAYS = 7;
 
+/** Synthetic session for local single-user mode (no real auth required) */
+export const LOCAL_ADMIN = {
+  id: 'local-admin',
+  email: 'admin@rorca.local',
+  displayName: 'Admin',
+  role: 'admin' as const,
+  plan: 'pro' as const,
+  githubConnected: false,
+  emailVerified: true,
+};
+
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const BCRYPT_COST = process.env.NODE_ENV === 'test' ? 4 : 12;
 
@@ -471,6 +482,12 @@ router.get('/me', async (req: Request, res: Response) => {
   const userId = authReq.user?.id ?? fallbackUser?.id;
 
   if (!userId) {
+    // Single-user local mode: no users in DB yet — return synthetic local-admin
+    // so the app always has a session on fresh installs or during DB recovery
+    if (process.env.AUTH_REQUIRED !== 'true') {
+      res.json({ user: LOCAL_ADMIN });
+      return;
+    }
     res.status(401).json({ error: 'No user configured' });
     return;
   }

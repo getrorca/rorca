@@ -998,20 +998,20 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
             onCancel={() => setEditingStoryId(null)} />
         ) : (
           <div key={story.id}>
-            <div className="relative">
+            <div>
               <StoryCard story={story} allStoryIds={allStoryIds} onEdit={() => setEditingStoryId(story.id)}
                 onToggleExclude={onToggleExclude ? () => onToggleExclude(story.id) : undefined}
                 specId={specId} workspaceId={workspaceId}
                 commentCount={commentCounts[story.id] ?? 0}
-                onOpenComments={() => setCommentsOpenFor(commentsOpenFor === story.id ? null : story.id)} />
-              <div className="absolute top-2 right-10 z-10">
-                <ModelBadge
-                  story={story}
-                  specId={specId}
-                  workspaceId={workspaceId}
-                  onModelChanged={(updated) => onStoryUpdated?.(updated)}
-                />
-              </div>
+                onOpenComments={() => setCommentsOpenFor(commentsOpenFor === story.id ? null : story.id)}
+                rightSlot={
+                  <ModelBadge
+                    story={story}
+                    specId={specId}
+                    workspaceId={workspaceId}
+                    onModelChanged={(updated) => onStoryUpdated?.(updated)}
+                  />
+                } />
             </div>
             {commentsOpenFor === story.id && (
               <StoryComments specId={specId} storyId={story.id} onClose={() => setCommentsOpenFor(null)}

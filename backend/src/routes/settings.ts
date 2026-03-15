@@ -304,4 +304,94 @@ router.put('/display', async (req: Request, res: Response) => {
   res.json({ ok: true, defaultModel: model, itemsPerPage: perPage });
 });
 
+interface WorkerSettingRow {
+  key: string;
+  value: string;
+}
+
+/**
+ * @swagger
+ * /api/settings/worker:
+ *   get:
+ *     tags: [Settings]
+ *     summary: Get worker settings
+ *     operationId: getWorkerSettings
+ *     description: Returns configurable worker parameters. These settings persist across backend restarts.
+ *     responses:
+ *       200:
+ *         description: Worker settings
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 max_concurrent_runs:
+ *                   type: integer
+ *                   minimum: 1
+ *                   maximum: 10
+ *                   example: 3
+ */
+router.get('/worker', async (_req: Request, res: Response) => {
+  const row = await queryOne<WorkerSettingRow>(
+    "SELECT value FROM worker_settings WHERE key = 'max_concurrent_runs'",
+  );
+  const max_concurrent_runs = row ? parseInt(row.value, 10) : 3;
+  res.json({ max_concurrent_runs });
+});
+
+/**
+ * @swagger
+ * /api/settings/worker:
+ *   put:
+ *     tags: [Settings]
+ *     summary: Update worker settings
+ *     operationId: updateWorkerSettings
+ *     description: Persists configurable worker parameters to the database. Changes take effect on the next worker poll cycle.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [max_concurrent_runs]
+ *             properties:
+ *               max_concurrent_runs:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 10
+ *                 example: 3
+ *     responses:
+ *       200:
+ *         description: Worker settings updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 max_concurrent_runs:
+ *                   type: integer
+ *       422:
+ *         description: max_concurrent_runs out of range (must be 1–10)
+ */
+const WorkerSettingsSchema = z.object({
+  max_concurrent_runs: z
+    .number()
+    .int('max_concurrent_runs must be an integer')
+    .min(1, 'max_concurrent_runs must be at least 1')
+    .max(10, 'max_concurrent_runs must be at most 10'),
+});
+
+router.put('/worker', validateBody(WorkerSettingsSchema), async (req: Request, res: Response) => {
+  const { max_concurrent_runs } = req.body as z.infer<typeof WorkerSettingsSchema>;
+
+  await execute(
+    `INSERT INTO worker_settings (key, value, updated_at)
+     VALUES ('max_concurrent_runs', $1, NOW())
+     ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+    [String(max_concurrent_runs)],
+  );
+
+  res.json({ max_concurrent_runs });
+});
+
 export default router;
