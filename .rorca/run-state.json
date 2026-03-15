@@ -2,7 +2,7 @@
   "specId": "rorca-orphan-process-sweep",
   "runId": 118,
   "startedAt": "2026-03-15T06:12:18.089Z",
-  "lastUpdatedAt": "2026-03-15T06:44:41.248Z",
+  "lastUpdatedAt": "2026-03-15T07:01:33.554Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -73,6 +73,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 953291
+    },
+    {
+      "storyId": "US-007",
+      "title": "Fix run_output_chunks terminal streaming for worktree pipeline runs",
+      "status": "passed",
+      "startedAt": "2026-03-15T06:44:55.839Z",
+      "finishedAt": "2026-03-15T07:01:33.554Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 997715
     }
   ],
   "failedStories": [],
