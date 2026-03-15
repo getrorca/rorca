@@ -13,6 +13,7 @@ import '@xterm/xterm/css/xterm.css';
 
 export interface RunTerminalHandle {
   scrollToStory: (storyId: string) => void;
+  writeMarker: (text: string) => void;
 }
 
 interface RunTerminalProps {
@@ -472,7 +473,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     try { localStorage.setItem(lsKey(runId), m); } catch { /* noop */ }
   }, [runId]);
 
-  // Expose scrollToStory via ref
+  // Expose scrollToStory + writeMarker via ref
   useImperativeHandle(ref, () => ({
     scrollToStory(storyId: string) {
       const term = termRef.current;
@@ -487,6 +488,11 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           return;
         }
       }
+    },
+    writeMarker(text: string) {
+      const term = termRef.current;
+      if (!term) return;
+      term.write(text);
     },
   }), []);
 

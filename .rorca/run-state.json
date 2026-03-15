@@ -2,7 +2,7 @@
   "specId": "rorca-run-view-streaming-fix",
   "runId": 126,
   "startedAt": "2026-03-15T20:14:13.214Z",
-  "lastUpdatedAt": "2026-03-15T20:18:55.982Z",
+  "lastUpdatedAt": "2026-03-15T20:21:57.932Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-15T20:18:55.982Z",
       "agentType": "claude",
       "elapsedMs": 130479
+    },
+    {
+      "storyId": "US-003",
+      "title": "Inject story completion markers into xterm terminal stream",
+      "status": "passed",
+      "startedAt": "2026-03-15T20:19:17.553Z",
+      "finishedAt": "2026-03-15T20:21:57.931Z",
+      "agentType": "claude",
+      "elapsedMs": 160378
     }
   ],
   "failedStories": [],
