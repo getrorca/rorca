@@ -2,7 +2,7 @@
   "specId": "rorca-run-view-streaming-fix",
   "runId": 126,
   "startedAt": "2026-03-15T20:14:13.214Z",
-  "lastUpdatedAt": "2026-03-15T20:57:27.984Z",
+  "lastUpdatedAt": "2026-03-15T21:08:25.642Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -66,6 +66,15 @@
       "finishedAt": "2026-03-15T20:57:27.984Z",
       "agentType": "claude",
       "elapsedMs": 567878
+    },
+    {
+      "storyId": "US-008",
+      "title": "Backend SSE endpoint injects story markers into output stream",
+      "status": "passed",
+      "startedAt": "2026-03-15T20:57:49.180Z",
+      "finishedAt": "2026-03-15T21:08:25.642Z",
+      "agentType": "claude",
+      "elapsedMs": 636462
     }
   ],
   "failedStories": [],
