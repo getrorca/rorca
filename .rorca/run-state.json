@@ -2,7 +2,7 @@
   "specId": "rorca-run-view-streaming-fix",
   "runId": 126,
   "startedAt": "2026-03-15T20:14:13.214Z",
-  "lastUpdatedAt": "2026-03-15T21:09:07.969Z",
+  "lastUpdatedAt": "2026-03-15T21:09:51.177Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -84,6 +84,15 @@
       "finishedAt": "2026-03-15T21:09:07.969Z",
       "agentType": "claude",
       "elapsedMs": 20949
+    },
+    {
+      "storyId": "US-010",
+      "title": "End-to-end validation — terminal output within 2s, story transitions visible, animations fire",
+      "status": "passed",
+      "startedAt": "2026-03-15T21:09:30.017Z",
+      "finishedAt": "2026-03-15T21:09:51.177Z",
+      "agentType": "claude",
+      "elapsedMs": 21160
     }
   ],
   "failedStories": [],
