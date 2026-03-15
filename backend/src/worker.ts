@@ -631,7 +631,11 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     const sequenceRef = { value: 1 };
     let pending = Buffer.alloc(0);
 
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const FLUSH_TIMER_MS = 500;
+
     const flushPending = async (): Promise<void> => {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       if (pending.length === 0) return;
       await writeBufferAsChunks(runId, pending, sequenceRef);
       pending = Buffer.alloc(0);
@@ -645,6 +649,15 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         await writeChunk(runId, sequenceRef.value, slice);
         sequenceRef.value += 1;
         pending = pending.slice(CHUNK_SIZE);
+      }
+      // Debounce: flush sub-CHUNK_SIZE tail after 500ms of no new data
+      if (pending.length > 0) {
+        if (flushTimer) clearTimeout(flushTimer);
+        flushTimer = setTimeout(() => { void flushPending(); }, FLUSH_TIMER_MS);
+      } else if (flushTimer) {
+        // Size-based flush consumed everything — cancel pending timer
+        clearTimeout(flushTimer);
+        flushTimer = null;
       }
     };
 
@@ -866,8 +879,11 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     // 6. Pipe stdout/stderr to run_output_chunks, continuing sequence from sequenceOffset
     const sequenceRef = { value: sequenceOffset + 1 };
     let pending = Buffer.alloc(0);
+    let flushTimer: ReturnType<typeof setTimeout> | null = null;
+    const FLUSH_TIMER_MS = 500;
 
     const flushPending = async (): Promise<void> => {
+      if (flushTimer) { clearTimeout(flushTimer); flushTimer = null; }
       if (pending.length === 0) return;
       await writeBufferAsChunks(runId, pending, sequenceRef);
       pending = Buffer.alloc(0);
@@ -880,6 +896,14 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         await writeChunk(runId, sequenceRef.value, slice);
         sequenceRef.value += 1;
         pending = pending.slice(CHUNK_SIZE);
+      }
+      // Debounce: flush sub-CHUNK_SIZE tail after 500ms of no new data
+      if (pending.length > 0) {
+        if (flushTimer) clearTimeout(flushTimer);
+        flushTimer = setTimeout(() => { void flushPending(); }, FLUSH_TIMER_MS);
+      } else if (flushTimer) {
+        clearTimeout(flushTimer);
+        flushTimer = null;
       }
     };
 
