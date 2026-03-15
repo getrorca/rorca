@@ -2,7 +2,7 @@
   "specId": "rorca-run-view-streaming-fix",
   "runId": 126,
   "startedAt": "2026-03-15T20:14:13.214Z",
-  "lastUpdatedAt": "2026-03-15T20:37:44.155Z",
+  "lastUpdatedAt": "2026-03-15T20:41:26.345Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -39,6 +39,15 @@
       "finishedAt": "2026-03-15T20:37:44.155Z",
       "agentType": "claude",
       "elapsedMs": 925390
+    },
+    {
+      "storyId": "US-005",
+      "title": "Jest tests for worker singleton guard and heartbeat-aware orphan sweep",
+      "status": "passed",
+      "startedAt": "2026-03-15T20:38:07.169Z",
+      "finishedAt": "2026-03-15T20:41:26.345Z",
+      "agentType": "claude",
+      "elapsedMs": 199176
     }
   ],
   "failedStories": [],
