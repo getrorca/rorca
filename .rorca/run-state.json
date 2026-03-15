@@ -1,8 +1,8 @@
 {
   "specId": "rorca-queue-observability",
-  "runId": 123,
-  "startedAt": "2026-03-15T08:41:50.465Z",
-  "lastUpdatedAt": "2026-03-15T08:44:10.909Z",
+  "runId": 124,
+  "startedAt": "2026-03-15T09:21:13.933Z",
+  "lastUpdatedAt": "2026-03-15T09:22:02.850Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-haiku-4-5-20251001",
       "elapsedMs": 139873
+    },
+    {
+      "storyId": "US-003",
+      "title": "GET /api/pipeline/queue/failed-jobs — dead-letter visibility endpoint with full job details and retry action",
+      "status": "passed",
+      "startedAt": "2026-03-15T09:21:14.543Z",
+      "finishedAt": "2026-03-15T09:22:02.849Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 48306
     }
   ],
   "failedStories": [],
@@ -52,5 +62,5 @@
       "rationale": "Minimizes endpoint latency; each query is O(1) on indexed columns (state, created_on, archived_on). Parallel execution adds ~30-50ms instead of ~200ms sequential."
     }
   ],
-  "resumedFromStory": "US-001"
+  "resumedFromStory": "US-002"
 }

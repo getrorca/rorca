@@ -1,14 +1,15 @@
 # Run State Summary
 
 Spec: rorca-queue-observability
-Run ID: 123
-Started: 2026-03-15T08:41:50.465Z
-Last Updated: 2026-03-15T08:44:10.909Z
+Run ID: 124
+Started: 2026-03-15T09:21:13.933Z
+Last Updated: 2026-03-15T09:22:02.850Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - US-001: Configure pg-boss maintenance settings — prevent unbounded table growth and enable queue monitoring — DONE (claude, claude-haiku-4-5-20251001, 58s)
 - US-002: Extend GET /api/pipeline/worker/health with queue statistics and health classification — DONE (claude, claude-haiku-4-5-20251001, 85s)
 - US-002: Extend GET /api/pipeline/worker/health with comprehensive queue stats — job counts by state, failed job count, archive size — DONE (claude, claude-haiku-4-5-20251001, 140s)
+- US-003: GET /api/pipeline/queue/failed-jobs — dead-letter visibility endpoint with full job details and retry action — DONE (claude, claude-sonnet-4-6, 48s)
 
 ## Decisions (2)
 - [2026-03-15T08:43:15.000Z] undefined: undefined — undefined
