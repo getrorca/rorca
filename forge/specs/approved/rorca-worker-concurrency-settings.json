@@ -141,7 +141,8 @@
         "spec-verifier",
         "backend"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ],
   "mermaidDiagram": "graph TD\n  US-001[\"US-001: Store max_concurrent_runs in DB\"]\n  US-002[\"US-002: Dynamic worker teamSize reload\"]\n  US-003[\"US-003: Settings UI — concurrency control\"]\n  US-004[\"US-004: Integration + unit tests\"]\n  US-001 --> US-002\n  US-001 --> US-003\n  US-002 --> US-004\n  US-003 --> US-004",
