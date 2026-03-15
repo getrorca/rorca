@@ -3,11 +3,12 @@
 Spec: rorca-orphan-process-sweep
 Run ID: 118
 Started: 2026-03-15T06:12:18.089Z
-Last Updated: 2026-03-15T06:25:26.898Z
+Last Updated: 2026-03-15T06:28:33.649Z
 
-## Completed Stories (5)
+## Completed Stories (6)
 - US-001: Implement orphan process sweep core function in worker.ts — DONE (claude, claude-sonnet-4-6, 386s)
 - US-002: Add startup orphan sweep on worker initialization — DONE (claude, claude-opus-4-6, 120s)
 - US-003: Add periodic orphan sweep every 5 minutes — DONE (claude, claude-sonnet-4-6, 67s)
 - US-004: Add POST /api/pipeline/orphan-sweep API endpoint — DONE (claude, claude-haiku-4-5-20251001, 145s)
 - US-004: Add POST /api/pipeline/orphan-sweep endpoint for manual trigger — DONE (claude, claude-haiku-4-5-20251001, 171s)
+- US-005: Add Jest tests for orphan sweep function and endpoint — DONE (claude, claude-sonnet-4-6, 172s)

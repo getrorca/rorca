@@ -2,7 +2,7 @@
   "specId": "rorca-orphan-process-sweep",
   "runId": 118,
   "startedAt": "2026-03-15T06:12:18.089Z",
-  "lastUpdatedAt": "2026-03-15T06:25:26.898Z",
+  "lastUpdatedAt": "2026-03-15T06:28:33.649Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -53,6 +53,16 @@
       "agentType": "claude",
       "model": "claude-haiku-4-5-20251001",
       "elapsedMs": 171084
+    },
+    {
+      "storyId": "US-005",
+      "title": "Add Jest tests for orphan sweep function and endpoint",
+      "status": "passed",
+      "startedAt": "2026-03-15T06:25:41.177Z",
+      "finishedAt": "2026-03-15T06:28:33.649Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 172472
     }
   ],
   "failedStories": [],
