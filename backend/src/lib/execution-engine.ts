@@ -128,6 +128,8 @@ interface EngineConfig {
   branchName: string | null;
   /** Workspace root (parent of worktree) — used for git merge commands. */
   workspacePath: string | null;
+  /** When set, skip (without re-emitting WAL events) all stories that appear before this story ID. Pre-seeded by trigger. */
+  startFromStoryId?: string;
 }
 
 // ─── Escalation Tracking ─────────────────────────────────────────────────────
@@ -2852,6 +2854,11 @@ async function main(): Promise<void> {
   if (resumeCtx.isResume) {
     logger.info(`[engine] Resuming from story ${resumeCtx.resumedFromStory} (${resumeCtx.passedStoryIds.size} stories already passed)`);
   }
+  if (config.startFromStoryId) {
+    // Pre-seeded by trigger — already-passing stories before this ID have story_results+WAL emitted.
+    // Engine respects passes:true in spec JSON via getNextStory, so no WAL re-emission happens.
+    logger.info(`[engine] Starting from story ${config.startFromStoryId} (pre-seeded stories already passed)`);
+  }
   let iteration = 0;
 
   while (true) {
@@ -3252,6 +3259,7 @@ function parseArgs(): EngineConfig {
   let worktreePath: string | null = null;
   let branchName: string | null = null;
   let workspacePath: string | null = null;
+  let startFromStoryId: string | undefined;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -3294,6 +3302,9 @@ function parseArgs(): EngineConfig {
       case '--workspace-path':
         workspacePath = args[++i];
         break;
+      case '--start-from':
+        startFromStoryId = args[++i];
+        break;
       default:
         logger.error(`Unknown arg: ${args[i]}`);
         process.exit(1);
@@ -3301,7 +3312,7 @@ function parseArgs(): EngineConfig {
   }
 
   if (!jsonPath || !cwd || !runId) {
-    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>]');
+    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>]');
     process.exit(1);
   }
 
@@ -3310,7 +3321,7 @@ function parseArgs(): EngineConfig {
   const agentType: AgentType = (cliAgent as AgentType) ?? envConfig.agentType;
   const agentModel: string | null = cliModel ?? envConfig.agentModel;
 
-  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, worktreePath, branchName, workspacePath };
+  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, worktreePath, branchName, workspacePath, startFromStoryId };
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
