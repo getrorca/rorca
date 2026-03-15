@@ -35,6 +35,7 @@ import { initDb, query, queryOne, execute } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { logger } from './lib/logger';
+import { broadcastAll } from './lib/sse-hub';
 
 // ── Post-merge smoke test ─────────────────────────────────────────────────────
 
@@ -1654,6 +1655,59 @@ async function start(): Promise<void> {
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
 
+  // 4b-monitor. Capture pg-boss monitor-states snapshots to queue_health_snapshots table.
+  // pg-boss emits 'monitor-states' every monitorStateIntervalSeconds (60s, set in US-001).
+  // Shape: { [queueName]: { created, retry, active, completed, cancelled, failed } }
+  // pg-boss emits 'monitor-states' but the TypeScript types only declare 'stopped'.
+  // Cast to EventEmitter to attach the listener without type errors.
+  type MonitorStatesPayload = Record<string, { created: number; retry: number; active: number; completed: number; cancelled: number; failed: number }>;
+  (boss as unknown as { on(event: string, listener: (states: MonitorStatesPayload) => void): void })
+    .on('monitor-states', (states: MonitorStatesPayload) => {
+    void (async () => {
+      try {
+        const totals = Object.values(states).reduce(
+          (acc, q) => {
+            acc.pending += (q.created ?? 0) + (q.retry ?? 0);
+            acc.active += q.active ?? 0;
+            acc.failed += q.failed ?? 0;
+            acc.completed += q.completed ?? 0;
+            return acc;
+          },
+          { pending: 0, active: 0, failed: 0, completed: 0 },
+        );
+
+        const breakdown = Object.entries(states).map(([name, counts]) => ({ name, ...counts }));
+
+        await execute(
+          `INSERT INTO queue_health_snapshots (total_pending, total_active, total_failed, total_completed, queue_breakdown, worker_id)
+           VALUES ($1, $2, $3, $4, $5, $6)`,
+          [totals.pending, totals.active, totals.failed, totals.completed, JSON.stringify(breakdown), WORKER_ID],
+        );
+
+        logger.debug(
+          { pending: totals.pending, active: totals.active, failed: totals.failed },
+          '[worker] queue_health_snapshot written',
+        );
+
+        // Alert: if any jobs are in failed state, broadcast for notification dispatcher / SSE clients.
+        if (totals.failed > 0) {
+          broadcastAll({
+            id: 0,
+            ts: new Date().toISOString(),
+            event_type: 'queue_failed_jobs_detected',
+            workspace_id: null,
+            spec_id: null,
+            story_id: null,
+            actor: 'worker',
+            payload: JSON.stringify({ count: totals.failed, breakdown }),
+          });
+        }
+      } catch (err) {
+        logger.warn({ err }, '[worker] monitor-states snapshot write failed');
+      }
+    })();
+  });
+
   // 4c. Periodic orphan sweep — runs every 5 minutes after job handlers are registered.
   // Handles the case where a sibling worker crashes mid-run AFTER our startup sweep —
   // those orphans would be missed by recoverStaleJobs/sweepOrphanProcesses at startup.
@@ -1727,6 +1781,24 @@ async function start(): Promise<void> {
 
   void pollDlq();
   setInterval(() => { void pollDlq(); }, 60_000);
+
+  // 4d. Auto-prune queue_health_snapshots — delete rows older than 30 days.
+  // Runs nightly at 03:00 via pg-boss native cron scheduling.
+  try {
+    await boss.schedule('queue-snapshot-prune', '0 3 * * *', {});
+    await boss.work('queue-snapshot-prune', async () => {
+      try {
+        const result = await execute(
+          `DELETE FROM queue_health_snapshots WHERE captured_at < NOW() - INTERVAL '30 days'`,
+        );
+        logger.info({ rowCount: result.rowCount }, '[worker] queue_health_snapshots pruned');
+      } catch (err) {
+        logger.warn({ err }, '[worker] queue_health_snapshots prune failed');
+      }
+    });
+  } catch (err) {
+    logger.warn({ err }, '[worker] queue-snapshot-prune schedule registration failed (non-fatal)');
+  }
 
   // 4. Bulk-register all enabled pipeline_schedules with pg-boss native scheduling.
   // Also registers the meta-cron (pipeline:cron, every minute) and per-schedule
