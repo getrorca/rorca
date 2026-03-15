@@ -2,7 +2,7 @@
   "specId": "rorca-queue-observability",
   "runId": 124,
   "startedAt": "2026-03-15T09:21:13.933Z",
-  "lastUpdatedAt": "2026-03-15T09:26:00.909Z",
+  "lastUpdatedAt": "2026-03-15T09:30:24.659Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -53,6 +53,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 222661
+    },
+    {
+      "storyId": "US-005",
+      "title": "Job pickup latency tracking — measure and expose avg/p95 time from job creation to worker pickup",
+      "status": "passed",
+      "startedAt": "2026-03-15T09:26:15.556Z",
+      "finishedAt": "2026-03-15T09:30:24.658Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 249102
     }
   ],
   "failedStories": [],
