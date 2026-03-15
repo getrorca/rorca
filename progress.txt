@@ -3,15 +3,16 @@
 Spec: rorca-queue-observability
 Run ID: 124
 Started: 2026-03-15T09:21:13.933Z
-Last Updated: 2026-03-15T09:30:24.659Z
+Last Updated: 2026-03-15T09:34:50.807Z
 
-## Completed Stories (6)
+## Completed Stories (7)
 - US-001: Configure pg-boss maintenance settings — prevent unbounded table growth and enable queue monitoring — DONE (claude, claude-haiku-4-5-20251001, 58s)
 - US-002: Extend GET /api/pipeline/worker/health with queue statistics and health classification — DONE (claude, claude-haiku-4-5-20251001, 85s)
 - US-002: Extend GET /api/pipeline/worker/health with comprehensive queue stats — job counts by state, failed job count, archive size — DONE (claude, claude-haiku-4-5-20251001, 140s)
 - US-003: GET /api/pipeline/queue/failed-jobs — dead-letter visibility endpoint with full job details and retry action — DONE (claude, claude-sonnet-4-6, 48s)
 - US-004: Capture pg-boss monitor-states events — write queue health snapshots to DB for trend analysis — DONE (claude, claude-sonnet-4-6, 223s)
 - US-005: Job pickup latency tracking — measure and expose avg/p95 time from job creation to worker pickup — DONE (claude, claude-sonnet-4-6, 249s)
+- US-006: Analytics panel queue health widget — real-time queue depth, failed job badge, latency chart, throughput — DONE (claude, claude-sonnet-4-6, 252s)
 
 ## Decisions (2)
 - [2026-03-15T08:43:15.000Z] undefined: undefined — undefined
