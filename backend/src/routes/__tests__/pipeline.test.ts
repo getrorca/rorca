@@ -1078,3 +1078,82 @@ describe('auto_merge column in pipeline_runs', () => {
     expect(getRes.body.run.auto_merge).toBe(true);
   });
 });
+
+// ─── POST /api/pipeline/orphan-sweep ────────────────────────────────────────
+
+describe('POST /api/pipeline/orphan-sweep', () => {
+  test('returns 200 with empty swept array when no orphans exist', async () => {
+    const res = await request(app)
+      .post('/api/pipeline/orphan-sweep')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('swept');
+    expect(res.body).toHaveProperty('count');
+    expect(Array.isArray(res.body.swept)).toBe(true);
+    expect(res.body.count).toBe(0);
+  });
+
+  test('returns 200 with swept runs when orphan processes exist', async () => {
+    // Create orphan runs with status='running' and no worker_id
+    // (simulates runs from a crashed worker)
+    const runId1 = await seedRun({ status: 'running', pid: 999999 });
+    const runId2 = await seedRun({ status: 'running', pid: null });
+
+    // Mark them as orphaned (worker_id NULL or different from current worker)
+    await execute(`UPDATE pipeline_runs SET worker_id = NULL WHERE id = $1`, [runId1]);
+    await execute(`UPDATE pipeline_runs SET worker_id = NULL WHERE id = $2`, [runId2]);
+
+    const res = await request(app)
+      .post('/api/pipeline/orphan-sweep')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveProperty('swept');
+    expect(res.body).toHaveProperty('count');
+    expect(Array.isArray(res.body.swept)).toBe(true);
+    expect(res.body.count).toBe(2);
+
+    // Verify swept results
+    expect(res.body.swept[0]).toHaveProperty('runId');
+    expect(res.body.swept[0]).toHaveProperty('pid');
+    expect(res.body.swept[0]).toHaveProperty('killed');
+
+    // Verify runs are now marked as failed
+    const failedRuns = await query<{ id: number; status: string }>(
+      `SELECT id, status FROM pipeline_runs WHERE id IN ($1, $2) ORDER BY id`,
+      [runId1, runId2]
+    );
+
+    expect(failedRuns).toHaveLength(2);
+    expect(failedRuns[0].status).toBe('failed');
+    expect(failedRuns[1].status).toBe('failed');
+
+    // Verify WAL events were emitted
+    const walEvents = await query<{ event_type: string; payload: any }>(
+      `SELECT event_type, payload FROM wal_events
+       WHERE workspace_id = 'ws-pipe' AND event_type IN ('run_finished', 'story_failed')
+       ORDER BY ts DESC LIMIT 10`,
+    );
+
+    expect(walEvents.length).toBeGreaterThan(0);
+    const runFinishedEvents = walEvents.filter(e => e.event_type === 'run_finished');
+    expect(runFinishedEvents.length).toBeGreaterThanOrEqual(1);
+    expect(runFinishedEvents[0].payload.reason).toBe('orphan_sweep');
+  });
+
+  test('returns 500 when sweepOrphanProcesses throws', async () => {
+    // Mock sweepOrphanProcesses to throw
+    jest.spyOn(require('../../../worker'), 'sweepOrphanProcesses').mockRejectedValueOnce(
+      new Error('Test sweep error')
+    );
+
+    const res = await request(app)
+      .post('/api/pipeline/orphan-sweep')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(500);
+    expect(res.body).toHaveProperty('error');
+    expect(res.body.error).toContain('Test sweep error');
+  });
+});

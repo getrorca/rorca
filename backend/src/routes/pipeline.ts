@@ -35,6 +35,7 @@ import { synthesizeRunMemory } from '../lib/auto-memory';
 import { logger } from '../lib/logger';
 import { getBoss } from '../lib/pg-boss';
 import { ConflictError, NotFoundError } from '../lib/errors';
+import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
 // Same pattern as execution-engine.ts — strips nested-session detection vars.
@@ -5358,6 +5359,68 @@ router.get('/worker/health', async (req: Request, res: Response) => {
     });
   } catch (error: unknown) {
     logger.error({ err: error }, '[Pipeline] worker health check error');
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/pipeline/orphan-sweep:
+ *   post:
+ *     summary: Trigger immediate orphan process sweep
+ *     description: Scans for pipeline runs with status='running' that belong to other workers or have no worker_id (orphaned), kills their processes, and marks runs as failed. Callable from API process (currentWorkerId is undefined, sweeps ALL stale runs).
+ *     tags:
+ *       - Pipeline
+ *     responses:
+ *       200:
+ *         description: Orphan sweep completed successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 swept:
+ *                   type: array
+ *                   description: Array of swept orphan runs
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       runId:
+ *                         type: number
+ *                         description: Pipeline run ID
+ *                       pid:
+ *                         type: number
+ *                         description: Process ID that was swept (or 0 if no PID)
+ *                       killed:
+ *                         type: boolean
+ *                         description: Whether the process was successfully terminated
+ *                     required: [runId, pid, killed]
+ *                 count:
+ *                   type: number
+ *                   description: Total number of orphan runs swept
+ *               required: [swept, count]
+ *       500:
+ *         description: Sweep operation failed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   description: Error message
+ *               required: [error]
+ */
+router.post('/orphan-sweep', async (req: Request, res: Response) => {
+  try {
+    const results = await sweepOrphanProcesses();
+
+    res.json({
+      swept: results,
+      count: results.length,
+    });
+  } catch (error: unknown) {
+    logger.error({ err: error }, '[Pipeline] orphan sweep error');
     res.status(500).json({ error: (error as Error).message });
   }
 });
