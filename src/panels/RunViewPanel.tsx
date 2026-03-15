@@ -828,54 +828,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     return map;
   }, [walEvents, seedStatuses]);
 
-  // Inject ANSI-colored story progress markers into xterm terminal on WAL events
-  const injectedWalIdsRef = useRef<Set<number>>(new Set());
-  useEffect(() => {
-    if (!terminalRef.current) return;
-    // Build a title lookup from specStories
-    const titleMap = new Map<string, string>();
-    for (const s of specStories) titleMap.set(s.id, s.title);
-
-    for (const evt of walEvents) {
-      if (injectedWalIdsRef.current.has(evt.id)) continue;
-      const sid = evt.story_id;
-      if (!sid) continue;
-
-      if (evt.event_type === 'story_passed' || evt.event_type === 'story_failed' || evt.event_type === 'story_skipped') {
-        injectedWalIdsRef.current.add(evt.id);
-        const title = titleMap.get(sid) ?? sid;
-
-        // Compute elapsed time from startedAt in liveStatuses
-        const derived = liveStatuses.get(sid);
-        let elapsedStr = '';
-        if (derived?.startedAt && evt.ts) {
-          const ms = new Date(evt.ts).getTime() - new Date(derived.startedAt).getTime();
-          const totalSec = Math.round(ms / 1000);
-          const min = Math.floor(totalSec / 60);
-          const sec = totalSec % 60;
-          elapsedStr = min > 0 ? `${min}m ${sec.toString().padStart(2, '0')}s` : `${sec}s`;
-        }
-
-        let marker: string;
-        if (evt.event_type === 'story_passed') {
-          marker = `\r\n\x1b[32m✓ ${sid}: ${title} — passed${elapsedStr ? ` (${elapsedStr})` : ''}\x1b[0m\r\n`;
-        } else if (evt.event_type === 'story_failed') {
-          marker = `\r\n\x1b[31m✗ ${sid}: ${title} — failed${elapsedStr ? ` (${elapsedStr})` : ''}\x1b[0m\r\n`;
-        } else {
-          // skipped — try to extract blocker from payload
-          let blockedBy = '';
-          try {
-            const p = JSON.parse(evt.payload ?? '{}');
-            if (p.blocked_by) blockedBy = ` (blocked by ${p.blocked_by})`;
-            else if (p.reason) blockedBy = ` (${p.reason})`;
-          } catch { /* ignore */ }
-          marker = `\r\n\x1b[33m⊘ ${sid}: ${title} — skipped${blockedBy}\x1b[0m\r\n`;
-        }
-
-        terminalRef.current.writeMarker(marker);
-      }
-    }
-  }, [walEvents, specStories, liveStatuses]);
+  // US-008: Story completion markers are now injected server-side into run_output_chunks
+  // by marker-injector.ts — they arrive via the chunk SSE stream and are replayed for late-joiners.
 
   // Derive merge status: start from DB base, overlay SSE events (like effectiveStatus pattern)
   const mergeInfo = useMemo<MergeInfo | null>(() => {
