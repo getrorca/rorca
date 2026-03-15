@@ -2,7 +2,7 @@
   "specId": "rorca-orphan-process-sweep",
   "runId": 118,
   "startedAt": "2026-03-15T06:12:18.089Z",
-  "lastUpdatedAt": "2026-03-15T06:22:20.762Z",
+  "lastUpdatedAt": "2026-03-15T06:25:26.898Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -33,6 +33,26 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 66505
+    },
+    {
+      "storyId": "US-004",
+      "title": "Add POST /api/pipeline/orphan-sweep API endpoint",
+      "status": "passed",
+      "startedAt": "2026-03-15T06:22:35.276Z",
+      "finishedAt": "2026-03-15T06:25:00.000Z",
+      "agentType": "claude",
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 144724
+    },
+    {
+      "storyId": "US-004",
+      "title": "Add POST /api/pipeline/orphan-sweep endpoint for manual trigger",
+      "status": "passed",
+      "startedAt": "2026-03-15T06:22:35.813Z",
+      "finishedAt": "2026-03-15T06:25:26.897Z",
+      "agentType": "claude",
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 171084
     }
   ],
   "failedStories": [],
