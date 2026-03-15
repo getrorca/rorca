@@ -1,5 +1,5 @@
 import { useState, lazy, Suspense } from 'react';
-import { BarChart3, Coins, DollarSign, TrendingUp, HeartPulse, Loader2 } from 'lucide-react';
+import { BarChart3, Coins, DollarSign, TrendingUp, HeartPulse, Activity, Loader2 } from 'lucide-react';
 
 /* ─── Lazy-loaded tab content ─────────────────────────────────────────────── */
 
@@ -11,10 +11,11 @@ const CompletionRatePanel = lazy(() => import('./CompletionRatePanel'));
 const RoiCalculatorPanel = lazy(() => import('./RoiCalculatorPanel'));
 const FinOpsDashboardPanel = lazy(() => import('./FinOpsDashboardPanel'));
 const HealthDashboardPanel = lazy(() => import('./HealthDashboardPanel'));
+const QueueHealthPanel = lazy(() => import('./QueueHealthPanel'));
 
 /* ─── Tab definitions ─────────────────────────────────────────────────────── */
 
-type AnalyticsTab = 'overview' | 'usage' | 'costs' | 'performance' | 'health';
+type AnalyticsTab = 'overview' | 'usage' | 'costs' | 'performance' | 'health' | 'queue';
 
 interface TabDef {
   id: AnalyticsTab;
@@ -28,6 +29,7 @@ const TABS: TabDef[] = [
   { id: 'costs', label: 'Costs', icon: DollarSign },
   { id: 'performance', label: 'Performance', icon: TrendingUp },
   { id: 'health', label: 'Health', icon: HeartPulse },
+  { id: 'queue', label: 'Queue', icon: Activity },
 ];
 
 /* ─── Loading fallback ────────────────────────────────────────────────────── */
@@ -118,6 +120,8 @@ function TabContent({ tab }: { tab: AnalyticsTab }) {
       return <PerformanceTab />;
     case 'health':
       return <HealthDashboardPanel />;
+    case 'queue':
+      return <QueueHealthWrapper />;
   }
 }
 
@@ -220,6 +224,18 @@ function PerformanceTab() {
           {subTab === 'roi' && <RoiCalculatorPanel />}
         </Suspense>
       </div>
+    </div>
+  );
+}
+
+/* ─── Queue Health Tab ─────────────────────────────────────────────────────── */
+
+function QueueHealthWrapper() {
+  return (
+    <div className="h-full overflow-y-auto p-4">
+      <Suspense fallback={<TabLoader />}>
+        <QueueHealthPanel />
+      </Suspense>
     </div>
   );
 }
