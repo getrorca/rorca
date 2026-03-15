@@ -472,8 +472,37 @@ The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Q
 
 `SUPPORTED_MODELS` list is authoritative — validate before passing to `chatComplete`.
 
-### PostgreSQL Migration Pattern
-Migrations are SQL files in `backend/src/db/pg-migrations/` (49 files, 001–049). They run in numeric order on first startup via `pg-index.ts`, tracked in `schema_migrations` table. Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively — no workarounds needed. New migrations: create `NNN_description.sql` in `pg-migrations/`.
+### Apache AGE — Pool Connection Hygiene (CRITICAL)
+Apache AGE requires `LOAD 'age'` + `SET search_path = ag_catalog, "$user", public` per session before Cypher queries. This **poisons** the pool connection — subsequent queries on that connection hit `ag_catalog.workspaces` (empty) instead of `rorca.workspaces` (real data), causing intermittent "Workspace not found" 404s.
+
+**Rule**: Any code that calls `setupAgeSession()` MUST restore the search_path before releasing:
+```typescript
+const client = await pool.connect();
+try {
+  await setupAgeSession(client);  // sets search_path to ag_catalog
+  await client.query(cypherSQL);
+} finally {
+  await client.query('SET search_path = rorca, public');  // MUST restore
+  client.release();
+}
+```
+
+Three schemas have a `workspaces` table: `rorca.workspaces` (app data), `ag_catalog.workspaces` (AGE system, empty), `public.workspaces` (legacy, empty). The pool has an `on('connect')` safety net in `db/index.ts`, but it does NOT replace proper cleanup in graph code.
+
+### PostgreSQL Migration Pattern — Timestamp Format (CRITICAL)
+Migrations are SQL files in `backend/src/db/pg-migrations/`. They run in numeric prefix order on first startup via `pg-index.ts`, tracked in `schema_migrations` table (BIGINT version column). Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively.
+
+**New migrations MUST use timestamp format**: `YYYYMMDDHHMMSS_description.sql`
+```bash
+# Example: creating a migration on 2026-03-14 at 15:00:00
+20260314150000_add_user_preferences.sql
+```
+
+**Why**: Sequential numbers (001, 002, ...) collide when parallel branches create migrations simultaneously — common with Rorca's worktree-per-spec architecture. Timestamps are structurally unique (two developers/agents can't commit at the exact same second).
+
+**Hybrid coexistence**: Existing sequential migrations (001–079) stay as-is. New timestamp migrations sort after them automatically (numeric sort: `79 < 20260314150000`). The runner supports both formats indefinitely — no renaming needed.
+
+**Duplicate prefix detection**: `pg-index.ts` calls `checkDuplicatePrefixes()` at startup and fails loudly if two files share the same numeric prefix. This catches collisions before any SQL runs.
 
 ### Skills Install Chain (install-from-sh)
 `POST /api/skills/install-from-sh` does NOT shell out to `npx skills add`. It fetches directly:
@@ -1309,33 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
-> Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture
-> Rule: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-## 2026-03-10 [Convention] PostgreSQL Migration Pattern
-> Rule: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
-
-## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates
-> Rule: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
-> Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-
-## 2026-03-12 [Bug Fix] MCP rorca_list_specs and rorca_list_runs wrong response shape
-> Rule: Both tools assumed wrong API response shapes. rorca_list_specs treated response as a bare array but API returns { items: [...] }. rorca_list_runs destructured { runs } but API returns { items: [...] }. Fixed by normalizing: Array.isArray(data) ? data : (data.items ?? []) for list_specs, and payload.runs ?? payload.items ?? [] for list_runs. Also fixed specName field: API uses specName not title — display as s.specName ?? s.title ?? s.id.
-
-## 2026-03-12 [Pattern] MCP tools vs prompts — tools are Claude-callable, prompts are user slash commands
-> Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
-
-## 2026-03-12 [Decision] GitHub org is getrorca — repo is github.com/getrorca/rorca (private)
-> Rule: The canonical remote for the Rorca codebase is https://github.com/getrorca/rorca (private repo). The old remote was sysgazer/rorcha — that is dead. All pushes go to getrorca/rorca. The repo is permanently closed source — never suggest open sourcing, BSL, or source-available licensing.
-
-## 2026-03-12 [Gotcha] Merging old SQLite-era branches with "take theirs" clobbers modern PostgreSQL files
-> Rule: NEVER merge old pre-postgres-migration branches (rorca-convention-agents, rorca-frontend-routing, and any branch with timestamp ~1772...) using "git checkout --theirs" on code conflicts. These branches were built on SQLite and will revert db/index.ts to the SQLite version, revert App.tsx/Sidebar.tsx/routes.tsx to the old multi-panel UI, and truncate server.ts. Always restore from a known-good modern commit (e.g. git show <pre-merge-sha>:path/to/file) after any such merge.
-
 ## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
 > Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
 
@@ -1368,6 +1370,33 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 ## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
 > Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
+
+## 2026-03-13 [Gotcha] Old execution-engine processes from test runs survive indefinitely
+> Rule: Execution-engine subprocesses from old load test runs (WR-019, PG-020) and integration tests in temp paths can survive machine restarts and run for days, consuming CPU/memory. Check with: `ps aux | grep execution-engine | grep -v grep`. Kill PIDs associated with temp paths (/var/folders, /tmp) or old worktree paths. WR-007 graceful shutdown only helps for clean worker exits — kill -9 or machine crash still orphans children. Safe to kill any execution-engine with a temp path or a worktree path that no longer exists.
+
+## 2026-03-13 [Decision] MCP-native generation: API as context+persistence layer, LLM work in caller's session
+> Rule: Rorca's API should split LLM-heavy operations (spec generation, enrichment) into two phases: (1) context-fetch — API returns the synthesized direction stack, memory, schema, skills as a raw bundle with no LLM call; (2) save — API persists the result the caller's LLM already generated. The LLM reasoning happens IN the caller's MCP session (Claude Code, OpenCode CLI, Codex CLI), not in a server-spawned subprocess. This means: rorca_get_generation_context returns the context bundle, the calling LLM generates the spec JSON in-session using cached/warm context, then rorca_save_spec persists it. The existing server-side generation path (spawning claude --print) is kept as a fallback for browser UI users who have no MCP session. This is the correct long-term architecture for rorca_forge_and_run too — it should orchestrate tool calls that the caller's session handles, not block on a subprocess.
+
+## 2026-03-13 [Architecture] All three CLI coding assistants support MCP — Rorca tools work from any of them
+> Rule: Claude Code, OpenCode CLI, and Codex CLI all support MCP servers. A user working in any of these three can call Rorca MCP tools (rorca_generate_spec, rorca_trigger_run, etc.) from their active session. The only path that does NOT support MCP is the browser UI. This means the MCP-native generation architecture benefits all CLI users regardless of which assistant they use: Claude Code (Claude model), OpenCode CLI (any provider — GPT-4o, Gemini, etc.), Codex CLI (ChatGPT model). Architecture principle: Rorca API = context + persistence. LLM reasoning = caller's session. Browser UI = server-side subprocess fallback only.
+
+## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
+> Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
+
+## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
+> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
+
+## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
+> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
+
+## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
+> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
+
+## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
+> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
+
+## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
+> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
 Follow this workflow for implementation:
 ## Agent Role: Backend Routes
@@ -1523,20 +1552,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-001):
-Add an `auto_merge` boolean column (default true) to the `pipeline_runs` table via a new PostgreSQL migration. Update `POST /api/pipeline/trigger` to accept `autoMerge` in the request body and persist it to the new column. Update the pg-boss job payload for `pipeline:run` to include the `autoMerge` flag so the worker can read it when picking up the job. The trigger route should only store `autoMerge=true` when `autoWorktree=true` — if the run is not in a worktree, `auto_merge` is stored as `false` regardless of the request payload.
-
-## Context
-- **Migration numbering**: Highest existing migration is `073_fix_retrieval_method_constraint.sql` — use `074_add_auto_merge_to_pipeline_runs.sql`. Never reuse a number; parallel branches have caused collisions before (duplicate 069 incident).
-- **Column convention**: `auto_merge BOOLEAN NOT NULL DEFAULT true` with snake_case. Map to camelCase `autoMerge` in API responses. Use `$1, $2, ...` numbered placeholders in all queries.
-- **Trigger route location**: `POST /api/pipeline/trigger` is in `backend/src/routes/pipeline.ts`. Destructure `autoMerge` from `req.body` alongside existing `autoWorktree`. Enforce constraint: `const autoMerge = autoWorktree && (bodyAutoMerge !== false)` — never store `auto_merge=true` for non-worktree runs.
-- **pg-boss payload**: Add `autoMerge` to the existing job data object passed to `boss.send()`. Do NOT change the UUID-based job ID generation pattern — pg-boss requires UUIDs (past bug: using `String(runId)` broke job pickup).
-- **INSERT/SELECT updates**: Add `auto_merge` to the `INSERT INTO pipeline_runs` column list in the trigger route, and to `SELECT` queries in `GET /api/pipeline/runs/:id` and any list routes. Alias as `auto_merge AS "autoMerge"` or map in JS.
-- **Tests**: Backend tests in `backend/src/routes/__tests__/pipeline.test.ts` (Jest). Cover three cases: (1) default true when `autoWorktree=true`, (2) forced false when `autoWorktree=false`, (3) explicit `autoMerge=false` with `autoWorktree=true` respected. Watch for conflict detection from leftover `status='running'` rows in test DB — clean up or mock accordingly.
-- **DB access is async**: Always `await` all `query()`, `queryOne()`, `execute()` calls. `queryOne<T>()` returns `T | undefined`.
+Create a new `worker_settings` table (or extend an existing settings table) to persist the max_concurrent_runs value. Add a migration, a typed DB accessor, and a REST API endpoint so the setting can be read and written without touching .env or restarting the server. Default value must be 3. The endpoint should live under the existing settings API surface (e.g. GET/PUT /api/settings/worker) and return/accept { max_concurrent_runs: number } validated to range 1–10.
 
 Acceptance Criteria:
-- A new migration file adds `auto_merge BOOLEAN NOT NULL DEFAULT true` to `pipeline_runs` table
-- POST /api/pipeline/trigger accepts `autoMerge` boolean in the request body (defaults to true)
-- When `autoWorktree=false`, `auto_merge` is stored as `false` regardless of the `autoMerge` request value
-- The pg-boss `pipeline:run` job data payload includes the `autoMerge` field
-- GET /api/pipeline/runs/:id response includes the `autoMerge` field in the run object
+- Migration creates a `worker_settings` table with columns: id SERIAL PRIMARY KEY, key TEXT UNIQUE NOT NULL, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW(). Tracked in schema_migrations.
+- On startup, backend seeds the row ('max_concurrent_runs', '3') using INSERT ... ON CONFLICT DO NOTHING so existing customised values are preserved.
+- GET /api/settings/worker returns { max_concurrent_runs: number } with the current DB value. Returns 200 with default 3 when no custom value has been set.
+- PUT /api/settings/worker accepts { max_concurrent_runs: number }, validates it is an integer in range 1–10 (returns 422 with descriptive error outside range), persists to DB, and returns the updated value.
+- Route has @swagger JSDoc annotations so the endpoint appears in /api/docs.

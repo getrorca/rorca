@@ -472,8 +472,37 @@ The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Q
 
 `SUPPORTED_MODELS` list is authoritative — validate before passing to `chatComplete`.
 
-### PostgreSQL Migration Pattern
-Migrations are SQL files in `backend/src/db/pg-migrations/` (49 files, 001–049). They run in numeric order on first startup via `pg-index.ts`, tracked in `schema_migrations` table. Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively — no workarounds needed. New migrations: create `NNN_description.sql` in `pg-migrations/`.
+### Apache AGE — Pool Connection Hygiene (CRITICAL)
+Apache AGE requires `LOAD 'age'` + `SET search_path = ag_catalog, "$user", public` per session before Cypher queries. This **poisons** the pool connection — subsequent queries on that connection hit `ag_catalog.workspaces` (empty) instead of `rorca.workspaces` (real data), causing intermittent "Workspace not found" 404s.
+
+**Rule**: Any code that calls `setupAgeSession()` MUST restore the search_path before releasing:
+```typescript
+const client = await pool.connect();
+try {
+  await setupAgeSession(client);  // sets search_path to ag_catalog
+  await client.query(cypherSQL);
+} finally {
+  await client.query('SET search_path = rorca, public');  // MUST restore
+  client.release();
+}
+```
+
+Three schemas have a `workspaces` table: `rorca.workspaces` (app data), `ag_catalog.workspaces` (AGE system, empty), `public.workspaces` (legacy, empty). The pool has an `on('connect')` safety net in `db/index.ts`, but it does NOT replace proper cleanup in graph code.
+
+### PostgreSQL Migration Pattern — Timestamp Format (CRITICAL)
+Migrations are SQL files in `backend/src/db/pg-migrations/`. They run in numeric prefix order on first startup via `pg-index.ts`, tracked in `schema_migrations` table (BIGINT version column). Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively.
+
+**New migrations MUST use timestamp format**: `YYYYMMDDHHMMSS_description.sql`
+```bash
+# Example: creating a migration on 2026-03-14 at 15:00:00
+20260314150000_add_user_preferences.sql
+```
+
+**Why**: Sequential numbers (001, 002, ...) collide when parallel branches create migrations simultaneously — common with Rorca's worktree-per-spec architecture. Timestamps are structurally unique (two developers/agents can't commit at the exact same second).
+
+**Hybrid coexistence**: Existing sequential migrations (001–079) stay as-is. New timestamp migrations sort after them automatically (numeric sort: `79 < 20260314150000`). The runner supports both formats indefinitely — no renaming needed.
+
+**Duplicate prefix detection**: `pg-index.ts` calls `checkDuplicatePrefixes()` at startup and fails loudly if two files share the same numeric prefix. This catches collisions before any SQL runs.
 
 ### Skills Install Chain (install-from-sh)
 `POST /api/skills/install-from-sh` does NOT shell out to `npx skills add`. It fetches directly:
@@ -1309,18 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
-> Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture
-> Rule: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-## 2026-03-10 [Convention] PostgreSQL Migration Pattern
-> Rule: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
-
-## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates
-> Rule: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-
 ## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
 > Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
 
@@ -1369,86 +1386,23 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
 > Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
 
+## 2026-03-13 [Gotcha] Old execution-engine processes from test runs survive indefinitely
+> Rule: Execution-engine subprocesses from old load test runs (WR-019, PG-020) and integration tests in temp paths can survive machine restarts and run for days, consuming CPU/memory. Check with: `ps aux | grep execution-engine | grep -v grep`. Kill PIDs associated with temp paths (/var/folders, /tmp) or old worktree paths. WR-007 graceful shutdown only helps for clean worker exits — kill -9 or machine crash still orphans children. Safe to kill any execution-engine with a temp path or a worktree path that no longer exists.
+
+## 2026-03-13 [Decision] MCP-native generation: API as context+persistence layer, LLM work in caller's session
+> Rule: Rorca's API should split LLM-heavy operations (spec generation, enrichment) into two phases: (1) context-fetch — API returns the synthesized direction stack, memory, schema, skills as a raw bundle with no LLM call; (2) save — API persists the result the caller's LLM already generated. The LLM reasoning happens IN the caller's MCP session (Claude Code, OpenCode CLI, Codex CLI), not in a server-spawned subprocess. This means: rorca_get_generation_context returns the context bundle, the calling LLM generates the spec JSON in-session using cached/warm context, then rorca_save_spec persists it. The existing server-side generation path (spawning claude --print) is kept as a fallback for browser UI users who have no MCP session. This is the correct long-term architecture for rorca_forge_and_run too — it should orchestrate tool calls that the caller's session handles, not block on a subprocess.
+
+## 2026-03-13 [Architecture] All three CLI coding assistants support MCP — Rorca tools work from any of them
+> Rule: Claude Code, OpenCode CLI, and Codex CLI all support MCP servers. A user working in any of these three can call Rorca MCP tools (rorca_generate_spec, rorca_trigger_run, etc.) from their active session. The only path that does NOT support MCP is the browser UI. This means the MCP-native generation architecture benefits all CLI users regardless of which assistant they use: Claude Code (Claude model), OpenCode CLI (any provider — GPT-4o, Gemini, etc.), Codex CLI (ChatGPT model). Architecture principle: Rorca API = context + persistence. LLM reasoning = caller's session. Browser UI = server-side subprocess fallback only.
+
+## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
+> Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
+
 Follow this workflow for implementation:
 ## Agent Role: Backend Routes
 
 
-## Skill: workflow-orchestrator (relevance: 8)
----
-name: workflow-orchestrator
-description: Build and orchestrate AI-driven development workflows that iterate until success using configurable patterns and multi-agent coordination
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers, AI agents, team leads
-  category: workflow
----
-
-# Workflow Orchestrator
-
-Design, configure, and execute AI-driven development workflows that iterate until tasks complete successfully using configurable patterns, multi-agent coordination, and intelligent stop conditions.
-
-## When to use me
-
-Use this skill when:
-- Building complex features requiring multiple AI agent passes
-- Implementing automated development workflows with verification steps
-- Coordinating parallel AI agents for different aspects of a task
-- Creating self-correcting loops that iterate until success criteria met
-- Need to orchestrate multiple AI agents in sequence or parallel
-
-## What I do
-
-### 1. Workflow Pattern Selection
-- **Analyze task requirements** to recommend optimal workflow patterns
-- **Match complexity levels** with appropriate workflow types
-- **Compare trade-offs** between speed, cost, control, and quality
-
-### 2. Multi-Agent Coordination
-- **Sequence agents** for linear workflows (build → verify → plan)
-- **Parallelize agents** for concurrent execution
-- **Handle failures and retries** with intelligent routing
-- **Implement steering patterns** (linear, conditional, parallel, unblocking)
-
-### 3. SSE Event Streaming
-- **Real-time monitoring** via Server-Sent Events
-- **Progress tracking** across workflow stages
-- **Live output streaming** from subprocess execution
-- **Late-joiner replay** from in-memory buffers
-
-### 4. Integration & Tooling
-- **Subprocess management** for isolated agent execution
-- **Output buffer management** with subscriber patterns
-- **Structured event emission** for semantic log parsing
-- **Git integration** for automated quality gates
-
-## Key Patterns
-
-### Subprocess → SSE → Terminal Pattern
-```
-Backend spawns subprocess (claude --print, opencode run)
-  → stdout/stderr piped to in-memory buffer
-  → buffer broadcasts to SSE subscribers
-  → SSE endpoint replays buffer + live chunks
-  → Frontend EventSource connects, writes to xterm.js
-  → Late joiners get full replay automatically
-```
-
-### Buffer Management
-- In-memory circular buffer per generation/run ID
-- Subscribers added/removed on SSE connect/disconnect
-- Auto-cleanup after TTL (30 min default)
-- Base64 encoding for binary-safe transport
-
-## Notes
-
-- **Start simple** — single agent pattern before scaling to multi-agent
-- **Monitor costs** — parallel agents increase expense
-- **Implement escape hatches** — always have manual stop conditions
-- **Use structured events** alongside raw output for dual-mode rendering
-- **Buffer management is critical** — memory leaks from uncleaned buffers
-
-## Skill: logging-fundamentals (relevance: 5)
+## Skill: logging-fundamentals (relevance: 6)
 ---
 name: logging-fundamentals
 description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
@@ -1695,22 +1649,65 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-004):
-After the execution-engine subprocess exits in the worker's `pipeline:run` handler, add a post-run merge step. The merge executes only when ALL of: (1) the run status is 'done' (all stories passed), (2) `autoWorktree` was true for the run, (3) `autoMerge` is true in the job data / pipeline_runs row, (4) a worktree branch name exists. The merge sequence: emit `worktree_merge_started` WAL event → `git checkout main` → `git pull --ff-only origin main` (to sync with remote, skip if no remote) → `git merge --no-ff <branch> -m 'chore: merge <branch> (run #<runId>)'` → if merge succeeds: capture the merge commit SHA from `git rev-parse HEAD`, emit `worktree_merged` with SHA, update `pipeline_runs.merge_status = 'merged'` and `pipeline_runs.merge_commit_sha = <sha>` → if merge fails (exit code != 0): do NOT abort yet, proceed to US-005 agentic resolution. Add two new columns to `pipeline_runs` via migration: `merge_status VARCHAR(20) DEFAULT NULL` (values: null, 'pending', 'merging', 'merged', 'failed') and `merge_commit_sha VARCHAR(64) DEFAULT NULL`. All git commands execute in the workspace root directory (not the worktree directory). After successful merge, clean up the worktree with `git worktree remove <worktree-path> --force`.
+pg-boss fires a `monitor-states` event every `monitorStateIntervalSeconds` (set to 60 in US-001) with a snapshot of job counts by state and queue. This story captures those events and persists them to a new `queue_health_snapshots` table for trend analysis, alerting, and the analytics charts in US-007.
+
+**Migration**: Create `backend/src/db/pg-migrations/072_queue_health_snapshots.sql`:
+```sql
+CREATE TABLE IF NOT EXISTS queue_health_snapshots (
+  id SERIAL PRIMARY KEY,
+  captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+  total_pending INT NOT NULL DEFAULT 0,
+  total_active INT NOT NULL DEFAULT 0,
+  total_failed INT NOT NULL DEFAULT 0,
+  total_completed INT NOT NULL DEFAULT 0,
+  queue_breakdown JSONB NOT NULL DEFAULT '[]',
+  worker_id TEXT,
+  oldest_pending_seconds INT
+);
+CREATE INDEX IF NOT EXISTS idx_queue_health_snapshots_captured_at
+  ON queue_health_snapshots (captured_at DESC);
+```
+
+**Event listener in worker.ts** (add after `boss.start()`):
+```typescript
+boss.on('monitor-states', async (states) => {
+  // states = { [queueName]: { created, retry, active, completed, cancelled, failed } }
+  const totals = Object.values(states).reduce((acc, q) => {
+    acc.pending += q.created + q.retry;
+    acc.active += q.active;
+    acc.failed += q.failed;
+    acc.completed += q.completed;
+    return acc;
+  }, { pending: 0, active: 0, failed: 0, completed: 0 });
+  const breakdown = Object.entries(states).map(([name, counts]) => ({ name, ...counts }));
+  await execute(
+    `INSERT INTO queue_health_snapshots (total_pending, total_active, total_failed, total_completed, queue_breakdown, worker_id)
+     VALUES ($1, $2, $3, $4, $5, $6)`,
+    [totals.pending, totals.active, totals.failed, totals.completed, JSON.stringify(breakdown), currentWorkerId]
+  );
+  // Alert: if failed > 0, emit WAL event for notification dispatcher
+  if (totals.failed > 0) {
+    broadcastAll({ event_type: 'queue_failed_jobs_detected', payload: { count: totals.failed, breakdown } });
+  }
+});
+```
+
+**Auto-pruning**: Add a nightly cleanup of old snapshots (keep last 30 days) via the existing `scheduler.ts` or as a pg-boss scheduled job: `DELETE FROM queue_health_snapshots WHERE captured_at < NOW() - INTERVAL '30 days'`.
+
+**New API route**: `GET /api/pipeline/queue/health-history?hours=24` — queries `queue_health_snapshots` and returns time-series data for the analytics chart in US-007. Accepts `hours` param (1, 6, 24, 168 for 1 week). Returns `{ snapshots: [{ capturedAt, pending, active, failed, completed }], interval: '1h' }`.
 
 ## Context
-- **Worker handler location**: Post-run merge logic goes after the execution-engine subprocess exits in `backend/src/worker.ts` `pipeline:run` handler. Run synchronously (not detached) to avoid orphan processes — memory notes execution-engine subprocesses can survive worker restarts.
-- **Migration numbering**: Check highest existing migration number in `backend/src/db/pg-migrations/` before creating — memory documents a duplicate migration 069 collision from parallel branches. Currently migrations go up to 073, so use `074_pipeline_runs_merge_columns.sql`. Use `ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS` (PostgreSQL-safe).
-- **WAL event emission**: Use `fetch('http://localhost:${port}/api/wal', ...)` pattern matching `execution-engine.ts`. Timestamp column is `ts` NOT `created_at`. Add event types `worktree_merge_started` and `worktree_merged` (with merge commit SHA in payload).
-- **Git commands CWD**: All git operations (`checkout`, `pull`, `merge`, `worktree remove`) must use `cwd: workspace.path` (the workspace root), NOT the worktree subdirectory. Worktree path comes from job data or `pipeline_runs` row.
-- **pg-boss column names are snake_case**: Memory documents `completed_on`, `started_on` etc. — NOT `completedon`. Any direct pgboss.job queries in reconciliation or logging must use underscored column names.
-- **DB placeholders**: Use `$1, $2, ...` numbered placeholders (PostgreSQL), not `?`. `merge_status VARCHAR(20)` values: `null | 'pending' | 'merging' | 'merged' | 'failed'`. `merge_commit_sha VARCHAR(64)` for 40-char hex SHA.
-- **Merge failure path**: On `git merge` exit code ≠ 0, set `merge_status = 'failed'` but do NOT run `git merge --abort` — US-005 agentic resolution expects conflict markers in the working tree. Only call `git worktree remove --force` on successful merge.
-- **Addresses documented process gap**: "No post-run auto-merge" is listed in MEMORY.md Process Gaps — this feature directly fixes the 150+ unmerged feat/ branches accumulation problem. Test end-to-end with a real worktree run to verify branch cleanup.
+- **monitor-states event shape**: Check the pg-boss docs/source for the exact shape of the `states` argument — it may be `{ [queueName]: { created, retry, active, completed, cancelled, failed } }` or a flat object. Log it once on first event to verify shape.
+- **Migration number**: Use 072 — check `backend/src/db/pg-migrations/` for the current highest number and use next. If 072 is taken, use the next available.
+- **broadcastAll import**: Import from `backend/src/lib/sse-hub.ts`. The `queue_failed_jobs_detected` event type should be added to the WAL event type enum if one exists.
+- **execute() is async**: Always `await execute(...)`. pg errors here should be caught and logged but not crash the event listener — wrap in try/catch.
+- **Worker ID**: The `currentWorkerId` is the `worker_id` from `worker_heartbeat` — make it accessible in the monitor-states handler (module-level variable set during initialization).
+- **Pruning**: Add `DELETE FROM queue_health_snapshots WHERE captured_at < NOW() - INTERVAL '30 days'` as a scheduled pg-boss cron job (`boss.schedule('queue-snapshot-prune', '0 3 * * *', {})`) or via the existing scheduler.ts. Check which pattern is already used in worker.ts.
 
 Acceptance Criteria:
-- Auto-merge only triggers when run status is 'done' AND autoWorktree=true AND autoMerge=true AND branch name exists
-- git merge --no-ff is used (creates a merge commit, not fast-forward)
-- On successful merge: merge_status is set to 'merged', merge_commit_sha is populated, worktree_merged WAL event is emitted
-- On merge conflict: merge is not aborted, control passes to agentic conflict resolution (US-005)
-- Two new columns (merge_status, merge_commit_sha) are added to pipeline_runs via migration
-- Worktree directory is cleaned up with git worktree remove after successful merge
+- Migration 072_queue_health_snapshots.sql creates the queue_health_snapshots table with correct schema and index on captured_at
+- boss.on('monitor-states', ...) listener writes a row to queue_health_snapshots every 60 seconds with correct totals and queue_breakdown JSON
+- When total_failed > 0, the listener calls broadcastAll with event_type 'queue_failed_jobs_detected' so notification dispatcher and SSE clients receive the alert
+- GET /api/pipeline/queue/health-history?hours=24 returns time-series data from queue_health_snapshots for the specified time window
+- Snapshots older than 30 days are automatically pruned by a scheduled cleanup job
+- monitor-states handler errors are caught and logged without crashing the worker

@@ -472,8 +472,37 @@ The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Q
 
 `SUPPORTED_MODELS` list is authoritative — validate before passing to `chatComplete`.
 
-### PostgreSQL Migration Pattern
-Migrations are SQL files in `backend/src/db/pg-migrations/` (49 files, 001–049). They run in numeric order on first startup via `pg-index.ts`, tracked in `schema_migrations` table. Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively — no workarounds needed. New migrations: create `NNN_description.sql` in `pg-migrations/`.
+### Apache AGE — Pool Connection Hygiene (CRITICAL)
+Apache AGE requires `LOAD 'age'` + `SET search_path = ag_catalog, "$user", public` per session before Cypher queries. This **poisons** the pool connection — subsequent queries on that connection hit `ag_catalog.workspaces` (empty) instead of `rorca.workspaces` (real data), causing intermittent "Workspace not found" 404s.
+
+**Rule**: Any code that calls `setupAgeSession()` MUST restore the search_path before releasing:
+```typescript
+const client = await pool.connect();
+try {
+  await setupAgeSession(client);  // sets search_path to ag_catalog
+  await client.query(cypherSQL);
+} finally {
+  await client.query('SET search_path = rorca, public');  // MUST restore
+  client.release();
+}
+```
+
+Three schemas have a `workspaces` table: `rorca.workspaces` (app data), `ag_catalog.workspaces` (AGE system, empty), `public.workspaces` (legacy, empty). The pool has an `on('connect')` safety net in `db/index.ts`, but it does NOT replace proper cleanup in graph code.
+
+### PostgreSQL Migration Pattern — Timestamp Format (CRITICAL)
+Migrations are SQL files in `backend/src/db/pg-migrations/`. They run in numeric prefix order on first startup via `pg-index.ts`, tracked in `schema_migrations` table (BIGINT version column). Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively.
+
+**New migrations MUST use timestamp format**: `YYYYMMDDHHMMSS_description.sql`
+```bash
+# Example: creating a migration on 2026-03-14 at 15:00:00
+20260314150000_add_user_preferences.sql
+```
+
+**Why**: Sequential numbers (001, 002, ...) collide when parallel branches create migrations simultaneously — common with Rorca's worktree-per-spec architecture. Timestamps are structurally unique (two developers/agents can't commit at the exact same second).
+
+**Hybrid coexistence**: Existing sequential migrations (001–079) stay as-is. New timestamp migrations sort after them automatically (numeric sort: `79 < 20260314150000`). The runner supports both formats indefinitely — no renaming needed.
+
+**Duplicate prefix detection**: `pg-index.ts` calls `checkDuplicatePrefixes()` at startup and fails loudly if two files share the same numeric prefix. This catches collisions before any SQL runs.
 
 ### Skills Install Chain (install-from-sh)
 `POST /api/skills/install-from-sh` does NOT shell out to `npx skills add`. It fetches directly:
@@ -1309,18 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
-> Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture
-> Rule: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-## 2026-03-10 [Convention] PostgreSQL Migration Pattern
-> Rule: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
-
-## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates
-> Rule: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-
 ## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
 > Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
 
@@ -1369,84 +1386,20 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
 > Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
 
+## 2026-03-13 [Gotcha] Old execution-engine processes from test runs survive indefinitely
+> Rule: Execution-engine subprocesses from old load test runs (WR-019, PG-020) and integration tests in temp paths can survive machine restarts and run for days, consuming CPU/memory. Check with: `ps aux | grep execution-engine | grep -v grep`. Kill PIDs associated with temp paths (/var/folders, /tmp) or old worktree paths. WR-007 graceful shutdown only helps for clean worker exits — kill -9 or machine crash still orphans children. Safe to kill any execution-engine with a temp path or a worktree path that no longer exists.
+
+## 2026-03-13 [Decision] MCP-native generation: API as context+persistence layer, LLM work in caller's session
+> Rule: Rorca's API should split LLM-heavy operations (spec generation, enrichment) into two phases: (1) context-fetch — API returns the synthesized direction stack, memory, schema, skills as a raw bundle with no LLM call; (2) save — API persists the result the caller's LLM already generated. The LLM reasoning happens IN the caller's MCP session (Claude Code, OpenCode CLI, Codex CLI), not in a server-spawned subprocess. This means: rorca_get_generation_context returns the context bundle, the calling LLM generates the spec JSON in-session using cached/warm context, then rorca_save_spec persists it. The existing server-side generation path (spawning claude --print) is kept as a fallback for browser UI users who have no MCP session. This is the correct long-term architecture for rorca_forge_and_run too — it should orchestrate tool calls that the caller's session handles, not block on a subprocess.
+
+## 2026-03-13 [Architecture] All three CLI coding assistants support MCP — Rorca tools work from any of them
+> Rule: Claude Code, OpenCode CLI, and Codex CLI all support MCP servers. A user working in any of these three can call Rorca MCP tools (rorca_generate_spec, rorca_trigger_run, etc.) from their active session. The only path that does NOT support MCP is the browser UI. This means the MCP-native generation architecture benefits all CLI users regardless of which assistant they use: Claude Code (Claude model), OpenCode CLI (any provider — GPT-4o, Gemini, etc.), Codex CLI (ChatGPT model). Architecture principle: Rorca API = context + persistence. LLM reasoning = caller's session. Browser UI = server-side subprocess fallback only.
+
+## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
+> Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
+
 Follow this workflow for implementation:
-## Agent Role: Backend Routes
-
-
-## Skill: workflow-orchestrator (relevance: 9)
----
-name: workflow-orchestrator
-description: Build and orchestrate AI-driven development workflows that iterate until success using configurable patterns and multi-agent coordination
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers, AI agents, team leads
-  category: workflow
----
-
-# Workflow Orchestrator
-
-Design, configure, and execute AI-driven development workflows that iterate until tasks complete successfully using configurable patterns, multi-agent coordination, and intelligent stop conditions.
-
-## When to use me
-
-Use this skill when:
-- Building complex features requiring multiple AI agent passes
-- Implementing automated development workflows with verification steps
-- Coordinating parallel AI agents for different aspects of a task
-- Creating self-correcting loops that iterate until success criteria met
-- Need to orchestrate multiple AI agents in sequence or parallel
-
-## What I do
-
-### 1. Workflow Pattern Selection
-- **Analyze task requirements** to recommend optimal workflow patterns
-- **Match complexity levels** with appropriate workflow types
-- **Compare trade-offs** between speed, cost, control, and quality
-
-### 2. Multi-Agent Coordination
-- **Sequence agents** for linear workflows (build → verify → plan)
-- **Parallelize agents** for concurrent execution
-- **Handle failures and retries** with intelligent routing
-- **Implement steering patterns** (linear, conditional, parallel, unblocking)
-
-### 3. SSE Event Streaming
-- **Real-time monitoring** via Server-Sent Events
-- **Progress tracking** across workflow stages
-- **Live output streaming** from subprocess execution
-- **Late-joiner replay** from in-memory buffers
-
-### 4. Integration & Tooling
-- **Subprocess management** for isolated agent execution
-- **Output buffer management** with subscriber patterns
-- **Structured event emission** for semantic log parsing
-- **Git integration** for automated quality gates
-
-## Key Patterns
-
-### Subprocess → SSE → Terminal Pattern
-```
-Backend spawns subprocess (claude --print, opencode run)
-  → stdout/stderr piped to in-memory buffer
-  → buffer broadcasts to SSE subscribers
-  → SSE endpoint replays buffer + live chunks
-  → Frontend EventSource connects, writes to xterm.js
-  → Late joiners get full replay automatically
-```
-
-### Buffer Management
-- In-memory circular buffer per generation/run ID
-- Subscribers added/removed on SSE connect/disconnect
-- Auto-cleanup after TTL (30 min default)
-- Base64 encoding for binary-safe transport
-
-## Notes
-
-- **Start simple** — single agent pattern before scaling to multi-agent
-- **Monitor costs** — parallel agents increase expense
-- **Implement escape hatches** — always have manual stop conditions
-- **Use structured events** alongside raw output for dual-mode rendering
-- **Buffer management is critical** — memory leaks from uncleaned buffers
+## Agent Role: Database
 
 ---
 name: rorca
@@ -1599,21 +1552,61 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-005):
-When `git merge --no-ff` in US-004 fails with merge conflicts, implement an agentic resolution step. The sequence: (1) Capture the conflict diff via `git diff` (this shows the conflict markers in the working tree after a failed merge). (2) Spawn `claude --print --dangerously-skip-permissions` with a prompt that includes the conflict diff and instructions: 'You are resolving git merge conflicts. The feature branch <branch> is being merged into main for run #<runId>. Resolve each conflict intelligently — understand the intent of both sides. Do not blindly take one side. After resolving, stage all files and commit.' The claude session has access to bash, edit, read tools to navigate the workspace and resolve conflicts. (3) Set a timeout of 5 minutes for the resolution session. (4) After claude exits: if exit code 0 and `git diff --check` shows no remaining conflict markers, run `git commit --no-edit` (the merge commit message was already set), capture SHA, emit `worktree_merged`, set `merge_status='merged'`. (5) If claude fails or timeout or conflicts remain: run `git merge --abort` to restore clean state, emit `worktree_merge_failed` with the original conflict diff excerpt as `conflictSummary`, set `merge_status='failed'`. Strip the same 4 Claude env vars before spawning as execution-engine does. Use CLAUDE_BIN for the binary path.
+Job pickup latency (time between `pgboss.job.created_on` and `pgboss.job.started_on`) is the primary indicator of worker responsiveness. If latency spikes above the 500ms target (pg-boss polling interval), it signals worker overload, pg-boss misconfiguration, or database connection exhaustion. This story adds pickup latency metrics to both the health endpoint and the queue health snapshots.
+
+**SQL to compute latency metrics** (add to US-002's worker/health endpoint and US-004's snapshot capture):
+```sql
+SELECT
+  AVG(EXTRACT(EPOCH FROM (started_on - created_on))) AS avg_pickup_seconds,
+  PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (started_on - created_on))) AS p95_pickup_seconds,
+  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (started_on - created_on))) AS p50_pickup_seconds,
+  MIN(EXTRACT(EPOCH FROM (started_on - created_on))) AS min_pickup_seconds,
+  MAX(EXTRACT(EPOCH FROM (started_on - created_on))) AS max_pickup_seconds,
+  COUNT(*) AS sample_count
+FROM pgboss.archive
+WHERE
+  started_on IS NOT NULL
+  AND created_on IS NOT NULL
+  AND archived_on > NOW() - INTERVAL '24 hours'
+  AND name IN ('pipeline:run', 'pipeline:retry')
+```
+
+**Add to worker/health response** (extend US-002's `queueStats` object):
+```json
+{
+  "pickupLatency": {
+    "avgSeconds": 0.43,
+    "p50Seconds": 0.38,
+    "p95Seconds": 1.2,
+    "maxSeconds": 4.7,
+    "sampleCount": 23,
+    "windowHours": 24,
+    "status": "healthy"
+  }
+}
+```
+
+**Latency status classification**:
+- `healthy`: p95 ≤ 2s
+- `degraded`: p95 between 2s and 10s
+- `critical`: p95 > 10s or sample_count = 0 and pending > 0 (jobs stuck, never picked up)
+
+**Add to queue_health_snapshots table**: Add columns `avg_pickup_seconds FLOAT` and `p95_pickup_seconds FLOAT` to the migration in US-004. The monitor-states listener runs the latency query alongside snapshot capture and stores both in the same row.
+
+**Alert threshold**: If latency status becomes `degraded` or `critical`, include `latencyAlert: true` in the `broadcastAll` payload from US-004's monitor-states handler so the frontend can show an actionable warning.
 
 ## Context
-- **Claude subprocess spawning**: Follow the exact env-var stripping pattern from `execution-engine.ts` — destructure `CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_AGENT_SDK_VERSION`, `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING` using aliased names (`_a, _b, _c, _d`) to avoid TS unused-variable warnings, then spread the rest into `cleanEnv`. Use `CLAUDE_BIN` full path (not bare `claude`) since NVM PATH isn't inherited by Node child processes.
-- **Timeout pattern**: Do NOT rely on `child_process.spawn({ timeout })` — it only sends SIGTERM. Implement the same two-stage pattern as execution-engine: 5-min `setTimeout` → `SIGTERM`, then a second 10s timer → `SIGKILL`. Clear both timers on normal exit to avoid dangling handles.
-- **Conflict diff capture**: After `git merge --no-ff` exits non-zero, run `git diff` (NOT `git diff --cached`) in the workspace `cwd` to get conflict markers in the working tree. Truncate to 50KB before injecting into the claude prompt to avoid prompt bloat.
-- **Post-resolution verification**: `git diff --check` returns non-zero if `<<<<<<<`/`=======`/`>>>>>>>` markers remain. Only commit (via `git commit --no-edit` — merge message already staged by the failed merge) when exit code is 0. If markers remain, treat as failure → `git merge --abort`.
-- **Abort safety**: `git merge --abort` must execute in the workspace `cwd` (not the rorca backend dir). After abort, verify clean state via `git status` before emitting `worktree_merge_failed`. If abort itself fails, log the error but still emit the WAL event.
-- **WAL events**: Emit via `fetch` to `http://localhost:${port}/api/wal` — same pattern as execution-engine. `worktree_merged` payload: `{ sha, branch, runId, resolvedBy: 'agentic' }`. `worktree_merge_failed` payload: `{ branch, runId, conflictSummary }` where `conflictSummary` is first 2KB of conflict diff.
-- **Orphan process risk**: Write the claude resolution PID somewhere recoverable (e.g. `pipeline_runs.pid` or a transient column) so the WR-010 dead-PID fallback can clean it up if the worker is killed mid-resolution. See memory: old execution-engine processes from test runs survive indefinitely.
-- **Testing**: Backend tests use Jest (not Vitest). Mock `child_process.spawn` to simulate claude exit codes 0 and non-zero, timeout scenarios, and verify the full flow: conflict diff → spawn → verify → commit/abort → WAL event.
+- **PERCENTILE_CONT is a PostgreSQL ordered-set aggregate**: Syntax is `PERCENTILE_CONT(fraction) WITHIN GROUP (ORDER BY expr)`. Not available in SQLite (not an issue — Rorca uses PostgreSQL 16).
+- **Sample window**: Use `pgboss.archive` (not `pgboss.job`) for latency calculation — completed/failed jobs have both `created_on` and `started_on` set. Active jobs have `started_on` but not yet completed; include them if latency window is short.
+- **Filter to pipeline queues only**: Exclude `pipeline:cron` and `pipeline:cron:<id>` jobs — cron jobs have a deliberately delayed start and would skew latency metrics. Filter `name IN ('pipeline:run', 'pipeline:retry', 'pipeline:cancel')`.
+- **Null handling**: If no jobs completed in the last 24h, `AVG()` returns NULL. Handle with `COALESCE(result, 0)` or return `null` in the response. `sampleCount: 0` indicates insufficient data.
+- **Queue_health_snapshots migration**: Since US-004 creates this table, US-005 must add the two new columns via an ALTER TABLE in a separate migration (073_queue_health_snapshots_latency.sql) or coordinate with US-004 to add them in migration 072. Running after US-004 is simplest — add a migration 073.
+- **Performance**: The PERCENTILE_CONT query against pgboss.archive scans rows in a 24h window. With Rorca's throughput (100s of jobs/day), this is fast. The index on `archived_on` from US-004's migration is essential.
 
 Acceptance Criteria:
-- On merge conflict, claude --print is spawned with the conflict diff and resolution instructions
-- Claude session has a 5-minute timeout enforced via SIGTERM then SIGKILL after 10s
-- On successful resolution: no conflict markers remain (verified by git diff --check), merge_status='merged', worktree_merged WAL event emitted with SHA
-- On failed resolution: git merge --abort restores clean main branch, merge_status='failed', worktree_merge_failed WAL event emitted with conflict summary
-- The 4 Claude env vars (CLAUDECODE, CLAUDE_CODE_ENTRYPOINT, CLAUDE_AGENT_SDK_VERSION, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING) are stripped from the spawned process
+- GET /api/pipeline/worker/health returns pickupLatency object with avgSeconds, p50Seconds, p95Seconds, maxSeconds, sampleCount, windowHours, and status fields
+- Latency status classification is correct: healthy (p95 ≤ 2s), degraded (2s < p95 ≤ 10s), critical (p95 > 10s or stuck jobs detected)
+- Latency query filters to pipeline:run and pipeline:retry queues only, excluding cron queues
+- queue_health_snapshots table includes avg_pickup_seconds and p95_pickup_seconds columns (via migration 073 or folded into 072)
+- When latency is degraded or critical, the monitor-states broadcastAll payload includes latencyAlert: true
+- Returns null latency fields (not error) when no completed jobs exist in the 24h window
