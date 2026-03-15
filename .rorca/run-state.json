@@ -2,7 +2,7 @@
   "specId": "rorca-run-view-streaming-fix",
   "runId": 126,
   "startedAt": "2026-03-15T20:14:13.214Z",
-  "lastUpdatedAt": "2026-03-15T21:08:25.642Z",
+  "lastUpdatedAt": "2026-03-15T21:09:07.969Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -75,6 +75,15 @@
       "finishedAt": "2026-03-15T21:08:25.642Z",
       "agentType": "claude",
       "elapsedMs": 636462
+    },
+    {
+      "storyId": "US-009",
+      "title": "Remove frontend-only marker injection to prevent duplicates with backend markers",
+      "status": "passed",
+      "startedAt": "2026-03-15T21:08:47.020Z",
+      "finishedAt": "2026-03-15T21:09:07.969Z",
+      "agentType": "claude",
+      "elapsedMs": 20949
     }
   ],
   "failedStories": [],
