@@ -5535,4 +5535,269 @@ router.post('/orphan-sweep', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/pipeline/queue/failed-jobs:
+ *   get:
+ *     summary: List failed pg-boss jobs
+ *     description: Returns a paginated list of failed pg-boss jobs from both pgboss.job (recent unarchived failures) and pgboss.archive (archived failures within the last 30 days). Each entry is enriched with the corresponding pipeline_runs row where the job's data.runId matches.
+ *     tags:
+ *       - Pipeline
+ *     parameters:
+ *       - in: query
+ *         name: page
+ *         schema:
+ *           type: integer
+ *           default: 1
+ *         description: Page number (1-indexed)
+ *       - in: query
+ *         name: pageSize
+ *         schema:
+ *           type: integer
+ *           default: 20
+ *           maximum: 100
+ *         description: Number of items per page
+ *     responses:
+ *       200:
+ *         description: Paginated list of failed jobs
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       jobId:
+ *                         type: string
+ *                         description: pg-boss job UUID
+ *                       queueName:
+ *                         type: string
+ *                         description: Queue name (e.g. pipeline:run)
+ *                       state:
+ *                         type: string
+ *                         description: Job state (always "failed")
+ *                       failedAt:
+ *                         type: string
+ *                         format: date-time
+ *                         description: Timestamp when the job failed (completed_on)
+ *                       retryCount:
+ *                         type: integer
+ *                         description: Number of retries consumed
+ *                       retryLimit:
+ *                         type: integer
+ *                         description: Maximum retries configured
+ *                       errorOutput:
+ *                         type: object
+ *                         description: Error details from the last attempt (API keys redacted)
+ *                         properties:
+ *                           message:
+ *                             type: string
+ *                           stack:
+ *                             type: string
+ *                       data:
+ *                         type: object
+ *                         description: Original job payload
+ *                       runId:
+ *                         type: integer
+ *                         nullable: true
+ *                         description: Linked pipeline_runs.id (null if not a pipeline:run job)
+ *                       runStatus:
+ *                         type: string
+ *                         nullable: true
+ *                         description: pipeline_runs.status for the linked run
+ *                       specPath:
+ *                         type: string
+ *                         nullable: true
+ *                         description: pipeline_runs.spec_path for the linked run
+ *                 total:
+ *                   type: integer
+ *                 page:
+ *                   type: integer
+ *                 pageSize:
+ *                   type: integer
+ *               required: [items, total, page, pageSize]
+ *       500:
+ *         description: Internal server error
+ */
+router.get('/queue/failed-jobs', async (req: Request, res: Response) => {
+  try {
+    const page = Math.max(parseInt(String(req.query.page ?? '1'), 10) || 1, 1);
+    const pageSize = Math.min(Math.max(parseInt(String(req.query.pageSize ?? '20'), 10) || 20, 1), 100);
+    const offset = (page - 1) * pageSize;
+
+    // UNION of unarchived failed jobs + archived failed jobs (last 30 days)
+    const unionSql = `
+      SELECT id, name, data, state, retry_count, retry_limit, output, completed_on, 'job' AS source
+      FROM pgboss.job
+      WHERE state = 'failed'
+      UNION ALL
+      SELECT id, name, data, state, retry_count, retry_limit, output, completed_on, 'archive' AS source
+      FROM pgboss.archive
+      WHERE state = 'failed'
+        AND archived_on > NOW() - INTERVAL '30 days'
+    `;
+
+    interface FailedJobRow {
+      id: string;
+      name: string;
+      data: Record<string, unknown> | null;
+      state: string;
+      retry_count: number | null;
+      retry_limit: number | null;
+      output: Record<string, unknown> | null;
+      completed_on: string | null;
+      source: string;
+      run_id: number | null;
+      run_status: string | null;
+      spec_path: string | null;
+    }
+
+    interface FailedJobCountRow { total: string }
+
+    const [countRow, rows] = await Promise.all([
+      queryOne<FailedJobCountRow>(
+        `SELECT COUNT(*)::text AS total FROM (${unionSql}) AS combined`,
+        [],
+      ).catch(() => ({ total: '0' })),
+      query<FailedJobRow>(
+        `SELECT j.id, j.name, j.data, j.state, j.retry_count, j.retry_limit, j.output, j.completed_on, j.source,
+                pr.id AS run_id, pr.status AS run_status, pr.spec_path
+         FROM (${unionSql}) AS j
+         LEFT JOIN pipeline_runs pr ON pr.id = (j.data->>'runId')::INT
+         ORDER BY j.completed_on DESC NULLS LAST
+         LIMIT $1 OFFSET $2`,
+        [pageSize, offset],
+      ).catch(() => [] as FailedJobRow[]),
+    ]);
+
+    const total = parseInt(countRow?.total ?? '0', 10);
+
+    // Scrub API keys from error output
+    const scrubSecrets = (text: string): string =>
+      text
+        .replace(/(sk-ant-[a-zA-Z0-9-]{10,})/g, '[REDACTED]')
+        .replace(/(sk-or-[a-zA-Z0-9-]{10,})/g, '[REDACTED]')
+        .replace(/(sk-[a-zA-Z0-9]{10,})/g, '[REDACTED]');
+
+    const items = rows.map(row => {
+      const rawOutput = row.output as Record<string, unknown> | null;
+      const errorOutput = rawOutput
+        ? {
+            message: typeof rawOutput.message === 'string' ? scrubSecrets(rawOutput.message) : undefined,
+            stack: typeof rawOutput.stack === 'string' ? scrubSecrets(rawOutput.stack) : undefined,
+            ...Object.fromEntries(
+              Object.entries(rawOutput)
+                .filter(([k]) => k !== 'message' && k !== 'stack')
+                .map(([k, v]) => [k, typeof v === 'string' ? scrubSecrets(v) : v]),
+            ),
+          }
+        : null;
+
+      return {
+        jobId: row.id,
+        queueName: row.name,
+        state: row.state,
+        failedAt: row.completed_on ?? null,
+        retryCount: row.retry_count ?? 0,
+        retryLimit: row.retry_limit ?? 0,
+        errorOutput,
+        data: row.data ?? {},
+        runId: row.run_id ?? null,
+        runStatus: row.run_status ?? null,
+        specPath: row.spec_path ?? null,
+      };
+    });
+
+    res.json({ items, total, page, pageSize });
+  } catch (error: unknown) {
+    logger.error({ err: error }, '[Pipeline] failed-jobs list error');
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/pipeline/queue/failed-jobs/{jobId}/retry:
+ *   post:
+ *     summary: Re-enqueue a failed pg-boss job
+ *     description: Reads the failed job from pgboss.archive or pgboss.job by its UUID, extracts the original queue name and payload, and re-inserts it as a fresh job via boss.send(). Used by operators to manually retry a failed job after fixing the underlying issue.
+ *     tags:
+ *       - Pipeline
+ *     parameters:
+ *       - in: path
+ *         name: jobId
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *         description: pg-boss job UUID
+ *     responses:
+ *       200:
+ *         description: Job successfully re-enqueued
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 newJobId:
+ *                   type: string
+ *                   description: UUID of the newly created job
+ *                 message:
+ *                   type: string
+ *                   example: Job requeued
+ *               required: [newJobId, message]
+ *       404:
+ *         description: Job not found in pgboss.job or pgboss.archive
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *               required: [error]
+ *       500:
+ *         description: Internal server error
+ */
+router.post('/queue/failed-jobs/:jobId/retry', async (req: Request, res: Response) => {
+  const { jobId } = req.params;
+
+  try {
+    interface JobLookupRow {
+      id: string;
+      name: string;
+      data: Record<string, unknown> | null;
+    }
+
+    // Look up in pgboss.job first (very recent failures), then pgboss.archive
+    const job = await queryOne<JobLookupRow>(
+      `SELECT id, name, data FROM pgboss.job WHERE id = $1 AND state = 'failed'
+       UNION ALL
+       SELECT id, name, data FROM pgboss.archive WHERE id = $1 AND state = 'failed'
+       LIMIT 1`,
+      [jobId],
+    );
+
+    if (!job) {
+      return res.status(404).json({ error: `Failed job ${jobId} not found` });
+    }
+
+    const boss = getBoss();
+    const newJobId = await boss.send(job.name, job.data ?? {});
+
+    if (!newJobId) {
+      return res.status(500).json({ error: 'boss.send() returned null — queue may not exist or boss is not running' });
+    }
+
+    logger.info({ jobId, newJobId, queueName: job.name }, '[Pipeline] failed job re-enqueued');
+    res.json({ newJobId, message: 'Job requeued' });
+  } catch (error: unknown) {
+    logger.error({ err: error, jobId }, '[Pipeline] failed job retry error');
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 export default router;
