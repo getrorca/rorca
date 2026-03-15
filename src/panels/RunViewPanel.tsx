@@ -49,6 +49,7 @@ interface StoryResultSeed {
   finished_at: string | null;
   elapsed_seconds: number | null;
   active_skills?: string | null; // JSON array string from story_results.active_skills
+  reason?: string | null; // e.g. 'previously_passed' for pre-seeded skip rows
 }
 
 interface StoryTokenEntry {
@@ -758,6 +759,12 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   // Merge status — base state seeded from pipeline_runs, derived state from SSE
   const [mergeInfoBase, setMergeInfoBase] = useState<MergeInfo | null>(null);
 
+  // Resume badge — shown when previously_passed stories were pre-seeded by the trigger
+  const [showResumeBadge, setShowResumeBadge] = useState(false);
+  const [resumeFromId, setResumeFromId] = useState<string | null>(null);
+  const [resumePrePassedCount, setResumePrePassedCount] = useState(0);
+  const resumeBadgeDismissedRef = useRef(false);
+
   // Filter tabs for mobile — hide Graph (too complex for small screens)
   const visibleTabs = useMemo(() => {
     if (isMobile) return TABS.filter((t) => t.id !== 'graph');
@@ -868,7 +875,21 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
       if (data.tokenSummary) setTokenSummary(data.tokenSummary);
       if (data.contextComparison !== undefined) setContextComparison(data.contextComparison ?? null);
       if (data.specStories) { setTotalStories(data.specStories.length); setSpecStories(data.specStories); }
-      if (data.stories) setDbStories(data.stories);
+      if (data.stories) {
+        setDbStories(data.stories);
+        // Resume badge: show when any pre-seeded 'previously_passed' skip rows exist
+        if (!resumeBadgeDismissedRef.current) {
+          const prePassed = data.stories.filter(s => s.status === 'skip' && s.reason === 'previously_passed');
+          if (prePassed.length > 0 && data.specStories?.length) {
+            // firstUnpassedId = first specStory not in prePassed set
+            const prePassedIds = new Set(prePassed.map(s => s.story_id));
+            const firstUnpassed = data.specStories.find(s => !prePassedIds.has(s.id));
+            setResumePrePassedCount(prePassed.length);
+            setResumeFromId(firstUnpassed?.id ?? null);
+            setShowResumeBadge(true);
+          }
+        }
+      }
       if (data.storyTokenBreakdown) setStoryTokenBreakdown(data.storyTokenBreakdown);
       // Seed graph colors from DB story results so nodes aren't all grey on load
       if (data.stories?.length) {
@@ -892,6 +913,26 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
   useEffect(() => {
     fetchRun();
   }, [fetchRun]);
+
+  // Dismiss resume badge when first real story_started WAL event fires
+  useEffect(() => {
+    if (!showResumeBadge || resumeBadgeDismissedRef.current) return;
+    const hasRealStart = walEvents.some(e => e.event_type === 'story_started');
+    if (hasRealStart) {
+      resumeBadgeDismissedRef.current = true;
+      setShowResumeBadge(false);
+    }
+  }, [walEvents, showResumeBadge]);
+
+  // Auto-dismiss resume badge after 30 seconds as fallback
+  useEffect(() => {
+    if (!showResumeBadge) return;
+    const timer = setTimeout(() => {
+      resumeBadgeDismissedRef.current = true;
+      setShowResumeBadge(false);
+    }, 30_000);
+    return () => clearTimeout(timer);
+  }, [showResumeBadge]);
 
   // Check DLQ once when run transitions to 'failed' (terminal state — no polling needed)
   useEffect(() => {
@@ -1217,6 +1258,16 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                 <MailWarning size={10} />
                 DLQ
               </button>
+            )}
+            {/* Resume badge — shown briefly when previously_passed stories were pre-seeded */}
+            {showResumeBadge && resumeFromId && (
+              <span
+                title={`${resumePrePassedCount} ${resumePrePassedCount === 1 ? 'story' : 'stories'} already passed — resuming from ${resumeFromId}`}
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 bg-amber-500/10 text-amber-500"
+              >
+                <RotateCcw size={10} />
+                Resuming from {resumeFromId} — {resumePrePassedCount} {resumePrePassedCount === 1 ? 'story' : 'stories'} already passed
+              </span>
             )}
           </div>
         }
