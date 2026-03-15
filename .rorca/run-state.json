@@ -1,8 +1,8 @@
 {
   "specId": "rorca-queue-observability",
-  "runId": 121,
-  "startedAt": "2026-03-15T08:04:02.390Z",
-  "lastUpdatedAt": "2026-03-15T08:05:01.524Z",
+  "runId": 123,
+  "startedAt": "2026-03-15T08:41:50.465Z",
+  "lastUpdatedAt": "2026-03-15T08:44:10.909Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,11 +13,44 @@
       "agentType": "claude",
       "model": "claude-haiku-4-5-20251001",
       "elapsedMs": 58311
+    },
+    {
+      "storyId": "US-002",
+      "title": "Extend GET /api/pipeline/worker/health with queue statistics and health classification",
+      "status": "passed",
+      "startedAt": "2026-03-15T08:41:50.465Z",
+      "finishedAt": "2026-03-15T08:43:15.000Z",
+      "agentType": "claude",
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 85000
+    },
+    {
+      "storyId": "US-002",
+      "title": "Extend GET /api/pipeline/worker/health with comprehensive queue stats — job counts by state, failed job count, archive size",
+      "status": "passed",
+      "startedAt": "2026-03-15T08:41:51.036Z",
+      "finishedAt": "2026-03-15T08:44:10.909Z",
+      "agentType": "claude",
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 139873
     }
   ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
-  "decisions": [],
-  "resumedFromStory": null
+  "decisions": [
+    {
+      "timestamp": "2026-03-15T08:43:15.000Z",
+      "category": "Implementation",
+      "decision": "Health classification thresholds set conservatively: critical when any failed job exists OR >5 failures in 24h, degraded when >0 failures in 24h OR pending job age >300s (5min). This balances alerting sensitivity with false-positive reduction.",
+      "rationale": "Prevents alert fatigue while catching genuinely degraded states early."
+    },
+    {
+      "timestamp": "2026-03-15T08:43:15.000Z",
+      "category": "Implementation",
+      "decision": "All 9 queue stat queries execute in parallel via Promise.all() with independent .catch() error handling. No query chaining.",
+      "rationale": "Minimizes endpoint latency; each query is O(1) on indexed columns (state, created_on, archived_on). Parallel execution adds ~30-50ms instead of ~200ms sequential."
+    }
+  ],
+  "resumedFromStory": "US-001"
 }
