@@ -1133,6 +1133,170 @@ async function recoverStaleJobs(): Promise<void> {
   logger.info({ recovered: staleJobs.length }, '[worker] recoverStaleJobs — recovery complete');
 }
 
+// ── Orphan process sweep ─────────────────────────────────────────────────
+// Finds pipeline_runs in status='running' that belong to a different worker
+// (or have no worker_id at all) — i.e., they were started by a worker that
+// has since crashed without cleaning up its processes. For each such run:
+//
+//   1. Check whether pipeline_runs.pid is still alive via process.kill(pid, 0).
+//   2. If alive: SIGTERM → wait 5s → SIGKILL (if still alive).
+//   3. Mark the run status='failed', finished_at=NOW().
+//   4. Emit run_finished WAL event with reason:'orphan_sweep'.
+//   5. For each story in the run that hasn't passed, emit story_failed WAL event.
+//
+// Safety: skips any runId currently tracked in activeProcesses (belt-and-suspenders
+// guard — this worker owns that run and its child is still alive by design).
+//
+// Error isolation: each run is wrapped in its own try/catch; a failure on one
+// run does not abort the sweep of the remaining runs.
+//
+// Returns: array of { runId, pid, killed } summary objects (never throws).
+
+export type OrphanSweepResult = {
+  runId: number;
+  pid: number;
+  killed: boolean;
+};
+
+export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
+  const results: OrphanSweepResult[] = [];
+
+  type OrphanRunRow = {
+    id: number;
+    pid: number | null;
+    workspace_id: number | string;
+  };
+
+  let orphanRuns: OrphanRunRow[];
+  try {
+    orphanRuns = await query<OrphanRunRow>(
+      `SELECT id, pid, workspace_id
+       FROM pipeline_runs
+       WHERE status = 'running'
+         AND (worker_id != $1 OR worker_id IS NULL)`,
+      [WORKER_ID],
+    );
+  } catch (err) {
+    logger.warn({ err }, '[worker] sweepOrphanProcesses — query failed, skipping');
+    return results;
+  }
+
+  if (orphanRuns.length === 0) {
+    logger.info('[worker] sweepOrphanProcesses — no orphan runs found');
+    return results;
+  }
+
+  logger.warn({ count: orphanRuns.length }, '[worker] sweepOrphanProcesses — found orphan runs');
+
+  for (const run of orphanRuns) {
+    const { id: runId, pid, workspace_id: workspaceId } = run;
+
+    // Belt-and-suspenders: skip runs this worker actively owns in memory
+    if (activeProcesses.has(runId)) {
+      logger.info({ runId }, '[worker] sweepOrphanProcesses — run is in activeProcesses, skipping');
+      continue;
+    }
+
+    let killed = false;
+
+    try {
+      // ── 1. Check PID liveness ──────────────────────────────────────────
+      if (pid !== null && pid !== undefined) {
+        let isAlive = false;
+        try {
+          process.kill(pid, 0); // throws if PID is dead (ESRCH) or not ours (EPERM)
+          isAlive = true;
+        } catch (killErr: any) {
+          // ESRCH = no such process (dead), EPERM = not ours (treat as dead)
+          isAlive = false;
+        }
+
+        if (isAlive) {
+          // ── 2a. SIGTERM ────────────────────────────────────────────────
+          try {
+            process.kill(pid, 'SIGTERM');
+            logger.info({ runId, pid }, '[worker] sweepOrphanProcesses — sent SIGTERM');
+          } catch {
+            // process may have died between the liveness check and SIGTERM — fine
+          }
+
+          // ── 2b. Wait 5s then SIGKILL if still alive ────────────────────
+          await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
+
+          let stillAlive = false;
+          try {
+            process.kill(pid, 0);
+            stillAlive = true;
+          } catch {
+            stillAlive = false;
+          }
+
+          if (stillAlive) {
+            try {
+              process.kill(pid, 'SIGKILL');
+              killed = true;
+              logger.info({ runId, pid }, '[worker] sweepOrphanProcesses — sent SIGKILL (SIGTERM ignored)');
+            } catch {
+              // PID recycled between liveness check and SIGKILL — harmless
+            }
+          } else {
+            killed = true; // SIGTERM was sufficient
+          }
+        }
+      }
+
+      // ── 3. Mark pipeline run as failed ────────────────────────────────
+      await execute(
+        `UPDATE pipeline_runs
+         SET status = 'failed', finished_at = NOW()
+         WHERE id = $1 AND status = 'running'`,
+        [runId],
+      );
+
+      // ── 4. Emit run_finished WAL event ────────────────────────────────
+      await emitWalEvent('run_finished', workspaceId, {
+        run_id: runId,
+        status: 'failed',
+        reason: 'orphan_sweep',
+        swept_pid: pid,
+        swept_at: new Date().toISOString(),
+      });
+
+      // ── 5. Emit story_failed for each incomplete story ─────────────────
+      let incompleteStories: { story_id: string }[] = [];
+      try {
+        incompleteStories = await query<{ story_id: string }>(
+          `SELECT story_id FROM story_results
+           WHERE run_id = $1 AND status != 'pass'`,
+          [runId],
+        );
+      } catch (storyErr) {
+        logger.warn({ storyErr, runId }, '[worker] sweepOrphanProcesses — could not query story_results');
+      }
+
+      for (const story of incompleteStories) {
+        await emitWalEvent('story_failed', workspaceId, {
+          run_id: runId,
+          story_id: story.story_id,
+          reason: 'orphan_sweep',
+        });
+      }
+
+      logger.warn(
+        { runId, pid, killed, incompleteStories: incompleteStories.length },
+        '[worker] sweepOrphanProcesses — orphan run swept',
+      );
+
+      results.push({ runId, pid: pid ?? 0, killed });
+    } catch (err) {
+      logger.error({ err, runId, pid }, '[worker] sweepOrphanProcesses — error processing orphan run, continuing');
+    }
+  }
+
+  logger.info({ swept: results.length }, '[worker] sweepOrphanProcesses — sweep complete');
+  return results;
+}
+
 // ── State reconciliation ─────────────────────────────────────────────────
 // Detects and repairs mismatches between pipeline_runs and pgboss.job.
 //
@@ -1384,6 +1548,10 @@ async function start(): Promise<void> {
   // (so freed slots are available when handlers start polling).
   await recoverStaleJobs();
 
+  // 3a. Sweep orphan processes — execution-engine subprocesses left running
+  // by a previous worker that crashed without a graceful shutdown.
+  await sweepOrphanProcesses();
+
   // 3b. Reconcile state between pipeline_runs and pgboss.job.
   // Runs once at startup, then every 60s during normal operation.
   await reconcileState();
@@ -1466,7 +1634,13 @@ async function start(): Promise<void> {
   logger.info('[worker] ready — listening for pipeline:run, pipeline:retry, pipeline:cancel, pipeline:cron, pipeline:merge');
 }
 
-start().catch((err) => {
-  logger.error({ err }, '[worker] startup failed');
-  process.exit(1);
-});
+// Only auto-start when this file is run directly (not imported by tests or other modules).
+// require.main === module is true when invoked via `node worker.js` / `tsx worker.ts`.
+// When Jest imports worker.ts to test sweepOrphanProcesses(), require.main !== module
+// so start() is NOT called and no DB connections / pg-boss setup are attempted.
+if (require.main === module) {
+  start().catch((err) => {
+    logger.error({ err }, '[worker] startup failed');
+    process.exit(1);
+  });
+}
