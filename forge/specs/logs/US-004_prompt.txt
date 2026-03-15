@@ -1338,21 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
-> Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-
-## 2026-03-12 [Bug Fix] MCP rorca_list_specs and rorca_list_runs wrong response shape
-> Rule: Both tools assumed wrong API response shapes. rorca_list_specs treated response as a bare array but API returns { items: [...] }. rorca_list_runs destructured { runs } but API returns { items: [...] }. Fixed by normalizing: Array.isArray(data) ? data : (data.items ?? []) for list_specs, and payload.runs ?? payload.items ?? [] for list_runs. Also fixed specName field: API uses specName not title — display as s.specName ?? s.title ?? s.id.
-
-## 2026-03-12 [Pattern] MCP tools vs prompts — tools are Claude-callable, prompts are user slash commands
-> Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
-
-## 2026-03-12 [Decision] GitHub org is getrorca — repo is github.com/getrorca/rorca (private)
-> Rule: The canonical remote for the Rorca codebase is https://github.com/getrorca/rorca (private repo). The old remote was sysgazer/rorcha — that is dead. All pushes go to getrorca/rorca. The repo is permanently closed source — never suggest open sourcing, BSL, or source-available licensing.
-
-## 2026-03-12 [Gotcha] Merging old SQLite-era branches with "take theirs" clobbers modern PostgreSQL files
-> Rule: NEVER merge old pre-postgres-migration branches (rorca-convention-agents, rorca-frontend-routing, and any branch with timestamp ~1772...) using "git checkout --theirs" on code conflicts. These branches were built on SQLite and will revert db/index.ts to the SQLite version, revert App.tsx/Sidebar.tsx/routes.tsx to the old multi-panel UI, and truncate server.ts. Always restore from a known-good modern commit (e.g. git show <pre-merge-sha>:path/to/file) after any such merge.
-
 ## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
 > Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
 
@@ -1398,105 +1383,23 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
 > Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
 
+## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
+> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
+
+## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
+> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
+
+## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
+> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
+
+## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
+> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
+
+## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
+> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
+
 Follow this workflow for implementation:
-## Agent Role: Backend Routes
-
-
-## Skill: logging-fundamentals (relevance: 6)
----
-name: logging-fundamentals
-description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers, SREs, DevOps engineers
-  category: observability
----
-
-# Logging Fundamentals
-
-Establish proper logging practices including log levels, structured logging, context propagation, and comprehensive logging strategies for applications, services, and infrastructure.
-
-## When to use me
-
-Use this skill when:
-- Setting up logging for new applications or services
-- Reviewing existing logging implementations
-- Establishing logging standards for teams or projects
-- Debugging issues with incomplete or poor logging
-- Implementing structured logging for better observability
-- Configuring log levels and verbosity for different environments
-- Ensuring logs contain sufficient context for troubleshooting
-
-## What I do
-
-### 1. Log Level Management
-- **Define appropriate log levels** (DEBUG, INFO, WARN, ERROR, FATAL)
-- **Configure level filtering** per environment (development, staging, production)
-- **Implement dynamic level adjustment** without application restarts
-- **Establish level usage guidelines** for different types of information
-
-### 2. Structured Logging Implementation
-- **Design log schema** with consistent field naming and types
-- **Implement structured formats** (JSON, key-value pairs, structured text)
-- **Include mandatory context fields** (timestamp, service, trace_id, user_id, etc.)
-- **Handle nested structures and arrays** appropriately in logs
-
-### 3. Context Propagation
-- **Implement correlation IDs** for request tracing across services
-- **Propagate context through async operations** (queues, background jobs)
-- **Maintain user/session context** throughout request lifecycle
-- **Include business context** (order_id, transaction_id, etc.) in logs
-
-### 4. Log Content Best Practices
-- **Include sufficient context** for debugging without external systems
-- **Balance detail with noise** - log enough but not too much
-- **Use consistent message formats** across the codebase
-- **Log before and after significant operations**
-- **Include error details** (stack traces, error codes, recovery suggestions)
-- **Avoid logging secrets, passwords, or sensitive data**
-
-## Logging Principles
-
-### The 5 Ws of Logging
-1. **WHO** - Which user/service/process generated the log?
-2. **WHAT** - What action/event is being logged?
-3. **WHEN** - Precise timestamp with timezone information
-4. **WHERE** - Which component/function/file generated the log?
-5. **WHY** - What is the significance/severity of the logged event?
-
-### Structured Logging Fields
-```json
-{
-  "timestamp": "2026-02-26T18:00:00Z",
-  "level": "INFO",
-  "service": "spec-generator",
-  "component": "chatComplete",
-  "trace_id": "gen-abc123",
-  "message": "LLM call completed",
-  "duration_ms": 5123,
-  "context": {
-    "model": "claude-sonnet-4-5-20250929",
-    "input_tokens": 12000,
-    "output_tokens": 4500
-  }
-}
-```
-
-### Log Level Guidelines
-- **DEBUG**: Detailed information for debugging, typically disabled in production
-- **INFO**: Routine information about normal operation
-- **WARN**: Warning conditions that might require attention but don't indicate failure
-- **ERROR**: Error conditions that indicate failure of a specific operation
-- **FATAL**: Critical errors that cause application termination
-
-## Notes
-
-- **Structured logging is essential** for modern log analysis and observability
-- **Context is more important than message content** - ensure logs can be correlated
-- **Log levels should reflect operational importance**, not developer convenience
-- **Consider log volume** - too many logs can overwhelm systems and teams
-- **Balance human readability with machine parsability** in log formats
+## Agent Role: Frontend
 
 ---
 name: rorca
@@ -1649,65 +1552,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-004):
-pg-boss fires a `monitor-states` event every `monitorStateIntervalSeconds` (set to 60 in US-001) with a snapshot of job counts by state and queue. This story captures those events and persists them to a new `queue_health_snapshots` table for trend analysis, alerting, and the analytics charts in US-007.
-
-**Migration**: Create `backend/src/db/pg-migrations/072_queue_health_snapshots.sql`:
-```sql
-CREATE TABLE IF NOT EXISTS queue_health_snapshots (
-  id SERIAL PRIMARY KEY,
-  captured_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-  total_pending INT NOT NULL DEFAULT 0,
-  total_active INT NOT NULL DEFAULT 0,
-  total_failed INT NOT NULL DEFAULT 0,
-  total_completed INT NOT NULL DEFAULT 0,
-  queue_breakdown JSONB NOT NULL DEFAULT '[]',
-  worker_id TEXT,
-  oldest_pending_seconds INT
-);
-CREATE INDEX IF NOT EXISTS idx_queue_health_snapshots_captured_at
-  ON queue_health_snapshots (captured_at DESC);
-```
-
-**Event listener in worker.ts** (add after `boss.start()`):
-```typescript
-boss.on('monitor-states', async (states) => {
-  // states = { [queueName]: { created, retry, active, completed, cancelled, failed } }
-  const totals = Object.values(states).reduce((acc, q) => {
-    acc.pending += q.created + q.retry;
-    acc.active += q.active;
-    acc.failed += q.failed;
-    acc.completed += q.completed;
-    return acc;
-  }, { pending: 0, active: 0, failed: 0, completed: 0 });
-  const breakdown = Object.entries(states).map(([name, counts]) => ({ name, ...counts }));
-  await execute(
-    `INSERT INTO queue_health_snapshots (total_pending, total_active, total_failed, total_completed, queue_breakdown, worker_id)
-     VALUES ($1, $2, $3, $4, $5, $6)`,
-    [totals.pending, totals.active, totals.failed, totals.completed, JSON.stringify(breakdown), currentWorkerId]
-  );
-  // Alert: if failed > 0, emit WAL event for notification dispatcher
-  if (totals.failed > 0) {
-    broadcastAll({ event_type: 'queue_failed_jobs_detected', payload: { count: totals.failed, breakdown } });
-  }
-});
-```
-
-**Auto-pruning**: Add a nightly cleanup of old snapshots (keep last 30 days) via the existing `scheduler.ts` or as a pg-boss scheduled job: `DELETE FROM queue_health_snapshots WHERE captured_at < NOW() - INTERVAL '30 days'`.
-
-**New API route**: `GET /api/pipeline/queue/health-history?hours=24` — queries `queue_health_snapshots` and returns time-series data for the analytics chart in US-007. Accepts `hours` param (1, 6, 24, 168 for 1 week). Returns `{ snapshots: [{ capturedAt, pending, active, failed, completed }], interval: '1h' }`.
-
-## Context
-- **monitor-states event shape**: Check the pg-boss docs/source for the exact shape of the `states` argument — it may be `{ [queueName]: { created, retry, active, completed, cancelled, failed } }` or a flat object. Log it once on first event to verify shape.
-- **Migration number**: Use 072 — check `backend/src/db/pg-migrations/` for the current highest number and use next. If 072 is taken, use the next available.
-- **broadcastAll import**: Import from `backend/src/lib/sse-hub.ts`. The `queue_failed_jobs_detected` event type should be added to the WAL event type enum if one exists.
-- **execute() is async**: Always `await execute(...)`. pg errors here should be caught and logged but not crash the event listener — wrap in try/catch.
-- **Worker ID**: The `currentWorkerId` is the `worker_id` from `worker_heartbeat` — make it accessible in the monitor-states handler (module-level variable set during initialization).
-- **Pruning**: Add `DELETE FROM queue_health_snapshots WHERE captured_at < NOW() - INTERVAL '30 days'` as a scheduled pg-boss cron job (`boss.schedule('queue-snapshot-prune', '0 3 * * *', {})`) or via the existing scheduler.ts. Check which pattern is already used in worker.ts.
+Write a Jest integration test (backend/src/__tests__/worker-concurrency.test.ts) that verifies the full round-trip: PUT /api/settings/worker persists the value, GET reads it back, and a mock of the worker polling mechanism detects the change and triggers the reload path. Also add a Vitest unit test for the UI component verifying it renders the fetched value and calls the API on save.
 
 Acceptance Criteria:
-- Migration 072_queue_health_snapshots.sql creates the queue_health_snapshots table with correct schema and index on captured_at
-- boss.on('monitor-states', ...) listener writes a row to queue_health_snapshots every 60 seconds with correct totals and queue_breakdown JSON
-- When total_failed > 0, the listener calls broadcastAll with event_type 'queue_failed_jobs_detected' so notification dispatcher and SSE clients receive the alert
-- GET /api/pipeline/queue/health-history?hours=24 returns time-series data from queue_health_snapshots for the specified time window
-- Snapshots older than 30 days are automatically pruned by a scheduled cleanup job
-- monitor-states handler errors are caught and logged without crashing the worker
+- Jest test calls PUT /api/settings/worker with { max_concurrent_runs: 5 } and asserts 200 + returned value equals 5. A subsequent GET /api/settings/worker returns 5.
+- Jest test calls PUT /api/settings/worker with { max_concurrent_runs: 0 } and asserts 422 with error referencing 'range'.
+- Jest test calls PUT /api/settings/worker with { max_concurrent_runs: 11 } and asserts 422.
+- Vitest test for the Settings UI component mocks apiFetch GET to return { max_concurrent_runs: 4 } and asserts the input renders with value 4. A simulated user change to 7 followed by save triggers apiFetch PUT with { max_concurrent_runs: 7 }.
+- Both test files are runnable with existing test commands (`cd backend && npm test` for Jest, `npx vitest run` for Vitest) without additional setup.
