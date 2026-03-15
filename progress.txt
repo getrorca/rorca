@@ -3,7 +3,8 @@
 Spec: rorca-worker-concurrency-settings
 Run ID: 125
 Started: 2026-03-15T19:39:34.377Z
-Last Updated: 2026-03-15T19:41:04.510Z
+Last Updated: 2026-03-15T19:43:27.852Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Store max_concurrent_runs in worker_settings DB table — DONE (claude, claude-sonnet-4-6, 84s)
+- US-002: Dynamic pg-boss teamSize reload in worker process — DONE (claude, claude-sonnet-4-6, 88s)

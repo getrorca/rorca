@@ -1338,21 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
-> Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-
-## 2026-03-12 [Bug Fix] MCP rorca_list_specs and rorca_list_runs wrong response shape
-> Rule: Both tools assumed wrong API response shapes. rorca_list_specs treated response as a bare array but API returns { items: [...] }. rorca_list_runs destructured { runs } but API returns { items: [...] }. Fixed by normalizing: Array.isArray(data) ? data : (data.items ?? []) for list_specs, and payload.runs ?? payload.items ?? [] for list_runs. Also fixed specName field: API uses specName not title — display as s.specName ?? s.title ?? s.id.
-
-## 2026-03-12 [Pattern] MCP tools vs prompts — tools are Claude-callable, prompts are user slash commands
-> Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
-
-## 2026-03-12 [Decision] GitHub org is getrorca — repo is github.com/getrorca/rorca (private)
-> Rule: The canonical remote for the Rorca codebase is https://github.com/getrorca/rorca (private repo). The old remote was sysgazer/rorcha — that is dead. All pushes go to getrorca/rorca. The repo is permanently closed source — never suggest open sourcing, BSL, or source-available licensing.
-
-## 2026-03-12 [Gotcha] Merging old SQLite-era branches with "take theirs" clobbers modern PostgreSQL files
-> Rule: NEVER merge old pre-postgres-migration branches (rorca-convention-agents, rorca-frontend-routing, and any branch with timestamp ~1772...) using "git checkout --theirs" on code conflicts. These branches were built on SQLite and will revert db/index.ts to the SQLite version, revert App.tsx/Sidebar.tsx/routes.tsx to the old multi-panel UI, and truncate server.ts. Always restore from a known-good modern commit (e.g. git show <pre-merge-sha>:path/to/file) after any such merge.
-
 ## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
 > Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
 
@@ -1398,8 +1383,195 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
 > Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
 
+## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
+> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
+
+## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
+> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
+
+## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
+> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
+
+## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
+> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
+
+## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
+> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
+
 Follow this workflow for implementation:
-## Agent Role: Database
+## Agent Role: Backend Routes
+
+
+## Skill: logging-fundamentals (relevance: 8)
+---
+name: logging-fundamentals
+description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers, SREs, DevOps engineers
+  category: observability
+---
+
+# Logging Fundamentals
+
+Establish proper logging practices including log levels, structured logging, context propagation, and comprehensive logging strategies for applications, services, and infrastructure.
+
+## When to use me
+
+Use this skill when:
+- Setting up logging for new applications or services
+- Reviewing existing logging implementations
+- Establishing logging standards for teams or projects
+- Debugging issues with incomplete or poor logging
+- Implementing structured logging for better observability
+- Configuring log levels and verbosity for different environments
+- Ensuring logs contain sufficient context for troubleshooting
+
+## What I do
+
+### 1. Log Level Management
+- **Define appropriate log levels** (DEBUG, INFO, WARN, ERROR, FATAL)
+- **Configure level filtering** per environment (development, staging, production)
+- **Implement dynamic level adjustment** without application restarts
+- **Establish level usage guidelines** for different types of information
+
+### 2. Structured Logging Implementation
+- **Design log schema** with consistent field naming and types
+- **Implement structured formats** (JSON, key-value pairs, structured text)
+- **Include mandatory context fields** (timestamp, service, trace_id, user_id, etc.)
+- **Handle nested structures and arrays** appropriately in logs
+
+### 3. Context Propagation
+- **Implement correlation IDs** for request tracing across services
+- **Propagate context through async operations** (queues, background jobs)
+- **Maintain user/session context** throughout request lifecycle
+- **Include business context** (order_id, transaction_id, etc.) in logs
+
+### 4. Log Content Best Practices
+- **Include sufficient context** for debugging without external systems
+- **Balance detail with noise** - log enough but not too much
+- **Use consistent message formats** across the codebase
+- **Log before and after significant operations**
+- **Include error details** (stack traces, error codes, recovery suggestions)
+- **Avoid logging secrets, passwords, or sensitive data**
+
+## Logging Principles
+
+### The 5 Ws of Logging
+1. **WHO** - Which user/service/process generated the log?
+2. **WHAT** - What action/event is being logged?
+3. **WHEN** - Precise timestamp with timezone information
+4. **WHERE** - Which component/function/file generated the log?
+5. **WHY** - What is the significance/severity of the logged event?
+
+### Structured Logging Fields
+```json
+{
+  "timestamp": "2026-02-26T18:00:00Z",
+  "level": "INFO",
+  "service": "spec-generator",
+  "component": "chatComplete",
+  "trace_id": "gen-abc123",
+  "message": "LLM call completed",
+  "duration_ms": 5123,
+  "context": {
+    "model": "claude-sonnet-4-5-20250929",
+    "input_tokens": 12000,
+    "output_tokens": 4500
+  }
+}
+```
+
+### Log Level Guidelines
+- **DEBUG**: Detailed information for debugging, typically disabled in production
+- **INFO**: Routine information about normal operation
+- **WARN**: Warning conditions that might require attention but don't indicate failure
+- **ERROR**: Error conditions that indicate failure of a specific operation
+- **FATAL**: Critical errors that cause application termination
+
+## Notes
+
+- **Structured logging is essential** for modern log analysis and observability
+- **Context is more important than message content** - ensure logs can be correlated
+- **Log levels should reflect operational importance**, not developer convenience
+- **Consider log volume** - too many logs can overwhelm systems and teams
+- **Balance human readability with machine parsability** in log formats
+
+## Skill: workflow-orchestrator (relevance: 6)
+---
+name: workflow-orchestrator
+description: Build and orchestrate AI-driven development workflows that iterate until success using configurable patterns and multi-agent coordination
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers, AI agents, team leads
+  category: workflow
+---
+
+# Workflow Orchestrator
+
+Design, configure, and execute AI-driven development workflows that iterate until tasks complete successfully using configurable patterns, multi-agent coordination, and intelligent stop conditions.
+
+## When to use me
+
+Use this skill when:
+- Building complex features requiring multiple AI agent passes
+- Implementing automated development workflows with verification steps
+- Coordinating parallel AI agents for different aspects of a task
+- Creating self-correcting loops that iterate until success criteria met
+- Need to orchestrate multiple AI agents in sequence or parallel
+
+## What I do
+
+### 1. Workflow Pattern Selection
+- **Analyze task requirements** to recommend optimal workflow patterns
+- **Match complexity levels** with appropriate workflow types
+- **Compare trade-offs** between speed, cost, control, and quality
+
+### 2. Multi-Agent Coordination
+- **Sequence agents** for linear workflows (build → verify → plan)
+- **Parallelize agents** for concurrent execution
+- **Handle failures and retries** with intelligent routing
+- **Implement steering patterns** (linear, conditional, parallel, unblocking)
+
+### 3. SSE Event Streaming
+- **Real-time monitoring** via Server-Sent Events
+- **Progress tracking** across workflow stages
+- **Live output streaming** from subprocess execution
+- **Late-joiner replay** from in-memory buffers
+
+### 4. Integration & Tooling
+- **Subprocess management** for isolated agent execution
+- **Output buffer management** with subscriber patterns
+- **Structured event emission** for semantic log parsing
+- **Git integration** for automated quality gates
+
+## Key Patterns
+
+### Subprocess → SSE → Terminal Pattern
+```
+Backend spawns subprocess (claude --print, opencode run)
+  → stdout/stderr piped to in-memory buffer
+  → buffer broadcasts to SSE subscribers
+  → SSE endpoint replays buffer + live chunks
+  → Frontend EventSource connects, writes to xterm.js
+  → Late joiners get full replay automatically
+```
+
+### Buffer Management
+- In-memory circular buffer per generation/run ID
+- Subscribers added/removed on SSE connect/disconnect
+- Auto-cleanup after TTL (30 min default)
+- Base64 encoding for binary-safe transport
+
+## Notes
+
+- **Start simple** — single agent pattern before scaling to multi-agent
+- **Monitor costs** — parallel agents increase expense
+- **Implement escape hatches** — always have manual stop conditions
+- **Use structured events** alongside raw output for dual-mode rendering
+- **Buffer management is critical** — memory leaks from uncleaned buffers
 
 ---
 name: rorca
@@ -1552,57 +1724,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-002):
-Extend the existing `GET /api/pipeline/worker/health` endpoint in `backend/src/routes/pipeline.ts` to return a `queueStats` object alongside existing worker liveness fields. The queue stats are read directly from `pgboss.job` and `pgboss.archive` tables via the same PostgreSQL connection pool used by the rest of the app.
-
-**New `queueStats` fields to add to the response**:
-```json
-{
-  "queueStats": {
-    "pending": 3,
-    "active": 1,
-    "failed": 0,
-    "completed24h": 14,
-    "failedInLast24h": 0,
-    "failedInLast7d": 2,
-    "archiveSize": 847,
-    "oldestPendingAgeSeconds": 12,
-    "queues": [
-      { "name": "pipeline:run", "pending": 2, "active": 1, "failed": 0 },
-      { "name": "pipeline:retry", "pending": 1, "active": 0, "failed": 0 },
-      { "name": "pipeline:cancel", "pending": 0, "active": 0, "failed": 0 }
-    ]
-  }
-}
-```
-
-**SQL queries** (run in parallel with `Promise.all`):
-- `pending`: `SELECT COUNT(*) FROM pgboss.job WHERE state='created'`
-- `active`: `SELECT COUNT(*) FROM pgboss.job WHERE state='active'`
-- `failed` (in pgboss.job — not yet archived): `SELECT COUNT(*) FROM pgboss.job WHERE state='failed'`
-- `failedInLast24h`: `SELECT COUNT(*) FROM pgboss.archive WHERE state='failed' AND archived_on > NOW() - INTERVAL '24 hours'`
-- `failedInLast7d`: `SELECT COUNT(*) FROM pgboss.archive WHERE state='failed' AND archived_on > NOW() - INTERVAL '7 days'`
-- `archiveSize`: `SELECT COUNT(*) FROM pgboss.archive`
-- `oldestPendingAgeSeconds`: `SELECT EXTRACT(EPOCH FROM (NOW() - MIN(created_on))) FROM pgboss.job WHERE state='created'` (returns null if no pending jobs)
-- Per-queue breakdown: `SELECT name, COUNT(*) FILTER (WHERE state='created') AS pending, COUNT(*) FILTER (WHERE state='active') AS active, COUNT(*) FILTER (WHERE state='failed') AS failed FROM pgboss.job GROUP BY name`
-
-**Health classification**: Add a top-level `queueHealth: 'healthy' | 'degraded' | 'critical'` field to the response:
-- `critical`: any job in `failed` state in `pgboss.job` (unarchived failures = very recent or stuck), OR `failedInLast24h > 5`
-- `degraded`: `failedInLast24h > 0`, OR `oldestPendingAgeSeconds > 300` (job pending for 5+ minutes — worker may be slow/stuck)
-- `healthy`: all other cases
-
-## Context
-- **pgboss schema access**: pg-boss creates its own `pgboss` schema in the same database. Query via the existing `query<T>()` helper from `backend/src/db/index.ts`. Use numbered placeholders `$1, $2` — never `?`.
-- **pgboss.job states**: `created` (pending, not yet picked up), `retry` (queued for retry after failure), `active` (currently being processed), `completed`, `cancelled`, `failed` (exhausted retries).
-- **pgboss.archive**: Completed and failed jobs are moved here by pg-boss maintenance. Has the same columns plus `archived_on TIMESTAMPTZ`. Query `pgboss.archive` for historical failure counts.
-- **Parallel queries**: Wrap all 7 queries in `Promise.all([...])` — each is a simple count query. Do NOT run them sequentially; at 7 queries sequential would add noticeable latency.
-- **Null safety**: `oldestPendingAgeSeconds` returns `null` when no pending jobs exist. Handle with `Number(result ?? 0)` or return `null` in the response — frontend should display 'none' for null.
-- **Existing response shape**: Current `worker/health` returns `{ alive: boolean, workerId: string, pid: number, lastSeen: Date, uptimeSeconds: number }`. Append `queueStats` and `queueHealth` to this shape without breaking existing consumers.
-- **@swagger annotation**: Update the existing JSDoc for `GET /api/pipeline/worker/health` to document the new `queueStats` and `queueHealth` fields.
+Replace the hardcoded `teamSize: 3` in worker.ts (introduced by PG-020) with a value fetched from the DB at startup and polled every 30 seconds. When the polled value differs from the active value, gracefully stop the current `boss.work('pipeline:run', ...)` subscription and restart it with the new teamSize, without restarting the worker process or losing in-flight jobs. Use pg-boss's `boss.offWork()` (or equivalent stop API) before re-registering via `boss.work()`.
 
 Acceptance Criteria:
-- GET /api/pipeline/worker/health returns queueStats object with pending, active, failed, failedInLast24h, failedInLast7d, archiveSize, oldestPendingAgeSeconds, and a queues array broken down by queue name
-- Response includes top-level queueHealth field: 'healthy', 'degraded', or 'critical' based on documented classification rules
-- All queue stat queries run in parallel (Promise.all) — no sequential query chaining
-- When pgboss.job is empty (no pending or active jobs), response returns 0 counts and null for oldestPendingAgeSeconds without error
-- Existing worker/health response fields (alive, workerId, pid, lastSeen, uptimeSeconds) are unchanged — backward compatible
-- @swagger annotation is updated to document queueStats and queueHealth in the OpenAPI spec
+- On worker startup, `getMaxConcurrentRuns()` fetches the value from the `worker_settings` table (via the DB pool) and uses it as the initial teamSize passed to `boss.work()`.
+- A polling interval (default 30s, configurable via WORKER_SETTINGS_POLL_MS env var) checks the DB for the current value. If the value has changed, the worker calls `boss.offWork('pipeline:run')` then re-registers `boss.work('pipeline:run', handler, { teamSize: newValue })` without exiting.
+- In-flight jobs are not interrupted during the reload — the worker waits for the current batch to drain (or relies on pg-boss's graceful stop behavior) before re-subscribing.
+- Worker logs a structured message at INFO level when teamSize changes: `[worker] max_concurrent_runs changed 3 → 5, reloading work subscription`.
+- WORKER_SETTINGS_POLL_MS defaults to 30000 and is documented in backend/.env.example (or similar reference file).

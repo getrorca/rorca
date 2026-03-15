@@ -1514,11 +1514,35 @@ async function reconcileState(): Promise<void> {
   }
 }
 
+// ── Worker settings (max_concurrent_runs) ───────────────────────────────
+
+const DEFAULT_MAX_CONCURRENT_RUNS = 5;
+
+/**
+ * Fetch max_concurrent_runs from worker_settings table.
+ * Falls back to RORCA_MAX_CONCURRENT_RUNS env var, then DEFAULT_MAX_CONCURRENT_RUNS.
+ */
+async function getMaxConcurrentRuns(): Promise<number> {
+  try {
+    const row = await queryOne<{ value: string }>(
+      `SELECT value FROM worker_settings WHERE key = 'max_concurrent_runs'`,
+    );
+    if (row) {
+      const parsed = parseInt(row.value, 10);
+      if (!isNaN(parsed) && parsed > 0) return parsed;
+    }
+  } catch (err) {
+    logger.warn({ err }, '[worker] getMaxConcurrentRuns — DB query failed, using env/default');
+  }
+  return parseInt(process.env.RORCA_MAX_CONCURRENT_RUNS ?? String(DEFAULT_MAX_CONCURRENT_RUNS), 10);
+}
+
 // ── Graceful shutdown ────────────────────────────────────────────────────
 
 let stopping = false;
 let reconcileIntervalHandle: ReturnType<typeof setInterval> | undefined;
 let sweepIntervalId: ReturnType<typeof setInterval> | undefined;
+let settingsPollIntervalId: ReturnType<typeof setInterval> | undefined;
 
 async function shutdown(signal: string): Promise<void> {
   if (stopping) return;
@@ -1532,6 +1556,11 @@ async function shutdown(signal: string): Promise<void> {
   if (reconcileIntervalHandle !== undefined) {
     clearInterval(reconcileIntervalHandle);
     reconcileIntervalHandle = undefined;
+  }
+
+  if (settingsPollIntervalId !== undefined) {
+    clearInterval(settingsPollIntervalId);
+    settingsPollIntervalId = undefined;
   }
 
   logger.info(`[worker] received ${signal} — starting graceful shutdown`);
@@ -1703,11 +1732,49 @@ async function start(): Promise<void> {
   // 4. Register job queue handlers.
   // Queues are already created by ensureQueues() inside initBoss() — just register handlers.
   const boss = getBoss();
-  const maxConcurrent = parseInt(process.env.RORCA_MAX_CONCURRENT_RUNS ?? '5', 10);
-  await boss.work('pipeline:run', { batchSize: maxConcurrent }, handlePipelineRun);
-  await boss.work('pipeline:retry', { batchSize: maxConcurrent }, handlePipelineRetry);
+
+  // Fetch initial concurrency from DB (falls back to env var / default).
+  let currentMaxConcurrent = await getMaxConcurrentRuns();
+  logger.info({ maxConcurrent: currentMaxConcurrent }, '[worker] initial max_concurrent_runs');
+
+  await boss.work('pipeline:run', { batchSize: currentMaxConcurrent }, handlePipelineRun);
+  await boss.work('pipeline:retry', { batchSize: currentMaxConcurrent }, handlePipelineRetry);
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
+
+  // Poll worker_settings every WORKER_SETTINGS_POLL_MS (default 30s).
+  // If max_concurrent_runs changed, hot-reload the pipeline:run and pipeline:retry subscriptions.
+  const WORKER_SETTINGS_POLL_MS = parseInt(process.env.WORKER_SETTINGS_POLL_MS ?? '30000', 10);
+
+  settingsPollIntervalId = setInterval(() => {
+    void (async () => {
+      if (stopping) return;
+      try {
+        const newMax = await getMaxConcurrentRuns();
+        if (newMax !== currentMaxConcurrent) {
+          logger.info(
+            { from: currentMaxConcurrent, to: newMax },
+            `[worker] max_concurrent_runs changed ${currentMaxConcurrent} → ${newMax}, reloading work subscription`,
+          );
+
+          // Stop current subscriptions gracefully (pg-boss drains in-flight batch
+          // before removing the subscription — in-flight jobs are NOT interrupted).
+          await boss.offWork('pipeline:run');
+          await boss.offWork('pipeline:retry');
+
+          currentMaxConcurrent = newMax;
+
+          // Re-register with updated batchSize.
+          await boss.work('pipeline:run', { batchSize: currentMaxConcurrent }, handlePipelineRun);
+          await boss.work('pipeline:retry', { batchSize: currentMaxConcurrent }, handlePipelineRetry);
+
+          logger.info({ maxConcurrent: currentMaxConcurrent }, '[worker] work subscription reloaded successfully');
+        }
+      } catch (err) {
+        logger.warn({ err }, '[worker] settings poll: failed to check/reload max_concurrent_runs');
+      }
+    })();
+  }, WORKER_SETTINGS_POLL_MS);
 
   // 4b-monitor. Capture pg-boss monitor-states snapshots to queue_health_snapshots table.
   // pg-boss emits 'monitor-states' every monitorStateIntervalSeconds (60s, set in US-001).
