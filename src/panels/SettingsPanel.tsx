@@ -66,6 +66,10 @@ const UnifiedActivitySection = lazy(() =>
   import('./settings/UnifiedActivitySection').then((m) => ({ default: m.UnifiedActivitySection })),
 );
 
+const DeadLetterQueueSection = lazy(() =>
+  import('./settings/DeadLetterQueueSection').then((m) => ({ default: m.DeadLetterQueueSection })),
+);
+
 const NotificationsSection = lazy(() =>
   import('./settings/AccountSettingsTab').then((m) => ({ default: m.NotificationsSection })),
 );
@@ -126,7 +130,13 @@ export default function SettingsPanel() {
           {activeTab === 'shortcuts' && <ShortcutsSettingsTab />}
           {activeTab === 'notifications' && <NotificationsSection />}
           {/* System group */}
-          {activeTab === 'system' && <UnifiedActivitySection />}
+          {activeTab === 'system' && (
+            <>
+              <DeadLetterQueueSection />
+              <hr className="border-border my-6" />
+              <UnifiedActivitySection />
+            </>
+          )}
           {activeTab === 'api-keys' && <ApiKeysSection />}
           {activeTab === 'developer' && <DeveloperToolsSection />}
         </Suspense>

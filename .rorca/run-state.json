@@ -2,7 +2,7 @@
   "specId": "rorca-queue-observability",
   "runId": 124,
   "startedAt": "2026-03-15T09:21:13.933Z",
-  "lastUpdatedAt": "2026-03-15T09:38:36.154Z",
+  "lastUpdatedAt": "2026-03-15T09:42:35.941Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -83,6 +83,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 211586
+    },
+    {
+      "storyId": "US-008",
+      "title": "Settings > System dead-letter queue panel — list failed jobs, inspect error, retry or discard",
+      "status": "passed",
+      "startedAt": "2026-03-15T09:38:50.916Z",
+      "finishedAt": "2026-03-15T09:42:35.941Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 225025
     }
   ],
   "failedStories": [],
