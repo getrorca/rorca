@@ -1338,21 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
-> Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-
-## 2026-03-12 [Bug Fix] MCP rorca_list_specs and rorca_list_runs wrong response shape
-> Rule: Both tools assumed wrong API response shapes. rorca_list_specs treated response as a bare array but API returns { items: [...] }. rorca_list_runs destructured { runs } but API returns { items: [...] }. Fixed by normalizing: Array.isArray(data) ? data : (data.items ?? []) for list_specs, and payload.runs ?? payload.items ?? [] for list_runs. Also fixed specName field: API uses specName not title — display as s.specName ?? s.title ?? s.id.
-
-## 2026-03-12 [Pattern] MCP tools vs prompts — tools are Claude-callable, prompts are user slash commands
-> Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
-
-## 2026-03-12 [Decision] GitHub org is getrorca — repo is github.com/getrorca/rorca (private)
-> Rule: The canonical remote for the Rorca codebase is https://github.com/getrorca/rorca (private repo). The old remote was sysgazer/rorcha — that is dead. All pushes go to getrorca/rorca. The repo is permanently closed source — never suggest open sourcing, BSL, or source-available licensing.
-
-## 2026-03-12 [Gotcha] Merging old SQLite-era branches with "take theirs" clobbers modern PostgreSQL files
-> Rule: NEVER merge old pre-postgres-migration branches (rorca-convention-agents, rorca-frontend-routing, and any branch with timestamp ~1772...) using "git checkout --theirs" on code conflicts. These branches were built on SQLite and will revert db/index.ts to the SQLite version, revert App.tsx/Sidebar.tsx/routes.tsx to the old multi-panel UI, and truncate server.ts. Always restore from a known-good modern commit (e.g. git show <pre-merge-sha>:path/to/file) after any such merge.
-
 ## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
 > Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
 
@@ -1398,8 +1383,84 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
 > Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
 
+## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
+> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
+
+## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
+> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
+
+## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
+> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
+
+## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
+> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
+
+## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
+> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
+
 Follow this workflow for implementation:
-## Agent Role: Database
+## Agent Role: Execution Engine
+
+
+## Skill: react-review (relevance: 9)
+---
+name: react-review
+description: Review React components for best practices and performance issues
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers
+  category: development
+---
+
+# React Review Skill
+
+Review React components for best practices, performance issues, and common patterns.
+
+## When to use me
+
+Use this skill when:
+- Reviewing React component code
+- Optimizing component performance
+- Checking for React best practices
+- Refactoring legacy components
+- Auditing component architecture
+
+## What I do
+
+- Analyze React components for performance issues (unnecessary re-renders, large bundles)
+- Check for React best practices (hooks usage, prop patterns, state management)
+- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
+- Suggest optimizations (memoization, code splitting, lazy loading)
+- Review TypeScript usage and type safety
+
+## Key Patterns
+
+### Performance
+- Use `React.memo` for components receiving object/function props from parent
+- Memoize expensive calculations with `useMemo`
+- Stabilize callback references with `useCallback`
+- Avoid inline object/array creation in JSX props
+- Use `React.lazy` + `Suspense` for code splitting
+
+### Hooks
+- Always include all dependencies in `useEffect` dependency arrays
+- Never call hooks conditionally or inside loops
+- Extract complex logic into custom hooks
+- Clean up subscriptions and timers in useEffect return
+
+### TypeScript
+- Define explicit interfaces for all component props
+- Use discriminated unions for variant components
+- Prefer `interface` over `type` for component props
+- Use `React.FC` sparingly — prefer explicit return types
+
+## Notes
+
+- Focuses on React 18+ patterns and best practices
+- Considers both class and function components
+- Includes TypeScript and JavaScript variants
+- References official React documentation and community patterns
 
 ---
 name: rorca
@@ -1552,50 +1613,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-003):
-Create a new route `GET /api/pipeline/queue/failed-jobs` in `backend/src/routes/pipeline.ts` that returns a paginated list of failed pg-boss jobs from both `pgboss.job` (unarchived, very recent failures) and `pgboss.archive` (archived failures). Each entry is enriched with the corresponding `pipeline_runs` row (if the job's `data.runId` matches). Also create a `POST /api/pipeline/queue/failed-jobs/:jobId/retry` endpoint that re-inserts the failed job into `pgboss.job` with a fresh state.
-
-**GET /api/pipeline/queue/failed-jobs response shape**:
-```json
-{
-  "items": [
-    {
-      "jobId": "uuid",
-      "queueName": "pipeline:run",
-      "state": "failed",
-      "failedAt": "2026-03-13T...",
-      "retryCount": 3,
-      "retryLimit": 3,
-      "errorOutput": { "message": "...", "stack": "..." },
-      "data": { "runId": 42, "specPath": "forge/specs/approved/my-spec.json" },
-      "runId": 42,
-      "runStatus": "failed",
-      "specPath": "forge/specs/approved/my-spec.json"
-    }
-  ],
-  "total": 5,
-  "page": 1,
-  "pageSize": 20
-}
-```
-
-**Query logic**: UNION query against `pgboss.job WHERE state='failed'` and `pgboss.archive WHERE state='failed' AND archived_on > NOW() - INTERVAL '30 days'`. Join on `data->>'runId'` to `pipeline_runs.id` (LEFT JOIN — some failed jobs may not have a runId if they failed before the run was created). Order by `failed_at DESC` (use `completed_on` from pgboss — it's set on failure too). Apply pagination via `LIMIT $pageSize OFFSET $offset`.
-
-**POST /api/pipeline/queue/failed-jobs/:jobId/retry**: Read the job from `pgboss.archive` (or `pgboss.job`), extract its `name` and `data`, call `boss.send(name, data)` to re-insert as a fresh job. Return `{ newJobId, message: 'Job requeued' }`. This is the manual re-queue action operators use when they've fixed the underlying issue.
-
-## Context
-- **pgboss.job columns**: `id UUID, name TEXT, data JSONB, state TEXT, retry_count INT, retry_limit INT, output JSONB, created_on TIMESTAMPTZ, started_on TIMESTAMPTZ, completed_on TIMESTAMPTZ`. The `output` column contains the error/result from the last attempt.
-- **pgboss.archive columns**: Same as pgboss.job plus `archived_on TIMESTAMPTZ`.
-- **UNION query**: Since failed jobs exist in both tables (recent in pgboss.job, archived in pgboss.archive), UNION both sources. Use `UNION ALL` (not `UNION`) to avoid deduplication overhead — the same job won't appear in both tables (archival removes it from pgboss.job).
-- **JOIN to pipeline_runs**: `LEFT JOIN pipeline_runs pr ON pr.id = (j.data->>'runId')::INT`. Cast the JSONB string to INT. Handle the case where `data->>'runId'` is null (not all queues carry a runId — e.g. pipeline:cron jobs).
-- **Retry endpoint — boss.send**: The MCP tool `rorca_retry_story` exists for story-level retries. This endpoint is for queue-level job retries (re-enqueue the pg-boss job itself). It should NOT call `boss.resume()` — that pg-boss API is for `created`/`retry` state jobs. For failed jobs use `boss.send(name, data)` to create a new job with the same payload.
-- **Pagination**: Follow existing `paginate()` helper from `backend/src/lib/paginate.ts` — returns `{ items, total, page, pageSize }`. Accept `?page=1&pageSize=20` query params.
-- **@swagger annotation**: Document both GET (with pagination params) and POST retry endpoint. Include example response showing `errorOutput` field structure.
-- **Security note**: `errorOutput` may contain stack traces — do NOT strip them, they're needed for debugging. But do NOT include raw DATABASE_URL or API keys that may appear in error messages. Scrub env vars: `output.stack?.replace(/(sk-[a-z0-9]+)/g, '[REDACTED]')`.
+Add a labelled number input (range 1–10, step 1) to the Settings > Execution Engine tab (SettingsPanel.tsx, tab id 'agents' or 'providers' — whichever currently renders execution engine options). The control must load the current value from GET /api/settings/worker on mount, allow the user to change it, and save via PUT /api/settings/worker on blur or an explicit Save button. Include an inline helper note explaining the practical ceiling by subscription tier.
 
 Acceptance Criteria:
-- GET /api/pipeline/queue/failed-jobs returns paginated list of failed jobs from both pgboss.job and pgboss.archive, enriched with pipeline_runs data where runId is available
-- Each item includes jobId, queueName, state, failedAt, retryCount, retryLimit, errorOutput (scrubbed of API keys), data payload, and matching pipeline_run fields if available
-- POST /api/pipeline/queue/failed-jobs/:jobId/retry successfully re-enqueues the failed job via boss.send() and returns the new job ID
-- Retry endpoint returns 404 if the jobId is not found in pgboss.job or pgboss.archive
-- Pagination works correctly: page and pageSize query params are respected, total count reflects UNION of both tables
-- @swagger annotations exist for both endpoints and appear in /api/docs/openapi.json
+- The number input renders under a 'Pipeline Concurrency' section heading in Settings > Execution Engine tab. It shows the current DB value on load (fetched via apiFetch, never hardcoded).
+- Input is constrained: min=1, max=10, step=1. Submitting a value outside this range is prevented by both HTML attributes and client-side validation (error toast shown).
+- On successful save, a success toast ('Max concurrent runs updated') appears. On API error, an error toast with the API error message is shown.
+- An inline note below the input reads: 'Claude Pro: recommended 2–3 concurrent runs. Claude Max / Max 5×: up to 10.' (exact text).
+- The input is disabled while the save request is in flight to prevent double-submit.

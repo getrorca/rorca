@@ -104,7 +104,8 @@
         "ux-designer",
         "best-practices"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-004",
