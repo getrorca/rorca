@@ -5280,6 +5280,18 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
  *                     failedInLast7d: { type: integer, description: "Number of jobs failed in the last 7 days" }
  *                     archiveSize: { type: integer, description: "Total number of archived jobs" }
  *                     oldestPendingAgeSeconds: { type: integer, nullable: true, description: "Age in seconds of the oldest pending job (null if no pending jobs)" }
+ *                     pickupLatency:
+ *                       type: object
+ *                       nullable: true
+ *                       description: "Job pickup latency metrics over a 24-hour rolling window (pipeline:run + pipeline:retry only)"
+ *                       properties:
+ *                         avgSeconds: { type: number, nullable: true }
+ *                         p50Seconds: { type: number, nullable: true }
+ *                         p95Seconds: { type: number, nullable: true }
+ *                         maxSeconds: { type: number, nullable: true }
+ *                         sampleCount: { type: integer }
+ *                         windowHours: { type: integer }
+ *                         status: { type: string, enum: ["healthy", "degraded", "critical"] }
  *                     queues:
  *                       type: array
  *                       items:
@@ -5387,6 +5399,14 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       active: string;
       failed: string;
     }
+    interface LatencyRow {
+      avg_pickup_seconds: number | null;
+      p50_pickup_seconds: number | null;
+      p95_pickup_seconds: number | null;
+      min_pickup_seconds: number | null;
+      max_pickup_seconds: number | null;
+      sample_count: string;
+    }
 
     const [
       pendingRow,
@@ -5398,6 +5418,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       archiveSizeRow,
       oldestAgeRow,
       queueRows,
+      latencyRow,
     ] = await Promise.all([
       queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE state = $1', ['created']).catch(() => ({ cnt: '0' })),
       queryOne<CountRow>('SELECT COUNT(*)::text AS cnt FROM pgboss.job WHERE state = $1', ['active']).catch(() => ({ cnt: '0' })),
@@ -5416,6 +5437,20 @@ router.get('/worker/health', async (req: Request, res: Response) => {
          GROUP BY name
          ORDER BY name`,
       ).catch(() => [] as QueueRow[]),
+      queryOne<LatencyRow>(
+        `SELECT
+           AVG(EXTRACT(EPOCH FROM (started_on - created_on)))                                                             AS avg_pickup_seconds,
+           PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (started_on - created_on)))                   AS p50_pickup_seconds,
+           PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (started_on - created_on)))                   AS p95_pickup_seconds,
+           MIN(EXTRACT(EPOCH FROM (started_on - created_on)))                                                             AS min_pickup_seconds,
+           MAX(EXTRACT(EPOCH FROM (started_on - created_on)))                                                             AS max_pickup_seconds,
+           COUNT(*)::text                                                                                                  AS sample_count
+         FROM pgboss.archive
+         WHERE started_on IS NOT NULL
+           AND created_on IS NOT NULL
+           AND archived_on > NOW() - INTERVAL '24 hours'
+           AND name IN ('pipeline:run', 'pipeline:retry')`,
+      ).catch(() => null),
     ]);
 
     const pending = parseInt(pendingRow?.cnt ?? '0', 10);
@@ -5426,6 +5461,30 @@ router.get('/worker/health', async (req: Request, res: Response) => {
     const failedInLast7d = parseInt(failedLast7dRow?.cnt ?? '0', 10);
     const archiveSize = parseInt(archiveSizeRow?.cnt ?? '0', 10);
     const oldestPendingAgeSeconds = oldestAgeRow?.age_seconds ?? null;
+
+    // ── Pickup latency classification ──────────────────────────────────────────
+    const latencySampleCount = parseInt(latencyRow?.sample_count ?? '0', 10);
+    const latencyP95 = latencyRow?.p95_pickup_seconds ?? null;
+    let latencyStatus: 'healthy' | 'degraded' | 'critical' = 'healthy';
+    if (latencyP95 === null) {
+      // No completed pipeline jobs in the last 24 hours.
+      // Mark critical only when jobs are stuck in pending (never started).
+      latencyStatus = pending > 0 ? 'critical' : 'healthy';
+    } else if (latencyP95 > 10) {
+      latencyStatus = 'critical';
+    } else if (latencyP95 > 2) {
+      latencyStatus = 'degraded';
+    }
+
+    const pickupLatency = {
+      avgSeconds: latencyRow?.avg_pickup_seconds ?? null,
+      p50Seconds: latencyRow?.p50_pickup_seconds ?? null,
+      p95Seconds: latencyP95,
+      maxSeconds: latencyRow?.max_pickup_seconds ?? null,
+      sampleCount: latencySampleCount,
+      windowHours: 24,
+      status: latencyStatus,
+    };
 
     // Convert per-queue breakdown to typed object
     const queues = queueRows.map(r => ({
@@ -5464,6 +5523,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
         failedInLast7d,
         archiveSize,
         oldestPendingAgeSeconds,
+        pickupLatency,
         queues,
       },
     });
