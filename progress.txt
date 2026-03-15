@@ -3,9 +3,10 @@
 Spec: rorca-run-view-streaming-fix
 Run ID: 126
 Started: 2026-03-15T20:14:13.214Z
-Last Updated: 2026-03-15T20:21:57.932Z
+Last Updated: 2026-03-15T20:37:44.155Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - US-001: Add flush timer to worker handleData() for sub-second terminal output — DONE (claude, 131s)
 - US-002: Replace StoriesListTab with RunStoryList in RunViewPanel — DONE (claude, 130s)
 - US-003: Inject story completion markers into xterm terminal stream — DONE (claude, 160s)
+- US-004: Jest tests for worker flush timer — mock timers, verify sub-4KB writes — DONE (claude, 925s)
