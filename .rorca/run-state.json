@@ -2,7 +2,7 @@
   "specId": "rorca-run-view-streaming-fix",
   "runId": 126,
   "startedAt": "2026-03-15T20:14:13.214Z",
-  "lastUpdatedAt": "2026-03-15T21:09:51.177Z",
+  "lastUpdatedAt": "2026-03-15T21:10:27.499Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -93,6 +93,15 @@
       "finishedAt": "2026-03-15T21:09:51.177Z",
       "agentType": "claude",
       "elapsedMs": 21160
+    },
+    {
+      "storyId": "US-011",
+      "title": "Aggregate story pass counts across all runs in kanban endpoint",
+      "status": "passed",
+      "startedAt": "2026-03-15T21:10:13.975Z",
+      "finishedAt": "2026-03-15T21:10:27.499Z",
+      "agentType": "claude",
+      "elapsedMs": 13524
     }
   ],
   "failedStories": [],
