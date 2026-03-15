@@ -41,13 +41,23 @@ export async function initBoss(): Promise<void> {
     connectionString,
     // Keep pg-boss internal tables in their own schema (pgboss.*)
     schema: 'pgboss',
-    // Archive completed jobs every 2 minutes; expire after 7 days
+    // Data retention and archiving settings (US-001)
+    // - Move completed jobs from pgboss.job → pgboss.archive after 1 hour
+    archiveCompletedAfterSeconds: 3600,
+    // - Keep failed jobs in pgboss.job for 7 days before archiving (longer retention for debugging)
+    archiveFailedAfterSeconds: 604800,
+    // - Delete archived jobs older than 14 days (balance between retention and table bloat)
+    deleteAfterDays: 14,
+    // - Retention period: keep archived data for 30 days before hard delete
+    retentionDays: 30,
+    // - Run maintenance cycle (archive + delete) every 2 minutes
     maintenanceIntervalSeconds: 120,
-    archiveCompletedAfterSeconds: 60 * 60 * 24 * 7,
+    // - Fire monitor-states event every 60 seconds with queue health snapshots (required for US-004)
+    monitorStateIntervalSeconds: 60,
   });
 
   boss.on('error', (err) => {
-    logger.error({ err }, '[pg-boss] internal error');
+    logger.error({ err }, '[pg-boss] internal error — pg-boss maintenance or connection issue');
   });
 
   // boss.start() creates / migrates the pgboss schema automatically

@@ -1,17 +1,9 @@
 # Run State Summary
 
-Spec: rorca-orphan-process-sweep
-Run ID: 118
-Started: 2026-03-15T06:12:18.089Z
-Last Updated: 2026-03-15T07:04:42.263Z
+Spec: rorca-queue-observability
+Run ID: 121
+Started: 2026-03-15T08:04:02.390Z
+Last Updated: 2026-03-15T08:05:01.524Z
 
-## Completed Stories (9)
-- US-001: Implement orphan process sweep core function in worker.ts — DONE (claude, claude-sonnet-4-6, 386s)
-- US-002: Add startup orphan sweep on worker initialization — DONE (claude, claude-opus-4-6, 120s)
-- US-003: Add periodic orphan sweep every 5 minutes — DONE (claude, claude-sonnet-4-6, 67s)
-- US-004: Add POST /api/pipeline/orphan-sweep API endpoint — DONE (claude, claude-haiku-4-5-20251001, 145s)
-- US-004: Add POST /api/pipeline/orphan-sweep endpoint for manual trigger — DONE (claude, claude-haiku-4-5-20251001, 171s)
-- US-005: Add Jest tests for orphan sweep function and endpoint — DONE (claude, claude-sonnet-4-6, 172s)
-- US-006: Pre-seed story_results for already-passed stories and add UI resume badge — DONE (claude, claude-sonnet-4-6, 953s)
-- US-007: Fix run_output_chunks terminal streaming for worktree pipeline runs — DONE (claude, claude-sonnet-4-6, 998s)
-- US-008: Store inner Node PID in pipeline_runs.pid — fix 409 kill error caused by stale tsx wrapper PID — DONE (claude, claude-sonnet-4-6, 172s)
+## Completed Stories (1)
+- US-001: Configure pg-boss maintenance settings — prevent unbounded table growth and enable queue monitoring — DONE (claude, claude-haiku-4-5-20251001, 58s)
