@@ -3,7 +3,8 @@
 Spec: rorca-run-view-streaming-fix
 Run ID: 126
 Started: 2026-03-15T20:14:13.214Z
-Last Updated: 2026-03-15T20:16:25.042Z
+Last Updated: 2026-03-15T20:18:55.982Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Add flush timer to worker handleData() for sub-second terminal output — DONE (claude, 131s)
+- US-002: Replace StoriesListTab with RunStoryList in RunViewPanel — DONE (claude, 130s)
