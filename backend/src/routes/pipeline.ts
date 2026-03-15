@@ -5800,4 +5800,110 @@ router.post('/queue/failed-jobs/:jobId/retry', async (req: Request, res: Respons
   }
 });
 
+// ─── GET /api/pipeline/queue/health-history — Time-series queue health snapshots ──
+
+/**
+ * @swagger
+ * /api/pipeline/queue/health-history:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Queue health time-series data
+ *     operationId: getQueueHealthHistory
+ *     description: >
+ *       Returns time-series snapshots from queue_health_snapshots, captured every
+ *       60 seconds by the worker's monitor-states listener. Use for trend charts,
+ *       alerting analysis, and queue observability dashboards.
+ *     parameters:
+ *       - in: query
+ *         name: hours
+ *         schema:
+ *           type: integer
+ *           enum: [1, 6, 24, 168]
+ *           default: 24
+ *         description: Time window in hours (1=1h, 6=6h, 24=24h, 168=1w)
+ *     responses:
+ *       200:
+ *         description: Time-series health snapshots
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 snapshots:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       capturedAt: { type: string, format: date-time }
+ *                       pending: { type: integer }
+ *                       active: { type: integer }
+ *                       failed: { type: integer }
+ *                       completed: { type: integer }
+ *                       oldestPendingSeconds: { type: integer, nullable: true }
+ *                       workerId: { type: string, nullable: true }
+ *                 interval:
+ *                   type: string
+ *                   description: Suggested chart bucket interval
+ *                 totalSnapshots: { type: integer }
+ *                 windowHours: { type: integer }
+ */
+router.get('/queue/health-history', async (req: Request, res: Response) => {
+  try {
+    const rawHours = parseInt(String(req.query.hours ?? '24'), 10);
+    const allowedHours = [1, 6, 24, 168];
+    const hours = allowedHours.includes(rawHours) ? rawHours : 24;
+
+    // Suggest a chart bucket interval based on window size
+    let interval: string;
+    if (hours <= 1) {
+      interval = '5m';
+    } else if (hours <= 6) {
+      interval = '15m';
+    } else if (hours <= 24) {
+      interval = '1h';
+    } else {
+      interval = '6h';
+    }
+
+    interface SnapshotRow {
+      captured_at: string;
+      total_pending: number;
+      total_active: number;
+      total_failed: number;
+      total_completed: number;
+      oldest_pending_seconds: number | null;
+      worker_id: string | null;
+    }
+
+    const rows = await query<SnapshotRow>(
+      `SELECT captured_at, total_pending, total_active, total_failed, total_completed,
+              oldest_pending_seconds, worker_id
+       FROM queue_health_snapshots
+       WHERE captured_at > NOW() - ($1 || ' hours')::interval
+       ORDER BY captured_at ASC`,
+      [hours],
+    );
+
+    const snapshots = rows.map(r => ({
+      capturedAt: r.captured_at,
+      pending: r.total_pending,
+      active: r.total_active,
+      failed: r.total_failed,
+      completed: r.total_completed,
+      oldestPendingSeconds: r.oldest_pending_seconds,
+      workerId: r.worker_id,
+    }));
+
+    res.json({
+      snapshots,
+      interval,
+      totalSnapshots: snapshots.length,
+      windowHours: hours,
+    });
+  } catch (error: unknown) {
+    logger.error({ err: error }, '[Pipeline] queue health history error');
+    res.status(500).json({ error: (error as Error).message });
+  }
+});
+
 export default router;

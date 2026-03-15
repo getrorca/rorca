@@ -2,7 +2,7 @@
   "specId": "rorca-queue-observability",
   "runId": 124,
   "startedAt": "2026-03-15T09:21:13.933Z",
-  "lastUpdatedAt": "2026-03-15T09:22:02.850Z",
+  "lastUpdatedAt": "2026-03-15T09:26:00.909Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -43,6 +43,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 48306
+    },
+    {
+      "storyId": "US-004",
+      "title": "Capture pg-boss monitor-states events — write queue health snapshots to DB for trend analysis",
+      "status": "passed",
+      "startedAt": "2026-03-15T09:22:18.248Z",
+      "finishedAt": "2026-03-15T09:26:00.909Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 222661
     }
   ],
   "failedStories": [],
