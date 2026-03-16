@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { queryOne } from '../db/index';
+import { PayloadTooLargeError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -39,12 +40,12 @@ router.post(
     pendingUpload.single('file')(req, res, (err: any) => {
       if (err) {
         if (err.code === 'LIMIT_FILE_SIZE') {
-          res.status(413).json({ error: 'File size exceeds 10MB limit' });
+          throw new PayloadTooLargeError('File size exceeds 10MB limit');
           return;
         }
         if (err.message?.startsWith('INVALID_FILE_TYPE:')) {
           const mimeType = err.message.replace('INVALID_FILE_TYPE:', '');
-          res.status(400).json({ error: `Unsupported file type: ${mimeType}`, supportedTypes: Array.from(ALLOWED_CONTENT_TYPES) });
+          throw new ValidationError(`Unsupported file type: ${mimeType}`);
           return;
         }
         next(err);
@@ -55,7 +56,7 @@ router.post(
   },
   async (req: Request, res: Response) => {
     if (!req.file) {
-      res.status(400).json({ error: 'No file uploaded' });
+      throw new ValidationError('No file uploaded');
       return;
     }
 

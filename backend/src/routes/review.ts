@@ -6,6 +6,7 @@ import { query, queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { getEffectiveUser } from '../lib/get-user';
 import { logger } from '../lib/logger';
+import { GoneError, NotFoundError, ValidationError } from '../lib/errors';
 
 // Two routers: one for spec-scoped endpoints (auth), one for public review access
 const specReviewRouter = Router({ mergeParams: true });
@@ -104,7 +105,7 @@ specReviewRouter.post('/:specId/review-link', async (req: Request, res: Response
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'workspaceId is required' });
+      throw new ValidationError('workspaceId is required');
       return;
     }
 
@@ -113,13 +114,13 @@ specReviewRouter.post('/:specId/review-link', async (req: Request, res: Response
       [workspaceId]
     );
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     const specFile = findSpecFile(workspace.path, specId);
     if (!specFile) {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -230,12 +231,12 @@ publicReviewRouter.get('/:token', async (req: Request, res: Response) => {
     );
 
     if (!tokenRow) {
-      res.status(404).json({ error: 'Invalid review link' });
+      throw new NotFoundError('Invalid review link');
       return;
     }
 
     if (new Date(tokenRow.expires_at) < new Date()) {
-      res.status(410).json({ error: 'This review link has expired' });
+      throw new GoneError('This review link has expired');
       return;
     }
 
@@ -244,13 +245,13 @@ publicReviewRouter.get('/:token', async (req: Request, res: Response) => {
       [tokenRow.workspace_id]
     );
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     const specFile = findSpecFile(workspace.path, tokenRow.spec_id);
     if (!specFile) {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -341,7 +342,7 @@ publicReviewRouter.post('/:token/comments', async (req: Request, res: Response) 
     const tokenHash = hashToken(token);
 
     if (!storyId || !body || typeof body !== 'string' || body.trim().length === 0) {
-      res.status(400).json({ error: 'storyId and body are required' });
+      throw new ValidationError('storyId and body are required');
       return;
     }
 
@@ -351,12 +352,12 @@ publicReviewRouter.post('/:token/comments', async (req: Request, res: Response) 
     );
 
     if (!tokenRow) {
-      res.status(404).json({ error: 'Invalid review link' });
+      throw new NotFoundError('Invalid review link');
       return;
     }
 
     if (new Date(tokenRow.expires_at) < new Date()) {
-      res.status(410).json({ error: 'This review link has expired' });
+      throw new GoneError('This review link has expired');
       return;
     }
 
@@ -455,7 +456,7 @@ publicReviewRouter.post('/comment', async (req: Request, res: Response) => {
     const { spec_id, story_id, body, author_name, review_persona, review_type } = req.body;
 
     if (!spec_id || !story_id || !body || typeof body !== 'string' || body.trim().length === 0) {
-      res.status(400).json({ error: 'spec_id, story_id, and body are required' });
+      throw new ValidationError('spec_id, story_id, and body are required');
       return;
     }
 

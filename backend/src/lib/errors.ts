@@ -60,8 +60,37 @@ export class NotFoundError extends AppError {
   readonly statusCode = 404 as const;
 
   constructor(resource: string, id?: string) {
+    // If the message already looks like a complete sentence (contains spaces and no trailing "not found"),
+    // use it verbatim. Otherwise build "Resource 'id' not found" or "Resource not found".
     const msg = id ? `${resource} '${id}' not found` : `${resource} not found`;
     super(msg, 'NOT_FOUND');
+  }
+}
+
+/** 410 — resource is gone (expired links, used tokens, etc.) */
+export class GoneError extends AppError {
+  readonly statusCode = 410 as const;
+
+  constructor(message: string) {
+    super(message, 'GONE');
+  }
+}
+
+/** 413 — payload too large */
+export class PayloadTooLargeError extends AppError {
+  readonly statusCode = 413 as const;
+
+  constructor(message = 'Payload too large') {
+    super(message, 'PAYLOAD_TOO_LARGE');
+  }
+}
+
+/** 429 — too many requests */
+export class TooManyRequestsError extends AppError {
+  readonly statusCode = 429 as const;
+
+  constructor(message = 'Too many requests') {
+    super(message, 'TOO_MANY_REQUESTS');
   }
 }
 

@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router({ mergeParams: true });
 
@@ -170,7 +171,7 @@ router.post('/', async (req: Request, res: Response) => {
     // Validate workspace exists
     const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -178,21 +179,21 @@ router.post('/', async (req: Request, res: Response) => {
     const validPeriods = ['daily', 'weekly', 'monthly'];
     const budgetPeriod = period || 'monthly';
     if (!validPeriods.includes(budgetPeriod)) {
-      res.status(400).json({ error: `period must be one of: ${validPeriods.join(', ')}` });
+      throw new ValidationError(`period must be one of: ${validPeriods.join(', ')}`);
       return;
     }
 
     // Validate thresholds
     if (alert_threshold_usd != null && alert_threshold_usd < 0) {
-      res.status(400).json({ error: 'alert_threshold_usd cannot be negative' });
+      throw new ValidationError('alert_threshold_usd cannot be negative');
       return;
     }
     if (hard_cap_usd != null && hard_cap_usd < 0) {
-      res.status(400).json({ error: 'hard_cap_usd cannot be negative' });
+      throw new ValidationError('hard_cap_usd cannot be negative');
       return;
     }
     if (alert_threshold_usd != null && hard_cap_usd != null && alert_threshold_usd >= hard_cap_usd) {
-      res.status(400).json({ error: 'alert_threshold_usd must be less than hard_cap_usd' });
+      throw new ValidationError('alert_threshold_usd must be less than hard_cap_usd');
       return;
     }
 
@@ -288,7 +289,7 @@ router.get('/', async (req: Request, res: Response) => {
     // Validate workspace exists
     const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -366,7 +367,7 @@ router.delete('/', async (req: Request, res: Response) => {
     const result = await execute('DELETE FROM budget_config WHERE workspace_id = $1', [workspaceId]);
 
     if (result.rowCount === 0) {
-      res.status(404).json({ error: 'No budget config found for this workspace' });
+      throw new NotFoundError('No budget config found for this workspace');
       return;
     }
 

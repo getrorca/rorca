@@ -13,6 +13,7 @@ import {
 } from '../lib/context-extractor';
 import { validateBody } from '../lib/validate';
 import { chatComplete } from '../lib/llm-client';
+import { ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -138,13 +139,13 @@ router.post('/upload', upload.array('files'), async (req: Request, res: Response
     const files = req.files as Express.Multer.File[] | undefined;
 
     if (!files || files.length === 0) {
-      res.status(400).json({ error: 'No files uploaded' });
+      throw new ValidationError('No files uploaded');
       return;
     }
 
     const targetLayer = Number(req.body.targetLayer) as 1 | 2 | 3;
     if (![1, 2, 3].includes(targetLayer)) {
-      res.status(400).json({ error: 'targetLayer must be 1, 2, or 3' });
+      throw new ValidationError('targetLayer must be 1, 2, or 3');
       return;
     }
 
@@ -207,7 +208,7 @@ router.get('/fetch-preview', async (req: Request, res: Response) => {
     const url = req.query.url as string | undefined;
 
     if (!url) {
-      res.status(400).json({ error: 'url query parameter is required' });
+      throw new ValidationError('url query parameter is required');
       return;
     }
 
