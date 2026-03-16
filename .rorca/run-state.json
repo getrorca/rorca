@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T10:00:13.394Z",
+  "lastUpdatedAt": "2026-03-16T09:50:16.112Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -25,14 +25,14 @@
       "elapsedMs": 1152753
     },
     {
-      "storyId": "US-017",
-      "title": "GitHub API outbound rate limiter with circuit breaker",
+      "storyId": "US-019",
+      "title": "Auth session management — JWT access/refresh tokens with CSRF",
       "status": "passed",
-      "startedAt": "2026-03-16T09:47:23.433Z",
-      "finishedAt": "2026-03-16T10:00:13.393Z",
+      "startedAt": "2026-03-16T09:50:03.376Z",
+      "finishedAt": "2026-03-16T09:50:16.112Z",
       "agentType": "claude",
       "model": "claude-opus-4-6",
-      "elapsedMs": 769960
+      "elapsedMs": 12736
     }
   ],
   "failedStories": [],
