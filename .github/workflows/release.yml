@@ -112,29 +112,205 @@ jobs:
           path: build/${{ matrix.binary }}
           retention-days: 1
 
-  # ── Step 9: Smoke test linux-x64 binary ──
+  # ── Step 9: Smoke test all platform binaries (matrix) ──
   smoke-test:
-    name: Smoke test linux-x64
+    name: Smoke test (${{ matrix.name }})
     needs: build
-    runs-on: ubuntu-latest
+    timeout-minutes: 1
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: darwin-arm64
+            os: macos-latest
+            binary: rorca-darwin-arm64
+            artifact: binary-rorca-darwin-arm64
+            exe: rorca-darwin-arm64
+            windows: false
+          - name: darwin-x64
+            os: macos-latest
+            binary: rorca-darwin-x64
+            artifact: binary-rorca-darwin-x64
+            exe: rorca-darwin-x64
+            windows: false
+          - name: linux-x64
+            os: ubuntu-latest
+            binary: rorca-linux-x64
+            artifact: binary-rorca-linux-x64
+            exe: rorca-linux-x64
+            windows: false
+          - name: win32-x64
+            os: windows-latest
+            binary: rorca-win32-x64.exe
+            artifact: binary-rorca-win32-x64.exe
+            exe: rorca-win32-x64.exe
+            windows: true
+    runs-on: ${{ matrix.os }}
     steps:
-      - name: Download linux-x64 binary
+      - name: Download ${{ matrix.name }} binary
+        id: download
         uses: actions/download-artifact@v4
         with:
-          name: binary-rorca-linux-x64
+          name: ${{ matrix.artifact }}
           path: ./
+        continue-on-error: true
 
-      - name: Running smoke test...
+      - name: Check download success (Unix)
+        if: ${{ !matrix.windows && steps.download.outcome == 'failure' }}
         run: |
-          chmod +x ./rorca-linux-x64
-          VERSION_OUTPUT=$(./rorca-linux-x64 --version)
-          echo "Binary version output: $VERSION_OUTPUT"
-          if echo "$VERSION_OUTPUT" | grep -q "${{ github.ref_name }}"; then
-            echo "Smoke test passed: version output contains ${{ github.ref_name }}"
-          else
-            echo "Smoke test FAILED: expected '${{ github.ref_name }}' in version output, got '$VERSION_OUTPUT'"
+          echo "Failed to download binary artifact for ${{ matrix.name }}"
+          exit 1
+
+      - name: Check download success (Windows)
+        if: ${{ matrix.windows && steps.download.outcome == 'failure' }}
+        shell: pwsh
+        run: |
+          Write-Error "Failed to download binary artifact for ${{ matrix.name }}"
+          exit 1
+
+      - name: Make executable (Unix)
+        if: ${{ !matrix.windows }}
+        run: chmod +x ./${{ matrix.exe }}
+
+      - name: Verify executable (Unix)
+        if: ${{ !matrix.windows }}
+        run: |
+          ./${{ matrix.exe }} --version 2>/dev/null
+          EXIT_CODE=$?
+          if [ $EXIT_CODE -eq 126 ]; then
+            echo "Binary not executable — check build permissions"
+            exit 1
+          elif [ $EXIT_CODE -ne 0 ]; then
+            echo "Binary not executable — check build permissions"
             exit 1
           fi
+
+      - name: Test --version (Unix)
+        if: ${{ !matrix.windows }}
+        run: |
+          VERSION_OUTPUT=$(./${{ matrix.exe }} --version)
+          echo "Version output: $VERSION_OUTPUT"
+          TAG="${{ github.ref_name }}"
+          VERSION="${TAG#v}"
+          if echo "$VERSION_OUTPUT" | grep -qF "$VERSION"; then
+            echo "PASS: version output contains $VERSION"
+          else
+            echo "FAIL: expected '$VERSION' in version output, got '$VERSION_OUTPUT'"
+            exit 1
+          fi
+
+      - name: Test --help (Unix)
+        if: ${{ !matrix.windows }}
+        run: |
+          HELP_OUTPUT=$(./${{ matrix.exe }} --help)
+          echo "$HELP_OUTPUT"
+          for cmd in start version help; do
+            if echo "$HELP_OUTPUT" | grep -q "$cmd"; then
+              echo "PASS: --help lists '$cmd'"
+            else
+              echo "FAIL: --help does not list '$cmd'"
+              exit 1
+            fi
+          done
+
+      - name: Test start --dry-run (Unix)
+        if: ${{ !matrix.windows }}
+        run: |
+          DRY_OUTPUT=$(./${{ matrix.exe }} start --dry-run --no-postgres 2>&1 || true)
+          echo "$DRY_OUTPUT"
+          if echo "$DRY_OUTPUT" | grep -q "dry-run complete"; then
+            echo "PASS: start --dry-run completed successfully"
+          else
+            echo "FAIL: start --dry-run did not print expected output"
+            exit 1
+          fi
+        env:
+          DATABASE_URL: postgres://rorca:rorca@localhost:5432/rorca
+
+      - name: Assert binary size (Unix)
+        if: ${{ !matrix.windows }}
+        run: |
+          if [ "$(uname)" = "Darwin" ]; then
+            SIZE=$(stat -f%z ./${{ matrix.exe }})
+          else
+            SIZE=$(stat -c%s ./${{ matrix.exe }})
+          fi
+          SIZE_MB=$(echo "scale=2; $SIZE / 1048576" | bc)
+          echo "Binary size: ${SIZE_MB}MB"
+          if [ "$SIZE" -gt 104857600 ]; then
+            echo "Binary too large: ${SIZE_MB}MB > 100MB limit"
+            exit 1
+          fi
+          echo "PASS: binary size ${SIZE_MB}MB is within 100MB limit"
+
+      - name: Verify executable (Windows)
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        run: |
+          $result = & ".\${{ matrix.exe }}" --version 2>&1
+          if ($LASTEXITCODE -eq 126 -or ($null -eq $result -and $LASTEXITCODE -ne 0)) {
+            Write-Error "Binary not executable — check build permissions"
+            exit 1
+          }
+
+      - name: Test --version (Windows)
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        run: |
+          $versionOutput = & ".\${{ matrix.exe }}" --version 2>&1
+          Write-Output "Version output: $versionOutput"
+          $tag = "${{ github.ref_name }}"
+          $version = $tag.TrimStart('v')
+          if ($versionOutput -like "*$version*") {
+            Write-Output "PASS: version output contains $version"
+          } else {
+            Write-Error "FAIL: expected '$version' in version output, got '$versionOutput'"
+            exit 1
+          }
+
+      - name: Test --help (Windows)
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        run: |
+          $helpOutput = & ".\${{ matrix.exe }}" --help 2>&1
+          Write-Output $helpOutput
+          $commands = @("start", "version", "help")
+          foreach ($cmd in $commands) {
+            if ($helpOutput -like "*$cmd*") {
+              Write-Output "PASS: --help lists '$cmd'"
+            } else {
+              Write-Error "FAIL: --help does not list '$cmd'"
+              exit 1
+            }
+          }
+
+      - name: Test start --dry-run (Windows)
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        env:
+          DATABASE_URL: postgres://rorca:rorca@localhost:5432/rorca
+        run: |
+          $dryOutput = & ".\${{ matrix.exe }}" start --dry-run --no-postgres 2>&1
+          Write-Output $dryOutput
+          if ($dryOutput -like "*dry-run complete*") {
+            Write-Output "PASS: start --dry-run completed successfully"
+          } else {
+            Write-Error "FAIL: start --dry-run did not print expected output"
+            exit 1
+          }
+
+      - name: Assert binary size (Windows)
+        if: ${{ matrix.windows }}
+        shell: pwsh
+        run: |
+          $sizeMB = [math]::Round((Get-Item ".\${{ matrix.exe }}").Length / 1MB, 2)
+          $sizeBytes = (Get-Item ".\${{ matrix.exe }}").Length
+          Write-Output "Binary size: ${sizeMB}MB"
+          if ($sizeBytes -gt 104857600) {
+            Write-Error "Binary too large: ${sizeMB}MB > 100MB limit"
+            exit 1
+          }
+          Write-Output "PASS: binary size ${sizeMB}MB is within 100MB limit"
 
   # ── Steps 7-8: Generate release notes + create release + upload assets ──
   release:
