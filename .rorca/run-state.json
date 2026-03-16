@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T20:23:16.653Z",
+  "lastUpdatedAt": "2026-03-16T22:04:10.835Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -81,6 +81,15 @@
       "finishedAt": "2026-03-16T20:23:16.653Z",
       "agentType": "claude",
       "elapsedMs": 318107
+    },
+    {
+      "storyId": "BL-003",
+      "title": "RSA key pair generation — RORCA_LICENSE_PRIVATE_KEY for offline license signing",
+      "status": "passed",
+      "startedAt": "2026-03-16T22:03:49.464Z",
+      "finishedAt": "2026-03-16T22:04:10.835Z",
+      "agentType": "claude",
+      "elapsedMs": 21371
     }
   ],
   "failedStories": [],
