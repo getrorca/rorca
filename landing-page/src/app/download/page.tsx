@@ -371,6 +371,24 @@ export default function DownloadPage() {
           </div>
         </motion.div>
 
+        {/* Troubleshooting link */}
+        <motion.div
+          initial={{ opacity: 0, y: 16 }}
+          animate={{ opacity: 1, y: 0 }}
+          transition={{ duration: 0.5, delay: 0.5, ease: 'easeOut' }}
+          className="mt-20 pt-12 border-t border-white/10 text-center"
+        >
+          <p className="text-zinc-500 text-sm mb-4">
+            Having trouble with installation?
+          </p>
+          <a
+            href="/troubleshooting"
+            className="inline-flex items-center gap-2 text-fizz hover:text-white transition-colors text-sm font-medium"
+          >
+            See our troubleshooting guide
+            <ChevronRight className="w-3.5 h-3.5" />
+          </a>
+        </motion.div>
       </div>
       <Footer />
     </main>
