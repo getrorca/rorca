@@ -1002,7 +1002,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     for (const evt of walEvents) {
       if (evt.event_type === 'pr_creating') {
         info = { state: 'creating' };
-      } else if (evt.event_type === 'pr_created' || evt.event_type === 'pr_updated') {
+      } else if (evt.event_type === 'pr_created' || evt.event_type === 'pr_updated' || evt.event_type === 'pr_draft_created' || evt.event_type === 'pr_ready') {
         try {
           const p = JSON.parse(evt.payload ?? '{}');
           info = { state: 'created', prNumber: p.pr_number, prUrl: p.pr_url };

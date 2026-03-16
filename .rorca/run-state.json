@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T10:59:13.960Z",
+  "lastUpdatedAt": "2026-03-16T11:11:05.122Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -53,56 +53,20 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 22407
+    },
+    {
+      "storyId": "US-034",
+      "title": "Draft PR Lifecycle — open at run start, convert at completion",
+      "status": "passed",
+      "startedAt": "2026-03-16T10:59:18.771Z",
+      "finishedAt": "2026-03-16T11:11:05.122Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 706351
     }
   ],
   "failedStories": [],
-  "skippedStories": [
-    {
-      "storyId": "US-039",
-      "title": "Stripe checkout flow (BIL-005)",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:59:13.847Z",
-      "finishedAt": "2026-03-16T10:59:13.847Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-036, US-038"
-    },
-    {
-      "storyId": "US-055",
-      "title": "RSA Key Pair Generation and License Server Setup",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:59:13.871Z",
-      "finishedAt": "2026-03-16T10:59:13.871Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-036, US-038"
-    },
-    {
-      "storyId": "US-041",
-      "title": "Global 402 interceptor — PaywallContext (BIL-007)",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:59:13.916Z",
-      "finishedAt": "2026-03-16T10:59:13.916Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-040"
-    },
-    {
-      "storyId": "US-042",
-      "title": "License status in Settings > Billing (BIL-008)",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:59:13.948Z",
-      "finishedAt": "2026-03-16T10:59:13.948Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-038, US-040"
-    },
-    {
-      "storyId": "US-062",
-      "title": "Plan Enforcement Guard for Active Pipeline Runs",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:59:13.959Z",
-      "finishedAt": "2026-03-16T10:59:13.959Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-037, US-061"
-    }
-  ],
+  "skippedStories": [],
   "currentStory": null,
   "decisions": [],
   "resumedFromStory": null
