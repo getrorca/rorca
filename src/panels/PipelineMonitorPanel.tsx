@@ -1,3 +1,4 @@
+// @refresh reset
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Terminal, Clock, ChevronRight, List, XCircle, ArrowRight, AlertTriangle, X } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
