@@ -18,10 +18,13 @@
  *   7. Emit pr_created / pr_updated / pr_creation_failed WAL events
  */
 
+import { spawnSync } from 'child_process';
 import { query, queryOne, execute } from '../db/index';
 import { decryptToken } from '../routes/auth';
 import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
+import { loadRorcaConfig } from './rorca-config';
+import { renderPrTemplate, PrTemplateData } from './github/pr-template';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -39,11 +42,17 @@ interface GitHubConnection {
 
 interface RunSummary {
   specTitle: string;
+  specBrief: string;
   passed: number;
   failed: number;
   skipped: number;
+  inputTokens: number;
+  outputTokens: number;
   totalTokens: number;
+  costUsd: number | null;
   elapsedSeconds: number | null;
+  agentType: string;
+  agentModel: string;
 }
 
 interface ExistingPr {
@@ -131,7 +140,42 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
     const prTitle = summary.specTitle
       ? `feat: ${summary.specTitle}`
       : `feat: worktree run #${runId}`;
-    const prBody = buildPrBody(summary, runId, branchName);
+
+    // Load custom template from .rorca/config.json (github.prTemplate)
+    let customTemplate: string | undefined;
+    try {
+      const rorcaConfig = loadRorcaConfig(opts.workspacePath);
+      customTemplate = rorcaConfig.github.prTemplate;
+    } catch {
+      // Non-fatal — fall back to default template
+    }
+
+    // Get diff stats from git
+    const diffStats = getGitDiffStats(opts.workspacePath, branchName, targetBranch);
+
+    const total = summary.passed + summary.failed + summary.skipped;
+    const templateData: PrTemplateData = {
+      spec: {
+        title: summary.specTitle,
+        brief: summary.specBrief,
+      },
+      run: {
+        id: runId,
+        storiesPassed: summary.passed,
+        storiesTotal: total,
+        storiesFailed: summary.failed,
+        storiesSkipped: summary.skipped,
+        tokensInput: summary.inputTokens,
+        tokensOutput: summary.outputTokens,
+        tokensTotal: summary.totalTokens,
+        costUsd: summary.costUsd != null ? `$${summary.costUsd.toFixed(2)}` : 'N/A',
+        duration: summary.elapsedSeconds != null ? formatDuration(summary.elapsedSeconds) : 'unknown',
+        agentType: summary.agentType,
+        model: summary.agentModel,
+        diffStats,
+      },
+    };
+    const prBody = renderPrTemplate(customTemplate, templateData);
 
     // 6. Check for existing open PR on this branch
     const existingPr = await findExistingPr(owner, repo, branchName, owner, token);
@@ -270,25 +314,31 @@ async function findExistingPr(
 }
 
 async function buildRunSummary(runId: number): Promise<RunSummary> {
-  // Spec title from spec_path
+  // Run metadata
   const runRow = await queryOne<{
     spec_path: string;
     started_at: string | null;
     finished_at: string | null;
     total_input_tokens: number | null;
     total_output_tokens: number | null;
+    total_cost_usd: number | null;
+    agent_type: string | null;
+    agent_model: string | null;
   }>(
-    'SELECT spec_path, started_at, finished_at, total_input_tokens, total_output_tokens FROM pipeline_runs WHERE id = $1',
+    `SELECT spec_path, started_at, finished_at,
+            total_input_tokens, total_output_tokens, total_cost_usd,
+            agent_type, agent_model
+     FROM pipeline_runs WHERE id = $1`,
     [runId],
   );
 
-  const specTitle = runRow
-    ? runRow.spec_path
-        .split('/')
-        .pop()
-        ?.replace(/\.json$/, '')
-        .replace(/-/g, ' ') ?? `run #${runId}`
-    : `run #${runId}`;
+  const specSlug = runRow
+    ? (runRow.spec_path.split('/').pop()?.replace(/\.json$/, '') ?? `run-${runId}`)
+    : `run-${runId}`;
+
+  const specTitle = specSlug.replace(/-/g, ' ');
+  // Use the slug as the brief since we don't store a human brief in pipeline_runs
+  const specBrief = specTitle;
 
   // Story outcome counts — use latest result per story_id
   type StoryRow = { story_id: string; status: string };
@@ -309,8 +359,10 @@ async function buildRunSummary(runId: number): Promise<RunSummary> {
     else skipped++;
   }
 
-  // Token total
-  const totalTokens = (runRow?.total_input_tokens ?? 0) + (runRow?.total_output_tokens ?? 0);
+  const inputTokens = runRow?.total_input_tokens ?? 0;
+  const outputTokens = runRow?.total_output_tokens ?? 0;
+  const totalTokens = inputTokens + outputTokens;
+  const costUsd = runRow?.total_cost_usd ?? null;
 
   // Elapsed seconds
   let elapsedSeconds: number | null = null;
@@ -320,42 +372,20 @@ async function buildRunSummary(runId: number): Promise<RunSummary> {
     elapsedSeconds = Math.round((endMs - startMs) / 1000);
   }
 
-  return { specTitle, passed, failed, skipped, totalTokens, elapsedSeconds };
-}
-
-function buildPrBody(summary: RunSummary, runId: number, branchName: string): string {
-  const total = summary.passed + summary.failed + summary.skipped;
-  const elapsedStr = summary.elapsedSeconds != null
-    ? formatDuration(summary.elapsedSeconds)
-    : 'unknown';
-
-  const lines = [
-    `## Rorca Pipeline Run #${runId}`,
-    '',
-    `**Branch**: \`${branchName}\``,
-    `**Spec**: ${summary.specTitle}`,
-    '',
-    '### Story Results',
-    '',
-    `| Outcome | Count |`,
-    `|---------|-------|`,
-    `| ✅ Passed | ${summary.passed} |`,
-    `| ❌ Failed | ${summary.failed} |`,
-    `| ⏭ Skipped | ${summary.skipped} |`,
-    `| **Total** | **${total}** |`,
-    '',
-    '### Run Metrics',
-    '',
-    `| Metric | Value |`,
-    `|--------|-------|`,
-    `| Elapsed | ${elapsedStr} |`,
-    `| Tokens | ${summary.totalTokens.toLocaleString()} |`,
-    '',
-    '---',
-    '*Generated automatically by [Rorca](https://rorca.app)*',
-  ];
-
-  return lines.join('\n');
+  return {
+    specTitle,
+    specBrief,
+    passed,
+    failed,
+    skipped,
+    inputTokens,
+    outputTokens,
+    totalTokens,
+    costUsd,
+    elapsedSeconds,
+    agentType: runRow?.agent_type ?? 'claude',
+    agentModel: runRow?.agent_model ?? 'unknown',
+  };
 }
 
 function formatDuration(seconds: number): string {
@@ -366,6 +396,26 @@ function formatDuration(seconds: number): string {
   const hrs = Math.floor(mins / 60);
   const remMins = mins % 60;
   return `${hrs}h ${remMins}m`;
+}
+
+/**
+ * Run `git diff --stat <base>...<branch>` in the workspace and return the output.
+ * Returns a placeholder string on any error.
+ */
+function getGitDiffStats(workspacePath: string, branchName: string, targetBranch: string): string {
+  try {
+    const result = spawnSync(
+      'git',
+      ['diff', '--stat', `${targetBranch}...${branchName}`],
+      { cwd: workspacePath, encoding: 'utf8', timeout: 10000 },
+    );
+    if (result.status === 0 && result.stdout) {
+      return result.stdout.trim();
+    }
+  } catch {
+    // Non-fatal
+  }
+  return 'Diff stats unavailable';
 }
 
 async function storeResult(runId: number, prNumber: number | null, errorMsg: string | null): Promise<void> {
