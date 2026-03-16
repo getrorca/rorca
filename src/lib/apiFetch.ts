@@ -63,11 +63,15 @@ export function clearTokens(): void {
   refreshToken = null;
 }
 
-let refreshPromise: Promise<boolean> | null = null;
+// Refresh result: 'ok' = tokens refreshed, 'auth_failed' = refresh rejected (401/403),
+// 'network_error' = fetch threw (offline/DNS), 'no_token' = no refresh token stored.
+type RefreshResult = 'ok' | 'auth_failed' | 'network_error' | 'no_token';
 
-async function attemptRefresh(): Promise<boolean> {
+let refreshPromise: Promise<RefreshResult> | null = null;
+
+async function attemptRefresh(): Promise<RefreshResult> {
   const rt = getRefreshToken();
-  if (!rt) return false;
+  if (!rt) return 'no_token';
 
   // Deduplicate concurrent refresh attempts
   if (refreshPromise) return refreshPromise;
@@ -81,14 +85,15 @@ async function attemptRefresh(): Promise<boolean> {
       });
       if (!res.ok) {
         clearTokens();
-        return false;
+        return 'auth_failed' as const;
       }
       const data = await res.json();
       setTokens(data.accessToken, data.refreshToken);
-      return true;
-    } catch {
+      return 'ok' as const;
+    } catch (err) {
+      if (isNetworkError(err)) return 'network_error' as const;
       clearTokens();
-      return false;
+      return 'auth_failed' as const;
     } finally {
       refreshPromise = null;
     }
@@ -96,6 +101,9 @@ async function attemptRefresh(): Promise<boolean> {
 
   return refreshPromise;
 }
+
+/** Routes excluded from 401 interception to prevent infinite refresh loops */
+const AUTH_BYPASS_PATHS = ['/api/auth/login', '/api/auth/refresh'];
 
 // ─── Parse error body into ApiError ───────────────────────────────────────────
 
@@ -176,38 +184,38 @@ export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: 
 
   const res = await fetchWithRetry(`${BASE_URL}${path}`, { ...opts, headers, credentials: 'include' });
 
-  // On 401 with expired token, attempt silent refresh and retry once
-  if (res.status === 401) {
-    let body: { error?: string } | undefined;
-    try {
-      body = await res.json();
-    } catch {
-      // non-JSON 401
-    }
+  // On 401, attempt silent token refresh and retry — unless this is an auth route itself
+  if (res.status === 401 && !AUTH_BYPASS_PATHS.some((p) => path.startsWith(p))) {
+    const result = await attemptRefresh();
 
-    if (body?.error === 'Token expired') {
-      const refreshed = await attemptRefresh();
-      if (refreshed) {
-        const newToken = getAccessToken();
-        const retryHeaders: Record<string, string> = {
-          ...(opts?.headers as Record<string, string> | undefined),
-        };
-        if (newToken) {
-          retryHeaders['Authorization'] = `Bearer ${newToken}`;
-        }
-        const retryRes = await fetch(`${BASE_URL}${path}`, { ...opts, headers: retryHeaders });
-        if (!retryRes.ok) {
-          const errText = await retryRes.text();
-          throw parseErrorBody(retryRes.status, errText);
-        }
-        return retryRes.json() as Promise<T>;
+    if (result === 'ok') {
+      // Refresh succeeded — retry original request with new token
+      const newToken = getAccessToken();
+      const retryHeaders: Record<string, string> = {
+        ...(opts?.headers as Record<string, string> | undefined),
+      };
+      if (newToken) {
+        retryHeaders['Authorization'] = `Bearer ${newToken}`;
       }
+      const retryRes = await fetch(`${BASE_URL}${path}`, { ...opts, headers: retryHeaders });
+      if (!retryRes.ok) {
+        const errText = await retryRes.text();
+        throw parseErrorBody(retryRes.status, errText);
+      }
+      return retryRes.json() as Promise<T>;
     }
 
+    if (result === 'network_error') {
+      // Network issue during refresh — don't redirect, show connection toast
+      notifyError('Connection error — please check your network and try again');
+      throw new ApiError(401, 'NETWORK_ERROR', 'Connection error during token refresh');
+    }
+
+    // auth_failed or no_token — session is dead, redirect to login
+    clearTokens();
     dispatch401();
-    const msg401 = body?.error || 'Unauthorized';
-    notifyError(msg401);
-    throw new ApiError(401, 'UNAUTHORIZED', msg401);
+    notifyError('Session expired, please log in again');
+    throw new ApiError(401, 'SESSION_EXPIRED', 'Session expired');
   }
 
   if (!res.ok) {
