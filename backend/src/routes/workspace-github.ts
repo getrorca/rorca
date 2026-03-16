@@ -5,6 +5,7 @@ import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
 import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 import { githubRateLimiter } from '../lib/github-rate-limiter';
+import { insertAuditEntry } from './integration-audit-log';
 
 const router = Router({ mergeParams: true });
 
@@ -224,6 +225,15 @@ router.post('/connect', async (req: Request, res: Response) => {
       [workspaceId, JSON.stringify({ repoOwner, repoName, webhookId: ghData.id })]
     );
 
+    insertAuditEntry({
+      workspaceId: String(workspaceId),
+      provider: 'github',
+      action: 'integration_connected',
+      actorType: 'user',
+      actorId: (req as any).user?.id ?? null,
+      details: { repoOwner, repoName, webhookId: ghData.id },
+    });
+
     res.status(201).json({
       connected: true,
       repoOwner,
@@ -330,6 +340,15 @@ router.post('/disconnect', async (req: Request, res: Response) => {
       "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_disconnected', $1, $2)",
       [workspaceId, JSON.stringify({ repoOwner: row.repo_owner, repoName: row.repo_name })]
     );
+
+    insertAuditEntry({
+      workspaceId: String(workspaceId),
+      provider: 'github',
+      action: 'integration_disconnected',
+      actorType: 'user',
+      actorId: (req as any).user?.id ?? null,
+      details: { repoOwner: row.repo_owner, repoName: row.repo_name },
+    });
 
     res.json({ connected: false });
   } catch (error: any) {
@@ -535,6 +554,15 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
       "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_oauth_disconnected', '', $1)",
       [JSON.stringify({ userId })]
     );
+
+    insertAuditEntry({
+      workspaceId: String(req.params.id),
+      provider: 'github',
+      action: 'token_revoked',
+      actorType: 'user',
+      actorId: userId,
+      details: { method: 'oauth_disconnect' },
+    });
 
     res.json({ disconnected: true });
   } catch (error: any) {
