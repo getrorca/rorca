@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T09:46:27.966Z",
+  "lastUpdatedAt": "2026-03-16T09:51:30.196Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -23,56 +23,20 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 1152753
+    },
+    {
+      "storyId": "US-007",
+      "title": "Wire all landing page CTA buttons to real destinations",
+      "status": "passed",
+      "startedAt": "2026-03-16T09:47:23.735Z",
+      "finishedAt": "2026-03-16T09:51:30.196Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 246461
     }
   ],
   "failedStories": [],
-  "skippedStories": [
-    {
-      "storyId": "US-048",
-      "title": "US-048",
-      "status": "skipped",
-      "startedAt": "2026-03-16T09:46:25.121Z",
-      "finishedAt": "2026-03-16T09:46:25.121Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-002"
-    },
-    {
-      "storyId": "US-049",
-      "title": "US-049",
-      "status": "skipped",
-      "startedAt": "2026-03-16T09:46:25.663Z",
-      "finishedAt": "2026-03-16T09:46:25.663Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-002"
-    },
-    {
-      "storyId": "US-054",
-      "title": "US-054",
-      "status": "skipped",
-      "startedAt": "2026-03-16T09:46:25.723Z",
-      "finishedAt": "2026-03-16T09:46:25.723Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-002"
-    },
-    {
-      "storyId": "US-048",
-      "title": "GitHub Actions CI — PR test results as comments",
-      "status": "skipped",
-      "startedAt": "2026-03-16T09:46:27.903Z",
-      "finishedAt": "2026-03-16T09:46:27.903Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-002"
-    },
-    {
-      "storyId": "US-049",
-      "title": "Backend test fixture audit — ensure all tests pass",
-      "status": "skipped",
-      "startedAt": "2026-03-16T09:46:27.965Z",
-      "finishedAt": "2026-03-16T09:46:27.965Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-002"
-    }
-  ],
+  "skippedStories": [],
   "currentStory": null,
   "decisions": [],
   "resumedFromStory": null
