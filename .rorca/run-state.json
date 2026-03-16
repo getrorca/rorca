@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T08:29:44.855Z",
+  "lastUpdatedAt": "2026-03-16T08:51:55.854Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 156379
+    },
+    {
+      "storyId": "US-005",
+      "title": "Landing page download/install page — /download",
+      "status": "passed",
+      "startedAt": "2026-03-16T08:47:52.926Z",
+      "finishedAt": "2026-03-16T08:51:55.853Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 242927
     }
   ],
   "failedStories": [],
