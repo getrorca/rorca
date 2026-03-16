@@ -14,14 +14,16 @@
  *   3. Query story_results + token_usage + pipeline_runs for PR body
  *   4. Check for existing open PR (GET /repos/:owner/:repo/pulls?head=branch)
  *   5. Create (POST) or update (PATCH) PR
- *   6. Store pr_number in pipeline_runs
- *   7. Emit pr_created / pr_updated / pr_creation_failed WAL events
+ *   6. Request reviewers (default + conditional rules + CODEOWNERS path matching)
+ *   7. Store pr_number in pipeline_runs
+ *   8. Emit pr_created / pr_updated / pr_creation_failed WAL events
  */
 
 import { query, queryOne, execute } from '../db/index';
 import { decryptToken } from '../routes/auth';
 import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
+import micromatch from 'micromatch';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -30,11 +32,42 @@ interface GithubWebhookConfig {
   repo_name: string;
   auto_pr_enabled: boolean;
   auto_pr_target_branch: string;
-  auto_pr_reviewers: string; // JSON array string
+  auto_pr_reviewers: string; // JSON array string (legacy)
+  review_config: string | ReviewConfig | null; // JSONB — may be string or parsed object
 }
 
 interface GitHubConnection {
   encrypted_token: string;
+}
+
+/** Stored in workspace_github_webhooks.review_config JSONB */
+export interface ReviewConfig {
+  defaultReviewers?: string[];
+  teamReviewers?: string[];
+  rules?: ConditionalRule[];
+  pathRules?: PathRule[];
+}
+
+export interface ConditionalRule {
+  condition: {
+    field: 'tag' | 'persona';
+    matches: string;
+  };
+  reviewers?: string[];
+  teamReviewers?: string[];
+}
+
+export interface PathRule {
+  pattern: string; // glob pattern (micromatch)
+  reviewers?: string[];
+  teamReviewers?: string[];
+}
+
+export interface ReviewRequestResult {
+  requestedReviewers: string[];
+  requestedTeams: string[];
+  failedReviewers: string[];
+  failedTeams: string[];
 }
 
 interface RunSummary {
@@ -69,7 +102,7 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
 
   // 1. Look up GitHub webhook config for this workspace
   const webhookConfig = await queryOne<GithubWebhookConfig>(
-    `SELECT repo_owner, repo_name, auto_pr_enabled, auto_pr_target_branch, auto_pr_reviewers
+    `SELECT repo_owner, repo_name, auto_pr_enabled, auto_pr_target_branch, auto_pr_reviewers, review_config
      FROM workspace_github_webhooks WHERE workspace_id = $1`,
     [String(workspaceId)],
   );
@@ -186,23 +219,19 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
       const prData = await createRes.json() as { number: number; html_url: string };
       prNumber = prData.number;
 
-      // Request reviewers if configured
-      const reviewers = parseReviewers(webhookConfig.auto_pr_reviewers);
-      if (reviewers.length > 0) {
-        try {
-          await githubRateLimiter.execute(() =>
-            fetch(`https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/requested_reviewers`, {
-              method: 'POST',
-              headers: buildGitHubHeaders(token),
-              body: JSON.stringify({ reviewers }),
-            }),
-          );
-        } catch (reviewerErr) {
-          logger.warn({ reviewerErr, runId, prNumber }, '[auto-pr] Failed to request reviewers (non-fatal)');
-        }
-      }
+      // Request reviewers — merge legacy auto_pr_reviewers + review_config
+      const reviewResult = await requestReviewers({
+        owner,
+        repo,
+        prNumber,
+        token,
+        legacyReviewers: webhookConfig.auto_pr_reviewers,
+        reviewConfig: webhookConfig.review_config,
+        runId,
+        workspaceId,
+      });
 
-      logger.info({ runId, prNumber, prUrl: prData.html_url, owner, repo }, '[auto-pr] PR created');
+      logger.info({ runId, prNumber, prUrl: prData.html_url, owner, repo, reviewResult }, '[auto-pr] PR created');
 
       await storeResult(runId, prNumber, null);
       await emitWalEvent('pr_created', workspaceId, {
@@ -211,6 +240,10 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
         pr_url: prData.html_url,
         branch: branchName,
         target_branch: targetBranch,
+        reviewers_requested: reviewResult.requestedReviewers,
+        teams_requested: reviewResult.requestedTeams,
+        reviewers_failed: reviewResult.failedReviewers,
+        teams_failed: reviewResult.failedTeams,
       });
     }
   } catch (err: unknown) {
@@ -244,6 +277,291 @@ function parseReviewers(raw: string): string[] {
   } catch {
     return [];
   }
+}
+
+export function parseReviewConfig(raw: string | ReviewConfig | null | undefined): ReviewConfig {
+  if (!raw) return {};
+  if (typeof raw === 'object') return raw;
+  try {
+    const parsed = JSON.parse(raw);
+    return typeof parsed === 'object' && parsed !== null ? parsed : {};
+  } catch {
+    return {};
+  }
+}
+
+/**
+ * Resolve all reviewers for a PR based on config layers:
+ * 1. Legacy auto_pr_reviewers (backward compat)
+ * 2. review_config.defaultReviewers / teamReviewers
+ * 3. Conditional rules (tag/persona matching)
+ * 4. CODEOWNERS-style path rules
+ */
+export function resolveReviewers(opts: {
+  legacyReviewers: string;
+  reviewConfig: string | ReviewConfig | null;
+  specTags?: string[];
+  storyPersonas?: string[];
+  changedFiles?: string[];
+}): { reviewers: string[]; teamReviewers: string[] } {
+  const config = parseReviewConfig(opts.reviewConfig);
+  const reviewerSet = new Set<string>();
+  const teamSet = new Set<string>();
+
+  // Layer 1: Legacy auto_pr_reviewers
+  for (const r of parseReviewers(opts.legacyReviewers)) {
+    reviewerSet.add(r);
+  }
+
+  // Layer 2: Default reviewers from review_config
+  if (config.defaultReviewers) {
+    for (const r of config.defaultReviewers) {
+      reviewerSet.add(r);
+    }
+  }
+  if (config.teamReviewers) {
+    for (const t of config.teamReviewers) {
+      teamSet.add(t);
+    }
+  }
+
+  // Layer 3: Conditional rules
+  if (config.rules) {
+    const specTags = opts.specTags ?? [];
+    const storyPersonas = opts.storyPersonas ?? [];
+
+    for (const rule of config.rules) {
+      let matched = false;
+      if (rule.condition.field === 'tag') {
+        matched = specTags.some(t => t.toLowerCase() === rule.condition.matches.toLowerCase());
+      } else if (rule.condition.field === 'persona') {
+        matched = storyPersonas.some(p => p.toLowerCase() === rule.condition.matches.toLowerCase());
+      }
+
+      if (matched) {
+        if (rule.reviewers) {
+          for (const r of rule.reviewers) reviewerSet.add(r);
+        }
+        if (rule.teamReviewers) {
+          for (const t of rule.teamReviewers) teamSet.add(t);
+        }
+      }
+    }
+  }
+
+  // Layer 4: CODEOWNERS-style path rules
+  if (config.pathRules && opts.changedFiles && opts.changedFiles.length > 0) {
+    for (const pathRule of config.pathRules) {
+      const matched = micromatch(opts.changedFiles, pathRule.pattern).length > 0;
+      if (matched) {
+        if (pathRule.reviewers) {
+          for (const r of pathRule.reviewers) reviewerSet.add(r);
+        }
+        if (pathRule.teamReviewers) {
+          for (const t of pathRule.teamReviewers) teamSet.add(t);
+        }
+      }
+    }
+  }
+
+  return {
+    reviewers: [...reviewerSet],
+    teamReviewers: [...teamSet],
+  };
+}
+
+/**
+ * Request reviewers on a GitHub PR. Handles partial failures gracefully.
+ * Never throws — returns a result with success/failure counts.
+ */
+async function requestReviewers(opts: {
+  owner: string;
+  repo: string;
+  prNumber: number;
+  token: string;
+  legacyReviewers: string;
+  reviewConfig: string | ReviewConfig | null;
+  runId: number;
+  workspaceId: number | string;
+}): Promise<ReviewRequestResult> {
+  const result: ReviewRequestResult = {
+    requestedReviewers: [],
+    requestedTeams: [],
+    failedReviewers: [],
+    failedTeams: [],
+  };
+
+  // Gather spec tags and story personas for conditional rules
+  let specTags: string[] = [];
+  let storyPersonas: string[] = [];
+  let changedFiles: string[] = [];
+
+  try {
+    // Fetch spec tags from the run's spec
+    const tagRows = await query<{ tag_name: string }>(
+      `SELECT DISTINCT t.name AS tag_name
+       FROM spec_tag_assignments sta
+       JOIN spec_tags t ON t.id = sta.tag_id
+       JOIN pipeline_runs pr ON pr.spec_path LIKE '%' || sta.spec_id || '%'
+       WHERE pr.id = $1`,
+      [opts.runId],
+    );
+    specTags = tagRows.map(r => r.tag_name);
+  } catch {
+    // Tags are optional — continue without them
+  }
+
+  try {
+    // Fetch story personas from story_results
+    const personaRows = await query<{ persona: string }>(
+      `SELECT DISTINCT sr.persona FROM story_results sr WHERE sr.run_id = $1 AND sr.persona IS NOT NULL`,
+      [opts.runId],
+    );
+    storyPersonas = personaRows.map(r => r.persona);
+  } catch {
+    // Personas are optional — continue without them
+  }
+
+  try {
+    // Fetch changed files from GitHub PR files API
+    const filesRes = await githubRateLimiter.execute(() =>
+      fetch(
+        `https://api.github.com/repos/${opts.owner}/${opts.repo}/pulls/${opts.prNumber}/files?per_page=100`,
+        { headers: buildGitHubHeaders(opts.token) },
+      ),
+    );
+    if (filesRes.ok) {
+      const files = await filesRes.json() as Array<{ filename: string }>;
+      changedFiles = files.map(f => f.filename);
+    }
+  } catch {
+    // Changed files are optional — continue without them
+  }
+
+  const { reviewers, teamReviewers } = resolveReviewers({
+    legacyReviewers: opts.legacyReviewers,
+    reviewConfig: opts.reviewConfig,
+    specTags,
+    storyPersonas,
+    changedFiles,
+  });
+
+  if (reviewers.length === 0 && teamReviewers.length === 0) {
+    return result;
+  }
+
+  // Emit "requesting reviewers" status
+  try {
+    await emitWalEvent('pr_requesting_reviewers', opts.workspaceId, {
+      run_id: opts.runId,
+      pr_number: opts.prNumber,
+      reviewers,
+      team_reviewers: teamReviewers,
+    });
+  } catch {
+    // Non-fatal
+  }
+
+  // Send single request with all reviewers + teams
+  try {
+    const reqBody: { reviewers?: string[]; team_reviewers?: string[] } = {};
+    if (reviewers.length > 0) reqBody.reviewers = reviewers;
+    if (teamReviewers.length > 0) reqBody.team_reviewers = teamReviewers;
+
+    const res = await githubRateLimiter.execute(() =>
+      fetch(
+        `https://api.github.com/repos/${opts.owner}/${opts.repo}/pulls/${opts.prNumber}/requested_reviewers`,
+        {
+          method: 'POST',
+          headers: buildGitHubHeaders(opts.token),
+          body: JSON.stringify(reqBody),
+        },
+      ),
+    );
+
+    if (res.ok) {
+      result.requestedReviewers = reviewers;
+      result.requestedTeams = teamReviewers;
+    } else {
+      // GitHub returns 422 with details about which reviewers failed
+      const errBody = await res.text();
+      logger.warn(
+        { status: res.status, body: errBody, runId: opts.runId, prNumber: opts.prNumber },
+        '[auto-pr] Reviewer request returned non-200 — falling back to individual requests',
+      );
+
+      // Fall back: try each reviewer individually
+      for (const r of reviewers) {
+        try {
+          const individualRes = await githubRateLimiter.execute(() =>
+            fetch(
+              `https://api.github.com/repos/${opts.owner}/${opts.repo}/pulls/${opts.prNumber}/requested_reviewers`,
+              {
+                method: 'POST',
+                headers: buildGitHubHeaders(opts.token),
+                body: JSON.stringify({ reviewers: [r] }),
+              },
+            ),
+          );
+          if (individualRes.ok) {
+            result.requestedReviewers.push(r);
+          } else {
+            result.failedReviewers.push(r);
+            logger.warn({ reviewer: r, status: individualRes.status, runId: opts.runId }, '[auto-pr] Individual reviewer request failed');
+          }
+        } catch {
+          result.failedReviewers.push(r);
+        }
+      }
+
+      for (const t of teamReviewers) {
+        try {
+          const individualRes = await githubRateLimiter.execute(() =>
+            fetch(
+              `https://api.github.com/repos/${opts.owner}/${opts.repo}/pulls/${opts.prNumber}/requested_reviewers`,
+              {
+                method: 'POST',
+                headers: buildGitHubHeaders(opts.token),
+                body: JSON.stringify({ team_reviewers: [t] }),
+              },
+            ),
+          );
+          if (individualRes.ok) {
+            result.requestedTeams.push(t);
+          } else {
+            result.failedTeams.push(t);
+            logger.warn({ team: t, status: individualRes.status, runId: opts.runId }, '[auto-pr] Team reviewer request failed');
+          }
+        } catch {
+          result.failedTeams.push(t);
+        }
+      }
+    }
+  } catch (err) {
+    // Total failure — all become failed
+    result.failedReviewers = reviewers;
+    result.failedTeams = teamReviewers;
+    logger.warn({ err, runId: opts.runId }, '[auto-pr] All reviewer requests failed');
+  }
+
+  // If ALL reviewers failed, emit a warning WAL event
+  const totalRequested = result.requestedReviewers.length + result.requestedTeams.length;
+  const totalFailed = result.failedReviewers.length + result.failedTeams.length;
+  if (totalFailed > 0 && totalRequested === 0) {
+    try {
+      await emitWalEvent('pr_review_warning', opts.workspaceId, {
+        run_id: opts.runId,
+        pr_number: opts.prNumber,
+        message: 'Could not add reviewers — check configuration',
+        failed_reviewers: result.failedReviewers,
+        failed_teams: result.failedTeams,
+      });
+    } catch {
+      // Non-fatal
+    }
+  }
+
+  return result;
 }
 
 async function findExistingPr(

@@ -80,6 +80,17 @@ router.get('/', async (req: Request, res: Response) => {
       return;
     }
 
+    let reviewConfig: Record<string, unknown> = {};
+    if ((row as any).review_config) {
+      try {
+        reviewConfig = typeof (row as any).review_config === 'string'
+          ? JSON.parse((row as any).review_config)
+          : (row as any).review_config;
+      } catch {
+        reviewConfig = {};
+      }
+    }
+
     res.json({
       connected: true,
       repoOwner: row.repo_owner,
@@ -92,6 +103,7 @@ router.get('/', async (req: Request, res: Response) => {
         targetBranch: row.auto_pr_target_branch || 'main',
         reviewers: JSON.parse(row.auto_pr_reviewers || '[]') as string[],
       },
+      reviewConfig,
     });
   } catch (error: any) {
     logger.error('[GitHub] Status error:', error);
@@ -658,6 +670,205 @@ router.put('/auto-pr', async (req: Request, res: Response) => {
   } catch (error: any) {
     logger.error('[GitHub] Auto-PR update error:', error);
     res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── GET /api/workspaces/:id/github/review-config — Get review request config ─────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/review-config:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: Get review request configuration
+ *     operationId: getWorkspaceGithubReviewConfig
+ *     description: Returns the review request configuration for automatic PR reviewer assignment.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Review config returned
+ *       404:
+ *         description: No GitHub connection found
+ */
+router.get('/review-config', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.params.id;
+    const row = await queryOne<{ review_config: string | null }>(
+      'SELECT review_config FROM workspace_github_webhooks WHERE workspace_id = $1',
+      [workspaceId],
+    );
+
+    if (!row) {
+      throw new NotFoundError('No GitHub connection found for this workspace');
+    }
+
+    let config: Record<string, unknown> = {};
+    if (row.review_config) {
+      try {
+        config = typeof row.review_config === 'string'
+          ? JSON.parse(row.review_config)
+          : row.review_config as Record<string, unknown>;
+      } catch {
+        config = {};
+      }
+    }
+
+    res.json({ reviewConfig: config });
+  } catch (error: any) {
+    if (error.statusCode) {
+      res.status(error.statusCode).json({ error: error.message });
+    } else {
+      logger.error('[GitHub] Review config get error:', error);
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// ─── PUT /api/workspaces/:id/github/review-config — Update review request config ──
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/review-config:
+ *   put:
+ *     tags: [GitHub]
+ *     summary: Update review request configuration
+ *     operationId: updateWorkspaceGithubReviewConfig
+ *     description: Updates the review request configuration for automatic PR reviewer assignment. Supports default reviewers, team reviewers, conditional rules (tag/persona matching), and CODEOWNERS-style path rules.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               defaultReviewers:
+ *                 type: array
+ *                 items: { type: string }
+ *                 description: GitHub usernames to always request
+ *               teamReviewers:
+ *                 type: array
+ *                 items: { type: string }
+ *                 description: GitHub team slugs to always request
+ *               rules:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     condition:
+ *                       type: object
+ *                       properties:
+ *                         field: { type: string, enum: [tag, persona] }
+ *                         matches: { type: string }
+ *                     reviewers: { type: array, items: { type: string } }
+ *                     teamReviewers: { type: array, items: { type: string } }
+ *               pathRules:
+ *                 type: array
+ *                 items:
+ *                   type: object
+ *                   properties:
+ *                     pattern: { type: string }
+ *                     reviewers: { type: array, items: { type: string } }
+ *                     teamReviewers: { type: array, items: { type: string } }
+ *     responses:
+ *       200:
+ *         description: Review config updated
+ *       404:
+ *         description: No GitHub connection found
+ */
+router.put('/review-config', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.params.id;
+    const { defaultReviewers, teamReviewers, rules, pathRules } = req.body;
+
+    const row = await queryOne<{ workspace_id: string }>(
+      'SELECT workspace_id FROM workspace_github_webhooks WHERE workspace_id = $1',
+      [workspaceId],
+    );
+
+    if (!row) {
+      throw new NotFoundError('No GitHub connection found for this workspace');
+    }
+
+    // Validate and sanitize usernames (alphanumeric + hyphens, no @ prefix)
+    const sanitizeUsername = (u: string) => u.replace(/^@/, '').trim();
+    const isValidUsername = (u: string) => /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(u);
+
+    const config: Record<string, unknown> = {};
+
+    if (Array.isArray(defaultReviewers)) {
+      config.defaultReviewers = defaultReviewers
+        .map(sanitizeUsername)
+        .filter((r): r is string => typeof r === 'string' && r.length > 0 && isValidUsername(r));
+    }
+
+    if (Array.isArray(teamReviewers)) {
+      config.teamReviewers = teamReviewers
+        .map((t: unknown) => typeof t === 'string' ? t.replace(/^@/, '').trim() : '')
+        .filter((t: string) => t.length > 0);
+    }
+
+    if (Array.isArray(rules)) {
+      config.rules = rules
+        .filter((r: any) => r?.condition?.field && r?.condition?.matches)
+        .map((r: any) => ({
+          condition: {
+            field: r.condition.field === 'persona' ? 'persona' : 'tag',
+            matches: String(r.condition.matches),
+          },
+          reviewers: Array.isArray(r.reviewers)
+            ? r.reviewers.map(sanitizeUsername).filter(isValidUsername)
+            : [],
+          teamReviewers: Array.isArray(r.teamReviewers)
+            ? r.teamReviewers.map((t: string) => t.replace(/^@/, '').trim()).filter(Boolean)
+            : [],
+        }));
+    }
+
+    if (Array.isArray(pathRules)) {
+      config.pathRules = pathRules
+        .filter((r: any) => typeof r?.pattern === 'string' && r.pattern.trim().length > 0)
+        .map((r: any) => ({
+          pattern: r.pattern.trim(),
+          reviewers: Array.isArray(r.reviewers)
+            ? r.reviewers.map(sanitizeUsername).filter(isValidUsername)
+            : [],
+          teamReviewers: Array.isArray(r.teamReviewers)
+            ? r.teamReviewers.map((t: string) => t.replace(/^@/, '').trim()).filter(Boolean)
+            : [],
+        }));
+    }
+
+    await execute(
+      'UPDATE workspace_github_webhooks SET review_config = $1 WHERE workspace_id = $2',
+      [JSON.stringify(config), workspaceId],
+    );
+
+    await execute(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_review_config_updated', $1, $2)",
+      [workspaceId, JSON.stringify(config)],
+    );
+
+    res.json({ reviewConfig: config });
+  } catch (error: any) {
+    if (error.statusCode) {
+      res.status(error.statusCode).json({ error: error.message });
+    } else {
+      logger.error('[GitHub] Review config update error:', error);
+      res.status(500).json({ error: error.message });
+    }
   }
 });
 

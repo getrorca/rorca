@@ -2,12 +2,31 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Github, Link2, Unlink, Loader2, CheckCircle2, AlertCircle,
   Webhook, FileText, RotateCcw, Download, Shield, ExternalLink,
-  RefreshCw, GitPullRequest, Users, X, Plus,
+  RefreshCw, GitPullRequest, Users, X, Plus, UserCheck, FolderGit2, Tag,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, BASE_URL, getAccessToken } from '../lib/apiFetch';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
+
+interface ReviewConfig {
+  defaultReviewers?: string[];
+  teamReviewers?: string[];
+  rules?: ConditionalRule[];
+  pathRules?: PathRule[];
+}
+
+interface ConditionalRule {
+  condition: { field: 'tag' | 'persona'; matches: string };
+  reviewers?: string[];
+  teamReviewers?: string[];
+}
+
+interface PathRule {
+  pattern: string;
+  reviewers?: string[];
+  teamReviewers?: string[];
+}
 
 interface GithubStatus {
   connected: boolean;
@@ -21,6 +40,7 @@ interface GithubStatus {
     targetBranch: string;
     reviewers: string[];
   };
+  reviewConfig?: ReviewConfig;
 }
 
 interface GithubAccount {
@@ -97,6 +117,16 @@ export default function GitHubSettingsPanel() {
   const [savingAutoPr, setSavingAutoPr] = useState(false);
   const [savedAutoPr, setSavedAutoPr] = useState(false);
 
+  // Review Requests config
+  const [rcDefaultReviewers, setRcDefaultReviewers] = useState<string[]>([]);
+  const [rcTeamReviewers, setRcTeamReviewers] = useState<string[]>([]);
+  const [rcRules, setRcRules] = useState<ConditionalRule[]>([]);
+  const [rcPathRules, setRcPathRules] = useState<PathRule[]>([]);
+  const [newDefaultReviewer, setNewDefaultReviewer] = useState('');
+  const [newTeamReviewer, setNewTeamReviewer] = useState('');
+  const [savingReviewConfig, setSavingReviewConfig] = useState(false);
+  const [savedReviewConfig, setSavedReviewConfig] = useState(false);
+
   // PR template
   const [prTemplate, setPrTemplate] = useState('');
   const [prTemplateSaving, setPrTemplateSaving] = useState(false);
@@ -115,6 +145,12 @@ export default function GitHubSettingsPanel() {
         setAutoPrEnabled(data.autoPr.enabled);
         setAutoPrBranch(data.autoPr.targetBranch);
         setAutoPrReviewers(data.autoPr.reviewers);
+      }
+      if (data.reviewConfig) {
+        setRcDefaultReviewers(data.reviewConfig.defaultReviewers ?? []);
+        setRcTeamReviewers(data.reviewConfig.teamReviewers ?? []);
+        setRcRules(data.reviewConfig.rules ?? []);
+        setRcPathRules(data.reviewConfig.pathRules ?? []);
       }
     } catch {
       setStatus({ connected: false });
@@ -266,6 +302,73 @@ export default function GitHubSettingsPanel() {
     if (r && !autoPrReviewers.includes(r)) {
       setAutoPrReviewers([...autoPrReviewers, r]);
       setNewReviewer('');
+    }
+  }
+
+  // ─── Review Config handlers ──────────────────────────────────────────────
+
+  const isValidUsername = (u: string) => /^[a-zA-Z0-9]([a-zA-Z0-9-]*[a-zA-Z0-9])?$/.test(u);
+
+  function addDefaultReviewer() {
+    const r = newDefaultReviewer.trim().replace(/^@/, '');
+    if (r && isValidUsername(r) && !rcDefaultReviewers.includes(r)) {
+      setRcDefaultReviewers([...rcDefaultReviewers, r]);
+      setNewDefaultReviewer('');
+    }
+  }
+
+  function addTeamReviewer() {
+    const t = newTeamReviewer.trim().replace(/^@/, '');
+    if (t && !rcTeamReviewers.includes(t)) {
+      setRcTeamReviewers([...rcTeamReviewers, t]);
+      setNewTeamReviewer('');
+    }
+  }
+
+  function addConditionalRule() {
+    setRcRules([...rcRules, { condition: { field: 'tag', matches: '' }, reviewers: [], teamReviewers: [] }]);
+  }
+
+  function updateRule(idx: number, patch: Partial<ConditionalRule>) {
+    setRcRules(rcRules.map((r, i) => i === idx ? { ...r, ...patch } : r));
+  }
+
+  function removeRule(idx: number) {
+    setRcRules(rcRules.filter((_, i) => i !== idx));
+  }
+
+  function addPathRule() {
+    setRcPathRules([...rcPathRules, { pattern: '', reviewers: [], teamReviewers: [] }]);
+  }
+
+  function updatePathRule(idx: number, patch: Partial<PathRule>) {
+    setRcPathRules(rcPathRules.map((r, i) => i === idx ? { ...r, ...patch } : r));
+  }
+
+  function removePathRule(idx: number) {
+    setRcPathRules(rcPathRules.filter((_, i) => i !== idx));
+  }
+
+  async function handleSaveReviewConfig() {
+    if (!workspaceId || savingReviewConfig) return;
+    setSavingReviewConfig(true);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/github/review-config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          defaultReviewers: rcDefaultReviewers,
+          teamReviewers: rcTeamReviewers,
+          rules: rcRules.filter(r => r.condition.matches.trim()),
+          pathRules: rcPathRules.filter(r => r.pattern.trim()),
+        }),
+      });
+      setSavedReviewConfig(true);
+      setTimeout(() => setSavedReviewConfig(false), 2000);
+    } catch {
+      // silent
+    } finally {
+      setSavingReviewConfig(false);
     }
   }
 
@@ -664,7 +767,241 @@ export default function GitHubSettingsPanel() {
         </section>
       )}
 
-      {/* ─── Section 4: GitHub Actions YAML ───────────────────────────── */}
+      {/* ─── Section 4: Review Requests ────────────────────────────────── */}
+      {status?.connected && (
+        <section className="border-t border-border pt-6">
+          <div className="flex items-center gap-2 mb-4">
+            <UserCheck size={20} strokeWidth={1.5} />
+            <h2 className="text-base font-semibold text-[var(--text)]">Review Requests</h2>
+          </div>
+
+          <div className="rounded-lg border border-border bg-panel p-4 space-y-5">
+            {/* Default reviewers */}
+            <div>
+              <div className="flex items-center gap-1.5 mb-2">
+                <Users size={14} className="text-muted" />
+                <span className="text-xs font-medium text-muted">Default Reviewers (GitHub usernames)</span>
+              </div>
+              <p className="text-xs text-muted mb-2">
+                These reviewers are requested on every PR created by a pipeline run.
+              </p>
+
+              {rcDefaultReviewers.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {rcDefaultReviewers.map(r => (
+                    <span key={r} className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-accent/10 text-accent">
+                      @{r}
+                      <button onClick={() => setRcDefaultReviewers(rcDefaultReviewers.filter(x => x !== r))} className="hover:text-red-400 transition-colors">
+                        <X size={10} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newDefaultReviewer}
+                  onChange={e => setNewDefaultReviewer(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addDefaultReviewer(); } }}
+                  placeholder="GitHub username"
+                  className="flex-1 px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                />
+                <button
+                  onClick={addDefaultReviewer}
+                  disabled={!newDefaultReviewer.trim()}
+                  className="px-2.5 py-1.5 text-xs rounded border border-border hover:bg-bg transition-colors disabled:opacity-50 flex items-center gap-1"
+                >
+                  <Plus size={12} /> Add
+                </button>
+              </div>
+            </div>
+
+            {/* Team reviewers */}
+            <div>
+              <div className="flex items-center gap-1.5 mb-2">
+                <Users size={14} className="text-muted" />
+                <span className="text-xs font-medium text-muted">Team Reviewers (GitHub team slugs)</span>
+              </div>
+              <p className="text-xs text-muted mb-2">
+                Team slugs (e.g. <code className="bg-bg px-1 rounded">frontend-team</code>) to request on every PR.
+              </p>
+
+              {rcTeamReviewers.length > 0 && (
+                <div className="flex flex-wrap gap-1.5 mb-2">
+                  {rcTeamReviewers.map(t => (
+                    <span key={t} className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-blue-500/10 text-blue-400">
+                      @{t}
+                      <button onClick={() => setRcTeamReviewers(rcTeamReviewers.filter(x => x !== t))} className="hover:text-red-400 transition-colors">
+                        <X size={10} />
+                      </button>
+                    </span>
+                  ))}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <input
+                  type="text"
+                  value={newTeamReviewer}
+                  onChange={e => setNewTeamReviewer(e.target.value)}
+                  onKeyDown={e => { if (e.key === 'Enter') { e.preventDefault(); addTeamReviewer(); } }}
+                  placeholder="team-slug"
+                  className="flex-1 px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                />
+                <button
+                  onClick={addTeamReviewer}
+                  disabled={!newTeamReviewer.trim()}
+                  className="px-2.5 py-1.5 text-xs rounded border border-border hover:bg-bg transition-colors disabled:opacity-50 flex items-center gap-1"
+                >
+                  <Plus size={12} /> Add
+                </button>
+              </div>
+            </div>
+
+            {/* Conditional rules */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-1.5">
+                  <Tag size={14} className="text-muted" />
+                  <span className="text-xs font-medium text-muted">Conditional Rules</span>
+                </div>
+                <button onClick={addConditionalRule} className="px-2 py-1 text-xs rounded border border-border hover:bg-bg transition-colors flex items-center gap-1">
+                  <Plus size={10} /> Add Rule
+                </button>
+              </div>
+              <p className="text-xs text-muted mb-2">
+                Add reviewers when a spec has matching tags or story personas.
+              </p>
+
+              {rcRules.length === 0 && (
+                <p className="text-xs text-muted italic">No conditional rules configured.</p>
+              )}
+
+              <div className="space-y-2">
+                {rcRules.map((rule, idx) => (
+                  <div key={idx} className="rounded border border-border bg-bg p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted whitespace-nowrap">If</span>
+                      <select
+                        value={rule.condition.field}
+                        onChange={e => updateRule(idx, { condition: { ...rule.condition, field: e.target.value as 'tag' | 'persona' } })}
+                        className="px-2 py-1 text-xs rounded bg-panel border border-border text-[var(--text)] focus:outline-none focus:border-accent"
+                      >
+                        <option value="tag">spec tag</option>
+                        <option value="persona">story persona</option>
+                      </select>
+                      <span className="text-xs text-muted">matches</span>
+                      <input
+                        type="text"
+                        value={rule.condition.matches}
+                        onChange={e => updateRule(idx, { condition: { ...rule.condition, matches: e.target.value } })}
+                        placeholder={rule.condition.field === 'tag' ? 'security' : 'backend'}
+                        className="flex-1 px-2 py-1 text-xs rounded bg-panel border border-border font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                      />
+                      <button onClick={() => removeRule(idx)} className="text-red-400 hover:text-red-300 transition-colors p-1">
+                        <X size={12} />
+                      </button>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={(rule.reviewers ?? []).join(', ')}
+                        onChange={e => updateRule(idx, { reviewers: e.target.value.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean) })}
+                        placeholder="Reviewers: user1, user2"
+                        className="flex-1 px-2 py-1 text-xs rounded bg-panel border border-border font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                      />
+                      <input
+                        type="text"
+                        value={(rule.teamReviewers ?? []).join(', ')}
+                        onChange={e => updateRule(idx, { teamReviewers: e.target.value.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean) })}
+                        placeholder="Teams: security-team"
+                        className="flex-1 px-2 py-1 text-xs rounded bg-panel border border-border font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* CODEOWNERS-style path rules */}
+            <div>
+              <div className="flex items-center justify-between mb-2">
+                <div className="flex items-center gap-1.5">
+                  <FolderGit2 size={14} className="text-muted" />
+                  <span className="text-xs font-medium text-muted">Path Rules (CODEOWNERS-style)</span>
+                </div>
+                <button onClick={addPathRule} className="px-2 py-1 text-xs rounded border border-border hover:bg-bg transition-colors flex items-center gap-1">
+                  <Plus size={10} /> Add Rule
+                </button>
+              </div>
+              <p className="text-xs text-muted mb-2">
+                If changed files match a glob pattern, add specific reviewers.
+              </p>
+
+              {rcPathRules.length === 0 && (
+                <p className="text-xs text-muted italic">No path rules configured.</p>
+              )}
+
+              <div className="space-y-2">
+                {rcPathRules.map((rule, idx) => (
+                  <div key={idx} className="rounded border border-border bg-bg p-3 space-y-2">
+                    <div className="flex items-center gap-2">
+                      <span className="text-xs text-muted whitespace-nowrap">Pattern</span>
+                      <input
+                        type="text"
+                        value={rule.pattern}
+                        onChange={e => updatePathRule(idx, { pattern: e.target.value })}
+                        placeholder="src/security/**"
+                        className="flex-1 px-2 py-1 text-xs rounded bg-panel border border-border font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                      />
+                      <button onClick={() => removePathRule(idx)} className="text-red-400 hover:text-red-300 transition-colors p-1">
+                        <X size={12} />
+                      </button>
+                    </div>
+                    <div className="flex gap-2">
+                      <input
+                        type="text"
+                        value={(rule.reviewers ?? []).join(', ')}
+                        onChange={e => updatePathRule(idx, { reviewers: e.target.value.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean) })}
+                        placeholder="Reviewers: user1, user2"
+                        className="flex-1 px-2 py-1 text-xs rounded bg-panel border border-border font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                      />
+                      <input
+                        type="text"
+                        value={(rule.teamReviewers ?? []).join(', ')}
+                        onChange={e => updatePathRule(idx, { teamReviewers: e.target.value.split(',').map(s => s.trim().replace(/^@/, '')).filter(Boolean) })}
+                        placeholder="Teams: infra-team"
+                        className="flex-1 px-2 py-1 text-xs rounded bg-panel border border-border font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                      />
+                    </div>
+                  </div>
+                ))}
+              </div>
+            </div>
+
+            {/* Empty state */}
+            {rcDefaultReviewers.length === 0 && rcTeamReviewers.length === 0 && rcRules.length === 0 && rcPathRules.length === 0 && (
+              <p className="text-xs text-muted italic border-t border-border pt-3">
+                No default reviewers configured. PRs will be created without review requests.
+              </p>
+            )}
+
+            {/* Save button */}
+            <button
+              onClick={handleSaveReviewConfig}
+              disabled={savingReviewConfig}
+              className="px-3 py-1.5 text-sm rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-1.5"
+            >
+              {savingReviewConfig ? <Loader2 size={14} className="animate-spin" /> : null}
+              {savedReviewConfig ? 'Saved!' : 'Save Review Config'}
+            </button>
+          </div>
+        </section>
+      )}
+
+      {/* ─── Section 6: GitHub Actions YAML ───────────────────────────── */}
       <section className="border-t border-border pt-6">
         <div className="flex items-center gap-2 mb-3">
           <Download size={18} />
@@ -708,7 +1045,7 @@ export default function GitHubSettingsPanel() {
         </button>
       </section>
 
-      {/* ─── Section 5: PR Template ───────────────────────────────────── */}
+      {/* ─── Section 7: PR Template ───────────────────────────────────── */}
       <section className="border-t border-border pt-6 pb-6">
         <div className="flex items-center gap-2 mb-3">
           <FileText size={18} />
