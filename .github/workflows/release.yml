@@ -100,6 +100,10 @@ jobs:
           name: frontend-dist
           path: dist/
 
+      # TODO: Add Apple Developer Program enrollment for proper code signing and notarization
+      # See: https://developer.apple.com/help/app-store-connect/reference/notarization-api
+      # This would allow us to sign binaries with an Apple certificate, eliminating the Gatekeeper
+      # quarantine warning and improving user experience on macOS.
       - name: Building ${{ matrix.name }}...
         env:
           RORCA_VERSION: ${{ github.ref_name }}
