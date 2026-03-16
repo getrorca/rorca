@@ -3,7 +3,7 @@ import { Link, NavLink } from 'react-router-dom';
 import {
   Settings2, Layers, Route, Zap, Github, Variable, Play, Webhook, Users,
   User, CreditCard, Keyboard, ArrowLeft, ChevronRight,
-  Key, Code2, Bell, Plug, Rss,
+  Key, Code2, Bell, Plug, Rss, LayoutGrid,
 } from 'lucide-react';
 import type { PanelId } from './Sidebar';
 import type { SettingsTab } from '../panels/SettingsPanel';
@@ -50,6 +50,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     id: 'integrations',
     label: 'Integrations',
     items: [
+      { id: 'integrations', label: 'Overview',  icon: LayoutGrid },
       { id: 'github',    label: 'GitHub',   icon: Github },
       { id: 'slack',     label: 'Slack',    icon: Plug, badge: 'Soon' },
       { id: 'linear',    label: 'Linear',   icon: Plug, badge: 'Soon' },
