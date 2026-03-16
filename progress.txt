@@ -3,10 +3,10 @@
 Spec: rorca-go-to-market-v1
 Run ID: 129
 Started: 2026-03-16T08:27:07.845Z
-Last Updated: 2026-03-16T10:18:41.164Z
+Last Updated: 2026-03-16T10:17:58.658Z
 
 ## Completed Stories (4)
 - US-001: Resolve merge conflict in worker.ts — DONE (claude, claude-sonnet-4-6, 156s)
 - US-051: API documentation completeness — @swagger on all routes — DONE (claude, claude-sonnet-4-6, 1153s)
 - US-053: Installation troubleshooting guide — DONE (claude, claude-haiku-4-5-20251001, 147s)
-- US-069: Changelog Landing Page — DONE (claude, claude-haiku-4-5-20251001, 169s)
+- US-070: macOS Binary Notarization Documentation and Gatekeeper Workaround — DONE (claude, claude-haiku-4-5-20251001, 126s)
