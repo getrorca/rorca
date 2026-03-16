@@ -3,9 +3,9 @@
 Spec: rorca-go-to-market-v1
 Run ID: 129
 Started: 2026-03-16T08:27:07.845Z
-Last Updated: 2026-03-16T09:57:56.569Z
+Last Updated: 2026-03-16T09:51:55.834Z
 
 ## Completed Stories (3)
 - US-001: Resolve merge conflict in worker.ts — DONE (claude, claude-sonnet-4-6, 156s)
 - US-051: API documentation completeness — @swagger on all routes — DONE (claude, claude-sonnet-4-6, 1153s)
-- US-021: Integration Credentials Vault extension for OAuth tokens — DONE (claude, claude-opus-4-6, 423s)
+- US-050: Smoke test for binary on all 4 platforms — DONE (claude, claude-sonnet-4-6, 272s)
