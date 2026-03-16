@@ -322,6 +322,22 @@ jobs:
         with:
           fetch-depth: 0
 
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Generate CHANGELOG.md
+        run: npx tsx scripts/generate-changelog.ts
+
+      - name: Commit and push CHANGELOG.md
+        run: |
+          git config user.name 'github-actions[bot]'
+          git config user.email 'github-actions[bot]@users.noreply.github.com'
+          git add CHANGELOG.md
+          git commit -m "chore: update CHANGELOG.md for ${{ github.ref_name }}" || echo "No changes to CHANGELOG.md"
+          git push
+
       - name: Download all binary artifacts
         uses: actions/download-artifact@v4
         with:
