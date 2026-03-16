@@ -318,6 +318,7 @@ import { createNotification } from './notifications';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { logger } from '../lib/logger';
 import { ConflictError, ForbiddenError, NotFoundError, PayloadTooLargeError, UnprocessableError, ValidationError } from '../lib/errors';
+import { githubRateLimiter } from '../lib/github-rate-limiter';
 
 const router = Router();
 
@@ -7908,15 +7909,17 @@ async function fetchGithubIssues(
     const batch = issueNumbers.slice(i, i + BATCH_SIZE);
     const results = await Promise.all(
       batch.map(async (num) => {
-        const res = await fetch(
-          `https://api.github.com/repos/${owner}/${repo}/issues/${num}`,
-          {
-            headers: {
-              'Authorization': `Bearer ${token}`,
-              'Accept': 'application/vnd.github+json',
-              'X-GitHub-Api-Version': '2022-11-28',
+        const res = await githubRateLimiter.execute(() =>
+          fetch(
+            `https://api.github.com/repos/${owner}/${repo}/issues/${num}`,
+            {
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Accept': 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+              },
             },
-          },
+          ),
         );
         if (!res.ok) {
           errors.push({ number: num, error: `GitHub API ${res.status}: ${res.statusText}` });
@@ -7947,15 +7950,17 @@ async function fetchAllGithubIssues(
   const perPage = 100; // GitHub max
 
   while (true) {
-    const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=${perPage}&page=${page}`,
-      {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28',
+    const res = await githubRateLimiter.execute(() =>
+      fetch(
+        `https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=${perPage}&page=${page}`,
+        {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
         },
-      },
+      ),
     );
 
     if (!res.ok) {
@@ -8288,13 +8293,15 @@ async function fetchGithubIssuesDirect(
     let url = `https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=${perPage}&page=${page}`;
     if (milestone) url += `&milestone=${encodeURIComponent(milestone)}`;
 
-    const res = await fetch(url, {
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Accept': 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-    });
+    const res = await githubRateLimiter.execute(() =>
+      fetch(url, {
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      }),
+    );
 
     if (!res.ok) {
       errors.push(`GitHub API ${res.status}: ${res.statusText}`);

@@ -4,6 +4,7 @@ import { queryOne, execute } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
 import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
+import { githubRateLimiter } from '../lib/github-rate-limiter';
 
 const router = Router({ mergeParams: true });
 
@@ -177,26 +178,28 @@ router.post('/connect', async (req: Request, res: Response) => {
     const webhookUrl = `${baseUrl}/api/webhooks/github`;
 
     // Create webhook via GitHub API
-    const ghRes = await fetch(`https://api.github.com/repos/${repoOwner}/${repoName}/hooks`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${githubToken}`,
-        'Accept': 'application/vnd.github+json',
-        'Content-Type': 'application/json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-      body: JSON.stringify({
-        name: 'web',
-        active: true,
-        events: ['push', 'pull_request', 'issues'],
-        config: {
-          url: webhookUrl,
-          content_type: 'json',
-          secret: webhookSecret,
-          insecure_ssl: '0',
+    const ghRes = await githubRateLimiter.execute(() =>
+      fetch(`https://api.github.com/repos/${repoOwner}/${repoName}/hooks`, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${githubToken}`,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+          'X-GitHub-Api-Version': '2022-11-28',
         },
+        body: JSON.stringify({
+          name: 'web',
+          active: true,
+          events: ['push', 'pull_request', 'issues'],
+          config: {
+            url: webhookUrl,
+            content_type: 'json',
+            secret: webhookSecret,
+            insecure_ssl: '0',
+          },
+        }),
       }),
-    });
+    );
 
     if (!ghRes.ok) {
       const ghBody = await ghRes.text();
@@ -295,16 +298,18 @@ router.post('/disconnect', async (req: Request, res: Response) => {
 
     // Delete webhook from GitHub if we have a webhook ID
     if (row.webhook_id) {
-      const ghRes = await fetch(
-        `https://api.github.com/repos/${row.repo_owner}/${row.repo_name}/hooks/${row.webhook_id}`,
-        {
-          method: 'DELETE',
-          headers: {
-            'Authorization': `Bearer ${githubToken}`,
-            'Accept': 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28',
+      const ghRes = await githubRateLimiter.execute(() =>
+        fetch(
+          `https://api.github.com/repos/${row.repo_owner}/${row.repo_name}/hooks/${row.webhook_id}`,
+          {
+            method: 'DELETE',
+            headers: {
+              'Authorization': `Bearer ${githubToken}`,
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+            },
           },
-        }
+        ),
       );
 
       // 404 = webhook already deleted on GitHub side — that's fine
@@ -433,13 +438,15 @@ router.post('/test-connection', async (req: Request, res: Response) => {
 
     const token = decryptToken(conn.encrypted_token);
 
-    const ghRes = await fetch('https://api.github.com/user', {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-    });
+    const ghRes = await githubRateLimiter.execute(() =>
+      fetch('https://api.github.com/user', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      }),
+    );
 
     if (ghRes.ok) {
       const user = await ghRes.json() as { login: string; id: number };
@@ -503,15 +510,17 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
     if (clientId && clientSecret) {
       try {
         const token = decryptToken(conn.encrypted_token);
-        await fetch(`https://api.github.com/applications/${clientId}/token`, {
-          method: 'DELETE',
-          headers: {
-            Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
-            Accept: 'application/vnd.github+json',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ access_token: token }),
-        });
+        await githubRateLimiter.execute(() =>
+          fetch(`https://api.github.com/applications/${clientId}/token`, {
+            method: 'DELETE',
+            headers: {
+              Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+              Accept: 'application/vnd.github+json',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ access_token: token }),
+          }),
+        );
       } catch (revokeErr) {
         logger.warn({ err: revokeErr }, '[GitHub] Token revocation failed (proceeding with local disconnect)');
       }
@@ -816,6 +825,40 @@ jobs:
           echo "| Skipped | $SKIPPED |" >> "$GITHUB_STEP_SUMMARY"
 `;
 }
+
+// ─── GET /api/workspaces/:id/github/rate-limit — GitHub API rate limit status ─
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/rate-limit:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: Get GitHub API rate limit status
+ *     operationId: getGithubRateLimit
+ *     description: Returns the current outbound GitHub API rate limit status including remaining requests, limit, reset time, and circuit breaker state.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Rate limit status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 remaining: { type: number }
+ *                 limit: { type: number }
+ *                 resetAt: { type: string, nullable: true }
+ *                 circuitState: { type: string, enum: [closed, open, half-open] }
+ */
+router.get('/rate-limit', (_req: Request, res: Response) => {
+  res.json(githubRateLimiter.getStatus());
+});
 
 // ─── Helper: verify webhook signature ────────────────────────────────────────
 
