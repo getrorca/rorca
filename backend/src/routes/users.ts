@@ -1,11 +1,72 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { query } from '../db/index';
+import { query, queryOne } from '../db/index';
 import { getEffectiveUser } from '../lib/get-user';
 import { logger } from '../lib/logger';
 
 const router = Router();
+
+/**
+ * @swagger
+ * /api/users/me:
+ *   get:
+ *     tags: [Users]
+ *     summary: Get current user profile including plan
+ *     operationId: getMe
+ *     description: Returns the current user's profile including their plan tier (free/solo/pro/team). Falls back to the first registered user when auth is bypassed (local single-user mode).
+ *     responses:
+ *       200:
+ *         description: Current user
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 email: { type: string }
+ *                 displayName: { type: string }
+ *                 plan: { type: string, enum: [free, solo, pro, team] }
+ *                 emailVerified: { type: boolean }
+ *                 avatarUrl: { type: string, nullable: true }
+ *       404:
+ *         description: No user found (empty database)
+ */
+router.get('/me', async (req: Request, res: Response) => {
+  try {
+    const user = await getEffectiveUser(req);
+    if (!user) {
+      res.status(404).json({ error: 'No user found' });
+      return;
+    }
+
+    const row = await queryOne<{
+      id: string;
+      email: string;
+      display_name: string;
+      plan: string;
+      email_verified_at: string | null;
+      avatar_url: string | null;
+    }>('SELECT id, email, display_name, plan, email_verified_at, avatar_url FROM users WHERE id = $1', [user.id]);
+
+    if (!row) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    res.json({
+      id: row.id,
+      email: row.email,
+      displayName: row.display_name,
+      plan: row.plan ?? 'free',
+      emailVerified: row.email_verified_at !== null,
+      avatarUrl: row.avatar_url ?? null,
+    });
+  } catch (error: any) {
+    logger.error('[Users] Get me error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 interface AssignmentDbRow {
   spec_id: string;

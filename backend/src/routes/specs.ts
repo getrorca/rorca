@@ -16,6 +16,7 @@ import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey } from './vault';
 import type { AuthUser } from './auth';
 import { getEffectiveUser } from '../lib/get-user';
+import { getPlanLimits, type PlanTier } from '../lib/plan-limits';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
 import { agentType as configuredAgentType } from '../lib/config';
 import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
@@ -874,6 +875,25 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
     // 1b. Validate model if provided (allow pass-through for openai-compat provider IDs)
     // No validation gate — any model string is accepted. Unknown models route to openai-compat.
+
+    // 1c. Plan limit — cap story count for free tier
+    {
+      const planUser = await getEffectiveUser(req);
+      if (planUser?.id) {
+        const planRow = await queryOne<{ plan: string }>('SELECT plan FROM users WHERE id = $1', [planUser.id]);
+        const userPlan = (planRow?.plan ?? 'free') as PlanTier;
+        const limits = getPlanLimits(userPlan);
+        if (isFinite(limits.maxStoriesPerSpec) && storyCount > limits.maxStoriesPerSpec) {
+          res.status(402).json({
+            error: 'plan_limit',
+            message: `Free plan allows at most ${limits.maxStoriesPerSpec} stories per spec. Upgrade to generate larger specs.`,
+            maxStoriesPerSpec: limits.maxStoriesPerSpec,
+            currentPlan: userPlan,
+          });
+          return;
+        }
+      }
+    }
 
     // 2. Fetch workspace from DB
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as Record<string, unknown> | undefined;
@@ -3873,6 +3893,28 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
     const existingStories: Array<{ id: string; title: string }> =
       specContent.userStories ?? specContent.stories ?? [];
+
+    // Plan limit — reject if adding would exceed maxStoriesPerSpec for free tier
+    {
+      const planUser = await getEffectiveUser(req);
+      if (planUser?.id) {
+        const planRow = await queryOne<{ plan: string }>('SELECT plan FROM users WHERE id = $1', [planUser.id]);
+        const userPlan = (planRow?.plan ?? 'free') as PlanTier;
+        const limits = getPlanLimits(userPlan);
+        if (isFinite(limits.maxStoriesPerSpec)) {
+          if (existingStories.length + storyCount > limits.maxStoriesPerSpec) {
+            res.status(402).json({
+              error: 'plan_limit',
+              message: `Free plan allows at most ${limits.maxStoriesPerSpec} stories per spec. This spec already has ${existingStories.length} stories. Upgrade to add more.`,
+              maxStoriesPerSpec: limits.maxStoriesPerSpec,
+              currentStoryCount: existingStories.length,
+              currentPlan: userPlan,
+            });
+            return;
+          }
+        }
+      }
+    }
 
     const storyPrefix = existingStories[0]?.id?.match(/^([A-Z]+)/)?.[1] ?? 'US';
     const maxN = existingStories.reduce((max, s) => {
