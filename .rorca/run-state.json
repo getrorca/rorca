@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T09:52:49.115Z",
+  "lastUpdatedAt": "2026-03-16T09:52:23.448Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -25,14 +25,14 @@
       "elapsedMs": 1152753
     },
     {
-      "storyId": "US-014",
-      "title": "Landing page download integration — fetch latest release dynamically",
+      "storyId": "US-015",
+      "title": "First-run onboarding verification — end-to-end rorca start test",
       "status": "passed",
-      "startedAt": "2026-03-16T09:47:23.528Z",
-      "finishedAt": "2026-03-16T09:52:49.115Z",
+      "startedAt": "2026-03-16T09:47:23.505Z",
+      "finishedAt": "2026-03-16T09:52:23.448Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 325587
+      "elapsedMs": 299943
     }
   ],
   "failedStories": [],
