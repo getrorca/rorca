@@ -67,7 +67,6 @@ router.get('/', async (req: Request, res: Response) => {
     const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
-      return;
     }
 
     const row = await queryOne<GithubWebhookRow>(
@@ -154,13 +153,11 @@ router.post('/connect', async (req: Request, res: Response) => {
 
     if (!repoOwner || !repoName || !githubToken) {
       throw new ValidationError('Missing required fields: repoOwner, repoName, githubToken');
-      return;
     }
 
     const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
-      return;
     }
 
     // Check if already connected
@@ -170,61 +167,92 @@ router.post('/connect', async (req: Request, res: Response) => {
     );
     if (existing) {
       throw new ConflictError('GitHub already connected for this workspace. Disconnect first.');
-      return;
     }
 
-    // Generate webhook secret
-    const webhookSecret = randomBytes(32).toString('hex');
+    // Generate webhook secret — graceful degradation if crypto fails
+    let webhookSecret: string | null = null;
+    try {
+      webhookSecret = randomBytes(32).toString('hex');
+    } catch (cryptoErr) {
+      logger.error({ err: cryptoErr }, '[GitHub] Failed to generate webhook secret');
+    }
 
     // Determine the webhook URL — use RORCA_BASE_URL env or fall back to localhost
     const baseUrl = process.env.RORCA_BASE_URL || 'http://localhost:3030';
     const webhookUrl = `${baseUrl}/api/webhooks/github`;
 
-    // Create webhook via GitHub API
-    const ghRes = await githubRateLimiter.execute(() =>
-      fetch(`https://api.github.com/repos/${repoOwner}/${repoName}/hooks`, {
-        method: 'POST',
-        headers: {
-          'Authorization': `Bearer ${githubToken}`,
-          'Accept': 'application/vnd.github+json',
-          'Content-Type': 'application/json',
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
-        body: JSON.stringify({
-          name: 'web',
-          active: true,
-          events: ['push', 'pull_request', 'issues'],
-          config: {
-            url: webhookUrl,
-            content_type: 'json',
-            secret: webhookSecret,
-            insecure_ssl: '0',
-          },
-        }),
-      }),
-    );
+    let webhookId: number | null = null;
+    let webhookError: string | null = null;
+    let manualSetupUrl: string | null = null;
 
-    if (!ghRes.ok) {
-      const ghBody = await ghRes.text();
-      logger.error({ status: ghRes.status, body: ghBody }, '[GitHub] Webhook creation failed');
-      res.status(ghRes.status === 404 ? 404 : 502).json({
-        error: `GitHub API error (${ghRes.status}): ${ghBody}`,
-      });
-      return;
+    // Only attempt webhook creation if we have a secret
+    if (webhookSecret) {
+      try {
+        // 5-second timeout on GitHub API call
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+        const ghRes = await githubRateLimiter.execute(() =>
+          fetch(`https://api.github.com/repos/${repoOwner}/${repoName}/hooks`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${githubToken}`,
+              'Accept': 'application/vnd.github+json',
+              'Content-Type': 'application/json',
+              'X-GitHub-Api-Version': '2022-11-28',
+            },
+            body: JSON.stringify({
+              name: 'web',
+              active: true,
+              events: ['push', 'pull_request', 'issues'],
+              config: {
+                url: webhookUrl,
+                content_type: 'json',
+                secret: webhookSecret,
+                insecure_ssl: '0',
+              },
+            }),
+            signal: controller.signal,
+          }),
+        );
+        clearTimeout(timeoutId);
+
+        if (ghRes.ok) {
+          const ghData = await ghRes.json() as { id: number };
+          webhookId = ghData.id;
+        } else if (ghRes.status === 403 || ghRes.status === 404) {
+          // Graceful degradation — save connection without webhook
+          manualSetupUrl = `https://github.com/${repoOwner}/${repoName}/settings/hooks`;
+          webhookError = 'Rorca needs admin access to register webhooks';
+          logger.warn({ status: ghRes.status, repoOwner, repoName }, '[GitHub] Webhook creation failed — insufficient permissions');
+        } else {
+          const ghBody = await ghRes.text();
+          logger.error({ status: ghRes.status, body: ghBody }, '[GitHub] Webhook creation failed');
+          webhookError = `GitHub API error (${ghRes.status}): ${ghBody}`;
+        }
+      } catch (fetchErr: any) {
+        if (fetchErr.name === 'AbortError') {
+          webhookError = 'Webhook registration timed out (>5s). Connection saved without webhook.';
+          logger.warn({ repoOwner, repoName }, '[GitHub] Webhook creation timed out');
+        } else {
+          webhookError = `Webhook registration failed: ${fetchErr.message}`;
+          logger.error({ err: fetchErr }, '[GitHub] Webhook creation error');
+        }
+      }
+    } else {
+      webhookError = 'Failed to generate webhook secret — connection saved without webhook';
     }
 
-    const ghData = await ghRes.json() as { id: number };
-
-    // Store connection
+    // Store connection (always — even without webhook)
     await execute(
       `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
        VALUES ($1, $2, $3, $4, $5)`,
-      [workspaceId, repoOwner, repoName, ghData.id, encryptToken(webhookSecret)]
+      [workspaceId, repoOwner, repoName, webhookId, webhookSecret ? encryptToken(webhookSecret) : '']
     );
 
     await execute(
       "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_connected', $1, $2)",
-      [workspaceId, JSON.stringify({ repoOwner, repoName, webhookId: ghData.id })]
+      [workspaceId, JSON.stringify({ repoOwner, repoName, webhookId, webhookError: webhookError || undefined })]
     );
 
     insertAuditEntry({
@@ -233,16 +261,23 @@ router.post('/connect', async (req: Request, res: Response) => {
       action: 'integration_connected',
       actorType: 'user',
       actorId: (req as any).user?.id ?? null,
-      details: { repoOwner, repoName, webhookId: ghData.id },
+      details: { repoOwner, repoName, webhookId, webhookError: webhookError || undefined },
     });
 
+    // Return 201 with degraded status if webhook failed
     res.status(201).json({
       connected: true,
       repoOwner,
       repoName,
-      webhookId: ghData.id,
+      webhookId,
+      ...(webhookError ? { error: webhookError } : {}),
+      ...(manualSetupUrl ? { manualSetupUrl } : {}),
     });
   } catch (error: any) {
+    if (error.statusCode) {
+      res.status(error.statusCode).json({ error: error.message });
+      return;
+    }
     logger.error('[GitHub] Connect error:', error);
     res.status(500).json({ error: error.message });
   }
@@ -295,7 +330,6 @@ router.post('/disconnect', async (req: Request, res: Response) => {
 
     if (!githubToken) {
       throw new ValidationError('Missing required field: githubToken');
-      return;
     }
 
     const row = await queryOne<GithubWebhookRow>(
@@ -305,7 +339,6 @@ router.post('/disconnect', async (req: Request, res: Response) => {
 
     if (!row) {
       throw new NotFoundError('No GitHub connection found for this workspace');
-      return;
     }
 
     // Delete webhook from GitHub if we have a webhook ID
@@ -512,7 +545,6 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
     const userId = userRow?.id;
     if (!userId) {
       throw new NotFoundError('No user configured');
-      return;
     }
 
     const conn = await queryOne<Pick<GitHubConnectionRow, 'id' | 'encrypted_token'>>(
@@ -522,7 +554,6 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
 
     if (!conn) {
       throw new NotFoundError('No GitHub connection found');
-      return;
     }
 
     // Attempt to revoke the token via GitHub API (best-effort)
@@ -638,7 +669,7 @@ router.delete('/', async (req: Request, res: Response) => {
       throw new NotFoundError('No GitHub connection found for this workspace');
     }
 
-    // 1. Revoke OAuth token via GitHub API (best-effort, before local cleanup)
+    // 1a. Revoke OAuth token via GitHub API (best-effort, before local cleanup)
     if (oauthConn) {
       const clientId = process.env.GITHUB_CLIENT_ID;
       const clientSecret = process.env.GITHUB_CLIENT_SECRET;
@@ -664,6 +695,32 @@ router.delete('/', async (req: Request, res: Response) => {
         }
       } else {
         logger.warn('[GitHub] GITHUB_CLIENT_ID/SECRET not configured — skipping token revocation');
+      }
+    }
+
+    // 1b. Delete webhook from GitHub (best-effort, before local cleanup)
+    if (webhookConn?.webhook_id && oauthConn) {
+      try {
+        const token = decryptToken(oauthConn.encrypted_token);
+        const delRes = await githubRateLimiter.execute(() =>
+          fetch(
+            `https://api.github.com/repos/${webhookConn.repo_owner}/${webhookConn.repo_name}/hooks/${webhookConn.webhook_id}`,
+            {
+              method: 'DELETE',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Accept': 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+              },
+            },
+          ),
+        );
+        // 404 = already deleted — that's fine
+        if (!delRes.ok && delRes.status !== 404) {
+          logger.warn({ status: delRes.status }, '[GitHub] Webhook deletion returned non-success (proceeding with local cleanup)');
+        }
+      } catch (delErr) {
+        logger.warn({ err: delErr }, '[GitHub] Webhook deletion failed (proceeding with local cleanup)');
       }
     }
 
@@ -784,7 +841,6 @@ router.put('/auto-pr', async (req: Request, res: Response) => {
 
     if (!row) {
       throw new NotFoundError('No GitHub connection found for this workspace');
-      return;
     }
 
     await execute(
@@ -858,7 +914,6 @@ router.get('/actions-yaml', async (req: Request, res: Response) => {
     );
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
-      return;
     }
 
     const yaml = generateActionsYaml(workspace.id, workspace.label);
