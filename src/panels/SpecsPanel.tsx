@@ -110,6 +110,7 @@ interface KanbanSpec {
   model?: string;
   attachments?: import('../types').Attachment[];
   attachmentCount?: number;
+  source?: string;
 }
 
 interface CustomColumnData {
@@ -714,7 +715,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
 
   useWalSSE((event) => {
     if (workspaceId && event.workspace_id && event.workspace_id !== String(workspaceId)) return;
-    const KANBAN_EVENTS = ['spec_approved', 'run_started', 'run_finished', 'spec_rejected', 'story_passed', 'story_failed'];
+    const KANBAN_EVENTS = ['spec_approved', 'run_started', 'run_finished', 'spec_rejected', 'story_passed', 'story_failed', 'spec_discovered', 'spec_updated'];
     if (!KANBAN_EVENTS.includes(event.event_type)) return;
     if (event.event_type === 'run_started' && event.spec_id) {
       setActiveRunSpecs((prev) => new Map(prev).set(event.spec_id!, 'running'));
@@ -1532,11 +1533,17 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
             </div>
           )}
 
-          {/* Row 3: Model badge + time-ago + tag pills + attachment badge */}
+          {/* Row 3: Model badge + source badge + time-ago + tag pills + attachment badge */}
           <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
             {modelName && (
               <span className={`shrink-0 inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded border ${modelColorClass(spec.model)}`}>
                 {modelName}
+              </span>
+            )}
+            {spec.source === 'github' && (
+              <span className="shrink-0 inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-purple-500/15 text-purple-400 border border-purple-500/30">
+                <Github size={8} />
+                From GitHub
               </span>
             )}
             <span className="shrink-0 text-[10px] text-muted flex items-center gap-0.5">

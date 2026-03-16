@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T10:17:58.658Z",
+  "lastUpdatedAt": "2026-03-16T10:51:41.007Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -43,6 +43,16 @@
       "agentType": "claude",
       "model": "claude-haiku-4-5-20251001",
       "elapsedMs": 125642
+    },
+    {
+      "storyId": "US-032",
+      "title": "Webhook Push Event — Spec Discovery",
+      "status": "passed",
+      "startedAt": "2026-03-16T10:41:39.983Z",
+      "finishedAt": "2026-03-16T10:51:41.006Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 601023
     }
   ],
   "failedStories": [],
