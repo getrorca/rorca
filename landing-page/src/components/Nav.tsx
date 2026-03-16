@@ -44,6 +44,7 @@ export function Nav() {
                     <Link href="/engine" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Engine</Link>
                     <Link href="/compute" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Compute</Link>
                     <Link href="#" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Pricing</Link>
+                    <Link href="/download" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Download</Link>
                 </div>
                 <div className="flex items-center gap-4">
                     <Link href="/login" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors hidden sm:block">Log In</Link>
