@@ -4,6 +4,7 @@ import { useNavigate } from 'react-router-dom';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
+import { usePipelineRuns, type PipelineRun } from '../hooks/usePipelineRuns';
 import { useWalSSE } from '../hooks/useWalSSE';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -16,23 +17,7 @@ import { useAppNavigate } from '../routes';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
-interface PipelineRun {
-  id: number;
-  spec_path: string;
-  workspace_id: string;
-  status: 'running' | 'paused' | 'done' | 'failed' | 'partial_failure' | 'cancelled' | 'queued';
-  pid: number | null;
-  started_at: string;
-  finished_at: string | null;
-  retried_from_run_id: number | null;
-  agent_type?: string;
-  agent_model?: string | null;
-  parallelism?: number;
-  branch_name?: string | null;
-  worktree_path?: string | null;
-  queue_position?: number | null;
-  queued_at?: string | null;
-}
+// PipelineRun type imported from usePipelineRuns hook
 
 interface WorkerHealthData {
   workerActive: boolean;
@@ -148,7 +133,7 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
   const { workspaceId } = useWorkspace();
   const navigateTo = useAppNavigate();
   const navigate = useNavigate();
-  const [runs, setRuns] = useState<PipelineRun[]>([]);
+  const { runs, refetch: refetchRuns } = usePipelineRuns(workspaceId, 10_000);
   const [_showStartHelp, _setShowStartHelp] = useState(false);
   const [_copied, setCopied] = useState(false);
   const [queueEntries, setQueueEntries] = useState<QueueEntry[]>([]);
@@ -191,31 +176,13 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
     return status;
   })();
 
-  // Fetch run list
-  const fetchRuns = useCallback(() => {
-    if (!workspaceId) return;
-    apiFetch<{ items: PipelineRun[]; total: number; hasMore: boolean }>(`/api/pipeline/runs?workspaceId=${workspaceId}`)
-      .then((data) => setRuns(data.items))
-      .catch(console.error);
-  }, [workspaceId]);
-
-  useEffect(() => { fetchRuns(); }, [fetchRuns]);
-
-  // Poll runs every 15s
-  useEffect(() => {
-    const interval = setInterval(fetchRuns, 15_000);
-    const onOnline = () => fetchRuns();
-    window.addEventListener('online', onOnline);
-    return () => { clearInterval(interval); window.removeEventListener('online', onOnline); };
-  }, [fetchRuns]);
-
-  // Re-fetch runs when SSE delivers lifecycle events
+  // Re-fetch runs via shared hook when SSE delivers lifecycle events
   useEffect(() => {
     const lifecycle = sseEvents.filter(e =>
       e.event_type === 'run_finished' || e.event_type === 'run_cancelled'
     );
-    if (lifecycle.length > 0) fetchRuns();
-  }, [sseEvents, fetchRuns]);
+    if (lifecycle.length > 0) refetchRuns();
+  }, [sseEvents, refetchRuns]);
 
   // ─── Queue data ────────────────────────────────────────────────
   const fetchQueue = useCallback(() => {
@@ -249,8 +216,8 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
   }, [fetchWorkerHealth]);
 
   // Global WAL SSE — handle run_queued_promoted
-  const fetchRunsRef = useRef(fetchRuns);
-  fetchRunsRef.current = fetchRuns;
+  const fetchRunsRef = useRef(refetchRuns);
+  fetchRunsRef.current = refetchRuns;
   const fetchQueueRef = useRef(fetchQueue);
   fetchQueueRef.current = fetchQueue;
   const fetchWorkerHealthRef = useRef(fetchWorkerHealth);
@@ -538,7 +505,7 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
                       setCancellingRunId(run.id);
                       try {
                         await apiFetch(`/api/pipeline/runs/${run.id}`, { method: 'DELETE' });
-                        setRuns((prev) => prev.filter((r) => r.id !== run.id));
+                        refetchRuns();
                       } catch (err) {
                         console.error('[Queue] Cancel failed:', err);
                       } finally {
