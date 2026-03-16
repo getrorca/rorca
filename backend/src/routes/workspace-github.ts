@@ -1282,6 +1282,239 @@ router.post('/import-issues', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/workspaces/:id/github/workflow-config — Get dispatch config ────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/workflow-config:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: Get workflow dispatch configuration for a workspace
+ *     operationId: getWorkspaceWorkflowConfig
+ *     description: Returns the stored GitHub Actions workflow dispatch configuration for this workspace.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Workflow config (null if not configured)
+ *       404:
+ *         description: Workspace not found
+ */
+router.get('/workflow-config', async (req: Request, res: Response) => {
+  const workspaceId = req.params.id;
+  const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+  if (!workspace) {
+    throw new NotFoundError('Workspace not found');
+  }
+  const row = await queryOne<{ workflow_config: unknown }>(
+    'SELECT workflow_config FROM workspace_github_webhooks WHERE workspace_id = $1',
+    [workspaceId]
+  );
+  res.json({ workflowConfig: row?.workflow_config ?? null });
+});
+
+// ─── PUT /api/workspaces/:id/github/workflow-config — Save dispatch config ───
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/workflow-config:
+ *   put:
+ *     tags: [GitHub]
+ *     summary: Save workflow dispatch configuration for a workspace
+ *     operationId: saveWorkspaceWorkflowConfig
+ *     description: Stores GitHub Actions workflow dispatch config (workflow_id, ref, inputs, enabled flag).
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workflowConfig]
+ *             properties:
+ *               workflowConfig:
+ *                 type: object
+ *                 properties:
+ *                   enabled: { type: boolean }
+ *                   workflow_id: { type: string }
+ *                   ref: { type: string }
+ *                   inputs: { type: object }
+ *     responses:
+ *       200:
+ *         description: Config saved successfully
+ *       404:
+ *         description: Workspace or GitHub webhook connection not found
+ */
+router.put('/workflow-config', async (req: Request, res: Response) => {
+  const workspaceId = req.params.id;
+  const { workflowConfig } = req.body;
+
+  const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+  if (!workspace) {
+    throw new NotFoundError('Workspace not found');
+  }
+
+  const row = await queryOne<{ workspace_id: string }>(
+    'SELECT workspace_id FROM workspace_github_webhooks WHERE workspace_id = $1',
+    [workspaceId]
+  );
+  if (!row) {
+    throw new NotFoundError('GitHub webhook connection not found. Connect a repository first.');
+  }
+
+  await execute(
+    'UPDATE workspace_github_webhooks SET workflow_config = $1 WHERE workspace_id = $2',
+    [JSON.stringify(workflowConfig), workspaceId]
+  );
+
+  res.json({ ok: true });
+});
+
+// ─── POST /api/workspaces/:id/github/dispatch — Trigger workflow dispatch ─────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/dispatch:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Trigger a GitHub Actions workflow dispatch event
+ *     operationId: dispatchWorkspaceWorkflow
+ *     description: |
+ *       Proxies a workflow_dispatch event to the GitHub API using the workspace's
+ *       stored OAuth token. Requires the token to have the `workflow` scope.
+ *       Returns 204 on success (GitHub returns no body for dispatches).
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [owner, repo, workflow_id, ref]
+ *             properties:
+ *               owner:
+ *                 type: string
+ *                 description: GitHub repository owner
+ *               repo:
+ *                 type: string
+ *                 description: GitHub repository name
+ *               workflow_id:
+ *                 type: string
+ *                 description: Workflow filename (e.g. deploy.yml) or workflow ID number
+ *               ref:
+ *                 type: string
+ *                 description: Branch or tag ref to run the workflow on (e.g. main)
+ *               inputs:
+ *                 type: object
+ *                 description: Optional input key-value pairs for the workflow
+ *     responses:
+ *       204:
+ *         description: Workflow dispatch triggered successfully
+ *       400:
+ *         description: Missing required fields
+ *       404:
+ *         description: Workspace not found, no GitHub connection, or workflow not found on GitHub
+ *       422:
+ *         description: Invalid inputs — check workflow filename and input parameters
+ *       502:
+ *         description: GitHub API error
+ */
+router.post('/dispatch', async (req: Request, res: Response) => {
+  const workspaceId = req.params.id;
+  const { owner, repo, workflow_id, ref, inputs } = req.body;
+
+  if (!owner || !repo || !workflow_id || !ref) {
+    throw new ValidationError('Missing required fields: owner, repo, workflow_id, ref');
+  }
+
+  const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+  if (!workspace) {
+    throw new NotFoundError('Workspace not found');
+  }
+
+  const token = await getOAuthToken();
+  if (!token) {
+    throw new NotFoundError('No GitHub OAuth connection found. Connect your GitHub account first.');
+  }
+
+  const ghUrl = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflow_id}/dispatches`;
+  const body: Record<string, unknown> = { ref };
+  if (inputs && Object.keys(inputs).length > 0) {
+    body.inputs = inputs;
+  }
+
+  const ghRes = await fetch(ghUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!ghRes.ok) {
+    const ghBody = await ghRes.text();
+    logger.error({ status: ghRes.status, body: ghBody, workflow_id }, '[GitHub] Workflow dispatch failed');
+
+    insertAuditEntry({
+      workspaceId: String(workspaceId),
+      provider: 'github',
+      action: 'api_call_failed',
+      actorType: 'user',
+      actorId: (req as any).user?.id ?? null,
+      details: { workflow_id, ref, owner, repo, status: ghRes.status, error: ghBody },
+    });
+
+    if (ghRes.status === 404) {
+      res.status(404).json({
+        error: `Workflow '${workflow_id}' not found in ${owner}/${repo}. Check the workflow filename and that it exists on the '${ref}' branch.`,
+      });
+      return;
+    }
+    if (ghRes.status === 422) {
+      let detail = ghBody;
+      try { detail = JSON.parse(ghBody).message ?? ghBody; } catch { /* use raw body */ }
+      res.status(422).json({
+        error: `Invalid workflow inputs for '${workflow_id}': ${detail}`,
+      });
+      return;
+    }
+    res.status(502).json({
+      error: `GitHub API error (${ghRes.status}) for workflow '${workflow_id}': ${ghBody}`,
+    });
+    return;
+  }
+
+  insertAuditEntry({
+    workspaceId: String(workspaceId),
+    provider: 'github',
+    action: 'api_call_made',
+    actorType: 'user',
+    actorId: (req as any).user?.id ?? null,
+    details: { workflow_id, ref, owner, repo },
+  });
+
+  // 204 No Content is the success response from GitHub for workflow_dispatch
+  res.status(204).send();
+});
+
 // ─── Helper: verify webhook signature ────────────────────────────────────────
 
 export function verifyWebhookSignature(
