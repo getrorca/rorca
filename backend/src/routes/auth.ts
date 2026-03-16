@@ -4,7 +4,7 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import Stripe from 'stripe';
 import { z } from 'zod';
-import { queryOne, execute } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { logger } from '../lib/logger';
 import { generateCsrfToken, setCsrfCookie } from '../lib/csrf';
@@ -28,6 +28,12 @@ export const LOCAL_ADMIN = {
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const BCRYPT_COST = process.env.NODE_ENV === 'test' ? 4 : 12;
+
+// Login rate limiting
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_LOCKOUT_MINUTES = 15;
+// Pre-computed dummy hash for constant-time comparison when email doesn't exist
+const DUMMY_HASH = '$2b$12$XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
 
 // Email verification constants
 const VERIFICATION_TOKEN_EXPIRES_HOURS = 24;
@@ -214,9 +220,14 @@ async function generateAndStoreVerificationToken(userId: string, email: string):
  *       400: { description: "Validation error", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
  *       409: { description: "Email already registered" }
  */
+const PASSWORD_STRENGTH_MSG = 'Password must be at least 8 characters and contain uppercase, lowercase, and a number';
+
 const RegisterSchema = z.object({
   email: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Email is required').regex(/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Invalid email format')),
-  password: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Password is required').min(8, 'Password must be at least 8 characters')),
+  password: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Password is required').min(8, PASSWORD_STRENGTH_MSG).refine(
+    (p) => /[A-Z]/.test(p) && /[a-z]/.test(p) && /[0-9]/.test(p),
+    { message: PASSWORD_STRENGTH_MSG },
+  )),
   displayName: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Display name is required')),
 });
 
@@ -228,12 +239,12 @@ router.post('/register', validateBody(RegisterSchema), async (req: Request, res:
   // Check for existing user
   const existing = await queryOne<UserRow>('SELECT id FROM users WHERE email = $1', [trimmedEmail]);
   if (existing) {
-    res.status(409).json({ error: 'Email already registered' });
+    res.status(409).json({ error: 'An account with this email already exists' });
     return;
   }
 
-  // Hash password and create user
-  const passwordHash = bcrypt.hashSync(password, BCRYPT_COST);
+  // Hash password and create user (async — ~250ms at cost 12)
+  const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
   const userId = crypto.randomUUID();
 
   await execute(
@@ -316,20 +327,51 @@ const LoginSchema = z.object({
 
 router.post('/login', validateBody(LoginSchema), async (req: Request, res: Response) => {
   const { email, password } = req.body;
-
   const trimmedEmail = email.trim().toLowerCase();
 
+  // Check login rate limit BEFORE any password work
+  const recentAttempts = await query<{ id: string }>(
+    `SELECT id FROM login_attempts WHERE email = $1 AND attempted_at > NOW() - INTERVAL '${LOGIN_LOCKOUT_MINUTES} minutes' AND success = false`,
+    [trimmedEmail]
+  );
+
+  if (recentAttempts.length >= LOGIN_MAX_ATTEMPTS) {
+    // Calculate seconds until oldest attempt expires
+    const oldest = await queryOne<{ attempted_at: string }>(
+      `SELECT attempted_at FROM login_attempts WHERE email = $1 AND attempted_at > NOW() - INTERVAL '${LOGIN_LOCKOUT_MINUTES} minutes' AND success = false ORDER BY attempted_at ASC LIMIT 1`,
+      [trimmedEmail]
+    );
+    const retryAfterSec = oldest
+      ? Math.ceil((new Date(oldest.attempted_at).getTime() + LOGIN_LOCKOUT_MINUTES * 60 * 1000 - Date.now()) / 1000)
+      : LOGIN_LOCKOUT_MINUTES * 60;
+
+    res.status(423).set('Retry-After', String(Math.max(retryAfterSec, 1))).json({
+      error: 'Too many failed login attempts. Please try again later.',
+    });
+    return;
+  }
+
   const user = await queryOne<UserRow>('SELECT * FROM users WHERE email = $1', [trimmedEmail]);
-  if (!user) {
+
+  // Constant-time comparison: always run bcrypt.compare even if user doesn't exist
+  const hashToCompare = user?.password_hash || DUMMY_HASH;
+  const passwordMatch = await bcrypt.compare(password, hashToCompare);
+
+  if (!user || !passwordMatch) {
+    // Record failed attempt
+    await execute(
+      'INSERT INTO login_attempts (email, success) VALUES ($1, false)',
+      [trimmedEmail]
+    );
     res.status(401).json({ error: 'Invalid email or password' });
     return;
   }
 
-  const passwordMatch = bcrypt.compareSync(password, user.password_hash);
-  if (!passwordMatch) {
-    res.status(401).json({ error: 'Invalid email or password' });
-    return;
-  }
+  // Record successful attempt (for audit — does NOT reset counter per AC)
+  await execute(
+    'INSERT INTO login_attempts (email, success) VALUES ($1, true)',
+    [trimmedEmail]
+  );
 
   const accessToken = generateAccessToken(user.id, user.email);
   const refreshToken = generateRefreshToken();
@@ -618,14 +660,14 @@ router.patch('/me', async (req: Request, res: Response) => {
       return;
     }
 
-    if (!bcrypt.compareSync(currentPassword, row.password_hash)) {
+    if (!(await bcrypt.compare(currentPassword, row.password_hash))) {
       res.status(403).json({ error: 'Current password is incorrect' });
       return;
     }
 
     paramIdx++;
     updates.push(`password_hash = $${paramIdx}`);
-    params.push(bcrypt.hashSync(newPassword, BCRYPT_COST));
+    params.push(await bcrypt.hash(newPassword, BCRYPT_COST));
   }
 
   if (updates.length === 0) {
@@ -966,7 +1008,7 @@ router.post('/reset-password', async (req: Request, res: Response) => {
   }
 
   // Update password
-  const passwordHash = bcrypt.hashSync(newPassword, BCRYPT_COST);
+  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
   await execute(
     'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
     [passwordHash, resetToken.user_id]
@@ -1049,7 +1091,7 @@ router.delete('/account', authRequired, async (req: Request, res: Response) => {
   }
 
   // Verify password
-  if (!bcrypt.compareSync(password, user.password_hash)) {
+  if (!(await bcrypt.compare(password, user.password_hash))) {
     res.status(403).json({ error: 'Incorrect password' });
     return;
   }
