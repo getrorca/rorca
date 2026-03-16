@@ -32,33 +32,10 @@ export function AuthProvider({ children }: { children: ReactNode }) {
   const [user, setUser] = useState<AuthUser | null>(null);
   const [loading, setLoading] = useState(true);
 
-  // On mount: check for GitHub OAuth callback tokens in URL fragment, or verify existing session
+  // On mount: verify existing session.
+  // GitHub OAuth callback tokens are processed by GitHubCallbackPage directly —
+  // see src/pages/GitHubCallbackPage.tsx.
   useEffect(() => {
-    // Check for GitHub OAuth callback tokens in URL fragment
-    if (window.location.hash && window.location.pathname === '/auth/github/callback') {
-      const params = new URLSearchParams(window.location.hash.slice(1));
-      const at = params.get('accessToken');
-      const rt = params.get('refreshToken');
-      const error = params.get('error');
-
-      // Clean up URL
-      window.history.replaceState(null, '', '/');
-
-      if (error) {
-        setLoading(false);
-        return;
-      }
-
-      if (at && rt) {
-        setTokens(at, rt);
-        apiFetch<{ user: AuthUser }>('/api/auth/me')
-          .then((res) => setUser(res.user))
-          .catch(() => clearTokens())
-          .finally(() => setLoading(false));
-        return;
-      }
-    }
-
     // Always call /api/auth/me — backend returns the first DB user when
     // auth is globally bypassed (single-user local mode), so we don't need
     // a token to get a valid session.
