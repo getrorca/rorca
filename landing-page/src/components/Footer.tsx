@@ -9,9 +9,10 @@ export function Footer() {
                     <span className="text-iceberg/50 text-sm">© {new Date().getFullYear()}</span>
                 </div>
                 <div className="flex gap-8">
-                    <Link href="#" className="text-iceberg/50 hover:text-fizz transition-colors text-sm font-medium">Twitter</Link>
-                    <Link href="#" className="text-iceberg/50 hover:text-fizz transition-colors text-sm font-medium">GitHub</Link>
-                    <Link href="#" className="text-iceberg/50 hover:text-fizz transition-colors text-sm font-medium">Terms</Link>
+                    <a href="https://twitter.com/rorcaapp" target="_blank" rel="noopener noreferrer" className="text-iceberg/50 hover:text-fizz transition-colors text-sm font-medium">Twitter</a>
+                    <a href="https://github.com/getrorca/rorca" target="_blank" rel="noopener noreferrer" className="text-iceberg/50 hover:text-fizz transition-colors text-sm font-medium">GitHub</a>
+                    {/* TODO: Update to /terms when terms page is built */}
+                    <Link href="/download" className="text-iceberg/50 hover:text-fizz transition-colors text-sm font-medium">Terms</Link>
                 </div>
             </div>
         </footer>
