@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Github, Link2, Unlink, Loader2, CheckCircle2, AlertCircle,
   Webhook, FileText, RotateCcw, Download, Shield, ExternalLink,
-  RefreshCw, GitPullRequest, Users, X, Plus,
+  RefreshCw, GitPullRequest, Users, X, Plus, Zap,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, BASE_URL, getAccessToken } from '../lib/apiFetch';
@@ -103,6 +103,16 @@ export default function GitHubSettingsPanel() {
   const [prTemplateSaved, setPrTemplateSaved] = useState(false);
   const [prTemplateLoaded, setPrTemplateLoaded] = useState(false);
 
+  // Workflow dispatch config (US-026)
+  const [workflowEnabled, setWorkflowEnabled] = useState(false);
+  const [workflowId, setWorkflowId] = useState('');
+  const [workflowRef, setWorkflowRef] = useState('main');
+  const [workflowInputsRaw, setWorkflowInputsRaw] = useState('{}');
+  const [workflowConfigLoaded, setWorkflowConfigLoaded] = useState(false);
+  const [savingWorkflow, setSavingWorkflow] = useState(false);
+  const [savedWorkflow, setSavedWorkflow] = useState(false);
+  const [workflowInputsError, setWorkflowInputsError] = useState<string | null>(null);
+
   // ─── Fetch workspace connection status ─────────────────────────────────────
 
   const fetchStatus = useCallback(async () => {
@@ -151,6 +161,28 @@ export default function GitHubSettingsPanel() {
       })
       .catch(() => { setPrTemplateLoaded(true); });
   }, [workspaceId, prTemplateLoaded]);
+
+  // ─── Fetch workflow config (US-026) ──────────────────────────────────────
+
+  useEffect(() => {
+    if (!workspaceId || workflowConfigLoaded) return;
+    apiFetch<{ workflowConfig: { enabled?: boolean; workflow_id?: string; ref?: string; inputs?: Record<string, string> } | null }>(
+      `/api/workspaces/${workspaceId}/github/workflow-config`
+    )
+      .then(data => {
+        const cfg = data.workflowConfig;
+        if (cfg) {
+          setWorkflowEnabled(cfg.enabled ?? false);
+          setWorkflowId(cfg.workflow_id ?? '');
+          setWorkflowRef(cfg.ref ?? 'main');
+          setWorkflowInputsRaw(cfg.inputs && Object.keys(cfg.inputs).length > 0
+            ? JSON.stringify(cfg.inputs, null, 2)
+            : '{}');
+        }
+        setWorkflowConfigLoaded(true);
+      })
+      .catch(() => { setWorkflowConfigLoaded(true); });
+  }, [workspaceId, workflowConfigLoaded]);
 
   // ─── Handlers ────────────────────────────────────────────────────────────
 
@@ -266,6 +298,42 @@ export default function GitHubSettingsPanel() {
     if (r && !autoPrReviewers.includes(r)) {
       setAutoPrReviewers([...autoPrReviewers, r]);
       setNewReviewer('');
+    }
+  }
+
+  async function handleSaveWorkflowConfig() {
+    if (!workspaceId || savingWorkflow) return;
+    // Validate inputs JSON
+    let inputs: Record<string, string> = {};
+    if (workflowInputsRaw.trim() && workflowInputsRaw.trim() !== '{}') {
+      try {
+        inputs = JSON.parse(workflowInputsRaw);
+        setWorkflowInputsError(null);
+      } catch {
+        setWorkflowInputsError('Invalid JSON in inputs field');
+        return;
+      }
+    }
+    setSavingWorkflow(true);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/github/workflow-config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workflowConfig: {
+            enabled: workflowEnabled,
+            workflow_id: workflowId.trim(),
+            ref: workflowRef.trim() || 'main',
+            inputs,
+          },
+        }),
+      });
+      setSavedWorkflow(true);
+      setTimeout(() => setSavedWorkflow(false), 2000);
+    } catch {
+      // silent
+    } finally {
+      setSavingWorkflow(false);
     }
   }
 
@@ -708,7 +776,110 @@ export default function GitHubSettingsPanel() {
         </button>
       </section>
 
-      {/* ─── Section 5: PR Template ───────────────────────────────────── */}
+      {/* ─── Section 5: Workflow Dispatch (US-026) ───────────────────── */}
+      <section className="border-t border-border pt-6 pb-6">
+        <div className="flex items-center gap-2 mb-3">
+          <Zap size={18} />
+          <h2 className="text-sm font-semibold text-[var(--text)]">Workflows</h2>
+        </div>
+
+        {!status?.connected ? (
+          <p className="text-xs text-muted">
+            No workflow configured — add a GitHub Actions workflow to trigger on run completion.
+            Connect a repository above to enable this feature.
+          </p>
+        ) : (
+          <div className="space-y-4">
+            <p className="text-xs text-muted">
+              Automatically trigger a GitHub Actions workflow when a pipeline run completes successfully.
+              The workflow must have a <code className="bg-surface px-1 rounded">workflow_dispatch</code> trigger.
+              Requires the <code className="bg-surface px-1 rounded">workflow</code> OAuth scope.
+            </p>
+
+            {/* Enable toggle */}
+            <label className="flex items-center gap-3 cursor-pointer">
+              <div
+                role="switch"
+                aria-checked={workflowEnabled}
+                tabIndex={0}
+                onClick={() => setWorkflowEnabled(v => !v)}
+                onKeyDown={e => { if (e.key === ' ' || e.key === 'Enter') setWorkflowEnabled(v => !v); }}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-1 ${workflowEnabled ? 'bg-accent' : 'bg-border'}`}
+              >
+                <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${workflowEnabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+              </div>
+              <span className="text-sm text-[var(--text)]">Enable workflow dispatch on run completion</span>
+            </label>
+
+            {workflowEnabled && (
+              <div className="space-y-3 pl-0">
+                {/* Workflow file */}
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">Workflow filename</label>
+                  <input
+                    type="text"
+                    value={workflowId}
+                    onChange={e => setWorkflowId(e.target.value)}
+                    placeholder="deploy.yml"
+                    className="w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                  />
+                  <p className="text-[11px] text-muted mt-1">
+                    Filename of the workflow (e.g. <code className="bg-surface px-1 rounded">deploy.yml</code>) or numeric workflow ID.
+                  </p>
+                </div>
+
+                {/* Branch ref */}
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">Branch / ref</label>
+                  <input
+                    type="text"
+                    value={workflowRef}
+                    onChange={e => setWorkflowRef(e.target.value)}
+                    placeholder="main"
+                    className="w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                  />
+                  <p className="text-[11px] text-muted mt-1">Branch or tag to run the workflow on.</p>
+                </div>
+
+                {/* Inputs */}
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">Inputs (JSON)</label>
+                  <textarea
+                    value={workflowInputsRaw}
+                    onChange={e => { setWorkflowInputsRaw(e.target.value); setWorkflowInputsError(null); }}
+                    rows={4}
+                    placeholder='{}'
+                    className={`w-full px-3 py-2 rounded bg-bg border text-sm font-mono text-[var(--text)] focus:outline-none resize-y ${workflowInputsError ? 'border-red-500' : 'border-border focus:border-accent'}`}
+                  />
+                  {workflowInputsError && (
+                    <p className="text-[11px] text-red-400 mt-1">{workflowInputsError}</p>
+                  )}
+                  <p className="text-[11px] text-muted mt-1">
+                    Optional key-value pairs passed as workflow inputs. Must be valid JSON object.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {!workflowEnabled && !workflowId && (
+              <p className="text-xs text-muted italic">
+                No workflow configured — add a GitHub Actions workflow to trigger on run completion.
+              </p>
+            )}
+
+            <button
+              onClick={handleSaveWorkflowConfig}
+              disabled={savingWorkflow}
+              className="px-3 py-1.5 text-sm rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-1.5"
+            >
+              {savingWorkflow ? <Loader2 size={14} className="animate-spin" /> : null}
+              {savedWorkflow ? 'Saved!' : 'Save Workflow Config'}
+            </button>
+          </div>
+        )}
+      </section>
+
+      {/* ─── Section 6: PR Template ───────────────────────────────────── */}
       <section className="border-t border-border pt-6 pb-6">
         <div className="flex items-center gap-2 mb-3">
           <FileText size={18} />
