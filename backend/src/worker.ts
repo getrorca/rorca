@@ -37,6 +37,7 @@ import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedule
 import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
 import { FlushBuffer } from './lib/flush-buffer';
+import { createOrUpdateAutoPr } from './lib/github-pr-creator';
 
 // ── Post-merge smoke test ─────────────────────────────────────────────────────
 
@@ -691,6 +692,22 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                 );
               } catch (mergeErr: any) {
                 logger.error({ err: mergeErr, runId }, '[worker] autoMergeAfterRun threw unexpectedly');
+              }
+            }
+
+            // Auto-PR: create (or update) a GitHub PR when a worktree run completes (US-028)
+            // Only fires when status='done' and a branch name is present (worktree run).
+            // Non-fatal: failures are logged but never affect the run status.
+            if (status === 'done' && payload.branchName) {
+              try {
+                await createOrUpdateAutoPr({
+                  runId,
+                  workspaceId,
+                  branchName: payload.branchName,
+                  workspacePath,
+                });
+              } catch (prErr: any) {
+                logger.error({ err: prErr, runId }, '[worker] createOrUpdateAutoPr threw unexpectedly');
               }
             }
           }
