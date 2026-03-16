@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText } from 'lucide-react';
+import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText, Github } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { fetchStoryOutput, retryRun } from '../api/pipeline';
 import type { WalEvent } from '../hooks/usePipelineSSE';
@@ -132,6 +132,7 @@ interface MergedStory {
   rateLimitRetryAt: number | null; // epoch ms when rate limit backoff expires
   rateLimitAttempt: number | null;
   blockedBy: string[] | null; // upstream story IDs that caused this story to be blocked
+  githubStatusPending: boolean; // US-027: true when commit status is being posted to GitHub
 }
 
 // ─── Live elapsed timer ──────────────────────────────────────────────────────
@@ -293,6 +294,10 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
         {/* Rate limit countdown */}
         {story.status === 'rate_limited' && story.rateLimitRetryAt != null && (
           <RateLimitCountdown retryAt={story.rateLimitRetryAt} />
+        )}
+        {/* US-027: GitHub status indicator — pulses while commit status is being posted */}
+        {story.githubStatusPending && (
+          <Github size={12} className="shrink-0 text-gray-400 animate-pulse" aria-label="Posting GitHub commit status" />
         )}
         {/* Live elapsed timer for running stories */}
         {story.status === 'running' && story.startedAt != null && (
@@ -666,6 +671,7 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
         rateLimitRetryAt: rlInfo?.retryAt ?? null,
         rateLimitAttempt: rlInfo?.attempt ?? null,
         blockedBy,
+        githubStatusPending: status === 'running' || status === 'retry',
       };
     });
   }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents]);
