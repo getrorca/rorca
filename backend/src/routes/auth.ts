@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { logger } from '../lib/logger';
+import { generateCsrfToken, setCsrfCookie } from '../lib/csrf';
 
 const router = Router();
 
@@ -254,6 +255,9 @@ router.post('/register', validateBody(RegisterSchema), async (req: Request, res:
     [JSON.stringify({ userId, email: trimmedEmail })]
   );
 
+  // US-044: Set CSRF double-submit cookie on session creation
+  setCsrfCookie(res, generateCsrfToken());
+
   res.status(201).json({
     user: {
       id: userId,
@@ -335,6 +339,9 @@ router.post('/login', validateBody(LoginSchema), async (req: Request, res: Respo
     "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('user_login', '', $1)",
     [JSON.stringify({ userId: user.id, email: user.email })]
   );
+
+  // US-044: Set CSRF double-submit cookie on session creation
+  setCsrfCookie(res, generateCsrfToken());
 
   res.json({
     user: {
@@ -418,6 +425,9 @@ router.post('/refresh', async (req: Request, res: Response) => {
   const newAccessToken = generateAccessToken(storedToken.user_id, storedToken.email);
   const newRefreshToken = generateRefreshToken();
   await storeRefreshToken(storedToken.user_id, newRefreshToken);
+
+  // US-044: Rotate CSRF token on refresh
+  setCsrfCookie(res, generateCsrfToken());
 
   res.json({
     accessToken: newAccessToken,
@@ -1339,6 +1349,9 @@ router.get('/github/callback', async (req: Request, res: Response) => {
       "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_login', '', $1)",
       [JSON.stringify({ userId, email: userEmail, githubUserId, githubUsername })]
     );
+
+    // US-044: Set CSRF double-submit cookie on session creation
+    setCsrfCookie(res, generateCsrfToken());
 
     // 7. Set tokens as httpOnly cookies and redirect frontend to the callback page
     const isProduction = process.env.NODE_ENV === 'production';
