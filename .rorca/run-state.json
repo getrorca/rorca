@@ -1,8 +1,8 @@
 {
   "specId": "rorca-go-to-market-v1",
-  "runId": 129,
-  "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T08:29:44.855Z",
+  "runId": 130,
+  "startedAt": "2026-03-16T08:46:24.415Z",
+  "lastUpdatedAt": "2026-03-16T08:46:24.415Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -19,5 +19,5 @@
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
-  "resumedFromStory": null
+  "resumedFromStory": "US-001"
 }
