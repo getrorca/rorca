@@ -546,10 +546,13 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
   }, [storyResults]);
 
   // Build SSE-derived running stories (all concurrently running in wave mode)
+  // Only consider events from the current run — old story_started events from
+  // previous runs for the same story_id would otherwise show stale timers.
   const runningStoryIds = useMemo(() => {
     const running = new Set<string>();
     for (const evt of walEvents) {
       if (!evt.story_id) continue;
+      if (evt.payload?.run_id !== undefined && evt.payload.run_id !== runId) continue;
       if (evt.event_type === 'story_started') {
         running.add(evt.story_id);
       } else if (
@@ -562,18 +565,20 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
       }
     }
     return running;
-  }, [walEvents]);
+  }, [walEvents, runId]);
 
   // Build SSE-derived started-at timestamps for live elapsed
+  // Filter by current runId so stale timestamps from prior runs don't bleed through.
   const storyStartTimes = useMemo(() => {
     const map = new Map<string, number>();
     for (const evt of walEvents) {
       if (evt.event_type === 'story_started' && evt.story_id) {
+        if (evt.payload?.run_id !== undefined && evt.payload.run_id !== runId) continue;
         map.set(evt.story_id, new Date(evt.ts).getTime());
       }
     }
     return map;
-  }, [walEvents]);
+  }, [walEvents, runId]);
 
   // Track rate-limited stories: storyId -> { retryAt (epoch ms), attempt }
   const rateLimitedStories = useMemo(() => {

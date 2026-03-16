@@ -1399,7 +1399,7 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
 Follow this workflow for implementation:
-## Agent Role: Backend Routes
+## Agent Role: Frontend
 
 ---
 name: rorca
@@ -1552,11 +1552,24 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-011):
-The `/api/specs/kanban` endpoint currently returns story pass/fail counts based only on the latest pipeline run for each spec. This means specs that required multiple runs to complete (e.g. run 121 passes US-001–US-003, run 122 resumes and passes US-004–US-009) show an incorrect progress bar — only the stories from the most recent run are counted. Fix the SQL query in `backend/src/routes/specs.ts` to aggregate `story_results` across ALL runs for each spec using a DISTINCT ON (story_id) strategy that picks the best status (passed > failed > skipped) per story across all runs. A story counts as passed if it passed in ANY run for that spec.
+Integrate Posthog (or Plausible as fallback) into the landing-page/ Next.js app for privacy-respecting analytics. Track: page views (automatic), CTA button clicks (custom events: 'cta_click' with {button, page}), download button clicks ('download_click' with {platform}), auth completion ('auth_complete' with {method: 'github'|'email'}), pricing toggle ('pricing_toggle' with {billing: 'monthly'|'annual'}). Initialize via environment variable (NEXT_PUBLIC_POSTHOG_KEY). Respect Do Not Track browser setting. No cookie banner needed for Posthog (cookieless mode). Add to layout.tsx as a provider.
+
+## Context
+- **Landing page is a separate Next.js 14 app** (`landing-page/` directory, port 3002) — NOT the main React/Vite frontend. All changes go in `landing-page/`, not `src/`. Use Next.js App Router patterns (`layout.tsx`, `'use client'` directives).
+- **Posthog Next.js integration**: Use `posthog-js` + `posthog-js/react` with a `PostHogProvider` wrapper in `layout.tsx`. For App Router automatic pageview tracking, use `usePathname()` + `useSearchParams()` in a client component that calls `posthog.capture('$pageview')` on route changes — the default SPA pageview auto-capture doesn't work reliably with Next.js App Router.
+- **Cookieless mode**: Initialize with `persistence: 'memory'` and `autocapture: false` (we only want explicit custom events). This avoids cookies entirely — no banner needed.
+- **Do Not Track**: Check `navigator.doNotTrack === '1'` or `window.doNotTrack === '1'` BEFORE initializing Posthog. If DNT is set, export a no-op analytics object that silently drops all `capture()` calls. Don't initialize the SDK at all — partial init wastes bandwidth.
+- **Empty env var guard**: Wrap initialization in `if (process.env.NEXT_PUBLIC_POSTHOG_KEY)` check. The provider component should render children regardless (pass-through when disabled). No `console.warn` or `console.error` — truly silent.
+- **Event buffering pattern**: Create an `analytics.ts` utility module that queues events in a `Map<string, object>` until `posthog.isFeatureEnabled !== undefined` (SDK ready signal), then flushes. Export typed helper functions (`trackCtaClick(button, page)`, `trackDownload(platform)`, etc.) rather than raw `posthog.capture` calls scattered across components.
+- **Platform identifiers for downloads**: The landing page likely has OS-detection logic for download buttons. Match the exact platform strings from the acceptance criteria (`darwin-arm64`, `darwin-x64`, `linux-x64`, `win32-x64`) — these correspond to the distribution binary targets from the roadmap.
+- **No backend changes needed** — this is purely a frontend/landing-page integration. Don't touch Express routes, the main React app, or any backend code.
 
 Acceptance Criteria:
-- The kanban endpoint aggregates story_results across all pipeline runs for a spec, not just the latest run_id, so a story that passed in run 121 still counts as passed when run 122 completes
-- The SQL uses a priority-based deduplication (passed > failed > skipped) per story_id so a story that passed in an earlier run is never downgraded to failed by a later run that re-attempted and failed it
-- A spec that completed across two runs (e.g. 3 stories in run 121 + 6 stories in run 122) shows all 9 stories as passed in the kanban progress bar
-- The fix does not break specs with only a single run — single-run pass counts remain identical to the previous behavior
-- A Jest test in `backend/src/__tests__/` covers the multi-run aggregation scenario: inserts story_results across two run_ids for the same spec and asserts the kanban response returns the correct aggregated passed/total counts
+- Posthog JS SDK is initialized in the Next.js layout with key from NEXT_PUBLIC_POSTHOG_KEY env var
+- Page views are automatically tracked on route changes via Next.js router integration
+- CTA clicks fire 'cta_click' custom event with button name and page path
+- Download button clicks fire 'download_click' event with platform identifier (darwin-arm64, darwin-x64, linux-x64, win32-x64)
+- Do Not Track browser setting is respected (no tracking calls made when navigator.doNotTrack === '1')
+- If NEXT_PUBLIC_POSTHOG_KEY env var is empty or missing, analytics silently disabled with no console errors (empty state)
+- While Posthog SDK is loading, event calls are queued and flushed once SDK is ready (loading state buffering)
+- If Posthog API call fails (network error), the failure is silently swallowed with no user-visible error

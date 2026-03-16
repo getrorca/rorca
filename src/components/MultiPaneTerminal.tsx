@@ -23,7 +23,12 @@ function deriveConcurrentStories(events: WalEvent[]): ConcurrentStory[] {
 
   for (const e of events) {
     if (!e.story_id) continue;
-    const payload = e.payload ? JSON.parse(e.payload) : {};
+    let payload: Record<string, unknown> = {};
+    if (e.payload) {
+      try {
+        payload = typeof e.payload === 'string' ? JSON.parse(e.payload) : (e.payload as Record<string, unknown>);
+      } catch { /* ignore */ }
+    }
 
     switch (e.event_type) {
       case 'story_started':

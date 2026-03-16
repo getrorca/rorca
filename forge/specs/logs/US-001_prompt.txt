@@ -1399,7 +1399,7 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
 Follow this workflow for implementation:
-## Agent Role: Backend Routes
+## Agent Role: Database
 
 ---
 name: rorca
@@ -1552,20 +1552,23 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-001):
-The worker's handleData() in backend/src/worker.ts buffers subprocess stdout into a `pending` buffer and only writes to the `run_output_chunks` DB table when `pending.length >= CHUNK_SIZE` (4096 bytes). With sparse initial execution-engine output (LLM thinking, tool warm-up), the first visible terminal output takes 45-60 seconds to appear.
+Fix the merge conflict in backend/src/worker.ts (lines 39-43 with <<<<<<< markers). Both imports are needed: FlushBuffer from './lib/flush-buffer' AND advanceQueue from './lib/run-queue'. Keep both import statements, remove all conflict markers (<<<<<<< HEAD, =======, >>>>>>> branch), and verify the backend compiles cleanly with `npx tsc --noEmit`.
 
-Add a 500ms flush timer that writes whatever is in `pending` to the DB regardless of size. The timer must:
-1. Start/restart on each `handleData()` call (debounce pattern — 500ms after last data arrival)
-2. Be cleared when the size-based flush fires (coalesce — don't double-write the same bytes)
-3. Be cleared and force-flush remaining bytes when the child process exits (existing `close`/`exit` handler)
-4. Use `setInterval` or `setTimeout` — NOT `setImmediate` (too aggressive, would write every byte individually)
-5. Keep the existing 4KB size-based flush for throughput during heavy output bursts (compilation output, large diffs)
-
-The fix is localized to the `handleData()` function and the process exit cleanup in worker.ts. The `writeChunk()` helper that inserts into `run_output_chunks` already exists and handles sequence numbering.
+## Context
+- **Merge conflict resolution**: The `UU` status on `worker.ts` confirms an active merge conflict. Both sides of the conflict contain valid imports — keep `FlushBuffer` from `'./lib/flush-buffer'` AND `advanceQueue` from `'./lib/run-queue'`. Remove all `<<<<<<<`, `=======`, `>>>>>>>` markers.
+- **Worker architecture context**: `worker.ts` is the pg-boss job consumer process (see CLAUDE.md "Job Queue Architecture"). It must connect to the same `DATABASE_URL` as the Express API, write heartbeats to `worker_heartbeat` every 30s, and handle graceful shutdown on SIGTERM. Any broken imports will prevent pipeline runs from executing.
+- **Known worker bugs to watch for**: Worker stale jobs (pg-boss `active` state persists across restarts), kill button silent fail (empty `activeProcesses` map after restart), and `startedon` vs `started_on` column name typo — all previously fixed. Verify the resolved file doesn't regress any of these fixes.
+- **Compilation verification**: Run `cd backend && npx tsc --noEmit` — this is the canonical backend type check. If `flush-buffer.ts` or `run-queue.ts` don't exist in `backend/src/lib/`, the build will fail with `Cannot find module`. Check both files exist before declaring success.
+- **Do NOT use `tsx watch` for verification**: Per user feedback, `tsx watch` kills active runs on restart. Use `npx tsc --noEmit` for type checking and only start the server briefly to confirm health endpoint responds, then kill it.
+- **Also resolve `run-state.json` conflict**: Git status shows `UU ../.rorca/run-state.json` — another active merge conflict. If this story's scope is worker.ts only, flag it but don't leave the repo in a broken state with unresolved conflicts elsewhere.
+- **pg-boss connection hygiene**: Worker connects to pg-boss on startup. Ensure the resolved imports don't break the initialization sequence — `FlushBuffer` is used for stdout chunk processing and `advanceQueue` manages the run queue after story completion. Both are called from job handlers, not top-level init.
 
 Acceptance Criteria:
-- A flush timer (500ms default) is added to handleData() that writes pending buffer contents to run_output_chunks regardless of buffer size
-- The timer is reset on each handleData() call so rapid data arrivals coalesce into a single write
-- When the size-based flush (4KB) fires, the timer is cleared to prevent double-writing the same data
-- When the child process exits, the timer is cleared and any remaining pending bytes are flushed immediately
-- The CHUNK_SIZE constant (4096) and size-based flush path remain unchanged for high-throughput scenarios
+- backend/src/worker.ts contains no merge conflict markers (no <<<<<<< , =======, or >>>>>>> strings anywhere in file)
+- Both imports are present: `import { FlushBuffer } from './lib/flush-buffer'` and `import { advanceQueue } from './lib/run-queue'`
+- `cd backend && npx tsc --noEmit` exits with code 0 (zero type errors)
+- `cd backend && npm run dev` starts without crash (verify port 3030 responds to GET /api/health within 10 seconds)
+- If either import target module does not exist, the build fails with error 'Cannot find module ./lib/flush-buffer' or 'Cannot find module ./lib/run-queue' identifying the missing module path (error state)
+- Worker process starts and connects to pg-boss without errors in stdout (no 'MODULE_NOT_FOUND' or 'Cannot find module' in output)
+- If the worker.ts file has no conflict markers but is empty or missing imports entirely (empty state), tsc --noEmit catches the missing references and exits with non-zero code listing undefined identifiers
+- While the backend is starting up after the fix (loading state), the health endpoint GET /api/health returns 503 until all route handlers are registered, then switches to 200 within 10 seconds
