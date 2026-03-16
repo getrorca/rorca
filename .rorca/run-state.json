@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T10:27:57.845Z",
+  "lastUpdatedAt": "2026-03-16T10:34:07.950Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -35,14 +35,14 @@
       "elapsedMs": 146608
     },
     {
-      "storyId": "US-025",
-      "title": "GitHub Issues Import — browse and convert to spec",
+      "storyId": "US-027",
+      "title": "Per-story GitHub Commit Status Checks",
       "status": "passed",
-      "startedAt": "2026-03-16T10:19:11.608Z",
-      "finishedAt": "2026-03-16T10:27:57.845Z",
+      "startedAt": "2026-03-16T10:19:23.610Z",
+      "finishedAt": "2026-03-16T10:34:07.949Z",
       "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 526237
+      "model": "claude-opus-4-6",
+      "elapsedMs": 884339
     }
   ],
   "failedStories": [],
