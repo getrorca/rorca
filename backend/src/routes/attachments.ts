@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import multer from 'multer';
 import { queryOne } from '../db/index';
+import { PayloadTooLargeError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -27,11 +28,86 @@ const pendingUpload = multer({
 });
 
 /**
- * POST /api/attachments/pending
- * Upload a file before a spec exists (pre-generation attachment).
- * Stores in spec_attachments under specSlug (from body) or '__forge__' fallback.
- * When spec generation runs, buildAttachmentSection(slug) picks these up automatically
- * if specSlug matches the generated spec's slug.
+ * @swagger
+ * /api/attachments/pending:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Upload a pre-generation attachment
+ *     operationId: uploadPendingAttachment
+ *     description: >
+ *       Upload a file before a spec exists (pre-generation attachment).
+ *       Stored in spec_attachments under specSlug from the request body,
+ *       or '__forge__' if no slug is provided. When spec generation runs,
+ *       buildAttachmentSection(slug) picks these up automatically if specSlug
+ *       matches the generated spec's slug. Supported types: PNG, JPEG, WebP,
+ *       PDF, Markdown, plain text, DOCX. Max 10 MB.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         multipart/form-data:
+ *           schema:
+ *             type: object
+ *             required: [file]
+ *             properties:
+ *               file:
+ *                 type: string
+ *                 format: binary
+ *                 description: The file to upload (max 10 MB)
+ *               specSlug:
+ *                 type: string
+ *                 description: Spec slug to associate this attachment with (defaults to '__forge__')
+ *                 example: my-spec-slug
+ *     responses:
+ *       201:
+ *         description: Attachment uploaded successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id:
+ *                   type: string
+ *                   description: UUID of the created attachment
+ *                 filename:
+ *                   type: string
+ *                   example: design-mockup.png
+ *                 contentType:
+ *                   type: string
+ *                   example: image/png
+ *                 fileSize:
+ *                   type: integer
+ *                   description: File size in bytes
+ *                   example: 204800
+ *                 createdAt:
+ *                   type: string
+ *                   format: date-time
+ *       400:
+ *         description: No file uploaded or unsupported file type
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 error:
+ *                   type: string
+ *                   example: "Unsupported file type: application/zip"
+ *                 supportedTypes:
+ *                   type: array
+ *                   items:
+ *                     type: string
+ *                   example: ["image/png", "image/jpeg", "application/pdf"]
+ *       413:
+ *         description: File size exceeds 10 MB limit
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
  */
 router.post(
   '/pending',
@@ -39,12 +115,12 @@ router.post(
     pendingUpload.single('file')(req, res, (err: any) => {
       if (err) {
         if (err.code === 'LIMIT_FILE_SIZE') {
-          res.status(413).json({ error: 'File size exceeds 10MB limit' });
+          throw new PayloadTooLargeError('File size exceeds 10MB limit');
           return;
         }
         if (err.message?.startsWith('INVALID_FILE_TYPE:')) {
           const mimeType = err.message.replace('INVALID_FILE_TYPE:', '');
-          res.status(400).json({ error: `Unsupported file type: ${mimeType}`, supportedTypes: Array.from(ALLOWED_CONTENT_TYPES) });
+          throw new ValidationError(`Unsupported file type: ${mimeType}`);
           return;
         }
         next(err);
@@ -55,7 +131,7 @@ router.post(
   },
   async (req: Request, res: Response) => {
     if (!req.file) {
-      res.status(400).json({ error: 'No file uploaded' });
+      throw new ValidationError('No file uploaded');
       return;
     }
 

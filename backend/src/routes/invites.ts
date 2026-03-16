@@ -4,6 +4,7 @@ import { queryOne, execute } from '../db';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { authRequired, type AuthUser } from './auth';
 import { logger } from '../lib/logger';
+import { ConflictError, ForbiddenError, GoneError, NotFoundError, TooManyRequestsError } from '../lib/errors';
 
 const router = Router();
 
@@ -94,17 +95,17 @@ router.get('/:token', async (req: Request, res: Response) => {
     );
 
     if (!invite) {
-      res.status(404).json({ error: 'Invalid invite token' });
+      throw new NotFoundError('Invalid invite token');
       return;
     }
 
     if (invite.accepted_at) {
-      res.status(410).json({ error: 'Invite has already been accepted' });
+      throw new GoneError('Invite has already been accepted');
       return;
     }
 
     if (new Date(invite.expires_at) <= new Date()) {
-      res.status(410).json({ error: 'Invite has expired' });
+      throw new GoneError('Invite has expired');
       return;
     }
 
@@ -113,7 +114,7 @@ router.get('/:token', async (req: Request, res: Response) => {
       [invite.team_id]
     );
     if (!team) {
-      res.status(404).json({ error: 'Team no longer exists' });
+      throw new NotFoundError('Team no longer exists');
       return;
     }
 
@@ -186,17 +187,17 @@ router.post('/:token/accept', authRequired, async (req: Request, res: Response) 
     );
 
     if (!invite) {
-      res.status(404).json({ error: 'Invalid invite token' });
+      throw new NotFoundError('Invalid invite token');
       return;
     }
 
     if (invite.accepted_at) {
-      res.status(410).json({ error: 'Invite has already been accepted' });
+      throw new GoneError('Invite has already been accepted');
       return;
     }
 
     if (new Date(invite.expires_at) <= new Date()) {
-      res.status(410).json({ error: 'Invite has expired' });
+      throw new GoneError('Invite has expired');
       return;
     }
 
@@ -206,7 +207,7 @@ router.post('/:token/accept', authRequired, async (req: Request, res: Response) 
       [user.id]
     );
     if (!userRow || userRow.email !== invite.email) {
-      res.status(403).json({ error: 'This invite was sent to a different email address' });
+      throw new ForbiddenError('This invite was sent to a different email address');
       return;
     }
 
@@ -221,7 +222,7 @@ router.post('/:token/accept', authRequired, async (req: Request, res: Response) 
         "UPDATE team_invites SET accepted_at = NOW() WHERE id = $1",
         [invite.id]
       );
-      res.status(409).json({ error: 'You are already a member of this team' });
+      throw new ConflictError('You are already a member of this team');
       return;
     }
 

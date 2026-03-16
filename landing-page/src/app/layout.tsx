@@ -1,6 +1,8 @@
 import type { Metadata } from "next";
 import { Geist, Geist_Mono, Space_Grotesk } from "next/font/google";
 import "./globals.css";
+import { buildMetadata, PAGES_METADATA } from "@/lib/metadata";
+import { AnalyticsProvider } from "@/components/AnalyticsProvider";
 
 const geistSans = Geist({
   variable: "--font-geist-sans",
@@ -18,10 +20,7 @@ const spaceGrotesk = Space_Grotesk({
   weight: ["400", "500", "600"],
 });
 
-export const metadata: Metadata = {
-  title: "Rorca",
-  description: "Autonomous AI agent orchestration platform.",
-};
+export const metadata: Metadata = buildMetadata(PAGES_METADATA.home);
 
 export default function RootLayout({
   children,
@@ -33,7 +32,7 @@ export default function RootLayout({
       <body
         className={`${geistSans.variable} ${geistMono.variable} ${spaceGrotesk.variable} antialiased`}
       >
-        {children}
+        <AnalyticsProvider>{children}</AnalyticsProvider>
       </body>
     </html>
   );

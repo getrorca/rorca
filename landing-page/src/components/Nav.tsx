@@ -43,13 +43,13 @@ export function Nav() {
                     <Link href="/architecture" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Architecture</Link>
                     <Link href="/engine" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Engine</Link>
                     <Link href="/compute" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Compute</Link>
-                    <Link href="#" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Pricing</Link>
+                    <Link href="/pricing" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Pricing</Link>
                 </div>
                 <div className="flex items-center gap-4">
-                    <Link href="#" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors hidden sm:block">Log In</Link>
-                    <button className="px-4 py-1.5 bg-white text-zinc-950 rounded-md text-sm font-medium hover:bg-zinc-200 transition-colors">
+                    <Link href="/login" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors hidden sm:block">Log In</Link>
+                    <Link href="/signup" className="px-4 py-1.5 bg-white text-zinc-950 rounded-md text-sm font-medium hover:bg-zinc-200 transition-colors">
                         Sign Up
-                    </button>
+                    </Link>
                 </div>
             </div>
         </header>

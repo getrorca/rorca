@@ -4,6 +4,7 @@ import { query, queryOne, execute } from '../db/index';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { logger } from '../lib/logger';
+import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -147,14 +148,12 @@ router.post('/', async (req: Request, res: Response) => {
     const { name, description, sourceSpecId, brief, storyStructure, directionLayers, teamId } = req.body;
 
     if (!name || !sourceSpecId || !brief || !storyStructure) {
-      res.status(400).json({
-        error: 'Missing required fields: name, sourceSpecId, brief, storyStructure',
-      });
+      throw new ValidationError('Missing required fields: name, sourceSpecId, brief, storyStructure');
       return;
     }
 
     if (!Array.isArray(storyStructure) || storyStructure.length === 0) {
-      res.status(400).json({ error: 'storyStructure must be a non-empty array' });
+      throw new ValidationError('storyStructure must be a non-empty array');
       return;
     }
 
@@ -162,7 +161,7 @@ router.post('/', async (req: Request, res: Response) => {
     if (teamId) {
       const userTeamIds = await getUserTeamIds(user.id);
       if (!userTeamIds.includes(teamId)) {
-        res.status(403).json({ error: 'You are not a member of this team' });
+        throw new ForbiddenError('You are not a member of this team');
         return;
       }
     }
@@ -197,6 +196,44 @@ router.post('/', async (req: Request, res: Response) => {
 
 // ─── GET / — List templates with scope filtering ─────────────────────────────
 
+/**
+ * @swagger
+ * /api/templates:
+ *   get:
+ *     tags: [Templates]
+ *     summary: List templates
+ *     operationId: listTemplates
+ *     description: >
+ *       Returns reusable spec templates filtered by scope. Personal templates are
+ *       created by the current user; team templates are shared within teams the user
+ *       belongs to; all returns both. Returns an empty list if user is not authenticated.
+ *     parameters:
+ *       - in: query
+ *         name: scope
+ *         schema:
+ *           type: string
+ *           enum: [all, personal, team]
+ *           default: all
+ *         description: Filter templates by ownership scope
+ *     responses:
+ *       200:
+ *         description: List of templates
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 templates:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/Template'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.get('/', async (req: Request, res: Response) => {
   try {
     const user = await getEffectiveUser(req);
@@ -303,7 +340,7 @@ router.post('/:id/rate', async (req: Request, res: Response) => {
     const { rating } = req.body;
 
     if (typeof rating !== 'number' || rating < 1 || rating > 5 || !Number.isInteger(rating)) {
-      res.status(400).json({ error: 'Rating must be an integer between 1 and 5' });
+      throw new ValidationError('Rating must be an integer between 1 and 5');
       return;
     }
 
@@ -313,7 +350,7 @@ router.post('/:id/rate', async (req: Request, res: Response) => {
       [templateId]
     );
     if (!template) {
-      res.status(404).json({ error: 'Template not found' });
+      throw new NotFoundError('Template not found');
       return;
     }
 
@@ -321,7 +358,7 @@ router.post('/:id/rate', async (req: Request, res: Response) => {
     if (template.team_id) {
       const userTeamIds = await getUserTeamIds(user.id);
       if (!userTeamIds.includes(template.team_id)) {
-        res.status(403).json({ error: 'You must be a team member to rate this template' });
+        throw new ForbiddenError('You must be a team member to rate this template');
         return;
       }
     }
@@ -376,7 +413,7 @@ router.post('/:id/use', async (req: Request, res: Response) => {
     );
 
     if (result.rowCount === 0) {
-      res.status(404).json({ error: 'Template not found' });
+      throw new NotFoundError('Template not found');
       return;
     }
 
@@ -428,7 +465,7 @@ router.get('/:id', async (req: Request, res: Response) => {
     const row = await queryOne<TemplateRow>('SELECT * FROM templates WHERE id = $1', [req.params.id]);
 
     if (!row) {
-      res.status(404).json({ error: 'Template not found' });
+      throw new NotFoundError('Template not found');
       return;
     }
 
@@ -450,12 +487,44 @@ router.get('/:id', async (req: Request, res: Response) => {
 
 // ─── DELETE /:id — Remove a template ──────────────────────────────────────────
 
+/**
+ * @swagger
+ * /api/templates/{id}:
+ *   delete:
+ *     tags: [Templates]
+ *     summary: Delete a template
+ *     operationId: deleteTemplate
+ *     description: Permanently deletes a template by its ID.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Template UUID
+ *         example: 550e8400-e29b-41d4-a716-446655440000
+ *     responses:
+ *       204:
+ *         description: Template deleted successfully (no content)
+ *       404:
+ *         description: Template not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const result = await execute('DELETE FROM templates WHERE id = $1', [req.params.id]);
 
     if (result.rowCount === 0) {
-      res.status(404).json({ error: 'Template not found' });
+      throw new NotFoundError('Template not found');
       return;
     }
 

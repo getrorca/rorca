@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight, Sparkles, Files, Cpu, MailWarning, Clock, Check, GitMerge } from 'lucide-react';
+import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight, Sparkles, Files, Cpu, MailWarning, Clock, Check, GitMerge, GitPullRequest, Zap } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -40,6 +40,9 @@ interface PipelineRun {
   merge_status?: 'pending' | 'merging' | 'merged' | 'failed' | null;
   merge_commit_sha?: string | null;
   merge_error?: string | null;
+  pr_number?: number | null;
+  pr_creating?: boolean;
+  pr_creation_error?: string | null;
 }
 
 interface StoryResultSeed {
@@ -725,6 +728,138 @@ function MergeStatusSection({ mergeInfo, runId, onRetry }: {
   );
 }
 
+// ─── PR Status Types ─────────────────────────────────────────────────────────
+
+type PrState = 'creating' | 'created' | 'failed';
+
+interface PrInfo {
+  state: PrState;
+  prNumber?: number;
+  prUrl?: string;
+  errorMsg?: string;
+}
+
+// ─── PrStatusSection ─────────────────────────────────────────────────────────
+
+function PrStatusSection({ prInfo, owner, repo }: {
+  prInfo: PrInfo;
+  owner?: string;
+  repo?: string;
+}) {
+  const { state, prNumber, prUrl, errorMsg } = prInfo;
+
+  const resolvedUrl = prUrl ?? (prNumber && owner && repo
+    ? `https://github.com/${owner}/${repo}/pull/${prNumber}`
+    : null);
+
+  return (
+    <div data-testid="pr-status-section" className="shrink-0 px-3 md:px-4 py-2 border-b border-border bg-panel">
+      <div className="flex items-center gap-2 text-xs">
+        <GitPullRequest size={13} className="text-muted shrink-0" />
+        <span className="text-muted font-medium">Auto-PR</span>
+
+        {state === 'creating' && (
+          <span data-testid="pr-badge-creating" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-amber-500/10 text-amber-500">
+            <Loader2 size={10} className="animate-spin" />
+            Creating pull request...
+          </span>
+        )}
+
+        {state === 'created' && prNumber && (
+          <>
+            <span data-testid="pr-badge-created" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-emerald-500/10 text-emerald-500">
+              <Check size={10} />
+              PR Created
+            </span>
+            {resolvedUrl ? (
+              <a
+                href={resolvedUrl}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono leading-none rounded bg-emerald-500/5 border border-emerald-500/20 text-emerald-400 hover:bg-emerald-500/10 transition-colors"
+              >
+                #{prNumber}
+                <ExternalLink size={9} />
+              </a>
+            ) : (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-mono leading-none rounded bg-emerald-500/5 border border-emerald-500/20 text-emerald-400">
+                #{prNumber}
+              </span>
+            )}
+          </>
+        )}
+
+        {state === 'failed' && (
+          <span data-testid="pr-badge-failed" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-amber-500/10 text-amber-500">
+            <AlertTriangle size={10} />
+            PR creation failed
+          </span>
+        )}
+      </div>
+
+      {/* Error details for failed state */}
+      {state === 'failed' && errorMsg && (
+        <div className="mt-1.5">
+          <pre className="text-[10px] text-amber-300/80 font-mono whitespace-pre-wrap break-all leading-relaxed bg-amber-500/5 border border-amber-500/10 rounded px-2 py-1.5 max-h-16 overflow-y-auto">
+            {errorMsg}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ─── WorkflowDispatchStatusSection (US-026) ──────────────────────────────────
+
+type WorkflowDispatchState = 'dispatching' | 'dispatched' | 'failed';
+
+interface WorkflowDispatchInfo {
+  state: WorkflowDispatchState;
+  workflowId?: string;
+  errorMsg?: string;
+}
+
+function WorkflowDispatchStatusSection({ dispatchInfo }: { dispatchInfo: WorkflowDispatchInfo }) {
+  const { state, workflowId, errorMsg } = dispatchInfo;
+  return (
+    <div data-testid="workflow-dispatch-status-section" className="shrink-0 px-3 md:px-4 py-2 border-b border-border bg-panel">
+      <div className="flex items-center gap-2 text-xs">
+        <Zap size={13} className="text-muted shrink-0" />
+        <span className="text-muted font-medium">Workflow Dispatch</span>
+
+        {state === 'dispatching' && (
+          <span data-testid="workflow-badge-dispatching" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-amber-500/10 text-amber-500">
+            <Loader2 size={10} className="animate-spin" />
+            Triggering workflow...
+          </span>
+        )}
+
+        {state === 'dispatched' && (
+          <span data-testid="workflow-badge-dispatched" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-emerald-500/10 text-emerald-500">
+            <Check size={10} />
+            Workflow triggered{workflowId ? ` — ${workflowId}` : ''}
+          </span>
+        )}
+
+        {state === 'failed' && (
+          <span data-testid="workflow-badge-failed" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-amber-500/10 text-amber-500">
+            <AlertTriangle size={10} />
+            Workflow dispatch failed{workflowId ? ` — ${workflowId}` : ''}
+          </span>
+        )}
+      </div>
+
+      {state === 'failed' && errorMsg && (
+        <div className="mt-1.5">
+          <pre className="text-[10px] text-amber-300/80 font-mono whitespace-pre-wrap break-all leading-relaxed bg-amber-500/5 border border-amber-500/10 rounded px-2 py-1.5 max-h-16 overflow-y-auto">
+            {errorMsg}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── RunViewPanel ───────────────────────────────────────────────────────────
 
 interface RunViewPanelProps {
@@ -765,6 +900,11 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
 
   // Merge status — base state seeded from pipeline_runs, derived state from SSE
   const [mergeInfoBase, setMergeInfoBase] = useState<MergeInfo | null>(null);
+
+  // PR status — base state seeded from pipeline_runs, derived state from SSE (US-028)
+  const [prInfoBase, setPrInfoBase] = useState<PrInfo | null>(null);
+
+  // Workflow dispatch status — derived from SSE events only (US-026), no DB seed needed
 
   // Resume badge — shown when previously_passed stories were pre-seeded by the trigger
   const [showResumeBadge, setShowResumeBadge] = useState(false);
@@ -856,6 +996,61 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     return info;
   }, [mergeInfoBase, walEvents]);
 
+  // Derive PR status: start from DB base, overlay SSE events (US-028)
+  const prInfo = useMemo<PrInfo | null>(() => {
+    let info = prInfoBase;
+    for (const evt of walEvents) {
+      if (evt.event_type === 'pr_creating') {
+        info = { state: 'creating' };
+      } else if (evt.event_type === 'pr_created' || evt.event_type === 'pr_updated' || evt.event_type === 'pr_draft_created' || evt.event_type === 'pr_ready') {
+        try {
+          const p = JSON.parse(evt.payload ?? '{}');
+          info = { state: 'created', prNumber: p.pr_number, prUrl: p.pr_url };
+        } catch {
+          info = { ...info, state: 'created' };
+        }
+      } else if (evt.event_type === 'pr_creation_failed') {
+        try {
+          const p = JSON.parse(evt.payload ?? '{}');
+          info = { state: 'failed', errorMsg: p.error };
+        } catch {
+          info = { state: 'failed' };
+        }
+      }
+    }
+    return info;
+  }, [prInfoBase, walEvents]);
+
+  // Derive workflow dispatch status from SSE events (US-026)
+  const workflowInfo = useMemo<WorkflowDispatchInfo | null>(() => {
+    let info: WorkflowDispatchInfo | null = null;
+    for (const evt of walEvents) {
+      if (evt.event_type === 'workflow_dispatching') {
+        try {
+          const p = JSON.parse(evt.payload ?? '{}');
+          info = { state: 'dispatching', workflowId: p.workflow_id };
+        } catch {
+          info = { state: 'dispatching' };
+        }
+      } else if (evt.event_type === 'workflow_dispatched') {
+        try {
+          const p = JSON.parse(evt.payload ?? '{}');
+          info = { state: 'dispatched', workflowId: p.workflow_id };
+        } catch {
+          info = { ...info, state: 'dispatched' };
+        }
+      } else if (evt.event_type === 'workflow_dispatch_failed') {
+        try {
+          const p = JSON.parse(evt.payload ?? '{}');
+          info = { state: 'failed', workflowId: p.workflow_id, errorMsg: p.error };
+        } catch {
+          info = { state: 'failed' };
+        }
+      }
+    }
+    return info;
+  }, [walEvents]);
+
   const fetchRun = useCallback(async () => {
     if (!workspaceId) return;
     try {
@@ -880,6 +1075,14 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
           state: 'pending',
           branchName: data.run.branch_name ?? undefined,
         });
+      }
+      // Seed PR status from DB columns (US-028)
+      if (data.run.pr_number != null) {
+        setPrInfoBase({ state: 'created', prNumber: data.run.pr_number });
+      } else if (data.run.pr_creating) {
+        setPrInfoBase({ state: 'creating' });
+      } else if (data.run.pr_creation_error) {
+        setPrInfoBase({ state: 'failed', errorMsg: data.run.pr_creation_error });
       }
       if (data.specModel !== undefined) setSpecModel(data.specModel);
       if (data.tokenSummary) setTokenSummary(data.tokenSummary);
@@ -1425,6 +1628,16 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
           runId={run.id}
           onRetry={handleRetryMerge}
         />
+      )}
+
+      {/* PR status — visible when auto-PR is in progress, created, or failed (US-028) */}
+      {prInfo && (
+        <PrStatusSection prInfo={prInfo} />
+      )}
+
+      {/* Workflow dispatch status — visible when dispatch is triggered (US-026) */}
+      {workflowInfo && (
+        <WorkflowDispatchStatusSection dispatchInfo={workflowInfo} />
       )}
 
       {/* Tab bar — scrollable horizontal strip on mobile */}

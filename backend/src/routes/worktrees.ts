@@ -4,6 +4,7 @@ import path from 'path';
 import { queryOne } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
+import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -147,13 +148,13 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -175,18 +176,94 @@ router.get('/', async (req: Request, res: Response) => {
 
 // ─── POST /api/worktrees ────────────────────────────────────────────────────
 
+/**
+ * @swagger
+ * /api/worktrees:
+ *   post:
+ *     tags: [Worktrees]
+ *     summary: Create a new git worktree
+ *     operationId: createWorktree
+ *     description: >
+ *       Creates a new git worktree branch in the specified workspace repository.
+ *       Worktrees enable parallel spec execution without branch conflicts — each
+ *       story run can be isolated in its own worktree. The branch is created from
+ *       baseBranch (default: main) and checked out at worktreePath.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, branchName]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace to create the worktree in
+ *                 example: cashflow-ai
+ *               branchName:
+ *                 type: string
+ *                 description: Name of the new branch for the worktree
+ *                 example: feat/stripe-billing-1700000000
+ *               baseBranch:
+ *                 type: string
+ *                 description: Base branch to create from (defaults to main)
+ *                 example: main
+ *               worktreePath:
+ *                 type: string
+ *                 description: Filesystem path for the worktree (auto-generated if omitted)
+ *                 example: /tmp/rorca-worktrees/stripe-billing-1700000000
+ *     responses:
+ *       201:
+ *         description: Worktree created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean, example: true }
+ *                 worktreePath:
+ *                   type: string
+ *                   description: Absolute path to the created worktree
+ *                 branchName:
+ *                   type: string
+ *                   description: Name of the created branch
+ *       400:
+ *         description: Missing workspaceId or branchName
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Workspace not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: Worktree path already exists
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.post('/', async (req: Request, res: Response) => {
   try {
     const { workspaceId, branchName, baseBranch, worktreePath } = req.body;
 
     if (!workspaceId || !branchName) {
-      res.status(400).json({ error: 'Missing required fields: workspaceId, branchName' });
+      throw new ValidationError('Missing required fields: workspaceId, branchName');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -206,7 +283,7 @@ router.post('/', async (req: Request, res: Response) => {
     res.status(201).json({ ok: true, worktreePath: targetPath, branchName });
   } catch (error: any) {
     if (error.message?.includes('already exists')) {
-      res.status(409).json({ error: error.message });
+      throw new ConflictError(error.message);
       return;
     }
     logger.error('[Worktrees] Create error:', error);
@@ -243,13 +320,13 @@ router.delete('/:encodedPath', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -270,7 +347,7 @@ router.delete('/:encodedPath', async (req: Request, res: Response) => {
     res.json({ ok: true });
   } catch (error: any) {
     if (error.message?.includes('dirty') || error.message?.includes('untracked') || error.message?.includes('modified')) {
-      res.status(409).json({ error: error.message });
+      throw new ConflictError(error.message);
       return;
     }
     logger.error('[Worktrees] Remove error:', error);
@@ -362,13 +439,13 @@ router.post('/merge/preview', async (req: Request, res: Response) => {
     const { workspaceId, branchName } = req.body;
 
     if (!workspaceId || !branchName) {
-      res.status(400).json({ error: 'Missing required fields: workspaceId, branchName' });
+      throw new ValidationError('Missing required fields: workspaceId, branchName');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -483,13 +560,13 @@ router.post('/merge', async (req: Request, res: Response) => {
     const { workspaceId, branchName, force } = req.body;
 
     if (!workspaceId || !branchName) {
-      res.status(400).json({ error: 'Missing required fields: workspaceId, branchName' });
+      throw new ValidationError('Missing required fields: workspaceId, branchName');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -513,7 +590,8 @@ router.post('/merge', async (req: Request, res: Response) => {
           // Even -X theirs can fail on delete/modify conflicts; handle those
           if (mergeError.message?.includes('CONFLICT')) {
             try { await git.merge(['--abort']); } catch { /* already clean */ }
-            res.status(409).json({ conflict: true, details: mergeError.message, conflictFiles: [] });
+            // NOTE: intentional raw res.status — carries { conflict: true, conflictFiles } for client UI; ConflictError lacks this shape.
+            res.status(409).json({ conflict: true, details: mergeError.message, conflictFiles: [] }); // intentional: merge-conflict structured response
             return;
           }
           throw mergeError;
@@ -533,7 +611,8 @@ router.post('/merge', async (req: Request, res: Response) => {
 
             try { await git.merge(['--abort']); } catch { /* already aborted */ }
 
-            res.status(409).json({ conflict: true, details: mergeError.message, conflictFiles });
+            // NOTE: intentional raw res.status — carries { conflict: true, conflictFiles } for client UI; ConflictError lacks this shape.
+            res.status(409).json({ conflict: true, details: mergeError.message, conflictFiles }); // intentional: merge-conflict structured response
             return;
           }
           throw mergeError;
@@ -601,13 +680,13 @@ router.get('/status', async (req: Request, res: Response) => {
     const worktreePath = req.query.path as string;
 
     if (!workspaceId || !worktreePath) {
-      res.status(400).json({ error: 'Missing required query params: workspaceId, path' });
+      throw new ValidationError('Missing required query params: workspaceId, path');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 

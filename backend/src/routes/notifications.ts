@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { query, queryOne, execute, transaction } from '../db/index';
 import type { AuthUser } from './auth';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -184,7 +185,7 @@ router.post('/:id/read', async (req, res) => {
     [req.params.id, user.id],
   );
   if (result.rowCount === 0) {
-    return res.status(404).json({ error: 'Notification not found or already read' });
+    throw new NotFoundError('Notification not found or already read');
   }
   res.json({ ok: true });
 });
@@ -249,7 +250,7 @@ router.delete('/:id', async (req, res) => {
     [req.params.id, user.id],
   );
   if (result.rowCount === 0) {
-    return res.status(404).json({ error: 'Notification not found' });
+    throw new NotFoundError('Notification not found');
   }
   res.json({ ok: true });
 });
@@ -341,7 +342,7 @@ router.put('/preferences', async (req, res) => {
   };
 
   if (!preferences || typeof preferences !== 'object') {
-    return res.status(400).json({ error: 'preferences object required' });
+    throw new ValidationError('preferences object required');
   }
 
   await transaction(async (client) => {

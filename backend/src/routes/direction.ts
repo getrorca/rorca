@@ -10,6 +10,7 @@ import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-vali
 import { getVaultKey } from './vault';
 import { logger } from '../lib/logger';
 import { invalidateDirection } from '../lib/context-cache';
+import { UnprocessableError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -93,7 +94,7 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     const { layer, workspaceId } = req.query;
 
     if (!layer || ![1, 2, 3].includes(Number(layer))) {
-      res.status(400).json({ error: 'layer must be 1, 2, or 3' });
+      throw new ValidationError('layer must be 1, 2, or 3');
       return;
     }
 
@@ -137,6 +138,81 @@ const DirectionUpsertSchema = z.object({
   skipValidation: z.boolean().optional(),
 });
 
+/**
+ * @swagger
+ * /api/direction:
+ *   put:
+ *     tags: [Direction Stack]
+ *     summary: Upsert a direction layer
+ *     operationId: upsertDirectionLayer
+ *     description: >
+ *       Creates or updates a direction layer (L1, L2, or L3) with YAML content.
+ *       L1 is global and applies to all workspaces. L2 is scoped to a domain.
+ *       L3 is scoped to a specific workspace. The preferredModel field is only
+ *       valid for L3 (workspace-scoped layer). Content is validated as YAML
+ *       unless skipValidation is true.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [layer, contentYaml]
+ *             properties:
+ *               layer:
+ *                 type: integer
+ *                 enum: [1, 2, 3]
+ *                 description: Direction layer number (1=global, 2=domain, 3=workspace)
+ *                 example: 3
+ *               contentYaml:
+ *                 type: string
+ *                 description: YAML content for the direction layer
+ *                 example: "stack: react\ndatabase: postgres"
+ *               workspaceId:
+ *                 type: string
+ *                 description: Required for L3; the workspace this layer applies to
+ *                 example: cashflow-ai
+ *               domain:
+ *                 type: string
+ *                 description: Domain tag for L2 layers (e.g. saas, fintech)
+ *                 example: saas
+ *               preferredModel:
+ *                 type: string
+ *                 nullable: true
+ *                 description: Preferred LLM model for spec generation (L3 only)
+ *                 example: claude-sonnet-4-6
+ *               skipValidation:
+ *                 type: boolean
+ *                 description: Skip YAML schema validation (default false)
+ *                 example: false
+ *     responses:
+ *       200:
+ *         description: Direction layer upserted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean, example: true }
+ *       400:
+ *         description: preferredModel only valid for layer 3
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       422:
+ *         description: Invalid YAML syntax or schema validation failed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.put('/', validateBody(DirectionUpsertSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { layer, workspaceId, domain, contentYaml, preferredModel, skipValidation } = req.body;
@@ -144,7 +220,7 @@ router.put('/', validateBody(DirectionUpsertSchema), async (req: Request, res: R
     // Validate preferredModel if provided (only valid for L3)
     if (preferredModel !== undefined && preferredModel !== null) {
       if (layer !== 3) {
-        res.status(400).json({ error: 'preferredModel is only valid for layer 3' });
+        throw new ValidationError('preferredModel is only valid for layer 3');
         return;
       }
       // Accept any model string — registered models get cost tracking, unregistered models pass through to openai-compat
@@ -154,17 +230,11 @@ router.put('/', validateBody(DirectionUpsertSchema), async (req: Request, res: R
     if (!skipValidation) {
       const validation = validateDirectionYaml(layer, contentYaml);
       if (validation.yamlError) {
-        res.status(422).json({
-          error: 'Invalid YAML syntax',
-          yamlError: validation.yamlError,
-        });
+        throw new UnprocessableError('Invalid YAML syntax');
         return;
       }
       if (!validation.valid) {
-        res.status(422).json({
-          error: 'Direction content failed schema validation',
-          validationErrors: validation.errors,
-        });
+        throw new UnprocessableError('Direction content failed schema validation');
         return;
       }
     }
@@ -216,7 +286,7 @@ router.get('/all', async (req: Request, res: Response, next: NextFunction) => {
     const { workspaceId } = req.query;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
@@ -409,7 +479,7 @@ router.post('/models/test', async (req: Request, res: Response, _next: NextFunct
     const { modelId } = req.body as { modelId?: string };
 
     if (!modelId || typeof modelId !== 'string') {
-      res.status(400).json({ error: 'modelId is required' });
+      throw new ValidationError('modelId is required');
       return;
     }
 
@@ -512,7 +582,7 @@ router.get('/preview', async (req: Request, res: Response, next: NextFunction) =
     const { workspaceId, domain, brief } = req.query;
 
     if (!brief) {
-      res.status(400).json({ error: 'Missing required query param: brief' });
+      throw new ValidationError('Missing required query param: brief');
       return;
     }
 
@@ -720,7 +790,7 @@ router.post('/wizard', async (req: Request, res: Response, _next: NextFunction) 
     const { answers } = req.body as { answers: Record<string, string> };
 
     if (!answers || typeof answers !== 'object' || Object.keys(answers).length === 0) {
-      res.status(400).json({ error: 'answers object is required and must not be empty' });
+      throw new ValidationError('answers object is required and must not be empty');
       return;
     }
 

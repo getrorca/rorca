@@ -6,6 +6,7 @@ import { backfillAll, isBackfillRunning, getQueueStats, getEmbeddingCounts, getP
 import { isGraphAvailable, graphStats, populateFromSpec, populateFromRun } from '../lib/knowledge-graph';
 import { query } from '../db/index';
 import { logger } from '../lib/logger';
+import { ConflictError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -121,7 +122,7 @@ router.get('/backups', (_req: Request, res: Response) => {
  */
 router.post('/embed-all', async (req: Request, res: Response) => {
   if (isBackfillRunning()) {
-    res.status(409).json({ error: 'Backfill already in progress' });
+    throw new ConflictError('Backfill already in progress');
     return;
   }
 
@@ -234,7 +235,7 @@ router.post('/graph-backfill', async (_req: Request, res: Response) => {
   try {
     const available = await isGraphAvailable();
     if (!available) {
-      res.status(400).json({ error: 'Apache AGE is not installed — graph features unavailable' });
+      throw new ValidationError('Apache AGE is not installed — graph features unavailable');
       return;
     }
 

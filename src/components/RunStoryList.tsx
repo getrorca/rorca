@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText } from 'lucide-react';
+import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText, Github } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { fetchStoryOutput, retryRun } from '../api/pipeline';
 import type { WalEvent } from '../hooks/usePipelineSSE';
@@ -132,6 +132,8 @@ interface MergedStory {
   rateLimitRetryAt: number | null; // epoch ms when rate limit backoff expires
   rateLimitAttempt: number | null;
   blockedBy: string[] | null; // upstream story IDs that caused this story to be blocked
+  githubStatusPending: boolean; // US-027: true when commit status is being posted to GitHub
+  prSyncPending: boolean; // US-034: true transiently when PR body is being updated
 }
 
 // ─── Live elapsed timer ──────────────────────────────────────────────────────
@@ -293,6 +295,17 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
         {/* Rate limit countdown */}
         {story.status === 'rate_limited' && story.rateLimitRetryAt != null && (
           <RateLimitCountdown retryAt={story.rateLimitRetryAt} />
+        )}
+        {/* US-027: GitHub status indicator — pulses while commit status is being posted */}
+        {story.githubStatusPending && (
+          <Github size={12} className="shrink-0 text-gray-400 animate-pulse" aria-label="Posting GitHub commit status" />
+        )}
+        {/* US-034: PR sync indicator — shown transiently when PR body is updated */}
+        {story.prSyncPending && (
+          <span className="inline-flex items-center gap-1 text-[10px] text-gray-400 animate-pulse shrink-0" aria-label="Syncing to GitHub PR">
+            <Github size={10} />
+            Syncing PR...
+          </span>
         )}
         {/* Live elapsed timer for running stories */}
         {story.status === 'running' && story.startedAt != null && (
@@ -467,6 +480,7 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
   const [loading, setLoading] = useState(true);
   const [collapsedWaves, setCollapsedWaves] = useState<Set<number>>(new Set());
   const [retryingStories, setRetryingStories] = useState<Set<string>>(new Set());
+  const [prSyncActive, setPrSyncActive] = useState(false);
   const [focusedIndex, setFocusedIndex] = useState<number>(-1);
 
   const scrollContainerRef = useRef<HTMLDivElement>(null);
@@ -583,6 +597,20 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
     return map;
   }, [walEvents]);
 
+  // US-034: Track pr_body_updated events — show transient "Syncing to GitHub PR..." indicator
+  const prSyncTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  useEffect(() => {
+    const hasPrUpdate = walEvents.some(e => e.event_type === 'pr_body_updated');
+    if (hasPrUpdate) {
+      setPrSyncActive(true);
+      if (prSyncTimerRef.current) clearTimeout(prSyncTimerRef.current);
+      prSyncTimerRef.current = setTimeout(() => setPrSyncActive(false), 2000);
+    }
+    return () => {
+      if (prSyncTimerRef.current) clearTimeout(prSyncTimerRef.current);
+    };
+  }, [walEvents]);
+
   // Track which waves have been merged (from wave_merged WAL events)
   const mergedWaveIndices = useMemo(() => {
     const set = new Set<number>();
@@ -666,9 +694,11 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
         rateLimitRetryAt: rlInfo?.retryAt ?? null,
         rateLimitAttempt: rlInfo?.attempt ?? null,
         blockedBy,
+        githubStatusPending: status === 'running' || status === 'retry',
+        prSyncPending: prSyncActive && (status === 'pass' || status === 'fail'),
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents, prSyncActive]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {

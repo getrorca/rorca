@@ -1,8 +1,13 @@
 import { Router, Request, Response } from 'express';
 import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
-import { queryOne, execute } from '../db/index';
+import * as fs from 'fs';
+import * as path from 'path';
+import { queryOne, execute, transaction } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
+import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
+import { githubRateLimiter } from '../lib/github-rate-limiter';
+import { insertAuditEntry } from './integration-audit-log';
 
 const router = Router({ mergeParams: true });
 
@@ -49,7 +54,7 @@ interface GitHubConnectionRow {
  *         description: Workspace ID
  *     responses:
  *       200:
- *         description: Connection status returned successfully. Returns `{ connected: false }` if no GitHub connection exists, or full connection details if connected.
+ *         description: "Connection status returned successfully. Returns `{ connected: false }` if no GitHub connection exists, or full connection details if connected."
  *       404:
  *         description: Workspace not found
  *       500:
@@ -61,8 +66,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
-      return;
+      throw new NotFoundError('Workspace not found');
     }
 
     const row = await queryOne<GithubWebhookRow>(
@@ -148,14 +152,12 @@ router.post('/connect', async (req: Request, res: Response) => {
     const { repoOwner, repoName, githubToken } = req.body;
 
     if (!repoOwner || !repoName || !githubToken) {
-      res.status(400).json({ error: 'Missing required fields: repoOwner, repoName, githubToken' });
-      return;
+      throw new ValidationError('Missing required fields: repoOwner, repoName, githubToken');
     }
 
     const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
-      return;
+      throw new NotFoundError('Workspace not found');
     }
 
     // Check if already connected
@@ -164,69 +166,118 @@ router.post('/connect', async (req: Request, res: Response) => {
       [workspaceId]
     );
     if (existing) {
-      res.status(409).json({ error: 'GitHub already connected for this workspace. Disconnect first.' });
-      return;
+      throw new ConflictError('GitHub already connected for this workspace. Disconnect first.');
     }
 
-    // Generate webhook secret
-    const webhookSecret = randomBytes(32).toString('hex');
+    // Generate webhook secret — graceful degradation if crypto fails
+    let webhookSecret: string | null = null;
+    try {
+      webhookSecret = randomBytes(32).toString('hex');
+    } catch (cryptoErr) {
+      logger.error({ err: cryptoErr }, '[GitHub] Failed to generate webhook secret');
+    }
 
     // Determine the webhook URL — use RORCA_BASE_URL env or fall back to localhost
     const baseUrl = process.env.RORCA_BASE_URL || 'http://localhost:3030';
     const webhookUrl = `${baseUrl}/api/webhooks/github`;
 
-    // Create webhook via GitHub API
-    const ghRes = await fetch(`https://api.github.com/repos/${repoOwner}/${repoName}/hooks`, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${githubToken}`,
-        'Accept': 'application/vnd.github+json',
-        'Content-Type': 'application/json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-      body: JSON.stringify({
-        name: 'web',
-        active: true,
-        events: ['push', 'pull_request', 'issues'],
-        config: {
-          url: webhookUrl,
-          content_type: 'json',
-          secret: webhookSecret,
-          insecure_ssl: '0',
-        },
-      }),
-    });
+    let webhookId: number | null = null;
+    let webhookError: string | null = null;
+    let manualSetupUrl: string | null = null;
 
-    if (!ghRes.ok) {
-      const ghBody = await ghRes.text();
-      logger.error({ status: ghRes.status, body: ghBody }, '[GitHub] Webhook creation failed');
-      res.status(ghRes.status === 404 ? 404 : 502).json({
-        error: `GitHub API error (${ghRes.status}): ${ghBody}`,
-      });
-      return;
+    // Only attempt webhook creation if we have a secret
+    if (webhookSecret) {
+      try {
+        // 5-second timeout on GitHub API call
+        const controller = new AbortController();
+        const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+        const ghRes = await githubRateLimiter.execute(() =>
+          fetch(`https://api.github.com/repos/${repoOwner}/${repoName}/hooks`, {
+            method: 'POST',
+            headers: {
+              'Authorization': `Bearer ${githubToken}`,
+              'Accept': 'application/vnd.github+json',
+              'Content-Type': 'application/json',
+              'X-GitHub-Api-Version': '2022-11-28',
+            },
+            body: JSON.stringify({
+              name: 'web',
+              active: true,
+              events: ['push', 'pull_request', 'issues'],
+              config: {
+                url: webhookUrl,
+                content_type: 'json',
+                secret: webhookSecret,
+                insecure_ssl: '0',
+              },
+            }),
+            signal: controller.signal,
+          }),
+        );
+        clearTimeout(timeoutId);
+
+        if (ghRes.ok) {
+          const ghData = await ghRes.json() as { id: number };
+          webhookId = ghData.id;
+        } else if (ghRes.status === 403 || ghRes.status === 404) {
+          // Graceful degradation — save connection without webhook
+          manualSetupUrl = `https://github.com/${repoOwner}/${repoName}/settings/hooks`;
+          webhookError = 'Rorca needs admin access to register webhooks';
+          logger.warn({ status: ghRes.status, repoOwner, repoName }, '[GitHub] Webhook creation failed — insufficient permissions');
+        } else {
+          const ghBody = await ghRes.text();
+          logger.error({ status: ghRes.status, body: ghBody }, '[GitHub] Webhook creation failed');
+          webhookError = `GitHub API error (${ghRes.status}): ${ghBody}`;
+        }
+      } catch (fetchErr: any) {
+        if (fetchErr.name === 'AbortError') {
+          webhookError = 'Webhook registration timed out (>5s). Connection saved without webhook.';
+          logger.warn({ repoOwner, repoName }, '[GitHub] Webhook creation timed out');
+        } else {
+          webhookError = `Webhook registration failed: ${fetchErr.message}`;
+          logger.error({ err: fetchErr }, '[GitHub] Webhook creation error');
+        }
+      }
+    } else {
+      webhookError = 'Failed to generate webhook secret — connection saved without webhook';
     }
 
-    const ghData = await ghRes.json() as { id: number };
-
-    // Store connection
+    // Store connection (always — even without webhook)
     await execute(
       `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
        VALUES ($1, $2, $3, $4, $5)`,
-      [workspaceId, repoOwner, repoName, ghData.id, encryptToken(webhookSecret)]
+      [workspaceId, repoOwner, repoName, webhookId, webhookSecret ? encryptToken(webhookSecret) : '']
     );
 
     await execute(
       "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_connected', $1, $2)",
-      [workspaceId, JSON.stringify({ repoOwner, repoName, webhookId: ghData.id })]
+      [workspaceId, JSON.stringify({ repoOwner, repoName, webhookId, webhookError: webhookError || undefined })]
     );
 
+    insertAuditEntry({
+      workspaceId: String(workspaceId),
+      provider: 'github',
+      action: 'integration_connected',
+      actorType: 'user',
+      actorId: (req as any).user?.id ?? null,
+      details: { repoOwner, repoName, webhookId, webhookError: webhookError || undefined },
+    });
+
+    // Return 201 with degraded status if webhook failed
     res.status(201).json({
       connected: true,
       repoOwner,
       repoName,
-      webhookId: ghData.id,
+      webhookId,
+      ...(webhookError ? { error: webhookError } : {}),
+      ...(manualSetupUrl ? { manualSetupUrl } : {}),
     });
   } catch (error: any) {
+    if (error.statusCode) {
+      res.status(error.statusCode).json({ error: error.message });
+      return;
+    }
     logger.error('[GitHub] Connect error:', error);
     res.status(500).json({ error: error.message });
   }
@@ -278,8 +329,7 @@ router.post('/disconnect', async (req: Request, res: Response) => {
     const { githubToken } = req.body;
 
     if (!githubToken) {
-      res.status(400).json({ error: 'Missing required field: githubToken' });
-      return;
+      throw new ValidationError('Missing required field: githubToken');
     }
 
     const row = await queryOne<GithubWebhookRow>(
@@ -288,22 +338,23 @@ router.post('/disconnect', async (req: Request, res: Response) => {
     );
 
     if (!row) {
-      res.status(404).json({ error: 'No GitHub connection found for this workspace' });
-      return;
+      throw new NotFoundError('No GitHub connection found for this workspace');
     }
 
     // Delete webhook from GitHub if we have a webhook ID
     if (row.webhook_id) {
-      const ghRes = await fetch(
-        `https://api.github.com/repos/${row.repo_owner}/${row.repo_name}/hooks/${row.webhook_id}`,
-        {
-          method: 'DELETE',
-          headers: {
-            'Authorization': `Bearer ${githubToken}`,
-            'Accept': 'application/vnd.github+json',
-            'X-GitHub-Api-Version': '2022-11-28',
+      const ghRes = await githubRateLimiter.execute(() =>
+        fetch(
+          `https://api.github.com/repos/${row.repo_owner}/${row.repo_name}/hooks/${row.webhook_id}`,
+          {
+            method: 'DELETE',
+            headers: {
+              'Authorization': `Bearer ${githubToken}`,
+              'Accept': 'application/vnd.github+json',
+              'X-GitHub-Api-Version': '2022-11-28',
+            },
           },
-        }
+        ),
       );
 
       // 404 = webhook already deleted on GitHub side — that's fine
@@ -324,6 +375,15 @@ router.post('/disconnect', async (req: Request, res: Response) => {
       "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_disconnected', $1, $2)",
       [workspaceId, JSON.stringify({ repoOwner: row.repo_owner, repoName: row.repo_name })]
     );
+
+    insertAuditEntry({
+      workspaceId: String(workspaceId),
+      provider: 'github',
+      action: 'integration_disconnected',
+      actorType: 'user',
+      actorId: (req as any).user?.id ?? null,
+      details: { repoOwner: row.repo_owner, repoName: row.repo_name },
+    });
 
     res.json({ connected: false });
   } catch (error: any) {
@@ -351,7 +411,7 @@ router.post('/disconnect', async (req: Request, res: Response) => {
  *         description: Workspace ID
  *     responses:
  *       200:
- *         description: Account info returned successfully. Returns `{ connected: false }` if no user or GitHub connection exists, or full account details if connected.
+ *         description: "Account info returned successfully. Returns `{ connected: false }` if no user or GitHub connection exists, or full account details if connected."
  *       500:
  *         description: Internal server error
  */
@@ -409,7 +469,7 @@ router.get('/account', async (req: Request, res: Response) => {
  *         description: Workspace ID
  *     responses:
  *       200:
- *         description: Test result returned. Returns `{ valid: true, username }` on success, or `{ valid: false, error }` if no connection exists or token is invalid.
+ *         description: "Test result returned. Returns `{ valid: true, username }` on success, or `{ valid: false, error }` if no connection exists or token is invalid."
  */
 router.post('/test-connection', async (req: Request, res: Response) => {
   try {
@@ -432,13 +492,15 @@ router.post('/test-connection', async (req: Request, res: Response) => {
 
     const token = decryptToken(conn.encrypted_token);
 
-    const ghRes = await fetch('https://api.github.com/user', {
-      headers: {
-        Authorization: `Bearer ${token}`,
-        Accept: 'application/vnd.github+json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-    });
+    const ghRes = await githubRateLimiter.execute(() =>
+      fetch('https://api.github.com/user', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      }),
+    );
 
     if (ghRes.ok) {
       const user = await ghRes.json() as { login: string; id: number };
@@ -482,8 +544,7 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
     const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
     const userId = userRow?.id;
     if (!userId) {
-      res.status(404).json({ error: 'No user configured' });
-      return;
+      throw new NotFoundError('No user configured');
     }
 
     const conn = await queryOne<Pick<GitHubConnectionRow, 'id' | 'encrypted_token'>>(
@@ -492,8 +553,7 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
     );
 
     if (!conn) {
-      res.status(404).json({ error: 'No GitHub connection found' });
-      return;
+      throw new NotFoundError('No GitHub connection found');
     }
 
     // Attempt to revoke the token via GitHub API (best-effort)
@@ -502,15 +562,17 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
     if (clientId && clientSecret) {
       try {
         const token = decryptToken(conn.encrypted_token);
-        await fetch(`https://api.github.com/applications/${clientId}/token`, {
-          method: 'DELETE',
-          headers: {
-            Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
-            Accept: 'application/vnd.github+json',
-            'Content-Type': 'application/json',
-          },
-          body: JSON.stringify({ access_token: token }),
-        });
+        await githubRateLimiter.execute(() =>
+          fetch(`https://api.github.com/applications/${clientId}/token`, {
+            method: 'DELETE',
+            headers: {
+              Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+              Accept: 'application/vnd.github+json',
+              'Content-Type': 'application/json',
+            },
+            body: JSON.stringify({ access_token: token }),
+          }),
+        );
       } catch (revokeErr) {
         logger.warn({ err: revokeErr }, '[GitHub] Token revocation failed (proceeding with local disconnect)');
       }
@@ -526,9 +588,200 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
       [JSON.stringify({ userId })]
     );
 
+    insertAuditEntry({
+      workspaceId: String(req.params.id),
+      provider: 'github',
+      action: 'token_revoked',
+      actorType: 'user',
+      actorId: userId,
+      details: { method: 'oauth_disconnect' },
+    });
+
     res.json({ disconnected: true });
   } catch (error: any) {
     logger.error('[GitHub] Disconnect OAuth error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── DELETE /api/workspaces/:id/github — Full disconnect (OAuth + webhook + all data) ──
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github:
+ *   delete:
+ *     tags: [GitHub]
+ *     summary: Fully disconnect GitHub integration for a workspace
+ *     operationId: deleteWorkspaceGithub
+ *     description: |
+ *       Revokes the OAuth token via the GitHub API (best-effort), then atomically
+ *       deletes all GitHub-specific data: integration_tokens, github_connections,
+ *       workspace_github_webhooks, and webhook_dlq entries for the github provider.
+ *       Writes an integration_audit_log entry for the disconnect. Pipeline runs
+ *       continue but without GitHub integration features.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: GitHub integration disconnected successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 disconnected:
+ *                   type: boolean
+ *       404:
+ *         description: No GitHub connection found for this workspace
+ *       500:
+ *         description: Internal server error
+ */
+router.delete('/', async (req: Request, res: Response) => {
+  const workspaceId = req.params.id;
+  try {
+    // Check if any GitHub connection exists (OAuth or webhook)
+    const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
+    const userId = userRow?.id ?? null;
+
+    const oauthConn = userId
+      ? await queryOne<Pick<GitHubConnectionRow, 'id' | 'encrypted_token'>>(
+          'SELECT id, encrypted_token FROM github_connections WHERE user_id = $1',
+          [userId],
+        )
+      : null;
+
+    const webhookConn = await queryOne<GithubWebhookRow>(
+      'SELECT * FROM workspace_github_webhooks WHERE workspace_id = $1',
+      [workspaceId],
+    );
+
+    const hasTokens = await queryOne<{ cnt: string }>(
+      "SELECT COUNT(*)::text AS cnt FROM integration_tokens WHERE workspace_id = $1 AND provider = 'github'",
+      [workspaceId],
+    );
+
+    if (!oauthConn && !webhookConn && Number(hasTokens?.cnt ?? 0) === 0) {
+      throw new NotFoundError('No GitHub connection found for this workspace');
+    }
+
+    // 1a. Revoke OAuth token via GitHub API (best-effort, before local cleanup)
+    if (oauthConn) {
+      const clientId = process.env.GITHUB_CLIENT_ID;
+      const clientSecret = process.env.GITHUB_CLIENT_SECRET;
+      if (clientId && clientSecret) {
+        try {
+          const token = decryptToken(oauthConn.encrypted_token);
+          const revokeRes = await githubRateLimiter.execute(() =>
+            fetch(`https://api.github.com/applications/${clientId}/token`, {
+              method: 'DELETE',
+              headers: {
+                Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+                Accept: 'application/vnd.github+json',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ access_token: token }),
+            }),
+          );
+          if (!revokeRes.ok && revokeRes.status !== 404 && revokeRes.status !== 422) {
+            logger.warn({ status: revokeRes.status }, '[GitHub] Token revocation returned non-success (proceeding with local cleanup)');
+          }
+        } catch (revokeErr) {
+          logger.warn({ err: revokeErr }, '[GitHub] Token revocation failed (proceeding with local cleanup)');
+        }
+      } else {
+        logger.warn('[GitHub] GITHUB_CLIENT_ID/SECRET not configured — skipping token revocation');
+      }
+    }
+
+    // 1b. Delete webhook from GitHub (best-effort, before local cleanup)
+    if (webhookConn?.webhook_id && oauthConn) {
+      try {
+        const token = decryptToken(oauthConn.encrypted_token);
+        const delRes = await githubRateLimiter.execute(() =>
+          fetch(
+            `https://api.github.com/repos/${webhookConn.repo_owner}/${webhookConn.repo_name}/hooks/${webhookConn.webhook_id}`,
+            {
+              method: 'DELETE',
+              headers: {
+                'Authorization': `Bearer ${token}`,
+                'Accept': 'application/vnd.github+json',
+                'X-GitHub-Api-Version': '2022-11-28',
+              },
+            },
+          ),
+        );
+        // 404 = already deleted — that's fine
+        if (!delRes.ok && delRes.status !== 404) {
+          logger.warn({ status: delRes.status }, '[GitHub] Webhook deletion returned non-success (proceeding with local cleanup)');
+        }
+      } catch (delErr) {
+        logger.warn({ err: delErr }, '[GitHub] Webhook deletion failed (proceeding with local cleanup)');
+      }
+    }
+
+    // 2. Atomic local cleanup
+    await transaction(async (client) => {
+      // Delete integration_tokens for github provider
+      await client.query(
+        "DELETE FROM integration_tokens WHERE workspace_id = $1 AND provider = 'github'",
+        [workspaceId],
+      );
+
+      // Delete github_connections (OAuth record)
+      if (oauthConn) {
+        await client.query('DELETE FROM github_connections WHERE id = $1', [oauthConn.id]);
+        if (userId) {
+          await client.query("UPDATE users SET github_id = NULL, updated_at = NOW() WHERE id = $1", [userId]);
+        }
+      }
+
+      // Delete workspace_github_webhooks
+      await client.query('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [workspaceId]);
+
+      // Clear webhook_dlq entries for github provider in this workspace
+      await client.query(
+        "DELETE FROM webhook_dlq WHERE workspace_id = $1 AND provider = 'github'",
+        [workspaceId],
+      );
+
+      // Write audit log entry
+      await client.query(
+        `INSERT INTO integration_audit_log (workspace_id, provider, action, actor_type, actor_id, details)
+         VALUES ($1, 'github', 'integration_disconnected', 'user', $2, $3)`,
+        [
+          workspaceId,
+          userId,
+          JSON.stringify({
+            repoOwner: webhookConn?.repo_owner ?? null,
+            repoName: webhookConn?.repo_name ?? null,
+            hadOAuth: !!oauthConn,
+            hadWebhook: !!webhookConn,
+          }),
+        ],
+      );
+    });
+
+    // 3. WAL event (outside transaction — fire-and-forget)
+    await execute(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_disconnected', $1, $2)",
+      [workspaceId, JSON.stringify({
+        repoOwner: webhookConn?.repo_owner ?? null,
+        repoName: webhookConn?.repo_name ?? null,
+      })],
+    );
+
+    res.json({ disconnected: true });
+  } catch (error: any) {
+    if (error instanceof NotFoundError) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    logger.error('[GitHub] Full disconnect error:', error);
     res.status(500).json({ error: error.message });
   }
 });
@@ -587,8 +840,7 @@ router.put('/auto-pr', async (req: Request, res: Response) => {
     );
 
     if (!row) {
-      res.status(404).json({ error: 'No GitHub connection found for this workspace' });
-      return;
+      throw new NotFoundError('No GitHub connection found for this workspace');
     }
 
     await execute(
@@ -661,8 +913,7 @@ router.get('/actions-yaml', async (req: Request, res: Response) => {
       [workspaceId]
     );
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
-      return;
+      throw new NotFoundError('Workspace not found');
     }
 
     const yaml = generateActionsYaml(workspace.id, workspace.label);
@@ -815,6 +1066,665 @@ jobs:
           echo "| Skipped | $SKIPPED |" >> "$GITHUB_STEP_SUMMARY"
 `;
 }
+
+// ─── GET /api/workspaces/:id/github/rate-limit — GitHub API rate limit status ─
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/rate-limit:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: Get GitHub API rate limit status
+ *     operationId: getGithubRateLimit
+ *     description: Returns the current outbound GitHub API rate limit status including remaining requests, limit, reset time, and circuit breaker state.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Rate limit status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 remaining: { type: number }
+ *                 limit: { type: number }
+ *                 resetAt: { type: string, nullable: true }
+ *                 circuitState: { type: string, enum: [closed, open, half-open] }
+ */
+router.get('/rate-limit', (_req: Request, res: Response) => {
+  res.json(githubRateLimiter.getStatus());
+});
+
+// ─── Helper: get OAuth token for the current user ─────────────────────────────
+
+async function getOAuthToken(): Promise<string | null> {
+  const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
+  if (!userRow) return null;
+  const conn = await queryOne<{ encrypted_token: string }>(
+    'SELECT encrypted_token FROM github_connections WHERE user_id = $1',
+    [userRow.id]
+  );
+  if (!conn) return null;
+  return decryptToken(conn.encrypted_token);
+}
+
+// ─── GET /api/workspaces/:id/github/repos — List user repos ──────────────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/repos:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: List GitHub repositories for the connected account
+ *     operationId: listWorkspaceGithubRepos
+ *     description: Fetches up to 100 repos (sorted by updated_at desc) from the connected GitHub OAuth account.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Repo list returned
+ *       400:
+ *         description: No GitHub OAuth connection found
+ *       502:
+ *         description: GitHub API error
+ */
+router.get('/repos', async (req: Request, res: Response) => {
+  try {
+    const token = await getOAuthToken();
+    if (!token) {
+      res.status(400).json({ error: 'No GitHub OAuth connection found. Connect GitHub in Settings > GitHub.' });
+      return;
+    }
+
+    const ghRes = await githubRateLimiter.execute(() =>
+      fetch('https://api.github.com/user/repos?per_page=100&sort=updated&direction=desc&type=all', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      })
+    );
+
+    if (!ghRes.ok) {
+      const body = await ghRes.text();
+      logger.error({ status: ghRes.status, body }, '[GitHub] Repos fetch failed');
+      res.status(502).json({ error: `GitHub API error (${ghRes.status})` });
+      return;
+    }
+
+    const repos = await ghRes.json() as Array<{
+      id: number;
+      full_name: string;
+      name: string;
+      owner: { login: string };
+      description: string | null;
+      private: boolean;
+      open_issues_count: number;
+      updated_at: string;
+      html_url: string;
+    }>;
+
+    res.json({
+      repos: repos.map(r => ({
+        id: r.id,
+        fullName: r.full_name,
+        name: r.name,
+        owner: r.owner.login,
+        description: r.description,
+        private: r.private,
+        openIssuesCount: r.open_issues_count,
+        updatedAt: r.updated_at,
+        htmlUrl: r.html_url,
+      })),
+    });
+  } catch (error: any) {
+    logger.error('[GitHub] Repos error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── GET /api/workspaces/:id/github/repos/:owner/:repo/issues ────────────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/repos/{owner}/{repo}/issues:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: List open issues for a GitHub repository
+ *     operationId: listWorkspaceGithubRepoIssues
+ *     description: Fetches up to 100 open issues (excluding PRs) from the specified repository.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *       - in: path
+ *         name: owner
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: repo
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Issue list returned
+ *       400:
+ *         description: No GitHub OAuth connection found
+ *       502:
+ *         description: GitHub API error
+ */
+router.get('/repos/:owner/:repo/issues', async (req: Request, res: Response) => {
+  try {
+    const { owner, repo } = req.params;
+
+    const token = await getOAuthToken();
+    if (!token) {
+      res.status(400).json({ error: 'No GitHub OAuth connection found. Connect GitHub in Settings > GitHub.' });
+      return;
+    }
+
+    const ghRes = await githubRateLimiter.execute(() =>
+      fetch(`https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=100&sort=created&direction=desc`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      })
+    );
+
+    if (!ghRes.ok) {
+      const body = await ghRes.text();
+      logger.error({ status: ghRes.status, body }, '[GitHub] Issues fetch failed');
+      res.status(502).json({ error: `GitHub API error (${ghRes.status})` });
+      return;
+    }
+
+    const issues = await ghRes.json() as Array<{
+      id: number;
+      number: number;
+      title: string;
+      body: string | null;
+      html_url: string;
+      pull_request?: object;
+      labels: Array<{ name: string; color: string }>;
+      assignee: { login: string; avatar_url: string } | null;
+      created_at: string;
+    }>;
+
+    // Filter out pull requests — GitHub Issues API includes PRs
+    const filtered = issues.filter(i => !i.pull_request);
+
+    res.json({
+      issues: filtered.map(i => ({
+        id: i.id,
+        number: i.number,
+        title: i.title,
+        body: i.body ?? '',
+        htmlUrl: i.html_url,
+        labels: i.labels.map(l => ({ name: l.name, color: l.color })),
+        assignee: i.assignee ? { login: i.assignee.login, avatarUrl: i.assignee.avatar_url } : null,
+        createdAt: i.created_at,
+      })),
+    });
+  } catch (error: any) {
+    logger.error('[GitHub] Issues error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /api/workspaces/:id/github/import-issues ────────────────────────────
+
+/**
+ * Extracts acceptance criteria from GitHub issue body markdown.
+ * Parses `- [ ]` and `- [x]` checkbox patterns.
+ */
+function extractAcceptanceCriteria(body: string): string[] {
+  const lines = body.split('\n');
+  const criteria: string[] = [];
+  for (const line of lines) {
+    const match = line.match(/^\s*-\s*\[[ xX]\]\s*(.+)/);
+    if (match) {
+      criteria.push(match[1].trim());
+    }
+  }
+  return criteria;
+}
+
+/**
+ * Converts a repo name + timestamp into a spec slug.
+ */
+function repoToSpecSlug(repoName: string): string {
+  const sanitized = repoName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const ts = Date.now();
+  return `${sanitized}-${ts}`.slice(0, 60);
+}
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/import-issues:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Import GitHub issues as a pending spec
+ *     operationId: importWorkspaceGithubIssues
+ *     description: Creates a pending spec JSON from selected GitHub issues. Each issue becomes a user story with title, description, and acceptance criteria extracted from markdown checkboxes.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [owner, repo, issueNumbers]
+ *             properties:
+ *               owner:
+ *                 type: string
+ *               repo:
+ *                 type: string
+ *               issueNumbers:
+ *                 type: array
+ *                 items:
+ *                   type: integer
+ *               specTitle:
+ *                 type: string
+ *                 description: Optional human-readable title for the spec
+ *     responses:
+ *       201:
+ *         description: Spec created
+ *       400:
+ *         description: Validation error or no GitHub connection
+ *       404:
+ *         description: Workspace not found
+ *       502:
+ *         description: GitHub API error
+ */
+router.post('/import-issues', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.params.id;
+    const { owner, repo, issueNumbers, specTitle } = req.body as {
+      owner?: string;
+      repo?: string;
+      issueNumbers?: number[];
+      specTitle?: string;
+    };
+
+    if (!owner || !repo) {
+      throw new ValidationError('Missing required fields: owner, repo');
+    }
+    if (!Array.isArray(issueNumbers) || issueNumbers.length === 0) {
+      throw new ValidationError('issueNumbers must be a non-empty array');
+    }
+
+    const workspace = await queryOne<{ id: string; path: string }>(
+      'SELECT id, path FROM workspaces WHERE id = $1',
+      [workspaceId]
+    );
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    const token = await getOAuthToken();
+    if (!token) {
+      res.status(400).json({ error: 'No GitHub OAuth connection found. Connect GitHub in Settings > GitHub.' });
+      return;
+    }
+
+    // Fetch each selected issue from GitHub
+    const fetchedIssues: Array<{
+      number: number;
+      title: string;
+      body: string;
+      htmlUrl: string;
+      labels: string[];
+    }> = [];
+
+    for (const num of issueNumbers) {
+      const ghRes = await githubRateLimiter.execute(() =>
+        fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${num}`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+        })
+      );
+
+      if (!ghRes.ok) {
+        logger.warn({ num, status: ghRes.status }, '[GitHub] Issue fetch failed — skipping');
+        continue;
+      }
+
+      const issue = await ghRes.json() as {
+        number: number;
+        title: string;
+        body: string | null;
+        html_url: string;
+        pull_request?: object;
+        labels: Array<{ name: string }>;
+      };
+
+      if (issue.pull_request) continue; // skip PRs
+
+      fetchedIssues.push({
+        number: issue.number,
+        title: issue.title,
+        body: issue.body ?? '',
+        htmlUrl: issue.html_url,
+        labels: issue.labels.map((l) => l.name),
+      });
+    }
+
+    if (fetchedIssues.length === 0) {
+      res.status(422).json({ error: 'No valid issues could be fetched from GitHub' });
+      return;
+    }
+
+    // Build user stories from issues
+    const userStories = fetchedIssues.map((issue, idx) => ({
+      id: `US-${String(idx + 1).padStart(3, '0')}`,
+      title: issue.title,
+      description: issue.body,
+      acceptanceCriteria: extractAcceptanceCriteria(issue.body),
+      dependsOn: [] as string[],
+      passes: false,
+      githubIssueNumber: issue.number,
+      githubIssueUrl: issue.htmlUrl,
+    }));
+
+    // Build spec slug and title
+    const slug = repoToSpecSlug(repo);
+    const title = specTitle || `${owner}/${repo} Issues`;
+
+    const specContent = {
+      id: slug,
+      title,
+      userStories,
+      generatedAt: new Date().toISOString(),
+      source: 'github-import',
+      githubRepo: `${owner}/${repo}`,
+    };
+
+    // Ensure pending directory exists and write spec file
+    const pendingDir = path.join(workspace.path, 'forge', 'specs', 'pending');
+    fs.mkdirSync(pendingDir, { recursive: true });
+    const specFilePath = path.join(pendingDir, `${slug}.json`);
+    fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2) + '\n', 'utf8');
+
+    // Emit WAL event
+    await execute(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_issues_imported', $1, $2)",
+      [workspaceId, JSON.stringify({ slug, owner, repo, storyCount: userStories.length, issueNumbers })]
+    );
+
+    res.status(201).json({
+      specId: slug,
+      storyCount: userStories.length,
+    });
+  } catch (error: any) {
+    logger.error('[GitHub] Import issues error:', error);
+    if (error.statusCode) {
+      res.status(error.statusCode).json({ error: error.message });
+    } else {
+      res.status(500).json({ error: error.message });
+    }
+  }
+});
+
+// ─── GET /api/workspaces/:id/github/workflow-config — Get dispatch config ────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/workflow-config:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: Get workflow dispatch configuration for a workspace
+ *     operationId: getWorkspaceWorkflowConfig
+ *     description: Returns the stored GitHub Actions workflow dispatch configuration for this workspace.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Workflow config (null if not configured)
+ *       404:
+ *         description: Workspace not found
+ */
+router.get('/workflow-config', async (req: Request, res: Response) => {
+  const workspaceId = req.params.id;
+  const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+  if (!workspace) {
+    throw new NotFoundError('Workspace not found');
+  }
+  const row = await queryOne<{ workflow_config: unknown }>(
+    'SELECT workflow_config FROM workspace_github_webhooks WHERE workspace_id = $1',
+    [workspaceId]
+  );
+  res.json({ workflowConfig: row?.workflow_config ?? null });
+});
+
+// ─── PUT /api/workspaces/:id/github/workflow-config — Save dispatch config ───
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/workflow-config:
+ *   put:
+ *     tags: [GitHub]
+ *     summary: Save workflow dispatch configuration for a workspace
+ *     operationId: saveWorkspaceWorkflowConfig
+ *     description: Stores GitHub Actions workflow dispatch config (workflow_id, ref, inputs, enabled flag).
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workflowConfig]
+ *             properties:
+ *               workflowConfig:
+ *                 type: object
+ *                 properties:
+ *                   enabled: { type: boolean }
+ *                   workflow_id: { type: string }
+ *                   ref: { type: string }
+ *                   inputs: { type: object }
+ *     responses:
+ *       200:
+ *         description: Config saved successfully
+ *       404:
+ *         description: Workspace or GitHub webhook connection not found
+ */
+router.put('/workflow-config', async (req: Request, res: Response) => {
+  const workspaceId = req.params.id;
+  const { workflowConfig } = req.body;
+
+  const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+  if (!workspace) {
+    throw new NotFoundError('Workspace not found');
+  }
+
+  const row = await queryOne<{ workspace_id: string }>(
+    'SELECT workspace_id FROM workspace_github_webhooks WHERE workspace_id = $1',
+    [workspaceId]
+  );
+  if (!row) {
+    throw new NotFoundError('GitHub webhook connection not found. Connect a repository first.');
+  }
+
+  await execute(
+    'UPDATE workspace_github_webhooks SET workflow_config = $1 WHERE workspace_id = $2',
+    [JSON.stringify(workflowConfig), workspaceId]
+  );
+
+  res.json({ ok: true });
+});
+
+// ─── POST /api/workspaces/:id/github/dispatch — Trigger workflow dispatch ─────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/dispatch:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Trigger a GitHub Actions workflow dispatch event
+ *     operationId: dispatchWorkspaceWorkflow
+ *     description: |
+ *       Proxies a workflow_dispatch event to the GitHub API using the workspace's
+ *       stored OAuth token. Requires the token to have the `workflow` scope.
+ *       Returns 204 on success (GitHub returns no body for dispatches).
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [owner, repo, workflow_id, ref]
+ *             properties:
+ *               owner:
+ *                 type: string
+ *                 description: GitHub repository owner
+ *               repo:
+ *                 type: string
+ *                 description: GitHub repository name
+ *               workflow_id:
+ *                 type: string
+ *                 description: Workflow filename (e.g. deploy.yml) or workflow ID number
+ *               ref:
+ *                 type: string
+ *                 description: Branch or tag ref to run the workflow on (e.g. main)
+ *               inputs:
+ *                 type: object
+ *                 description: Optional input key-value pairs for the workflow
+ *     responses:
+ *       204:
+ *         description: Workflow dispatch triggered successfully
+ *       400:
+ *         description: Missing required fields
+ *       404:
+ *         description: Workspace not found, no GitHub connection, or workflow not found on GitHub
+ *       422:
+ *         description: Invalid inputs — check workflow filename and input parameters
+ *       502:
+ *         description: GitHub API error
+ */
+router.post('/dispatch', async (req: Request, res: Response) => {
+  const workspaceId = req.params.id;
+  const { owner, repo, workflow_id, ref, inputs } = req.body;
+
+  if (!owner || !repo || !workflow_id || !ref) {
+    throw new ValidationError('Missing required fields: owner, repo, workflow_id, ref');
+  }
+
+  const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+  if (!workspace) {
+    throw new NotFoundError('Workspace not found');
+  }
+
+  const token = await getOAuthToken();
+  if (!token) {
+    throw new NotFoundError('No GitHub OAuth connection found. Connect your GitHub account first.');
+  }
+
+  const ghUrl = `https://api.github.com/repos/${owner}/${repo}/actions/workflows/${workflow_id}/dispatches`;
+  const body: Record<string, unknown> = { ref };
+  if (inputs && Object.keys(inputs).length > 0) {
+    body.inputs = inputs;
+  }
+
+  const ghRes = await fetch(ghUrl, {
+    method: 'POST',
+    headers: {
+      'Authorization': `Bearer ${token}`,
+      'Accept': 'application/vnd.github+json',
+      'Content-Type': 'application/json',
+      'X-GitHub-Api-Version': '2022-11-28',
+    },
+    body: JSON.stringify(body),
+  });
+
+  if (!ghRes.ok) {
+    const ghBody = await ghRes.text();
+    logger.error({ status: ghRes.status, body: ghBody, workflow_id }, '[GitHub] Workflow dispatch failed');
+
+    insertAuditEntry({
+      workspaceId: String(workspaceId),
+      provider: 'github',
+      action: 'api_call_failed',
+      actorType: 'user',
+      actorId: (req as any).user?.id ?? null,
+      details: { workflow_id, ref, owner, repo, status: ghRes.status, error: ghBody },
+    });
+
+    if (ghRes.status === 404) {
+      res.status(404).json({
+        error: `Workflow '${workflow_id}' not found in ${owner}/${repo}. Check the workflow filename and that it exists on the '${ref}' branch.`,
+      });
+      return;
+    }
+    if (ghRes.status === 422) {
+      let detail = ghBody;
+      try { detail = JSON.parse(ghBody).message ?? ghBody; } catch { /* use raw body */ }
+      res.status(422).json({
+        error: `Invalid workflow inputs for '${workflow_id}': ${detail}`,
+      });
+      return;
+    }
+    res.status(502).json({
+      error: `GitHub API error (${ghRes.status}) for workflow '${workflow_id}': ${ghBody}`,
+    });
+    return;
+  }
+
+  insertAuditEntry({
+    workspaceId: String(workspaceId),
+    provider: 'github',
+    action: 'api_call_made',
+    actorType: 'user',
+    actorId: (req as any).user?.id ?? null,
+    details: { workflow_id, ref, owner, repo },
+  });
+
+  // 204 No Content is the success response from GitHub for workflow_dispatch
+  res.status(204).send();
+});
 
 // ─── Helper: verify webhook signature ────────────────────────────────────────
 
