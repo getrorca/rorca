@@ -111,3 +111,12 @@ export class UnprocessableError extends AppError {
     super(message, 'UNPROCESSABLE', details);
   }
 }
+
+/** 503 — service unavailable (upstream down, circuit breaker open) */
+export class ServiceUnavailableError extends AppError {
+  readonly statusCode = 503 as const;
+
+  constructor(message = 'Service temporarily unavailable') {
+    super(message, 'SERVICE_UNAVAILABLE');
+  }
+}

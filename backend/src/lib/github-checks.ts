@@ -4,6 +4,7 @@ import { queryOne } from '../db/index';
 import { decryptToken } from '../routes/auth';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
+import { githubRateLimiter } from './github-rate-limiter';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -75,16 +76,18 @@ export async function postCommitStatus(
   }
 
   try {
-    const res = await fetch(url, {
-      method: 'POST',
-      headers: {
-        'Authorization': `Bearer ${token}`,
-        'Accept': 'application/vnd.github+json',
-        'Content-Type': 'application/json',
-        'X-GitHub-Api-Version': '2022-11-28',
-      },
-      body: JSON.stringify(body),
-    });
+    const res = await githubRateLimiter.execute(() =>
+      fetch(url, {
+        method: 'POST',
+        headers: {
+          'Authorization': `Bearer ${token}`,
+          'Accept': 'application/vnd.github+json',
+          'Content-Type': 'application/json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+        body: JSON.stringify(body),
+      }),
+    );
 
     if (!res.ok) {
       const text = await res.text();
@@ -123,13 +126,15 @@ async function fetchPrChangedFiles(
   while (page <= 3) {
     const url = `https://api.github.com/repos/${owner}/${repo}/pulls/${prNumber}/files?per_page=${perPage}&page=${page}`;
     try {
-      const res = await fetch(url, {
-        headers: {
-          'Authorization': `Bearer ${token}`,
-          'Accept': 'application/vnd.github+json',
-          'X-GitHub-Api-Version': '2022-11-28',
-        },
-      });
+      const res = await githubRateLimiter.execute(() =>
+        fetch(url, {
+          headers: {
+            'Authorization': `Bearer ${token}`,
+            'Accept': 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+        }),
+      );
       if (!res.ok) break;
       const pageFiles = await res.json() as PrFile[];
       files.push(...pageFiles);
