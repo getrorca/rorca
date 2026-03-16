@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
-import { queryOne, execute } from '../db/index';
+import { queryOne, execute, transaction } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
 import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
@@ -569,6 +569,162 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
     res.json({ disconnected: true });
   } catch (error: any) {
     logger.error('[GitHub] Disconnect OAuth error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── DELETE /api/workspaces/:id/github — Full disconnect (OAuth + webhook + all data) ──
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github:
+ *   delete:
+ *     tags: [GitHub]
+ *     summary: Fully disconnect GitHub integration for a workspace
+ *     operationId: deleteWorkspaceGithub
+ *     description: |
+ *       Revokes the OAuth token via the GitHub API (best-effort), then atomically
+ *       deletes all GitHub-specific data: integration_tokens, github_connections,
+ *       workspace_github_webhooks, and webhook_dlq entries for the github provider.
+ *       Writes an integration_audit_log entry for the disconnect. Pipeline runs
+ *       continue but without GitHub integration features.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: GitHub integration disconnected successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 disconnected:
+ *                   type: boolean
+ *       404:
+ *         description: No GitHub connection found for this workspace
+ *       500:
+ *         description: Internal server error
+ */
+router.delete('/', async (req: Request, res: Response) => {
+  const workspaceId = req.params.id;
+  try {
+    // Check if any GitHub connection exists (OAuth or webhook)
+    const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
+    const userId = userRow?.id ?? null;
+
+    const oauthConn = userId
+      ? await queryOne<Pick<GitHubConnectionRow, 'id' | 'encrypted_token'>>(
+          'SELECT id, encrypted_token FROM github_connections WHERE user_id = $1',
+          [userId],
+        )
+      : null;
+
+    const webhookConn = await queryOne<GithubWebhookRow>(
+      'SELECT * FROM workspace_github_webhooks WHERE workspace_id = $1',
+      [workspaceId],
+    );
+
+    const hasTokens = await queryOne<{ cnt: string }>(
+      "SELECT COUNT(*)::text AS cnt FROM integration_tokens WHERE workspace_id = $1 AND provider = 'github'",
+      [workspaceId],
+    );
+
+    if (!oauthConn && !webhookConn && Number(hasTokens?.cnt ?? 0) === 0) {
+      throw new NotFoundError('No GitHub connection found for this workspace');
+    }
+
+    // 1. Revoke OAuth token via GitHub API (best-effort, before local cleanup)
+    if (oauthConn) {
+      const clientId = process.env.GITHUB_CLIENT_ID;
+      const clientSecret = process.env.GITHUB_CLIENT_SECRET;
+      if (clientId && clientSecret) {
+        try {
+          const token = decryptToken(oauthConn.encrypted_token);
+          const revokeRes = await githubRateLimiter.execute(() =>
+            fetch(`https://api.github.com/applications/${clientId}/token`, {
+              method: 'DELETE',
+              headers: {
+                Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+                Accept: 'application/vnd.github+json',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ access_token: token }),
+            }),
+          );
+          if (!revokeRes.ok && revokeRes.status !== 404 && revokeRes.status !== 422) {
+            logger.warn({ status: revokeRes.status }, '[GitHub] Token revocation returned non-success (proceeding with local cleanup)');
+          }
+        } catch (revokeErr) {
+          logger.warn({ err: revokeErr }, '[GitHub] Token revocation failed (proceeding with local cleanup)');
+        }
+      } else {
+        logger.warn('[GitHub] GITHUB_CLIENT_ID/SECRET not configured — skipping token revocation');
+      }
+    }
+
+    // 2. Atomic local cleanup
+    await transaction(async (client) => {
+      // Delete integration_tokens for github provider
+      await client.query(
+        "DELETE FROM integration_tokens WHERE workspace_id = $1 AND provider = 'github'",
+        [workspaceId],
+      );
+
+      // Delete github_connections (OAuth record)
+      if (oauthConn) {
+        await client.query('DELETE FROM github_connections WHERE id = $1', [oauthConn.id]);
+        if (userId) {
+          await client.query("UPDATE users SET github_id = NULL, updated_at = NOW() WHERE id = $1", [userId]);
+        }
+      }
+
+      // Delete workspace_github_webhooks
+      await client.query('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [workspaceId]);
+
+      // Clear webhook_dlq entries for github provider in this workspace
+      await client.query(
+        "DELETE FROM webhook_dlq WHERE workspace_id = $1 AND provider = 'github'",
+        [workspaceId],
+      );
+
+      // Write audit log entry
+      await client.query(
+        `INSERT INTO integration_audit_log (workspace_id, provider, action, actor_type, actor_id, details)
+         VALUES ($1, 'github', 'integration_disconnected', 'user', $2, $3)`,
+        [
+          workspaceId,
+          userId,
+          JSON.stringify({
+            repoOwner: webhookConn?.repo_owner ?? null,
+            repoName: webhookConn?.repo_name ?? null,
+            hadOAuth: !!oauthConn,
+            hadWebhook: !!webhookConn,
+          }),
+        ],
+      );
+    });
+
+    // 3. WAL event (outside transaction — fire-and-forget)
+    await execute(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_disconnected', $1, $2)",
+      [workspaceId, JSON.stringify({
+        repoOwner: webhookConn?.repo_owner ?? null,
+        repoName: webhookConn?.repo_name ?? null,
+      })],
+    );
+
+    res.json({ disconnected: true });
+  } catch (error: any) {
+    if (error instanceof NotFoundError) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    logger.error('[GitHub] Full disconnect error:', error);
     res.status(500).json({ error: error.message });
   }
 });
