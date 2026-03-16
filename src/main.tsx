@@ -4,6 +4,7 @@ import { BrowserRouter } from 'react-router-dom';
 import './styles/tokens.css';
 import './styles/index.css';
 import App from './App';
+import { PaywallProvider } from './contexts/PaywallContext';
 
 // Global handler for unhandled promise rejections
 window.addEventListener('unhandledrejection', (event) => {
@@ -19,6 +20,8 @@ window.addEventListener('unhandledrejection', (event) => {
 
 ReactDOM.createRoot(document.getElementById('root')!).render(
   <BrowserRouter>
-    <App />
+    <PaywallProvider>
+      <App />
+    </PaywallProvider>
   </BrowserRouter>,
 );

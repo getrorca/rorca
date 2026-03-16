@@ -40,6 +40,17 @@ export function dispatch401() {
   window.dispatchEvent(new CustomEvent('rorca:auth-expired'));
 }
 
+// Custom event for 402 paywall gating (PaywallContext listens)
+export interface PaywallDetail {
+  feature?: string;
+  currentPlan?: string;
+  requiredPlan?: string;
+  message?: string;
+}
+export function dispatch402(detail: PaywallDetail) {
+  window.dispatchEvent(new CustomEvent('rorca:paywall-required', { detail }));
+}
+
 // ─── Token storage (in-memory — XSS safety) ──────────────────────────────────
 
 let accessToken: string | null = null;
@@ -220,6 +231,23 @@ export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: 
 
   if (!res.ok) {
     const errText = await res.text();
+
+    // 402 — paywall gating: dispatch event for PaywallModal, suppress toast
+    if (res.status === 402) {
+      try {
+        const body = JSON.parse(errText);
+        dispatch402({
+          feature: body.feature,
+          currentPlan: body.currentPlan,
+          requiredPlan: body.requiredPlan,
+          message: body.message || body.error,
+        });
+      } catch {
+        dispatch402({ message: errText });
+      }
+      throw parseErrorBody(res.status, errText);
+    }
+
     // 429 is transient (rate limit window resets soon) — never show toast.
     // Also skip toast if caller passed silent:true (background polling).
     if (res.status !== 429 && !opts?.silent) {

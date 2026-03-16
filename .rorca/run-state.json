@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T20:23:16.653Z",
+  "lastUpdatedAt": "2026-03-16T21:20:53.170Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -81,6 +81,15 @@
       "finishedAt": "2026-03-16T20:23:16.653Z",
       "agentType": "claude",
       "elapsedMs": 318107
+    },
+    {
+      "storyId": "BL-005",
+      "title": "Paywall UI modal — PaywallModal component and PaywallContext",
+      "status": "passed",
+      "startedAt": "2026-03-16T21:16:08.859Z",
+      "finishedAt": "2026-03-16T21:20:53.169Z",
+      "agentType": "claude",
+      "elapsedMs": 284310
     }
   ],
   "failedStories": [],
