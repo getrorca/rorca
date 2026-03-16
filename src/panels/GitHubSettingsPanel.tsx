@@ -75,15 +75,20 @@ export default function GitHubSettingsPanel() {
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
 
-  // Disconnect (webhook)
+  // Disconnect (webhook — legacy per-section)
   const [disconnectToken, setDisconnectToken] = useState('');
   const [showDisconnect, setShowDisconnect] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [disconnectError, setDisconnectError] = useState<string | null>(null);
 
-  // OAuth disconnect
+  // OAuth disconnect (legacy per-section)
   const [disconnectingOAuth, setDisconnectingOAuth] = useState(false);
   const [showOAuthDisconnect, setShowOAuthDisconnect] = useState(false);
+
+  // Full disconnect (unified — DELETE /api/workspaces/:id/github)
+  const [showFullDisconnect, setShowFullDisconnect] = useState(false);
+  const [fullDisconnecting, setFullDisconnecting] = useState(false);
+  const [fullDisconnectError, setFullDisconnectError] = useState<string | null>(null);
 
   // Test connection
   const [testing, setTesting] = useState(false);
@@ -222,6 +227,24 @@ export default function GitHubSettingsPanel() {
       // silent
     } finally {
       setDisconnectingOAuth(false);
+    }
+  }
+
+  async function handleFullDisconnect() {
+    if (!workspaceId) return;
+    setFullDisconnecting(true);
+    setFullDisconnectError(null);
+    try {
+      await apiFetch<{ disconnected: boolean }>(`/api/workspaces/${workspaceId}/github`, {
+        method: 'DELETE',
+      });
+      setAccount({ connected: false });
+      setStatus({ connected: false });
+      setShowFullDisconnect(false);
+    } catch (err: unknown) {
+      setFullDisconnectError(err instanceof Error ? err.message : 'Failed to disconnect');
+    } finally {
+      setFullDisconnecting(false);
     }
   }
 
@@ -751,6 +774,70 @@ export default function GitHubSettingsPanel() {
           </button>
         </div>
       </section>
+
+      {/* ─── Section 6: Full Disconnect ──────────────────────────────── */}
+      {(account?.connected || status?.connected) && (
+        <section className="border-t border-border pt-6 pb-8">
+          <div className="flex items-center gap-2 mb-3">
+            <Unlink size={18} className="text-red-400" />
+            <h2 className="text-sm font-semibold text-red-400">Disconnect GitHub</h2>
+          </div>
+          <p className="text-xs text-muted mb-4">
+            Remove all GitHub integration data from this workspace. Pipeline runs will continue but without GitHub features.
+          </p>
+
+          {!showFullDisconnect ? (
+            <button
+              onClick={() => setShowFullDisconnect(true)}
+              className="px-4 py-2 text-sm rounded text-red-400 border border-red-500/30 hover:bg-red-500/10 transition-colors flex items-center gap-1.5"
+            >
+              <Unlink size={14} />
+              Disconnect GitHub
+            </button>
+          ) : (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-4 space-y-3">
+              <p className="text-sm text-red-400 font-medium">Are you sure?</p>
+              <p className="text-xs text-muted">
+                This will revoke the OAuth token and remove all GitHub-specific data.
+                Pipeline runs will continue but without GitHub integration.
+              </p>
+
+              {fullDisconnectError && (
+                <div className="flex items-center gap-1.5 text-xs text-red-400">
+                  <AlertCircle size={12} /> {fullDisconnectError}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <button
+                  onClick={handleFullDisconnect}
+                  disabled={fullDisconnecting}
+                  className="px-3 py-1.5 text-sm rounded bg-red-600 text-white hover:bg-red-500 disabled:opacity-50 transition-colors flex items-center gap-1.5"
+                >
+                  {fullDisconnecting ? (
+                    <>
+                      <Loader2 size={14} className="animate-spin" />
+                      Disconnecting...
+                    </>
+                  ) : (
+                    <>
+                      <Unlink size={14} />
+                      Confirm Disconnect
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => { setShowFullDisconnect(false); setFullDisconnectError(null); }}
+                  disabled={fullDisconnecting}
+                  className="px-3 py-1.5 text-sm rounded border border-border hover:bg-panel transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }
