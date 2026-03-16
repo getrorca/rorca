@@ -137,6 +137,81 @@ const DirectionUpsertSchema = z.object({
   skipValidation: z.boolean().optional(),
 });
 
+/**
+ * @swagger
+ * /api/direction:
+ *   put:
+ *     tags: [Direction Stack]
+ *     summary: Upsert a direction layer
+ *     operationId: upsertDirectionLayer
+ *     description: >
+ *       Creates or updates a direction layer (L1, L2, or L3) with YAML content.
+ *       L1 is global and applies to all workspaces. L2 is scoped to a domain.
+ *       L3 is scoped to a specific workspace. The preferredModel field is only
+ *       valid for L3 (workspace-scoped layer). Content is validated as YAML
+ *       unless skipValidation is true.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [layer, contentYaml]
+ *             properties:
+ *               layer:
+ *                 type: integer
+ *                 enum: [1, 2, 3]
+ *                 description: Direction layer number (1=global, 2=domain, 3=workspace)
+ *                 example: 3
+ *               contentYaml:
+ *                 type: string
+ *                 description: YAML content for the direction layer
+ *                 example: "stack: react\ndatabase: postgres"
+ *               workspaceId:
+ *                 type: string
+ *                 description: Required for L3; the workspace this layer applies to
+ *                 example: cashflow-ai
+ *               domain:
+ *                 type: string
+ *                 description: Domain tag for L2 layers (e.g. saas, fintech)
+ *                 example: saas
+ *               preferredModel:
+ *                 type: string
+ *                 nullable: true
+ *                 description: Preferred LLM model for spec generation (L3 only)
+ *                 example: claude-sonnet-4-6
+ *               skipValidation:
+ *                 type: boolean
+ *                 description: Skip YAML schema validation (default false)
+ *                 example: false
+ *     responses:
+ *       200:
+ *         description: Direction layer upserted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean, example: true }
+ *       400:
+ *         description: preferredModel only valid for layer 3
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       422:
+ *         description: Invalid YAML syntax or schema validation failed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.put('/', validateBody(DirectionUpsertSchema), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { layer, workspaceId, domain, contentYaml, preferredModel, skipValidation } = req.body;

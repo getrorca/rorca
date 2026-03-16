@@ -769,6 +769,81 @@ function requireRole(...roles: string[]) {
 `,
 };
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/context-files/create-skill:
+ *   post:
+ *     tags: [Context Files]
+ *     summary: Create a new skill file in .rorca/skills/
+ *     operationId: createSkillFile
+ *     description: >
+ *       Creates a new skill markdown file at .rorca/skills/{filename}.md in the
+ *       workspace directory. Optionally uses a predefined template. Returns the
+ *       path and metadata of the created file.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *         example: cashflow-ai
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [filename]
+ *             properties:
+ *               filename:
+ *                 type: string
+ *                 description: Filename for the skill (without extension, or with .md)
+ *                 example: react-hooks
+ *               template:
+ *                 type: string
+ *                 description: Template ID to use as initial content (optional)
+ *                 example: basic
+ *     responses:
+ *       201:
+ *         description: Skill file created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 created: { type: boolean, example: true }
+ *                 relativePath:
+ *                   type: string
+ *                   description: Path relative to workspace root
+ *                   example: .rorca/skills/react-hooks.md
+ *                 sizeBytes: { type: integer, example: 512 }
+ *                 modifiedAt: { type: string, format: date-time }
+ *       400:
+ *         description: Missing or invalid filename
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Workspace not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: File already exists at that path
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.post('/:id/context-files/create-skill', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {

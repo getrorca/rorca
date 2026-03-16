@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T08:29:44.855Z",
+  "lastUpdatedAt": "2026-03-16T09:08:58.112Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 156379
+    },
+    {
+      "storyId": "US-051",
+      "title": "API documentation completeness — @swagger on all routes",
+      "status": "passed",
+      "startedAt": "2026-03-16T08:49:45.356Z",
+      "finishedAt": "2026-03-16T09:08:58.109Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 1152753
     }
   ],
   "failedStories": [],
