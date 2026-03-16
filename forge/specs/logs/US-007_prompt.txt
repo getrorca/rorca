@@ -1338,21 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
-> Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-
-## 2026-03-12 [Bug Fix] MCP rorca_list_specs and rorca_list_runs wrong response shape
-> Rule: Both tools assumed wrong API response shapes. rorca_list_specs treated response as a bare array but API returns { items: [...] }. rorca_list_runs destructured { runs } but API returns { items: [...] }. Fixed by normalizing: Array.isArray(data) ? data : (data.items ?? []) for list_specs, and payload.runs ?? payload.items ?? [] for list_runs. Also fixed specName field: API uses specName not title — display as s.specName ?? s.title ?? s.id.
-
-## 2026-03-12 [Pattern] MCP tools vs prompts — tools are Claude-callable, prompts are user slash commands
-> Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
-
-## 2026-03-12 [Decision] GitHub org is getrorca — repo is github.com/getrorca/rorca (private)
-> Rule: The canonical remote for the Rorca codebase is https://github.com/getrorca/rorca (private repo). The old remote was sysgazer/rorcha — that is dead. All pushes go to getrorca/rorca. The repo is permanently closed source — never suggest open sourcing, BSL, or source-available licensing.
-
-## 2026-03-12 [Gotcha] Merging old SQLite-era branches with "take theirs" clobbers modern PostgreSQL files
-> Rule: NEVER merge old pre-postgres-migration branches (rorca-convention-agents, rorca-frontend-routing, and any branch with timestamp ~1772...) using "git checkout --theirs" on code conflicts. These branches were built on SQLite and will revert db/index.ts to the SQLite version, revert App.tsx/Sidebar.tsx/routes.tsx to the old multi-panel UI, and truncate server.ts. Always restore from a known-good modern commit (e.g. git show <pre-merge-sha>:path/to/file) after any such merge.
-
 ## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
 > Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
 
@@ -1398,70 +1383,22 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
 > Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
 
+## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
+> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
+
+## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
+> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
+
+## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
+> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
+
+## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
+> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
+
+## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
+> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
+
 Follow this workflow for implementation:
-## Agent Role: Frontend
-
-
-## Skill: react-review (relevance: 8)
----
-name: react-review
-description: Review React components for best practices and performance issues
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers
-  category: development
----
-
-# React Review Skill
-
-Review React components for best practices, performance issues, and common patterns.
-
-## When to use me
-
-Use this skill when:
-- Reviewing React component code
-- Optimizing component performance
-- Checking for React best practices
-- Refactoring legacy components
-- Auditing component architecture
-
-## What I do
-
-- Analyze React components for performance issues (unnecessary re-renders, large bundles)
-- Check for React best practices (hooks usage, prop patterns, state management)
-- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
-- Suggest optimizations (memoization, code splitting, lazy loading)
-- Review TypeScript usage and type safety
-
-## Key Patterns
-
-### Performance
-- Use `React.memo` for components receiving object/function props from parent
-- Memoize expensive calculations with `useMemo`
-- Stabilize callback references with `useCallback`
-- Avoid inline object/array creation in JSX props
-- Use `React.lazy` + `Suspense` for code splitting
-
-### Hooks
-- Always include all dependencies in `useEffect` dependency arrays
-- Never call hooks conditionally or inside loops
-- Extract complex logic into custom hooks
-- Clean up subscriptions and timers in useEffect return
-
-### TypeScript
-- Define explicit interfaces for all component props
-- Use discriminated unions for variant components
-- Prefer `interface` over `type` for component props
-- Use `React.FC` sparingly — prefer explicit return types
-
-## Notes
-
-- Focuses on React 18+ patterns and best practices
-- Considers both class and function components
-- Includes TypeScript and JavaScript variants
-- References official React documentation and community patterns
-
 ---
 name: rorca
 description: Implement and validate changes to the Rorca codebase with subagent-assisted context management.
@@ -1613,37 +1550,24 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-007):
-Add a non-blocking amber warning banner at the top of the Runs panel (`src/panels/RunsPanel.tsx`) when queue conditions indicate a potential problem — specifically when jobs have been pending too long or the worker appears stuck. This is a faster, more visible alert than the analytics panel chart for the common case of 'I triggered a run and nothing is happening.'
+The flush timer logic added in US-001 is embedded inside the worker's process spawning code, making it hard to unit test in isolation. Extract the buffering + flushing logic into a standalone `FlushBuffer` class in `backend/src/lib/flush-buffer.ts` that can be instantiated and tested independently.
 
-**Banner trigger conditions** (evaluated from worker/health queueStats):
-1. `oldestPendingAgeSeconds > 30` AND `active === 0`: A job has been pending for 30+ seconds with no active worker processing — likely the worker is down or stuck. Banner text: 'Worker appears stuck — N jobs have been queued for Xs. Check that the worker is running.'
-2. `queueHealth === 'critical'`: Banner text: 'N jobs failed in the queue. Go to Analytics > Queue Health for details.'
-3. `queueHealth === 'degraded'` AND `oldestPendingAgeSeconds > 120`: Banner text: 'Jobs are processing slowly (oldest pending: Xs). Worker may be overloaded.'
+The class should encapsulate:
+- `pending: Buffer` — the accumulation buffer
+- `CHUNK_SIZE: number` — configurable (default 4096)
+- `FLUSH_INTERVAL_MS: number` — configurable (default 500)
+- `onFlush: (data: Buffer) => Promise<void>` — callback invoked when flushing
+- `write(data: Buffer): void` — append data, trigger size-based flush if threshold reached, reset/start timer
+- `close(): Promise<void>` — flush remaining, clear timer
+- Internal timer management (setTimeout/clearTimeout)
 
-**Banner component**:
-- Amber background (`bg-amber-50 border-amber-200`), amber icon (ExclamationTriangle)
-- Dismissible per session (localStorage key `rorca_queue_banner_dismissed_<timestamp>` — auto-clears on next condition change)
-- Not dismissible when condition is `critical` — too important
-- Shows only one banner at a time (highest severity wins)
-- 'View queue →' link navigates to Analytics panel queue section
-- 'Check worker' link opens Settings > System tab
+Then refactor worker.ts `handleData()` to use `new FlushBuffer({ chunkSize: 4096, flushInterval: 500, onFlush: writeChunk })` instead of inline buffer management. The behavioral contract must remain identical — this is a refactor, not a feature change.
 
-**Data source**: Reuse the worker/health API data already fetched by the Runs panel (if it already polls this endpoint) or add a 30s polling hook. Do NOT add a separate API call if the data is already available via existing polling.
-
-**SSE-driven updates**: Listen to `queue_failed_jobs_detected` SSE event — immediately show/update the banner without waiting for the next poll cycle.
-
-## Context
-- **Runs panel location**: `src/panels/RunsPanel.tsx`. Read the existing component before adding — it likely has a header section where the banner should appear, above the run history table.
-- **Existing worker health polling**: Check if RunsPanel or a parent context already polls `GET /api/pipeline/worker/health` for the worker liveness indicator. If so, extend the existing hook rather than adding a duplicate fetch.
-- **localStorage dismiss key**: Include a timestamp component in the key (`rorca_queue_banner_dismissed_${Math.floor(Date.now() / 60000)}`) so the dismissal expires every minute — the banner will reappear if the condition persists.
-- **Priority order**: If both `critical` and `degraded` conditions are true, show only the `critical` banner. Never stack multiple banners.
-- **Navigation links**: Use `react-router-dom` `useNavigate` to navigate to `/analytics` (queue section) and `/settings/system` (worker tab). Do not use `window.location.href` — it causes full page reload.
-- **Mobile/compact**: Banner should be responsive — on narrow viewports, drop the 'View queue →' link text to just an icon.
+Update the Jest tests from US-004 to test FlushBuffer directly (simpler, no worker mocking needed).
 
 Acceptance Criteria:
-- Amber warning banner appears in Runs panel when oldestPendingAgeSeconds > 30 AND active === 0, indicating worker may be stuck
-- Banner appears when queueHealth is 'critical' with count of failed jobs
-- Banner is dismissible per session for 'degraded' conditions, non-dismissible for 'critical'
-- Only the highest-severity banner is shown — no stacking of multiple banners
-- Banner updates immediately on queue_failed_jobs_detected SSE event without waiting for next poll
-- Navigation links in the banner use react-router-dom useNavigate (no full page reload)
+- FlushBuffer class exists in backend/src/lib/flush-buffer.ts with write(), close(), and configurable onFlush callback
+- worker.ts handleData() uses FlushBuffer instead of inline buffer + timer management
+- FlushBuffer supports configurable CHUNK_SIZE (default 4096) and FLUSH_INTERVAL_MS (default 500)
+- The behavioral contract is identical — no change in observable flushing behavior from US-001
+- Jest tests from US-004 are updated to test FlushBuffer class directly

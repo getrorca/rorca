@@ -1552,11 +1552,20 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-001):
-Create a new `worker_settings` table (or extend an existing settings table) to persist the max_concurrent_runs value. Add a migration, a typed DB accessor, and a REST API endpoint so the setting can be read and written without touching .env or restarting the server. Default value must be 3. The endpoint should live under the existing settings API surface (e.g. GET/PUT /api/settings/worker) and return/accept { max_concurrent_runs: number } validated to range 1–10.
+The worker's handleData() in backend/src/worker.ts buffers subprocess stdout into a `pending` buffer and only writes to the `run_output_chunks` DB table when `pending.length >= CHUNK_SIZE` (4096 bytes). With sparse initial execution-engine output (LLM thinking, tool warm-up), the first visible terminal output takes 45-60 seconds to appear.
+
+Add a 500ms flush timer that writes whatever is in `pending` to the DB regardless of size. The timer must:
+1. Start/restart on each `handleData()` call (debounce pattern — 500ms after last data arrival)
+2. Be cleared when the size-based flush fires (coalesce — don't double-write the same bytes)
+3. Be cleared and force-flush remaining bytes when the child process exits (existing `close`/`exit` handler)
+4. Use `setInterval` or `setTimeout` — NOT `setImmediate` (too aggressive, would write every byte individually)
+5. Keep the existing 4KB size-based flush for throughput during heavy output bursts (compilation output, large diffs)
+
+The fix is localized to the `handleData()` function and the process exit cleanup in worker.ts. The `writeChunk()` helper that inserts into `run_output_chunks` already exists and handles sequence numbering.
 
 Acceptance Criteria:
-- Migration creates a `worker_settings` table with columns: id SERIAL PRIMARY KEY, key TEXT UNIQUE NOT NULL, value TEXT NOT NULL, updated_at TIMESTAMPTZ DEFAULT NOW(). Tracked in schema_migrations.
-- On startup, backend seeds the row ('max_concurrent_runs', '3') using INSERT ... ON CONFLICT DO NOTHING so existing customised values are preserved.
-- GET /api/settings/worker returns { max_concurrent_runs: number } with the current DB value. Returns 200 with default 3 when no custom value has been set.
-- PUT /api/settings/worker accepts { max_concurrent_runs: number }, validates it is an integer in range 1–10 (returns 422 with descriptive error outside range), persists to DB, and returns the updated value.
-- Route has @swagger JSDoc annotations so the endpoint appears in /api/docs.
+- A flush timer (500ms default) is added to handleData() that writes pending buffer contents to run_output_chunks regardless of buffer size
+- The timer is reset on each handleData() call so rapid data arrivals coalesce into a single write
+- When the size-based flush (4KB) fires, the timer is cleared to prevent double-writing the same data
+- When the child process exits, the timer is cleared and any remaining pending bytes are flushed immediately
+- The CHUNK_SIZE constant (4096) and size-based flush path remain unchanged for high-throughput scenarios

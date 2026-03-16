@@ -1338,21 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
-> Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-
-## 2026-03-12 [Bug Fix] MCP rorca_list_specs and rorca_list_runs wrong response shape
-> Rule: Both tools assumed wrong API response shapes. rorca_list_specs treated response as a bare array but API returns { items: [...] }. rorca_list_runs destructured { runs } but API returns { items: [...] }. Fixed by normalizing: Array.isArray(data) ? data : (data.items ?? []) for list_specs, and payload.runs ?? payload.items ?? [] for list_runs. Also fixed specName field: API uses specName not title — display as s.specName ?? s.title ?? s.id.
-
-## 2026-03-12 [Pattern] MCP tools vs prompts — tools are Claude-callable, prompts are user slash commands
-> Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
-
-## 2026-03-12 [Decision] GitHub org is getrorca — repo is github.com/getrorca/rorca (private)
-> Rule: The canonical remote for the Rorca codebase is https://github.com/getrorca/rorca (private repo). The old remote was sysgazer/rorcha — that is dead. All pushes go to getrorca/rorca. The repo is permanently closed source — never suggest open sourcing, BSL, or source-available licensing.
-
-## 2026-03-12 [Gotcha] Merging old SQLite-era branches with "take theirs" clobbers modern PostgreSQL files
-> Rule: NEVER merge old pre-postgres-migration branches (rorca-convention-agents, rorca-frontend-routing, and any branch with timestamp ~1772...) using "git checkout --theirs" on code conflicts. These branches were built on SQLite and will revert db/index.ts to the SQLite version, revert App.tsx/Sidebar.tsx/routes.tsx to the old multi-panel UI, and truncate server.ts. Always restore from a known-good modern commit (e.g. git show <pre-merge-sha>:path/to/file) after any such merge.
-
 ## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
 > Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
 
@@ -1398,11 +1383,26 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
 > Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
 
+## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
+> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
+
+## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
+> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
+
+## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
+> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
+
+## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
+> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
+
+## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
+> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
+
 Follow this workflow for implementation:
 ## Agent Role: Frontend
 
 
-## Skill: react-review (relevance: 8)
+## Skill: react-review (relevance: 9)
 ---
 name: react-review
 description: Review React components for best practices and performance issues
@@ -1613,48 +1613,21 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-006):
-Add a 'Queue Health' section to the Analytics panel (`src/panels/AnalyticsPanel.tsx`) that displays queue observability data using the new endpoints from US-002 and US-004. The section should appear only when there are active pipeline runs or queue data available — it should not clutter analytics for idle workspaces.
+Write Vitest tests that verify RunStoryList renders correctly within the Run View context and responds to live WAL event data. These tests validate the integration wiring from US-002.
 
-**Widget layout** (collapsed by default in idle state, auto-expands when degraded/critical):
+Create `src/__tests__/RunStoryListIntegration.test.tsx` (or add to existing test file if one exists for RunViewPanel):
 
-**Top row — Status bar**:
-- Green/amber/red dot with label: `Queue: healthy | degraded | critical` (from `queueHealth` field)
-- Four stat pills: `N pending`, `N active`, `N failed (24h)`, `N completed today`
-- If `queueHealth === 'critical'`: amber pulsing banner: 'Queue alert: N failed jobs require attention'
+1. **Renders in Run View**: Mount RunViewPanel with a mock run (runId, stories array), switch to Stories tab, verify RunStoryList is rendered (not the legacy StoriesListTab)
+2. **Story status transitions**: Simulate WAL events (story_started → story_passed) and verify the story card transitions from pending → running → passed with correct visual indicators
+3. **Live elapsed timer**: Simulate a story_started event, advance timers, verify the elapsed time display updates
+4. **Auto-scroll**: Render a list with 20+ stories, simulate story_started for story #15, verify the list scrolls to bring that story into view
+5. **Checkmark animation class**: Simulate story_passed, verify the checkmark element has the `animate-checkmark-pop` CSS class applied
 
-**Middle row — Per-queue breakdown table**:
-| Queue | Pending | Active | Failed |
-|-------|---------|--------|--------|
-| pipeline:run | 2 | 1 | 0 |
-| pipeline:retry | 0 | 0 | 1 |
-
-**Pickup latency card**:
-- Avg: 0.43s | P50: 0.38s | P95: 1.2s | Status: healthy
-- Small inline trend indicator: ↑ degraded vs last hour (compare current p95 to 1h ago from health-history)
-
-**Throughput chart** (line chart, last 24h from `GET /api/pipeline/queue/health-history?hours=24`):
-- Y-axis: pending + completed counts
-- X-axis: time
-- Two lines: 'Pending jobs' (amber) and 'Completed jobs' (green)
-- Data points every 60s from queue_health_snapshots
-
-**Failed jobs count with drill-down link**: If `failedInLast24h > 0`, show amber pill '2 failed jobs' with a link to Settings > System > Dead-letter Queue (US-008).
-
-**Auto-refresh**: Poll `GET /api/pipeline/worker/health` every 30 seconds. Reconnect on SSE `queue_failed_jobs_detected` event (from US-004 broadcastAll) to immediately update on new failures.
-
-## Context
-- **Analytics panel location**: `src/panels/AnalyticsPanel.tsx`. Read the existing panel structure before adding — it likely has sections for token usage, costs, velocity. Add the queue health section as a new collapsible section.
-- **Chart library**: Check what charting library is already used in the analytics panel (likely Recharts or a simple SVG-based chart). Do NOT add a new chart dependency — use what already exists.
-- **SSE event subscription**: The panel should subscribe to WAL SSE events at `GET /api/pipeline/stream` and listen for `queue_failed_jobs_detected` events. On receipt, immediately refetch worker/health. Use the existing `usePipelineSSE` hook from `src/hooks/usePipelineSSE.ts` if it supports event filtering.
-- **Collapsed/idle state**: When queue is healthy and no runs are active, show only the status bar (one line). Auto-expand on degraded/critical. This prevents the widget from dominating the analytics view.
-- **Tailwind styling**: Follow existing component styling. Use `amber-500` for degraded, `red-500` for critical, `green-500` for healthy. Pulsing animation: `animate-pulse` on critical state dot.
-- **Null handling**: If worker is offline (health endpoint returns error), show 'Worker offline — queue data unavailable' instead of empty stats. Do NOT show zero counts when data is unavailable — that's misleading.
+Use `@testing-library/react` for rendering and assertions. Mock `usePipelineSSE` to provide controlled WAL events. Mock `apiFetch` for run data.
 
 Acceptance Criteria:
-- Analytics panel has a Queue Health section showing queueHealth status (healthy/degraded/critical), job counts by state, and per-queue breakdown table
-- When queueHealth is 'critical', an amber pulsing banner appears: 'Queue alert: N failed jobs require attention'
-- Throughput chart displays time-series data from /api/pipeline/queue/health-history for the last 24h with pending (amber) and completed (green) lines
-- Pickup latency card shows avg, P50, and P95 with a status indicator and trend comparison vs 1 hour ago
-- When failedInLast24h > 0, an amber pill with count links to Settings > System > Dead-letter Queue
-- Widget auto-refreshes every 30s and immediately updates on receipt of queue_failed_jobs_detected SSE event
-- When worker is offline, widget shows 'Worker offline — queue data unavailable' instead of misleading zero counts
+- Test file src/__tests__/RunStoryListIntegration.test.tsx exists with at least 5 test cases
+- A test verifies RunStoryList (not StoriesListTab) renders in the Run View stories tab
+- A test verifies story status transitions from pending → running → passed when WAL events arrive
+- A test verifies the animate-checkmark-pop CSS class is applied to passed stories
+- All tests pass when run with: npx vitest run --reporter=verbose RunStoryListIntegration

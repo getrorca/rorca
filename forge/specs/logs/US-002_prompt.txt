@@ -1399,179 +1399,68 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
 Follow this workflow for implementation:
-## Agent Role: Backend Routes
+## Agent Role: Frontend
 
 
-## Skill: logging-fundamentals (relevance: 8)
+## Skill: react-review (relevance: 9)
 ---
-name: logging-fundamentals
-description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
+name: react-review
+description: Review React components for best practices and performance issues
 license: MIT
 compatibility: opencode
 metadata:
-  audience: developers, SREs, DevOps engineers
-  category: observability
+  audience: developers
+  category: development
 ---
 
-# Logging Fundamentals
+# React Review Skill
 
-Establish proper logging practices including log levels, structured logging, context propagation, and comprehensive logging strategies for applications, services, and infrastructure.
+Review React components for best practices, performance issues, and common patterns.
 
 ## When to use me
 
 Use this skill when:
-- Setting up logging for new applications or services
-- Reviewing existing logging implementations
-- Establishing logging standards for teams or projects
-- Debugging issues with incomplete or poor logging
-- Implementing structured logging for better observability
-- Configuring log levels and verbosity for different environments
-- Ensuring logs contain sufficient context for troubleshooting
+- Reviewing React component code
+- Optimizing component performance
+- Checking for React best practices
+- Refactoring legacy components
+- Auditing component architecture
 
 ## What I do
 
-### 1. Log Level Management
-- **Define appropriate log levels** (DEBUG, INFO, WARN, ERROR, FATAL)
-- **Configure level filtering** per environment (development, staging, production)
-- **Implement dynamic level adjustment** without application restarts
-- **Establish level usage guidelines** for different types of information
-
-### 2. Structured Logging Implementation
-- **Design log schema** with consistent field naming and types
-- **Implement structured formats** (JSON, key-value pairs, structured text)
-- **Include mandatory context fields** (timestamp, service, trace_id, user_id, etc.)
-- **Handle nested structures and arrays** appropriately in logs
-
-### 3. Context Propagation
-- **Implement correlation IDs** for request tracing across services
-- **Propagate context through async operations** (queues, background jobs)
-- **Maintain user/session context** throughout request lifecycle
-- **Include business context** (order_id, transaction_id, etc.) in logs
-
-### 4. Log Content Best Practices
-- **Include sufficient context** for debugging without external systems
-- **Balance detail with noise** - log enough but not too much
-- **Use consistent message formats** across the codebase
-- **Log before and after significant operations**
-- **Include error details** (stack traces, error codes, recovery suggestions)
-- **Avoid logging secrets, passwords, or sensitive data**
-
-## Logging Principles
-
-### The 5 Ws of Logging
-1. **WHO** - Which user/service/process generated the log?
-2. **WHAT** - What action/event is being logged?
-3. **WHEN** - Precise timestamp with timezone information
-4. **WHERE** - Which component/function/file generated the log?
-5. **WHY** - What is the significance/severity of the logged event?
-
-### Structured Logging Fields
-```json
-{
-  "timestamp": "2026-02-26T18:00:00Z",
-  "level": "INFO",
-  "service": "spec-generator",
-  "component": "chatComplete",
-  "trace_id": "gen-abc123",
-  "message": "LLM call completed",
-  "duration_ms": 5123,
-  "context": {
-    "model": "claude-sonnet-4-5-20250929",
-    "input_tokens": 12000,
-    "output_tokens": 4500
-  }
-}
-```
-
-### Log Level Guidelines
-- **DEBUG**: Detailed information for debugging, typically disabled in production
-- **INFO**: Routine information about normal operation
-- **WARN**: Warning conditions that might require attention but don't indicate failure
-- **ERROR**: Error conditions that indicate failure of a specific operation
-- **FATAL**: Critical errors that cause application termination
-
-## Notes
-
-- **Structured logging is essential** for modern log analysis and observability
-- **Context is more important than message content** - ensure logs can be correlated
-- **Log levels should reflect operational importance**, not developer convenience
-- **Consider log volume** - too many logs can overwhelm systems and teams
-- **Balance human readability with machine parsability** in log formats
-
-## Skill: workflow-orchestrator (relevance: 6)
----
-name: workflow-orchestrator
-description: Build and orchestrate AI-driven development workflows that iterate until success using configurable patterns and multi-agent coordination
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers, AI agents, team leads
-  category: workflow
----
-
-# Workflow Orchestrator
-
-Design, configure, and execute AI-driven development workflows that iterate until tasks complete successfully using configurable patterns, multi-agent coordination, and intelligent stop conditions.
-
-## When to use me
-
-Use this skill when:
-- Building complex features requiring multiple AI agent passes
-- Implementing automated development workflows with verification steps
-- Coordinating parallel AI agents for different aspects of a task
-- Creating self-correcting loops that iterate until success criteria met
-- Need to orchestrate multiple AI agents in sequence or parallel
-
-## What I do
-
-### 1. Workflow Pattern Selection
-- **Analyze task requirements** to recommend optimal workflow patterns
-- **Match complexity levels** with appropriate workflow types
-- **Compare trade-offs** between speed, cost, control, and quality
-
-### 2. Multi-Agent Coordination
-- **Sequence agents** for linear workflows (build → verify → plan)
-- **Parallelize agents** for concurrent execution
-- **Handle failures and retries** with intelligent routing
-- **Implement steering patterns** (linear, conditional, parallel, unblocking)
-
-### 3. SSE Event Streaming
-- **Real-time monitoring** via Server-Sent Events
-- **Progress tracking** across workflow stages
-- **Live output streaming** from subprocess execution
-- **Late-joiner replay** from in-memory buffers
-
-### 4. Integration & Tooling
-- **Subprocess management** for isolated agent execution
-- **Output buffer management** with subscriber patterns
-- **Structured event emission** for semantic log parsing
-- **Git integration** for automated quality gates
+- Analyze React components for performance issues (unnecessary re-renders, large bundles)
+- Check for React best practices (hooks usage, prop patterns, state management)
+- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
+- Suggest optimizations (memoization, code splitting, lazy loading)
+- Review TypeScript usage and type safety
 
 ## Key Patterns
 
-### Subprocess → SSE → Terminal Pattern
-```
-Backend spawns subprocess (claude --print, opencode run)
-  → stdout/stderr piped to in-memory buffer
-  → buffer broadcasts to SSE subscribers
-  → SSE endpoint replays buffer + live chunks
-  → Frontend EventSource connects, writes to xterm.js
-  → Late joiners get full replay automatically
-```
+### Performance
+- Use `React.memo` for components receiving object/function props from parent
+- Memoize expensive calculations with `useMemo`
+- Stabilize callback references with `useCallback`
+- Avoid inline object/array creation in JSX props
+- Use `React.lazy` + `Suspense` for code splitting
 
-### Buffer Management
-- In-memory circular buffer per generation/run ID
-- Subscribers added/removed on SSE connect/disconnect
-- Auto-cleanup after TTL (30 min default)
-- Base64 encoding for binary-safe transport
+### Hooks
+- Always include all dependencies in `useEffect` dependency arrays
+- Never call hooks conditionally or inside loops
+- Extract complex logic into custom hooks
+- Clean up subscriptions and timers in useEffect return
+
+### TypeScript
+- Define explicit interfaces for all component props
+- Use discriminated unions for variant components
+- Prefer `interface` over `type` for component props
+- Use `React.FC` sparingly — prefer explicit return types
 
 ## Notes
 
-- **Start simple** — single agent pattern before scaling to multi-agent
-- **Monitor costs** — parallel agents increase expense
-- **Implement escape hatches** — always have manual stop conditions
-- **Use structured events** alongside raw output for dual-mode rendering
-- **Buffer management is critical** — memory leaks from uncleaned buffers
+- Focuses on React 18+ patterns and best practices
+- Considers both class and function components
+- Includes TypeScript and JavaScript variants
+- References official React documentation and community patterns
 
 ---
 name: rorca
@@ -1724,11 +1613,21 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-002):
-Replace the hardcoded `teamSize: 3` in worker.ts (introduced by PG-020) with a value fetched from the DB at startup and polled every 30 seconds. When the polled value differs from the active value, gracefully stop the current `boss.work('pipeline:run', ...)` subscription and restart it with the new teamSize, without restarting the worker process or losing in-flight jobs. Use pg-boss's `boss.offWork()` (or equivalent stop API) before re-registering via `boss.work()`.
+The Run View panel (src/panels/RunViewPanel.tsx) renders a legacy `StoriesListTab` component (defined inline, lines 165-364) for the stories tab. This is a static list with colored dots and plain text — no live elapsed timers, no running story indicator, no micro-animations, no real-time WAL event integration.
+
+Meanwhile, `src/components/RunStoryList.tsx` (1010 lines) already implements all the desired features: live elapsed timers per story, auto-scroll to the currently running story, checkmark pop animation (animate-checkmark-pop), green flash animation (animate-story-pass), WAL event integration for real-time status updates, wave group visualization, and keyboard navigation (j/k).
+
+Replace the `<StoriesListTab />` usage in RunViewPanel's tab rendering with `<RunStoryList />`. Wire the required props:
+- `runId` from the current run
+- `stories` from the run data (story_results or spec userStories)
+- `walEvents` from the `usePipelineSSE` hook already used in RunViewPanel
+- Any other required props (onStoryClick, compact mode, etc.)
+
+After wiring, remove or comment out the legacy `StoriesListTab` function definition (lines 165-364) to prevent confusion. Do NOT delete it entirely yet — mark it as `@deprecated` in case rollback is needed.
 
 Acceptance Criteria:
-- On worker startup, `getMaxConcurrentRuns()` fetches the value from the `worker_settings` table (via the DB pool) and uses it as the initial teamSize passed to `boss.work()`.
-- A polling interval (default 30s, configurable via WORKER_SETTINGS_POLL_MS env var) checks the DB for the current value. If the value has changed, the worker calls `boss.offWork('pipeline:run')` then re-registers `boss.work('pipeline:run', handler, { teamSize: newValue })` without exiting.
-- In-flight jobs are not interrupted during the reload — the worker waits for the current batch to drain (or relies on pg-boss's graceful stop behavior) before re-subscribing.
-- Worker logs a structured message at INFO level when teamSize changes: `[worker] max_concurrent_runs changed 3 → 5, reloading work subscription`.
-- WORKER_SETTINGS_POLL_MS defaults to 30000 and is documented in backend/.env.example (or similar reference file).
+- RunStoryList component is rendered in the Run View stories tab instead of the legacy StoriesListTab
+- RunStoryList receives runId, stories array, and walEvents from usePipelineSSE as props
+- Live elapsed timers appear next to running stories and increment in real-time
+- The currently running story auto-scrolls into view when it starts
+- The legacy StoriesListTab function is marked @deprecated with a comment explaining it was replaced by RunStoryList

@@ -1399,10 +1399,10 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
 Follow this workflow for implementation:
-## Agent Role: Execution Engine
+## Agent Role: Frontend
 
 
-## Skill: react-review (relevance: 9)
+## Skill: react-review (relevance: 7)
 ---
 name: react-review
 description: Review React components for best practices and performance issues
@@ -1613,11 +1613,20 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-003):
-Add a labelled number input (range 1–10, step 1) to the Settings > Execution Engine tab (SettingsPanel.tsx, tab id 'agents' or 'providers' — whichever currently renders execution engine options). The control must load the current value from GET /api/settings/worker on mount, allow the user to change it, and save via PUT /api/settings/worker on blur or an explicit Save button. Include an inline helper note explaining the practical ceiling by subscription tier.
+After US-002 wires RunStoryList into the stories tab, users watching the Terminal tab (the default tab) still miss story completions because they happen silently. The terminal shows raw agent output but no structured progress markers.
+
+When a `story_passed` or `story_failed` WAL event arrives via `usePipelineSSE`, inject a visible ANSI-colored marker line into the xterm terminal instance:
+- **Passed**: `\x1b[32m✓ US-001: Add user login — passed (2m 34s)\x1b[0m\n` (green text)
+- **Failed**: `\x1b[31m✗ US-002: Add OAuth flow — failed (5m 12s)\x1b[0m\n` (red text)
+- **Skipped**: `\x1b[33m⊘ US-003: Add SSO — skipped (blocked by US-002)\x1b[0m\n` (yellow text)
+
+The injection point is in the RunViewPanel or RunTerminal component where the xterm Terminal instance is accessible. Use `terminal.write()` to inject the marker. The marker should appear at the current cursor position (after the last line of agent output).
+
+The elapsed time comes from the WAL event payload (`startedAt` → `completedAt` diff). The story title comes from the stories array or the WAL event payload.
 
 Acceptance Criteria:
-- The number input renders under a 'Pipeline Concurrency' section heading in Settings > Execution Engine tab. It shows the current DB value on load (fetched via apiFetch, never hardcoded).
-- Input is constrained: min=1, max=10, step=1. Submitting a value outside this range is prevented by both HTML attributes and client-side validation (error toast shown).
-- On successful save, a success toast ('Max concurrent runs updated') appears. On API error, an error toast with the API error message is shown.
-- An inline note below the input reads: 'Claude Pro: recommended 2–3 concurrent runs. Claude Max / Max 5×: up to 10.' (exact text).
-- The input is disabled while the save request is in flight to prevent double-submit.
+- When a story_passed WAL event arrives, a green checkmark line (✓ US-XXX: Title — passed (elapsed)) is written to the xterm terminal
+- When a story_failed WAL event arrives, a red X line (✗ US-XXX: Title — failed) is written to the xterm terminal
+- When a story_skipped WAL event arrives, a yellow skip marker (⊘ US-XXX: Title — skipped) is written to the xterm terminal
+- Marker lines use ANSI color codes and are visually distinct from regular agent output
+- Elapsed time is computed from WAL event payload timestamps (startedAt to completedAt)
