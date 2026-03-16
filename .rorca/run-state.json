@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T08:48:05.697Z",
+  "lastUpdatedAt": "2026-03-16T08:49:30.630Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -15,14 +15,14 @@
       "elapsedMs": 156379
     },
     {
-      "storyId": "US-009",
-      "title": "Landing page legal pages — /terms and /privacy",
+      "storyId": "US-012",
+      "title": "GitHub Actions release workflow — build binaries on tag push",
       "status": "passed",
-      "startedAt": "2026-03-16T08:47:51.288Z",
-      "finishedAt": "2026-03-16T08:48:05.696Z",
+      "startedAt": "2026-03-16T08:47:51.301Z",
+      "finishedAt": "2026-03-16T08:49:30.630Z",
       "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 14408
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 99329
     }
   ],
   "failedStories": [],

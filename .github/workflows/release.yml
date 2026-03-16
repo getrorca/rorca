@@ -56,29 +56,25 @@ jobs:
 
   # ── Step 6: Matrix build — 4 parallel jobs producing platform binaries ──
   build:
-    name: Build ${{ matrix.name }}
+    name: Building ${{ matrix.name }}...
     needs: validate
-    runs-on: ${{ matrix.os }}
+    runs-on: ubuntu-latest
     strategy:
       fail-fast: false
       matrix:
         include:
-          - os: macos-14
-            target: bun-darwin-arm64
+          - target: bun-darwin-arm64
             binary: rorca-darwin-arm64
-            name: macOS ARM64
-          - os: macos-13
-            target: bun-darwin-x64
+            name: darwin-arm64
+          - target: bun-darwin-x64
             binary: rorca-darwin-x64
-            name: macOS x64
-          - os: ubuntu-latest
-            target: bun-linux-x64
+            name: darwin-x64
+          - target: bun-linux-x64
             binary: rorca-linux-x64
-            name: Linux x64
-          - os: ubuntu-latest
-            target: bun-windows-x64
-            binary: rorca-windows-x64.exe
-            name: Windows x64
+            name: linux-x64
+          - target: bun-windows-x64
+            binary: rorca-win32-x64.exe
+            name: win32-x64
 
     steps:
       - uses: actions/checkout@v4
@@ -104,23 +100,51 @@ jobs:
           name: frontend-dist
           path: dist/
 
-      - name: Build binary
+      - name: Building ${{ matrix.name }}...
+        env:
+          RORCA_VERSION: ${{ github.ref_name }}
         run: bash scripts/build-binaries.sh --target ${{ matrix.target }} --output build/${{ matrix.binary }}
 
-      - name: Upload binary artifact
+      - name: Uploading assets...
         uses: actions/upload-artifact@v4
         with:
           name: binary-${{ matrix.binary }}
           path: build/${{ matrix.binary }}
           retention-days: 1
 
-  # ── Steps 7-8: Create release and upload assets ──
-  release:
-    name: Create Release
+  # ── Step 9: Smoke test linux-x64 binary ──
+  smoke-test:
+    name: Smoke test linux-x64
     needs: build
     runs-on: ubuntu-latest
     steps:
+      - name: Download linux-x64 binary
+        uses: actions/download-artifact@v4
+        with:
+          name: binary-rorca-linux-x64
+          path: ./
+
+      - name: Running smoke test...
+        run: |
+          chmod +x ./rorca-linux-x64
+          VERSION_OUTPUT=$(./rorca-linux-x64 --version)
+          echo "Binary version output: $VERSION_OUTPUT"
+          if echo "$VERSION_OUTPUT" | grep -q "${{ github.ref_name }}"; then
+            echo "Smoke test passed: version output contains ${{ github.ref_name }}"
+          else
+            echo "Smoke test FAILED: expected '${{ github.ref_name }}' in version output, got '$VERSION_OUTPUT'"
+            exit 1
+          fi
+
+  # ── Steps 7-8: Generate release notes + create release + upload assets ──
+  release:
+    name: Create Release
+    needs: [build, smoke-test]
+    runs-on: ubuntu-latest
+    steps:
       - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
 
       - name: Download all binary artifacts
         uses: actions/download-artifact@v4
@@ -136,17 +160,34 @@ jobs:
         id: version
         run: echo "version=${GITHUB_REF_NAME#v}" >> "$GITHUB_OUTPUT"
 
-      # Step 7: Create GitHub Release with auto-generated notes
-      # Step 8: Upload all 4 binaries + LICENSE as release assets
-      - name: Create GitHub Release
+      # Step 7: Generate release notes from git log since last tag
+      - name: Generate release notes
+        id: notes
+        run: |
+          CURRENT_TAG="${GITHUB_REF_NAME}"
+          # Find the previous tag; fall back to initial commit if this is the first release
+          PREV_TAG=$(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)
+          echo "Generating notes from ${PREV_TAG}..${CURRENT_TAG}"
+          {
+            echo "## What's Changed"
+            echo ""
+            git log --oneline "${PREV_TAG}..HEAD" --pretty=format:"- %s (%h)"
+            echo ""
+            echo ""
+            echo "**Full Changelog**: https://github.com/${{ github.repository }}/compare/${PREV_TAG}...${CURRENT_TAG}"
+          } > release-notes.txt
+          cat release-notes.txt
+
+      # Step 8: Create GitHub Release and upload all 4 binaries as release assets
+      - name: Uploading assets...
         env:
           GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
         run: |
           gh release create "$GITHUB_REF_NAME" \
-            --title "Rorca v${{ steps.version.outputs.version }}" \
-            --generate-notes \
+            --title "Rorca ${{ github.ref_name }}" \
+            --notes-file release-notes.txt \
             artifacts/rorca-darwin-arm64 \
             artifacts/rorca-darwin-x64 \
             artifacts/rorca-linux-x64 \
-            artifacts/rorca-windows-x64.exe \
+            artifacts/rorca-win32-x64.exe \
             LICENSE
