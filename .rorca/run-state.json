@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T10:46:58.522Z",
+  "lastUpdatedAt": "2026-03-16T10:42:03.208Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -45,14 +45,14 @@
       "elapsedMs": 125642
     },
     {
-      "storyId": "US-033",
-      "title": "GitHub Disconnect + Cleanup",
+      "storyId": "US-057",
+      "title": "Password Reset Flow",
       "status": "passed",
-      "startedAt": "2026-03-16T10:41:39.794Z",
-      "finishedAt": "2026-03-16T10:46:58.522Z",
+      "startedAt": "2026-03-16T10:41:40.801Z",
+      "finishedAt": "2026-03-16T10:42:03.208Z",
       "agentType": "claude",
       "model": "claude-opus-4-6",
-      "elapsedMs": 318728
+      "elapsedMs": 22407
     }
   ],
   "failedStories": [],
