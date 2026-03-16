@@ -80,6 +80,7 @@ import { startMarkerInjector } from './lib/marker-injector';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 import { initBoss } from './lib/pg-boss';
+import { verifyLicenseOnStartup } from './lib/license';
 
 dotenv.config();
 
@@ -371,6 +372,8 @@ if (process.env.NODE_ENV !== 'test') {
     startFileWatcher();
     // PG-004: Initialise pg-boss so the Express process can send jobs
     initBoss().catch(err => logger.error({ err }, '[pg-boss] startup init failed'));
+    // US-036: Verify license in background — never blocks startup
+    verifyLicenseOnStartup().catch(err => logger.error({ err }, '[License] Startup verification failed'));
     // Startup self-test: verify workspace queries resolve against rorca schema (not ag_catalog)
     queryOne('SELECT id FROM workspaces LIMIT 1').then(row => {
       if (!row) logger.warn('[StartupCheck] No workspaces found — onboarding will show');

@@ -8,6 +8,7 @@ import { detectCodex } from '../lib/codex-detector';
 import { isTelemetryEnabled } from '../lib/telemetry-config';
 import { getQueueStats } from '../lib/embedding-pipeline';
 import { cacheStats } from '../lib/context-cache';
+import { getLicenseState } from '../lib/license';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -163,6 +164,10 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
         codexInstalled: codex.codexInstalled,
         codexVersion: codex.codexVersion,
       } : {}),
+      license: (() => {
+        const ls = getLicenseState();
+        return { status: ls.status, plan: ls.plan };
+      })(),
       embeddings: getQueueStats(),
       cache: cacheStats(),
       activeJobs: activeJobsResult.status === 'fulfilled' ? activeJobsResult.value : [],
