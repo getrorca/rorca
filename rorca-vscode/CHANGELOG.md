@@ -22,5 +22,5 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Initial release
 
-[Unreleased]: https://github.com/sysgazer/rorca/compare/v0.1.0-vscode...HEAD
-[0.1.0]: https://github.com/sysgazer/rorca/releases/tag/v0.1.0-vscode
+[Unreleased]: https://github.com/getrorca/rorca/compare/v0.1.0-vscode...HEAD
+[0.1.0]: https://github.com/getrorca/rorca/releases/tag/v0.1.0-vscode
