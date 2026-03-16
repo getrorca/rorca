@@ -179,6 +179,56 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: List all workspaces
+ *     operationId: listWorkspaces
+ *     description: >
+ *       Returns all registered workspace entries ordered by creation date descending.
+ *       Supports cursor-based pagination via query parameters.
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 50
+ *         description: Maximum number of items to return
+ *       - in: query
+ *         name: cursor
+ *         schema:
+ *           type: string
+ *         description: Cursor for the next page (from previous response)
+ *     responses:
+ *       200:
+ *         description: Paginated list of workspaces
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/Workspace'
+ *                 total:
+ *                   type: integer
+ *                   example: 3
+ *                 hasMore:
+ *                   type: boolean
+ *                   example: false
+ *                 cursor:
+ *                   type: string
+ *                   nullable: true
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 // GET /api/workspaces
 router.get('/', async (req, res, next) => {
   try {
@@ -571,6 +621,80 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}:
+ *   patch:
+ *     tags: [Workspaces]
+ *     summary: Update workspace settings
+ *     operationId: updateWorkspace
+ *     description: >
+ *       Partially updates a workspace. All body fields are optional — only provided
+ *       fields are updated. If path is supplied, it must exist on the filesystem.
+ *       Domains should be an array of domain strings (e.g. ["saas", "fintech"]).
+ *       pr_template can be set to null or empty string to clear the PR template.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *         example: cashflow-ai
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               label:
+ *                 type: string
+ *                 description: Human-readable workspace name
+ *                 example: CashflowAI (updated)
+ *               path:
+ *                 type: string
+ *                 description: Absolute filesystem path to the workspace
+ *                 example: /Users/dev/cashflow-ai
+ *               domains:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: Domain tags for this workspace (affects L2 direction layer)
+ *                 example: ["saas", "fintech"]
+ *               pr_template:
+ *                 type: string
+ *                 nullable: true
+ *                 description: Markdown template for auto-generated pull request bodies
+ *     responses:
+ *       200:
+ *         description: Workspace updated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 workspace:
+ *                   $ref: '#/components/schemas/Workspace'
+ *       400:
+ *         description: Supplied path does not exist on the filesystem
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Workspace not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 // PATCH /api/workspaces/:id — Update workspace settings
 router.patch('/:id', async (req, res, next) => {
   try {
@@ -2238,6 +2362,35 @@ router.get('/:id/context-health', async (req, res, next) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}:
+ *   delete:
+ *     tags: [Workspaces]
+ *     summary: Delete a workspace
+ *     operationId: deleteWorkspace
+ *     description: >
+ *       Permanently deletes a workspace record from the database and emits a
+ *       workspace_delete WAL event. Does not delete files on disk. Any active
+ *       pipeline runs associated with this workspace should be cancelled first.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *         example: cashflow-ai
+ *     responses:
+ *       204:
+ *         description: Workspace deleted successfully (no content)
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 // DELETE /api/workspaces/:id
 router.delete('/:id', async (req, res, next) => {
   try {

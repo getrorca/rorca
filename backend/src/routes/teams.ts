@@ -156,6 +156,64 @@ router.get('/', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/teams:
+ *   post:
+ *     tags: [Teams]
+ *     summary: Create a new team
+ *     operationId: createTeam
+ *     description: >
+ *       Creates a new team and assigns the authenticated user as its owner with admin role.
+ *       The slug must be unique across all teams and must be lowercase alphanumeric with hyphens only.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [name, slug]
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 description: Human-readable team name
+ *                 example: Rorca Core
+ *               slug:
+ *                 type: string
+ *                 description: URL-safe unique identifier (lowercase alphanumeric and hyphens)
+ *                 example: rorca-core
+ *     responses:
+ *       201:
+ *         description: Team created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 name: { type: string, example: Rorca Core }
+ *                 slug: { type: string, example: rorca-core }
+ *                 ownerId: { type: string }
+ *                 createdAt: { type: string, format: date-time }
+ *       400:
+ *         description: Missing name or invalid slug format
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: Team slug already taken
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 // POST /api/teams — Create a new team
 router.post('/', async (req: Request, res: Response) => {
   try {
