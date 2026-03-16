@@ -3,8 +3,8 @@
 Spec: rorca-go-to-market-v1
 Run ID: 129
 Started: 2026-03-16T08:27:07.845Z
-Last Updated: 2026-03-16T08:58:51.513Z
+Last Updated: 2026-03-16T08:49:32.957Z
 
 ## Completed Stories (2)
 - US-001: Resolve merge conflict in worker.ts — DONE (claude, claude-sonnet-4-6, 156s)
-- US-035: Default to free plan on fresh install (BIL-001) — DONE (claude, claude-sonnet-4-6, 658s)
+- US-045: CORS production hardening — DONE (claude, claude-sonnet-4-6, 75s)
