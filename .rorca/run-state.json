@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T10:42:03.208Z",
+  "lastUpdatedAt": "2026-03-16T11:11:05.122Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -53,6 +53,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 22407
+    },
+    {
+      "storyId": "US-034",
+      "title": "Draft PR Lifecycle — open at run start, convert at completion",
+      "status": "passed",
+      "startedAt": "2026-03-16T10:59:18.771Z",
+      "finishedAt": "2026-03-16T11:11:05.122Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 706351
     }
   ],
   "failedStories": [],
