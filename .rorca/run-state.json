@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T10:15:29.950Z",
+  "lastUpdatedAt": "2026-03-16T10:24:50.363Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -33,173 +33,20 @@
       "agentType": "claude",
       "model": "claude-haiku-4-5-20251001",
       "elapsedMs": 146608
+    },
+    {
+      "storyId": "US-011",
+      "title": "Privacy-respecting analytics — Posthog integration",
+      "status": "passed",
+      "startedAt": "2026-03-16T10:15:52.166Z",
+      "finishedAt": "2026-03-16T10:24:50.363Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 538197
     }
   ],
   "failedStories": [],
-  "skippedStories": [
-    {
-      "storyId": "US-037",
-      "title": "US-037",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:26.677Z",
-      "finishedAt": "2026-03-16T10:15:26.677Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-036"
-    },
-    {
-      "storyId": "US-038",
-      "title": "US-038",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.721Z",
-      "finishedAt": "2026-03-16T10:15:27.721Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-036, US-037"
-    },
-    {
-      "storyId": "US-039",
-      "title": "US-039",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.775Z",
-      "finishedAt": "2026-03-16T10:15:27.775Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-036, US-038"
-    },
-    {
-      "storyId": "US-040",
-      "title": "US-040",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.787Z",
-      "finishedAt": "2026-03-16T10:15:27.787Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-037"
-    },
-    {
-      "storyId": "US-041",
-      "title": "US-041",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.822Z",
-      "finishedAt": "2026-03-16T10:15:27.822Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-040"
-    },
-    {
-      "storyId": "US-042",
-      "title": "US-042",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.837Z",
-      "finishedAt": "2026-03-16T10:15:27.837Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-038, US-040"
-    },
-    {
-      "storyId": "US-043",
-      "title": "US-043",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.843Z",
-      "finishedAt": "2026-03-16T10:15:27.843Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-036"
-    },
-    {
-      "storyId": "US-055",
-      "title": "US-055",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.849Z",
-      "finishedAt": "2026-03-16T10:15:27.849Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-036, US-038"
-    },
-    {
-      "storyId": "US-060",
-      "title": "US-060",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.857Z",
-      "finishedAt": "2026-03-16T10:15:27.857Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-039, US-042"
-    },
-    {
-      "storyId": "US-061",
-      "title": "US-061",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.862Z",
-      "finishedAt": "2026-03-16T10:15:27.862Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-043, US-037"
-    },
-    {
-      "storyId": "US-062",
-      "title": "US-062",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.869Z",
-      "finishedAt": "2026-03-16T10:15:27.869Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-037, US-061"
-    },
-    {
-      "storyId": "US-065",
-      "title": "US-065",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.876Z",
-      "finishedAt": "2026-03-16T10:15:27.876Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-018"
-    },
-    {
-      "storyId": "US-066",
-      "title": "US-066",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.882Z",
-      "finishedAt": "2026-03-16T10:15:27.882Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-039, US-040"
-    },
-    {
-      "storyId": "US-067",
-      "title": "US-067",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:27.893Z",
-      "finishedAt": "2026-03-16T10:15:27.893Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-042, US-055, US-039"
-    },
-    {
-      "storyId": "US-054",
-      "title": "End-to-end launch verification — full user journey test",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:29.904Z",
-      "finishedAt": "2026-03-16T10:15:29.904Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-002"
-    },
-    {
-      "storyId": "US-065",
-      "title": "GitHub OAuth Minimal Scope Strategy with Incremental Upgrade",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:29.925Z",
-      "finishedAt": "2026-03-16T10:15:29.925Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-018"
-    },
-    {
-      "storyId": "US-037",
-      "title": "Wire license into requirePlan middleware (BIL-003)",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:29.940Z",
-      "finishedAt": "2026-03-16T10:15:29.940Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-036"
-    },
-    {
-      "storyId": "US-043",
-      "title": "14-day Pro trial on fresh install (BIL-013)",
-      "status": "skipped",
-      "startedAt": "2026-03-16T10:15:29.950Z",
-      "finishedAt": "2026-03-16T10:15:29.950Z",
-      "agentType": "claude",
-      "failReason": "blocked_by: US-036"
-    }
-  ],
+  "skippedStories": [],
   "currentStory": null,
   "decisions": [],
   "resumedFromStory": null

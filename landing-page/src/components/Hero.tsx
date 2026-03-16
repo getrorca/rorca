@@ -3,6 +3,7 @@
 import { motion } from 'framer-motion';
 import { ChevronRight } from 'lucide-react';
 import Link from 'next/link';
+import { trackCtaClick } from '@/lib/analytics';
 
 export function Hero() {
     return (
@@ -48,11 +49,11 @@ export function Hero() {
                 transition={{ duration: 0.8, delay: 0.3, ease: "easeOut" }}
                 className="mt-10 flex flex-col sm:flex-row items-center gap-4"
             >
-                <Link href="/download" className="px-6 py-3 bg-white text-zinc-950 rounded-lg font-medium shadow-[0_0_40px_rgba(255,255,255,0.1)] hover:shadow-[0_0_60px_rgba(255,255,255,0.2)] transition-shadow">
+                <Link href="/download" onClick={() => trackCtaClick('start_building', '/')} className="px-6 py-3 bg-white text-zinc-950 rounded-lg font-medium shadow-[0_0_40px_rgba(255,255,255,0.1)] hover:shadow-[0_0_60px_rgba(255,255,255,0.2)] transition-shadow">
                     Start Building
                 </Link>
                 {/* TODO: Update to /docs when docs page is built */}
-                <Link href="/download" className="px-6 py-3 bg-transparent text-white border border-white/10 rounded-lg font-medium hover:bg-white/5 transition-colors flex items-center gap-2">
+                <Link href="/download" onClick={() => trackCtaClick('read_the_docs', '/')} className="px-6 py-3 bg-transparent text-white border border-white/10 rounded-lg font-medium hover:bg-white/5 transition-colors flex items-center gap-2">
                     Read the Docs
                 </Link>
             </motion.div>
