@@ -175,6 +175,82 @@ router.get('/', async (req: Request, res: Response) => {
 
 // ─── POST /api/worktrees ────────────────────────────────────────────────────
 
+/**
+ * @swagger
+ * /api/worktrees:
+ *   post:
+ *     tags: [Worktrees]
+ *     summary: Create a new git worktree
+ *     operationId: createWorktree
+ *     description: >
+ *       Creates a new git worktree branch in the specified workspace repository.
+ *       Worktrees enable parallel spec execution without branch conflicts — each
+ *       story run can be isolated in its own worktree. The branch is created from
+ *       baseBranch (default: main) and checked out at worktreePath.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, branchName]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace to create the worktree in
+ *                 example: cashflow-ai
+ *               branchName:
+ *                 type: string
+ *                 description: Name of the new branch for the worktree
+ *                 example: feat/stripe-billing-1700000000
+ *               baseBranch:
+ *                 type: string
+ *                 description: Base branch to create from (defaults to main)
+ *                 example: main
+ *               worktreePath:
+ *                 type: string
+ *                 description: Filesystem path for the worktree (auto-generated if omitted)
+ *                 example: /tmp/rorca-worktrees/stripe-billing-1700000000
+ *     responses:
+ *       201:
+ *         description: Worktree created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean, example: true }
+ *                 worktreePath:
+ *                   type: string
+ *                   description: Absolute path to the created worktree
+ *                 branchName:
+ *                   type: string
+ *                   description: Name of the created branch
+ *       400:
+ *         description: Missing workspaceId or branchName
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Workspace not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: Worktree path already exists
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.post('/', async (req: Request, res: Response) => {
   try {
     const { workspaceId, branchName, baseBranch, worktreePath } = req.body;
