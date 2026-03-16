@@ -38,6 +38,7 @@ import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
 import { FlushBuffer } from './lib/flush-buffer';
 import { createOrUpdateAutoPr } from './lib/github-pr-creator';
+import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 
 // ── Post-merge smoke test ─────────────────────────────────────────────────────
 
@@ -651,6 +652,34 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
     await emitWalEvent('run_started', workspaceId, { run_id: runId, spec_path: specPath });
 
+    // 2b. US-034: Create draft PR on GitHub if this is a worktree run
+    if (payload.branchName) {
+      let specTitle = 'Pipeline run';
+      let totalStories = 0;
+      try {
+        const specFile = path.join(workspacePath, specPath);
+        if (fs.existsSync(specFile)) {
+          const specJson = JSON.parse(fs.readFileSync(specFile, 'utf-8'));
+          totalStories = (specJson.userStories ?? []).length;
+          const slug = path.basename(specPath, '.json');
+          specTitle = specJson.title ?? slug.replace(/-/g, ' ');
+        }
+      } catch { /* non-fatal — use defaults */ }
+
+      try {
+        await createDraftPr({
+          runId,
+          workspaceId,
+          branchName: payload.branchName,
+          workspacePath,
+          specTitle,
+          totalStories,
+        });
+      } catch (draftErr: any) {
+        logger.error({ err: draftErr, runId }, '[worker] createDraftPr threw unexpectedly');
+      }
+    }
+
     // 3. Build engine args
     const executionEngineTs = path.join(__dirname, 'lib', 'execution-engine.ts');
     const tsxBin = path.join(__dirname, '..', 'node_modules', '.bin', 'tsx');
@@ -801,19 +830,36 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               }
             }
 
-            // Auto-PR: create (or update) a GitHub PR when a worktree run completes (US-028)
-            // Only fires when status='done' and a branch name is present (worktree run).
-            // Non-fatal: failures are logged but never affect the run status.
-            if (status === 'done' && payload.branchName) {
+            // US-034: Finalize draft PR on run completion. If a draft PR was created
+            // at run start, convert it to ready-for-review (success) or update with
+            // failure summary (failure). Falls back to legacy auto-PR if no draft exists.
+            if (payload.branchName) {
               try {
-                await createOrUpdateAutoPr({
-                  runId,
-                  workspaceId,
-                  branchName: payload.branchName,
-                  workspacePath,
-                });
+                const prRow = await queryOne<{ pr_number: number | null }>(
+                  'SELECT pr_number FROM pipeline_runs WHERE id = $1',
+                  [runId],
+                );
+
+                if (prRow?.pr_number) {
+                  // Draft PR exists — finalize it
+                  await finalizeDraftPr({
+                    runId,
+                    workspaceId,
+                    branchName: payload.branchName,
+                    workspacePath,
+                    status,
+                  });
+                } else if (status === 'done') {
+                  // No draft PR — fall back to legacy auto-PR creation (US-028)
+                  await createOrUpdateAutoPr({
+                    runId,
+                    workspaceId,
+                    branchName: payload.branchName,
+                    workspacePath,
+                  });
+                }
               } catch (prErr: any) {
-                logger.error({ err: prErr, runId }, '[worker] createOrUpdateAutoPr threw unexpectedly');
+                logger.error({ err: prErr, runId }, '[worker] Draft PR finalization/auto-PR threw unexpectedly');
               }
             }
 
