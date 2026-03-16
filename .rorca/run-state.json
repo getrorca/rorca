@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T10:17:58.658Z",
+  "lastUpdatedAt": "2026-03-16T10:46:58.522Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -43,6 +43,16 @@
       "agentType": "claude",
       "model": "claude-haiku-4-5-20251001",
       "elapsedMs": 125642
+    },
+    {
+      "storyId": "US-033",
+      "title": "GitHub Disconnect + Cleanup",
+      "status": "passed",
+      "startedAt": "2026-03-16T10:41:39.794Z",
+      "finishedAt": "2026-03-16T10:46:58.522Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 318728
     }
   ],
   "failedStories": [],
