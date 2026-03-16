@@ -1,8 +1,10 @@
-import { useState, useEffect, useCallback } from 'react';
+import { lazy, Suspense, useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Github, RefreshCw, AlertCircle, CheckCircle2, XCircle, Clock } from 'lucide-react';
 import { apiFetch } from '../../lib/apiFetch';
 import { useWorkspace } from '../../contexts/WorkspaceContext';
+
+const IntegrationHealthDashboard = lazy(() => import('./IntegrationHealthDashboard'));
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -368,6 +370,11 @@ export function IntegrationsHubTab() {
           );
         })}
       </div>
+
+      {/* Integration Health Dashboard */}
+      <Suspense fallback={null}>
+        <IntegrationHealthDashboard />
+      </Suspense>
     </div>
   );
 }
