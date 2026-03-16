@@ -53,6 +53,7 @@ import { rateLimiter, initRateLimiterCache } from './lib/rate-limiter';
 import { publicReviewRouter, specReviewRouter } from './routes/review';
 import fileWatchRouter from './routes/file-watch';
 import { errorHandler } from './lib/error-handler';
+import { csrfProtection } from './lib/csrf';
 import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
 import { queryOne } from './db/index';
 import runQueueRouter from './routes/run-queue';
@@ -243,6 +244,12 @@ if (process.env.AUTH_REQUIRED === 'true') {
 
 // ─── Rate limiting (after auth so req.user is available) ───
 app.use(rateLimiter);
+
+// ─── CSRF protection (double-submit cookie pattern) ───
+// Validates X-CSRF-Token header against _csrf cookie on POST/PUT/PATCH/DELETE.
+// Exempt: webhooks, health, login, register, GitHub OAuth, billing webhook.
+// Skips validation when _csrf cookie is absent (user not logged in).
+app.use(csrfProtection);
 
 // ─── Protected routes ───
 app.use('/api/workspaces', workspacesRouter);
