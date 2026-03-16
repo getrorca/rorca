@@ -163,7 +163,7 @@ router.post('/discover', async (req: Request, res: Response) => {
  *       - in: query
  *         name: status
  *         schema: { type: string, enum: [pending, approved, rejected, all] }
- *         description: Filter by status (default: all)
+ *         description: "Filter by status (default: all)"
  *     responses:
  *       200:
  *         description: List of proposals

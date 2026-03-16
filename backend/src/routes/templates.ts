@@ -196,6 +196,44 @@ router.post('/', async (req: Request, res: Response) => {
 
 // ─── GET / — List templates with scope filtering ─────────────────────────────
 
+/**
+ * @swagger
+ * /api/templates:
+ *   get:
+ *     tags: [Templates]
+ *     summary: List templates
+ *     operationId: listTemplates
+ *     description: >
+ *       Returns reusable spec templates filtered by scope. Personal templates are
+ *       created by the current user; team templates are shared within teams the user
+ *       belongs to; all returns both. Returns an empty list if user is not authenticated.
+ *     parameters:
+ *       - in: query
+ *         name: scope
+ *         schema:
+ *           type: string
+ *           enum: [all, personal, team]
+ *           default: all
+ *         description: Filter templates by ownership scope
+ *     responses:
+ *       200:
+ *         description: List of templates
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 templates:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/Template'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.get('/', async (req: Request, res: Response) => {
   try {
     const user = await getEffectiveUser(req);
@@ -449,6 +487,38 @@ router.get('/:id', async (req: Request, res: Response) => {
 
 // ─── DELETE /:id — Remove a template ──────────────────────────────────────────
 
+/**
+ * @swagger
+ * /api/templates/{id}:
+ *   delete:
+ *     tags: [Templates]
+ *     summary: Delete a template
+ *     operationId: deleteTemplate
+ *     description: Permanently deletes a template by its ID.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Template UUID
+ *         example: 550e8400-e29b-41d4-a716-446655440000
+ *     responses:
+ *       204:
+ *         description: Template deleted successfully (no content)
+ *       404:
+ *         description: Template not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const result = await execute('DELETE FROM templates WHERE id = $1', [req.params.id]);
