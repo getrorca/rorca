@@ -146,6 +146,7 @@ export default function GitHubSettingsPanel() {
   const [githubToken, setGithubToken] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [connectSuccess, setConnectSuccess] = useState(false);
 
   // Disconnect (webhook — legacy per-section)
   const [disconnectToken, setDisconnectToken] = useState('');
@@ -271,16 +272,29 @@ export default function GitHubSettingsPanel() {
     if (!workspaceId || !repoOwner.trim() || !repoName.trim() || !githubToken.trim()) return;
     setConnecting(true);
     setConnectError(null);
+    setConnectSuccess(false);
     try {
-      const data = await apiFetch<GithubStatus>(`/api/workspaces/${workspaceId}/github/connect`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repoOwner: repoOwner.trim(), repoName: repoName.trim(), githubToken: githubToken.trim() }),
-      });
+      const data = await apiFetch<GithubStatus & { error?: string; manualSetupUrl?: string }>(
+        `/api/workspaces/${workspaceId}/github/connect`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repoOwner: repoOwner.trim(), repoName: repoName.trim(), githubToken: githubToken.trim() }),
+        },
+      );
       setStatus(data);
       setRepoOwner('');
       setRepoName('');
       setGithubToken('');
+
+      if (data.error) {
+        // Degraded success — connection saved but webhook failed
+        setConnectError(data.error + (data.manualSetupUrl ? ` — Set up manually: ${data.manualSetupUrl}` : ''));
+      } else {
+        // Full success — show green checkmark for 3 seconds
+        setConnectSuccess(true);
+        setTimeout(() => setConnectSuccess(false), 3000);
+      }
     } catch (err: unknown) {
       setConnectError(err instanceof Error ? err.message : 'Failed to connect');
     } finally {
@@ -617,10 +631,17 @@ export default function GitHubSettingsPanel() {
                 </div>
               </div>
 
-              <div className="mt-3 flex items-center gap-2 text-xs text-muted">
-                <Webhook size={14} />
-                Events: push, pull_request, issues
-              </div>
+              {status.webhookId ? (
+                <div className="mt-3 flex items-center gap-2 text-xs text-muted">
+                  <Webhook size={14} />
+                  Events: push, pull_request, issues
+                </div>
+              ) : (
+                <div className="mt-3 flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded px-2.5 py-1.5">
+                  <AlertCircle size={14} />
+                  Webhook not configured — push events disabled
+                </div>
+              )}
             </div>
 
             {/* Disconnect webhook */}
@@ -725,8 +746,22 @@ export default function GitHubSettingsPanel() {
               disabled={connecting || !repoOwner.trim() || !repoName.trim() || !githubToken.trim()}
               className="px-4 py-2 text-sm rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-1.5"
             >
-              {connecting ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
-              Connect GitHub
+              {connecting ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  Configuring GitHub webhook...
+                </>
+              ) : connectSuccess ? (
+                <>
+                  <CheckCircle2 size={14} className="text-emerald-300" />
+                  Webhook registered
+                </>
+              ) : (
+                <>
+                  <Link2 size={14} />
+                  Connect GitHub
+                </>
+              )}
             </button>
           </div>
         )}
