@@ -19,6 +19,7 @@ import { echolocate, inferSkillsFromStack, STACK_TO_SKILLS } from '../lib/worksp
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 import { NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
+import { githubRateLimiter } from '../lib/github-rate-limiter';
 
 const router = Router();
 
@@ -628,7 +629,9 @@ async function fetchSkillFromRegistry(query: string): Promise<{
     // Fallback: use GitHub tree API to find the right SKILL.md path
     try {
       const treeUrl = `https://api.github.com/repos/${source}/git/trees/HEAD?recursive=1`;
-      const treeResp = await fetch(treeUrl, { signal: AbortSignal.timeout(10_000) });
+      const treeResp = await githubRateLimiter.execute(() =>
+        fetch(treeUrl, { signal: AbortSignal.timeout(10_000) }),
+      );
       if (treeResp.ok) {
         const tree: any = await treeResp.json();
         const skillFiles: string[] = (tree.tree || [])
@@ -1119,10 +1122,12 @@ router.post('/browse-github', async (req: Request, res: Response) => {
     const treeUrl = `https://api.github.com/repos/${owner}/${repo}/git/trees/HEAD?recursive=1`;
     let treeData: any;
     try {
-      const treeResp = await fetch(treeUrl, {
-        headers: { Accept: 'application/vnd.github+json' },
-        signal: AbortSignal.timeout(15_000),
-      });
+      const treeResp = await githubRateLimiter.execute(() =>
+        fetch(treeUrl, {
+          headers: { Accept: 'application/vnd.github+json' },
+          signal: AbortSignal.timeout(15_000),
+        }),
+      );
       if (treeResp.status === 404) {
         throw new NotFoundError('Repository not found');
         return;
