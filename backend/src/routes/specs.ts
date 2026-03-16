@@ -855,6 +855,86 @@ const GenerateSpecSchema = z.object({
   path: ['brief'],
 });
 
+/**
+ * @swagger
+ * /api/specs/generate:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Generate a spec from a plain-English brief
+ *     operationId: generateSpec
+ *     description: >
+ *       Generates a structured spec (JSON with userStories array) from a plain-English
+ *       brief using LLM with the synthesized direction stack (L1-L5) as context.
+ *       Spec is saved to the workspace's forge/specs/pending/ directory.
+ *       Generation typically takes 20-60 seconds depending on story count and model.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [brief]
+ *             properties:
+ *               brief:
+ *                 type: string
+ *                 description: Plain-English description of the feature to build
+ *                 example: Add Stripe billing with monthly and annual plans
+ *               specBrief:
+ *                 type: string
+ *                 description: Alias for brief (either field is accepted)
+ *               title:
+ *                 type: string
+ *                 description: Spec slug/title (auto-generated from brief if omitted)
+ *                 example: stripe-billing
+ *               specName:
+ *                 type: string
+ *                 description: Alias for title
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace to generate the spec for
+ *                 example: cashflow-ai
+ *               storyCount:
+ *                 type: integer
+ *                 description: Target number of user stories to generate (default 10)
+ *                 example: 12
+ *               model:
+ *                 type: string
+ *                 description: LLM model override (defaults to workspace L3 preferred_model)
+ *                 example: claude-sonnet-4-6
+ *               multiPass:
+ *                 type: boolean
+ *                 description: Enable multi-pass spec generation for richer output
+ *                 example: false
+ *               storyPrefix:
+ *                 type: string
+ *                 description: Prefix for story IDs (default US)
+ *                 example: FEAT
+ *     responses:
+ *       200:
+ *         description: Spec generated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Spec'
+ *       400:
+ *         description: Missing brief or invalid request parameters
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Workspace not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: LLM generation failed or internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, res: Response) => {
   // Hoist error-relevant state so catch block can build structured errors
   let resolvedModel = 'unknown';
@@ -2872,6 +2952,102 @@ interface KanbanSpec {
   attachmentCount: number;
 }
 
+/**
+ * @swagger
+ * /api/specs/kanban:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Get kanban board data for a workspace
+ *     operationId: getSpecsKanban
+ *     description: >
+ *       Returns specs organized into kanban columns: draft (pending), inProgress (approved,
+ *       queued, or actively running), custom columns, and done (passed or manually marked done).
+ *       Each spec card includes story progress, active run status, queue position, model, tags,
+ *       and attachment count.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID of the workspace to load the board for
+ *         example: cashflow-ai
+ *     responses:
+ *       200:
+ *         description: Kanban board data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 draft:
+ *                   type: array
+ *                   description: Pending specs not yet approved
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       title: { type: string }
+ *                       storyCount: { type: integer }
+ *                       passedCount: { type: integer }
+ *                       failedCount: { type: integer }
+ *                       model: { type: string, nullable: true }
+ *                       tags: { type: array, items: { type: string } }
+ *                       attachmentCount: { type: integer }
+ *                 inProgress:
+ *                   type: array
+ *                   description: Approved specs that are running, queued, or awaiting a run
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       title: { type: string }
+ *                       storyCount: { type: integer }
+ *                       passedCount: { type: integer }
+ *                       failedCount: { type: integer }
+ *                       activeRunId: { type: integer, nullable: true }
+ *                       activeRunStatus: { type: string, enum: [running, queued], nullable: true }
+ *                       queuePosition: { type: integer, nullable: true }
+ *                       model: { type: string, nullable: true }
+ *                       tags: { type: array, items: { type: string } }
+ *                       attachmentCount: { type: integer }
+ *                 customColumns:
+ *                   type: array
+ *                   description: Specs assigned to user-defined custom columns
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       columnId: { type: integer }
+ *                       columnName: { type: string }
+ *                       columnColor: { type: string }
+ *                       specs:
+ *                         type: array
+ *                         items:
+ *                           type: object
+ *                 done:
+ *                   type: array
+ *                   description: Specs where all stories passed or manually marked done
+ *                   items:
+ *                     type: object
+ *       400:
+ *         description: Missing required workspaceId query parameter
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Workspace not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.get('/kanban', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
@@ -3063,6 +3239,59 @@ router.get('/kanban', async (req: Request, res: Response) => {
 
 // ─── Kanban Manual Done ───────────────────────────────────────────────────────────
 
+/**
+ * @swagger
+ * /api/specs/{id}/mark-done:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Manually mark a spec as done in the kanban board
+ *     operationId: markSpecDone
+ *     description: >
+ *       Inserts a record into kanban_manual_done, causing the spec to appear in the
+ *       Done column of the kanban board regardless of story pass/fail status.
+ *       Idempotent — calling multiple times has no additional effect.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Spec slug identifier
+ *         example: my-spec-slug
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace ID the spec belongs to
+ *                 example: cashflow-ai
+ *     responses:
+ *       200:
+ *         description: Spec marked as done
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean, example: true }
+ *       400:
+ *         description: Missing workspaceId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.post('/:id/mark-done', async (req: Request, res: Response) => {
   const { id } = req.params;
   const { workspaceId } = req.body;
@@ -3074,6 +3303,59 @@ router.post('/:id/mark-done', async (req: Request, res: Response) => {
   res.json({ ok: true });
 });
 
+/**
+ * @swagger
+ * /api/specs/{id}/unmark-done:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Remove the manual done mark from a spec
+ *     operationId: unmarkSpecDone
+ *     description: >
+ *       Removes the kanban_manual_done record for this spec, returning it to the In Progress
+ *       column (if approved) or Draft column (if pending). Has no effect if the spec was
+ *       never manually marked done.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Spec slug identifier
+ *         example: my-spec-slug
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace ID the spec belongs to
+ *                 example: cashflow-ai
+ *     responses:
+ *       200:
+ *         description: Done mark removed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean, example: true }
+ *       400:
+ *         description: Missing workspaceId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.post('/:id/unmark-done', async (req: Request, res: Response) => {
   const { id } = req.params;
   const { workspaceId } = req.body;
@@ -3086,6 +3368,55 @@ router.post('/:id/unmark-done', async (req: Request, res: Response) => {
 
 const MAX_CUSTOM_COLUMNS = 8;
 
+/**
+ * @swagger
+ * /api/specs/kanban/columns:
+ *   get:
+ *     tags: [Specs]
+ *     summary: List custom kanban columns for a workspace
+ *     operationId: listKanbanColumns
+ *     description: >
+ *       Returns all user-defined custom kanban columns for the given workspace,
+ *       ordered by their position (ascending). These appear between the In Progress
+ *       and Done columns on the kanban board. Maximum of 8 custom columns per workspace.
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: ID of the workspace
+ *         example: cashflow-ai
+ *     responses:
+ *       200:
+ *         description: List of custom kanban columns
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 columns:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: integer, example: 1 }
+ *                       name: { type: string, example: Review }
+ *                       color: { type: string, example: indigo }
+ *                       position: { type: integer, example: 0 }
+ *       400:
+ *         description: Missing workspaceId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.get('/kanban/columns', async (req: Request, res: Response) => {
   const workspaceId = req.query.workspaceId as string;
   if (!workspaceId) { throw new ValidationError('Missing workspaceId'); return; }
@@ -3093,6 +3424,68 @@ router.get('/kanban/columns', async (req: Request, res: Response) => {
   res.json({ columns });
 });
 
+/**
+ * @swagger
+ * /api/specs/kanban/columns:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Create a custom kanban column
+ *     operationId: createKanbanColumn
+ *     description: >
+ *       Creates a new custom kanban column in the given workspace. Appended after
+ *       the existing columns (position = max + 1). A workspace can have at most
+ *       8 custom columns; returns 422 if the limit is reached.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, name]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: ID of the workspace
+ *                 example: cashflow-ai
+ *               name:
+ *                 type: string
+ *                 description: Display name for the column
+ *                 example: Review
+ *               color:
+ *                 type: string
+ *                 description: Tailwind color name for the column badge (defaults to 'indigo')
+ *                 example: violet
+ *     responses:
+ *       200:
+ *         description: Column created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: integer, example: 3 }
+ *                 name: { type: string, example: Review }
+ *                 color: { type: string, example: violet }
+ *                 position: { type: integer, example: 2 }
+ *       400:
+ *         description: Missing workspaceId or name
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       422:
+ *         description: Maximum 8 custom columns already reached
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.post('/kanban/columns', async (req: Request, res: Response) => {
   const { workspaceId, name, color } = req.body;
   if (!workspaceId || !name) { throw new ValidationError('Missing workspaceId or name'); return; }
@@ -3106,6 +3499,70 @@ router.post('/kanban/columns', async (req: Request, res: Response) => {
   res.json({ id: result!.id, name: name.trim(), color: color || 'indigo', position: maxPos + 1 });
 });
 
+/**
+ * @swagger
+ * /api/specs/kanban/columns/{id}:
+ *   put:
+ *     tags: [Specs]
+ *     summary: Update a custom kanban column
+ *     operationId: updateKanbanColumn
+ *     description: >
+ *       Updates the name, color, and/or position of an existing custom kanban column.
+ *       All fields are optional — only supplied fields are updated. Changing position
+ *       triggers a full reorder of all columns in the workspace to maintain contiguous
+ *       0-based positions.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Column ID
+ *         example: 3
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               name:
+ *                 type: string
+ *                 description: New display name for the column
+ *                 example: Staging
+ *               color:
+ *                 type: string
+ *                 description: New Tailwind color name
+ *                 example: emerald
+ *               position:
+ *                 type: integer
+ *                 description: New 0-based position index
+ *                 example: 1
+ *     responses:
+ *       200:
+ *         description: Updated column object
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: integer }
+ *                 name: { type: string }
+ *                 color: { type: string }
+ *                 position: { type: integer }
+ *       404:
+ *         description: Column not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.put('/kanban/columns/:id', async (req: Request, res: Response) => {
   const colId = Number(req.params.id);
   const { name, color, position } = req.body;
@@ -3137,6 +3594,51 @@ router.put('/kanban/columns/:id', async (req: Request, res: Response) => {
   res.json(updated);
 });
 
+/**
+ * @swagger
+ * /api/specs/kanban/columns/{id}:
+ *   delete:
+ *     tags: [Specs]
+ *     summary: Delete a custom kanban column
+ *     operationId: deleteKanbanColumn
+ *     description: >
+ *       Deletes a custom kanban column and all spec assignments to it. Specs that were
+ *       assigned to this column automatically move back to the In Progress column.
+ *       Remaining columns are recompacted to maintain contiguous 0-based positions.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Column ID
+ *         example: 3
+ *     responses:
+ *       200:
+ *         description: Column deleted and assignments removed
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean, example: true }
+ *                 reassignedCount:
+ *                   type: integer
+ *                   description: Number of specs that were unassigned from this column
+ *                   example: 4
+ *       404:
+ *         description: Column not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.delete('/kanban/columns/:id', async (req: Request, res: Response) => {
   const colId = Number(req.params.id);
 
@@ -3162,6 +3664,66 @@ router.delete('/kanban/columns/:id', async (req: Request, res: Response) => {
   res.json({ ok: true, reassignedCount: assignedCount });
 });
 
+/**
+ * @swagger
+ * /api/specs/kanban/columns/assign:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Assign or unassign a spec to a custom kanban column
+ *     operationId: assignSpecToKanbanColumn
+ *     description: >
+ *       Assigns a spec to a custom kanban column, or removes the assignment by passing
+ *       columnId as null (returns spec to In Progress). Uses an upsert so repeated calls
+ *       for the same spec simply update the column assignment.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, specId]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: Workspace ID
+ *                 example: cashflow-ai
+ *               specId:
+ *                 type: string
+ *                 description: Spec slug to assign
+ *                 example: my-spec-slug
+ *               columnId:
+ *                 type: integer
+ *                 nullable: true
+ *                 description: Target column ID, or null to remove from custom columns
+ *                 example: 3
+ *     responses:
+ *       200:
+ *         description: Assignment updated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok: { type: boolean, example: true }
+ *       400:
+ *         description: Missing workspaceId or specId
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Column not found in this workspace
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 // Move a spec to a custom column (or back to in-progress by passing columnId: null)
 router.post('/kanban/columns/assign', async (req: Request, res: Response) => {
   const { workspaceId, specId, columnId } = req.body;

@@ -50,7 +50,7 @@ interface GitHubConnectionRow {
  *         description: Workspace ID
  *     responses:
  *       200:
- *         description: Connection status returned successfully. Returns `{ connected: false }` if no GitHub connection exists, or full connection details if connected.
+ *         description: "Connection status returned successfully. Returns `{ connected: false }` if no GitHub connection exists, or full connection details if connected."
  *       404:
  *         description: Workspace not found
  *       500:
@@ -352,7 +352,7 @@ router.post('/disconnect', async (req: Request, res: Response) => {
  *         description: Workspace ID
  *     responses:
  *       200:
- *         description: Account info returned successfully. Returns `{ connected: false }` if no user or GitHub connection exists, or full account details if connected.
+ *         description: "Account info returned successfully. Returns `{ connected: false }` if no user or GitHub connection exists, or full account details if connected."
  *       500:
  *         description: Internal server error
  */
@@ -410,7 +410,7 @@ router.get('/account', async (req: Request, res: Response) => {
  *         description: Workspace ID
  *     responses:
  *       200:
- *         description: Test result returned. Returns `{ valid: true, username }` on success, or `{ valid: false, error }` if no connection exists or token is invalid.
+ *         description: "Test result returned. Returns `{ valid: true, username }` on success, or `{ valid: false, error }` if no connection exists or token is invalid."
  */
 router.post('/test-connection', async (req: Request, res: Response) => {
   try {

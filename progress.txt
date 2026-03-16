@@ -3,8 +3,8 @@
 Spec: rorca-go-to-market-v1
 Run ID: 129
 Started: 2026-03-16T08:27:07.845Z
-Last Updated: 2026-03-16T08:52:11.369Z
+Last Updated: 2026-03-16T09:08:58.112Z
 
 ## Completed Stories (2)
 - US-001: Resolve merge conflict in worker.ts — DONE (claude, claude-sonnet-4-6, 156s)
-- US-047: Health check hardening — include all component statuses — DONE (claude, claude-sonnet-4-6, 148s)
+- US-051: API documentation completeness — @swagger on all routes — DONE (claude, claude-sonnet-4-6, 1153s)
