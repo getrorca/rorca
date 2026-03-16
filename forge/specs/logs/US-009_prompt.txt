@@ -1338,21 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
-> Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-
-## 2026-03-12 [Bug Fix] MCP rorca_list_specs and rorca_list_runs wrong response shape
-> Rule: Both tools assumed wrong API response shapes. rorca_list_specs treated response as a bare array but API returns { items: [...] }. rorca_list_runs destructured { runs } but API returns { items: [...] }. Fixed by normalizing: Array.isArray(data) ? data : (data.items ?? []) for list_specs, and payload.runs ?? payload.items ?? [] for list_runs. Also fixed specName field: API uses specName not title — display as s.specName ?? s.title ?? s.id.
-
-## 2026-03-12 [Pattern] MCP tools vs prompts — tools are Claude-callable, prompts are user slash commands
-> Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
-
-## 2026-03-12 [Decision] GitHub org is getrorca — repo is github.com/getrorca/rorca (private)
-> Rule: The canonical remote for the Rorca codebase is https://github.com/getrorca/rorca (private repo). The old remote was sysgazer/rorcha — that is dead. All pushes go to getrorca/rorca. The repo is permanently closed source — never suggest open sourcing, BSL, or source-available licensing.
-
-## 2026-03-12 [Gotcha] Merging old SQLite-era branches with "take theirs" clobbers modern PostgreSQL files
-> Rule: NEVER merge old pre-postgres-migration branches (rorca-convention-agents, rorca-frontend-routing, and any branch with timestamp ~1772...) using "git checkout --theirs" on code conflicts. These branches were built on SQLite and will revert db/index.ts to the SQLite version, revert App.tsx/Sidebar.tsx/routes.tsx to the old multi-panel UI, and truncate server.ts. Always restore from a known-good modern commit (e.g. git show <pre-merge-sha>:path/to/file) after any such merge.
-
 ## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
 > Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
 
@@ -1398,8 +1383,84 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
 > Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
 
+## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
+> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
+
+## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
+> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
+
+## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
+> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
+
+## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
+> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
+
+## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
+> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
+
 Follow this workflow for implementation:
-## Agent Role: Database
+## Agent Role: Frontend
+
+
+## Skill: react-review (relevance: 7)
+---
+name: react-review
+description: Review React components for best practices and performance issues
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers
+  category: development
+---
+
+# React Review Skill
+
+Review React components for best practices, performance issues, and common patterns.
+
+## When to use me
+
+Use this skill when:
+- Reviewing React component code
+- Optimizing component performance
+- Checking for React best practices
+- Refactoring legacy components
+- Auditing component architecture
+
+## What I do
+
+- Analyze React components for performance issues (unnecessary re-renders, large bundles)
+- Check for React best practices (hooks usage, prop patterns, state management)
+- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
+- Suggest optimizations (memoization, code splitting, lazy loading)
+- Review TypeScript usage and type safety
+
+## Key Patterns
+
+### Performance
+- Use `React.memo` for components receiving object/function props from parent
+- Memoize expensive calculations with `useMemo`
+- Stabilize callback references with `useCallback`
+- Avoid inline object/array creation in JSX props
+- Use `React.lazy` + `Suspense` for code splitting
+
+### Hooks
+- Always include all dependencies in `useEffect` dependency arrays
+- Never call hooks conditionally or inside loops
+- Extract complex logic into custom hooks
+- Clean up subscriptions and timers in useEffect return
+
+### TypeScript
+- Define explicit interfaces for all component props
+- Use discriminated unions for variant components
+- Prefer `interface` over `type` for component props
+- Use `React.FC` sparingly — prefer explicit return types
+
+## Notes
+
+- Focuses on React 18+ patterns and best practices
+- Considers both class and function components
+- Includes TypeScript and JavaScript variants
+- References official React documentation and community patterns
 
 ---
 name: rorca
@@ -1552,33 +1613,21 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-009):
-Write comprehensive Jest tests for all backend endpoints introduced in US-002, US-003, US-004, and US-005. Tests must cover happy paths, edge cases (empty queue, null latency, archived vs unarchived jobs), and error conditions. Backend tests use Jest (not Vitest). All DB calls must be mocked — no test database required.
+After US-008 implements backend-side marker injection into `run_output_chunks`, the frontend-only injection from US-003 would cause duplicate markers — one from the persisted chunk stream and one from the frontend `terminal.write()` call.
 
-**Test files to create**:
-1. `backend/src/routes/__tests__/queue-observability.test.ts` — tests for GET /api/pipeline/worker/health extensions, GET /api/pipeline/queue/stats, GET /api/pipeline/queue/failed-jobs, POST /api/pipeline/queue/failed-jobs/:jobId/retry, GET /api/pipeline/queue/health-history
-2. `backend/src/__tests__/queue-snapshots.test.ts` — tests for the monitor-states event listener (mock boss.on, verify execute() calls and broadcastAll calls)
+Remove or gate the frontend marker injection from US-003. Two approaches (pick the simpler one):
 
-**Coverage requirements**:
-- `GET /api/pipeline/worker/health` (extended): (1) returns queueStats with all fields, (2) queueHealth='critical' when failed > 0, (3) queueHealth='degraded' when oldestPendingAge > 300s, (4) queueHealth='healthy' when all zeros, (5) parallel Promise.all queries called correctly
-- `GET /api/pipeline/queue/failed-jobs`: (1) returns UNION of pgboss.job and pgboss.archive failed jobs, (2) pagination works (page 2 returns correct offset), (3) job with runId returns enriched pipeline_runs data, (4) job without runId returns null run fields, (5) error output is scrubbed of API keys (test with sk-ant-xxxx in output)
-- `POST /api/pipeline/queue/failed-jobs/:jobId/retry`: (1) calls boss.send with correct name and data, (2) returns 404 when jobId not found, (3) returns new job ID on success
-- `GET /api/pipeline/queue/health-history`: (1) returns snapshots in time window, (2) hours param respected, (3) empty result when no snapshots exist
-- `monitor-states handler`: (1) inserts row to queue_health_snapshots with correct totals, (2) calls broadcastAll when failed > 0, (3) does NOT call broadcastAll when failed === 0, (4) catches and logs execute() errors without crashing
-- `pickupLatency`: (1) returns null fields when no completed jobs in window, (2) latencyStatus='degraded' when p95 > 2s, (3) latencyStatus='critical' when p95 > 10s
+**Option A (preferred — remove entirely):** Delete the WAL event listener in RunViewPanel/RunTerminal that calls `terminal.write()` with marker lines. The backend markers arrive via the existing chunk stream, so no frontend injection is needed.
 
-## Context
-- **pg mocking pattern**: Use `jest.mock('../../../db')` to mock `query`, `queryOne`, and `execute` from `backend/src/db/index.ts`. Each mock returns controlled test data. Follow the exact pattern used in existing route tests in `backend/src/routes/__tests__/`.
-- **boss.send mock**: Mock the pg-boss instance — `const mockBoss = { send: jest.fn().mockResolvedValue('new-uuid'), on: jest.fn() }`. Verify retry endpoint calls `mockBoss.send('pipeline:run', expectedData)`.
-- **PERCENTILE_CONT in tests**: Since `queryOne<T>` is mocked, the SQL itself is not validated. Assert that `avg_pickup_seconds` and `p95_pickup_seconds` fields appear in the response with correct values from the mock return.
-- **broadcastAll mock**: `jest.mock('../../../lib/sse-hub', () => ({ broadcastAll: jest.fn() }))`. Assert `broadcastAll` is called with `event_type: 'queue_failed_jobs_detected'` when failed > 0.
-- **API key scrubbing test**: Include a test case where `errorOutput.stack` contains `sk-ant-api03-xxxx` and verify the response replaces it with `[REDACTED]`.
-- **pg numbered placeholders**: Any SQL assertion (e.g. checking `query.mock.calls[0][0]`) must expect `$1, $2` not `?`.
-- **Test runner**: `npx jest --testPathPattern='queue-observability|queue-snapshots'`. All tests must pass before the spec is marked complete.
+**Option B (feature flag):** Add a check — if the output stream already contains the marker (detect by matching the story ID pattern in recent chunks), skip the frontend injection. This is more complex and Option A is preferred.
+
+Also verify that the checkmark animations in RunStoryList (from US-002) still fire correctly — they are driven by WAL events independently of the terminal markers and should be unaffected.
+
+This is a cleanup story — small scope, but important to prevent confusing double-markers in the terminal.
 
 Acceptance Criteria:
-- backend/src/routes/__tests__/queue-observability.test.ts exists with tests covering all 5 endpoints: worker/health extensions, queue/stats, queue/failed-jobs (GET and POST retry), and queue/health-history
-- backend/src/__tests__/queue-snapshots.test.ts exists and verifies monitor-states handler writes correct snapshot rows and calls broadcastAll only when failed > 0
-- API key scrubbing is tested: a mock job with sk-ant-xxxx in errorOutput returns [REDACTED] in the response
-- Latency status classification is tested for all three states: healthy, degraded, critical
-- All tests pass when run with npx jest --testPathPattern='queue-observability|queue-snapshots'
-- Mock setup follows existing backend test patterns — jest.mock for db/index.ts and sse-hub, no real DB connections
+- Frontend-only marker injection code from US-003 is removed or disabled
+- Story completion markers appear exactly once in the terminal (from backend injection via run_output_chunks)
+- RunStoryList checkmark animations still fire correctly on story_passed WAL events
+- No duplicate marker lines appear when watching the terminal during a live run
+- Late-join terminal replay shows markers at the correct positions in the output stream
