@@ -1203,6 +1203,24 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     return started.size >= 2;
   }, [run, walEvents]);
 
+  // Count currently-active stories (started but not completed) for parallel banner
+  const activeStoryCount = useMemo(() => {
+    const active = new Set<string>();
+    for (const evt of walEvents) {
+      if (!evt.story_id) continue;
+      if (evt.event_type === 'story_started') {
+        active.add(evt.story_id);
+      } else if (
+        evt.event_type === 'story_passed' ||
+        evt.event_type === 'story_failed' ||
+        evt.event_type === 'story_skipped'
+      ) {
+        active.delete(evt.story_id);
+      }
+    }
+    return active.size;
+  }, [walEvents]);
+
   const handlePauseResume = useCallback(async () => {
     if (!isActive) return;
     setPauseLoading(true);
@@ -1367,9 +1385,21 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         return (
           <SplitPane
             left={
-              useMultiPane
-                ? <MultiPaneTerminal runId={run.id} walEvents={walEvents} />
-                : <RunTerminal ref={terminalRef} runId={run.id} workspaceId={workspaceId} />
+              <div className="h-full flex flex-col min-h-0">
+                {activeStoryCount >= 2 && (
+                  <div className="shrink-0 flex items-center gap-2 px-3 py-1.5 bg-emerald-500/10 border-b border-emerald-500/20">
+                    <Zap size={12} className="text-emerald-500 animate-pulse" />
+                    <span className="text-xs font-medium text-emerald-500">
+                      {activeStoryCount} stories running in parallel
+                    </span>
+                  </div>
+                )}
+                <div className="flex-1 min-h-0">
+                  {useMultiPane
+                    ? <MultiPaneTerminal runId={run.id} walEvents={walEvents} />
+                    : <RunTerminal ref={terminalRef} runId={run.id} workspaceId={workspaceId} />}
+                </div>
+              </div>
             }
             right={
               <div className="h-full flex flex-col min-h-0">

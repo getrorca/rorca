@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T20:10:06.115Z",
+  "lastUpdatedAt": "2026-03-16T20:23:16.653Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -72,6 +72,15 @@
       "finishedAt": "2026-03-16T20:10:06.115Z",
       "agentType": "claude",
       "elapsedMs": 19429
+    },
+    {
+      "storyId": "US-005",
+      "title": "Show simultaneous pulsing Running indicators and parallel count banner in RunStoryList for wave runs",
+      "status": "passed",
+      "startedAt": "2026-03-16T20:17:58.546Z",
+      "finishedAt": "2026-03-16T20:23:16.653Z",
+      "agentType": "claude",
+      "elapsedMs": 318107
     }
   ],
   "failedStories": [],
