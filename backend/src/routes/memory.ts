@@ -1053,6 +1053,70 @@ router.post('/synthesize', async (req: Request, res: Response) => {
   res.json({ proposals: allProposals, total: allProposals.length });
 });
 
+/**
+ * @swagger
+ * /api/memory/synthesize-from-run/{runId}:
+ *   post:
+ *     tags: [Context Files]
+ *     summary: Synthesize memory proposals from a pipeline run
+ *     operationId: synthesizeMemoryFromRun
+ *     description: >
+ *       Analyzes WAL events and story results from a completed pipeline run and
+ *       generates memory proposals (structured entries for MEMORY.md). Proposals
+ *       are not automatically saved — they must be accepted via POST /api/memory/proposals/:id/accept.
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema:
+ *           type: integer
+ *         description: Pipeline run ID to synthesize memory from
+ *         example: 42
+ *     responses:
+ *       200:
+ *         description: Memory proposals generated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 proposals:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       proposalId: { type: string }
+ *                       date: { type: string, format: date }
+ *                       category:
+ *                         type: string
+ *                         enum: [Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha]
+ *                       title: { type: string }
+ *                       rule: { type: string }
+ *                       context: { type: string, nullable: true }
+ *                       source: { type: string }
+ *                       status:
+ *                         type: string
+ *                         enum: [pending, accepted, rejected]
+ *                 total: { type: integer }
+ *       400:
+ *         description: Invalid runId (non-numeric)
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Pipeline run not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.post('/synthesize-from-run/:runId', async (req: Request, res: Response) => {
   const runId = parseInt(req.params.runId as string, 10);
   if (isNaN(runId)) throw new ValidationError('Invalid runId');
