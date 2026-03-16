@@ -144,6 +144,15 @@ async function fetchWithRetry(
   }
 }
 
+// ─── CSRF cookie reader ──────────────────────────────────────────────────────
+
+const STATE_CHANGING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+
+function getCsrfToken(): string | null {
+  const match = document.cookie.match(/(?:^|;\s*)_csrf=([^;]*)/);
+  return match ? match[1] : null;
+}
+
 // ─── Core fetch ───────────────────────────────────────────────────────────────
 
 export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: boolean }): Promise<T> {
@@ -156,7 +165,16 @@ export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: 
     headers['Authorization'] = `Bearer ${at}`;
   }
 
-  const res = await fetchWithRetry(`${BASE_URL}${path}`, { ...opts, headers });
+  // US-044: Attach CSRF token on state-changing requests (double-submit cookie pattern)
+  const method = (opts?.method || 'GET').toUpperCase();
+  if (STATE_CHANGING_METHODS.has(method)) {
+    const csrf = getCsrfToken();
+    if (csrf) {
+      headers['X-CSRF-Token'] = csrf;
+    }
+  }
+
+  const res = await fetchWithRetry(`${BASE_URL}${path}`, { ...opts, headers, credentials: 'include' });
 
   // On 401 with expired token, attempt silent refresh and retry once
   if (res.status === 401) {
