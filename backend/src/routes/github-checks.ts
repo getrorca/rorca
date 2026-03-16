@@ -3,6 +3,7 @@ import { queryOne } from '../db/index';
 import { postCommitStatus, CHECK_NAME, type CheckState } from '../lib/github-checks';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -63,17 +64,17 @@ router.post('/:sha', async (req: Request, res: Response) => {
     const { state, description, workspaceId } = req.body;
 
     if (!sha || sha.length < 7) {
-      res.status(400).json({ error: 'Invalid SHA' });
+      throw new ValidationError('Invalid SHA');
       return;
     }
 
     if (!state || !['pending', 'success', 'failure', 'error'].includes(state)) {
-      res.status(400).json({ error: 'Invalid state. Must be pending, success, failure, or error' });
+      throw new ValidationError('Invalid state. Must be pending, success, failure, or error');
       return;
     }
 
     if (!workspaceId || typeof workspaceId !== 'string') {
-      res.status(400).json({ error: 'workspaceId is required' });
+      throw new ValidationError('workspaceId is required');
       return;
     }
 
@@ -84,7 +85,7 @@ router.post('/:sha', async (req: Request, res: Response) => {
     );
 
     if (!webhookRow) {
-      res.status(404).json({ error: 'No GitHub connection found for this workspace' });
+      throw new NotFoundError('No GitHub connection found for this workspace');
       return;
     }
 

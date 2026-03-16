@@ -28,6 +28,7 @@ import { broadcastAll } from '../lib/sse-hub';
 import { invalidateMemory } from '../lib/context-cache';
 import { deduplicateMemory } from '../lib/memory-dedup';
 import { embedText, prepareText } from '../lib/embedding-pipeline';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -117,10 +118,10 @@ function inferSourceType(source: string): SourceType {
  */
 router.get('/', async (req: Request, res: Response) => {
   const { workspaceId, category, limit } = req.query;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   const wsPath = await getWorkspacePath(workspaceId as string);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const ledgerPath = getLedgerPath(workspaceId as string);
 
@@ -192,21 +193,21 @@ router.post('/', async (req: Request, res: Response) => {
   const { workspaceId, category, title, rule, context, source, sourceType } = req.body;
 
   if (!workspaceId || !category || !title || !rule) {
-    return res.status(400).json({ error: 'workspaceId, category, title, and rule are required' });
+    throw new ValidationError('workspaceId, category, title, and rule are required');
   }
 
   if (!MEMORY_CATEGORIES.includes(category as MemoryCategory)) {
-    return res.status(400).json({ error: `Invalid category. Must be one of: ${MEMORY_CATEGORIES.join(', ')}` });
+    throw new ValidationError(`Invalid category. Must be one of: ${MEMORY_CATEGORIES.join(', ')}`);
   }
 
   // Validate sourceType if provided; default to 'manual'
   const resolvedSourceType: SourceType = sourceType ?? 'manual';
   if (!VALID_SOURCE_TYPES.includes(resolvedSourceType as SourceType)) {
-    return res.status(400).json({ error: `Invalid sourceType. Must be one of: ${VALID_SOURCE_TYPES.join(', ')}` });
+    throw new ValidationError(`Invalid sourceType. Must be one of: ${VALID_SOURCE_TYPES.join(', ')}`);
   }
 
   const wsPath = await getWorkspacePath(workspaceId);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const entry: MemoryEntry = {
     date: todayDate(),
@@ -300,18 +301,18 @@ router.put('/entry', async (req: Request, res: Response) => {
   const { workspaceId, date, title, updates } = req.body;
 
   if (!workspaceId || !date || !title) {
-    return res.status(400).json({ error: 'workspaceId, date, and title are required' });
+    throw new ValidationError('workspaceId, date, and title are required');
   }
 
   if (updates?.category && !MEMORY_CATEGORIES.includes(updates.category as MemoryCategory)) {
-    return res.status(400).json({ error: `Invalid category. Must be one of: ${MEMORY_CATEGORIES.join(', ')}` });
+    throw new ValidationError(`Invalid category. Must be one of: ${MEMORY_CATEGORIES.join(', ')}`);
   }
 
   const wsPath = await getWorkspacePath(workspaceId);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const result = updateEntry(wsPath, date, title, updates ?? {}, getLedgerPath(workspaceId));
-  if (!result) return res.status(404).json({ error: 'Entry not found' });
+  if (!result) throw new NotFoundError('Entry not found');
 
   invalidateMemory(workspaceId); // PG-013
   res.json({ items: result, total: result.length });
@@ -352,14 +353,14 @@ router.delete('/entry', async (req: Request, res: Response) => {
   const { workspaceId, date, title } = req.body;
 
   if (!workspaceId || !date || !title) {
-    return res.status(400).json({ error: 'workspaceId, date, and title are required' });
+    throw new ValidationError('workspaceId, date, and title are required');
   }
 
   const wsPath = await getWorkspacePath(workspaceId);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const removed = deleteEntry(wsPath, date, title, getLedgerPath(workspaceId));
-  if (!removed) return res.status(404).json({ error: 'Entry not found' });
+  if (!removed) throw new NotFoundError('Entry not found');
 
   invalidateMemory(workspaceId); // PG-013
   res.json({ deleted: true });
@@ -416,7 +417,7 @@ router.delete('/entry', async (req: Request, res: Response) => {
  */
 router.get('/proposals', async (req: Request, res: Response) => {
   const { workspaceId, status, runId } = req.query;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   let sql = 'SELECT * FROM memory_proposals WHERE workspace_id = $1';
   const params: (string | number)[] = [workspaceId as string];
@@ -544,11 +545,11 @@ router.post('/proposals', async (req: Request, res: Response) => {
   };
 
   if (!workspaceId || !proposals || !Array.isArray(proposals)) {
-    return res.status(400).json({ error: 'workspaceId and proposals array required' });
+    throw new ValidationError('workspaceId and proposals array required');
   }
 
   const wsPath = await getWorkspacePath(workspaceId);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const ledgerPath = getLedgerPath(workspaceId);
   const results: Array<{ proposalId: string; action: string; success: boolean }> = [];
@@ -682,7 +683,7 @@ router.post('/proposals/dismiss', async (req: Request, res: Response) => {
   };
 
   if (!workspaceId || !proposalIds || !Array.isArray(proposalIds)) {
-    return res.status(400).json({ error: 'workspaceId and proposalIds array required' });
+    throw new ValidationError('workspaceId and proposalIds array required');
   }
 
   let dismissed = 0;
@@ -733,7 +734,7 @@ router.post('/proposals/undismiss', async (req: Request, res: Response) => {
   };
 
   if (!workspaceId) {
-    return res.status(400).json({ error: 'workspaceId required' });
+    throw new ValidationError('workspaceId required');
   }
 
   let restored = 0;
@@ -785,10 +786,10 @@ router.post('/proposals/undismiss', async (req: Request, res: Response) => {
  */
 router.get('/rejected', async (req: Request, res: Response) => {
   const { workspaceId } = req.query;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   const wsPath = await getWorkspacePath(workspaceId as string);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const rejected = readRejected(wsPath);
   res.json({ items: rejected, total: rejected.length });
@@ -826,10 +827,10 @@ router.get('/rejected', async (req: Request, res: Response) => {
  */
 router.get('/context', async (req: Request, res: Response) => {
   const { workspaceId, n } = req.query;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   const wsPath = await getWorkspacePath(workspaceId as string);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const snippet = getContextSnippet(wsPath, parseInt(n as string, 10) || 20, getLedgerPath(workspaceId as string));
   res.json({ snippet, tokenEstimate: Math.ceil(snippet.length / 4) });
@@ -887,10 +888,10 @@ router.get('/categories', (_req: Request, res: Response) => {
  */
 router.get('/archive/count', async (req: Request, res: Response) => {
   const { workspaceId } = req.query;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   const wsPath = await getWorkspacePath(workspaceId as string);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const count = countArchiveEntries(wsPath);
   res.json({ count });
@@ -936,10 +937,10 @@ router.get('/archive/count', async (req: Request, res: Response) => {
  */
 router.post('/rotate', async (req: Request, res: Response) => {
   const { workspaceId, retentionDays, maxEntries, tokenBudget } = req.body;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   const wsPath = await getWorkspacePath(workspaceId);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const result = rotateMemory(wsPath, {
     retentionDays: retentionDays !== undefined ? Number(retentionDays) : undefined,
@@ -995,7 +996,7 @@ router.post('/rotate', async (req: Request, res: Response) => {
 // POST /api/memory/synthesize — synthesize memory proposals from all recent runs for a workspace
 router.post('/synthesize', async (req: Request, res: Response) => {
   const { workspaceId } = req.body;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId is required' });
+  if (!workspaceId) throw new ValidationError('workspaceId is required');
 
   // Find recent completed runs for this workspace (last 10)
   const runs = await dbQuery<{ id: number }>(
@@ -1054,14 +1055,14 @@ router.post('/synthesize', async (req: Request, res: Response) => {
 
 router.post('/synthesize-from-run/:runId', async (req: Request, res: Response) => {
   const runId = parseInt(req.params.runId as string, 10);
-  if (isNaN(runId)) return res.status(400).json({ error: 'Invalid runId' });
+  if (isNaN(runId)) throw new ValidationError('Invalid runId');
 
   const run = await queryOne<{ id: number; workspace_id: string; status: string }>(
     'SELECT id, workspace_id, status FROM pipeline_runs WHERE id = $1',
     [runId]
   );
 
-  if (!run) return res.status(404).json({ error: 'Run not found' });
+  if (!run) throw new NotFoundError('Run not found');
 
   // Generate candidates from WAL event analysis
   const candidates = await analyzeRunEvents(runId);
@@ -1171,10 +1172,10 @@ router.post('/synthesize-from-run/:runId', async (req: Request, res: Response) =
  */
 router.post('/deduplicate', async (req: Request, res: Response) => {
   const { workspaceId } = req.body;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   const wsPath = await getWorkspacePath(workspaceId);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const dryRun = req.query.dryRun === 'true';
 
@@ -1244,7 +1245,7 @@ router.post('/deduplicate', async (req: Request, res: Response) => {
  */
 router.get('/items', async (req: Request, res: Response) => {
   const { workspaceId, category, confidence, sourceRunId, search, pinnedOnly } = req.query;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   let sql = `SELECT id, workspace_id, category, content, source_story_id, source_run_id,
              confidence, related_files, pinned, source_type, created_at
@@ -1366,7 +1367,7 @@ router.get('/items', async (req: Request, res: Response) => {
  */
 router.patch('/items/:id', async (req: Request, res: Response) => {
   const id = parseInt(req.params.id as string, 10);
-  if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+  if (isNaN(id)) throw new ValidationError('Invalid id');
 
   const { content, pinned } = req.body as { content?: string; pinned?: boolean };
 
@@ -1375,7 +1376,7 @@ router.patch('/items/:id', async (req: Request, res: Response) => {
     'SELECT id, workspace_id, content FROM memories WHERE id = $1 AND deleted_at IS NULL',
     [id],
   );
-  if (!existing) return res.status(404).json({ error: 'Memory not found' });
+  if (!existing) throw new NotFoundError('Memory not found');
 
   const setClauses: string[] = [];
   const params: (string | number | boolean | null)[] = [];
@@ -1407,7 +1408,7 @@ router.patch('/items/:id', async (req: Request, res: Response) => {
   }
 
   if (setClauses.length === 0) {
-    return res.status(400).json({ error: 'No fields to update' });
+    throw new ValidationError('No fields to update');
   }
 
   params.push(id);
@@ -1457,13 +1458,13 @@ router.patch('/items/:id', async (req: Request, res: Response) => {
  */
 router.delete('/items/:id', async (req: Request, res: Response) => {
   const id = parseInt(req.params.id as string, 10);
-  if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+  if (isNaN(id)) throw new ValidationError('Invalid id');
 
   const existing = await queryOne<{ id: number; workspace_id: string }>(
     'SELECT id, workspace_id FROM memories WHERE id = $1 AND deleted_at IS NULL',
     [id],
   );
-  if (!existing) return res.status(404).json({ error: 'Memory not found' });
+  if (!existing) throw new NotFoundError('Memory not found');
 
   await execute('UPDATE memories SET deleted_at = NOW() WHERE id = $1', [id]);
   invalidateMemory(existing.workspace_id);
@@ -1491,13 +1492,13 @@ router.delete('/items/:id', async (req: Request, res: Response) => {
  */
 router.post('/items/:id/undelete', async (req: Request, res: Response) => {
   const id = parseInt(req.params.id as string, 10);
-  if (isNaN(id)) return res.status(400).json({ error: 'Invalid id' });
+  if (isNaN(id)) throw new ValidationError('Invalid id');
 
   const existing = await queryOne<{ id: number; workspace_id: string }>(
     'SELECT id, workspace_id FROM memories WHERE id = $1 AND deleted_at IS NOT NULL',
     [id],
   );
-  if (!existing) return res.status(404).json({ error: 'Memory not found or not deleted' });
+  if (!existing) throw new NotFoundError('Memory not found or not deleted');
 
   await execute('UPDATE memories SET deleted_at = NULL WHERE id = $1', [id]);
   invalidateMemory(existing.workspace_id);
@@ -1530,7 +1531,7 @@ router.post('/items/bulk', async (req: Request, res: Response) => {
   const { ids, action } = req.body as { ids: number[]; action: 'delete' | 'pin' | 'unpin' };
 
   if (!ids || !Array.isArray(ids) || ids.length === 0 || !action) {
-    return res.status(400).json({ error: 'ids array and action required' });
+    throw new ValidationError('ids array and action required');
   }
 
   // Build numbered placeholders for IN clause
@@ -1544,7 +1545,7 @@ router.post('/items/bulk', async (req: Request, res: Response) => {
   } else if (action === 'unpin') {
     sql = `UPDATE memories SET pinned = false WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
   } else {
-    return res.status(400).json({ error: 'action must be delete, pin, or unpin' });
+    throw new ValidationError('action must be delete, pin, or unpin');
   }
 
   const result = await execute(sql, ids);

@@ -8,6 +8,7 @@
 import { Router, Request, Response } from 'express';
 import { hybridSearch, type SearchOptions, type SourceType } from '../lib/search';
 import { logger } from '../lib/logger';
+import { ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -80,7 +81,7 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const q = req.query.q as string;
     if (!q || !q.trim()) {
-      res.status(400).json({ error: 'Missing required query param: q (search query)' });
+      throw new ValidationError('Missing required query param: q (search query)');
       return;
     }
 

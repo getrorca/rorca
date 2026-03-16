@@ -6,6 +6,7 @@ import type { AuthUser } from './auth';
 import { chatComplete } from '../lib/llm-client';
 import type { ProviderType } from '../lib/llm-client';
 import { invalidateProviderCache } from '../lib/embedding-pipeline';
+import { AuthError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -107,22 +108,22 @@ export interface VaultKeyResult {
  */
 router.post('/', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
-  if (!user) { res.status(401).json({ error: 'No user found' }); return; }
+  if (!user) { throw new AuthError('No user found'); return; }
 
   const { provider, key, label, base_url } = req.body;
 
   if (!provider || typeof provider !== 'string') {
-    res.status(400).json({ error: 'provider is required' });
+    throw new ValidationError('provider is required');
     return;
   }
   if (!key || typeof key !== 'string') {
-    res.status(400).json({ error: 'key is required' });
+    throw new ValidationError('key is required');
     return;
   }
 
   const validProviders = ['anthropic', 'openai', 'openrouter', 'openai-compat'];
   if (!validProviders.includes(provider)) {
-    res.status(400).json({ error: `Invalid provider. Must be one of: ${validProviders.join(', ')}` });
+    throw new ValidationError(`Invalid provider. Must be one of: ${validProviders.join(', ')}`);
     return;
   }
 
@@ -231,7 +232,7 @@ router.get('/', async (req: Request, res: Response) => {
  */
 router.delete('/:id', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
-  if (!user) { res.status(401).json({ error: 'No user found' }); return; }
+  if (!user) { throw new AuthError('No user found'); return; }
   const keyId = req.params.id;
 
   // Verify ownership before deleting
@@ -241,7 +242,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
   );
 
   if (!existing) {
-    res.status(404).json({ error: 'Key not found' });
+    throw new NotFoundError('Key not found');
     return;
   }
 
@@ -289,17 +290,17 @@ router.delete('/:id', async (req: Request, res: Response) => {
  */
 router.post('/test', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
-  if (!user) { res.status(401).json({ error: 'No user found' }); return; }
+  if (!user) { throw new AuthError('No user found'); return; }
   const { provider } = req.body as { provider?: string };
 
   if (!provider || typeof provider !== 'string') {
-    res.status(400).json({ error: 'provider is required' });
+    throw new ValidationError('provider is required');
     return;
   }
 
   const validProviders = ['claude-cli', 'anthropic', 'openai-compat', 'openrouter'];
   if (!validProviders.includes(provider)) {
-    res.status(400).json({ error: `Invalid provider. Must be one of: ${validProviders.join(', ')}` });
+    throw new ValidationError(`Invalid provider. Must be one of: ${validProviders.join(', ')}`);
     return;
   }
 
@@ -316,7 +317,7 @@ router.post('/test', async (req: Request, res: Response) => {
       );
 
       if (!row) {
-        res.status(400).json({ error: `No API key stored for provider "${provider}". Add a key first.` });
+        throw new ValidationError(`No API key stored for provider "${provider}". Add a key first.`);
         return;
       }
 
@@ -385,7 +386,7 @@ router.get('/default-provider', async (req: Request, res: Response) => {
   const { workspaceId } = req.query;
 
   if (!workspaceId || typeof workspaceId !== 'string') {
-    res.status(400).json({ error: 'workspaceId query param is required' });
+    throw new ValidationError('workspaceId query param is required');
     return;
   }
 
@@ -432,21 +433,21 @@ router.get('/default-provider', async (req: Request, res: Response) => {
  */
 router.put('/default-provider', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
-  if (!user) { res.status(401).json({ error: 'No user found' }); return; }
+  if (!user) { throw new AuthError('No user found'); return; }
   const { workspaceId, provider } = req.body;
 
   if (!workspaceId || typeof workspaceId !== 'string') {
-    res.status(400).json({ error: 'workspaceId is required' });
+    throw new ValidationError('workspaceId is required');
     return;
   }
   if (!provider || typeof provider !== 'string') {
-    res.status(400).json({ error: 'provider is required' });
+    throw new ValidationError('provider is required');
     return;
   }
 
   const validProviders = ['claude-cli', 'anthropic', 'openai-compat', 'openrouter'];
   if (!validProviders.includes(provider)) {
-    res.status(400).json({ error: `Invalid provider. Must be one of: ${validProviders.join(', ')}` });
+    throw new ValidationError(`Invalid provider. Must be one of: ${validProviders.join(', ')}`);
     return;
   }
 
