@@ -3,8 +3,8 @@
 Spec: rorca-go-to-market-v1
 Run ID: 129
 Started: 2026-03-16T08:27:07.845Z
-Last Updated: 2026-03-16T08:49:10.815Z
+Last Updated: 2026-03-16T08:52:20.199Z
 
 ## Completed Stories (2)
 - US-001: Resolve merge conflict in worker.ts — DONE (claude, claude-sonnet-4-6, 156s)
-- US-003: Commit untracked database migration files — DONE (claude, claude-haiku-4-5-20251001, 79s)
+- US-004: Landing page auth pages — /login and /signup with GitHub OAuth — DONE (claude, claude-sonnet-4-6, 267s)
