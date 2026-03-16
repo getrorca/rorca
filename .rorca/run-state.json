@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T10:20:48.724Z",
+  "lastUpdatedAt": "2026-03-16T10:19:07.613Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -35,14 +35,14 @@
       "elapsedMs": 146608
     },
     {
-      "storyId": "US-063",
-      "title": "OG image generation script for landing pages",
+      "storyId": "US-064",
+      "title": "/docs Page or Redirect",
       "status": "passed",
-      "startedAt": "2026-03-16T10:15:52.096Z",
-      "finishedAt": "2026-03-16T10:20:48.724Z",
+      "startedAt": "2026-03-16T10:15:52.204Z",
+      "finishedAt": "2026-03-16T10:19:07.613Z",
       "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 296628
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 195409
     }
   ],
   "failedStories": [],
