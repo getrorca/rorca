@@ -4,6 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { Nav } from '@/components/Nav';
+import { Footer } from '@/components/Footer';
 
 const GITHUB_CLIENT_ID = process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID;
 
@@ -208,6 +209,8 @@ export default function SignupPage() {
                     </div>
                 </motion.div>
             </div>
+
+            <Footer />
         </main>
     );
 }
