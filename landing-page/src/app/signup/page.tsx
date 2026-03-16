@@ -5,6 +5,7 @@ import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { Nav } from '@/components/Nav';
 import { Footer } from '@/components/Footer';
+import { trackAuthComplete } from '@/lib/analytics';
 
 const GITHUB_CLIENT_ID = process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID;
 
@@ -46,6 +47,7 @@ export default function SignupPage() {
     function handleGitHubSignup() {
         if (!GITHUB_CLIENT_ID) return;
         setIsGithubLoading(true);
+        trackAuthComplete('github');
         const params = new URLSearchParams({
             client_id: GITHUB_CLIENT_ID,
             redirect_uri: `${window.location.origin}/api/auth/github/callback`,
@@ -77,6 +79,7 @@ export default function SignupPage() {
                 setErrors({ form: 'Something went wrong. Please try again.' });
                 return;
             }
+            trackAuthComplete('email');
             window.location.href = '/';
         } catch {
             setErrors({ form: 'Unable to connect. Please try again.' });
