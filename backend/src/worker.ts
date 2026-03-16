@@ -1648,6 +1648,198 @@ export async function checkSingletonGuard(): Promise<void> {
   }
 }
 
+// ── Integration health checks ────────────────────────────────────────────
+// Pings each connected integration's API endpoint every 5 minutes (via pg-boss cron).
+// Stores health snapshots in integration_health table for trend display.
+
+interface IntegrationTokenRow {
+  workspace_id: string;
+  provider: string;
+  encrypted_token: string;
+}
+
+/**
+ * Compute health status based on thresholds from AC:
+ * - healthy: error_rate < 0.05 AND rate_limit_remaining >= 500 AND consecutive_failures <= 3
+ * - degraded: error_rate 0.05-0.20 OR rate_limit_remaining < 500
+ * - disconnected: consecutive_failures > 3 OR rate_limit_remaining = 0
+ */
+function computeHealthStatus(
+  errorRate: number,
+  rateLimitRemaining: number | null,
+  consecutiveFailures: number,
+): 'healthy' | 'degraded' | 'disconnected' {
+  if (consecutiveFailures > 3 || rateLimitRemaining === 0) return 'disconnected';
+  if (errorRate >= 0.05 || (rateLimitRemaining !== null && rateLimitRemaining < 500)) return 'degraded';
+  return 'healthy';
+}
+
+async function runIntegrationHealthChecks(): Promise<void> {
+  logger.info('[worker] integration:health-check — starting');
+
+  // Find all workspaces with connected integrations.
+  // Check github_connections (legacy) and integration_tokens (new).
+  // For GitHub: use github_connections.encrypted_token (existing pattern).
+
+  // 1. GitHub health checks via github_connections
+  try {
+    const { decryptToken } = await import('./routes/auth');
+
+    type GithubConnRow = { user_id: string; encrypted_token: string; github_username: string | null };
+    const ghConns = await query<GithubConnRow>(
+      `SELECT gc.user_id, gc.encrypted_token, gc.github_username
+       FROM github_connections gc
+       WHERE gc.encrypted_token IS NOT NULL`,
+    );
+
+    // For each GitHub connection, find associated workspaces
+    for (const conn of ghConns) {
+      let token: string;
+      try {
+        token = decryptToken(conn.encrypted_token);
+      } catch {
+        logger.warn({ userId: conn.user_id }, '[worker] integration:health-check — failed to decrypt GitHub token, skipping');
+        continue;
+      }
+
+      // Find workspaces with GitHub webhooks configured
+      type WsRow = { workspace_id: string };
+      const wsRows = await query<WsRow>(
+        `SELECT DISTINCT workspace_id FROM workspace_github_webhooks`,
+      );
+
+      for (const ws of wsRows) {
+        await checkGitHubHealth(ws.workspace_id, token);
+      }
+    }
+
+    // If no github_connections, check integration_tokens table
+    if (ghConns.length === 0) {
+      const tokenRows = await query<IntegrationTokenRow>(
+        `SELECT workspace_id, provider, encrypted_token
+         FROM integration_tokens
+         WHERE provider = 'github' AND token_type = 'oauth_access' AND revoked_at IS NULL`,
+      );
+
+      for (const row of tokenRows) {
+        try {
+          const { getOAuthToken } = await import('./lib/integration-vault');
+          const result = await getOAuthToken(row.workspace_id, 'github');
+          if (result) {
+            await checkGitHubHealth(row.workspace_id, result.token);
+          }
+        } catch (err) {
+          logger.warn({ err, workspaceId: row.workspace_id }, '[worker] integration:health-check — vault token check failed');
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, '[worker] integration:health-check — GitHub checks failed (preserving last-known-good state)');
+  }
+
+  logger.info('[worker] integration:health-check — complete');
+}
+
+async function checkGitHubHealth(workspaceId: string, token: string): Promise<void> {
+  // Get previous health snapshot for this workspace+provider
+  type PrevHealthRow = { consecutive_failures: number; last_success: string | null };
+  const prev = await queryOne<PrevHealthRow>(
+    `SELECT consecutive_failures, last_success FROM integration_health
+     WHERE workspace_id = $1 AND provider = 'github'
+     ORDER BY checked_at DESC LIMIT 1`,
+    [workspaceId],
+  );
+
+  let rateLimitRemaining: number | null = null;
+  let rateLimitMax: number | null = null;
+  let consecutiveFailures = prev?.consecutive_failures ?? 0;
+  let lastSuccess = prev?.last_success ?? null;
+  let lastError: string | null = null;
+  let errorRate = 0;
+
+  try {
+    const response = await fetch('https://api.github.com/rate_limit', {
+      headers: {
+        'Authorization': `token ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'Rorca/1.0',
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (response.ok) {
+      const data = await response.json() as { rate: { remaining: number; limit: number; reset: number } };
+      rateLimitRemaining = data.rate.remaining;
+      rateLimitMax = data.rate.limit;
+      consecutiveFailures = 0;
+      lastSuccess = new Date().toISOString();
+    } else {
+      consecutiveFailures += 1;
+      lastError = `GitHub API returned ${response.status}: ${response.statusText}`;
+    }
+  } catch (err: any) {
+    consecutiveFailures += 1;
+    lastError = err.message ?? String(err);
+  }
+
+  // Calculate error rate from last 24h snapshots
+  try {
+    type ErrorRateRow = { total: string; failures: string };
+    const rateRow = await queryOne<ErrorRateRow>(
+      `SELECT COUNT(*)::text AS total,
+              COUNT(*) FILTER (WHERE consecutive_failures > 0)::text AS failures
+       FROM integration_health
+       WHERE workspace_id = $1 AND provider = 'github'
+         AND checked_at > NOW() - INTERVAL '24 hours'`,
+      [workspaceId],
+    );
+    if (rateRow) {
+      const total = parseInt(rateRow.total, 10);
+      const failures = parseInt(rateRow.failures, 10);
+      errorRate = total > 0 ? failures / total : 0;
+    }
+  } catch {
+    // Non-fatal — use 0
+  }
+
+  // Compute webhook success rate from recent webhook deliveries
+  let webhookSuccessRate = 1.0;
+  try {
+    type WebhookRateRow = { total: string; successes: string };
+    const whRow = await queryOne<WebhookRateRow>(
+      `SELECT COUNT(*)::text AS total,
+              COUNT(*) FILTER (WHERE status_code >= 200 AND status_code < 300)::text AS successes
+       FROM webhook_deliveries
+       WHERE workspace_id = $1 AND provider = 'github'
+         AND delivered_at > NOW() - INTERVAL '24 hours'`,
+      [workspaceId],
+    );
+    if (whRow) {
+      const total = parseInt(whRow.total, 10);
+      const successes = parseInt(whRow.successes, 10);
+      webhookSuccessRate = total > 0 ? successes / total : 1.0;
+    }
+  } catch {
+    // webhook_deliveries table may not exist — use default 1.0
+  }
+
+  const status = computeHealthStatus(errorRate, rateLimitRemaining, consecutiveFailures);
+
+  // Insert health snapshot (never delete previous rows — preserve history)
+  try {
+    await execute(
+      `INSERT INTO integration_health
+         (workspace_id, provider, status, error_rate, rate_limit_remaining, rate_limit_max,
+          consecutive_failures, last_success, webhook_success_rate, last_error, checked_at)
+       VALUES ($1, 'github', $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
+      [workspaceId, status, errorRate, rateLimitRemaining, rateLimitMax,
+       consecutiveFailures, lastSuccess, webhookSuccessRate, lastError],
+    );
+  } catch (err) {
+    logger.warn({ err, workspaceId }, '[worker] integration:health-check — failed to write health snapshot');
+  }
+}
+
 // ── Startup ──────────────────────────────────────────────────────────────
 
 async function start(): Promise<void> {
@@ -1925,6 +2117,17 @@ async function start(): Promise<void> {
     });
   } catch (err) {
     logger.warn({ err }, '[worker] queue-snapshot-prune schedule registration failed (non-fatal)');
+  }
+
+  // 4e. Integration health check cron — pings connected integrations every 5 minutes.
+  try {
+    await boss.schedule('integration:health-check', '*/5 * * * *', {});
+    await boss.work('integration:health-check', async () => {
+      await runIntegrationHealthChecks();
+    });
+    logger.info('[worker] integration:health-check cron registered (every 5 min)');
+  } catch (err) {
+    logger.warn({ err }, '[worker] integration:health-check schedule registration failed (non-fatal)');
   }
 
   // 4. Bulk-register all enabled pipeline_schedules with pg-boss native scheduling.
