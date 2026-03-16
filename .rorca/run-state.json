@@ -1,70 +1,9 @@
 {
-  "specId": "rorca-go-to-market-v1",
-  "runId": 129,
-  "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T11:17:36.545Z",
-  "completedStories": [
-    {
-      "storyId": "US-001",
-      "title": "Resolve merge conflict in worker.ts",
-      "status": "passed",
-      "startedAt": "2026-03-16T08:27:08.476Z",
-      "finishedAt": "2026-03-16T08:29:44.855Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 156379
-    },
-    {
-      "storyId": "US-051",
-      "title": "API documentation completeness — @swagger on all routes",
-      "status": "passed",
-      "startedAt": "2026-03-16T08:49:45.356Z",
-      "finishedAt": "2026-03-16T09:08:58.109Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 1152753
-    },
-    {
-      "storyId": "US-053",
-      "title": "Installation troubleshooting guide",
-      "status": "passed",
-      "startedAt": "2026-03-16T09:47:24.271Z",
-      "finishedAt": "2026-03-16T09:49:50.879Z",
-      "agentType": "claude",
-      "model": "claude-haiku-4-5-20251001",
-      "elapsedMs": 146608
-    },
-    {
-      "storyId": "US-070",
-      "title": "macOS Binary Notarization Documentation and Gatekeeper Workaround",
-      "status": "passed",
-      "startedAt": "2026-03-16T10:15:53.016Z",
-      "finishedAt": "2026-03-16T10:17:58.658Z",
-      "agentType": "claude",
-      "model": "claude-haiku-4-5-20251001",
-      "elapsedMs": 125642
-    },
-    {
-      "storyId": "US-057",
-      "title": "Password Reset Flow",
-      "status": "passed",
-      "startedAt": "2026-03-16T10:41:40.801Z",
-      "finishedAt": "2026-03-16T10:42:03.208Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 22407
-    },
-    {
-      "storyId": "US-068",
-      "title": "Account Deletion and GDPR Right-to-Erasure",
-      "status": "passed",
-      "startedAt": "2026-03-16T10:59:24.938Z",
-      "finishedAt": "2026-03-16T11:17:36.545Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 1091607
-    }
-  ],
+  "specId": "rorca-runs-panel-fixes",
+  "runId": 133,
+  "startedAt": "2026-03-16T20:09:38.227Z",
+  "lastUpdatedAt": "2026-03-16T20:09:38.227Z",
+  "completedStories": [],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
