@@ -138,6 +138,10 @@ const EmbeddingSchema = z.object({
   model: z.string().optional(),
 });
 
+const GithubConfigSchema = z.object({
+  prTemplate: z.string().optional(),
+});
+
 export const RorcaConfigSchema = z.object({
   $schema: z.string().optional(),
   version: z.number().int().min(1).default(1),
@@ -148,6 +152,7 @@ export const RorcaConfigSchema = z.object({
   execution: ExecutionSchema.default(() => ExecutionSchema.parse({})),
   personas: PersonasConfigSchema.default(() => PersonasConfigSchema.parse({})),
   embedding: EmbeddingSchema.default(() => EmbeddingSchema.parse({})),
+  github: GithubConfigSchema.default(() => GithubConfigSchema.parse({})),
 });
 
 // ─── Exported Types ──────────────────────────────────────────────────────────
@@ -166,6 +171,7 @@ export type GatesConfig = z.infer<typeof GatesSchema>;
 export type AdversarialReviewConfig = z.infer<typeof AdversarialReviewSchema>;
 export type PersonasConfig = z.infer<typeof PersonasConfigSchema>;
 export type EmbeddingConfig = z.infer<typeof EmbeddingSchema>;
+export type GithubConfig = z.infer<typeof GithubConfigSchema>;
 
 // ─── Config Loading ──────────────────────────────────────────────────────────
 

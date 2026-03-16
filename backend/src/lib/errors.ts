@@ -60,8 +60,42 @@ export class NotFoundError extends AppError {
   readonly statusCode = 404 as const;
 
   constructor(resource: string, id?: string) {
-    const msg = id ? `${resource} '${id}' not found` : `${resource} not found`;
+    // If the message already looks like a complete sentence (ends with "not found"),
+    // use it verbatim. Otherwise build "Resource 'id' not found" or "Resource not found".
+    let msg: string;
+    if (resource.toLowerCase().endsWith('not found')) {
+      msg = resource;
+    } else {
+      msg = id ? `${resource} '${id}' not found` : `${resource} not found`;
+    }
     super(msg, 'NOT_FOUND');
+  }
+}
+
+/** 410 — resource is gone (expired links, used tokens, etc.) */
+export class GoneError extends AppError {
+  readonly statusCode = 410 as const;
+
+  constructor(message: string) {
+    super(message, 'GONE');
+  }
+}
+
+/** 413 — payload too large */
+export class PayloadTooLargeError extends AppError {
+  readonly statusCode = 413 as const;
+
+  constructor(message = 'Payload too large') {
+    super(message, 'PAYLOAD_TOO_LARGE');
+  }
+}
+
+/** 429 — too many requests */
+export class TooManyRequestsError extends AppError {
+  readonly statusCode = 429 as const;
+
+  constructor(message = 'Too many requests') {
+    super(message, 'TOO_MANY_REQUESTS');
   }
 }
 
@@ -80,5 +114,14 @@ export class UnprocessableError extends AppError {
 
   constructor(message: string, details?: Record<string, unknown>) {
     super(message, 'UNPROCESSABLE', details);
+  }
+}
+
+/** 503 — service unavailable (upstream down, circuit breaker open) */
+export class ServiceUnavailableError extends AppError {
+  readonly statusCode = 503 as const;
+
+  constructor(message = 'Service temporarily unavailable') {
+    super(message, 'SERVICE_UNAVAILABLE');
   }
 }

@@ -16,6 +16,8 @@ import storiesRouter from './routes/stories';
 import schedulesRouter from './routes/schedules';
 import envVarsRouter from './routes/env-vars';
 import workspaceGithubRouter from './routes/workspace-github';
+import workspaceIntegrationsRouter from './routes/workspace-integrations';
+import integrationAuditLogRouter from './routes/integration-audit-log';
 import webhooksRouter from './routes/webhooks';
 import githubChecksRouter from './routes/github-checks';
 import teamsRouter from './routes/teams';
@@ -38,6 +40,7 @@ import settingsRouter from './routes/settings';
 import billingRouter, { webhookRouter as billingWebhookRouter } from './routes/billing';
 import { fireAgentHooks } from './lib/agent-hook-runner';
 import { startNotificationDispatcher } from './lib/notification-dispatcher';
+import { registerDraftPrSubscriber } from './lib/draft-pr-subscriber';
 import { startQueueConsumer } from './lib/queue-consumer';
 import { startMemorySynthesis } from './lib/memory-synthesis';
 import { startFileWatcher } from './lib/file-watcher';
@@ -51,6 +54,7 @@ import { rateLimiter, initRateLimiterCache } from './lib/rate-limiter';
 import { publicReviewRouter, specReviewRouter } from './routes/review';
 import fileWatchRouter from './routes/file-watch';
 import { errorHandler } from './lib/error-handler';
+import { csrfProtection } from './lib/csrf';
 import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
 import { queryOne } from './db/index';
 import runQueueRouter from './routes/run-queue';
@@ -77,6 +81,8 @@ import { startGraphPopulator } from './lib/graph-populator';
 import workspaceDriftRouter from './routes/workspace-drift';
 import { startDriftSubscriber } from './lib/drift-subscriber';
 import { startMarkerInjector } from './lib/marker-injector';
+import { startCommitStatusPoster } from './lib/commit-status-poster';
+import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 import { initBoss } from './lib/pg-boss';
@@ -126,8 +132,9 @@ app.use((_req, res, next) => {
   next();
 });
 
-// CORS configuration — supports comma-separated allowed origins
-// In production, CORS_ORIGIN must be set to a specific origin; '*' or absent logs a warning.
+// CORS configuration — explicit origin required; no wildcards in production.
+// CORS_ORIGIN defaults to http://localhost:5210 for development.
+// In production, set CORS_ORIGIN to https://rorca.app (or comma-separated list).
 let corsOrigin: boolean | string | string[];
 let allowCredentials = false;
 
@@ -138,27 +145,27 @@ if (process.env.RORCA_SERVE_STATIC === '1') {
 } else {
   const rawOrigin = process.env.CORS_ORIGIN || '';
 
-  if (process.env.NODE_ENV === 'production' && (!rawOrigin || rawOrigin === '*')) {
-    console.warn('WARNING: CORS_ORIGIN not configured — API accessible from any origin');
+  if (!rawOrigin) {
+    console.warn('WARNING: CORS_ORIGIN not set — defaulting to http://localhost:5210 (development only)');
   }
 
-  if (!rawOrigin || rawOrigin === '*') {
-    // Wildcard: allow all origins, no credentials
-    corsOrigin = '*';
-    allowCredentials = false;
-  } else {
-    // Specific origin(s): support comma-separated list
-    const origins = rawOrigin.split(',').map((o: string) => o.trim()).filter(Boolean);
-    corsOrigin = origins.length === 1 ? origins[0] : origins;
-    allowCredentials = true;
+  if (process.env.NODE_ENV === 'production' && (!rawOrigin || rawOrigin === '*')) {
+    console.warn('WARNING: CORS_ORIGIN not configured for production — set CORS_ORIGIN to restrict access');
   }
+
+  // Default to localhost:5210 for development; never use wildcard '*'
+  const effectiveOrigin = rawOrigin && rawOrigin !== '*' ? rawOrigin : 'http://localhost:5210';
+  const origins = effectiveOrigin.split(',').map((o: string) => o.trim()).filter(Boolean);
+  corsOrigin = origins.length === 1 ? origins[0] : origins;
+  allowCredentials = true;
 }
 
 app.use(cors({
   origin: corsOrigin,
   credentials: allowCredentials,
-  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Workspace-Id'],
+  maxAge: 86400,
 }));
 
 // Capture raw body for webhook signature verification.
@@ -240,6 +247,12 @@ if (process.env.AUTH_REQUIRED === 'true') {
 // ─── Rate limiting (after auth so req.user is available) ───
 app.use(rateLimiter);
 
+// ─── CSRF protection (double-submit cookie pattern) ───
+// Validates X-CSRF-Token header against _csrf cookie on POST/PUT/PATCH/DELETE.
+// Exempt: webhooks, health, login, register, GitHub OAuth, billing webhook.
+// Skips validation when _csrf cookie is absent (user not logged in).
+app.use(csrfProtection);
+
 // ─── Protected routes ───
 app.use('/api/workspaces', workspacesRouter);
 app.use('/api/workspace', fileWatchRouter);
@@ -260,6 +273,8 @@ app.use('/api/workspaces/:id/budget', budgetRouter);
 app.use('/api/workspaces/:id/agent-hooks', agentHooksRouter);
 app.use('/api/workspaces/:id/agent-profiles', agentProfilesRouter);
 app.use('/api/workspaces/:id/github', workspaceGithubRouter);
+app.use('/api/workspaces/:id/integrations', workspaceIntegrationsRouter);
+app.use('/api/workspaces/:id/integrations', integrationAuditLogRouter);
 app.use('/api/workspaces', workspaceDriftRouter);
 app.use('/api/github/checks', githubChecksRouter);
 app.use('/api/teams', teamsRouter);
@@ -308,6 +323,9 @@ subscribe(fireAgentHooks);
 // V2-073: Subscribe notification dispatcher to WAL broadcasts
 startNotificationDispatcher();
 
+// US-034: Subscribe draft PR lifecycle to update PR body on story completions
+registerDraftPrSubscriber();
+
 // RQ-002: Subscribe queue consumer to auto-trigger next run on completion
 startQueueConsumer();
 
@@ -325,6 +343,12 @@ startDriftSubscriber();
 
 // US-008: Subscribe marker injector to write story completion markers into run_output_chunks
 startMarkerInjector();
+
+// US-027: Subscribe commit status poster to post GitHub status checks for story progress
+startCommitStatusPoster();
+
+// US-030: Subscribe check run poster to manage GitHub Check Runs for pipeline runs
+startCheckRunPoster();
 
 // PR-019: Auto-rotate memory after each pipeline run completion
 // PR-018: Auto-deduplicate memory after rotation (post-run)

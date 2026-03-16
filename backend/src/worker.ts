@@ -37,6 +37,9 @@ import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedule
 import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
 import { advanceQueue } from './lib/run-queue';
+import { FlushBuffer } from './lib/flush-buffer';
+import { createOrUpdateAutoPr } from './lib/github-pr-creator';
+import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
 
 // ── Post-merge smoke test ─────────────────────────────────────────────────────
 
@@ -68,6 +71,112 @@ async function runPostMergeSmokeTest(workspaceId: string | number): Promise<{ ok
   }
 
   return { ok: failures.length === 0, failures };
+}
+
+// ── GitHub Actions workflow dispatch on run completion (US-026) ───────────────
+
+/**
+ * Fire a GitHub Actions workflow_dispatch event if the workspace has a workflow
+ * config stored in workspace_github_webhooks.workflow_config with enabled=true.
+ * Non-fatal: any failure is logged to integration_audit_log and emitted as a WAL event.
+ * Never throws — must not block run finalization.
+ */
+async function dispatchWorkflowIfConfigured(
+  workspaceId: string | number,
+  runId: number,
+): Promise<void> {
+  const port = process.env.PORT || 3030;
+  const base = `http://localhost:${port}`;
+
+  try {
+    // Fetch workspace webhook row to get repo details + workflow config
+    const row = await queryOne<{
+      repo_owner: string;
+      repo_name: string;
+      workflow_config: string | Record<string, unknown> | null;
+    }>(
+      'SELECT repo_owner, repo_name, workflow_config FROM workspace_github_webhooks WHERE workspace_id = $1',
+      [workspaceId]
+    );
+
+    if (!row || !row.workflow_config) return;
+
+    const cfg = (typeof row.workflow_config === 'string'
+      ? JSON.parse(row.workflow_config)
+      : row.workflow_config) as {
+        enabled?: boolean;
+        workflow_id?: string;
+        ref?: string;
+        inputs?: Record<string, string>;
+      };
+
+    if (!cfg.enabled || !cfg.workflow_id || !cfg.ref) return;
+
+    // Emit SSE: "Triggering workflow..."
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatching', $1, $2)`,
+      [String(workspaceId), JSON.stringify({ run_id: runId, workflow_id: cfg.workflow_id, ref: cfg.ref })]
+    );
+
+    // Proxy through our own API so the OAuth token lookup + audit log happens in one place
+    const dispatchRes = await fetch(`${base}/api/workspaces/${workspaceId}/github/dispatch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        owner: row.repo_owner,
+        repo: row.repo_name,
+        workflow_id: cfg.workflow_id,
+        ref: cfg.ref,
+        inputs: cfg.inputs ?? {},
+      }),
+    });
+
+    if (dispatchRes.ok || dispatchRes.status === 204) {
+      await execute(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatched', $1, $2)`,
+        [String(workspaceId), JSON.stringify({
+          run_id: runId,
+          workflow_id: cfg.workflow_id,
+          ref: cfg.ref,
+          owner: row.repo_owner,
+          repo: row.repo_name,
+        })]
+      );
+      logger.info({ runId, workflow_id: cfg.workflow_id }, '[worker] GitHub workflow dispatch succeeded');
+    } else {
+      const errText = await dispatchRes.text().catch(() => String(dispatchRes.status));
+      await execute(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatch_failed', $1, $2)`,
+        [String(workspaceId), JSON.stringify({
+          run_id: runId,
+          workflow_id: cfg.workflow_id,
+          error: errText,
+          status_code: dispatchRes.status,
+        })]
+      );
+      // Also log to integration_audit_log for the Run View amber banner
+      await execute(
+        `INSERT INTO integration_audit_log (workspace_id, provider, action, actor_type, actor_id, details)
+         VALUES ($1, 'github', 'api_call_failed', 'system', NULL, $2)`,
+        [String(workspaceId), JSON.stringify({
+          run_id: runId,
+          workflow_id: cfg.workflow_id,
+          status_code: dispatchRes.status,
+          error: errText,
+        })]
+      ).catch(() => { /* non-fatal */ });
+      logger.warn({ runId, workflow_id: cfg.workflow_id, status: dispatchRes.status, errText }, '[worker] GitHub workflow dispatch failed');
+    }
+  } catch (err: any) {
+    logger.error({ err, runId }, '[worker] dispatchWorkflowIfConfigured threw unexpectedly');
+    // Emit failure WAL event so the UI can show the amber banner
+    try {
+      await execute(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatch_failed', $1, $2)`,
+        [String(workspaceId), JSON.stringify({ run_id: runId, error: err.message })]
+      );
+    } catch { /* double-fault, ignore */ }
+  }
 }
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ────────
@@ -560,6 +669,34 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
     await emitWalEvent('run_started', workspaceId, { run_id: runId, spec_path: specPath });
 
+    // 2b. US-034: Create draft PR on GitHub if this is a worktree run
+    if (payload.branchName) {
+      let specTitle = 'Pipeline run';
+      let totalStories = 0;
+      try {
+        const specFile = path.join(workspacePath, specPath);
+        if (fs.existsSync(specFile)) {
+          const specJson = JSON.parse(fs.readFileSync(specFile, 'utf-8'));
+          totalStories = (specJson.userStories ?? []).length;
+          const slug = path.basename(specPath, '.json');
+          specTitle = specJson.title ?? slug.replace(/-/g, ' ');
+        }
+      } catch { /* non-fatal — use defaults */ }
+
+      try {
+        await createDraftPr({
+          runId,
+          workspaceId,
+          branchName: payload.branchName,
+          workspacePath,
+          specTitle,
+          totalStories,
+        });
+      } catch (draftErr: any) {
+        logger.error({ err: draftErr, runId }, '[worker] createDraftPr threw unexpectedly');
+      }
+    }
+
     // 3. Build engine args
     const executionEngineTs = path.join(__dirname, 'lib', 'execution-engine.ts');
     const tsxBin = path.join(__dirname, '..', 'node_modules', '.bin', 'tsx');
@@ -718,6 +855,45 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               } catch (mergeErr: any) {
                 logger.error({ err: mergeErr, runId }, '[worker] autoMergeAfterRun threw unexpectedly');
               }
+            }
+
+            // US-034: Finalize draft PR on run completion. If a draft PR was created
+            // at run start, convert it to ready-for-review (success) or update with
+            // failure summary (failure). Falls back to legacy auto-PR if no draft exists.
+            if (payload.branchName) {
+              try {
+                const prRow = await queryOne<{ pr_number: number | null }>(
+                  'SELECT pr_number FROM pipeline_runs WHERE id = $1',
+                  [runId],
+                );
+
+                if (prRow?.pr_number) {
+                  // Draft PR exists — finalize it
+                  await finalizeDraftPr({
+                    runId,
+                    workspaceId,
+                    branchName: payload.branchName,
+                    workspacePath,
+                    status,
+                  });
+                } else if (status === 'done') {
+                  // No draft PR — fall back to legacy auto-PR creation (US-028)
+                  await createOrUpdateAutoPr({
+                    runId,
+                    workspaceId,
+                    branchName: payload.branchName,
+                    workspacePath,
+                  });
+                }
+              } catch (prErr: any) {
+                logger.error({ err: prErr, runId }, '[worker] Draft PR finalization/auto-PR threw unexpectedly');
+              }
+            }
+
+            // Workflow dispatch (US-026): trigger configured GitHub Actions workflow on run completion.
+            // Only fires when status='done'. Non-fatal.
+            if (status === 'done') {
+              await dispatchWorkflowIfConfigured(workspaceId, runId);
             }
           }
         } catch (err) {
@@ -1725,6 +1901,213 @@ async function start(): Promise<void> {
   } catch {
     // worker_heartbeat table might not exist yet — continue startup
   }
+}
+
+// ── Integration health checks ────────────────────────────────────────────
+// Pings each connected integration's API endpoint every 5 minutes (via pg-boss cron).
+// Stores health snapshots in integration_health table for trend display.
+
+interface IntegrationTokenRow {
+  workspace_id: string;
+  provider: string;
+  encrypted_token: string;
+}
+
+/**
+ * Compute health status based on thresholds from AC:
+ * - healthy: error_rate < 0.05 AND rate_limit_remaining >= 500 AND consecutive_failures <= 3
+ * - degraded: error_rate 0.05-0.20 OR rate_limit_remaining < 500
+ * - disconnected: consecutive_failures > 3 OR rate_limit_remaining = 0
+ */
+function computeHealthStatus(
+  errorRate: number,
+  rateLimitRemaining: number | null,
+  consecutiveFailures: number,
+): 'healthy' | 'degraded' | 'disconnected' {
+  if (consecutiveFailures > 3 || rateLimitRemaining === 0) return 'disconnected';
+  if (errorRate >= 0.05 || (rateLimitRemaining !== null && rateLimitRemaining < 500)) return 'degraded';
+  return 'healthy';
+}
+
+async function runIntegrationHealthChecks(): Promise<void> {
+  logger.info('[worker] integration:health-check — starting');
+
+  // Find all workspaces with connected integrations.
+  // Check github_connections (legacy) and integration_tokens (new).
+  // For GitHub: use github_connections.encrypted_token (existing pattern).
+
+  // 1. GitHub health checks via github_connections
+  try {
+    const { decryptToken } = await import('./routes/auth');
+
+    type GithubConnRow = { user_id: string; encrypted_token: string; github_username: string | null };
+    const ghConns = await query<GithubConnRow>(
+      `SELECT gc.user_id, gc.encrypted_token, gc.github_username
+       FROM github_connections gc
+       WHERE gc.encrypted_token IS NOT NULL`,
+    );
+
+    // For each GitHub connection, find associated workspaces
+    for (const conn of ghConns) {
+      let token: string;
+      try {
+        token = decryptToken(conn.encrypted_token);
+      } catch {
+        logger.warn({ userId: conn.user_id }, '[worker] integration:health-check — failed to decrypt GitHub token, skipping');
+        continue;
+      }
+
+      // Find workspaces with GitHub webhooks configured
+      type WsRow = { workspace_id: string };
+      const wsRows = await query<WsRow>(
+        `SELECT DISTINCT workspace_id FROM workspace_github_webhooks`,
+      );
+
+      for (const ws of wsRows) {
+        await checkGitHubHealth(ws.workspace_id, token);
+      }
+    }
+
+    // If no github_connections, check integration_tokens table
+    if (ghConns.length === 0) {
+      const tokenRows = await query<IntegrationTokenRow>(
+        `SELECT workspace_id, provider, encrypted_token
+         FROM integration_tokens
+         WHERE provider = 'github' AND token_type = 'oauth_access' AND revoked_at IS NULL`,
+      );
+
+      for (const row of tokenRows) {
+        try {
+          const { getOAuthToken } = await import('./lib/integration-vault');
+          const result = await getOAuthToken(row.workspace_id, 'github');
+          if (result) {
+            await checkGitHubHealth(row.workspace_id, result.token);
+          }
+        } catch (err) {
+          logger.warn({ err, workspaceId: row.workspace_id }, '[worker] integration:health-check — vault token check failed');
+        }
+      }
+    }
+  } catch (err) {
+    logger.warn({ err }, '[worker] integration:health-check — GitHub checks failed (preserving last-known-good state)');
+  }
+
+  logger.info('[worker] integration:health-check — complete');
+}
+
+async function checkGitHubHealth(workspaceId: string, token: string): Promise<void> {
+  // Get previous health snapshot for this workspace+provider
+  type PrevHealthRow = { consecutive_failures: number; last_success: string | null };
+  const prev = await queryOne<PrevHealthRow>(
+    `SELECT consecutive_failures, last_success FROM integration_health
+     WHERE workspace_id = $1 AND provider = 'github'
+     ORDER BY checked_at DESC LIMIT 1`,
+    [workspaceId],
+  );
+
+  let rateLimitRemaining: number | null = null;
+  let rateLimitMax: number | null = null;
+  let consecutiveFailures = prev?.consecutive_failures ?? 0;
+  let lastSuccess = prev?.last_success ?? null;
+  let lastError: string | null = null;
+  let errorRate = 0;
+
+  try {
+    const response = await fetch('https://api.github.com/rate_limit', {
+      headers: {
+        'Authorization': `token ${token}`,
+        'Accept': 'application/vnd.github.v3+json',
+        'User-Agent': 'Rorca/1.0',
+      },
+      signal: AbortSignal.timeout(10_000),
+    });
+
+    if (response.ok) {
+      const data = await response.json() as { rate: { remaining: number; limit: number; reset: number } };
+      rateLimitRemaining = data.rate.remaining;
+      rateLimitMax = data.rate.limit;
+      consecutiveFailures = 0;
+      lastSuccess = new Date().toISOString();
+    } else {
+      consecutiveFailures += 1;
+      lastError = `GitHub API returned ${response.status}: ${response.statusText}`;
+    }
+  } catch (err: any) {
+    consecutiveFailures += 1;
+    lastError = err.message ?? String(err);
+  }
+
+  // Calculate error rate from last 24h snapshots
+  try {
+    type ErrorRateRow = { total: string; failures: string };
+    const rateRow = await queryOne<ErrorRateRow>(
+      `SELECT COUNT(*)::text AS total,
+              COUNT(*) FILTER (WHERE consecutive_failures > 0)::text AS failures
+       FROM integration_health
+       WHERE workspace_id = $1 AND provider = 'github'
+         AND checked_at > NOW() - INTERVAL '24 hours'`,
+      [workspaceId],
+    );
+    if (rateRow) {
+      const total = parseInt(rateRow.total, 10);
+      const failures = parseInt(rateRow.failures, 10);
+      errorRate = total > 0 ? failures / total : 0;
+    }
+  } catch {
+    // Non-fatal — use 0
+  }
+
+  // Compute webhook success rate from recent webhook deliveries
+  let webhookSuccessRate = 1.0;
+  try {
+    type WebhookRateRow = { total: string; successes: string };
+    const whRow = await queryOne<WebhookRateRow>(
+      `SELECT COUNT(*)::text AS total,
+              COUNT(*) FILTER (WHERE status_code >= 200 AND status_code < 300)::text AS successes
+       FROM webhook_deliveries
+       WHERE workspace_id = $1 AND provider = 'github'
+         AND delivered_at > NOW() - INTERVAL '24 hours'`,
+      [workspaceId],
+    );
+    if (whRow) {
+      const total = parseInt(whRow.total, 10);
+      const successes = parseInt(whRow.successes, 10);
+      webhookSuccessRate = total > 0 ? successes / total : 1.0;
+    }
+  } catch {
+    // webhook_deliveries table may not exist — use default 1.0
+  }
+
+  const status = computeHealthStatus(errorRate, rateLimitRemaining, consecutiveFailures);
+
+  // Insert health snapshot (never delete previous rows — preserve history)
+  try {
+    await execute(
+      `INSERT INTO integration_health
+         (workspace_id, provider, status, error_rate, rate_limit_remaining, rate_limit_max,
+          consecutive_failures, last_success, webhook_success_rate, last_error, checked_at)
+       VALUES ($1, 'github', $2, $3, $4, $5, $6, $7, $8, $9, NOW())`,
+      [workspaceId, status, errorRate, rateLimitRemaining, rateLimitMax,
+       consecutiveFailures, lastSuccess, webhookSuccessRate, lastError],
+    );
+  } catch (err) {
+    logger.warn({ err, workspaceId }, '[worker] integration:health-check — failed to write health snapshot');
+  }
+}
+
+// ── Startup ──────────────────────────────────────────────────────────────
+
+async function start(): Promise<void> {
+  // 1. Run pending SQL migrations (001–NNN) against the main public schema
+  try {
+    await initDb();
+  } catch (err) {
+    logger.error({ err }, '[worker] database initialisation failed');
+    process.exit(1);
+  }
+
+  // 1b. Singleton guard — exit if another worker has a fresh heartbeat.
+  await checkSingletonGuard();
 
   // 2. Start pg-boss — creates/upgrades pgboss.* schema automatically
   try {
@@ -1989,6 +2372,17 @@ async function start(): Promise<void> {
     });
   } catch (err) {
     logger.warn({ err }, '[worker] queue-snapshot-prune schedule registration failed (non-fatal)');
+  }
+
+  // 4e. Integration health check cron — pings connected integrations every 5 minutes.
+  try {
+    await boss.schedule('integration:health-check', '*/5 * * * *', {});
+    await boss.work('integration:health-check', async () => {
+      await runIntegrationHealthChecks();
+    });
+    logger.info('[worker] integration:health-check cron registered (every 5 min)');
+  } catch (err) {
+    logger.warn({ err }, '[worker] integration:health-check schedule registration failed (non-fatal)');
   }
 
   // 4. Bulk-register all enabled pipeline_schedules with pg-boss native scheduling.

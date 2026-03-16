@@ -16,6 +16,7 @@ import { queryOne } from '../db/index';
 import { PersonaRegistry, PERSONA_CATEGORIES, type PersonaCategory } from '../lib/agent-personas';
 import { loadRorcaConfig, writeRorcaConfig } from '../lib/rorca-config';
 import { markWriting } from '../lib/file-watcher';
+import { ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -80,12 +81,12 @@ Describe the role and expertise of this persona.
 router.get('/', async (req: Request, res: Response) => {
   const workspaceId = req.query.workspaceId as string;
   if (!workspaceId) {
-    return res.status(400).json({ error: 'workspaceId query parameter required' });
+    throw new ValidationError('workspaceId query parameter required');
   }
 
   const wsPath = await resolveWorkspacePath(workspaceId);
   if (!wsPath) {
-    return res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
   }
 
   const rorcaDir = path.join(wsPath, '.rorca');
@@ -162,22 +163,22 @@ router.get('/read', async (req: Request, res: Response) => {
   const filePath = req.query.filePath as string;
 
   if (!workspaceId || !filePath) {
-    return res.status(400).json({ error: 'workspaceId and filePath query parameters required' });
+    throw new ValidationError('workspaceId and filePath query parameters required');
   }
 
   const wsPath = await resolveWorkspacePath(workspaceId);
   if (!wsPath) {
-    return res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
   }
 
   const absPath = path.resolve(wsPath, filePath);
   // Security: ensure path is within workspace
   if (!absPath.startsWith(wsPath)) {
-    return res.status(403).json({ error: 'Path traversal not allowed' });
+    throw new ForbiddenError('Path traversal not allowed');
   }
 
   if (!fs.existsSync(absPath)) {
-    return res.status(404).json({ error: 'Persona file not found' });
+    throw new NotFoundError('Persona file not found');
   }
 
   const content = fs.readFileSync(absPath, 'utf-8');
@@ -203,17 +204,17 @@ router.put('/write', async (req: Request, res: Response) => {
   };
 
   if (!workspaceId || !filePath || typeof content !== 'string') {
-    return res.status(400).json({ error: 'workspaceId, filePath, and content required' });
+    throw new ValidationError('workspaceId, filePath, and content required');
   }
 
   const wsPath = await resolveWorkspacePath(workspaceId);
   if (!wsPath) {
-    return res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
   }
 
   const absPath = path.resolve(wsPath, filePath);
   if (!absPath.startsWith(wsPath)) {
-    return res.status(403).json({ error: 'Path traversal not allowed' });
+    throw new ForbiddenError('Path traversal not allowed');
   }
 
   // Ensure parent directory exists
@@ -248,12 +249,12 @@ router.post('/create', async (req: Request, res: Response) => {
   };
 
   if (!workspaceId || !name) {
-    return res.status(400).json({ error: 'workspaceId and name required' });
+    throw new ValidationError('workspaceId and name required');
   }
 
   const wsPath = await resolveWorkspacePath(workspaceId);
   if (!wsPath) {
-    return res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
   }
 
   const cat = category || 'specialist';
@@ -263,7 +264,7 @@ router.post('/create', async (req: Request, res: Response) => {
   const absPath = path.join(wsPath, relativePath);
 
   if (fs.existsSync(absPath)) {
-    return res.status(409).json({ error: `Persona file already exists: ${relativePath}` });
+    throw new ConflictError(`Persona file already exists: ${relativePath}`);
   }
 
   // Ensure directory exists
@@ -302,12 +303,12 @@ router.post('/toggle', async (req: Request, res: Response) => {
   };
 
   if (!workspaceId || !personaName || typeof enabled !== 'boolean') {
-    return res.status(400).json({ error: 'workspaceId, personaName, and enabled (boolean) required' });
+    throw new ValidationError('workspaceId, personaName, and enabled (boolean) required');
   }
 
   const wsPath = await resolveWorkspacePath(workspaceId);
   if (!wsPath) {
-    return res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
   }
 
   const config = loadRorcaConfig(wsPath);

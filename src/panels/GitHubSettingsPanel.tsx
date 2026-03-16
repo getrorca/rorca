@@ -1,11 +1,83 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useDeferredValue } from 'react';
 import {
   Github, Link2, Unlink, Loader2, CheckCircle2, AlertCircle,
   Webhook, FileText, RotateCcw, Download, Shield, ExternalLink,
-  RefreshCw, GitPullRequest, Users, X, Plus,
+  RefreshCw, GitPullRequest, Users, X, Plus, Zap,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, BASE_URL, getAccessToken } from '../lib/apiFetch';
+
+// ─── PR Template (duplicated from backend/src/lib/github/pr-template.ts) ──────
+
+const DEFAULT_PR_TEMPLATE = `## Summary
+
+{{spec.brief}}
+
+## Stories
+
+{{run.storiesPassed}}/{{run.storiesTotal}} stories passed
+
+| Outcome | Count |
+|---------|-------|
+| ✅ Passed | {{run.storiesPassed}} |
+| ❌ Failed | {{run.storiesFailed}} |
+| ⏭ Skipped | {{run.storiesSkipped}} |
+
+## Changes
+
+\`\`\`
+{{run.diffStats}}
+\`\`\`
+
+## Token Usage
+
+| Metric | Value |
+|--------|-------|
+| Input tokens | {{run.tokensInput}} |
+| Output tokens | {{run.tokensOutput}} |
+| Total tokens | {{run.tokensTotal}} |
+| Estimated cost | {{run.costUsd}} |
+
+## Run Details
+
+| Field | Value |
+|-------|-------|
+| Run ID | {{run.id}} |
+| Duration | {{run.duration}} |
+| Agent | {{run.agentType}} |
+| Model | {{run.model}} |
+| Spec | {{spec.title}} |
+
+---
+*Generated automatically by [Rorca](https://rorca.app)*`;
+
+const SAMPLE_DATA: Record<string, string> = {
+  'spec.title': 'rorca-go-to-market-v1',
+  'spec.brief': 'Add GitHub integration with auto-PR creation and PR description templates.',
+  'run.id': '42',
+  'run.storiesPassed': '8',
+  'run.storiesTotal': '10',
+  'run.storiesFailed': '1',
+  'run.storiesSkipped': '1',
+  'run.tokensInput': '125,000',
+  'run.tokensOutput': '18,000',
+  'run.tokensTotal': '143,000',
+  'run.costUsd': '$1.43',
+  'run.duration': '12m 34s',
+  'run.agentType': 'claude',
+  'run.model': 'claude-opus-4-6',
+  'run.diffStats': '12 files changed, 487 insertions(+), 23 deletions(-)',
+};
+
+function renderPreview(template: string): string {
+  const tpl = template.trim() ? template : DEFAULT_PR_TEMPLATE;
+  return tpl.replace(/\{\{([^}]+)\}\}/g, (match: string, key: string) => {
+    const trimmed = key.trim();
+    return Object.prototype.hasOwnProperty.call(SAMPLE_DATA, trimmed)
+      ? SAMPLE_DATA[trimmed]
+      : match;
+  });
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -74,16 +146,22 @@ export default function GitHubSettingsPanel() {
   const [githubToken, setGithubToken] = useState('');
   const [connecting, setConnecting] = useState(false);
   const [connectError, setConnectError] = useState<string | null>(null);
+  const [connectSuccess, setConnectSuccess] = useState(false);
 
-  // Disconnect (webhook)
+  // Disconnect (webhook — legacy per-section)
   const [disconnectToken, setDisconnectToken] = useState('');
   const [showDisconnect, setShowDisconnect] = useState(false);
   const [disconnecting, setDisconnecting] = useState(false);
   const [disconnectError, setDisconnectError] = useState<string | null>(null);
 
-  // OAuth disconnect
+  // OAuth disconnect (legacy per-section)
   const [disconnectingOAuth, setDisconnectingOAuth] = useState(false);
   const [showOAuthDisconnect, setShowOAuthDisconnect] = useState(false);
+
+  // Full disconnect (unified — DELETE /api/workspaces/:id/github)
+  const [showFullDisconnect, setShowFullDisconnect] = useState(false);
+  const [fullDisconnecting, setFullDisconnecting] = useState(false);
+  const [fullDisconnectError, setFullDisconnectError] = useState<string | null>(null);
 
   // Test connection
   const [testing, setTesting] = useState(false);
@@ -102,6 +180,20 @@ export default function GitHubSettingsPanel() {
   const [prTemplateSaving, setPrTemplateSaving] = useState(false);
   const [prTemplateSaved, setPrTemplateSaved] = useState(false);
   const [prTemplateLoaded, setPrTemplateLoaded] = useState(false);
+  const [prTemplatePreviewVisible, setPrTemplatePreviewVisible] = useState(false);
+  // Deferred so the preview update doesn't block keystrokes
+  const deferredPrTemplate = useDeferredValue(prTemplate);
+  const previewText = renderPreview(deferredPrTemplate);
+
+  // Workflow dispatch config (US-026)
+  const [workflowEnabled, setWorkflowEnabled] = useState(false);
+  const [workflowId, setWorkflowId] = useState('');
+  const [workflowRef, setWorkflowRef] = useState('main');
+  const [workflowInputsRaw, setWorkflowInputsRaw] = useState('{}');
+  const [workflowConfigLoaded, setWorkflowConfigLoaded] = useState(false);
+  const [savingWorkflow, setSavingWorkflow] = useState(false);
+  const [savedWorkflow, setSavedWorkflow] = useState(false);
+  const [workflowInputsError, setWorkflowInputsError] = useState<string | null>(null);
 
   // ─── Fetch workspace connection status ─────────────────────────────────────
 
@@ -140,17 +232,39 @@ export default function GitHubSettingsPanel() {
 
   useEffect(() => { fetchStatus(); fetchAccount(); }, [fetchStatus, fetchAccount]);
 
-  // ─── Fetch PR template ───────────────────────────────────────────────────
+  // ─── Fetch PR template from rorca-config ────────────────────────────────
 
   useEffect(() => {
     if (!workspaceId || prTemplateLoaded) return;
-    apiFetch<{ workspace: { pr_template: string | null } }>(`/api/workspaces/${workspaceId}`)
+    apiFetch<{ config: { github?: { prTemplate?: string } } }>(`/api/workspaces/${workspaceId}/rorca-config`)
       .then(data => {
-        setPrTemplate(data.workspace.pr_template ?? '');
+        setPrTemplate(data.config.github?.prTemplate ?? '');
         setPrTemplateLoaded(true);
       })
       .catch(() => { setPrTemplateLoaded(true); });
   }, [workspaceId, prTemplateLoaded]);
+
+  // ─── Fetch workflow config (US-026) ──────────────────────────────────────
+
+  useEffect(() => {
+    if (!workspaceId || workflowConfigLoaded) return;
+    apiFetch<{ workflowConfig: { enabled?: boolean; workflow_id?: string; ref?: string; inputs?: Record<string, string> } | null }>(
+      `/api/workspaces/${workspaceId}/github/workflow-config`
+    )
+      .then(data => {
+        const cfg = data.workflowConfig;
+        if (cfg) {
+          setWorkflowEnabled(cfg.enabled ?? false);
+          setWorkflowId(cfg.workflow_id ?? '');
+          setWorkflowRef(cfg.ref ?? 'main');
+          setWorkflowInputsRaw(cfg.inputs && Object.keys(cfg.inputs).length > 0
+            ? JSON.stringify(cfg.inputs, null, 2)
+            : '{}');
+        }
+        setWorkflowConfigLoaded(true);
+      })
+      .catch(() => { setWorkflowConfigLoaded(true); });
+  }, [workspaceId, workflowConfigLoaded]);
 
   // ─── Handlers ────────────────────────────────────────────────────────────
 
@@ -158,16 +272,29 @@ export default function GitHubSettingsPanel() {
     if (!workspaceId || !repoOwner.trim() || !repoName.trim() || !githubToken.trim()) return;
     setConnecting(true);
     setConnectError(null);
+    setConnectSuccess(false);
     try {
-      const data = await apiFetch<GithubStatus>(`/api/workspaces/${workspaceId}/github/connect`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ repoOwner: repoOwner.trim(), repoName: repoName.trim(), githubToken: githubToken.trim() }),
-      });
+      const data = await apiFetch<GithubStatus & { error?: string; manualSetupUrl?: string }>(
+        `/api/workspaces/${workspaceId}/github/connect`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ repoOwner: repoOwner.trim(), repoName: repoName.trim(), githubToken: githubToken.trim() }),
+        },
+      );
       setStatus(data);
       setRepoOwner('');
       setRepoName('');
       setGithubToken('');
+
+      if (data.error) {
+        // Degraded success — connection saved but webhook failed
+        setConnectError(data.error + (data.manualSetupUrl ? ` — Set up manually: ${data.manualSetupUrl}` : ''));
+      } else {
+        // Full success — show green checkmark for 3 seconds
+        setConnectSuccess(true);
+        setTimeout(() => setConnectSuccess(false), 3000);
+      }
     } catch (err: unknown) {
       setConnectError(err instanceof Error ? err.message : 'Failed to connect');
     } finally {
@@ -225,6 +352,24 @@ export default function GitHubSettingsPanel() {
     }
   }
 
+  async function handleFullDisconnect() {
+    if (!workspaceId) return;
+    setFullDisconnecting(true);
+    setFullDisconnectError(null);
+    try {
+      await apiFetch<{ disconnected: boolean }>(`/api/workspaces/${workspaceId}/github`, {
+        method: 'DELETE',
+      });
+      setAccount({ connected: false });
+      setStatus({ connected: false });
+      setShowFullDisconnect(false);
+    } catch (err: unknown) {
+      setFullDisconnectError(err instanceof Error ? err.message : 'Failed to disconnect');
+    } finally {
+      setFullDisconnecting(false);
+    }
+  }
+
   async function handleSaveAutoPr() {
     if (!workspaceId || savingAutoPr) return;
     setSavingAutoPr(true);
@@ -247,10 +392,19 @@ export default function GitHubSettingsPanel() {
     if (!workspaceId || prTemplateSaving) return;
     setPrTemplateSaving(true);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}`, {
-        method: 'PATCH',
+      // Read-merge-write to avoid clobbering other config sections
+      const current = await apiFetch<{ config: Record<string, unknown> }>(`/api/workspaces/${workspaceId}/rorca-config`);
+      const merged = {
+        ...current.config,
+        github: {
+          ...(typeof current.config.github === 'object' && current.config.github !== null ? current.config.github : {}),
+          prTemplate: prTemplate || undefined,
+        },
+      };
+      await apiFetch(`/api/workspaces/${workspaceId}/rorca-config`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pr_template: prTemplate || null }),
+        body: JSON.stringify({ config: merged }),
       });
       setPrTemplateSaved(true);
       setTimeout(() => setPrTemplateSaved(false), 2000);
@@ -266,6 +420,42 @@ export default function GitHubSettingsPanel() {
     if (r && !autoPrReviewers.includes(r)) {
       setAutoPrReviewers([...autoPrReviewers, r]);
       setNewReviewer('');
+    }
+  }
+
+  async function handleSaveWorkflowConfig() {
+    if (!workspaceId || savingWorkflow) return;
+    // Validate inputs JSON
+    let inputs: Record<string, string> = {};
+    if (workflowInputsRaw.trim() && workflowInputsRaw.trim() !== '{}') {
+      try {
+        inputs = JSON.parse(workflowInputsRaw);
+        setWorkflowInputsError(null);
+      } catch {
+        setWorkflowInputsError('Invalid JSON in inputs field');
+        return;
+      }
+    }
+    setSavingWorkflow(true);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/github/workflow-config`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          workflowConfig: {
+            enabled: workflowEnabled,
+            workflow_id: workflowId.trim(),
+            ref: workflowRef.trim() || 'main',
+            inputs,
+          },
+        }),
+      });
+      setSavedWorkflow(true);
+      setTimeout(() => setSavedWorkflow(false), 2000);
+    } catch {
+      // silent
+    } finally {
+      setSavingWorkflow(false);
     }
   }
 
@@ -441,10 +631,17 @@ export default function GitHubSettingsPanel() {
                 </div>
               </div>
 
-              <div className="mt-3 flex items-center gap-2 text-xs text-muted">
-                <Webhook size={14} />
-                Events: push, pull_request, issues
-              </div>
+              {status.webhookId ? (
+                <div className="mt-3 flex items-center gap-2 text-xs text-muted">
+                  <Webhook size={14} />
+                  Events: push, pull_request, issues
+                </div>
+              ) : (
+                <div className="mt-3 flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded px-2.5 py-1.5">
+                  <AlertCircle size={14} />
+                  Webhook not configured — push events disabled
+                </div>
+              )}
             </div>
 
             {/* Disconnect webhook */}
@@ -549,8 +746,22 @@ export default function GitHubSettingsPanel() {
               disabled={connecting || !repoOwner.trim() || !repoName.trim() || !githubToken.trim()}
               className="px-4 py-2 text-sm rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-1.5"
             >
-              {connecting ? <Loader2 size={14} className="animate-spin" /> : <Link2 size={14} />}
-              Connect GitHub
+              {connecting ? (
+                <>
+                  <Loader2 size={14} className="animate-spin" />
+                  Configuring GitHub webhook...
+                </>
+              ) : connectSuccess ? (
+                <>
+                  <CheckCircle2 size={14} className="text-emerald-300" />
+                  Webhook registered
+                </>
+              ) : (
+                <>
+                  <Link2 size={14} />
+                  Connect GitHub
+                </>
+              )}
             </button>
           </div>
         )}
@@ -708,34 +919,196 @@ export default function GitHubSettingsPanel() {
         </button>
       </section>
 
-      {/* ─── Section 5: PR Template ───────────────────────────────────── */}
+      {/* ─── Section 5: Workflow Dispatch (US-026) ───────────────────── */}
       <section className="border-t border-border pt-6 pb-6">
         <div className="flex items-center gap-2 mb-3">
-          <FileText size={18} />
-          <h2 className="text-sm font-semibold text-[var(--text)]">PR Description Template</h2>
+          <Zap size={18} />
+          <h2 className="text-sm font-semibold text-[var(--text)]">Workflows</h2>
         </div>
+
+        {!status?.connected ? (
+          <p className="text-xs text-muted">
+            No workflow configured — add a GitHub Actions workflow to trigger on run completion.
+            Connect a repository above to enable this feature.
+          </p>
+        ) : (
+          <div className="space-y-4">
+            <p className="text-xs text-muted">
+              Automatically trigger a GitHub Actions workflow when a pipeline run completes successfully.
+              The workflow must have a <code className="bg-surface px-1 rounded">workflow_dispatch</code> trigger.
+              Requires the <code className="bg-surface px-1 rounded">workflow</code> OAuth scope.
+            </p>
+
+            {/* Enable toggle */}
+            <label className="flex items-center gap-3 cursor-pointer">
+              <div
+                role="switch"
+                aria-checked={workflowEnabled}
+                tabIndex={0}
+                onClick={() => setWorkflowEnabled(v => !v)}
+                onKeyDown={e => { if (e.key === ' ' || e.key === 'Enter') setWorkflowEnabled(v => !v); }}
+                className={`relative inline-flex h-5 w-9 items-center rounded-full transition-colors focus:outline-none focus:ring-2 focus:ring-accent focus:ring-offset-1 ${workflowEnabled ? 'bg-accent' : 'bg-border'}`}
+              >
+                <span className={`inline-block h-3.5 w-3.5 transform rounded-full bg-white transition-transform ${workflowEnabled ? 'translate-x-4' : 'translate-x-0.5'}`} />
+              </div>
+              <span className="text-sm text-[var(--text)]">Enable workflow dispatch on run completion</span>
+            </label>
+
+            {workflowEnabled && (
+              <div className="space-y-3 pl-0">
+                {/* Workflow file */}
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">Workflow filename</label>
+                  <input
+                    type="text"
+                    value={workflowId}
+                    onChange={e => setWorkflowId(e.target.value)}
+                    placeholder="deploy.yml"
+                    className="w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                  />
+                  <p className="text-[11px] text-muted mt-1">
+                    Filename of the workflow (e.g. <code className="bg-surface px-1 rounded">deploy.yml</code>) or numeric workflow ID.
+                  </p>
+                </div>
+
+                {/* Branch ref */}
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">Branch / ref</label>
+                  <input
+                    type="text"
+                    value={workflowRef}
+                    onChange={e => setWorkflowRef(e.target.value)}
+                    placeholder="main"
+                    className="w-full px-3 py-1.5 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent"
+                  />
+                  <p className="text-[11px] text-muted mt-1">Branch or tag to run the workflow on.</p>
+                </div>
+
+                {/* Inputs */}
+                <div>
+                  <label className="block text-xs font-medium text-muted mb-1">Inputs (JSON)</label>
+                  <textarea
+                    value={workflowInputsRaw}
+                    onChange={e => { setWorkflowInputsRaw(e.target.value); setWorkflowInputsError(null); }}
+                    rows={4}
+                    placeholder='{}'
+                    className={`w-full px-3 py-2 rounded bg-bg border text-sm font-mono text-[var(--text)] focus:outline-none resize-y ${workflowInputsError ? 'border-red-500' : 'border-border focus:border-accent'}`}
+                  />
+                  {workflowInputsError && (
+                    <p className="text-[11px] text-red-400 mt-1">{workflowInputsError}</p>
+                  )}
+                  <p className="text-[11px] text-muted mt-1">
+                    Optional key-value pairs passed as workflow inputs. Must be valid JSON object.
+                  </p>
+                </div>
+              </div>
+            )}
+
+            {!workflowEnabled && !workflowId && (
+              <p className="text-xs text-muted italic">
+                No workflow configured — add a GitHub Actions workflow to trigger on run completion.
+              </p>
+            )}
+
+            <button
+              onClick={handleSaveWorkflowConfig}
+              disabled={savingWorkflow}
+              className="px-3 py-1.5 text-sm rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-1.5"
+            >
+              {savingWorkflow ? <Loader2 size={14} className="animate-spin" /> : null}
+              {savedWorkflow ? 'Saved!' : 'Save Workflow Config'}
+            </button>
+          </div>
+        )}
+      </section>
+
+      {/* ─── Section 6: PR Template ───────────────────────────────────── */}
+      <section className="border-t border-border pt-6 pb-6">
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <FileText size={18} />
+            <h2 className="text-sm font-semibold text-[var(--text)]">PR Description Template</h2>
+          </div>
+          <button
+            onClick={() => setPrTemplatePreviewVisible(v => !v)}
+            className="text-xs text-muted hover:text-[var(--text)] transition-colors border border-border rounded px-2 py-1"
+          >
+            {prTemplatePreviewVisible ? 'Hide Preview' : 'Show Preview'}
+          </button>
+        </div>
+
         <p className="text-xs text-muted mb-3">
-          Customize the PR description generated by "Copy PR Body" on story cards.
-          Use <code className="bg-surface px-1 rounded">{'{{storyId}}'}</code>,{' '}
-          <code className="bg-surface px-1 rounded">{'{{storyTitle}}'}</code>,{' '}
-          <code className="bg-surface px-1 rounded">{'{{storyDescription}}'}</code>,{' '}
-          <code className="bg-surface px-1 rounded">{'{{acceptanceCriteriaChecklist}}'}</code>,{' '}
-          <code className="bg-surface px-1 rounded">{'{{dependencyList}}'}</code>,{' '}
-          <code className="bg-surface px-1 rounded">{'{{specId}}'}</code>,{' '}
-          <code className="bg-surface px-1 rounded">{'{{specLink}}'}</code>.
-          Wrap optional sections with <code className="bg-surface px-1 rounded">{'{{#if dependencies}}...{{/if}}'}</code>.
+          Customize the PR description used by auto-PR creation (US-028).
+          Supported variables:{' '}
+          {[
+            '{{spec.title}}', '{{spec.brief}}',
+            '{{run.storiesPassed}}', '{{run.storiesTotal}}',
+            '{{run.storiesFailed}}', '{{run.storiesSkipped}}',
+            '{{run.tokensInput}}', '{{run.tokensOutput}}', '{{run.tokensTotal}}',
+            '{{run.costUsd}}', '{{run.duration}}',
+            '{{run.agentType}}', '{{run.model}}',
+            '{{run.id}}', '{{run.diffStats}}',
+          ].map((v, i) => (
+            <span key={v}>
+              <code className="bg-surface px-1 rounded">{v}</code>
+              {i < 14 ? ', ' : ''}
+            </span>
+          ))}
+          . Unrecognized variables are left as-is.
         </p>
-        <textarea
-          value={prTemplate}
-          onChange={e => { setPrTemplate(e.target.value); setPrTemplateSaved(false); }}
-          placeholder="Leave empty to use the default template"
-          rows={12}
-          className="w-full px-3 py-2 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent resize-y"
-        />
+
+        {!prTemplateLoaded ? (
+          /* Loading skeleton */
+          <div className="space-y-2 mb-3" aria-busy="true" aria-label="Loading PR template">
+            {[80, 60, 90, 70, 50].map((w, i) => (
+              <div
+                key={i}
+                className="h-3 rounded bg-border animate-pulse"
+                style={{ width: `${w}%` }}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className={`${prTemplatePreviewVisible ? 'grid grid-cols-2 gap-3' : 'block'}`}>
+            {/* Editor */}
+            <div>
+              <label className="block text-xs text-muted mb-1">Template</label>
+              <textarea
+                value={prTemplate}
+                onChange={e => { setPrTemplate(e.target.value); setPrTemplateSaved(false); }}
+                placeholder="Leave empty to use the default template"
+                rows={16}
+                className="w-full px-3 py-2 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent resize-y"
+              />
+            </div>
+
+            {/* Live preview */}
+            {prTemplatePreviewVisible && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs text-muted">Preview (sample data)</label>
+                </div>
+                {deferredPrTemplate !== prTemplate ? (
+                  /* Skeleton while deferred value is stale */
+                  <div className="rounded bg-bg border border-border p-3 space-y-2 h-[calc(16*1.5rem+0.5rem)] overflow-auto" aria-busy="true" aria-label="Preview loading">
+                    {[90, 70, 80, 60, 75, 55, 85, 65].map((w, i) => (
+                      <div key={i} className="h-3 rounded bg-border animate-pulse" style={{ width: `${w}%` }} />
+                    ))}
+                  </div>
+                ) : (
+                  <pre className="rounded bg-bg border border-border p-3 text-xs font-mono text-[var(--text)] overflow-auto whitespace-pre-wrap h-[calc(16*1.5rem+0.5rem)]">
+                    {previewText}
+                  </pre>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex items-center gap-2 mt-2">
           <button
             onClick={handleSavePrTemplate}
-            disabled={prTemplateSaving}
+            disabled={prTemplateSaving || !prTemplateLoaded}
             className="px-3 py-1.5 text-sm rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-1.5"
           >
             {prTemplateSaving ? <Loader2 size={14} className="animate-spin" /> : null}
@@ -743,7 +1116,8 @@ export default function GitHubSettingsPanel() {
           </button>
           <button
             onClick={() => { setPrTemplate(''); setPrTemplateSaved(false); }}
-            className="px-3 py-1.5 text-sm rounded border border-border hover:bg-panel transition-colors flex items-center gap-1.5 text-muted"
+            disabled={!prTemplateLoaded}
+            className="px-3 py-1.5 text-sm rounded border border-border hover:bg-panel transition-colors flex items-center gap-1.5 text-muted disabled:opacity-50"
             title="Reset to default template"
           >
             <RotateCcw size={12} />
@@ -751,6 +1125,70 @@ export default function GitHubSettingsPanel() {
           </button>
         </div>
       </section>
+
+      {/* ─── Section 6: Full Disconnect ──────────────────────────────── */}
+      {(account?.connected || status?.connected) && (
+        <section className="border-t border-border pt-6 pb-8">
+          <div className="flex items-center gap-2 mb-3">
+            <Unlink size={18} className="text-red-400" />
+            <h2 className="text-sm font-semibold text-red-400">Disconnect GitHub</h2>
+          </div>
+          <p className="text-xs text-muted mb-4">
+            Remove all GitHub integration data from this workspace. Pipeline runs will continue but without GitHub features.
+          </p>
+
+          {!showFullDisconnect ? (
+            <button
+              onClick={() => setShowFullDisconnect(true)}
+              className="px-4 py-2 text-sm rounded text-red-400 border border-red-500/30 hover:bg-red-500/10 transition-colors flex items-center gap-1.5"
+            >
+              <Unlink size={14} />
+              Disconnect GitHub
+            </button>
+          ) : (
+            <div className="rounded-lg border border-red-500/30 bg-red-500/5 p-4 space-y-3">
+              <p className="text-sm text-red-400 font-medium">Are you sure?</p>
+              <p className="text-xs text-muted">
+                This will revoke the OAuth token and remove all GitHub-specific data.
+                Pipeline runs will continue but without GitHub integration.
+              </p>
+
+              {fullDisconnectError && (
+                <div className="flex items-center gap-1.5 text-xs text-red-400">
+                  <AlertCircle size={12} /> {fullDisconnectError}
+                </div>
+              )}
+
+              <div className="flex gap-2">
+                <button
+                  onClick={handleFullDisconnect}
+                  disabled={fullDisconnecting}
+                  className="px-3 py-1.5 text-sm rounded bg-red-600 text-white hover:bg-red-500 disabled:opacity-50 transition-colors flex items-center gap-1.5"
+                >
+                  {fullDisconnecting ? (
+                    <>
+                      <Loader2 size={14} className="animate-spin" />
+                      Disconnecting...
+                    </>
+                  ) : (
+                    <>
+                      <Unlink size={14} />
+                      Confirm Disconnect
+                    </>
+                  )}
+                </button>
+                <button
+                  onClick={() => { setShowFullDisconnect(false); setFullDisconnectError(null); }}
+                  disabled={fullDisconnecting}
+                  className="px-3 py-1.5 text-sm rounded border border-border hover:bg-panel transition-colors"
+                >
+                  Cancel
+                </button>
+              </div>
+            </div>
+          )}
+        </section>
+      )}
     </div>
   );
 }

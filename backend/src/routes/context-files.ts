@@ -16,6 +16,7 @@ import { execSync } from 'child_process';
 import { queryOne, query } from '../db/index';
 import { loadRorcaConfig } from '../lib/rorca-config';
 import { markWriting } from '../lib/file-watcher';
+import { AuthError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -79,7 +80,7 @@ function countWords(text: string): number {
 router.get('/:id/context-files', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -212,25 +213,25 @@ router.get('/:id/context-files', async (req: Request, res: Response) => {
 router.get('/:id/context-files/read', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
   const filePath = req.query.filePath as string;
   if (!filePath) {
-    res.status(400).json({ error: 'Missing filePath query parameter' });
+    throw new ValidationError('Missing filePath query parameter');
     return;
   }
 
   const abs = path.resolve(wsPath, filePath);
   // Security: prevent path traversal
   if (!abs.startsWith(path.resolve(wsPath))) {
-    res.status(400).json({ error: 'Invalid path' });
+    throw new ValidationError('Invalid path');
     return;
   }
 
   if (!fs.existsSync(abs)) {
-    res.status(404).json({ error: 'File not found' });
+    throw new NotFoundError('File not found');
     return;
   }
 
@@ -279,20 +280,20 @@ router.get('/:id/context-files/read', async (req: Request, res: Response) => {
 router.put('/:id/context-files/write', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
   const { filePath, content } = req.body as { filePath: string; content: string };
   if (!filePath || typeof content !== 'string') {
-    res.status(400).json({ error: 'Missing filePath or content' });
+    throw new ValidationError('Missing filePath or content');
     return;
   }
 
   const abs = path.resolve(wsPath, filePath);
   // Security: prevent path traversal
   if (!abs.startsWith(path.resolve(wsPath))) {
-    res.status(400).json({ error: 'Invalid path' });
+    throw new ValidationError('Invalid path');
     return;
   }
 
@@ -344,19 +345,19 @@ router.put('/:id/context-files/write', async (req: Request, res: Response) => {
 router.get('/:id/context-files/diff', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
   const filePath = req.query.filePath as string;
   if (!filePath) {
-    res.status(400).json({ error: 'Missing filePath query parameter' });
+    throw new ValidationError('Missing filePath query parameter');
     return;
   }
 
   const abs = path.resolve(wsPath, filePath);
   if (!abs.startsWith(path.resolve(wsPath))) {
-    res.status(400).json({ error: 'Invalid path' });
+    throw new ValidationError('Invalid path');
     return;
   }
 
@@ -747,12 +748,12 @@ Authentication & authorization skill — enforces auth best practices.
 // Middleware
 function requireAuth(req, res, next) {
   const token = req.headers.authorization?.split(' ')[1];
-  if (!token) return res.status(401).json({ error: 'Authentication required' });
+  if (!token) throw new AuthError('Authentication required');
   try {
     req.user = verifyJWT(token);
     next();
   } catch {
-    res.status(401).json({ error: 'Invalid or expired token' });
+    throw new AuthError('Invalid or expired token');
   }
 }
 
@@ -760,7 +761,7 @@ function requireAuth(req, res, next) {
 function requireRole(...roles: string[]) {
   return (req, res, next) => {
     if (!roles.includes(req.user.role)) {
-      return res.status(403).json({ error: 'Insufficient permissions' });
+      throw new ForbiddenError('Insufficient permissions');
     }
     next();
   };
@@ -769,23 +770,98 @@ function requireRole(...roles: string[]) {
 `,
 };
 
+/**
+ * @swagger
+ * /api/workspaces/{id}/context-files/create-skill:
+ *   post:
+ *     tags: [Context Files]
+ *     summary: Create a new skill file in .rorca/skills/
+ *     operationId: createSkillFile
+ *     description: >
+ *       Creates a new skill markdown file at .rorca/skills/{filename}.md in the
+ *       workspace directory. Optionally uses a predefined template. Returns the
+ *       path and metadata of the created file.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *         example: cashflow-ai
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [filename]
+ *             properties:
+ *               filename:
+ *                 type: string
+ *                 description: Filename for the skill (without extension, or with .md)
+ *                 example: react-hooks
+ *               template:
+ *                 type: string
+ *                 description: Template ID to use as initial content (optional)
+ *                 example: basic
+ *     responses:
+ *       201:
+ *         description: Skill file created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 created: { type: boolean, example: true }
+ *                 relativePath:
+ *                   type: string
+ *                   description: Path relative to workspace root
+ *                   example: .rorca/skills/react-hooks.md
+ *                 sizeBytes: { type: integer, example: 512 }
+ *                 modifiedAt: { type: string, format: date-time }
+ *       400:
+ *         description: Missing or invalid filename
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Workspace not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       409:
+ *         description: File already exists at that path
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 router.post('/:id/context-files/create-skill', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
   const { filename, template: templateId } = req.body as { filename: string; template?: string };
   if (!filename || typeof filename !== 'string') {
-    res.status(400).json({ error: 'Missing filename' });
+    throw new ValidationError('Missing filename');
     return;
   }
 
   // Sanitize filename
   const sanitized = filename.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
   if (!sanitized) {
-    res.status(400).json({ error: 'Invalid filename' });
+    throw new ValidationError('Invalid filename');
     return;
   }
 
@@ -793,7 +869,7 @@ router.post('/:id/context-files/create-skill', async (req: Request, res: Respons
   const abs = path.join(wsPath, relPath);
 
   if (fs.existsSync(abs)) {
-    res.status(409).json({ error: 'File already exists', path: relPath });
+    throw new ConflictError('File already exists');
     return;
   }
 
@@ -874,13 +950,13 @@ router.get('/:id/context-files/skill-templates', (_req: Request, res: Response) 
 router.delete('/:id/context-files/delete-skill', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
   const { filename } = req.body as { filename: string };
   if (!filename || typeof filename !== 'string') {
-    res.status(400).json({ error: 'Missing filename' });
+    throw new ValidationError('Missing filename');
     return;
   }
 
@@ -889,12 +965,12 @@ router.delete('/:id/context-files/delete-skill', async (req: Request, res: Respo
   const abs = path.join(wsPath, relPath);
 
   if (!abs.startsWith(path.resolve(wsPath))) {
-    res.status(400).json({ error: 'Invalid path' });
+    throw new ValidationError('Invalid path');
     return;
   }
 
   if (!fs.existsSync(abs)) {
-    res.status(404).json({ error: 'File not found' });
+    throw new NotFoundError('File not found');
     return;
   }
 
@@ -959,7 +1035,7 @@ router.delete('/:id/context-files/delete-skill', async (req: Request, res: Respo
 router.get('/:id/context-files/skill-usage', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -1033,13 +1109,13 @@ router.get('/:id/context-files/skill-usage', async (req: Request, res: Response)
 router.post('/:id/context-files/import-skill', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
   const { url, filename } = req.body as { url: string; filename: string };
   if (!url || !filename) {
-    res.status(400).json({ error: 'Missing url or filename' });
+    throw new ValidationError('Missing url or filename');
     return;
   }
 
@@ -1048,17 +1124,17 @@ router.post('/:id/context-files/import-skill', async (req: Request, res: Respons
   try {
     parsedUrl = new URL(url);
     if (!['http:', 'https:'].includes(parsedUrl.protocol)) {
-      res.status(400).json({ error: 'Only HTTP/HTTPS URLs are supported' });
+      throw new ValidationError('Only HTTP/HTTPS URLs are supported');
       return;
     }
   } catch {
-    res.status(400).json({ error: 'Invalid URL' });
+    throw new ValidationError('Invalid URL');
     return;
   }
 
   const sanitized = filename.replace(/[^a-zA-Z0-9_-]/g, '-').toLowerCase();
   if (!sanitized) {
-    res.status(400).json({ error: 'Invalid filename' });
+    throw new ValidationError('Invalid filename');
     return;
   }
 
@@ -1066,7 +1142,7 @@ router.post('/:id/context-files/import-skill', async (req: Request, res: Respons
   const abs = path.join(wsPath, relPath);
 
   if (fs.existsSync(abs)) {
-    res.status(409).json({ error: 'File already exists', path: relPath });
+    throw new ConflictError('File already exists');
     return;
   }
 
@@ -1080,13 +1156,13 @@ router.post('/:id/context-files/import-skill', async (req: Request, res: Respons
     clearTimeout(timeout);
 
     if (!response.ok) {
-      res.status(400).json({ error: `Failed to fetch: HTTP ${response.status}` });
+      throw new ValidationError(`Failed to fetch: HTTP ${response.status}`);
       return;
     }
 
     const content = await response.text();
     if (content.length > 500_000) {
-      res.status(400).json({ error: 'Content too large (max 500KB)' });
+      throw new ValidationError('Content too large (max 500KB)');
       return;
     }
 
@@ -1109,7 +1185,7 @@ router.post('/:id/context-files/import-skill', async (req: Request, res: Respons
     });
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : 'Failed to fetch URL';
-    res.status(400).json({ error: msg });
+    throw new ValidationError(msg);
   }
 });
 
@@ -1141,13 +1217,13 @@ router.post('/:id/context-files/import-skill', async (req: Request, res: Respons
 router.get('/:id/context-files/export-skill', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
   const filename = req.query.filename as string;
   if (!filename) {
-    res.status(400).json({ error: 'Missing filename query parameter' });
+    throw new ValidationError('Missing filename query parameter');
     return;
   }
 
@@ -1156,12 +1232,12 @@ router.get('/:id/context-files/export-skill', async (req: Request, res: Response
   const abs = path.join(wsPath, relPath);
 
   if (!abs.startsWith(path.resolve(wsPath))) {
-    res.status(400).json({ error: 'Invalid path' });
+    throw new ValidationError('Invalid path');
     return;
   }
 
   if (!fs.existsSync(abs)) {
-    res.status(404).json({ error: 'Skill file not found' });
+    throw new NotFoundError('Skill file not found');
     return;
   }
 
@@ -1194,7 +1270,7 @@ router.get('/:id/context-files/export-skill', async (req: Request, res: Response
 router.get('/:id/context-files/skill-assignments', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 

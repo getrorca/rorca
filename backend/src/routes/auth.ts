@@ -4,9 +4,10 @@ import jwt from 'jsonwebtoken';
 import crypto from 'crypto';
 import Stripe from 'stripe';
 import { z } from 'zod';
-import { queryOne, execute } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { logger } from '../lib/logger';
+import { generateCsrfToken, setCsrfCookie } from '../lib/csrf';
 
 const router = Router();
 
@@ -28,6 +29,12 @@ export const LOCAL_ADMIN = {
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
 const BCRYPT_COST = process.env.NODE_ENV === 'test' ? 4 : 12;
 
+// Login rate limiting
+const LOGIN_MAX_ATTEMPTS = 5;
+const LOGIN_LOCKOUT_MINUTES = 15;
+// Pre-computed dummy hash for constant-time comparison when email doesn't exist
+const DUMMY_HASH = '$2b$12$XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX';
+
 // Email verification constants
 const VERIFICATION_TOKEN_EXPIRES_HOURS = 24;
 const VERIFICATION_RATE_LIMIT_PER_HOUR = 3;
@@ -36,7 +43,27 @@ const VERIFICATION_RATE_LIMIT_PER_HOUR = 3;
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
 const GITHUB_CALLBACK_URL = process.env.GITHUB_CALLBACK_URL || 'http://localhost:3030/api/auth/github/callback';
-const GITHUB_SCOPES = 'user:email repo';
+const GITHUB_SCOPES = 'user:email,public_repo';
+
+// In-memory CSRF state store (TTL: 10 minutes). Not persisted — ephemeral tokens only.
+const oauthStateCache = new Map<string, number>();
+const OAUTH_STATE_TTL_MS = 10 * 60 * 1000;
+
+function storeOAuthState(state: string): void {
+  oauthStateCache.set(state, Date.now() + OAUTH_STATE_TTL_MS);
+  // Prune expired entries (lazy GC)
+  const now = Date.now();
+  for (const [s, exp] of oauthStateCache.entries()) {
+    if (exp < now) oauthStateCache.delete(s);
+  }
+}
+
+function validateOAuthState(state: string): boolean {
+  const exp = oauthStateCache.get(state);
+  if (!exp || exp < Date.now()) return false;
+  oauthStateCache.delete(state); // one-time use
+  return true;
+}
 
 // Encryption key for GitHub tokens at rest — derived from JWT_SECRET via SHA256 to get 32 bytes
 const ENCRYPTION_KEY = crypto.createHash('sha256').update(JWT_SECRET).digest();
@@ -48,6 +75,7 @@ interface UserRow {
   display_name: string;
   password_hash: string;
   github_id: string | null;
+  github_login: string | null;
   role: string;
   email_verified_at: string | null;
   created_at: string;
@@ -91,6 +119,7 @@ interface GitHubUser {
   id: number;
   login: string;
   email: string | null;
+  avatar_url: string | null;
 }
 
 interface GitHubEmail {
@@ -191,9 +220,14 @@ async function generateAndStoreVerificationToken(userId: string, email: string):
  *       400: { description: "Validation error", content: { application/json: { schema: { $ref: '#/components/schemas/Error' } } } }
  *       409: { description: "Email already registered" }
  */
+const PASSWORD_STRENGTH_MSG = 'Password must be at least 8 characters and contain uppercase, lowercase, and a number';
+
 const RegisterSchema = z.object({
   email: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Email is required').regex(/^[^\s@]+@[^\s@]+\.[^\s@]+$/, 'Invalid email format')),
-  password: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Password is required').min(8, 'Password must be at least 8 characters')),
+  password: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Password is required').min(8, PASSWORD_STRENGTH_MSG).refine(
+    (p) => /[A-Z]/.test(p) && /[a-z]/.test(p) && /[0-9]/.test(p),
+    { message: PASSWORD_STRENGTH_MSG },
+  )),
   displayName: z.preprocess(v => (v == null ? '' : v), z.string().min(1, 'Display name is required')),
 });
 
@@ -205,12 +239,12 @@ router.post('/register', validateBody(RegisterSchema), async (req: Request, res:
   // Check for existing user
   const existing = await queryOne<UserRow>('SELECT id FROM users WHERE email = $1', [trimmedEmail]);
   if (existing) {
-    res.status(409).json({ error: 'Email already registered' });
+    res.status(409).json({ error: 'An account with this email already exists' });
     return;
   }
 
-  // Hash password and create user
-  const passwordHash = bcrypt.hashSync(password, BCRYPT_COST);
+  // Hash password and create user (async — ~250ms at cost 12)
+  const passwordHash = await bcrypt.hash(password, BCRYPT_COST);
   const userId = crypto.randomUUID();
 
   await execute(
@@ -231,6 +265,9 @@ router.post('/register', validateBody(RegisterSchema), async (req: Request, res:
     "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('user_registered', '', $1)",
     [JSON.stringify({ userId, email: trimmedEmail })]
   );
+
+  // US-044: Set CSRF double-submit cookie on session creation
+  setCsrfCookie(res, generateCsrfToken());
 
   res.status(201).json({
     user: {
@@ -290,20 +327,51 @@ const LoginSchema = z.object({
 
 router.post('/login', validateBody(LoginSchema), async (req: Request, res: Response) => {
   const { email, password } = req.body;
-
   const trimmedEmail = email.trim().toLowerCase();
 
+  // Check login rate limit BEFORE any password work
+  const recentAttempts = await query<{ id: string }>(
+    `SELECT id FROM login_attempts WHERE email = $1 AND attempted_at > NOW() - INTERVAL '${LOGIN_LOCKOUT_MINUTES} minutes' AND success = false`,
+    [trimmedEmail]
+  );
+
+  if (recentAttempts.length >= LOGIN_MAX_ATTEMPTS) {
+    // Calculate seconds until oldest attempt expires
+    const oldest = await queryOne<{ attempted_at: string }>(
+      `SELECT attempted_at FROM login_attempts WHERE email = $1 AND attempted_at > NOW() - INTERVAL '${LOGIN_LOCKOUT_MINUTES} minutes' AND success = false ORDER BY attempted_at ASC LIMIT 1`,
+      [trimmedEmail]
+    );
+    const retryAfterSec = oldest
+      ? Math.ceil((new Date(oldest.attempted_at).getTime() + LOGIN_LOCKOUT_MINUTES * 60 * 1000 - Date.now()) / 1000)
+      : LOGIN_LOCKOUT_MINUTES * 60;
+
+    res.status(423).set('Retry-After', String(Math.max(retryAfterSec, 1))).json({
+      error: 'Too many failed login attempts. Please try again later.',
+    });
+    return;
+  }
+
   const user = await queryOne<UserRow>('SELECT * FROM users WHERE email = $1', [trimmedEmail]);
-  if (!user) {
+
+  // Constant-time comparison: always run bcrypt.compare even if user doesn't exist
+  const hashToCompare = user?.password_hash || DUMMY_HASH;
+  const passwordMatch = await bcrypt.compare(password, hashToCompare);
+
+  if (!user || !passwordMatch) {
+    // Record failed attempt
+    await execute(
+      'INSERT INTO login_attempts (email, success) VALUES ($1, false)',
+      [trimmedEmail]
+    );
     res.status(401).json({ error: 'Invalid email or password' });
     return;
   }
 
-  const passwordMatch = bcrypt.compareSync(password, user.password_hash);
-  if (!passwordMatch) {
-    res.status(401).json({ error: 'Invalid email or password' });
-    return;
-  }
+  // Record successful attempt (for audit — does NOT reset counter per AC)
+  await execute(
+    'INSERT INTO login_attempts (email, success) VALUES ($1, true)',
+    [trimmedEmail]
+  );
 
   const accessToken = generateAccessToken(user.id, user.email);
   const refreshToken = generateRefreshToken();
@@ -313,6 +381,9 @@ router.post('/login', validateBody(LoginSchema), async (req: Request, res: Respo
     "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('user_login', '', $1)",
     [JSON.stringify({ userId: user.id, email: user.email })]
   );
+
+  // US-044: Set CSRF double-submit cookie on session creation
+  setCsrfCookie(res, generateCsrfToken());
 
   res.json({
     user: {
@@ -396,6 +467,9 @@ router.post('/refresh', async (req: Request, res: Response) => {
   const newAccessToken = generateAccessToken(storedToken.user_id, storedToken.email);
   const newRefreshToken = generateRefreshToken();
   await storeRefreshToken(storedToken.user_id, newRefreshToken);
+
+  // US-044: Rotate CSRF token on refresh
+  setCsrfCookie(res, generateCsrfToken());
 
   res.json({
     accessToken: newAccessToken,
@@ -586,14 +660,14 @@ router.patch('/me', async (req: Request, res: Response) => {
       return;
     }
 
-    if (!bcrypt.compareSync(currentPassword, row.password_hash)) {
+    if (!(await bcrypt.compare(currentPassword, row.password_hash))) {
       res.status(403).json({ error: 'Current password is incorrect' });
       return;
     }
 
     paramIdx++;
     updates.push(`password_hash = $${paramIdx}`);
-    params.push(bcrypt.hashSync(newPassword, BCRYPT_COST));
+    params.push(await bcrypt.hash(newPassword, BCRYPT_COST));
   }
 
   if (updates.length === 0) {
@@ -934,7 +1008,7 @@ router.post('/reset-password', async (req: Request, res: Response) => {
   }
 
   // Update password
-  const passwordHash = bcrypt.hashSync(newPassword, BCRYPT_COST);
+  const passwordHash = await bcrypt.hash(newPassword, BCRYPT_COST);
   await execute(
     'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
     [passwordHash, resetToken.user_id]
@@ -1017,7 +1091,7 @@ router.delete('/account', authRequired, async (req: Request, res: Response) => {
   }
 
   // Verify password
-  if (!bcrypt.compareSync(password, user.password_hash)) {
+  if (!(await bcrypt.compare(password, user.password_hash))) {
     res.status(403).json({ error: 'Incorrect password' });
     return;
   }
@@ -1111,12 +1185,14 @@ async function githubApiFetch<T>(url: string, token: string): Promise<T> {
  *       500: { description: "GitHub OAuth not configured" }
  */
 router.get('/github', (_req: Request, res: Response) => {
-  if (!GITHUB_CLIENT_ID) {
-    res.status(500).json({ error: 'GitHub OAuth not configured: GITHUB_CLIENT_ID missing' });
+  if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
+    res.status(503).json({ error: 'GitHub OAuth not configured' });
     return;
   }
 
-  const state = crypto.randomBytes(16).toString('hex');
+  const state = crypto.randomBytes(32).toString('hex');
+  storeOAuthState(state);
+
   const params = new URLSearchParams({
     client_id: GITHUB_CLIENT_ID,
     redirect_uri: GITHUB_CALLBACK_URL,
@@ -1147,15 +1223,28 @@ router.get('/github', (_req: Request, res: Response) => {
  *       400: { description: "Missing authorization code" }
  */
 router.get('/github/callback', async (req: Request, res: Response) => {
-  const { code } = req.query;
+  const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
+  const { code, state, error: githubError } = req.query;
+
+  // Handle user-denied consent from GitHub
+  if (githubError === 'access_denied') {
+    res.redirect(`${frontendUrl}/auth/github/callback?error=github_denied`);
+    return;
+  }
 
   if (!code || typeof code !== 'string') {
-    res.status(400).json({ error: 'Authorization code is required' });
+    res.redirect(`${frontendUrl}/auth/github/callback?error=missing_code`);
     return;
   }
 
   if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
-    res.status(500).json({ error: 'GitHub OAuth not configured' });
+    res.status(503).json({ error: 'GitHub OAuth not configured' });
+    return;
+  }
+
+  // Validate CSRF state parameter
+  if (!state || typeof state !== 'string' || !validateOAuthState(state)) {
+    res.redirect(`${frontendUrl}/auth/github/callback?error=invalid_state`);
     return;
   }
 
@@ -1177,7 +1266,7 @@ router.get('/github/callback', async (req: Request, res: Response) => {
 
     const tokenData = await tokenResp.json() as GitHubTokenResponse & { error?: string; error_description?: string };
     if (tokenData.error || !tokenData.access_token) {
-      res.status(401).json({ error: tokenData.error_description || 'Failed to exchange authorization code' });
+      res.redirect(`${frontendUrl}/auth/github/callback?error=token_exchange_failed`);
       return;
     }
 
@@ -1188,6 +1277,7 @@ router.get('/github/callback', async (req: Request, res: Response) => {
     const githubUser = await githubApiFetch<GitHubUser>('https://api.github.com/user', githubAccessToken);
     const githubUserId = String(githubUser.id);
     const githubUsername = githubUser.login;
+    const githubAvatarUrl = githubUser.avatar_url;
 
     // 3. Fetch verified primary email
     let primaryEmail = githubUser.email;
@@ -1195,7 +1285,7 @@ router.get('/github/callback', async (req: Request, res: Response) => {
       const emails = await githubApiFetch<GitHubEmail[]>('https://api.github.com/user/emails', githubAccessToken);
       const primary = emails.find(e => e.primary && e.verified);
       if (!primary) {
-        res.status(400).json({ error: 'No verified primary email found on GitHub account' });
+        res.redirect(`${frontendUrl}/auth/github/callback?error=no_verified_email`);
         return;
       }
       primaryEmail = primary.email;
@@ -1225,6 +1315,11 @@ router.get('/github/callback', async (req: Request, res: Response) => {
         'UPDATE github_connections SET encrypted_token = $1, scopes = $2, github_username = $3, updated_at = NOW() WHERE id = $4',
         [encryptToken(githubAccessToken), grantedScopes, githubUsername, existingConnection.id]
       );
+      // Update github_login and avatar_url on user
+      await execute(
+        'UPDATE users SET github_login = $1, avatar_url = COALESCE($2, avatar_url), updated_at = NOW() WHERE id = $3',
+        [githubUsername, githubAvatarUrl ?? null, userId]
+      );
     } else {
       // Check if a user with this email already exists (account linking)
       const existingUser = await queryOne<UserRow>('SELECT * FROM users WHERE email = $1', [primaryEmail]);
@@ -1235,8 +1330,11 @@ router.get('/github/callback', async (req: Request, res: Response) => {
         userEmail = existingUser.email;
         displayName = existingUser.display_name;
 
-        // Set github_id on user
-        await execute('UPDATE users SET github_id = $1, updated_at = NOW() WHERE id = $2', [githubUserId, userId]);
+        // Set github_id and github_login on user
+        await execute(
+          'UPDATE users SET github_id = $1, github_login = $2, avatar_url = COALESCE($3, avatar_url), updated_at = NOW() WHERE id = $4',
+          [githubUserId, githubUsername, githubAvatarUrl ?? null, userId]
+        );
       } else {
         // Create new user (no password — GitHub-only account)
         userId = crypto.randomUUID();
@@ -1246,8 +1344,8 @@ router.get('/github/callback', async (req: Request, res: Response) => {
         // Use a random unusable password hash for GitHub-only users
         const noPasswordHash = `github:${crypto.randomBytes(32).toString('hex')}`;
         await execute(
-          'INSERT INTO users (id, email, display_name, password_hash, github_id, email_verified_at) VALUES ($1, $2, $3, $4, $5, NOW())',
-          [userId, userEmail, displayName, noPasswordHash, githubUserId]
+          'INSERT INTO users (id, email, display_name, password_hash, github_id, github_login, avatar_url, email_verified_at) VALUES ($1, $2, $3, $4, $5, $6, $7, NOW())',
+          [userId, userEmail, displayName, noPasswordHash, githubUserId, githubUsername, githubAvatarUrl ?? null]
         );
       }
 
@@ -1265,7 +1363,25 @@ router.get('/github/callback', async (req: Request, res: Response) => {
       );
     }
 
-    // 5. Generate JWT + refresh token pair (same as email login)
+    // 5. Store GitHub access token in api_key_vault (encrypted, namespaced by provider=github, label=oauth)
+    const encryptedVaultToken = encryptToken(githubAccessToken);
+    const existingVaultEntry = await queryOne<{ id: string }>(
+      "SELECT id FROM api_key_vault WHERE user_id = $1 AND provider = 'github' AND label = 'oauth'",
+      [userId]
+    );
+    if (existingVaultEntry) {
+      await execute(
+        'UPDATE api_key_vault SET encrypted_key = $1 WHERE id = $2',
+        [encryptedVaultToken, existingVaultEntry.id]
+      );
+    } else {
+      await execute(
+        "INSERT INTO api_key_vault (id, user_id, provider, encrypted_key, label) VALUES ($1, $2, 'github', $3, 'oauth')",
+        [crypto.randomUUID(), userId, encryptedVaultToken]
+      );
+    }
+
+    // 6. Generate JWT + refresh token pair (same as email login)
     const accessToken = generateAccessToken(userId, userEmail);
     const refreshToken = generateRefreshToken();
     await storeRefreshToken(userId, refreshToken);
@@ -1276,17 +1392,30 @@ router.get('/github/callback', async (req: Request, res: Response) => {
       [JSON.stringify({ userId, email: userEmail, githubUserId, githubUsername })]
     );
 
-    // Redirect to frontend with tokens in URL fragment (fragments aren't sent to servers)
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
-    const fragment = new URLSearchParams({
-      accessToken,
-      refreshToken,
-    }).toString();
+    // US-044: Set CSRF double-submit cookie on session creation
+    setCsrfCookie(res, generateCsrfToken());
+
+    // 7. Set tokens as httpOnly cookies and redirect frontend to the callback page
+    const isProduction = process.env.NODE_ENV === 'production';
+    res.cookie('rorca_access_token', accessToken, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: 'lax',
+      maxAge: 15 * 60 * 1000, // 15 minutes
+    });
+    res.cookie('rorca_refresh_token', refreshToken, {
+      httpOnly: true,
+      secure: isProduction,
+      sameSite: 'lax',
+      maxAge: REFRESH_TOKEN_EXPIRES_DAYS * 24 * 60 * 60 * 1000,
+    });
+
+    // Also pass tokens in fragment for backwards-compat with existing AuthContext
+    const fragment = new URLSearchParams({ accessToken, refreshToken }).toString();
     res.redirect(`${frontendUrl}/auth/github/callback#${fragment}`);
   } catch (err) {
-    const message = err instanceof Error ? err.message : 'Unknown error during GitHub OAuth';
-    const frontendUrl = process.env.FRONTEND_URL || 'http://localhost:5210';
-    res.redirect(`${frontendUrl}/auth/github/callback#error=${encodeURIComponent(message)}`);
+    logger.error({ err }, '[auth] GitHub OAuth callback error');
+    res.redirect(`${frontendUrl}/auth/github/callback?error=github_error`);
   }
 });
 
