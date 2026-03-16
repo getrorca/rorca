@@ -112,7 +112,7 @@ test('schema_migrations has applied versions', async () => {
     'SELECT version, filename FROM schema_migrations ORDER BY version ASC'
   );
   expect(rows.length).toBeGreaterThan(0);
-  expect(rows[0].version).toBe(1);
+  expect(Number(rows[0].version)).toBe(1);
   expect(rows[0].filename).toContain('001');
 });
 

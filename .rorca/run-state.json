@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T10:17:58.658Z",
+  "lastUpdatedAt": "2026-03-16T10:41:30.983Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -46,7 +46,35 @@
     }
   ],
   "failedStories": [],
-  "skippedStories": [],
+  "skippedStories": [
+    {
+      "storyId": "US-038",
+      "title": "License activation endpoint (BIL-004)",
+      "status": "skipped",
+      "startedAt": "2026-03-16T10:41:30.918Z",
+      "finishedAt": "2026-03-16T10:41:30.918Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: US-036, US-037"
+    },
+    {
+      "storyId": "US-040",
+      "title": "Paywall UI modal (BIL-006)",
+      "status": "skipped",
+      "startedAt": "2026-03-16T10:41:30.958Z",
+      "finishedAt": "2026-03-16T10:41:30.958Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: US-037"
+    },
+    {
+      "storyId": "US-061",
+      "title": "Trial Expiry Notification and Grace Period",
+      "status": "skipped",
+      "startedAt": "2026-03-16T10:41:30.983Z",
+      "finishedAt": "2026-03-16T10:41:30.983Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: US-043, US-037"
+    }
+  ],
   "currentStory": null,
   "decisions": [],
   "resumedFromStory": null
