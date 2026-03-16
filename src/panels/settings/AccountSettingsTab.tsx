@@ -3,6 +3,8 @@ import { Save, Loader2, Trash2, Eye, EyeOff, Check, Mail, AlertTriangle, Zap, XC
 import { useAuth } from '../../contexts/AuthContext';
 import { useTheme } from '../../contexts/ThemeContext';
 import { apiFetch, clearTokens } from '../../lib/apiFetch';
+import { AnimatedModal } from '../../components/AnimatedModal';
+import { useGlobalToast } from '../../contexts/ToastContext';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -539,31 +541,38 @@ function TelemetrySection() {
 // ─── Account Deletion Section ─────────────────────────────────────────────────
 
 function AccountDeletionSection() {
-  const [showConfirm, setShowConfirm] = useState(false);
+  const { show: showToast } = useGlobalToast();
+  const [modalOpen, setModalOpen] = useState(false);
   const [password, setPassword] = useState('');
-  const [confirmText, setConfirmText] = useState('');
   const [deleting, setDeleting] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
-  const canDelete = password.length > 0 && confirmText === 'DELETE';
-
   const handleDelete = async () => {
-    if (!canDelete) return;
+    if (!password) return;
     setDeleting(true);
     setError(null);
     try {
-      await apiFetch('/api/auth/account', {
+      await apiFetch('/api/users/me', {
         method: 'DELETE',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ password }),
       });
       clearTokens();
-      window.location.href = '/';
+      setModalOpen(false);
+      showToast('Your account has been deleted', 'success');
+      setTimeout(() => { window.location.href = '/'; }, 3000);
     } catch (err: any) {
       setError(err.message || 'Failed to delete account');
     } finally {
       setDeleting(false);
     }
+  };
+
+  const closeModal = () => {
+    if (deleting) return;
+    setModalOpen(false);
+    setPassword('');
+    setError(null);
   };
 
   return (
@@ -581,69 +590,78 @@ function AccountDeletionSection() {
           <div className="text-sm text-[var(--text)]">
             <p className="font-medium">Delete your account</p>
             <p className="text-xs text-muted mt-1">
-              This will permanently delete your user account, all workspaces you own, specs, direction layers,
-              pipeline runs, WAL events, API keys, team memberships, and cancel your subscription if active.
-              This cannot be undone.
+              This will permanently delete your personal data, API keys, and credentials.
+              Operational records (pipeline runs, comments) will be anonymized. This cannot be undone.
             </p>
           </div>
         </div>
 
-        {!showConfirm ? (
-          <button
-            onClick={() => setShowConfirm(true)}
-            className="flex items-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded hover:bg-red-700 transition-colors"
-          >
-            <Trash2 size={14} />
-            Delete my account
-          </button>
-        ) : (
-          <div className="space-y-3 border-t border-red-500/20 pt-4">
+        <button
+          onClick={() => setModalOpen(true)}
+          className="flex items-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded hover:bg-red-700 transition-colors"
+        >
+          <Trash2 size={14} />
+          Delete Account
+        </button>
+      </div>
+
+      <AnimatedModal isOpen={modalOpen} onClose={closeModal} closeOnBackdropClick={!deleting}>
+        <div className="w-[420px] bg-panel border border-border rounded-lg shadow-xl overflow-hidden">
+          {/* Red header */}
+          <div className="bg-red-600 px-6 py-4">
+            <h2 className="text-base font-semibold text-white">Delete Account</h2>
+          </div>
+
+          <div className="px-6 py-5 space-y-4">
+            <p className="text-sm text-muted">
+              This action cannot be undone. Enter your password to confirm.
+            </p>
+
             <div>
-              <label className="block text-xs text-muted mb-1">Enter your password to confirm</label>
+              <label className="block text-xs text-muted mb-1">Password</label>
               <input
                 type="password"
                 value={password}
                 onChange={e => setPassword(e.target.value)}
-                placeholder="Your current password"
-                className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-red-500 outline-none"
+                placeholder="Enter your password"
+                readOnly={deleting}
+                className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-red-500 outline-none read-only:opacity-60"
                 autoFocus
-              />
-            </div>
-
-            <div>
-              <label className="block text-xs text-muted mb-1">
-                Type <span className="font-mono font-bold text-red-400">DELETE</span> to confirm
-              </label>
-              <input
-                type="text"
-                value={confirmText}
-                onChange={e => setConfirmText(e.target.value)}
-                placeholder="DELETE"
-                className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-red-500 outline-none font-mono"
               />
             </div>
 
             {error && <p className="text-xs text-red-500">{error}</p>}
 
-            <div className="flex gap-2">
+            <div className="flex gap-2 pt-2">
               <button
                 onClick={handleDelete}
-                disabled={!canDelete || deleting}
-                className="flex items-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 transition-colors"
+                disabled={!password || deleting}
+                className="flex-1 flex items-center justify-center gap-2 px-4 py-2 text-sm bg-red-600 text-white rounded hover:bg-red-700 disabled:opacity-50 transition-colors"
               >
-                {deleting ? <Loader2 size={14} className="animate-spin" /> : <Trash2 size={14} />}
-                {deleting ? 'Deleting...' : 'Permanently delete my account'}
+                {deleting ? (
+                  <>
+                    <Loader2 size={14} className="animate-spin" />
+                    Deleting your account...
+                  </>
+                ) : (
+                  <>
+                    <Trash2 size={14} />
+                    Delete My Account
+                  </>
+                )}
               </button>
               <button
-                onClick={() => { setShowConfirm(false); setPassword(''); setConfirmText(''); setError(null); }}
-                className="px-4 py-2 text-sm text-muted hover:text-[var(--text)] transition-colors"
+                onClick={closeModal}
+                disabled={deleting}
+                className="px-4 py-2 text-sm text-muted hover:text-[var(--text)] disabled:opacity-50 transition-colors"
               >
                 Cancel
               </button>
             </div>
           </div>
-        )}
-      </div>
+        </div>
+      </AnimatedModal>
+
     </div>
   );
 }
