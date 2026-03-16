@@ -8,18 +8,23 @@
  * - handlePullRequestMerge: On PR close+merge, marks matching stories as passed in spec JSON
  * - handlePullRequestCheck: On PR open/synchronize/reopen, posts GitHub commit status check
  * - handlePush: On push, maps commit messages to story IDs and records in story_commits table
+ * - handlePushSpecDiscovery: On push, detects new/updated spec files and emits WAL events
  *
  * WAL events emitted:
  * - github_pr_merged: When a merged PR contains story IDs from spec files
  * - github_push_commits: When commits reference story IDs
+ * - spec_discovered: When a new valid spec file is detected in a push
+ * - spec_updated: When an existing spec file is updated in a push
  */
 import * as fs from 'fs';
 import * as path from 'path';
+import { z } from 'zod';
 import { queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { evaluatePrAndPostCheck } from '../lib/github-checks';
 import { onGithubEvent } from './webhooks';
 import { logger } from '../lib/logger';
+import { decryptToken } from './auth';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -376,13 +381,241 @@ export function handlePullRequestCheck(
     });
 }
 
+// ─── Push spec discovery handler ────────────────────────────────────────────
+
+/** Regex to match spec file paths in push commits */
+const SPEC_FILE_PATTERN = /^forge\/specs\/(pending|approved)\/[^/]+\.json$/;
+
+/** Zod schema for validating spec JSON structure */
+const SpecUserStorySchema = z.object({
+  id: z.string(),
+  title: z.string(),
+  description: z.string(),
+  acceptanceCriteria: z.array(z.string()),
+});
+
+const SpecFileSchema = z.object({
+  userStories: z.array(SpecUserStorySchema).min(1),
+});
+
+interface GithubConnectionRow {
+  encrypted_token: string;
+}
+
+/**
+ * Fetch raw file content from GitHub API.
+ * Returns null if the file cannot be fetched.
+ */
+async function fetchGithubFileContent(
+  repoFullName: string,
+  filePath: string,
+  ref: string,
+  token: string,
+): Promise<string | null> {
+  try {
+    const url = `https://api.github.com/repos/${repoFullName}/contents/${encodeURIComponent(filePath)}?ref=${encodeURIComponent(ref)}`;
+    const resp = await fetch(url, {
+      headers: {
+        Authorization: `Bearer ${token}`,
+        Accept: 'application/vnd.github.v3.raw',
+        'User-Agent': 'Rorca/1.0',
+      },
+    });
+    if (!resp.ok) {
+      logger.warn(`[Webhook] GitHub API ${resp.status} fetching ${filePath} from ${repoFullName}`);
+      return null;
+    }
+    return await resp.text();
+  } catch (err) {
+    logger.error({ err }, `[Webhook] Failed to fetch ${filePath} from GitHub`);
+    return null;
+  }
+}
+
+/**
+ * Handle push events: detect new or updated spec files (forge/specs/pending/*.json
+ * or forge/specs/approved/*.json), fetch them from GitHub, validate the JSON
+ * structure, and emit WAL events.
+ */
+export async function handlePushSpecDiscovery(
+  payload: Record<string, any>,
+  _event: string,
+  workspaceId: string,
+): Promise<void> {
+  const commits: Array<{
+    id: string;
+    added?: string[];
+    modified?: string[];
+  }> = payload.commits ?? [];
+
+  if (commits.length === 0) return;
+
+  // Collect unique spec file paths from all commits
+  const addedPaths = new Set<string>();
+  const modifiedPaths = new Set<string>();
+
+  for (const commit of commits) {
+    for (const filePath of commit.added ?? []) {
+      if (SPEC_FILE_PATTERN.test(filePath)) {
+        addedPaths.add(filePath);
+      }
+    }
+    for (const filePath of commit.modified ?? []) {
+      if (SPEC_FILE_PATTERN.test(filePath)) {
+        modifiedPaths.add(filePath);
+        // If also added in the same push, treat as added
+        addedPaths.delete(filePath);
+      }
+    }
+  }
+
+  // Remove from modified if also in added (added takes priority)
+  for (const p of addedPaths) {
+    modifiedPaths.delete(p);
+  }
+
+  const allSpecPaths = new Set([...addedPaths, ...modifiedPaths]);
+  if (allSpecPaths.size === 0) return;
+
+  // Resolve GitHub token
+  const conn = await queryOne<GithubConnectionRow>(
+    'SELECT encrypted_token FROM github_connections LIMIT 1'
+  );
+  if (!conn) {
+    logger.warn('[Webhook] No GitHub connection found — cannot fetch spec files');
+    return;
+  }
+  const token = decryptToken(conn.encrypted_token);
+
+  const repoFullName: string = payload.repository?.full_name ?? '';
+  const ref: string = payload.after ?? payload.ref?.replace('refs/heads/', '') ?? 'main';
+
+  for (const filePath of allSpecPaths) {
+    const specSlug = path.basename(filePath, '.json');
+    const isNew = addedPaths.has(filePath);
+
+    // Fetch file content from GitHub
+    const content = await fetchGithubFileContent(repoFullName, filePath, ref, token);
+    if (!content) continue;
+
+    // Parse JSON
+    let parsed: Record<string, any>;
+    try {
+      parsed = JSON.parse(content);
+    } catch (parseErr) {
+      logger.warn(`Invalid spec file: ${filePath} — ${parseErr instanceof Error ? parseErr.message : String(parseErr)}`);
+      continue;
+    }
+
+    // Validate spec structure with Zod safeParse
+    const validation = SpecFileSchema.safeParse(parsed);
+    if (!validation.success) {
+      const errorMsg = validation.error.issues.map(i => `${i.path.join('.')}: ${i.message}`).join('; ');
+      logger.warn(`Invalid spec file: ${filePath} — ${errorMsg}`);
+      continue;
+    }
+
+    const storyCount = validation.data.userStories.length;
+    const specTitle = parsed.title || specSlug;
+
+    // Check if this spec was previously discovered
+    const existing = await queryOne<{ spec_id: string }>(
+      'SELECT spec_id FROM spec_sources WHERE spec_id = $1 AND workspace_id = $2',
+      [specSlug, workspaceId]
+    );
+
+    if (isNew || !existing) {
+      // New spec — record source and emit spec_discovered
+      await execute(
+        `INSERT INTO spec_sources (spec_id, workspace_id, source, source_repo, source_ref, source_sha)
+         VALUES ($1, $2, 'github', $3, $4, $5)
+         ON CONFLICT (spec_id, workspace_id) DO UPDATE SET source = 'github', source_repo = $3, source_ref = $4, source_sha = $5, discovered_at = NOW()`,
+        [specSlug, workspaceId, repoFullName, ref, payload.after ?? null]
+      );
+
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload)
+         VALUES ('spec_discovered', $1, $2, 'github', $3) RETURNING *`,
+        [workspaceId, specSlug, JSON.stringify({
+          title: specTitle,
+          story_count: storyCount,
+          source: 'github',
+          repo: repoFullName,
+          ref,
+          file_path: filePath,
+        })]
+      );
+      if (walEvent) broadcastAll(walEvent);
+
+      logger.info(`[Webhook] Spec discovered from GitHub: ${specSlug} (${storyCount} stories) in ${repoFullName}`);
+    } else {
+      // Existing spec updated — get previous story count from filesystem for delta
+      let oldStoryCount = 0;
+      const workspace = await queryOne<{ path: string }>(
+        'SELECT path FROM workspaces WHERE id = $1',
+        [workspaceId]
+      );
+      if (workspace) {
+        const localPath = path.join(workspace.path, filePath);
+        try {
+          const localContent = JSON.parse(fs.readFileSync(localPath, 'utf8'));
+          oldStoryCount = (localContent.userStories ?? []).length;
+        } catch {
+          // Local file may not exist yet
+        }
+      }
+
+      // Update source tracking
+      await execute(
+        `UPDATE spec_sources SET source_ref = $1, source_sha = $2, discovered_at = NOW()
+         WHERE spec_id = $3 AND workspace_id = $4`,
+        [ref, payload.after ?? null, specSlug, workspaceId]
+      );
+
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload)
+         VALUES ('spec_updated', $1, $2, 'github', $3) RETURNING *`,
+        [workspaceId, specSlug, JSON.stringify({
+          title: specTitle,
+          story_count: storyCount,
+          old_story_count: oldStoryCount,
+          story_count_delta: storyCount - oldStoryCount,
+          source: 'github',
+          repo: repoFullName,
+          ref,
+          file_path: filePath,
+        })]
+      );
+      if (walEvent) broadcastAll(walEvent);
+
+      logger.info(`[Webhook] Spec updated from GitHub: ${specSlug} (${oldStoryCount} → ${storyCount} stories) in ${repoFullName}`);
+    }
+
+    // Write the spec file to the workspace filesystem so it appears in the kanban
+    const workspace = await queryOne<{ path: string }>(
+      'SELECT path FROM workspaces WHERE id = $1',
+      [workspaceId]
+    );
+    if (workspace) {
+      const localPath = path.join(workspace.path, filePath);
+      const dir = path.dirname(localPath);
+      if (!fs.existsSync(dir)) {
+        fs.mkdirSync(dir, { recursive: true });
+      }
+      fs.writeFileSync(localPath, content, 'utf8');
+    }
+  }
+}
+
 // ─── Register handlers ───────────────────────────────────────────────────────
 
 export function registerWebhookHandlers(): void {
   onGithubEvent('pull_request', handlePullRequestMerge);
   onGithubEvent('pull_request', handlePullRequestCheck);
   onGithubEvent('push', handlePush);
+  onGithubEvent('push', handlePushSpecDiscovery);
   logger.info('[Webhook] Registered pull_request merge handler');
   logger.info('[Webhook] Registered pull_request spec-compliance check handler');
   logger.info('[Webhook] Registered push commit-linking handler');
+  logger.info('[Webhook] Registered push spec-discovery handler');
 }
