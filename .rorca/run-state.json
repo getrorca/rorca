@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T09:08:58.112Z",
+  "lastUpdatedAt": "2026-03-16T09:51:55.834Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 1152753
+    },
+    {
+      "storyId": "US-050",
+      "title": "Smoke test for binary on all 4 platforms",
+      "status": "passed",
+      "startedAt": "2026-03-16T09:47:23.379Z",
+      "finishedAt": "2026-03-16T09:51:55.834Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 272455
     }
   ],
   "failedStories": [],
