@@ -29,6 +29,7 @@ import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
 
 // — Lazy-loaded pages (not part of initial bundle) —
 const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
+const GitHubCallbackPage = lazy(() => import('./pages/GitHubCallbackPage'));
 const ForgotPasswordPage = lazy(() => import('./components/ForgotPasswordPage'));
 const ResetPasswordPage = lazy(() => import('./components/ResetPasswordPage'));
 const OnboardingWizard = lazy(() => import('./components/OnboardingWizard'));
@@ -66,6 +67,15 @@ function AuthGate() {
     return (
       <Suspense fallback={<BoardSkeleton />}>
         <PublicReviewPage token={reviewMatch[1]} />
+      </Suspense>
+    );
+  }
+
+  // GitHub OAuth callback — rendered outside auth gate and shell (no sidebar/nav)
+  if (location.pathname === '/auth/github/callback') {
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <GitHubCallbackPage />
       </Suspense>
     );
   }
