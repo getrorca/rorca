@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T20:23:16.653Z",
+  "lastUpdatedAt": "2026-03-16T21:16:22.234Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -81,6 +81,15 @@
       "finishedAt": "2026-03-16T20:23:16.653Z",
       "agentType": "claude",
       "elapsedMs": 318107
+    },
+    {
+      "storyId": "BL-001",
+      "title": "requirePlan middleware — gate pipeline execution behind license check",
+      "status": "passed",
+      "startedAt": "2026-03-16T21:15:59.706Z",
+      "finishedAt": "2026-03-16T21:16:22.233Z",
+      "agentType": "claude",
+      "elapsedMs": 22527
     }
   ],
   "failedStories": [],
