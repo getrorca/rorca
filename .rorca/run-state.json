@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T08:29:44.855Z",
+  "lastUpdatedAt": "2026-03-16T08:49:30.630Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 156379
+    },
+    {
+      "storyId": "US-012",
+      "title": "GitHub Actions release workflow — build binaries on tag push",
+      "status": "passed",
+      "startedAt": "2026-03-16T08:47:51.301Z",
+      "finishedAt": "2026-03-16T08:49:30.630Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 99329
     }
   ],
   "failedStories": [],
