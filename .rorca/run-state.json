@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T09:50:23.224Z",
+  "lastUpdatedAt": "2026-03-16T09:52:49.115Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -25,14 +25,14 @@
       "elapsedMs": 1152753
     },
     {
-      "storyId": "US-010",
-      "title": "Landing page footer with real links",
+      "storyId": "US-014",
+      "title": "Landing page download integration — fetch latest release dynamically",
       "status": "passed",
-      "startedAt": "2026-03-16T09:47:23.226Z",
-      "finishedAt": "2026-03-16T09:50:23.224Z",
+      "startedAt": "2026-03-16T09:47:23.528Z",
+      "finishedAt": "2026-03-16T09:52:49.115Z",
       "agentType": "claude",
-      "model": "claude-haiku-4-5-20251001",
-      "elapsedMs": 179998
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 325587
     }
   ],
   "failedStories": [],
