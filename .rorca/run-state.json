@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T11:17:36.545Z",
+  "lastUpdatedAt": "2026-03-16T20:11:55.535Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -63,6 +63,15 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 1091607
+    },
+    {
+      "storyId": "US-001",
+      "title": "Add @refresh reset directive to RunViewPanel and PipelineMonitorPanel",
+      "status": "passed",
+      "startedAt": "2026-03-16T20:09:53.080Z",
+      "finishedAt": "2026-03-16T20:11:55.535Z",
+      "agentType": "claude",
+      "elapsedMs": 122455
     }
   ],
   "failedStories": [],
