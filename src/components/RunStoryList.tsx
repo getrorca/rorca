@@ -37,7 +37,7 @@ type DerivedStatus = 'pending' | 'running' | 'pass' | 'fail' | 'blocked' | 'excl
 
 const STATUS_CONFIG: Record<DerivedStatus, { icon: typeof CheckCircle2; color: string; label: string; rowClass?: string }> = {
   pending:      { icon: Circle,       color: 'text-gray-400',    label: 'Pending' },
-  running:      { icon: Loader2,      color: 'text-blue-500',    label: 'Running',      rowClass: 'border-l-2 border-l-blue-500 bg-blue-500/5' },
+  running:      { icon: Loader2,      color: 'text-emerald-500', label: 'Running',      rowClass: 'border-l-2 border-l-emerald-500 bg-emerald-500/5' },
   pass:         { icon: CheckCircle2, color: 'text-emerald-500', label: 'Passed' },
   fail:         { icon: XCircle,      color: 'text-red-500',     label: 'Failed',       rowClass: 'border-l-2 border-l-red-500 bg-red-500/5' },
   blocked:      { icon: Ban,          color: 'text-gray-400',    label: 'Blocked',      rowClass: 'border-l-2 border-l-gray-400 bg-gray-500/5' },
@@ -145,7 +145,7 @@ function LiveElapsed({ startedAt }: { startedAt: number }) {
     return () => clearInterval(id);
   }, []);
   const seconds = Math.round((now - startedAt) / 1000);
-  return <span className="text-[10px] text-blue-400 shrink-0">{formatElapsed(seconds)}</span>;
+  return <span className="text-[10px] text-emerald-400 shrink-0">{formatElapsed(seconds)}</span>;
 }
 
 // ─── Rate limit countdown timer ──────────────────────────────────────────────
@@ -181,7 +181,8 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
 }) {
   const cfg = STATUS_CONFIG[story.status] || STATUS_CONFIG.pending;
   const Icon = cfg.icon;
-  const isAnimated = story.status === 'running' || story.status === 'retry';
+  const isRunning = story.status === 'running';
+  const isRetrying = story.status === 'retry';
   const isExcluded = story.status === 'excluded';
   const isFailed = story.status === 'fail';
   const isBlocked = story.status === 'blocked';
@@ -259,10 +260,10 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
         ) : null}
         <Icon
           size={14}
-          className={`shrink-0 ${cfg.color} ${isAnimated ? 'animate-spin' : ''} ${justPassed ? 'animate-checkmark-pop' : ''}`}
+          className={`shrink-0 ${cfg.color} ${isRunning ? 'animate-pulse' : isRetrying ? 'animate-spin' : ''} ${justPassed ? 'animate-checkmark-pop' : ''}`}
         />
         <span className={`text-[11px] font-mono font-semibold shrink-0 px-1 py-0.5 rounded ${
-          story.status === 'running' ? 'bg-blue-500/10 text-blue-500' :
+          story.status === 'running' ? 'bg-emerald-500/10 text-emerald-500' :
           story.status === 'pass' ? 'bg-emerald-500/10 text-emerald-500' :
           story.status === 'fail' ? 'bg-red-500/10 text-red-500' :
           story.status === 'blocked' ? 'bg-gray-500/10 text-gray-400' :
