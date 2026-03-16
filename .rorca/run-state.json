@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T09:57:56.569Z",
+  "lastUpdatedAt": "2026-03-16T09:51:55.834Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -25,14 +25,14 @@
       "elapsedMs": 1152753
     },
     {
-      "storyId": "US-021",
-      "title": "Integration Credentials Vault extension for OAuth tokens",
+      "storyId": "US-050",
+      "title": "Smoke test for binary on all 4 platforms",
       "status": "passed",
-      "startedAt": "2026-03-16T09:50:53.394Z",
-      "finishedAt": "2026-03-16T09:57:56.568Z",
+      "startedAt": "2026-03-16T09:47:23.379Z",
+      "finishedAt": "2026-03-16T09:51:55.834Z",
       "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 423174
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 272455
     }
   ],
   "failedStories": [],

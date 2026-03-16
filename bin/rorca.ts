@@ -39,12 +39,14 @@ Options for start:
   --port <port>            Server port (default: 3030)
   --no-open                Don't open browser on start
   --no-postgres            Skip managed Postgres; requires DATABASE_URL to be set
+  --dry-run                Validate config and exit without starting servers
 
 Examples:
   rorca start
   rorca start --port 4040
   rorca start --no-open
   rorca start --no-postgres
+  rorca start --dry-run
   rorca init
 `);
   process.exit(0);
@@ -134,6 +136,7 @@ async function runStart(startArgs: string[]): Promise<void> {
   const port = portIdx !== -1 && startArgs[portIdx + 1] ? startArgs[portIdx + 1] : '3030';
   const noOpen = startArgs.includes('--no-open');
   const noPostgres = startArgs.includes('--no-postgres');
+  const dryRun = startArgs.includes('--dry-run');
 
   const portNum = parseInt(port, 10);
   if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
@@ -145,6 +148,19 @@ async function runStart(startArgs: string[]): Promise<void> {
   if (noPostgres && !process.env.DATABASE_URL) {
     console.error('DATABASE_URL required when --no-postgres is set');
     process.exit(1);
+  }
+
+  // --dry-run: validate config and exit without starting servers
+  if (dryRun) {
+    console.log(`rorca v${pkg.version} — dry-run mode`);
+    console.log(`  Port: ${portNum}`);
+    const dbUrl = process.env.DATABASE_URL || '(managed Postgres will be provisioned)';
+    console.log(`  DATABASE_URL: ${dbUrl.replace(/\/\/[^@]*@/, '//***@')}`);
+    const rorcaHome = join(homedir(), '.rorca');
+    console.log(`  Config dir: ${rorcaHome}`);
+    console.log('Config OK — dry-run complete.');
+    process.exit(0);
+    return;
   }
 
   // Ensure ~/.rorca/ config directory exists
