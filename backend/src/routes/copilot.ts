@@ -13,6 +13,7 @@ import { queryOne, execute } from '../db';
 import { encryptToken, decryptToken } from './auth';
 import type { AuthUser } from './auth';
 import { AuthError, NotFoundError, ValidationError } from '../lib/errors';
+import { githubRateLimiter } from '../lib/github-rate-limiter';
 
 const router = Router();
 
@@ -162,12 +163,14 @@ router.get('/callback', async (req: Request, res: Response) => {
     const grantedScopes = tokenData.scope || '';
 
     // Fetch GitHub user profile
-    const userRes = await fetch('https://api.github.com/user', {
-      headers: {
-        Authorization: `Bearer ${githubToken}`,
-        Accept: 'application/json',
-      },
-    });
+    const userRes = await githubRateLimiter.execute(() =>
+      fetch('https://api.github.com/user', {
+        headers: {
+          Authorization: `Bearer ${githubToken}`,
+          Accept: 'application/json',
+        },
+      }),
+    );
 
     if (!userRes.ok) {
       res.status(502).json({ error: 'Failed to fetch GitHub user profile' });
