@@ -37,6 +37,7 @@ import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedule
 import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
 import { FlushBuffer } from './lib/flush-buffer';
+import { validateAllGitHubTokens } from './lib/github-token-validator';
 
 // ── Post-merge smoke test ─────────────────────────────────────────────────────
 
@@ -1713,6 +1714,21 @@ async function start(): Promise<void> {
   await boss.work('pipeline:retry', { batchSize: currentMaxConcurrent }, handlePipelineRetry);
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
+
+  // 4a. Register github:token-validate daily cron (3 AM).
+  try {
+    await boss.schedule('github:token-validate', '0 3 * * *', {});
+    await boss.work('github:token-validate', { batchSize: 1 }, async () => {
+      try {
+        await validateAllGitHubTokens();
+      } catch (err) {
+        logger.error({ err }, '[worker] github:token-validate job failed');
+      }
+    });
+    logger.info('[worker] Registered github:token-validate cron (daily 3 AM)');
+  } catch (err) {
+    logger.error({ err }, '[worker] Failed to register github:token-validate cron');
+  }
 
   // Poll worker_settings every WORKER_SETTINGS_POLL_MS (default 30s).
   // If max_concurrent_runs changed, hot-reload the pipeline:run and pipeline:retry subscriptions.

@@ -817,6 +817,90 @@ jobs:
 `;
 }
 
+// ─── GET /api/workspaces/:id/github/token-status — OAuth token health ────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/token-status:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: Get GitHub OAuth token health status
+ *     operationId: getWorkspaceGithubTokenStatus
+ *     description: Returns the current status of the GitHub OAuth token (valid, revoked, or expired based on last_validated_at staleness).
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Token status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 hasToken: { type: boolean }
+ *                 status: { type: string, enum: [valid, revoked, expired] }
+ *                 lastValidatedAt: { type: string, format: date-time, nullable: true }
+ *                 revokedAt: { type: string, format: date-time, nullable: true }
+ *       404:
+ *         description: Workspace not found
+ */
+router.get('/token-status', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.params.id;
+
+    const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    // Get the GitHub connection for the user (auth is bypassed, fall back to first user)
+    const conn = await queryOne<{
+      id: string;
+      revoked_at: string | null;
+      last_validated_at: string | null;
+    }>(
+      'SELECT id, revoked_at, last_validated_at FROM github_connections ORDER BY updated_at DESC LIMIT 1',
+      [],
+    );
+
+    if (!conn) {
+      res.json({ hasToken: false, status: 'none', lastValidatedAt: null, revokedAt: null });
+      return;
+    }
+
+    let status: 'valid' | 'revoked' | 'expired';
+    if (conn.revoked_at) {
+      status = 'revoked';
+    } else if (!conn.last_validated_at) {
+      // Never validated — treat as valid (newly connected)
+      status = 'valid';
+    } else {
+      const lastValidated = new Date(conn.last_validated_at);
+      const cutoff = new Date(Date.now() - 48 * 60 * 60 * 1000); // 48 hours
+      status = lastValidated < cutoff ? 'expired' : 'valid';
+    }
+
+    res.json({
+      hasToken: true,
+      status,
+      lastValidatedAt: conn.last_validated_at,
+      revokedAt: conn.revoked_at,
+    });
+  } catch (error: any) {
+    if (error.code === 404) {
+      res.status(404).json({ error: error.message });
+      return;
+    }
+    logger.error('[GitHub] Token status error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
 // ─── Helper: verify webhook signature ────────────────────────────────────────
 
 export function verifyWebhookSignature(

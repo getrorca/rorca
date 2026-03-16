@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T09:08:58.112Z",
+  "lastUpdatedAt": "2026-03-16T10:06:57.211Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 1152753
+    },
+    {
+      "storyId": "US-018",
+      "title": "OAuth token refresh and rotation lifecycle",
+      "status": "passed",
+      "startedAt": "2026-03-16T09:47:29.319Z",
+      "finishedAt": "2026-03-16T10:06:57.211Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 1167892
     }
   ],
   "failedStories": [],

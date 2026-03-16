@@ -37,6 +37,13 @@ interface TestResult {
   error?: string;
 }
 
+interface TokenStatus {
+  hasToken: boolean;
+  status: 'valid' | 'revoked' | 'expired' | 'none';
+  lastValidatedAt: string | null;
+  revokedAt: string | null;
+}
+
 // ─── Scope descriptions ─────────────────────────────────────────────────────
 
 const SCOPE_DESCRIPTIONS: Record<string, string> = {
@@ -97,6 +104,10 @@ export default function GitHubSettingsPanel() {
   const [savingAutoPr, setSavingAutoPr] = useState(false);
   const [savedAutoPr, setSavedAutoPr] = useState(false);
 
+  // Token status
+  const [tokenStatus, setTokenStatus] = useState<TokenStatus | null>(null);
+  const [tokenStatusLoading, setTokenStatusLoading] = useState(true);
+
   // PR template
   const [prTemplate, setPrTemplate] = useState('');
   const [prTemplateSaving, setPrTemplateSaving] = useState(false);
@@ -138,7 +149,22 @@ export default function GitHubSettingsPanel() {
     }
   }, [workspaceId]);
 
-  useEffect(() => { fetchStatus(); fetchAccount(); }, [fetchStatus, fetchAccount]);
+  // ─── Fetch token status ──────────────────────────────────────────────────
+
+  const fetchTokenStatus = useCallback(async () => {
+    if (!workspaceId) return;
+    setTokenStatusLoading(true);
+    try {
+      const data = await apiFetch<TokenStatus>(`/api/workspaces/${workspaceId}/github/token-status`);
+      setTokenStatus(data);
+    } catch {
+      setTokenStatus(null);
+    } finally {
+      setTokenStatusLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => { fetchStatus(); fetchAccount(); fetchTokenStatus(); }, [fetchStatus, fetchAccount, fetchTokenStatus]);
 
   // ─── Fetch PR template ───────────────────────────────────────────────────
 
@@ -397,6 +423,88 @@ export default function GitHubSettingsPanel() {
           </div>
         )}
       </section>
+
+      {/* ─── Section 1b: Token Health ────────────────────────────────── */}
+      {account?.connected && (
+        <section className="border-t border-border pt-6">
+          <div className="flex items-center gap-2 mb-4">
+            <Shield size={20} strokeWidth={1.5} />
+            <h2 className="text-base font-semibold text-[var(--text)]">Token Health</h2>
+          </div>
+
+          {tokenStatusLoading ? (
+            <div className="flex items-center gap-2 text-muted text-sm">
+              <Loader2 size={16} className="animate-spin" /> Checking token status...
+            </div>
+          ) : tokenStatus?.hasToken ? (
+            <div className="rounded-lg border border-border bg-panel p-4 space-y-3">
+              <div className="flex items-center justify-between">
+                <div className="flex items-center gap-2">
+                  {tokenStatus.status === 'valid' && (
+                    <>
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/20">
+                        <CheckCircle2 size={12} /> Valid
+                      </span>
+                      {tokenStatus.lastValidatedAt && (
+                        <span className="text-xs text-muted">
+                          Last validated {new Date(tokenStatus.lastValidatedAt).toLocaleString()}
+                        </span>
+                      )}
+                    </>
+                  )}
+                  {tokenStatus.status === 'revoked' && (
+                    <>
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-red-500/10 text-red-400 border border-red-500/20">
+                        <AlertCircle size={12} /> Revoked
+                      </span>
+                      {tokenStatus.revokedAt && (
+                        <span className="text-xs text-muted">
+                          Revoked {new Date(tokenStatus.revokedAt).toLocaleString()}
+                        </span>
+                      )}
+                    </>
+                  )}
+                  {tokenStatus.status === 'expired' && (
+                    <>
+                      <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs font-medium rounded-full bg-amber-500/10 text-amber-400 border border-amber-500/20">
+                        <AlertCircle size={12} /> Expired
+                      </span>
+                      <span className="text-xs text-muted">
+                        Validation stale &gt; 48h
+                      </span>
+                    </>
+                  )}
+                </div>
+
+                {tokenStatus.status !== 'valid' && (
+                  <a
+                    href={`${BASE_URL}/api/auth/github/refresh`}
+                    className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded bg-accent text-white hover:opacity-90 transition-opacity"
+                  >
+                    <RefreshCw size={12} />
+                    Reconnect
+                  </a>
+                )}
+              </div>
+
+              {tokenStatus.status === 'revoked' && (
+                <p className="text-xs text-red-400/80">
+                  This token was rejected by GitHub (401). Click Reconnect to re-authorize with a fresh token.
+                </p>
+              )}
+              {tokenStatus.status === 'expired' && (
+                <p className="text-xs text-amber-400/80">
+                  Token has not been validated in over 48 hours. This may indicate a connectivity issue or the daily validation job has not run. Click Reconnect to re-authorize.
+                </p>
+              )}
+            </div>
+          ) : (
+            <div className="rounded-lg border border-border bg-panel p-4">
+              <p className="text-sm text-muted">No GitHub token found. Connect your GitHub account above.</p>
+            </div>
+          )}
+        </section>
+      )}
 
       {/* ─── Section 2: Workspace Repository ──────────────────────────── */}
       <section className="border-t border-border pt-6">
