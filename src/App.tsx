@@ -25,6 +25,7 @@ import {
 } from './components/skeletons';
 import SlideOver from './components/SlideOver';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
+import { usePipelineRuns } from './hooks/usePipelineRuns';
 import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
 
 // — Lazy-loaded pages (not part of initial bundle) —
@@ -360,8 +361,6 @@ function AppLayout() {
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
   const [queueCount, setQueueCount] = useState(0);
   const [pendingSpecsCount, setPendingSpecsCount] = useState(0);
-  const [activeRunCount, setActiveRunCount] = useState(0);
-
   // Derive activeRunId from URL path /runs/:runId
   const runMatch = location.pathname.match(/^\/runs\/(\d+)/);
   const activeRunId = runMatch ? Number(runMatch[1]) : null;
@@ -399,21 +398,9 @@ function AppLayout() {
     return () => clearInterval(interval);
   }, [workspaceId]);
 
-  // ULT-004: Poll active run count every 10s for Pipeline sidebar badge
-  useEffect(() => {
-    if (!workspaceId) { setActiveRunCount(0); return; }
-    const fetchActiveRuns = () => {
-      apiFetch<{ items: Array<{ status: string }>; total: number }>(`/api/pipeline/runs?workspaceId=${workspaceId}`)
-        .then((data) => {
-          const count = data.items.filter(r => r.status === 'running' || r.status === 'paused').length;
-          setActiveRunCount(count);
-        })
-        .catch(() => setActiveRunCount(0));
-    };
-    fetchActiveRuns();
-    const interval = setInterval(fetchActiveRuns, 10_000);
-    return () => clearInterval(interval);
-  }, [workspaceId]);
+  // ULT-004: Shared singleton poll for pipeline runs (sidebar badge)
+  const { runs: pipelineRuns } = usePipelineRuns(workspaceId, 10_000);
+  const activeRunCount = pipelineRuns.filter(r => r.status === 'running' || r.status === 'paused').length;
 
   const navigateToRun = useCallback((runId: number) => {
     routerNavigate(`/runs/${runId}`);
