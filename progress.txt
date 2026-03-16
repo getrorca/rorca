@@ -3,9 +3,9 @@
 Spec: rorca-go-to-market-v1
 Run ID: 129
 Started: 2026-03-16T08:27:07.845Z
-Last Updated: 2026-03-16T09:50:16.112Z
+Last Updated: 2026-03-16T09:58:06.136Z
 
 ## Completed Stories (3)
 - US-001: Resolve merge conflict in worker.ts — DONE (claude, claude-sonnet-4-6, 156s)
 - US-051: API documentation completeness — @swagger on all routes — DONE (claude, claude-sonnet-4-6, 1153s)
-- US-019: Auth session management — JWT access/refresh tokens with CSRF — DONE (claude, claude-opus-4-6, 13s)
+- US-020: Integration Settings Hub in Settings panel — DONE (claude, claude-sonnet-4-6, 443s)
