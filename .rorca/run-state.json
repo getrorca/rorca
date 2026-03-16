@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T20:11:55.535Z",
+  "lastUpdatedAt": "2026-03-16T20:17:18.439Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -65,13 +65,13 @@
       "elapsedMs": 1091607
     },
     {
-      "storyId": "US-001",
-      "title": "Add @refresh reset directive to RunViewPanel and PipelineMonitorPanel",
+      "storyId": "US-002",
+      "title": "Extract usePipelineRuns shared hook to eliminate duplicate polling and 429 storms",
       "status": "passed",
-      "startedAt": "2026-03-16T20:09:53.080Z",
-      "finishedAt": "2026-03-16T20:11:55.535Z",
+      "startedAt": "2026-03-16T20:09:53.324Z",
+      "finishedAt": "2026-03-16T20:17:18.439Z",
       "agentType": "claude",
-      "elapsedMs": 122455
+      "elapsedMs": 445115
     }
   ],
   "failedStories": [],
