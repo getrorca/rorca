@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T10:34:07.950Z",
+  "lastUpdatedAt": "2026-03-16T10:29:22.095Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -35,14 +35,14 @@
       "elapsedMs": 146608
     },
     {
-      "storyId": "US-027",
-      "title": "Per-story GitHub Commit Status Checks",
+      "storyId": "US-028",
+      "title": "Auto PR creation on run completion",
       "status": "passed",
-      "startedAt": "2026-03-16T10:19:23.610Z",
-      "finishedAt": "2026-03-16T10:34:07.949Z",
+      "startedAt": "2026-03-16T10:19:23.283Z",
+      "finishedAt": "2026-03-16T10:29:22.094Z",
       "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 884339
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 598811
     }
   ],
   "failedStories": [],
