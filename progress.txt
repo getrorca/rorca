@@ -3,7 +3,7 @@
 Spec: rorca-go-to-market-v1
 Run ID: 129
 Started: 2026-03-16T08:27:07.845Z
-Last Updated: 2026-03-16T20:11:55.535Z
+Last Updated: 2026-03-16T20:17:18.439Z
 
 ## Completed Stories (7)
 - US-001: Resolve merge conflict in worker.ts — DONE (claude, claude-sonnet-4-6, 156s)
@@ -12,4 +12,4 @@ Last Updated: 2026-03-16T20:11:55.535Z
 - US-070: macOS Binary Notarization Documentation and Gatekeeper Workaround — DONE (claude, claude-haiku-4-5-20251001, 126s)
 - US-057: Password Reset Flow — DONE (claude, claude-opus-4-6, 22s)
 - US-068: Account Deletion and GDPR Right-to-Erasure — DONE (claude, claude-opus-4-6, 1092s)
-- US-001: Add @refresh reset directive to RunViewPanel and PipelineMonitorPanel — DONE (claude, 122s)
+- US-002: Extract usePipelineRuns shared hook to eliminate duplicate polling and 429 storms — DONE (claude, 445s)
