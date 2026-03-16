@@ -219,10 +219,18 @@ export default function DownloadClient() {
             className="mb-10 mx-auto max-w-2xl flex items-start gap-3 bg-amber-500/10 border border-amber-500/20 rounded-xl px-5 py-4 text-sm text-amber-300"
           >
             <AlertTriangle className="w-4 h-4 flex-shrink-0 mt-0.5" />
-            <span>
-              After downloading, you may need to allow Rorca in{' '}
-              <strong>System Settings › Privacy &amp; Security</strong> before running.
-            </span>
+            <div className="flex-1">
+              <span>
+                After downloading, you may need to allow Rorca in{' '}
+                <strong>System Settings › Privacy &amp; Security</strong> before running.{' '}
+                <a
+                  href="/troubleshooting#gatekeeper"
+                  className="underline hover:text-amber-200 transition-colors"
+                >
+                  Learn more
+                </a>
+              </span>
+            </div>
           </motion.div>
         )}
 

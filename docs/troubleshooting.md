@@ -285,7 +285,10 @@ macOS Gatekeeper blocks unsigned binaries by default. Rorca's standalone binary 
 
 ### Fix
 
-**Remove the quarantine attribute:**
+**Option 1: Remove the quarantine attribute (Recommended)**
+
+When you download Rorca directly from a browser, macOS applies a quarantine flag to the binary. Remove it using `xattr`:
+
 ```bash
 # For ARM64 (Apple Silicon)
 xattr -d com.apple.quarantine ./rorca-macos-arm64
@@ -299,9 +302,23 @@ Then run normally:
 ./rorca-macos-arm64
 ```
 
-**Alternative: Allow in System Settings**
+**Note on curl|sh installs:** If you used the `curl -fsSL https://get.rorca.app | sh` one-liner, the quarantine flag is not set. The `xattr` command will show an error like:
+```
+xattr: [Errno 93] No such xattr: com.apple.quarantine
+```
 
-If the `xattr` command doesn't work:
+This is **not an error** — it means the quarantine flag was never applied and no action is needed. You can run Rorca directly.
+
+**Option 2: Right-click in Finder**
+
+1. Open **Finder** and navigate to the Rorca binary
+2. Right-click on it and select **"Open"** (NOT "Open with...")
+3. When the Gatekeeper dialog appears, click **"Open"** to allow it
+4. Rorca will run and be allowed to execute in the future without warnings
+
+**Option 3: Allow in System Settings**
+
+If the above don't work:
 1. Open **System Settings** → **Privacy & Security**
 2. Scroll down to the "Security" section
 3. Look for the message "rorca-macos-arm64 was blocked from use..."
