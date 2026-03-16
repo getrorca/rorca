@@ -14,7 +14,15 @@ import * as path from 'path';
 const router = Router();
 
 const startTime = Date.now();
-const VERSION = '0.0.1';
+
+// Cache package.json version at module load — avoids fs.readFileSync on every request
+let VERSION = '0.0.1';
+try {
+  // eslint-disable-next-line @typescript-eslint/no-var-requires
+  VERSION = (require('../../package.json') as { version: string }).version;
+} catch {
+  // Fall back to default if package.json is unavailable (e.g. compiled build)
+}
 const NO_CACHE_HEADERS = {
   'Cache-Control': 'no-cache, no-store, must-revalidate',
   'Pragma': 'no-cache',
@@ -28,7 +36,7 @@ const NO_CACHE_HEADERS = {
  *     tags: [Health]
  *     summary: Basic health check
  *     operationId: getHealth
- *     description: Returns basic server health status including database connectivity, uptime, active pipeline runs, MCP transport mode, and telemetry status. When agent type is opencode or codex, includes installation status.
+ *     description: Returns basic server health status including database connectivity, uptime, active pipeline runs, MCP transport mode, and telemetry status. When agent type is opencode or codex, includes installation status. Also returns component-level health for database, worker, github, postgres, and migrations.
  *     responses:
  *       200:
  *         description: Server is healthy
@@ -37,7 +45,7 @@ const NO_CACHE_HEADERS = {
  *             schema:
  *               type: object
  *               properties:
- *                 status: { type: string, enum: [healthy, degraded] }
+ *                 status: { type: string, enum: [ok, degraded, down] }
  *                 version: { type: string }
  *                 uptime: { type: integer, description: "Uptime in seconds" }
  *                 db_connected: { type: boolean }
@@ -49,15 +57,64 @@ const NO_CACHE_HEADERS = {
  *                 opencodeVersion: { type: string }
  *                 codexInstalled: { type: boolean }
  *                 codexVersion: { type: string }
+ *                 components:
+ *                   type: object
+ *                   properties:
+ *                     database: { type: object }
+ *                     worker: { type: object }
+ *                     github: { type: object }
+ *                     postgres: { type: object }
+ *                     migrations: { type: object }
  *       503:
- *         description: Server is degraded (database not connected)
+ *         description: Server is down (database unreachable)
  */
 router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
   try {
     res.set(NO_CACHE_HEADERS);
 
-    const healthResult = await dbHealthCheck();
-    const dbConnected = healthResult.ok;
+    // Run all component checks in parallel for <500ms SLA
+    const [
+      dbResult,
+      workerResult,
+      githubResult,
+      migrationsResult,
+      activeJobsResult,
+      scheduledJobsResult,
+    ] = await Promise.allSettled([
+      checkDatabaseComponent(),
+      checkWorkerComponent(),
+      checkGithubComponent(),
+      checkMigrationsComponent(),
+      getActiveJobs(),
+      getScheduledJobs(),
+    ]);
+
+    const dbHealth = dbResult.status === 'fulfilled' ? dbResult.value : { status: 'down' as const, error: 'check failed' };
+    const workerHealth = workerResult.status === 'fulfilled' ? workerResult.value : { status: 'unknown' as const };
+    const githubHealth = githubResult.status === 'fulfilled' ? githubResult.value : { status: 'unknown' as const };
+    const migrationsHealth = migrationsResult.status === 'fulfilled' ? migrationsResult.value : { status: 'unknown' as const };
+
+    const dbConnected = dbHealth.status !== 'down';
+    const workerDown = workerHealth.status === 'down' || workerHealth.status === 'not_running';
+
+    // Overall status: 'down' if DB or worker is down, 'degraded' if any component is amber, 'ok' if all green
+    let overallStatus: 'ok' | 'degraded' | 'down';
+    if (!dbConnected) {
+      overallStatus = 'down';
+    } else if (workerDown || githubHealth.status === 'degraded' || migrationsHealth.status === 'degraded') {
+      overallStatus = 'degraded';
+    } else {
+      overallStatus = 'ok';
+    }
+
+    if (!dbConnected) {
+      return res.status(503).json({
+        status: 'down',
+        error: 'Database unreachable',
+        version: VERSION,
+        uptime: Math.floor((Date.now() - startTime) / 1000),
+      });
+    }
 
     let activeRuns = 0;
     try {
@@ -69,30 +126,29 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       // DB query failed — already captured by dbConnected
     }
 
-    const status = dbConnected ? 'healthy' : 'degraded';
-    const statusCode = dbConnected ? 200 : 503;
-
     // OC-002: Include opencode status when agentType=opencode
     const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
     // OC-024: Include codex status when agentType=codex
     const codex = agentType === 'codex' ? detectCodex() : undefined;
 
-    res.status(statusCode).json({
-      status,
+    // Reconstruct dbHealthCheck fields from our component check
+    const rawDbHealth = (dbHealth as ComponentDatabaseHealth);
+
+    res.status(200).json({
+      status: overallStatus,
       version: VERSION,
       uptime: Math.floor((Date.now() - startTime) / 1000),
       database: 'postgresql',
       db_connected: dbConnected,
       active_runs: activeRuns,
-      db: healthResult.poolStats,
-      ...(healthResult.pgVersion ? { pgVersion: healthResult.pgVersion } : {}),
-      ...(healthResult.extensions ? { extensions: healthResult.extensions } : {}),
-      poolStats: healthResult.poolStats,
-      // PG-019: Cloud managed service compatibility
-      cloud: healthResult.cloud,
-      provider: healthResult.provider,
-      ...(healthResult.extensionStatus ? { extensionStatus: healthResult.extensionStatus } : {}),
-      ...(healthResult.connectionLimit ? { connectionLimit: healthResult.connectionLimit } : {}),
+      db: rawDbHealth.poolStats,
+      ...(rawDbHealth.pgVersion ? { pgVersion: rawDbHealth.pgVersion } : {}),
+      ...(rawDbHealth.extensions ? { extensions: rawDbHealth.extensions } : {}),
+      poolStats: rawDbHealth.poolStats,
+      cloud: rawDbHealth.cloud,
+      provider: rawDbHealth.provider,
+      ...(rawDbHealth.extensionStatus ? { extensionStatus: rawDbHealth.extensionStatus } : {}),
+      ...(rawDbHealth.connectionLimit ? { connectionLimit: rawDbHealth.connectionLimit } : {}),
       // CA-021: Report MCP transport mode
       mcpTransport: 'http',
       // PR-005: Report telemetry status
@@ -109,11 +165,194 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       } : {}),
       embeddings: getQueueStats(),
       cache: cacheStats(),
-      activeJobs: await getActiveJobs(),
-      scheduledJobs: await getScheduledJobs(),
+      activeJobs: activeJobsResult.status === 'fulfilled' ? activeJobsResult.value : [],
+      scheduledJobs: scheduledJobsResult.status === 'fulfilled' ? scheduledJobsResult.value : [],
+      // US-047: Component-level health status
+      components: {
+        database: dbHealth,
+        worker: workerHealth,
+        github: githubHealth,
+        postgres: buildPostgresComponent(rawDbHealth),
+        migrations: migrationsHealth,
+      },
     });
   } catch (err) { next(err); }
 });
+
+// ── Component health check types ─────────────────────────────────────────
+
+interface ComponentDatabaseHealth {
+  status: 'ok' | 'degraded' | 'down';
+  latencyMs?: number;
+  connectionPoolSize?: number;
+  activeConnections?: number;
+  error?: string;
+  // Forwarded from dbHealthCheck
+  poolStats?: { total: number; idle: number; waiting: number; maxSize: number };
+  pgVersion?: string;
+  extensions?: string[];
+  cloud?: boolean;
+  provider?: string;
+  extensionStatus?: { vector: boolean; age: boolean };
+  connectionLimit?: number;
+}
+
+interface ComponentWorkerHealth {
+  status: 'ok' | 'stale' | 'not_running' | 'down' | 'unknown';
+  lastHeartbeat?: string;
+  activePid?: number | null;
+  message?: string;
+}
+
+interface ComponentGithubHealth {
+  status: 'ok' | 'degraded' | 'unknown';
+  rateRemaining?: number | null;
+  lastCheck?: string | null;
+}
+
+interface ComponentPostgresHealth {
+  status: 'ok' | 'unknown';
+  version?: string;
+  uptime?: number | null;
+}
+
+interface ComponentMigrationsHealth {
+  status: 'ok' | 'degraded' | 'unknown';
+  applied?: number;
+  pending?: number;
+}
+
+// ── Component check functions ─────────────────────────────────────────────
+
+async function checkDatabaseComponent(): Promise<ComponentDatabaseHealth> {
+  try {
+    const result = await dbHealthCheck();
+    if (!result.ok) {
+      return {
+        status: 'down',
+        latencyMs: result.latencyMs,
+        connectionPoolSize: result.poolStats.maxSize,
+        activeConnections: result.poolStats.total - result.poolStats.idle,
+        error: 'SELECT 1 failed',
+      };
+    }
+    return {
+      status: result.latencyMs > 200 ? 'degraded' : 'ok',
+      latencyMs: result.latencyMs,
+      connectionPoolSize: result.poolStats.maxSize,
+      activeConnections: result.poolStats.total - result.poolStats.idle,
+      poolStats: result.poolStats,
+      pgVersion: result.pgVersion,
+      extensions: result.extensions,
+      cloud: result.cloud,
+      provider: result.provider,
+      extensionStatus: result.extensionStatus,
+      connectionLimit: result.connectionLimit,
+    };
+  } catch {
+    return { status: 'down', error: 'Database unreachable' };
+  }
+}
+
+async function checkWorkerComponent(): Promise<ComponentWorkerHealth> {
+  try {
+    const row = await queryOne<{ pid: number | null; last_seen: string; worker_id: string }>(
+      `SELECT pid, last_seen, worker_id FROM worker_heartbeat ORDER BY last_seen DESC LIMIT 1`
+    );
+
+    if (!row) {
+      return {
+        status: 'not_running',
+        message: 'Start worker with npm run worker',
+      };
+    }
+
+    const lastSeenMs = new Date(row.last_seen).getTime();
+    const ageSeconds = (Date.now() - lastSeenMs) / 1000;
+
+    if (ageSeconds > 90) {
+      return {
+        status: 'stale',
+        lastHeartbeat: row.last_seen,
+        activePid: row.pid,
+        message: `Last heartbeat ${Math.round(ageSeconds)}s ago (stale after 90s)`,
+      };
+    }
+
+    return {
+      status: 'ok',
+      lastHeartbeat: row.last_seen,
+      activePid: row.pid,
+    };
+  } catch {
+    return { status: 'unknown' };
+  }
+}
+
+async function checkGithubComponent(): Promise<ComponentGithubHealth> {
+  try {
+    // Check integration_health table if it exists (written by GitHub webhook handler)
+    const row = await queryOne<{ rate_remaining: number | null; checked_at: string }>(
+      `SELECT rate_remaining, checked_at FROM integration_health WHERE provider = 'github' ORDER BY checked_at DESC LIMIT 1`
+    );
+
+    if (!row) {
+      return { status: 'unknown', rateRemaining: null, lastCheck: null };
+    }
+
+    const rateOk = row.rate_remaining === null || row.rate_remaining > 100;
+    return {
+      status: rateOk ? 'ok' : 'degraded',
+      rateRemaining: row.rate_remaining,
+      lastCheck: row.checked_at,
+    };
+  } catch {
+    // Table may not exist yet — not an error
+    return { status: 'unknown', rateRemaining: null, lastCheck: null };
+  }
+}
+
+async function checkMigrationsComponent(): Promise<ComponentMigrationsHealth> {
+  try {
+    // Count applied migrations from schema_migrations
+    const appliedRow = await queryOne<{ cnt: string }>(
+      `SELECT COUNT(*) AS cnt FROM schema_migrations`
+    );
+    const applied = parseInt(appliedRow?.cnt ?? '0', 10);
+
+    // Count migration files on disk
+    let totalOnDisk = 0;
+    try {
+      const migrationsDir = path.join(__dirname, '..', 'db', 'pg-migrations');
+      if (fs.existsSync(migrationsDir)) {
+        totalOnDisk = fs.readdirSync(migrationsDir).filter(f => f.endsWith('.sql')).length;
+      }
+    } catch {
+      // File system read failed — report what we know
+    }
+
+    const pending = Math.max(0, totalOnDisk - applied);
+    return {
+      status: pending > 0 ? 'degraded' : 'ok',
+      applied,
+      pending,
+    };
+  } catch {
+    return { status: 'unknown' };
+  }
+}
+
+function buildPostgresComponent(dbHealth: ComponentDatabaseHealth): ComponentPostgresHealth {
+  if (!dbHealth.pgVersion) {
+    return { status: 'unknown' };
+  }
+  return {
+    status: 'ok',
+    version: dbHealth.pgVersion,
+    // pg doesn't expose server uptime directly without a superuser query
+    uptime: null,
+  };
+}
 
 /**
  * getActiveJobs — query pgboss.job for active and created pipeline jobs.
