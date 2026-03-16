@@ -3,10 +3,28 @@
 import { motion } from 'framer-motion';
 import { Nav } from '@/components/Nav';
 import { Footer } from '@/components/Footer';
-import { Download, Copy, Check, Monitor, Terminal, Database, Globe, ChevronRight, AlertTriangle, CheckCircle } from 'lucide-react';
+import { Download, Copy, Check, Monitor, Terminal, Database, Globe, ChevronRight, AlertTriangle, CheckCircle, ExternalLink } from 'lucide-react';
 import { useState, useEffect } from 'react';
 
 type Platform = 'macos-arm64' | 'macos-x64' | 'linux-x64' | 'windows-x64';
+
+interface GitHubAsset {
+  name: string;
+  size: number;
+  browser_download_url: string;
+}
+
+interface GitHubRelease {
+  tag_name: string;
+  published_at: string;
+  assets: GitHubAsset[];
+  html_url: string;
+}
+
+interface ReleaseCache {
+  data: GitHubRelease;
+  timestamp: number;
+}
 
 interface PlatformAsset {
   id: Platform;
@@ -58,6 +76,9 @@ const PLATFORMS: PlatformAsset[] = [
 ];
 
 const GITHUB_RELEASES_BASE = 'https://github.com/getrorca/rorca/releases/latest/download';
+const GITHUB_RELEASES_PAGE = 'https://github.com/getrorca/rorca/releases';
+const CACHE_KEY = 'rorca_release_cache';
+const CACHE_TTL_MS = 60 * 60 * 1000; // 1 hour
 
 const CURL_ONELINER = 'curl -fsSL https://get.rorca.app | sh';
 
@@ -102,17 +123,69 @@ const START_STEPS = [
 
 function detectPlatform(): Platform {
   if (typeof navigator === 'undefined') return 'macos-arm64';
-  const ua = navigator.userAgent.toLowerCase();
-  const platform = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData?.platform?.toLowerCase() ?? '';
 
-  if (ua.includes('win') || platform.includes('win')) return 'windows-x64';
-  if (ua.includes('linux') || platform.includes('linux')) return 'linux-x64';
-  // macOS — check ARM vs Intel
-  if (ua.includes('mac') || platform.includes('mac')) {
-    // M1/M2/M3 chips report arm in some UAs or via canvas fingerprint; best we can do in browser
+  // User-Agent Client Hints API (Chrome 90+, Edge 90+) — more reliable than UA string
+  const uaData = (navigator as Navigator & { userAgentData?: { platform?: string } }).userAgentData;
+  const clientHintsPlatform = uaData?.platform?.toLowerCase() ?? '';
+
+  // Fallback: legacy navigator.platform
+  const legacyPlatform = navigator.platform?.toLowerCase() ?? '';
+
+  // Fallback: UA string
+  const ua = navigator.userAgent.toLowerCase();
+
+  const platformStr = clientHintsPlatform || legacyPlatform || ua;
+
+  if (platformStr.includes('win')) return 'windows-x64';
+  if (platformStr.includes('linux')) return 'linux-x64';
+  if (platformStr.includes('mac') || platformStr.includes('darwin')) {
+    // Best-effort ARM detection: UA string sometimes contains 'arm', 'apple', or 'aarch'
+    // navigator.platform on Apple Silicon still reports "MacIntel" in many browsers
+    // so we default to arm64 (more common modern Mac)
     return 'macos-arm64';
   }
+
   return 'macos-arm64';
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes === 0) return '';
+  const mb = bytes / (1024 * 1024);
+  return `${mb.toFixed(1)} MB`;
+}
+
+function formatReleaseDate(isoDate: string): string {
+  try {
+    return new Date(isoDate).toLocaleDateString('en-US', {
+      year: 'numeric',
+      month: 'long',
+      day: 'numeric',
+    });
+  } catch {
+    return '';
+  }
+}
+
+function readCache(): GitHubRelease | null {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    if (!raw) return null;
+    const cached: ReleaseCache = JSON.parse(raw);
+    if (Date.now() - cached.timestamp > CACHE_TTL_MS) return null;
+    return cached.data;
+  } catch {
+    // localStorage unavailable (private browsing) or parse error
+    return null;
+  }
+}
+
+function writeCache(data: GitHubRelease): void {
+  try {
+    const entry: ReleaseCache = { data, timestamp: Date.now() };
+    localStorage.setItem(CACHE_KEY, JSON.stringify(entry));
+  } catch {
+    // localStorage unavailable — skip silently
+  }
 }
 
 function DownloadButtonSkeleton() {
@@ -131,20 +204,60 @@ function DownloadButtonSkeleton() {
 export default function DownloadPage() {
   const [detected, setDetected] = useState<Platform | null>(null);
   const [copied, setCopied] = useState(false);
-  const [hasReleases, setHasReleases] = useState<boolean | null>(null); // null = loading
+  // null = loading, false = failed/no releases, GitHubRelease = success
+  const [release, setRelease] = useState<GitHubRelease | null | false>(null);
 
   useEffect(() => {
     setDetected(detectPlatform());
 
-    // Check if releases exist by probing the GitHub releases API
-    fetch('https://api.github.com/repos/getrorca/rorca/releases/latest', {
-      headers: { Accept: 'application/vnd.github+json' },
-    })
-      .then((r) => {
-        setHasReleases(r.ok);
+    // Try cache first
+    const cached = readCache();
+    if (cached) {
+      setRelease(cached);
+      return;
+    }
+
+    // Fetch with ETag conditional request support
+    const storedEtag = (() => {
+      try { return localStorage.getItem(`${CACHE_KEY}_etag`) ?? undefined; } catch { return undefined; }
+    })();
+
+    const headers: Record<string, string> = { Accept: 'application/vnd.github+json' };
+    if (storedEtag) headers['If-None-Match'] = storedEtag;
+
+    fetch('https://api.github.com/repos/getrorca/rorca/releases/latest', { headers })
+      .then(async (r) => {
+        if (r.status === 304) {
+          // Not modified — bump cache TTL by rewriting with existing data
+          const stale = readCache();
+          if (stale) { writeCache(stale); setRelease(stale); }
+          else setRelease(false);
+          return;
+        }
+        if (r.status === 403 || r.status === 429) {
+          // Rate limited — fall back to static links (no error shown to user)
+          setRelease(false);
+          return;
+        }
+        if (!r.ok) {
+          // 404 (private repo / no releases) or other error
+          setRelease(false);
+          return;
+        }
+
+        // Store ETag for future conditional requests
+        const etag = r.headers.get('ETag');
+        if (etag) {
+          try { localStorage.setItem(`${CACHE_KEY}_etag`, etag); } catch { /* skip */ }
+        }
+
+        const data: GitHubRelease = await r.json();
+        writeCache(data);
+        setRelease(data);
       })
       .catch(() => {
-        setHasReleases(false);
+        // Network error — fall back to static links silently
+        setRelease(false);
       });
   }, []);
 
@@ -155,8 +268,30 @@ export default function DownloadPage() {
     });
   };
 
-  const isLoading = detected === null || hasReleases === null;
+  const isLoading = detected === null || release === null;
+  const hasRelease = release !== null && release !== false;
+  const noReleases = release === false;
   const showMacWarning = detected === 'macos-arm64' || detected === 'macos-x64';
+
+  // Find the asset size for a given platform filename
+  const getAssetSize = (filename: string): string => {
+    if (!hasRelease) return '';
+    const asset = (release as GitHubRelease).assets.find((a) =>
+      a.name === filename || a.name.startsWith(filename)
+    );
+    return asset ? formatBytes(asset.size) : '';
+  };
+
+  // Get the direct download URL from the release assets, falling back to the CDN pattern
+  const getDownloadUrl = (platform: PlatformAsset): string => {
+    if (hasRelease) {
+      const asset = (release as GitHubRelease).assets.find((a) =>
+        a.name === platform.filename || a.name.startsWith(platform.filename)
+      );
+      if (asset) return asset.browser_download_url;
+    }
+    return `${GITHUB_RELEASES_BASE}/${platform.filename}`;
+  };
 
   return (
     <main className="min-h-screen bg-abyss text-white selection:bg-fizz selection:text-abyss flex flex-col">
@@ -180,6 +315,33 @@ export default function DownloadPage() {
           <p className="text-zinc-400 text-xl max-w-2xl mx-auto leading-relaxed">
             A single binary. Postgres auto-provisioned. Dashboard ready in under 30 seconds.
           </p>
+
+          {/* Release version + date */}
+          {hasRelease && (
+            <motion.div
+              initial={{ opacity: 0 }}
+              animate={{ opacity: 1 }}
+              transition={{ duration: 0.4, delay: 0.2 }}
+              className="mt-6 flex items-center justify-center gap-3 flex-wrap"
+            >
+              <span className="inline-flex items-center gap-1.5 px-3 py-1 rounded-full bg-violet-500/10 border border-violet-500/20 text-violet-300 text-sm font-mono font-medium">
+                {(release as GitHubRelease).tag_name}
+              </span>
+              {(release as GitHubRelease).published_at && (
+                <span className="text-sm text-zinc-500">
+                  Released {formatReleaseDate((release as GitHubRelease).published_at)}
+                </span>
+              )}
+              <a
+                href={(release as GitHubRelease).html_url}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="inline-flex items-center gap-1 text-xs text-zinc-500 hover:text-zinc-300 transition-colors"
+              >
+                Release notes <ExternalLink className="w-3 h-3" />
+              </a>
+            </motion.div>
+          )}
         </motion.div>
 
         {/* curl | sh one-liner */}
@@ -240,43 +402,71 @@ export default function DownloadPage() {
             Or download the binary
           </p>
 
+          {/* No releases yet — empty state */}
+          {!isLoading && noReleases && (
+            <div className="text-center text-sm text-zinc-500 mb-6">
+              No releases available yet.{' '}
+              <a
+                href={GITHUB_RELEASES_PAGE}
+                target="_blank"
+                rel="noopener noreferrer"
+                className="text-violet-400 hover:text-violet-300 transition-colors inline-flex items-center gap-1"
+              >
+                Check /releases <ExternalLink className="w-3 h-3" />
+              </a>
+            </div>
+          )}
+
           <div className="space-y-3 max-w-2xl mx-auto">
             {isLoading
               ? PLATFORMS.map((p) => <DownloadButtonSkeleton key={p.id} />)
-              : PLATFORMS.map((platform) => {
+              : PLATFORMS.map((platform, idx) => {
                   const isActive = detected === platform.id;
-                  const href = `${GITHUB_RELEASES_BASE}/${platform.filename}`;
+                  const assetSize = getAssetSize(platform.filename);
+                  const downloadUrl = getDownloadUrl(platform);
 
                   return (
                     <motion.div
                       key={platform.id}
                       initial={{ opacity: 0, x: -8 }}
                       animate={{ opacity: 1, x: 0 }}
-                      transition={{ duration: 0.3, delay: PLATFORMS.indexOf(platform) * 0.06 }}
+                      transition={{ duration: 0.3, delay: idx * 0.06 }}
                       className={`flex items-center gap-4 rounded-xl p-5 border transition-all ${
                         isActive
-                          ? 'bg-white/5 border-white/20'
+                          ? 'bg-white/5 border-violet-500'
                           : 'bg-zinc-900/50 border-white/5 opacity-70 hover:opacity-100 hover:border-white/10'
                       }`}
                     >
                       <span className="text-2xl w-9 text-center flex-shrink-0">{platform.icon}</span>
                       <div className="flex-1 min-w-0">
-                        <div className="flex items-center gap-2">
+                        <div className="flex items-center gap-2 flex-wrap">
                           <span className="font-medium text-white text-sm">{platform.label}</span>
                           {isActive && (
                             <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 border border-emerald-500/20">
                               Detected
                             </span>
                           )}
+                          {assetSize && (
+                            <span className="text-[10px] font-medium px-1.5 py-0.5 rounded bg-zinc-800 text-zinc-400 border border-white/5 font-mono">
+                              {assetSize}
+                            </span>
+                          )}
                         </div>
                         <p className="text-xs text-zinc-500 mt-0.5 font-mono">{platform.filename}</p>
                       </div>
 
-                      {hasReleases ? (
+                      {noReleases ? (
+                        <span
+                          aria-disabled="true"
+                          className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-zinc-800/50 text-zinc-500 cursor-not-allowed select-none border border-white/5"
+                        >
+                          Coming Soon
+                        </span>
+                      ) : (
                         <a
-                          href={href}
+                          href={downloadUrl}
                           download
-                          className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
+                          className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all whitespace-nowrap ${
                             isActive
                               ? 'bg-white text-zinc-950 hover:bg-zinc-100'
                               : 'bg-zinc-800 text-zinc-200 hover:bg-zinc-700'
@@ -285,10 +475,6 @@ export default function DownloadPage() {
                           <Download className="w-3.5 h-3.5" />
                           Download
                         </a>
-                      ) : (
-                        <span className="flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium bg-zinc-800/50 text-zinc-500 cursor-not-allowed select-none border border-white/5">
-                          Coming Soon
-                        </span>
                       )}
                     </motion.div>
                   );
