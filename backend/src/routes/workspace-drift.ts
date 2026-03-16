@@ -11,6 +11,7 @@ import { detectDrift } from '../lib/graph-drift-detector';
 import type { GraphDriftReport } from '../lib/graph-drift-detector';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
+import { NotFoundError } from '../lib/errors';
 
 const router = Router({ mergeParams: true });
 
@@ -86,7 +87,7 @@ router.get('/:id/drift', async (req: Request, res: Response) => {
     [workspaceId],
   );
   if (!workspace) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -191,7 +192,7 @@ router.post('/:id/drift/check', async (req: Request, res: Response) => {
     [workspaceId],
   );
   if (!workspace) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -208,7 +209,7 @@ router.post('/:id/drift/check', async (req: Request, res: Response) => {
     );
 
     if (!latestRun?.spec_path) {
-      res.status(404).json({ error: 'No completed spec runs found for this workspace' });
+      throw new NotFoundError('No completed spec runs found for this workspace');
       return;
     }
 
@@ -218,7 +219,7 @@ router.post('/:id/drift/check', async (req: Request, res: Response) => {
   }
 
   if (!specId) {
-    res.status(404).json({ error: 'Could not determine spec ID' });
+    throw new NotFoundError('Could not determine spec ID');
     return;
   }
 

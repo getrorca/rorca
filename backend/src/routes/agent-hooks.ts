@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { query, queryOne, execute } from '../db/index';
 import type { AgentHookRow } from '../lib/agent-hook-runner';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router({ mergeParams: true });
 
@@ -90,19 +91,19 @@ router.post('/', async (req: Request, res: Response) => {
   const { event_type, command, enabled, timeout_seconds } = req.body;
 
   if (!event_type || !command) {
-    res.status(400).json({ error: 'Missing required fields: event_type, command' });
+    throw new ValidationError('Missing required fields: event_type, command');
     return;
   }
 
   if (!VALID_EVENT_TYPES.includes(event_type)) {
-    res.status(400).json({ error: `Invalid event_type. Must be one of: ${VALID_EVENT_TYPES.join(', ')}` });
+    throw new ValidationError(`Invalid event_type. Must be one of: ${VALID_EVENT_TYPES.join(', ')}`);
     return;
   }
 
   // Verify workspace exists
   const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
   if (!workspace) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -156,7 +157,7 @@ router.post('/', async (req: Request, res: Response) => {
 router.put('/:hookId', async (req: Request, res: Response) => {
   const hookId = parseInt(String(req.params.hookId), 10);
   if (isNaN(hookId)) {
-    res.status(400).json({ error: 'Invalid hook ID' });
+    throw new ValidationError('Invalid hook ID');
     return;
   }
 
@@ -166,14 +167,14 @@ router.put('/:hookId', async (req: Request, res: Response) => {
   );
 
   if (!existing) {
-    res.status(404).json({ error: 'Hook not found' });
+    throw new NotFoundError('Hook not found');
     return;
   }
 
   const { event_type, command, enabled, timeout_seconds } = req.body;
 
   if (event_type && !VALID_EVENT_TYPES.includes(event_type)) {
-    res.status(400).json({ error: `Invalid event_type. Must be one of: ${VALID_EVENT_TYPES.join(', ')}` });
+    throw new ValidationError(`Invalid event_type. Must be one of: ${VALID_EVENT_TYPES.join(', ')}`);
     return;
   }
 
@@ -220,7 +221,7 @@ router.put('/:hookId', async (req: Request, res: Response) => {
 router.delete('/:hookId', async (req: Request, res: Response) => {
   const hookId = parseInt(String(req.params.hookId), 10);
   if (isNaN(hookId)) {
-    res.status(400).json({ error: 'Invalid hook ID' });
+    throw new ValidationError('Invalid hook ID');
     return;
   }
 
@@ -230,7 +231,7 @@ router.delete('/:hookId', async (req: Request, res: Response) => {
   );
 
   if (!existing) {
-    res.status(404).json({ error: 'Hook not found' });
+    throw new NotFoundError('Hook not found');
     return;
   }
 
