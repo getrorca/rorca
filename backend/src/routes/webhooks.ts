@@ -4,6 +4,7 @@ import { decryptToken } from './auth';
 import { verifyWebhookSignature } from './workspace-github';
 import { logger } from '../lib/logger';
 import { AuthError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
+import { insertAuditEntry } from './integration-audit-log';
 
 const router = Router();
 
@@ -155,6 +156,20 @@ router.post('/github', async (req: Request, res: Response) => {
   // ── Signature valid — respond 200 immediately, process async ──
   res.json({ ok: true });
 
+  insertAuditEntry({
+    workspaceId: row.workspace_id,
+    provider: 'github',
+    action: 'webhook_received',
+    actorType: 'webhook',
+    details: {
+      webhook_event: event,
+      delivery_id: deliveryId,
+      repo: repoFullName,
+      action: payload.action || null,
+      sender: payload.sender?.login || null,
+    },
+  });
+
   // Async processing via setImmediate to avoid blocking the response
   setImmediate(async () => {
     try {
@@ -181,8 +196,33 @@ router.post('/github', async (req: Request, res: Response) => {
 
       // Dispatch to event-specific handlers
       await dispatchEvent(event, payload, row.workspace_id);
+
+      insertAuditEntry({
+        workspaceId: row.workspace_id,
+        provider: 'github',
+        action: 'webhook_processed',
+        actorType: 'webhook',
+        details: {
+          webhook_event: event,
+          delivery_id: deliveryId,
+          repo: repoFullName,
+        },
+      });
     } catch (err) {
       logger.error({ err }, '[Webhook] Async processing error');
+
+      insertAuditEntry({
+        workspaceId: row.workspace_id,
+        provider: 'github',
+        action: 'webhook_failed',
+        actorType: 'webhook',
+        details: {
+          webhook_event: event,
+          delivery_id: deliveryId,
+          repo: repoFullName,
+          error: err instanceof Error ? err.message : String(err),
+        },
+      });
     }
   });
 });
