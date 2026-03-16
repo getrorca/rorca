@@ -2951,6 +2951,7 @@ interface KanbanSpec {
   queuePosition?: number;
   model?: string;
   attachmentCount: number;
+  source?: string;
 }
 
 /**
@@ -3074,6 +3075,16 @@ router.get('/kanban', async (req: Request, res: Response) => {
       attachmentCountBySpecId.set(row.spec_id, parseInt(row.cnt, 10));
     }
 
+    // Fetch spec sources (e.g. 'github' for webhook-discovered specs)
+    const sourceRows = await query<{ spec_id: string; source: string }>(
+      `SELECT spec_id, source FROM spec_sources WHERE workspace_id = $1`,
+      [workspaceId]
+    );
+    const sourceBySpecId = new Map<string, string>();
+    for (const row of sourceRows) {
+      sourceBySpecId.set(row.spec_id, row.source);
+    }
+
     // Build summaries from filesystem
     const pendingSpecs: KanbanSpec[] = [];
     for (const file of safeReaddir(pendingDir)) {
@@ -3092,6 +3103,7 @@ router.get('/kanban', async (req: Request, res: Response) => {
           storyTitles: s.storyTitles,
           model: content.model,
           attachmentCount: attachmentCountBySpecId.get(s.id) ?? 0,
+          source: sourceBySpecId.get(s.id),
         });
       } catch { /* skip unparseable */ }
     }
@@ -3119,6 +3131,7 @@ router.get('/kanban', async (req: Request, res: Response) => {
           storyTitles: s.storyTitles,
           model: content.model,
           attachmentCount: attachmentCountBySpecId.get(s.id) ?? 0,
+          source: sourceBySpecId.get(s.id),
         });
       } catch { /* skip unparseable */ }
     }
