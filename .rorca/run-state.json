@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T20:17:18.439Z",
+  "lastUpdatedAt": "2026-03-16T20:10:06.115Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -65,13 +65,13 @@
       "elapsedMs": 1091607
     },
     {
-      "storyId": "US-002",
-      "title": "Extract usePipelineRuns shared hook to eliminate duplicate polling and 429 storms",
+      "storyId": "US-003",
+      "title": "Emit run_setup_started and run_setup_done WAL events from execution-engine during wave worktree creation",
       "status": "passed",
-      "startedAt": "2026-03-16T20:09:53.324Z",
-      "finishedAt": "2026-03-16T20:17:18.439Z",
+      "startedAt": "2026-03-16T20:09:46.686Z",
+      "finishedAt": "2026-03-16T20:10:06.115Z",
       "agentType": "claude",
-      "elapsedMs": 445115
+      "elapsedMs": 19429
     }
   ],
   "failedStories": [],
