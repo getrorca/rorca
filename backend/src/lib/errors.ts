@@ -60,9 +60,14 @@ export class NotFoundError extends AppError {
   readonly statusCode = 404 as const;
 
   constructor(resource: string, id?: string) {
-    // If the message already looks like a complete sentence (contains spaces and no trailing "not found"),
+    // If the message already looks like a complete sentence (ends with "not found"),
     // use it verbatim. Otherwise build "Resource 'id' not found" or "Resource not found".
-    const msg = id ? `${resource} '${id}' not found` : `${resource} not found`;
+    let msg: string;
+    if (resource.toLowerCase().endsWith('not found')) {
+      msg = resource;
+    } else {
+      msg = id ? `${resource} '${id}' not found` : `${resource} not found`;
+    }
     super(msg, 'NOT_FOUND');
   }
 }
