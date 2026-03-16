@@ -1,5 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
+import * as fs from 'fs';
+import * as path from 'path';
 import { queryOne, execute } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
@@ -858,6 +860,398 @@ jobs:
  */
 router.get('/rate-limit', (_req: Request, res: Response) => {
   res.json(githubRateLimiter.getStatus());
+});
+
+// ─── Helper: get OAuth token for the current user ─────────────────────────────
+
+async function getOAuthToken(): Promise<string | null> {
+  const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
+  if (!userRow) return null;
+  const conn = await queryOne<{ encrypted_token: string }>(
+    'SELECT encrypted_token FROM github_connections WHERE user_id = $1',
+    [userRow.id]
+  );
+  if (!conn) return null;
+  return decryptToken(conn.encrypted_token);
+}
+
+// ─── GET /api/workspaces/:id/github/repos — List user repos ──────────────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/repos:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: List GitHub repositories for the connected account
+ *     operationId: listWorkspaceGithubRepos
+ *     description: Fetches up to 100 repos (sorted by updated_at desc) from the connected GitHub OAuth account.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Repo list returned
+ *       400:
+ *         description: No GitHub OAuth connection found
+ *       502:
+ *         description: GitHub API error
+ */
+router.get('/repos', async (req: Request, res: Response) => {
+  try {
+    const token = await getOAuthToken();
+    if (!token) {
+      res.status(400).json({ error: 'No GitHub OAuth connection found. Connect GitHub in Settings > GitHub.' });
+      return;
+    }
+
+    const ghRes = await githubRateLimiter.execute(() =>
+      fetch('https://api.github.com/user/repos?per_page=100&sort=updated&direction=desc&type=all', {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      })
+    );
+
+    if (!ghRes.ok) {
+      const body = await ghRes.text();
+      logger.error({ status: ghRes.status, body }, '[GitHub] Repos fetch failed');
+      res.status(502).json({ error: `GitHub API error (${ghRes.status})` });
+      return;
+    }
+
+    const repos = await ghRes.json() as Array<{
+      id: number;
+      full_name: string;
+      name: string;
+      owner: { login: string };
+      description: string | null;
+      private: boolean;
+      open_issues_count: number;
+      updated_at: string;
+      html_url: string;
+    }>;
+
+    res.json({
+      repos: repos.map(r => ({
+        id: r.id,
+        fullName: r.full_name,
+        name: r.name,
+        owner: r.owner.login,
+        description: r.description,
+        private: r.private,
+        openIssuesCount: r.open_issues_count,
+        updatedAt: r.updated_at,
+        htmlUrl: r.html_url,
+      })),
+    });
+  } catch (error: any) {
+    logger.error('[GitHub] Repos error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── GET /api/workspaces/:id/github/repos/:owner/:repo/issues ────────────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/repos/{owner}/{repo}/issues:
+ *   get:
+ *     tags: [GitHub]
+ *     summary: List open issues for a GitHub repository
+ *     operationId: listWorkspaceGithubRepoIssues
+ *     description: Fetches up to 100 open issues (excluding PRs) from the specified repository.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *       - in: path
+ *         name: owner
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: path
+ *         name: repo
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Issue list returned
+ *       400:
+ *         description: No GitHub OAuth connection found
+ *       502:
+ *         description: GitHub API error
+ */
+router.get('/repos/:owner/:repo/issues', async (req: Request, res: Response) => {
+  try {
+    const { owner, repo } = req.params;
+
+    const token = await getOAuthToken();
+    if (!token) {
+      res.status(400).json({ error: 'No GitHub OAuth connection found. Connect GitHub in Settings > GitHub.' });
+      return;
+    }
+
+    const ghRes = await githubRateLimiter.execute(() =>
+      fetch(`https://api.github.com/repos/${owner}/${repo}/issues?state=open&per_page=100&sort=created&direction=desc`, {
+        headers: {
+          Authorization: `Bearer ${token}`,
+          Accept: 'application/vnd.github+json',
+          'X-GitHub-Api-Version': '2022-11-28',
+        },
+      })
+    );
+
+    if (!ghRes.ok) {
+      const body = await ghRes.text();
+      logger.error({ status: ghRes.status, body }, '[GitHub] Issues fetch failed');
+      res.status(502).json({ error: `GitHub API error (${ghRes.status})` });
+      return;
+    }
+
+    const issues = await ghRes.json() as Array<{
+      id: number;
+      number: number;
+      title: string;
+      body: string | null;
+      html_url: string;
+      pull_request?: object;
+      labels: Array<{ name: string; color: string }>;
+      assignee: { login: string; avatar_url: string } | null;
+      created_at: string;
+    }>;
+
+    // Filter out pull requests — GitHub Issues API includes PRs
+    const filtered = issues.filter(i => !i.pull_request);
+
+    res.json({
+      issues: filtered.map(i => ({
+        id: i.id,
+        number: i.number,
+        title: i.title,
+        body: i.body ?? '',
+        htmlUrl: i.html_url,
+        labels: i.labels.map(l => ({ name: l.name, color: l.color })),
+        assignee: i.assignee ? { login: i.assignee.login, avatarUrl: i.assignee.avatar_url } : null,
+        createdAt: i.created_at,
+      })),
+    });
+  } catch (error: any) {
+    logger.error('[GitHub] Issues error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
+
+// ─── POST /api/workspaces/:id/github/import-issues ────────────────────────────
+
+/**
+ * Extracts acceptance criteria from GitHub issue body markdown.
+ * Parses `- [ ]` and `- [x]` checkbox patterns.
+ */
+function extractAcceptanceCriteria(body: string): string[] {
+  const lines = body.split('\n');
+  const criteria: string[] = [];
+  for (const line of lines) {
+    const match = line.match(/^\s*-\s*\[[ xX]\]\s*(.+)/);
+    if (match) {
+      criteria.push(match[1].trim());
+    }
+  }
+  return criteria;
+}
+
+/**
+ * Converts a repo name + timestamp into a spec slug.
+ */
+function repoToSpecSlug(repoName: string): string {
+  const sanitized = repoName.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
+  const ts = Date.now();
+  return `${sanitized}-${ts}`.slice(0, 60);
+}
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/github/import-issues:
+ *   post:
+ *     tags: [GitHub]
+ *     summary: Import GitHub issues as a pending spec
+ *     operationId: importWorkspaceGithubIssues
+ *     description: Creates a pending spec JSON from selected GitHub issues. Each issue becomes a user story with title, description, and acceptance criteria extracted from markdown checkboxes.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [owner, repo, issueNumbers]
+ *             properties:
+ *               owner:
+ *                 type: string
+ *               repo:
+ *                 type: string
+ *               issueNumbers:
+ *                 type: array
+ *                 items:
+ *                   type: integer
+ *               specTitle:
+ *                 type: string
+ *                 description: Optional human-readable title for the spec
+ *     responses:
+ *       201:
+ *         description: Spec created
+ *       400:
+ *         description: Validation error or no GitHub connection
+ *       404:
+ *         description: Workspace not found
+ *       502:
+ *         description: GitHub API error
+ */
+router.post('/import-issues', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.params.id;
+    const { owner, repo, issueNumbers, specTitle } = req.body as {
+      owner?: string;
+      repo?: string;
+      issueNumbers?: number[];
+      specTitle?: string;
+    };
+
+    if (!owner || !repo) {
+      throw new ValidationError('Missing required fields: owner, repo');
+    }
+    if (!Array.isArray(issueNumbers) || issueNumbers.length === 0) {
+      throw new ValidationError('issueNumbers must be a non-empty array');
+    }
+
+    const workspace = await queryOne<{ id: string; path: string }>(
+      'SELECT id, path FROM workspaces WHERE id = $1',
+      [workspaceId]
+    );
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    const token = await getOAuthToken();
+    if (!token) {
+      res.status(400).json({ error: 'No GitHub OAuth connection found. Connect GitHub in Settings > GitHub.' });
+      return;
+    }
+
+    // Fetch each selected issue from GitHub
+    const fetchedIssues: Array<{
+      number: number;
+      title: string;
+      body: string;
+      htmlUrl: string;
+      labels: string[];
+    }> = [];
+
+    for (const num of issueNumbers) {
+      const ghRes = await githubRateLimiter.execute(() =>
+        fetch(`https://api.github.com/repos/${owner}/${repo}/issues/${num}`, {
+          headers: {
+            Authorization: `Bearer ${token}`,
+            Accept: 'application/vnd.github+json',
+            'X-GitHub-Api-Version': '2022-11-28',
+          },
+        })
+      );
+
+      if (!ghRes.ok) {
+        logger.warn({ num, status: ghRes.status }, '[GitHub] Issue fetch failed — skipping');
+        continue;
+      }
+
+      const issue = await ghRes.json() as {
+        number: number;
+        title: string;
+        body: string | null;
+        html_url: string;
+        pull_request?: object;
+        labels: Array<{ name: string }>;
+      };
+
+      if (issue.pull_request) continue; // skip PRs
+
+      fetchedIssues.push({
+        number: issue.number,
+        title: issue.title,
+        body: issue.body ?? '',
+        htmlUrl: issue.html_url,
+        labels: issue.labels.map((l) => l.name),
+      });
+    }
+
+    if (fetchedIssues.length === 0) {
+      res.status(422).json({ error: 'No valid issues could be fetched from GitHub' });
+      return;
+    }
+
+    // Build user stories from issues
+    const userStories = fetchedIssues.map((issue, idx) => ({
+      id: `US-${String(idx + 1).padStart(3, '0')}`,
+      title: issue.title,
+      description: issue.body,
+      acceptanceCriteria: extractAcceptanceCriteria(issue.body),
+      dependsOn: [] as string[],
+      passes: false,
+      githubIssueNumber: issue.number,
+      githubIssueUrl: issue.htmlUrl,
+    }));
+
+    // Build spec slug and title
+    const slug = repoToSpecSlug(repo);
+    const title = specTitle || `${owner}/${repo} Issues`;
+
+    const specContent = {
+      id: slug,
+      title,
+      userStories,
+      generatedAt: new Date().toISOString(),
+      source: 'github-import',
+      githubRepo: `${owner}/${repo}`,
+    };
+
+    // Ensure pending directory exists and write spec file
+    const pendingDir = path.join(workspace.path, 'forge', 'specs', 'pending');
+    fs.mkdirSync(pendingDir, { recursive: true });
+    const specFilePath = path.join(pendingDir, `${slug}.json`);
+    fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2) + '\n', 'utf8');
+
+    // Emit WAL event
+    await execute(
+      "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_issues_imported', $1, $2)",
+      [workspaceId, JSON.stringify({ slug, owner, repo, storyCount: userStories.length, issueNumbers })]
+    );
+
+    res.status(201).json({
+      specId: slug,
+      storyCount: userStories.length,
+    });
+  } catch (error: any) {
+    logger.error('[GitHub] Import issues error:', error);
+    if (error.statusCode) {
+      res.status(error.statusCode).json({ error: error.message });
+    } else {
+      res.status(500).json({ error: error.message });
+    }
+  }
 });
 
 // ─── Helper: verify webhook signature ────────────────────────────────────────
