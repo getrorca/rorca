@@ -23,6 +23,7 @@ import type { ScaffoldFile } from '../lib/workspace-scaffold';
 import { logger } from '../lib/logger';
 import { requirePlan } from '../lib/require-plan';
 import { inferDomain } from '../lib/domain-inference';
+import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -117,7 +118,7 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
     const { id, label, path, domains } = req.body;
 
     if (!fs.existsSync(path)) {
-      res.status(400).json({ error: `Path does not exist on filesystem: ${path}` });
+      throw new ValidationError(`Path does not exist on filesystem: ${path}`);
       return;
     }
 
@@ -128,7 +129,7 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
       );
     } catch (err: any) {
       if (err.code === '23505' || err.message?.includes('duplicate key value violates unique constraint')) {
-        res.status(409).json({ error: `Workspace '${id}' already exists` });
+        throw new ConflictError(`Workspace '${id}' already exists`);
         return;
       }
       throw err;
@@ -293,7 +294,7 @@ router.post('/:id/hydrate', async (req, res, next) => {
     // 1. Fetch workspace
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -348,7 +349,7 @@ router.post('/:id/hydrate', async (req, res, next) => {
         });
       } catch (err: any) {
         if (err.message?.includes('Not a git repository')) {
-          res.status(422).json({ error: err.message });
+          throw new UnprocessableError(err.message);
           return;
         }
         res.status(502).json({ error: `Git map step failed: ${err.message}` });
@@ -444,7 +445,7 @@ router.get('/:id/files', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -561,7 +562,7 @@ router.get('/:id', async (req, res, next) => {
   try {
     const row = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!row) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
     res.json({ workspace: parseWorkspace(row) });
@@ -575,7 +576,7 @@ router.patch('/:id', async (req, res, next) => {
   try {
     const row = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!row) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -587,7 +588,7 @@ router.patch('/:id', async (req, res, next) => {
 
     if (wsPath !== undefined) {
       if (!fs.existsSync(wsPath)) {
-        res.status(400).json({ error: `Path does not exist on filesystem: ${wsPath}` });
+        throw new ValidationError(`Path does not exist on filesystem: ${wsPath}`);
         return;
       }
       await execute('UPDATE workspaces SET path = $1 WHERE id = $2', [String(wsPath), req.params.id]);
@@ -648,7 +649,7 @@ router.get('/:id/pipeline-config', async (req, res, next) => {
       [req.params.id]
     );
     if (!row) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
     const config = JSON.parse(row.pipeline_config || '{}');
@@ -707,7 +708,7 @@ router.put('/:id/pipeline-config', async (req, res, next) => {
   try {
     const row = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [req.params.id]);
     if (!row) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
     const { autoWorktree, storyTimeoutMin, maxRetries, defaultParallelism } = req.body;
@@ -778,7 +779,7 @@ router.get('/:id/stats', async (req, res, next) => {
     const workspaceId = req.params.id;
     const row = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [workspaceId]);
     if (!row) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -921,7 +922,7 @@ router.get('/:id/team-members', async (req, res, next) => {
     const workspaceId = req.params.id;
     const row = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [workspaceId]);
     if (!row) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -1012,12 +1013,12 @@ router.post('/:id/scan-direction', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (!fs.existsSync(workspace.path)) {
-      res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+      throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
       return;
     }
 
@@ -1209,12 +1210,12 @@ router.get('/:id/health', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (!fs.existsSync(workspace.path)) {
-      res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+      throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
       return;
     }
 
@@ -1361,12 +1362,12 @@ router.post('/:id/echolocate', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (!fs.existsSync(workspace.path)) {
-      res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+      throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
       return;
     }
 
@@ -1431,12 +1432,12 @@ router.post('/:id/monorepo/discover', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (!fs.existsSync(workspace.path)) {
-      res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+      throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
       return;
     }
 
@@ -1444,7 +1445,7 @@ router.post('/:id/monorepo/discover', async (req, res, next) => {
       const result = discoverMonorepo(workspace.path);
 
       if (!result.apps.length) {
-        res.status(400).json({ error: 'No monorepo structure detected', tool: result.tool });
+        throw new ValidationError('No monorepo structure detected');
         return;
       }
 
@@ -1571,12 +1572,12 @@ router.post('/:id/scaffold', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (!fs.existsSync(workspace.path)) {
-      res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+      throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
       return;
     }
 
@@ -1608,19 +1609,19 @@ router.post('/:id/scaffold', async (req, res, next) => {
     if (mode === 'write') {
       const files = req.body.files as Array<{ relativePath: string; content: string }> | undefined;
       if (!files || !Array.isArray(files) || files.length === 0) {
-        res.status(400).json({ error: 'mode=write requires a non-empty files array' });
+        throw new ValidationError('mode=write requires a non-empty files array');
         return;
       }
 
       // Validate file paths — prevent directory traversal
       for (const f of files) {
         if (!f.relativePath || !f.content) {
-          res.status(400).json({ error: 'Each file must have relativePath and content' });
+          throw new ValidationError('Each file must have relativePath and content');
           return;
         }
         const resolved = path.resolve(workspace.path, f.relativePath);
         if (!resolved.startsWith(workspace.path)) {
-          res.status(400).json({ error: `Path traversal detected: ${f.relativePath}` });
+          throw new ValidationError(`Path traversal detected: ${f.relativePath}`);
           return;
         }
       }
@@ -1672,7 +1673,7 @@ router.post('/:id/scaffold', async (req, res, next) => {
       return;
     }
 
-    res.status(400).json({ error: `Unknown mode: ${mode}. Use "preview" or "write".` });
+    throw new ValidationError(`Unknown mode: ${mode}. Use "preview" or "write".`);
   } catch (err) {
     next(err);
   }
@@ -1751,12 +1752,12 @@ router.post('/:id/bootstrap', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (!fs.existsSync(workspace.path)) {
-      res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+      throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
       return;
     }
 
@@ -1990,7 +1991,7 @@ router.post('/:id/bootstrap/commit', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -2187,7 +2188,7 @@ router.get('/:id/context-health', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 

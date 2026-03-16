@@ -10,6 +10,7 @@ import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-vali
 import { getVaultKey } from './vault';
 import { logger } from '../lib/logger';
 import { invalidateDirection } from '../lib/context-cache';
+import { UnprocessableError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -93,7 +94,7 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     const { layer, workspaceId } = req.query;
 
     if (!layer || ![1, 2, 3].includes(Number(layer))) {
-      res.status(400).json({ error: 'layer must be 1, 2, or 3' });
+      throw new ValidationError('layer must be 1, 2, or 3');
       return;
     }
 
@@ -144,7 +145,7 @@ router.put('/', validateBody(DirectionUpsertSchema), async (req: Request, res: R
     // Validate preferredModel if provided (only valid for L3)
     if (preferredModel !== undefined && preferredModel !== null) {
       if (layer !== 3) {
-        res.status(400).json({ error: 'preferredModel is only valid for layer 3' });
+        throw new ValidationError('preferredModel is only valid for layer 3');
         return;
       }
       // Accept any model string — registered models get cost tracking, unregistered models pass through to openai-compat
@@ -154,17 +155,11 @@ router.put('/', validateBody(DirectionUpsertSchema), async (req: Request, res: R
     if (!skipValidation) {
       const validation = validateDirectionYaml(layer, contentYaml);
       if (validation.yamlError) {
-        res.status(422).json({
-          error: 'Invalid YAML syntax',
-          yamlError: validation.yamlError,
-        });
+        throw new UnprocessableError('Invalid YAML syntax');
         return;
       }
       if (!validation.valid) {
-        res.status(422).json({
-          error: 'Direction content failed schema validation',
-          validationErrors: validation.errors,
-        });
+        throw new UnprocessableError('Direction content failed schema validation');
         return;
       }
     }
@@ -216,7 +211,7 @@ router.get('/all', async (req: Request, res: Response, next: NextFunction) => {
     const { workspaceId } = req.query;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
@@ -409,7 +404,7 @@ router.post('/models/test', async (req: Request, res: Response, _next: NextFunct
     const { modelId } = req.body as { modelId?: string };
 
     if (!modelId || typeof modelId !== 'string') {
-      res.status(400).json({ error: 'modelId is required' });
+      throw new ValidationError('modelId is required');
       return;
     }
 
@@ -512,7 +507,7 @@ router.get('/preview', async (req: Request, res: Response, next: NextFunction) =
     const { workspaceId, domain, brief } = req.query;
 
     if (!brief) {
-      res.status(400).json({ error: 'Missing required query param: brief' });
+      throw new ValidationError('Missing required query param: brief');
       return;
     }
 
@@ -720,7 +715,7 @@ router.post('/wizard', async (req: Request, res: Response, _next: NextFunction) 
     const { answers } = req.body as { answers: Record<string, string> };
 
     if (!answers || typeof answers !== 'object' || Object.keys(answers).length === 0) {
-      res.status(400).json({ error: 'answers object is required and must not be empty' });
+      throw new ValidationError('answers object is required and must not be empty');
       return;
     }
 

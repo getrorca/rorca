@@ -15,6 +15,7 @@ import { installPack, forkPack } from '../lib/pack-installer';
 import { PackRegistry, PackJsonSchema } from '../lib/pack-registry';
 import { broadcastAll } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
+import { NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -99,12 +100,12 @@ router.post('/install', async (req: Request, res: Response) => {
   const { workspaceId, packPath } = req.body;
 
   if (!workspaceId || typeof workspaceId !== 'string') {
-    res.status(400).json({ error: 'Missing required field: workspaceId' });
+    throw new ValidationError('Missing required field: workspaceId');
     return;
   }
 
   if (!packPath || typeof packPath !== 'string') {
-    res.status(400).json({ error: 'Missing required field: packPath' });
+    throw new ValidationError('Missing required field: packPath');
     return;
   }
 
@@ -114,12 +115,12 @@ router.post('/install', async (req: Request, res: Response) => {
   );
 
   if (!workspace) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
   if (!fs.existsSync(workspace.path)) {
-    res.status(404).json({ error: 'Workspace path does not exist on disk' });
+    throw new NotFoundError('Workspace path does not exist on disk');
     return;
   }
 
@@ -129,7 +130,7 @@ router.post('/install', async (req: Request, res: Response) => {
     : path.join(workspace.path, packPath);
 
   if (!fs.existsSync(absPackPath)) {
-    res.status(404).json({ error: 'Pack path does not exist', packPath: absPackPath });
+    throw new NotFoundError('Pack path does not exist');
     return;
   }
 
@@ -149,13 +150,10 @@ router.post('/install', async (req: Request, res: Response) => {
       agentsMdAction: result.agentsMdAction,
     });
   } catch (err: any) {
-    // ValidationError from PackLoader or PackRegistry
-    if (err.statusCode === 400 || err.name === 'ValidationError') {
-      res.status(422).json({ error: err.message, details: err.details });
-      return;
-    }
+    // Re-throw AppError subclasses (ValidationError, NotFoundError, etc.) — error handler serializes them
+    if (err.statusCode) throw err;
     logger.error('[Packs] Install error:', err);
-    res.status(500).json({ error: 'Pack installation failed', details: err.message });
+    throw err;
   }
 });
 
@@ -220,17 +218,17 @@ router.post('/fork', async (req: Request, res: Response) => {
   const { workspaceId, sourcePack, newName } = req.body;
 
   if (!workspaceId || typeof workspaceId !== 'string') {
-    res.status(400).json({ error: 'Missing required field: workspaceId' });
+    throw new ValidationError('Missing required field: workspaceId');
     return;
   }
 
   if (!sourcePack || typeof sourcePack !== 'string') {
-    res.status(400).json({ error: 'Missing required field: sourcePack' });
+    throw new ValidationError('Missing required field: sourcePack');
     return;
   }
 
   if (!newName || typeof newName !== 'string') {
-    res.status(400).json({ error: 'Missing required field: newName' });
+    throw new ValidationError('Missing required field: newName');
     return;
   }
 
@@ -240,12 +238,12 @@ router.post('/fork', async (req: Request, res: Response) => {
   );
 
   if (!workspace) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
   if (!fs.existsSync(workspace.path)) {
-    res.status(404).json({ error: 'Workspace path does not exist on disk' });
+    throw new NotFoundError('Workspace path does not exist on disk');
     return;
   }
 
@@ -260,20 +258,10 @@ router.post('/fork', async (req: Request, res: Response) => {
       forkedPackPath: result.forkedPackPath,
     });
   } catch (err: any) {
-    if (err.statusCode === 400 || err.name === 'ValidationError') {
-      res.status(400).json({ error: err.message, details: err.details });
-      return;
-    }
-    if (err.statusCode === 404 || err.name === 'NotFoundError') {
-      res.status(404).json({ error: err.message });
-      return;
-    }
-    if (err.statusCode === 409 || err.name === 'ConflictError') {
-      res.status(409).json({ error: err.message });
-      return;
-    }
+    // Re-throw AppError subclasses — error handler serializes them
+    if (err.statusCode) throw err;
     logger.error('[Packs] Fork error:', err);
-    res.status(500).json({ error: 'Pack fork failed', details: err.message });
+    throw err;
   }
 });
 
@@ -323,7 +311,7 @@ router.get('/', async (req: Request, res: Response) => {
   const workspaceId = req.query.workspaceId as string | undefined;
 
   if (!workspaceId) {
-    res.status(400).json({ error: 'Missing required query param: workspaceId' });
+    throw new ValidationError('Missing required query param: workspaceId');
     return;
   }
 
@@ -332,7 +320,7 @@ router.get('/', async (req: Request, res: Response) => {
   );
 
   if (!workspace) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -471,18 +459,18 @@ router.get('/detail', (req: Request, res: Response) => {
   const packPath = req.query.packPath as string | undefined;
 
   if (!packPath) {
-    res.status(400).json({ error: 'Missing required query param: packPath' });
+    throw new ValidationError('Missing required query param: packPath');
     return;
   }
 
   if (!fs.existsSync(packPath)) {
-    res.status(404).json({ error: 'Pack path not found' });
+    throw new NotFoundError('Pack path not found');
     return;
   }
 
   const packJsonPath = path.join(packPath, 'pack.json');
   if (!fs.existsSync(packJsonPath)) {
-    res.status(404).json({ error: 'pack.json not found' });
+    throw new NotFoundError('pack.json not found');
     return;
   }
 
@@ -490,7 +478,7 @@ router.get('/detail', (req: Request, res: Response) => {
     const raw = JSON.parse(fs.readFileSync(packJsonPath, 'utf-8'));
     const result = PackJsonSchema.safeParse(raw);
     if (!result.success) {
-      res.status(422).json({ error: 'Invalid pack.json' });
+      throw new UnprocessableError('Invalid pack.json');
       return;
     }
 
@@ -603,7 +591,7 @@ router.delete('/:name', async (req: Request, res: Response) => {
   const rawWsId = req.query.workspaceId;
 
   if (!rawWsId || typeof rawWsId !== 'string') {
-    res.status(400).json({ error: 'Missing required query param: workspaceId' });
+    throw new ValidationError('Missing required query param: workspaceId');
     return;
   }
 
@@ -614,7 +602,7 @@ router.delete('/:name', async (req: Request, res: Response) => {
   );
 
   if (!workspace) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -625,7 +613,7 @@ router.delete('/:name', async (req: Request, res: Response) => {
   );
 
   if (!packRow) {
-    res.status(404).json({ error: `Pack "${packName}" not installed in this workspace` });
+    throw new NotFoundError(`Pack "${packName}" not installed in this workspace`);
     return;
   }
 
@@ -663,12 +651,10 @@ router.delete('/:name', async (req: Request, res: Response) => {
 
     res.json({ ok: true, packName, removed: true });
   } catch (err: any) {
-    if (err.statusCode === 404) {
-      res.status(404).json({ error: err.message });
-      return;
-    }
+    // Re-throw AppError subclasses — error handler serializes them
+    if (err.statusCode) throw err;
     logger.error('[Packs] Uninstall error:', err);
-    res.status(500).json({ error: err.message });
+    throw err;
   }
 });
 

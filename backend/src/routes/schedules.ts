@@ -5,6 +5,7 @@ import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { getBoss } from '../lib/pg-boss';
 import { scheduleName } from '../lib/scheduler';
 import { logger } from '../lib/logger';
+import { NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -51,7 +52,7 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
@@ -109,7 +110,7 @@ router.post('/', async (req: Request, res: Response) => {
     const { workspaceId, specId, cronExpression, enabled } = req.body;
 
     if (!workspaceId || !specId || !cronExpression) {
-      res.status(400).json({ error: 'Missing required fields: workspaceId, specId, cronExpression' });
+      throw new ValidationError('Missing required fields: workspaceId, specId, cronExpression');
       return;
     }
 
@@ -119,7 +120,7 @@ router.post('/', async (req: Request, res: Response) => {
       [workspaceId]
     );
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -127,7 +128,7 @@ router.post('/', async (req: Request, res: Response) => {
     try {
       CronExpressionParser.parse(cronExpression);
     } catch (e: any) {
-      res.status(422).json({ error: `Invalid cron expression: ${e.message}` });
+      throw new UnprocessableError(`Invalid cron expression: ${e.message}`);
       return;
     }
 
@@ -208,7 +209,7 @@ router.patch('/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
-      res.status(400).json({ error: 'Invalid schedule id' });
+      throw new ValidationError('Invalid schedule id');
       return;
     }
 
@@ -217,7 +218,7 @@ router.patch('/:id', async (req: Request, res: Response) => {
       [id]
     );
     if (!existing) {
-      res.status(404).json({ error: 'Schedule not found' });
+      throw new NotFoundError('Schedule not found');
       return;
     }
 
@@ -227,7 +228,7 @@ router.patch('/:id', async (req: Request, res: Response) => {
       try {
         CronExpressionParser.parse(cronExpression);
       } catch (e: any) {
-        res.status(422).json({ error: `Invalid cron expression: ${e.message}` });
+        throw new UnprocessableError(`Invalid cron expression: ${e.message}`);
         return;
       }
     }
@@ -307,7 +308,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const id = parseInt(String(req.params.id), 10);
     if (isNaN(id)) {
-      res.status(400).json({ error: 'Invalid schedule id' });
+      throw new ValidationError('Invalid schedule id');
       return;
     }
 
@@ -316,7 +317,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
       [id]
     );
     if (!existing) {
-      res.status(404).json({ error: 'Schedule not found' });
+      throw new NotFoundError('Schedule not found');
       return;
     }
 

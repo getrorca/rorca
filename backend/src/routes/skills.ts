@@ -18,6 +18,7 @@ import { SkillRegistry, inferCategory } from '../lib/skill-registry';
 import { echolocate, inferSkillsFromStack, STACK_TO_SKILLS } from '../lib/workspace-echolocation';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
+import { NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -207,11 +208,11 @@ router.post('/install', async (req: Request, res: Response) => {
     const { name, content, source } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
-      res.status(400).json({ error: 'name is required' });
+      throw new ValidationError('name is required');
       return;
     }
     if (!content || typeof content !== 'string') {
-      res.status(400).json({ error: 'content is required' });
+      throw new ValidationError('content is required');
       return;
     }
 
@@ -384,13 +385,13 @@ router.get('/preview', async (req: Request, res: Response) => {
   try {
     const query = (req.query.query as string || '').trim().replace(/\.md$/i, '');
     if (!query) {
-      res.status(400).json({ error: 'query is required' });
+      throw new ValidationError('query is required');
       return;
     }
 
     const result = await fetchSkillFromRegistry(query);
     if (!result) {
-      res.status(404).json({ error: `No skill found for "${query}" in skills.sh` });
+      throw new NotFoundError(`No skill found for "${query}" in skills.sh`);
       return;
     }
 
@@ -503,7 +504,7 @@ router.get('/:name/content', async (req: Request, res: Response) => {
     }
 
     // 3) Not found
-    res.status(404).json({ error: `Skill "${name}" not found` });
+    throw new NotFoundError(`Skill "${name}" not found`);
   } catch (error: any) {
     logger.error('[Skills] Content error:', error);
     res.status(500).json({ error: error.message });
@@ -538,7 +539,7 @@ router.delete('/:name', async (req: Request, res: Response) => {
     const removed = await registry.remove(name);
 
     if (!removed) {
-      res.status(404).json({ error: `Skill "${name}" not found in installed skills` });
+      throw new NotFoundError(`Skill "${name}" not found in installed skills`);
       return;
     }
 
@@ -699,7 +700,7 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
     const { name, workspaceId } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
-      res.status(400).json({ error: 'name is required' });
+      throw new ValidationError('name is required');
       return;
     }
 
@@ -717,14 +718,14 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
     }
 
     if (!wsPath) {
-      res.status(400).json({ error: 'No workspace found' });
+      throw new ValidationError('No workspace found');
       return;
     }
 
     // Search skills.sh and fetch content from GitHub
     const result = await fetchSkillFromRegistry(queryStr);
     if (!result) {
-      res.status(404).json({ error: `No skill found for "${queryStr}" in skills.sh registry` });
+      throw new NotFoundError(`No skill found for "${queryStr}" in skills.sh registry`);
       return;
     }
 
@@ -838,7 +839,7 @@ router.get('/suggestions', async (req: Request, res: Response) => {
   try {
     const wsPath = await resolveWorkspacePath(req);
     if (!wsPath) {
-      res.status(400).json({ error: 'No workspace found' });
+      throw new ValidationError('No workspace found');
       return;
     }
 
@@ -953,7 +954,7 @@ router.post('/search', async (req: Request, res: Response) => {
     const { query: searchQuery, limit } = req.body;
 
     if (!searchQuery || typeof searchQuery !== 'string' || !searchQuery.trim()) {
-      res.status(400).json({ error: 'query is required' });
+      throw new ValidationError('query is required');
       return;
     }
 
@@ -1103,13 +1104,13 @@ router.post('/browse-github', async (req: Request, res: Response) => {
   try {
     const { repoUrl } = req.body;
     if (!repoUrl || typeof repoUrl !== 'string' || !repoUrl.trim()) {
-      res.status(400).json({ error: 'Invalid repository URL' });
+      throw new ValidationError('Invalid repository URL');
       return;
     }
 
     const parsed = parseGitHubRepo(repoUrl);
     if (!parsed) {
-      res.status(400).json({ error: 'Invalid repository URL' });
+      throw new ValidationError('Invalid repository URL');
       return;
     }
     const { owner, repo } = parsed;
@@ -1123,11 +1124,11 @@ router.post('/browse-github', async (req: Request, res: Response) => {
         signal: AbortSignal.timeout(15_000),
       });
       if (treeResp.status === 404) {
-        res.status(404).json({ error: 'Repository not found' });
+        throw new NotFoundError('Repository not found');
         return;
       }
       if (treeResp.status === 403) {
-        res.status(429).json({ error: 'GitHub API rate limit exceeded. Try again later or add a GitHub token in Settings.' });
+        throw new TooManyRequestsError('GitHub API rate limit exceeded. Try again later or add a GitHub token in Settings.');
         return;
       }
       if (!treeResp.ok) {
@@ -1295,17 +1296,17 @@ router.post('/install-from-github', async (req: Request, res: Response) => {
     const { repoUrl, skillPath, workspaceId } = req.body;
 
     if (!repoUrl || typeof repoUrl !== 'string' || !repoUrl.trim()) {
-      res.status(400).json({ error: 'repoUrl is required' });
+      throw new ValidationError('repoUrl is required');
       return;
     }
     if (!skillPath || typeof skillPath !== 'string' || !skillPath.trim()) {
-      res.status(400).json({ error: 'skillPath is required' });
+      throw new ValidationError('skillPath is required');
       return;
     }
 
     const parsed = parseGitHubRepo(repoUrl);
     if (!parsed) {
-      res.status(400).json({ error: 'Invalid repository URL' });
+      throw new ValidationError('Invalid repository URL');
       return;
     }
     const { owner, repo } = parsed;
@@ -1321,7 +1322,7 @@ router.post('/install-from-github', async (req: Request, res: Response) => {
     }
 
     if (!wsPath) {
-      res.status(400).json({ error: 'No workspace found' });
+      throw new ValidationError('No workspace found');
       return;
     }
 
@@ -1347,7 +1348,7 @@ router.post('/install-from-github', async (req: Request, res: Response) => {
     }
 
     if (!content) {
-      res.status(404).json({ error: `Skill file not found at ${trimmedPath} in ${owner}/${repo}` });
+      throw new NotFoundError(`Skill file not found at ${trimmedPath} in ${owner}/${repo}`);
       return;
     }
 
@@ -1483,7 +1484,7 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
     const { skills, workspaceId } = req.body;
 
     if (!Array.isArray(skills) || skills.length === 0) {
-      res.status(400).json({ error: 'skills array is required and must not be empty' });
+      throw new ValidationError('skills array is required and must not be empty');
       return;
     }
 
@@ -1498,7 +1499,7 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
     }
 
     if (!wsPath) {
-      res.status(400).json({ error: 'No workspace found' });
+      throw new ValidationError('No workspace found');
       return;
     }
 
@@ -1675,7 +1676,7 @@ router.post('/bulk-remove', async (req: Request, res: Response) => {
     const { names, workspaceId } = req.body;
 
     if (!Array.isArray(names) || names.length === 0) {
-      res.status(400).json({ error: 'names array is required and must not be empty' });
+      throw new ValidationError('names array is required and must not be empty');
       return;
     }
 

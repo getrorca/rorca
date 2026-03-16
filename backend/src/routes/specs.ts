@@ -316,6 +316,7 @@ function categorizeSpecError(error: any): SpecErrorCategory {
 import { createNotification } from './notifications';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { logger } from '../lib/logger';
+import { ConflictError, ForbiddenError, NotFoundError, PayloadTooLargeError, UnprocessableError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -878,7 +879,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // 2. Fetch workspace from DB
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as Record<string, unknown> | undefined;
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -2116,7 +2117,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       specPath = writeResult.specPath;
       diagramsPath = writeResult.diagramsPath;
     } catch (writeErr: any) {
-      res.status(409).json({ error: writeErr.message });
+      throw new ConflictError(writeErr.message);
       return;
     }
 
@@ -2479,7 +2480,7 @@ router.post('/generate/batch', async (req: Request, res: Response) => {
     const { briefs } = req.body as { briefs?: BatchRequestItem[] };
 
     if (!Array.isArray(briefs) || briefs.length === 0) {
-      res.status(400).json({ error: 'Missing or empty briefs array' });
+      throw new ValidationError('Missing or empty briefs array');
       return;
     }
 
@@ -2487,7 +2488,7 @@ router.post('/generate/batch', async (req: Request, res: Response) => {
     for (let i = 0; i < briefs.length; i++) {
       const b = briefs[i];
       if (!b.title || !b.brief || !b.workspaceId) {
-        res.status(400).json({ error: `Brief at index ${i} missing required fields: title, brief, workspaceId` });
+        throw new ValidationError(`Brief at index ${i} missing required fields: title, brief, workspaceId`);
         return;
       }
       // Model validation removed — any model string is accepted for openai-compat pass-through
@@ -2574,7 +2575,7 @@ router.get('/generate/batch/:batchId', (req: Request, res: Response) => {
     const batch = batchQueue.get(batchId);
 
     if (!batch) {
-      res.status(404).json({ error: 'Batch not found or expired' });
+      throw new NotFoundError('Batch not found or expired');
       return;
     }
 
@@ -2632,7 +2633,7 @@ router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
   const batch = batchQueue.get(batchId);
 
   if (!batch) {
-    res.status(404).json({ error: 'Batch not found or expired' });
+    throw new NotFoundError('Batch not found or expired');
     return;
   }
 
@@ -2760,13 +2761,13 @@ router.get('/', async (req: Request, res: Response) => {
     const statusFilter = (req.query.status as string) || 'all';
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -2855,13 +2856,13 @@ router.get('/kanban', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -3045,7 +3046,7 @@ router.get('/kanban', async (req: Request, res: Response) => {
 router.post('/:id/mark-done', async (req: Request, res: Response) => {
   const { id } = req.params;
   const { workspaceId } = req.body;
-  if (!workspaceId) { res.status(400).json({ error: 'Missing workspaceId' }); return; }
+  if (!workspaceId) { throw new ValidationError('Missing workspaceId'); return; }
   await execute(
     `INSERT INTO kanban_manual_done (spec_id, workspace_id) VALUES ($1, $2) ON CONFLICT DO NOTHING`,
     [id, workspaceId]
@@ -3056,7 +3057,7 @@ router.post('/:id/mark-done', async (req: Request, res: Response) => {
 router.post('/:id/unmark-done', async (req: Request, res: Response) => {
   const { id } = req.params;
   const { workspaceId } = req.body;
-  if (!workspaceId) { res.status(400).json({ error: 'Missing workspaceId' }); return; }
+  if (!workspaceId) { throw new ValidationError('Missing workspaceId'); return; }
   await execute(`DELETE FROM kanban_manual_done WHERE spec_id = $1 AND workspace_id = $2`, [id, workspaceId]);
   res.json({ ok: true });
 });
@@ -3067,17 +3068,17 @@ const MAX_CUSTOM_COLUMNS = 8;
 
 router.get('/kanban/columns', async (req: Request, res: Response) => {
   const workspaceId = req.query.workspaceId as string;
-  if (!workspaceId) { res.status(400).json({ error: 'Missing workspaceId' }); return; }
+  if (!workspaceId) { throw new ValidationError('Missing workspaceId'); return; }
   const columns = await query(`SELECT id, name, color, position FROM kanban_columns WHERE workspace_id = $1 ORDER BY position ASC`, [workspaceId]);
   res.json({ columns });
 });
 
 router.post('/kanban/columns', async (req: Request, res: Response) => {
   const { workspaceId, name, color } = req.body;
-  if (!workspaceId || !name) { res.status(400).json({ error: 'Missing workspaceId or name' }); return; }
+  if (!workspaceId || !name) { throw new ValidationError('Missing workspaceId or name'); return; }
 
   const count = (await queryOne(`SELECT COUNT(*) as cnt FROM kanban_columns WHERE workspace_id = $1`, [workspaceId]) as { cnt: number }).cnt;
-  if (count >= MAX_CUSTOM_COLUMNS) { res.status(422).json({ error: `Maximum ${MAX_CUSTOM_COLUMNS} custom columns reached` }); return; }
+  if (count >= MAX_CUSTOM_COLUMNS) { throw new UnprocessableError(`Maximum ${MAX_CUSTOM_COLUMNS} custom columns reached`); return; }
 
   const maxPos = (await queryOne(`SELECT COALESCE(MAX(position), -1) as maxPos FROM kanban_columns WHERE workspace_id = $1`, [workspaceId]) as { maxPos: number }).maxPos;
   const result = await queryOne<{ id: number }>(`INSERT INTO kanban_columns (workspace_id, name, color, position) VALUES ($1, $2, $3, $4) RETURNING id`, [workspaceId, name.trim(), color || 'indigo', maxPos + 1]);
@@ -3090,7 +3091,7 @@ router.put('/kanban/columns/:id', async (req: Request, res: Response) => {
   const { name, color, position } = req.body;
 
   const col = await queryOne(`SELECT id, workspace_id, position FROM kanban_columns WHERE id = $1`, [colId]) as { id: number; workspace_id: string; position: number } | undefined;
-  if (!col) { res.status(404).json({ error: 'Column not found' }); return; }
+  if (!col) { throw new NotFoundError('Column not found'); return; }
 
   if (name !== undefined) {
     await execute(`UPDATE kanban_columns SET name = $1 WHERE id = $2`, [name.trim(), colId]);
@@ -3120,7 +3121,7 @@ router.delete('/kanban/columns/:id', async (req: Request, res: Response) => {
   const colId = Number(req.params.id);
 
   const col = await queryOne(`SELECT id, workspace_id FROM kanban_columns WHERE id = $1`, [colId]) as { id: number; workspace_id: string } | undefined;
-  if (!col) { res.status(404).json({ error: 'Column not found' }); return; }
+  if (!col) { throw new NotFoundError('Column not found'); return; }
 
   // Count assigned specs before deleting
   const assignedCount = (await queryOne(`SELECT COUNT(*) as cnt FROM kanban_spec_assignments WHERE column_id = $1`, [colId]) as { cnt: number }).cnt;
@@ -3144,7 +3145,7 @@ router.delete('/kanban/columns/:id', async (req: Request, res: Response) => {
 // Move a spec to a custom column (or back to in-progress by passing columnId: null)
 router.post('/kanban/columns/assign', async (req: Request, res: Response) => {
   const { workspaceId, specId, columnId } = req.body;
-  if (!workspaceId || !specId) { res.status(400).json({ error: 'Missing workspaceId or specId' }); return; }
+  if (!workspaceId || !specId) { throw new ValidationError('Missing workspaceId or specId'); return; }
 
   if (columnId === null || columnId === undefined) {
     // Remove assignment — spec goes back to In Progress
@@ -3152,7 +3153,7 @@ router.post('/kanban/columns/assign', async (req: Request, res: Response) => {
   } else {
     // Verify column exists
     const col = await queryOne(`SELECT id FROM kanban_columns WHERE id = $1 AND workspace_id = $2`, [columnId, workspaceId]);
-    if (!col) { res.status(404).json({ error: 'Column not found' }); return; }
+    if (!col) { throw new NotFoundError('Column not found'); return; }
 
     // Upsert assignment
     await execute(`INSERT INTO kanban_spec_assignments (workspace_id, spec_id, column_id) VALUES ($1, $2, $3)
@@ -3488,13 +3489,13 @@ router.get('/archive', async (req: Request, res: Response) => {
     const agentTypeFilter = (req.query.agentType as string) || '';
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -3744,17 +3745,17 @@ router.get('/search/stories', async (req: Request, res: Response) => {
     const query = req.query.q as string | undefined;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
     if (!query || query.trim().length === 0) {
-      res.status(400).json({ error: 'Missing required query param: q (search query)' });
+      throw new ValidationError('Missing required query param: q (search query)');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -3851,13 +3852,13 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     const storyCount = Math.min(20, Math.max(1, parseInt(count) || 3));
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -3868,7 +3869,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
     let specFilePath: string;
     if (fs.existsSync(approvedFile)) specFilePath = approvedFile;
     else if (fs.existsSync(pendingFile)) specFilePath = pendingFile;
-    else { res.status(404).json({ error: 'Spec not found' }); return; }
+    else { throw new NotFoundError('Spec not found'); return; }
 
     const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
     const existingStories: Array<{ id: string; title: string }> =
@@ -4154,12 +4155,12 @@ router.get('/:specId/diff', async (req: Request, res: Response) => {
     const v2 = parseInt(req.query.v2 as string);
 
     if (isNaN(v1) || isNaN(v2)) {
-      res.status(400).json({ error: 'Missing or invalid query params: v1 and v2 must be integers' });
+      throw new ValidationError('Missing or invalid query params: v1 and v2 must be integers');
       return;
     }
 
     if (v1 === v2) {
-      res.status(400).json({ error: 'v1 and v2 must be different versions' });
+      throw new ValidationError('v1 and v2 must be different versions');
       return;
     }
 
@@ -4169,7 +4170,7 @@ router.get('/:specId/diff', async (req: Request, res: Response) => {
 
     if (!row1 || !row2) {
       const missing = !row1 && !row2 ? `v${v1} and v${v2}` : !row1 ? `v${v1}` : `v${v2}`;
-      res.status(404).json({ error: `Version(s) not found: ${missing}` });
+      throw new NotFoundError(`Version(s) not found: ${missing}`);
       return;
     }
 
@@ -4241,18 +4242,18 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
     const versionNum = parseInt(version);
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     if (isNaN(versionNum)) {
-      res.status(400).json({ error: 'Invalid version number' });
+      throw new ValidationError('Invalid version number');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -4260,7 +4261,7 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
     const row = await queryOne('SELECT content_json, status FROM spec_versions WHERE spec_slug = $1 AND version = $2', [specId, versionNum]) as { content_json: unknown; status: string } | undefined;
 
     if (!row) {
-      res.status(404).json({ error: `Version ${versionNum} not found for spec ${specId}` });
+      throw new NotFoundError(`Version ${versionNum} not found for spec ${specId}`);
       return;
     }
 
@@ -4362,13 +4363,13 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
     const { workspaceId, excluded, title, description, acceptanceCriteria } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -4382,11 +4383,11 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
     if (isFieldEdit) {
       // EQ-006: Field edits only allowed on pending specs
       if (fs.existsSync(approvedFile)) {
-        res.status(403).json({ error: 'Cannot edit stories in an approved spec. Only pending specs may be edited.' });
+        throw new ForbiddenError('Cannot edit stories in an approved spec. Only pending specs may be edited.');
         return;
       }
       if (!fs.existsSync(pendingFile)) {
-        res.status(404).json({ error: 'Spec not found' });
+        throw new NotFoundError('Spec not found');
         return;
       }
 
@@ -4396,7 +4397,7 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
       const storyIndex = stories.findIndex((s: UserStory) => s.id === storyId);
 
       if (storyIndex === -1) {
-        res.status(404).json({ error: 'Story not found' });
+        throw new NotFoundError('Story not found');
         return;
       }
 
@@ -4439,7 +4440,7 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
     } else if (fs.existsSync(pendingFile)) {
       specPath = pendingFile;
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -4448,7 +4449,7 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
     const story = stories.find((s: UserStory) => s.id === storyId);
 
     if (!story) {
-      res.status(404).json({ error: 'Story not found' });
+      throw new NotFoundError('Story not found');
       return;
     }
 
@@ -4531,28 +4532,28 @@ router.put('/:specId/stories/:storyId', async (req: Request, res: Response) => {
     const { workspaceId, title, description, acceptanceCriteria, complexity, priority, timeoutMinutes, model } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     if (complexity !== undefined && (!Number.isInteger(complexity) || complexity < 1 || complexity > 5)) {
-      res.status(400).json({ error: 'complexity must be an integer between 1 and 5' });
+      throw new ValidationError('complexity must be an integer between 1 and 5');
       return;
     }
 
     if (priority !== undefined && (!Number.isInteger(priority) || priority < 1 || priority > 4)) {
-      res.status(400).json({ error: 'priority must be an integer between 1 (urgent) and 4 (low)' });
+      throw new ValidationError('priority must be an integer between 1 (urgent) and 4 (low)');
       return;
     }
 
     if (timeoutMinutes !== undefined && (!Number.isInteger(timeoutMinutes) || timeoutMinutes < 5 || timeoutMinutes > 120)) {
-      res.status(400).json({ error: 'timeoutMinutes must be an integer between 5 and 120' });
+      throw new ValidationError('timeoutMinutes must be an integer between 5 and 120');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -4566,7 +4567,7 @@ router.put('/:specId/stories/:storyId', async (req: Request, res: Response) => {
     } else if (fs.existsSync(pendingFile)) {
       specPath = pendingFile;
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -4576,7 +4577,7 @@ router.put('/:specId/stories/:storyId', async (req: Request, res: Response) => {
     const storyIndex = stories.findIndex((s: UserStory) => s.id === storyId);
 
     if (storyIndex === -1) {
-      res.status(404).json({ error: 'Story not found' });
+      throw new NotFoundError('Story not found');
       return;
     }
 
@@ -4665,13 +4666,13 @@ router.delete('/:specId/stories/:storyId', async (req: Request, res: Response) =
     const workspaceId = (req.query.workspaceId ?? req.body?.workspaceId) as string | undefined;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -4685,7 +4686,7 @@ router.delete('/:specId/stories/:storyId', async (req: Request, res: Response) =
     } else if (fs.existsSync(pendingFile)) {
       specPath = pendingFile;
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -4695,7 +4696,7 @@ router.delete('/:specId/stories/:storyId', async (req: Request, res: Response) =
     const storyIndex = stories.findIndex((s: UserStory) => s.id === storyId);
 
     if (storyIndex === -1) {
-      res.status(404).json({ error: `Story ${storyId} not found in spec ${specId}` });
+      throw new NotFoundError(`Story ${storyId} not found in spec ${specId}`);
       return;
     }
 
@@ -4803,13 +4804,13 @@ router.post('/:specId/stories/:storyId/rewrite', async (req: Request, res: Respo
     const { workspaceId, instructions, model } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -4823,7 +4824,7 @@ router.post('/:specId/stories/:storyId/rewrite', async (req: Request, res: Respo
     } else if (fs.existsSync(pendingFile)) {
       specPath = pendingFile;
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -4833,7 +4834,7 @@ router.post('/:specId/stories/:storyId/rewrite', async (req: Request, res: Respo
     const story = stories.find((s: UserStory) => s.id === storyId);
 
     if (!story) {
-      res.status(404).json({ error: 'Story not found' });
+      throw new NotFoundError('Story not found');
       return;
     }
 
@@ -4875,7 +4876,7 @@ Rewrite the story following the user instructions. Keep the same scope unless to
     const rewritten = JSON.parse(cleaned);
 
     if (!rewritten.title || !Array.isArray(rewritten.acceptanceCriteria)) {
-      res.status(422).json({ error: 'LLM returned invalid story structure' });
+      throw new UnprocessableError('LLM returned invalid story structure');
       return;
     }
 
@@ -4936,7 +4937,7 @@ router.get('/tags/autocomplete', async (req: Request, res: Response) => {
     const q = (req.query.q as string) || '';
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
@@ -4986,13 +4987,13 @@ router.get('/:specId', async (req: Request, res: Response) => {
     const workspaceId = req.query.workspaceId as string;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -5009,7 +5010,7 @@ router.get('/:specId', async (req: Request, res: Response) => {
       content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
       specStatus = 'approved';
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -5070,13 +5071,13 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
     const brief = req.body.brief as string | undefined;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -5091,7 +5092,7 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
     } else if (fs.existsSync(approvedFile)) {
       sourceFile = approvedFile;
     } else {
-      res.status(404).json({ error: `Spec '${specId}' not found` });
+      throw new NotFoundError(`Spec '${specId}' not found`);
       return;
     }
 
@@ -5200,13 +5201,13 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -5214,7 +5215,7 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
     const pendingFile = path.join(pendingDir, `${specId}.json`);
 
     if (!fs.existsSync(pendingFile)) {
-      res.status(404).json({ error: `Spec '${specId}' not found in pending` });
+      throw new NotFoundError(`Spec '${specId}' not found in pending`);
       return;
     }
 
@@ -5266,13 +5267,13 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
     const { workspaceId, reason } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -5290,7 +5291,7 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
     }
 
     if (!fs.existsSync(pendingFile)) {
-      res.status(404).json({ error: `Spec '${specId}' not found` });
+      throw new NotFoundError(`Spec '${specId}' not found`);
       return;
     }
 
@@ -5424,13 +5425,13 @@ router.get('/:specId/check', async (req: Request, res: Response) => {
     const workspaceId = req.query.workspaceId as string;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -5444,7 +5445,7 @@ router.get('/:specId/check', async (req: Request, res: Response) => {
     } else if (fs.existsSync(approvedFile)) {
       content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -5624,13 +5625,13 @@ router.get('/:specId/score', async (req: Request, res: Response) => {
     const workspaceId = req.query.workspaceId as string;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -5644,7 +5645,7 @@ router.get('/:specId/score', async (req: Request, res: Response) => {
     } else if (fs.existsSync(approvedFile)) {
       content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -5761,13 +5762,13 @@ router.delete('/:specId', async (req: Request, res: Response) => {
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -5786,7 +5787,7 @@ router.delete('/:specId', async (req: Request, res: Response) => {
     }
 
     if (!deleted) {
-      res.status(404).json({ error: `Spec '${specId}' not found` });
+      throw new NotFoundError(`Spec '${specId}' not found`);
       return;
     }
 
@@ -5848,13 +5849,13 @@ router.post('/:specId/request-review', async (req: Request, res: Response) => {
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -5862,7 +5863,7 @@ router.post('/:specId/request-review', async (req: Request, res: Response) => {
     const specFile = path.join(pendingDir, `${specId}.json`);
 
     if (!fs.existsSync(specFile)) {
-      res.status(404).json({ error: `Spec '${specId}' not found in pending` });
+      throw new NotFoundError(`Spec '${specId}' not found in pending`);
       return;
     }
 
@@ -5872,9 +5873,7 @@ router.post('/:specId/request-review', async (req: Request, res: Response) => {
 
     // Only draft or changes_requested specs can be submitted for review
     if (currentStatus !== 'draft' && currentStatus !== 'changes_requested') {
-      res.status(409).json({
-        error: `Cannot request review: spec is currently '${currentStatus}'`,
-      });
+      throw new ConflictError(`Cannot request review: spec is currently '${currentStatus}'`);
       return;
     }
 
@@ -5939,18 +5938,18 @@ router.post('/:specId/review', async (req: Request, res: Response) => {
     const { workspaceId, action, comment, reviewerId } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     if (!action || !['approve', 'request_changes'].includes(action)) {
-      res.status(400).json({ error: "Missing or invalid 'action': must be 'approve' or 'request_changes'" });
+      throw new ValidationError("Missing or invalid 'action': must be 'approve' or 'request_changes'");
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -5958,7 +5957,7 @@ router.post('/:specId/review', async (req: Request, res: Response) => {
     const specFile = path.join(pendingDir, `${specId}.json`);
 
     if (!fs.existsSync(specFile)) {
-      res.status(404).json({ error: `Spec '${specId}' not found in pending` });
+      throw new NotFoundError(`Spec '${specId}' not found in pending`);
       return;
     }
 
@@ -5968,9 +5967,7 @@ router.post('/:specId/review', async (req: Request, res: Response) => {
 
     // Can only review specs that are in review_requested state
     if (currentStatus !== 'review_requested') {
-      res.status(409).json({
-        error: `Cannot review: spec is currently '${currentStatus}', expected 'review_requested'`,
-      });
+      throw new ConflictError(`Cannot review: spec is currently '${currentStatus}', expected 'review_requested'`);
       return;
     }
 
@@ -6141,7 +6138,7 @@ router.post('/:specId/stories/bulk', async (req: Request, res: Response) => {
     const { workspaceId, action, storyIds, priority } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
@@ -6149,25 +6146,25 @@ router.post('/:specId/stories/bulk', async (req: Request, res: Response) => {
     type BulkAction = typeof validActions[number];
 
     if (!action || !validActions.includes(action as BulkAction)) {
-      res.status(400).json({ error: `Invalid action. Must be one of: ${validActions.join(', ')}` });
+      throw new ValidationError(`Invalid action. Must be one of: ${validActions.join(', ')}`);
       return;
     }
 
     if (!Array.isArray(storyIds) || storyIds.length === 0) {
-      res.status(400).json({ error: 'storyIds must be a non-empty array' });
+      throw new ValidationError('storyIds must be a non-empty array');
       return;
     }
 
     if (action === 'set_priority') {
       if (priority === undefined || !Number.isInteger(priority) || priority < 1 || priority > 4) {
-        res.status(400).json({ error: 'priority must be an integer between 1 (urgent) and 4 (low) for set_priority action' });
+        throw new ValidationError('priority must be an integer between 1 (urgent) and 4 (low) for set_priority action');
         return;
       }
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -6181,7 +6178,7 @@ router.post('/:specId/stories/bulk', async (req: Request, res: Response) => {
     } else if (fs.existsSync(pendingFile)) {
       specPath = pendingFile;
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -6194,7 +6191,7 @@ router.post('/:specId/stories/bulk', async (req: Request, res: Response) => {
     const foundIds = stories.filter(s => storyIdSet.has(s.id)).map(s => s.id);
     if (foundIds.length !== storyIdSet.size) {
       const missing = [...storyIdSet].filter(id => !foundIds.includes(id));
-      res.status(404).json({ error: `Stories not found: ${missing.join(', ')}` });
+      throw new NotFoundError(`Stories not found: ${missing.join(', ')}`);
       return;
     }
 
@@ -6246,7 +6243,7 @@ router.post('/:specId/stories/bulk', async (req: Request, res: Response) => {
         break;
 
       default:
-        res.status(400).json({ error: 'Unknown action' });
+        throw new ValidationError('Unknown action');
         return;
     }
 
@@ -6342,13 +6339,13 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
     const runId = req.query.runId as string | undefined;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -6363,7 +6360,7 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
     } else if (fs.existsSync(approvedFile)) {
       specContent = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -6380,7 +6377,7 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
     // Detect cycles
     const cycle = detectCycle(stories);
     if (cycle) {
-      res.status(422).json({ error: 'Circular dependency detected', cycle } as GraphErrorResponse);
+      throw new UnprocessableError('Circular dependency detected', { cycle } as Record<string, unknown>);
       return;
     }
 
@@ -6496,13 +6493,13 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -6517,7 +6514,7 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
     } else if (fs.existsSync(approvedFile)) {
       specContent = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -6708,13 +6705,13 @@ router.post('/:specId/apply-dependencies', async (req: Request, res: Response) =
     };
 
     if (!workspaceId || !Array.isArray(dependencies) || dependencies.length === 0) {
-      res.status(400).json({ error: 'Missing workspaceId or dependencies array' });
+      throw new ValidationError('Missing workspaceId or dependencies array');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -6732,7 +6729,7 @@ router.post('/:specId/apply-dependencies', async (req: Request, res: Response) =
       specContent = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
       specFilePath = approvedFile;
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -6763,7 +6760,7 @@ router.post('/:specId/apply-dependencies', async (req: Request, res: Response) =
     }));
     const cycle = detectCycle(allStories);
     if (cycle) {
-      res.status(422).json({ error: 'Accepting these dependencies would create a circular dependency', cycle });
+      throw new UnprocessableError('Accepting these dependencies would create a circular dependency');
       return;
     }
 
@@ -6833,17 +6830,17 @@ router.post('/:specId/tags', async (req: Request, res: Response) => {
     const { workspaceId, tags } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
     if (!tags || !Array.isArray(tags) || tags.length === 0) {
-      res.status(400).json({ error: 'Missing required field: tags (array of strings)' });
+      throw new ValidationError('Missing required field: tags (array of strings)');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -6911,7 +6908,7 @@ router.delete('/:specId/tags/:tag', async (req: Request, res: Response) => {
     const workspaceId = req.query.workspaceId as string;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
@@ -6919,7 +6916,7 @@ router.delete('/:specId/tags/:tag', async (req: Request, res: Response) => {
     const result = await execute('DELETE FROM spec_tags WHERE spec_id = $1 AND workspace_id = $2 AND tag_name = $3', [specId, workspaceId, tagName]);
 
     if (result.rowCount === 0) {
-      res.status(404).json({ error: 'Tag not found on this spec' });
+      throw new NotFoundError('Tag not found on this spec');
       return;
     }
 
@@ -6997,7 +6994,7 @@ router.get('/:specId/stories/:storyId/commits', async (req: Request, res: Respon
     const workspaceId = req.query.workspaceId as string;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing workspaceId query param' });
+      throw new ValidationError('Missing workspaceId query param');
       return;
     }
 
@@ -7062,13 +7059,13 @@ router.post('/:specId/stories/:storyId/branch', async (req: Request, res: Respon
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -7094,11 +7091,7 @@ router.post('/:specId/stories/:storyId/branch', async (req: Request, res: Respon
     // Check if branch already exists
     const allBranches = await git.branchLocal();
     if (allBranches.all.includes(branchName)) {
-      res.status(409).json({
-        error: 'Branch already exists',
-        branchName,
-        checkoutCommand: `git checkout ${branchName}`,
-      });
+      throw new ConflictError(`Branch already exists: ${branchName} (run: git checkout ${branchName})`);
       return;
     }
 
@@ -7207,14 +7200,14 @@ router.post('/:specId/stories/:storyId/pr-body', async (req: Request, res: Respo
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
       (WorkspaceRow & { pr_template?: string | null }) | undefined;
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -7225,7 +7218,7 @@ router.post('/:specId/stories/:storyId/pr-body', async (req: Request, res: Respo
       filePath = path.join(pendingDir, `${specId}.json`);
     }
     if (!fs.existsSync(filePath)) {
-      res.status(404).json({ error: `Spec '${specId}' not found` });
+      throw new NotFoundError(`Spec '${specId}' not found`);
       return;
     }
 
@@ -7233,7 +7226,7 @@ router.post('/:specId/stories/:storyId/pr-body', async (req: Request, res: Respo
     const stories: UserStory[] = (content.userStories ?? []) as UserStory[];
     const story = stories.find(s => s.id === storyId);
     if (!story) {
-      res.status(404).json({ error: `Story '${storyId}' not found in spec '${specId}'` });
+      throw new NotFoundError(`Story '${storyId}' not found in spec '${specId}'`);
       return;
     }
 
@@ -7445,13 +7438,13 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
     };
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -7459,7 +7452,7 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
     const ghConn = await queryOne('SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = $1', [workspaceId]) as GithubWebhookRow | undefined;
 
     if (!ghConn) {
-      res.status(400).json({ error: 'No GitHub connection for this workspace. Connect via workspace settings first.' });
+      throw new ValidationError('No GitHub connection for this workspace. Connect via workspace settings first.');
       return;
     }
 
@@ -7467,7 +7460,7 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
     const tokenRow = await queryOne('SELECT encrypted_token FROM github_connections LIMIT 1') as GitHubConnectionRow | undefined;
 
     if (!tokenRow) {
-      res.status(400).json({ error: 'No GitHub OAuth token available. Connect your GitHub account first.' });
+      throw new ValidationError('No GitHub OAuth token available. Connect your GitHub account first.');
       return;
     }
 
@@ -7482,7 +7475,7 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
     let specFilePath: string;
     if (fs.existsSync(approvedFile)) specFilePath = approvedFile;
     else if (fs.existsSync(pendingFile)) specFilePath = pendingFile;
-    else { res.status(404).json({ error: 'Spec not found' }); return; }
+    else { throw new NotFoundError('Spec not found'); return; }
 
     const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
     const existingStories: Array<{ id: string }> =
@@ -7790,17 +7783,17 @@ router.post('/:specId/import', async (req: Request, res: Response) => {
     const { workspaceId, source, preview } = body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
     if (!source || !['linear', 'github'].includes(source)) {
-      res.status(400).json({ error: "Missing or invalid 'source'. Must be 'linear' or 'github'." });
+      throw new ValidationError("Missing or invalid 'source'. Must be 'linear' or 'github'.");
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -7812,7 +7805,7 @@ router.post('/:specId/import', async (req: Request, res: Response) => {
     let specFilePath: string;
     if (fs.existsSync(approvedFile)) specFilePath = approvedFile;
     else if (fs.existsSync(pendingFile)) specFilePath = pendingFile;
-    else { res.status(404).json({ error: 'Spec not found' }); return; }
+    else { throw new NotFoundError('Spec not found'); return; }
 
     const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
     const existingStories: Array<{ id: string }> =
@@ -7831,7 +7824,7 @@ router.post('/:specId/import', async (req: Request, res: Response) => {
     if (source === 'linear') {
       // Linear import
       if (!body.linearApiKey) {
-        res.status(400).json({ error: 'Missing required field: linearApiKey' });
+        throw new ValidationError('Missing required field: linearApiKey');
         return;
       }
 
@@ -7855,7 +7848,7 @@ router.post('/:specId/import', async (req: Request, res: Response) => {
     } else {
       // GitHub import
       if (!body.githubToken || !body.githubOwner || !body.githubRepo) {
-        res.status(400).json({ error: 'Missing required fields: githubToken, githubOwner, githubRepo' });
+        throw new ValidationError('Missing required fields: githubToken, githubOwner, githubRepo');
         return;
       }
 
@@ -8051,7 +8044,7 @@ router.post('/:specId/stories/:storyId/comments', async (req: Request, res: Resp
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
     if (!body || typeof body !== 'string' || body.trim().length === 0) {
-      res.status(400).json({ error: 'body is required' });
+      throw new ValidationError('body is required');
       return;
     }
 
@@ -8158,12 +8151,12 @@ router.post('/:specId/stories/:storyId/comments/:commentId/resolve', async (req:
     const existing = await queryOne('SELECT id, resolved_at FROM story_comments WHERE id = $1 AND spec_id = $2 AND story_id = $3', [commentId, specId, storyId]) as { id: string; resolved_at: string | null } | undefined;
 
     if (!existing) {
-      res.status(404).json({ error: 'Comment not found' });
+      throw new NotFoundError('Comment not found');
       return;
     }
 
     if (existing.resolved_at) {
-      res.status(400).json({ error: 'Comment is already resolved' });
+      throw new ValidationError('Comment is already resolved');
       return;
     }
 
@@ -8304,13 +8297,13 @@ router.put('/:specId/assign', async (req: Request, res: Response) => {
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -8318,7 +8311,7 @@ router.put('/:specId/assign', async (req: Request, res: Response) => {
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
     if (!fs.existsSync(path.join(pendingDir, `${specId}.json`)) &&
         !fs.existsSync(path.join(approvedDir, `${specId}.json`))) {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -8348,7 +8341,7 @@ router.put('/:specId/assign', async (req: Request, res: Response) => {
       | { id: string; display_name: string; email: string; avatar_url: string | null }
       | undefined;
     if (!assignee) {
-      res.status(404).json({ error: 'Assignee user not found' });
+      throw new NotFoundError('Assignee user not found');
       return;
     }
 
@@ -8443,13 +8436,13 @@ router.put('/:specId/stories/:storyId/assign', async (req: Request, res: Respons
     if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -8463,14 +8456,14 @@ router.put('/:specId/stories/:storyId/assign', async (req: Request, res: Respons
     else if (fs.existsSync(pendingFile)) specPath = pendingFile;
 
     if (!specPath) {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
     const content = JSON.parse(fs.readFileSync(specPath, 'utf8'));
     const stories: UserStory[] = content.userStories ?? [];
     if (!stories.some(s => s.id === storyId)) {
-      res.status(404).json({ error: 'Story not found' });
+      throw new NotFoundError('Story not found');
       return;
     }
 
@@ -8500,7 +8493,7 @@ router.put('/:specId/stories/:storyId/assign', async (req: Request, res: Respons
       | { id: string; display_name: string; email: string; avatar_url: string | null }
       | undefined;
     if (!assignee) {
-      res.status(404).json({ error: 'Assignee user not found' });
+      throw new NotFoundError('Assignee user not found');
       return;
     }
 
@@ -8588,7 +8581,7 @@ router.get('/:specId/assignments', async (req: Request, res: Response) => {
     const workspaceId = req.query.workspaceId as string;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
@@ -8683,13 +8676,13 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -8700,7 +8693,7 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
     let specFilePath: string;
     if (fs.existsSync(approvedFile)) specFilePath = approvedFile;
     else if (fs.existsSync(pendingFile)) specFilePath = pendingFile;
-    else { res.status(404).json({ error: 'Spec not found' }); return; }
+    else { throw new NotFoundError('Spec not found'); return; }
 
     const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
     const allStories: Array<{ id: string; title: string; description?: string; acceptanceCriteria: string[]; dependsOn?: string[] }> =
@@ -8708,7 +8701,7 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
 
     const targetStory = allStories.find(s => s.id === storyId);
     if (!targetStory) {
-      res.status(404).json({ error: `Story ${storyId} not found in spec ${specId}` });
+      throw new NotFoundError(`Story ${storyId} not found in spec ${specId}`);
       return;
     }
 
@@ -8845,17 +8838,17 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
     const { workspaceId, criteria } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
     if (!Array.isArray(criteria) || criteria.length === 0) {
-      res.status(400).json({ error: 'Missing or empty criteria array' });
+      throw new ValidationError('Missing or empty criteria array');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -8866,7 +8859,7 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
     let specFilePath: string;
     if (fs.existsSync(approvedFile)) specFilePath = approvedFile;
     else if (fs.existsSync(pendingFile)) specFilePath = pendingFile;
-    else { res.status(404).json({ error: 'Spec not found' }); return; }
+    else { throw new NotFoundError('Spec not found'); return; }
 
     const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
     const allStories: Array<{ id: string; acceptanceCriteria: string[] }> =
@@ -8874,7 +8867,7 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
 
     const targetStory = allStories.find(s => s.id === storyId);
     if (!targetStory) {
-      res.status(404).json({ error: `Story ${storyId} not found in spec ${specId}` });
+      throw new NotFoundError(`Story ${storyId} not found in spec ${specId}`);
       return;
     }
 
@@ -8966,13 +8959,13 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'workspaceId is required' });
+      throw new ValidationError('workspaceId is required');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -8984,7 +8977,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
       specFilePath = path.join(pendingDir, `${specId}.json`);
       specStatus = 'pending';
       if (!fs.existsSync(specFilePath)) {
-        res.status(404).json({ error: 'Spec not found in approved or pending directories' });
+        throw new NotFoundError('Spec not found in approved or pending directories');
         return;
       }
     }
@@ -8993,14 +8986,14 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
     const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
     const stories: UserStory[] = specContent.userStories ?? [];
     if (stories.length === 0) {
-      res.status(422).json({ error: 'Spec has no user stories' });
+      throw new UnprocessableError('Spec has no user stories');
       return;
     }
 
     // Build skill catalog context
     const catalogs = await buildCatalogContext(workspace.path as string, workspace.id);
     if (catalogs.skillNames.size === 0) {
-      res.status(422).json({ error: 'No skills installed. Install skills from the Marketplace before matching.' });
+      throw new UnprocessableError('No skills installed. Install skills from the Marketplace before matching.');
       return;
     }
 
@@ -9275,13 +9268,13 @@ router.post('/:specId/suggest-models', async (req: Request, res: Response) => {
     const { workspaceId, availableModels } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'workspaceId is required' });
+      throw new ValidationError('workspaceId is required');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -9291,7 +9284,7 @@ router.post('/:specId/suggest-models', async (req: Request, res: Response) => {
     if (!fs.existsSync(specFilePath)) {
       specFilePath = path.join(pendingDir, `${specId}.json`);
       if (!fs.existsSync(specFilePath)) {
-        res.status(404).json({ error: 'Spec not found in approved or pending directories' });
+        throw new NotFoundError('Spec not found in approved or pending directories');
         return;
       }
     }
@@ -9300,7 +9293,7 @@ router.post('/:specId/suggest-models', async (req: Request, res: Response) => {
     const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
     const stories: UserStory[] = specContent.userStories ?? [];
     if (stories.length === 0) {
-      res.status(422).json({ error: 'Spec has no user stories' });
+      throw new UnprocessableError('Spec has no user stories');
       return;
     }
 
@@ -9484,13 +9477,13 @@ router.post('/:specId/validate', async (req: Request, res: Response) => {
     const { workspaceId } = req.body as { workspaceId?: string };
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -9504,7 +9497,7 @@ router.post('/:specId/validate', async (req: Request, res: Response) => {
     } else if (fs.existsSync(approvedFile)) {
       specContent = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -9578,7 +9571,7 @@ Respond with ONLY valid JSON, no markdown fences, no prose. Format:
       parsed = JSON.parse(cleaned);
     } catch {
       logger.error(`[Specs] validate: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
-      res.status(422).json({ error: 'LLM response is not valid JSON' });
+      throw new UnprocessableError('LLM response is not valid JSON');
       return;
     }
 
@@ -9663,13 +9656,13 @@ router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'workspaceId is required' });
+      throw new ValidationError('workspaceId is required');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -9681,7 +9674,7 @@ router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
       specFilePath = path.join(pendingDir, `${specId}.json`);
       specStatus = 'pending';
       if (!fs.existsSync(specFilePath)) {
-        res.status(404).json({ error: 'Spec not found in approved or pending directories' });
+        throw new NotFoundError('Spec not found in approved or pending directories');
         return;
       }
     }
@@ -9689,7 +9682,7 @@ router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
     // Read spec
     const specContent = JSON.parse(fs.readFileSync(specFilePath, 'utf8'));
     if (!Array.isArray(specContent.userStories) || specContent.userStories.length === 0) {
-      res.status(422).json({ error: 'Spec has no user stories' });
+      throw new UnprocessableError('Spec has no user stories');
       return;
     }
 
@@ -9699,7 +9692,7 @@ router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
       result = await matchSkills(specContent, workspace.path as string, specFilePath, workspaceId);
     } catch (matchErr: any) {
       if (matchErr.message?.includes('No skills installed')) {
-        res.status(422).json({ error: matchErr.message });
+        throw new UnprocessableError(matchErr.message);
         return;
       }
       throw matchErr;
@@ -9786,13 +9779,13 @@ router.post('/:specId/fix', async (req: Request, res: Response) => {
     const { workspaceId } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required body param: workspaceId' });
+      throw new ValidationError('Missing required body param: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -9809,7 +9802,7 @@ router.post('/:specId/fix', async (req: Request, res: Response) => {
       specFile = approvedFile;
       content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -9947,7 +9940,7 @@ router.get('/:specId/attachments', async (req: Request, res: Response) => {
   }
 
   if (!specExists) {
-    res.status(404).json({ error: `Spec not found: ${specId}` });
+    throw new NotFoundError(`Spec not found: ${specId}`);
     return;
   }
 
@@ -10037,7 +10030,7 @@ router.get('/:specId/attachments/:attachmentId', async (req: Request, res: Respo
   );
 
   if (!row || !row.file_data) {
-    res.status(404).json({ error: 'Attachment not found' });
+    throw new NotFoundError('Attachment not found');
     return;
   }
 
@@ -10108,12 +10101,12 @@ router.post(
     attachmentUpload.single('file')(req, res, (err: any) => {
       if (err) {
         if (err.code === 'LIMIT_FILE_SIZE') {
-          res.status(413).json({ error: 'File size exceeds 10MB limit' });
+          throw new PayloadTooLargeError('File size exceeds 10MB limit');
           return;
         }
         if (err.message?.startsWith('INVALID_FILE_TYPE:')) {
           const mimeType = err.message.replace('INVALID_FILE_TYPE:', '');
-          res.status(400).json({ error: `Invalid file type: ${mimeType}` });
+          throw new ValidationError(`Invalid file type: ${mimeType}`);
           return;
         }
         next(err);
@@ -10126,7 +10119,7 @@ router.post(
     const { specId } = req.params;
 
     if (!req.file) {
-      res.status(400).json({ error: 'No file uploaded' });
+      throw new ValidationError('No file uploaded');
       return;
     }
 
@@ -10143,7 +10136,7 @@ router.post(
     }
 
     if (!specExists) {
-      res.status(404).json({ error: `Spec not found: ${specId}` });
+      throw new NotFoundError(`Spec not found: ${specId}`);
       return;
     }
 
@@ -10209,7 +10202,7 @@ router.delete('/:specId/attachments/:attachmentId', async (req: Request, res: Re
   );
 
   if (result.rowCount === 0) {
-    res.status(404).json({ error: 'Attachment not found' });
+    throw new NotFoundError('Attachment not found');
     return;
   }
 
@@ -10280,13 +10273,13 @@ router.put('/:specId', async (req: Request, res: Response) => {
     const { workspaceId, model, title, _notes } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required body param: workspaceId' });
+      throw new ValidationError('Missing required body param: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -10303,7 +10296,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
       specFile = approvedFile;
       content = JSON.parse(fs.readFileSync(approvedFile, 'utf8'));
     } else {
-      res.status(404).json({ error: 'Spec not found' });
+      throw new NotFoundError('Spec not found');
       return;
     }
 
@@ -10385,13 +10378,13 @@ router.post('/:specId/enrich', async (req: Request, res: Response) => {
     const { workspaceId, model: modelOverride } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required body param: workspaceId' });
+      throw new ValidationError('Missing required body param: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -10406,7 +10399,7 @@ router.post('/:specId/enrich', async (req: Request, res: Response) => {
     } else if (fs.existsSync(approvedFile)) {
       specFile = approvedFile;
     } else {
-      res.status(404).json({ error: `Spec '${specId}' not found` });
+      throw new NotFoundError(`Spec '${specId}' not found`);
       return;
     }
 
@@ -10419,7 +10412,7 @@ router.post('/:specId/enrich', async (req: Request, res: Response) => {
       [workspaceId, specPath],
     );
     if (activeRun) {
-      res.status(409).json({ error: `Spec '${specId}' has an active pipeline run (run #${activeRun.id}) — wait for it to finish before enriching` });
+      throw new ConflictError(`Spec '${specId}' has an active pipeline run (run #${activeRun.id}) — wait for it to finish before enriching`);
       return;
     }
 
@@ -10682,13 +10675,13 @@ router.post('/:id/assign-models', async (req: Request, res: Response) => {
     const { workspaceId, dryRun = false } = req.body;
 
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required field: workspaceId' });
+      throw new ValidationError('Missing required field: workspaceId');
       return;
     }
 
     const workspace = await getWorkspace(workspaceId);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -10699,7 +10692,7 @@ router.post('/:id/assign-models', async (req: Request, res: Response) => {
     const specFile = fs.existsSync(approvedPath) ? approvedPath : fs.existsSync(pendingPath) ? pendingPath : null;
 
     if (!specFile) {
-      res.status(404).json({ error: `Spec '${specId}' not found in pending or approved` });
+      throw new NotFoundError(`Spec '${specId}' not found in pending or approved`);
       return;
     }
 

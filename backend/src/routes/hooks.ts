@@ -5,6 +5,7 @@ import type { PipelineHookRow } from '../lib/hook-runner';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { encryptToken } from './auth';
 import { logger } from '../lib/logger';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -33,7 +34,7 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
@@ -81,18 +82,18 @@ router.post('/', async (req: Request, res: Response) => {
     const { workspaceId, hookType, command, webhookUrl, enabled } = req.body;
 
     if (!workspaceId || !hookType) {
-      res.status(400).json({ error: 'Missing required fields: workspaceId, hookType' });
+      throw new ValidationError('Missing required fields: workspaceId, hookType');
       return;
     }
 
     // Either command (shell hook) or webhookUrl (HTTP webhook) must be provided
     if (!command && !webhookUrl) {
-      res.status(400).json({ error: 'Either command or webhookUrl is required' });
+      throw new ValidationError('Either command or webhookUrl is required');
       return;
     }
 
     if (!VALID_HOOK_TYPES.includes(hookType)) {
-      res.status(400).json({ error: `Invalid hookType. Must be one of: ${VALID_HOOK_TYPES.join(', ')}` });
+      throw new ValidationError(`Invalid hookType. Must be one of: ${VALID_HOOK_TYPES.join(', ')}`);
       return;
     }
 
@@ -162,7 +163,7 @@ router.put('/:id', async (req: Request, res: Response) => {
   try {
     const hookId = parseInt(String(req.params.id), 10);
     if (isNaN(hookId)) {
-      res.status(400).json({ error: 'Invalid hook ID' });
+      throw new ValidationError('Invalid hook ID');
       return;
     }
 
@@ -171,14 +172,14 @@ router.put('/:id', async (req: Request, res: Response) => {
       [hookId]
     );
     if (!existing) {
-      res.status(404).json({ error: 'Hook not found' });
+      throw new NotFoundError('Hook not found');
       return;
     }
 
     const { hookType, command, enabled } = req.body;
 
     if (hookType && !VALID_HOOK_TYPES.includes(hookType)) {
-      res.status(400).json({ error: `Invalid hookType. Must be one of: ${VALID_HOOK_TYPES.join(', ')}` });
+      throw new ValidationError(`Invalid hookType. Must be one of: ${VALID_HOOK_TYPES.join(', ')}`);
       return;
     }
 
@@ -223,7 +224,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
   try {
     const hookId = parseInt(String(req.params.id), 10);
     if (isNaN(hookId)) {
-      res.status(400).json({ error: 'Invalid hook ID' });
+      throw new ValidationError('Invalid hook ID');
       return;
     }
 
@@ -232,7 +233,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
       [hookId]
     );
     if (!existing) {
-      res.status(404).json({ error: 'Hook not found' });
+      throw new NotFoundError('Hook not found');
       return;
     }
 

@@ -7,6 +7,7 @@ import { z } from 'zod';
 import { queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { logger } from '../lib/logger';
+import { AuthError, ConflictError, ForbiddenError, NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -205,7 +206,7 @@ router.post('/register', validateBody(RegisterSchema), async (req: Request, res:
   // Check for existing user
   const existing = await queryOne<UserRow>('SELECT id FROM users WHERE email = $1', [trimmedEmail]);
   if (existing) {
-    res.status(409).json({ error: 'Email already registered' });
+    throw new ConflictError('Email already registered');
     return;
   }
 
@@ -295,13 +296,13 @@ router.post('/login', validateBody(LoginSchema), async (req: Request, res: Respo
 
   const user = await queryOne<UserRow>('SELECT * FROM users WHERE email = $1', [trimmedEmail]);
   if (!user) {
-    res.status(401).json({ error: 'Invalid email or password' });
+    throw new AuthError('Invalid email or password');
     return;
   }
 
   const passwordMatch = bcrypt.compareSync(password, user.password_hash);
   if (!passwordMatch) {
-    res.status(401).json({ error: 'Invalid email or password' });
+    throw new AuthError('Invalid email or password');
     return;
   }
 
@@ -360,7 +361,7 @@ router.post('/refresh', async (req: Request, res: Response) => {
   const { refreshToken } = req.body;
 
   if (!refreshToken || typeof refreshToken !== 'string') {
-    res.status(400).json({ error: 'Refresh token is required' });
+    throw new ValidationError('Refresh token is required');
     return;
   }
 
@@ -372,17 +373,17 @@ router.post('/refresh', async (req: Request, res: Response) => {
   );
 
   if (!storedToken) {
-    res.status(401).json({ error: 'Invalid refresh token' });
+    throw new AuthError('Invalid refresh token');
     return;
   }
 
   if (storedToken.revoked_at) {
-    res.status(401).json({ error: 'Refresh token has been revoked' });
+    throw new AuthError('Refresh token has been revoked');
     return;
   }
 
   if (new Date(storedToken.expires_at) <= new Date()) {
-    res.status(401).json({ error: 'Refresh token has expired' });
+    throw new AuthError('Refresh token has expired');
     return;
   }
 
@@ -429,7 +430,7 @@ router.post('/logout', async (req: Request, res: Response) => {
   const { refreshToken } = req.body;
 
   if (!refreshToken || typeof refreshToken !== 'string') {
-    res.status(400).json({ error: 'Refresh token is required' });
+    throw new ValidationError('Refresh token is required');
     return;
   }
 
@@ -441,7 +442,7 @@ router.post('/logout', async (req: Request, res: Response) => {
   );
 
   if (result.rowCount === 0) {
-    res.status(401).json({ error: 'Invalid or already revoked refresh token' });
+    throw new AuthError('Invalid or already revoked refresh token');
     return;
   }
 
@@ -488,7 +489,7 @@ router.get('/me', async (req: Request, res: Response) => {
       res.json({ user: LOCAL_ADMIN });
       return;
     }
-    res.status(401).json({ error: 'No user configured' });
+    throw new AuthError('No user configured');
     return;
   }
 
@@ -498,7 +499,7 @@ router.get('/me', async (req: Request, res: Response) => {
   );
 
   if (!user) {
-    res.status(401).json({ error: 'User not found' });
+    throw new AuthError('User not found');
     return;
   }
 
@@ -548,7 +549,7 @@ router.patch('/me', async (req: Request, res: Response) => {
   const userId = authReq.user?.id ?? fallbackUser?.id;
 
   if (!userId) {
-    res.status(401).json({ error: 'No user configured' });
+    throw new AuthError('No user configured');
     return;
   }
 
@@ -561,7 +562,7 @@ router.patch('/me', async (req: Request, res: Response) => {
   // Display name update
   if (displayName !== undefined) {
     if (typeof displayName !== 'string' || displayName.trim().length === 0) {
-      res.status(400).json({ error: 'displayName must be a non-empty string' });
+      throw new ValidationError('displayName must be a non-empty string');
       return;
     }
     paramIdx++;
@@ -572,22 +573,22 @@ router.patch('/me', async (req: Request, res: Response) => {
   // Password change (requires currentPassword)
   if (newPassword !== undefined) {
     if (!currentPassword || typeof currentPassword !== 'string') {
-      res.status(400).json({ error: 'currentPassword is required to change password' });
+      throw new ValidationError('currentPassword is required to change password');
       return;
     }
     if (typeof newPassword !== 'string' || newPassword.length < 6) {
-      res.status(400).json({ error: 'newPassword must be at least 6 characters' });
+      throw new ValidationError('newPassword must be at least 6 characters');
       return;
     }
 
     const row = await queryOne<Pick<UserRow, 'password_hash'>>('SELECT password_hash FROM users WHERE id = $1', [userId]);
     if (!row) {
-      res.status(404).json({ error: 'User not found' });
+      throw new NotFoundError('User not found');
       return;
     }
 
     if (!bcrypt.compareSync(currentPassword, row.password_hash)) {
-      res.status(403).json({ error: 'Current password is incorrect' });
+      throw new ForbiddenError('Current password is incorrect');
       return;
     }
 
@@ -597,7 +598,7 @@ router.patch('/me', async (req: Request, res: Response) => {
   }
 
   if (updates.length === 0) {
-    res.status(400).json({ error: 'No fields to update' });
+    throw new ValidationError('No fields to update');
     return;
   }
 
@@ -650,7 +651,7 @@ router.get('/verify-email', async (req: Request, res: Response) => {
   const { token } = req.query;
 
   if (!token || typeof token !== 'string') {
-    res.status(400).json({ error: 'Verification token is required' });
+    throw new ValidationError('Verification token is required');
     return;
   }
 
@@ -661,7 +662,7 @@ router.get('/verify-email', async (req: Request, res: Response) => {
   );
 
   if (!verificationToken) {
-    res.status(400).json({ error: 'Invalid or expired verification token' });
+    throw new ValidationError('Invalid or expired verification token');
     return;
   }
 
@@ -673,7 +674,7 @@ router.get('/verify-email', async (req: Request, res: Response) => {
   }
 
   if (verificationToken.is_expired) {
-    res.status(400).json({ error: 'This verification token has expired. Please request a new one.' });
+    throw new ValidationError('This verification token has expired. Please request a new one.');
     return;
   }
 
@@ -726,7 +727,7 @@ router.post('/resend-verification', async (req: Request, res: Response) => {
   const { email } = req.body;
 
   if (!email || typeof email !== 'string') {
-    res.status(400).json({ error: 'Email is required' });
+    throw new ValidationError('Email is required');
     return;
   }
 
@@ -755,7 +756,7 @@ router.post('/resend-verification', async (req: Request, res: Response) => {
   const recentCount = parseInt(rateRow?.count || '0', 10);
 
   if (recentCount >= VERIFICATION_RATE_LIMIT_PER_HOUR) {
-    res.status(429).json({ error: 'Too many verification requests. Please try again later.' });
+    throw new TooManyRequestsError('Too many verification requests. Please try again later.');
     return;
   }
 
@@ -809,13 +810,13 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
   const { email } = req.body;
 
   if (!email || typeof email !== 'string') {
-    res.status(400).json({ error: 'Email is required' });
+    throw new ValidationError('Email is required');
     return;
   }
 
   const trimmedEmail = email.trim().toLowerCase();
   if (!EMAIL_REGEX.test(trimmedEmail)) {
-    res.status(400).json({ error: 'Invalid email format' });
+    throw new ValidationError('Invalid email format');
     return;
   }
 
@@ -837,7 +838,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
   const recentCount = parseInt(rateRow?.count || '0', 10);
 
   if (recentCount >= RESET_RATE_LIMIT_PER_HOUR) {
-    res.status(429).json({ error: 'Too many reset requests. Please try again later.' });
+    throw new TooManyRequestsError('Too many reset requests. Please try again later.');
     return;
   }
 
@@ -898,17 +899,17 @@ router.post('/reset-password', async (req: Request, res: Response) => {
   const { token, newPassword } = req.body;
 
   if (!token || typeof token !== 'string') {
-    res.status(400).json({ error: 'Reset token is required' });
+    throw new ValidationError('Reset token is required');
     return;
   }
 
   if (!newPassword || typeof newPassword !== 'string') {
-    res.status(400).json({ error: 'New password is required' });
+    throw new ValidationError('New password is required');
     return;
   }
 
   if (newPassword.length < 8) {
-    res.status(400).json({ error: 'Password must be at least 8 characters' });
+    throw new ValidationError('Password must be at least 8 characters');
     return;
   }
 
@@ -919,17 +920,17 @@ router.post('/reset-password', async (req: Request, res: Response) => {
   );
 
   if (!resetToken) {
-    res.status(400).json({ error: 'Invalid or expired reset token' });
+    throw new ValidationError('Invalid or expired reset token');
     return;
   }
 
   if (resetToken.used_at) {
-    res.status(400).json({ error: 'This reset token has already been used' });
+    throw new ValidationError('This reset token has already been used');
     return;
   }
 
   if (resetToken.is_expired) {
-    res.status(400).json({ error: 'This reset token has expired' });
+    throw new ValidationError('This reset token has expired');
     return;
   }
 
@@ -995,7 +996,7 @@ router.delete('/account', authRequired, async (req: Request, res: Response) => {
   const { password } = req.body;
 
   if (!password || typeof password !== 'string') {
-    res.status(400).json({ error: 'Password is required to confirm account deletion' });
+    throw new ValidationError('Password is required to confirm account deletion');
     return;
   }
 
@@ -1006,19 +1007,19 @@ router.delete('/account', authRequired, async (req: Request, res: Response) => {
   );
 
   if (!user) {
-    res.status(404).json({ error: 'User not found' });
+    throw new NotFoundError('User not found');
     return;
   }
 
   // GitHub-only accounts have unusable password hashes (prefix: "github:")
   if (user.password_hash.startsWith('github:')) {
-    res.status(400).json({ error: 'GitHub-only accounts cannot be deleted via password. Please disconnect GitHub first and set a password.' });
+    throw new ValidationError('GitHub-only accounts cannot be deleted via password. Please disconnect GitHub first and set a password.');
     return;
   }
 
   // Verify password
   if (!bcrypt.compareSync(password, user.password_hash)) {
-    res.status(403).json({ error: 'Incorrect password' });
+    throw new ForbiddenError('Incorrect password');
     return;
   }
 
@@ -1150,7 +1151,7 @@ router.get('/github/callback', async (req: Request, res: Response) => {
   const { code } = req.query;
 
   if (!code || typeof code !== 'string') {
-    res.status(400).json({ error: 'Authorization code is required' });
+    throw new ValidationError('Authorization code is required');
     return;
   }
 
@@ -1177,8 +1178,7 @@ router.get('/github/callback', async (req: Request, res: Response) => {
 
     const tokenData = await tokenResp.json() as GitHubTokenResponse & { error?: string; error_description?: string };
     if (tokenData.error || !tokenData.access_token) {
-      res.status(401).json({ error: tokenData.error_description || 'Failed to exchange authorization code' });
-      return;
+      throw new AuthError(tokenData.error_description || 'Failed to exchange authorization code');
     }
 
     const githubAccessToken = tokenData.access_token;
@@ -1195,7 +1195,7 @@ router.get('/github/callback', async (req: Request, res: Response) => {
       const emails = await githubApiFetch<GitHubEmail[]>('https://api.github.com/user/emails', githubAccessToken);
       const primary = emails.find(e => e.primary && e.verified);
       if (!primary) {
-        res.status(400).json({ error: 'No verified primary email found on GitHub account' });
+        throw new ValidationError('No verified primary email found on GitHub account');
         return;
       }
       primaryEmail = primary.email;
@@ -1314,7 +1314,7 @@ export async function authRequired(req: Request, res: Response, next: NextFuncti
   }
 
   if (!token) {
-    res.status(401).json({ error: 'Authentication required' });
+    throw new AuthError('Authentication required');
     return;
   }
 
@@ -1328,7 +1328,7 @@ export async function authRequired(req: Request, res: Response, next: NextFuncti
     );
 
     if (!user) {
-      res.status(401).json({ error: 'Invalid token' });
+      throw new AuthError('Invalid token');
       return;
     }
 
@@ -1340,10 +1340,10 @@ export async function authRequired(req: Request, res: Response, next: NextFuncti
     next();
   } catch (err) {
     if (err instanceof jwt.TokenExpiredError) {
-      res.status(401).json({ error: 'Invalid token' });
+      throw new AuthError('Invalid token');
       return;
     }
-    res.status(401).json({ error: 'Invalid token' });
+    throw new AuthError('Invalid token');
   }
 }
 
@@ -1371,7 +1371,7 @@ export function requireRole(minRole: TeamRole) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const user = (req as Request & { user: AuthUser }).user;
     if (!user) {
-      res.status(401).json({ error: 'Authentication required' });
+      throw new AuthError('Authentication required');
       return;
     }
 
@@ -1382,7 +1382,7 @@ export function requireRole(minRole: TeamRole) {
       req.body?.teamId;
 
     if (!teamId) {
-      res.status(400).json({ error: 'Team ID is required' });
+      throw new ValidationError('Team ID is required');
       return;
     }
 
@@ -1398,7 +1398,7 @@ export function requireRole(minRole: TeamRole) {
     );
 
     if (!membership) {
-      res.status(403).json({ error: 'You are not a member of this team' });
+      throw new ForbiddenError('You are not a member of this team');
       return;
     }
 
@@ -1406,7 +1406,7 @@ export function requireRole(minRole: TeamRole) {
     const requiredLevel = ROLE_HIERARCHY[minRole];
 
     if (userLevel === undefined || userLevel < requiredLevel) {
-      res.status(403).json({ error: `Insufficient permissions: requires ${minRole} role` });
+      throw new ForbiddenError(`Insufficient permissions: requires ${minRole} role`);
       return;
     }
 
