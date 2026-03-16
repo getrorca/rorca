@@ -71,6 +71,112 @@ async function runPostMergeSmokeTest(workspaceId: string | number): Promise<{ ok
   return { ok: failures.length === 0, failures };
 }
 
+// ── GitHub Actions workflow dispatch on run completion (US-026) ───────────────
+
+/**
+ * Fire a GitHub Actions workflow_dispatch event if the workspace has a workflow
+ * config stored in workspace_github_webhooks.workflow_config with enabled=true.
+ * Non-fatal: any failure is logged to integration_audit_log and emitted as a WAL event.
+ * Never throws — must not block run finalization.
+ */
+async function dispatchWorkflowIfConfigured(
+  workspaceId: string | number,
+  runId: number,
+): Promise<void> {
+  const port = process.env.PORT || 3030;
+  const base = `http://localhost:${port}`;
+
+  try {
+    // Fetch workspace webhook row to get repo details + workflow config
+    const row = await queryOne<{
+      repo_owner: string;
+      repo_name: string;
+      workflow_config: string | Record<string, unknown> | null;
+    }>(
+      'SELECT repo_owner, repo_name, workflow_config FROM workspace_github_webhooks WHERE workspace_id = $1',
+      [workspaceId]
+    );
+
+    if (!row || !row.workflow_config) return;
+
+    const cfg = (typeof row.workflow_config === 'string'
+      ? JSON.parse(row.workflow_config)
+      : row.workflow_config) as {
+        enabled?: boolean;
+        workflow_id?: string;
+        ref?: string;
+        inputs?: Record<string, string>;
+      };
+
+    if (!cfg.enabled || !cfg.workflow_id || !cfg.ref) return;
+
+    // Emit SSE: "Triggering workflow..."
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatching', $1, $2)`,
+      [String(workspaceId), JSON.stringify({ run_id: runId, workflow_id: cfg.workflow_id, ref: cfg.ref })]
+    );
+
+    // Proxy through our own API so the OAuth token lookup + audit log happens in one place
+    const dispatchRes = await fetch(`${base}/api/workspaces/${workspaceId}/github/dispatch`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        owner: row.repo_owner,
+        repo: row.repo_name,
+        workflow_id: cfg.workflow_id,
+        ref: cfg.ref,
+        inputs: cfg.inputs ?? {},
+      }),
+    });
+
+    if (dispatchRes.ok || dispatchRes.status === 204) {
+      await execute(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatched', $1, $2)`,
+        [String(workspaceId), JSON.stringify({
+          run_id: runId,
+          workflow_id: cfg.workflow_id,
+          ref: cfg.ref,
+          owner: row.repo_owner,
+          repo: row.repo_name,
+        })]
+      );
+      logger.info({ runId, workflow_id: cfg.workflow_id }, '[worker] GitHub workflow dispatch succeeded');
+    } else {
+      const errText = await dispatchRes.text().catch(() => String(dispatchRes.status));
+      await execute(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatch_failed', $1, $2)`,
+        [String(workspaceId), JSON.stringify({
+          run_id: runId,
+          workflow_id: cfg.workflow_id,
+          error: errText,
+          status_code: dispatchRes.status,
+        })]
+      );
+      // Also log to integration_audit_log for the Run View amber banner
+      await execute(
+        `INSERT INTO integration_audit_log (workspace_id, provider, action, actor_type, actor_id, details)
+         VALUES ($1, 'github', 'api_call_failed', 'system', NULL, $2)`,
+        [String(workspaceId), JSON.stringify({
+          run_id: runId,
+          workflow_id: cfg.workflow_id,
+          status_code: dispatchRes.status,
+          error: errText,
+        })]
+      ).catch(() => { /* non-fatal */ });
+      logger.warn({ runId, workflow_id: cfg.workflow_id, status: dispatchRes.status, errText }, '[worker] GitHub workflow dispatch failed');
+    }
+  } catch (err: any) {
+    logger.error({ err, runId }, '[worker] dispatchWorkflowIfConfigured threw unexpectedly');
+    // Emit failure WAL event so the UI can show the amber banner
+    try {
+      await execute(
+        `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('workflow_dispatch_failed', $1, $2)`,
+        [String(workspaceId), JSON.stringify({ run_id: runId, error: err.message })]
+      );
+    } catch { /* double-fault, ignore */ }
+  }
+}
+
 // ── Claude binary + env-var stripping for agentic conflict resolution ────────
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN ||
@@ -709,6 +815,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               } catch (prErr: any) {
                 logger.error({ err: prErr, runId }, '[worker] createOrUpdateAutoPr threw unexpectedly');
               }
+            }
+
+            // Workflow dispatch (US-026): trigger configured GitHub Actions workflow on run completion.
+            // Only fires when status='done'. Non-fatal.
+            if (status === 'done') {
+              await dispatchWorkflowIfConfigured(workspaceId, runId);
             }
           }
         } catch (err) {
