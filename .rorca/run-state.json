@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T09:08:58.112Z",
+  "lastUpdatedAt": "2026-03-16T09:50:40.423Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 1152753
+    },
+    {
+      "storyId": "US-052",
+      "title": "CHANGELOG.md from git tags",
+      "status": "passed",
+      "startedAt": "2026-03-16T09:47:39.024Z",
+      "finishedAt": "2026-03-16T09:50:40.422Z",
+      "agentType": "claude",
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 181398
     }
   ],
   "failedStories": [],
