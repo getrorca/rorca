@@ -81,6 +81,7 @@ import workspaceDriftRouter from './routes/workspace-drift';
 import { startDriftSubscriber } from './lib/drift-subscriber';
 import { startMarkerInjector } from './lib/marker-injector';
 import { startCommitStatusPoster } from './lib/commit-status-poster';
+import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 import { initBoss } from './lib/pg-boss';
@@ -341,6 +342,9 @@ startMarkerInjector();
 
 // US-027: Subscribe commit status poster to post GitHub status checks for story progress
 startCommitStatusPoster();
+
+// US-030: Subscribe check run poster to manage GitHub Check Runs for pipeline runs
+startCheckRunPoster();
 
 // PR-019: Auto-rotate memory after each pipeline run completion
 // PR-018: Auto-deduplicate memory after rotation (post-run)
