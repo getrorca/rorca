@@ -126,8 +126,9 @@ app.use((_req, res, next) => {
   next();
 });
 
-// CORS configuration — supports comma-separated allowed origins
-// In production, CORS_ORIGIN must be set to a specific origin; '*' or absent logs a warning.
+// CORS configuration — explicit origin required; no wildcards in production.
+// CORS_ORIGIN defaults to http://localhost:5210 for development.
+// In production, set CORS_ORIGIN to https://rorca.app (or comma-separated list).
 let corsOrigin: boolean | string | string[];
 let allowCredentials = false;
 
@@ -138,27 +139,27 @@ if (process.env.RORCA_SERVE_STATIC === '1') {
 } else {
   const rawOrigin = process.env.CORS_ORIGIN || '';
 
-  if (process.env.NODE_ENV === 'production' && (!rawOrigin || rawOrigin === '*')) {
-    console.warn('WARNING: CORS_ORIGIN not configured — API accessible from any origin');
+  if (!rawOrigin) {
+    console.warn('WARNING: CORS_ORIGIN not set — defaulting to http://localhost:5210 (development only)');
   }
 
-  if (!rawOrigin || rawOrigin === '*') {
-    // Wildcard: allow all origins, no credentials
-    corsOrigin = '*';
-    allowCredentials = false;
-  } else {
-    // Specific origin(s): support comma-separated list
-    const origins = rawOrigin.split(',').map((o: string) => o.trim()).filter(Boolean);
-    corsOrigin = origins.length === 1 ? origins[0] : origins;
-    allowCredentials = true;
+  if (process.env.NODE_ENV === 'production' && (!rawOrigin || rawOrigin === '*')) {
+    console.warn('WARNING: CORS_ORIGIN not configured for production — set CORS_ORIGIN to restrict access');
   }
+
+  // Default to localhost:5210 for development; never use wildcard '*'
+  const effectiveOrigin = rawOrigin && rawOrigin !== '*' ? rawOrigin : 'http://localhost:5210';
+  const origins = effectiveOrigin.split(',').map((o: string) => o.trim()).filter(Boolean);
+  corsOrigin = origins.length === 1 ? origins[0] : origins;
+  allowCredentials = true;
 }
 
 app.use(cors({
   origin: corsOrigin,
   credentials: allowCredentials,
-  methods: ['GET', 'HEAD', 'PUT', 'PATCH', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization'],
+  methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Workspace-Id'],
+  maxAge: 86400,
 }));
 
 // Capture raw body for webhook signature verification.
