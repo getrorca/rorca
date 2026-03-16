@@ -1552,24 +1552,24 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-010):
-Create a manual validation checklist story (no automated E2E yet — Playwright spec is not built) that the implementer must execute and document results for. This story verifies the full chain across US-001 through US-009.
+Create a shared Footer component in landing-page/ that appears on every page. Four columns: Product (Download, Pricing, Docs, Changelog), Company (About, Blog, Careers), Legal (Terms, Privacy), Community (GitHub, Twitter/X, Discord). Bottom row: © 2026 Rorca. All rights reserved. Links: GitHub → https://github.com/getrorca/rorca, Twitter/X → https://x.com/getrorca, Discord → placeholder (https://discord.gg/rorca), support email → support@rorca.app, Terms → /terms, Privacy → /privacy. Footer uses zinc-900 background, subtle border-top.
 
-The implementer must:
-1. Start the backend (`npm run dev`) and worker (`npm run worker`)
-2. Trigger a real pipeline run via the UI or `POST /api/pipeline/trigger` with a small 2-3 story spec
-3. Open the Run View immediately after triggering
-4. **Verify Bug 1 fix**: Terminal output appears within 2 seconds of the run starting (not 45-60 seconds)
-5. **Verify Bug 2 fix**: Switch to the Stories tab and confirm RunStoryList is rendering (live timers, running indicator, not plain dots)
-6. **Verify Bug 3 fix (animations)**: Watch the Stories tab as stories complete — confirm green checkmark pop animation fires on pass
-7. **Verify terminal markers**: Switch to Terminal tab — confirm story completion markers (✓/✗/⊘) appear inline with agent output
-8. **Verify late-join replay**: Close the Run View, reopen it mid-run, confirm terminal output replays including any markers already emitted
-9. **Verify no duplicate markers**: Confirm each story shows exactly one marker line in the terminal (not doubled)
-
-Document pass/fail for each check as a comment in the spec JSON or via POST to `/api/pipeline/story-result`.
+## Context
+- **Landing page stack**: The landing page lives in `landing-page/` and uses Next.js 14 + Tailwind v4 + Framer Motion on port 3002 — this is separate from the main React/Vite frontend. Use Next.js layout patterns (e.g., `layout.tsx`) to ensure the Footer renders on every route without per-page imports.
+- **Tailwind v4 specifics**: The landing page uses Tailwind v4 (not v3 like the main app). Use `zinc-900` via Tailwind utility classes. Check existing landing page components for the prevailing color/spacing conventions before introducing new design tokens.
+- **Link architecture**: All internal links (`/terms`, `/privacy`, `/pricing`, `/download`) should use Next.js `<Link>` for client-side navigation. External links (`github.com`, `x.com`, `discord.gg`) must use plain `<a>` tags with `target="_blank" rel="noopener noreferrer"`. Never use `href="#"` — the AC explicitly greps for this.
+- **"Coming Soon" pattern**: For pages that don't exist yet, keep the `<Link>` with the real `href` but render a `(Coming Soon)` span in `text-zinc-500` (or equivalent muted color). Do NOT disable the link or remove the href — the link must be functional for when the page is created later.
+- **Layout shift prevention**: Set `min-height` on the footer container (e.g., `min-h-[280px]` or similar) so the page layout is stable before content paints. This satisfies the "no layout shift" AC.
+- **Responsive columns**: Use a 4-column grid on desktop (`grid-cols-4`) that collapses to 2-col on tablet and 1-col on mobile. Check existing landing page sections for the responsive breakpoint pattern already in use and match it.
+- **Copyright year**: Hardcode `© 2026 Rorca. All rights reserved.` as specified — do not use `new Date().getFullYear()` since the AC checks for the exact string `© 2026`.
+- **No over-engineering**: This is a static footer with no data fetching, no runtime link validation, and no dynamic content. Keep it as a single `Footer.tsx` component — no need for sub-components, context providers, or abstraction layers.
 
 Acceptance Criteria:
-- Terminal output appears within 2 seconds of run start (verifies flush timer from US-001)
-- Stories tab shows RunStoryList with live elapsed timers and running story indicator (verifies US-002 swap)
-- Green checkmark animation (animate-checkmark-pop) fires when a story passes in the Stories tab (verifies US-002 + CSS)
-- Story completion markers (✓/✗/⊘ with ANSI colors) appear inline in the Terminal tab (verifies US-008 backend markers)
-- Late-join terminal replay includes previously emitted story markers at correct positions (verifies US-008 persistence)
+- Footer component renders on every landing page route (home, architecture, engine, compute, login, signup, download, pricing, terms, privacy) — verified by navigating each route
+- Four-column layout with Product, Company, Legal, Community sections each containing at least 2 links
+- All links point to real destinations (no href='#' placeholders) — verified by grep for href='#' returning empty
+- GitHub link opens https://github.com/getrorca/rorca in new tab with rel='noopener noreferrer'
+- Copyright line shows '© 2026 Rorca. All rights reserved.'
+- If a linked page does not exist yet (empty state), the link is present but shows '(Coming Soon)' text next to it in muted color
+- Footer renders within 100ms of page load with no layout shift (loading state: footer height is pre-allocated via min-height)
+- If an external link (GitHub, Twitter, Discord) fails to load or returns 404 (error state), the link still renders with the correct href — no broken link detection at runtime since these are static anchor elements

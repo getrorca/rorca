@@ -1401,67 +1401,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 Follow this workflow for implementation:
 ## Agent Role: Frontend
 
-
-## Skill: react-review (relevance: 9)
----
-name: react-review
-description: Review React components for best practices and performance issues
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers
-  category: development
----
-
-# React Review Skill
-
-Review React components for best practices, performance issues, and common patterns.
-
-## When to use me
-
-Use this skill when:
-- Reviewing React component code
-- Optimizing component performance
-- Checking for React best practices
-- Refactoring legacy components
-- Auditing component architecture
-
-## What I do
-
-- Analyze React components for performance issues (unnecessary re-renders, large bundles)
-- Check for React best practices (hooks usage, prop patterns, state management)
-- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
-- Suggest optimizations (memoization, code splitting, lazy loading)
-- Review TypeScript usage and type safety
-
-## Key Patterns
-
-### Performance
-- Use `React.memo` for components receiving object/function props from parent
-- Memoize expensive calculations with `useMemo`
-- Stabilize callback references with `useCallback`
-- Avoid inline object/array creation in JSX props
-- Use `React.lazy` + `Suspense` for code splitting
-
-### Hooks
-- Always include all dependencies in `useEffect` dependency arrays
-- Never call hooks conditionally or inside loops
-- Extract complex logic into custom hooks
-- Clean up subscriptions and timers in useEffect return
-
-### TypeScript
-- Define explicit interfaces for all component props
-- Use discriminated unions for variant components
-- Prefer `interface` over `type` for component props
-- Use `React.FC` sparingly — prefer explicit return types
-
-## Notes
-
-- Focuses on React 18+ patterns and best practices
-- Considers both class and function components
-- Includes TypeScript and JavaScript variants
-- References official React documentation and community patterns
-
 ---
 name: rorca
 description: Implement and validate changes to the Rorca codebase with subagent-assisted context management.
@@ -1613,21 +1552,24 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-006):
-Write Vitest tests that verify RunStoryList renders correctly within the Run View context and responds to live WAL event data. These tests validate the integration wiring from US-002.
+Create /pricing page in landing-page/ Next.js app. Three-column pricing comparison matrix. Tiers: Free ($0, spec generation only, 1 workspace, community support), Pro ($15/mo, full pipeline execution, 3 workspaces, all integrations, email support), Team ($30/mo per seat, unlimited workspaces, RBAC, audit log, SSO, priority support). Self-hosted badge: 'Self-hosted is always free'. Each tier has a CTA button: Free → 'Get Started' (links to /download), Pro → 'Start Free Trial' (links to Stripe checkout), Team → 'Contact Sales' (mailto or form). Feature rows: spec generation, pipeline execution, workspaces, integrations, model cascading, RBAC, audit log, SSO, support tier. Toggle for monthly/annual billing (annual = 2 months free).
 
-Create `src/__tests__/RunStoryListIntegration.test.tsx` (or add to existing test file if one exists for RunViewPanel):
-
-1. **Renders in Run View**: Mount RunViewPanel with a mock run (runId, stories array), switch to Stories tab, verify RunStoryList is rendered (not the legacy StoriesListTab)
-2. **Story status transitions**: Simulate WAL events (story_started → story_passed) and verify the story card transitions from pending → running → passed with correct visual indicators
-3. **Live elapsed timer**: Simulate a story_started event, advance timers, verify the elapsed time display updates
-4. **Auto-scroll**: Render a list with 20+ stories, simulate story_started for story #15, verify the list scrolls to bring that story into view
-5. **Checkmark animation class**: Simulate story_passed, verify the checkmark element has the `animate-checkmark-pop` CSS class applied
-
-Use `@testing-library/react` for rendering and assertions. Mock `usePipelineSSE` to provide controlled WAL events. Mock `apiFetch` for run data.
+## Context
+- This is a **landing page** component in the `landing-page/` Next.js 14 app (separate from the main React/Vite frontend at `src/`). Use Next.js App Router conventions (`app/pricing/page.tsx`), Tailwind v4, and Framer Motion for animations — consistent with the existing landing page stack.
+- Pricing tiers and feature matrix data should be defined as a typed constant array (not fetched from an API). The tiers/prices are static marketing content matching the business model in CLAUDE.md: Free ($0), Pro ($15/mo), Team ($30/mo/seat). Annual pricing = 10 months cost (2 months free).
+- Stripe checkout link should be a configurable env var (`NEXT_PUBLIC_STRIPE_PRICE_ID_PRO`, `NEXT_PUBLIC_STRIPE_PRICE_ID_TEAM`) or similar. The "empty state" AC requires checking if these are set — if not, render "Coming Soon" badges instead of checkout CTAs. Do NOT hardcode Stripe URLs.
+- The monthly/annual toggle is client-side state only (no API call). Use `useState` for the toggle. Annual prices should show strikethrough on the monthly equivalent with the discounted annual price beside it.
+- The skeleton loading state (500ms) should use a brief `setTimeout` or CSS animation delay — this is a perceived performance pattern, not actual data loading. Use Tailwind `animate-pulse` on placeholder divs matching the grid layout.
+- Stripe checkout error handling: wrap the CTA click in a try/catch. If the Stripe redirect fails (network error or missing config), show an inline error message with a retry button — do NOT use a toast or modal, keep it localized to the Pro CTA cell.
+- The "Self-hosted is always free" badge should be visually distinct (e.g., a pill/badge above the pricing grid) and use the same design language as other badges on the landing page. Check existing landing page components for badge patterns before creating a new one.
+- Ensure the page is fully responsive: 3-column grid on desktop (`lg:`), stacked cards on mobile. Feature comparison rows should remain scannable on narrow viewports — consider a horizontal scroll or accordion pattern on mobile if the matrix is too wide.
 
 Acceptance Criteria:
-- Test file src/__tests__/RunStoryListIntegration.test.tsx exists with at least 5 test cases
-- A test verifies RunStoryList (not StoriesListTab) renders in the Run View stories tab
-- A test verifies story status transitions from pending → running → passed when WAL events arrive
-- A test verifies the animate-checkmark-pop CSS class is applied to passed stories
-- All tests pass when run with: npx vitest run --reporter=verbose RunStoryListIntegration
+- /pricing page renders with 3 tier columns: Free ($0), Pro ($15/mo), Team ($30/mo/seat)
+- Feature comparison matrix has at least 9 rows with checkmarks/x marks per tier
+- Monthly/annual toggle switches prices (annual shows 2 months free discount with strikethrough on old price)
+- 'Self-hosted is always free' badge is prominently displayed above the pricing grid
+- CTA buttons link to correct destinations: /download for Free, Stripe checkout for Pro, contact form for Team
+- If Stripe checkout link fails to load, Pro CTA shows error 'Payment service unavailable — try again later' with retry button
+- On initial page load, pricing grid shows skeleton placeholders for 500ms before rendering (loading state)
+- If no Stripe price IDs are configured (empty state), Pro and Team CTAs show 'Coming Soon' instead of checkout links

@@ -1149,9 +1149,9 @@ Phase 6 — React Native Mobile (after cloud)
 
 **The brand statement**: "Every story runs as a fresh isolated subprocess with the full tool set — bash, edit, read, write, glob, grep. No context limits. A spec can run forever. That's the Rorca engine."
 
-## Wave-Based Parallel Execution (Future Roadmap)
+## Wave-Based Parallel Execution
 
-**Status**: Not built. Sequential execution is default for V1. Wave = opt-in V2 feature.
+**Status**: Built. Wave parallel is opt-in per run (toggle in spec detail slide-over). Sequential is still the default.
 
 **The idea**: Instead of running stories one-by-one, compile the `dependsOn` DAG into topological wave groups. Each wave runs its stories in parallel git worktrees, then auto-merges before the next wave starts.
 
@@ -1162,13 +1162,4 @@ Wave 2: US-006 → 1 worktree → merge → done
 Sequential: 40 min total  →  Wave parallel: ~12 min (3.3x speedup on 3-wave spec)
 ```
 
-**What needs to be built** (future `rorca-wave-execution` spec):
-1. Wave compiler — topological sort of `dependsOn` DAG into wave groups (~50 lines)
-2. Wave orchestrator — spawn N parallel subprocesses, one per story per wave
-3. File-touch predictor — pre-analyze stories to detect shared-file conflicts before wave starts
-4. Auto-merge sequence — merge each wave's worktrees in sequence; use Haiku to resolve conflicts
-5. `.rorca/config.json` toggle: `execution.waveParallelism: false` (default) → `true` to enable
-
-**Why not V1**: Shared filesystem race conditions. Two stories editing the same file simultaneously cause merge conflicts. The file-touch predictor + auto-merge resolves most, but adds complexity. Sequential is safer and simpler for initial launch. Wave stays opt-in.
-
-**Trigger**: Build this spec after `rorca-integrations` ships. Requires worktrees (already built) + file-touch predictor (new). Infrastructure is 80% there.
+**How it works**: Wave compiler does a topological sort of the `dependsOn` DAG into wave groups. Each wave runs its stories in parallel git worktrees. Auto-merge fires after each wave before the next starts. Configurable max parallelism (default 20). Toggle visible in the spec detail slide-over — shows wave breakdown before you run.

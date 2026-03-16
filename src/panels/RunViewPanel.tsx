@@ -979,14 +979,14 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
         info = { ...info, state: 'merging', branchName: info?.branchName };
       } else if (evt.event_type === 'worktree_merged') {
         try {
-          const p = JSON.parse(evt.payload ?? '{}');
+          const p = evt.payload ? (typeof evt.payload === 'string' ? JSON.parse(evt.payload) : evt.payload as Record<string, unknown>) : {};
           info = { state: 'merged', branchName: p.branchName, commitSha: p.mergeCommitSha };
         } catch {
           info = { ...info, state: 'merged' };
         }
       } else if (evt.event_type === 'worktree_merge_failed') {
         try {
-          const p = JSON.parse(evt.payload ?? '{}');
+          const p = evt.payload ? (typeof evt.payload === 'string' ? JSON.parse(evt.payload) : evt.payload as Record<string, unknown>) : {};
           info = { state: 'failed', branchName: p.branchName, conflictSummary: p.conflictSummary || p.message };
         } catch {
           info = { ...info, state: 'failed' };
@@ -1289,7 +1289,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     for (const evt of walEvents) {
       if (evt.event_type !== 'story_failed' || !evt.story_id || !evt.payload) continue;
       try {
-        const payload = JSON.parse(evt.payload);
+        const payload = typeof evt.payload === 'string' ? JSON.parse(evt.payload) : evt.payload as Record<string, unknown>;
         if (payload.reason === 'blocked_by' && Array.isArray(payload.blockedBy)) {
           blockedStories.set(evt.story_id, payload.blockedBy);
         } else {

@@ -1399,68 +1399,7 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
 Follow this workflow for implementation:
-## Agent Role: Frontend
-
-
-## Skill: react-review (relevance: 7)
----
-name: react-review
-description: Review React components for best practices and performance issues
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers
-  category: development
----
-
-# React Review Skill
-
-Review React components for best practices, performance issues, and common patterns.
-
-## When to use me
-
-Use this skill when:
-- Reviewing React component code
-- Optimizing component performance
-- Checking for React best practices
-- Refactoring legacy components
-- Auditing component architecture
-
-## What I do
-
-- Analyze React components for performance issues (unnecessary re-renders, large bundles)
-- Check for React best practices (hooks usage, prop patterns, state management)
-- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
-- Suggest optimizations (memoization, code splitting, lazy loading)
-- Review TypeScript usage and type safety
-
-## Key Patterns
-
-### Performance
-- Use `React.memo` for components receiving object/function props from parent
-- Memoize expensive calculations with `useMemo`
-- Stabilize callback references with `useCallback`
-- Avoid inline object/array creation in JSX props
-- Use `React.lazy` + `Suspense` for code splitting
-
-### Hooks
-- Always include all dependencies in `useEffect` dependency arrays
-- Never call hooks conditionally or inside loops
-- Extract complex logic into custom hooks
-- Clean up subscriptions and timers in useEffect return
-
-### TypeScript
-- Define explicit interfaces for all component props
-- Use discriminated unions for variant components
-- Prefer `interface` over `type` for component props
-- Use `React.FC` sparingly — prefer explicit return types
-
-## Notes
-
-- Focuses on React 18+ patterns and best practices
-- Considers both class and function components
-- Includes TypeScript and JavaScript variants
-- References official React documentation and community patterns
+## Agent Role: Database
 
 ---
 name: rorca
@@ -1613,20 +1552,23 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-003):
-After US-002 wires RunStoryList into the stories tab, users watching the Terminal tab (the default tab) still miss story completions because they happen silently. The terminal shows raw agent output but no structured progress markers.
+Three untracked migration files exist in the backend that need to be committed and verified: 072_workspace_context_git_memory_hydrated_at.sql, 073_fix_retrieval_method_constraint.sql, 074_add_memories_embedding_column.sql. Verify each migration file has valid SQL syntax, uses IF NOT EXISTS guards where appropriate, and applies cleanly against the current schema. Ensure they don't conflict with any existing migrations (check schema_migrations table for applied versions).
 
-When a `story_passed` or `story_failed` WAL event arrives via `usePipelineSSE`, inject a visible ANSI-colored marker line into the xterm terminal instance:
-- **Passed**: `\x1b[32m✓ US-001: Add user login — passed (2m 34s)\x1b[0m\n` (green text)
-- **Failed**: `\x1b[31m✗ US-002: Add OAuth flow — failed (5m 12s)\x1b[0m\n` (red text)
-- **Skipped**: `\x1b[33m⊘ US-003: Add SSO — skipped (blocked by US-002)\x1b[0m\n` (yellow text)
-
-The injection point is in the RunViewPanel or RunTerminal component where the xterm Terminal instance is accessible. Use `terminal.write()` to inject the marker. The marker should appear at the current cursor position (after the last line of agent output).
-
-The elapsed time comes from the WAL event payload (`startedAt` → `completedAt` diff). The story title comes from the stories array or the WAL event payload.
+## Context
+- **Migration naming**: These use sequential prefixes (072–074) which is legacy format. Per CLAUDE.md, new migrations MUST use timestamp format `YYYYMMDDHHMMSS`. However, since these files already exist as 072/073/074 and coexist with the 001–079 sequential range, do NOT rename them — just verify no duplicate prefix collision via `checkDuplicatePrefixes()` in `pg-index.ts`.
+- **Idempotency guards are critical**: PostgreSQL natively supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes. For `ALTER TABLE ... ADD COLUMN`, use `DO $$ BEGIN ... EXCEPTION WHEN duplicate_column THEN NULL; END $$` pattern if `IF NOT EXISTS` isn't supported for the specific DDL statement.
+- **Migration runner behavior** (`backend/src/db/pg-index.ts`): Each migration runs inside a transaction. The runner tracks applied versions in `schema_migrations` table (BIGINT version column). Verify the numeric prefixes 072/073/074 don't collide with any existing files — the duplicate migration 069 collision (2026-03-13) is a known process gap.
+- **pgvector context**: Migration 074 adds an embedding column — ensure `CREATE EXTENSION IF NOT EXISTS vector` is present (likely in an earlier migration) before referencing the `vector` type. Check existing migrations for the pgvector extension setup.
+- **`workspace_context` table gotcha**: The `workspace_context` table stores cached git memory + schema snapshots. Migration 072 adds `git_memory_hydrated_at` — this should be a nullable `TIMESTAMPTZ` column (not `TIMESTAMP`) to match PostgreSQL best practices used elsewhere in the schema.
+- **Test approach**: Run `npx tsx backend/src/db/pg-index.ts` (or the migration path used by the runner) to verify clean application. Then run again to confirm idempotency — no errors on re-run. Check `SELECT * FROM schema_migrations ORDER BY version DESC LIMIT 5` to confirm all three versions are recorded.
+- **Git commit**: Stage only the three migration files specifically by name (`git add backend/src/db/pg-migrations/072_*.sql 073_*.sql 074_*.sql`) — do NOT use `git add .` which could pick up unrelated changes visible in the dirty working tree (merge conflicts in `worker.ts` and `run-state.json`).
 
 Acceptance Criteria:
-- When a story_passed WAL event arrives, a green checkmark line (✓ US-XXX: Title — passed (elapsed)) is written to the xterm terminal
-- When a story_failed WAL event arrives, a red X line (✗ US-XXX: Title — failed) is written to the xterm terminal
-- When a story_skipped WAL event arrives, a yellow skip marker (⊘ US-XXX: Title — skipped) is written to the xterm terminal
-- Marker lines use ANSI color codes and are visually distinct from regular agent output
-- Elapsed time is computed from WAL event payload timestamps (startedAt to completedAt)
+- All three migration files (072, 073, 074) are tracked by git (not in untracked status)
+- Each migration file contains valid PostgreSQL SQL that parses without syntax errors
+- Migrations use IF NOT EXISTS / IF EXISTS guards for idempotency
+- Running the migration runner (`pg-index.ts`) applies all three without errors on a database that has migrations 001-071 already applied
+- If a migration fails (e.g., syntax error or constraint violation), the transaction rolls back and the error message includes the migration filename and SQL line number (error state)
+- Running migrations a second time (re-run) produces no errors due to idempotency guards (empty state: already applied)
+- If the database connection is unavailable when migrations attempt to run (error state), the migration runner exits with error 'Database connection failed: {host}:{port}' and does not partially apply
+- While migrations are being applied sequentially (loading state), each migration logs 'Applying migration NNN_description.sql...' before execution and 'Applied migration NNN in {ms}ms' after completion

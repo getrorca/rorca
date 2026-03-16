@@ -36,10 +36,17 @@ function createLogger(): pino.Logger {
       // pino-pretty not available (bun compiled binary or missing dep) — use JSON
     }
   }
+  // When running as the execution-engine subprocess, disable sonic-boom's 4KB
+  // write buffer so output streams to the worker in real-time rather than in
+  // 4KB blobs. RORCA_PROCESS_ROLE=engine is set by worker.ts before spawning.
+  const dest = process.env.RORCA_PROCESS_ROLE === 'engine'
+    ? pino.destination({ minLength: 0, sync: false })
+    : undefined;
   return pino({
     level,
     timestamp: pino.stdTimeFunctions.isoTime,
-  });
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  }, dest as any);
 }
 
 export const logger = createLogger();

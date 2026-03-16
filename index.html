@@ -6,7 +6,7 @@
     <title>Rorca</title>
     <link rel="preconnect" href="https://fonts.googleapis.com">
     <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
-    <link href="https://fonts.googleapis.com/css2?family=Inter:wght@400;500;600&family=JetBrains+Mono:wght@400;500&display=swap" rel="stylesheet">
+    <link href="https://fonts.googleapis.com/css2?family=Geist:wght@400;500;600&family=Geist+Mono:wght@400;500&display=swap" rel="stylesheet">
     <script>
       // Prevent flash: apply saved theme before React hydrates
       (function() {
@@ -19,21 +19,21 @@
       /* Critical CSS — inlined so shell skeleton renders before JS loads.
          Matches tokens.css variables + Shell/Sidebar layout exactly. */
       :root, [data-theme="dark"] {
-        --bg: #09090b; --panel: #121214; --border: #27272a; --surface-200: #18181b;
-        --text: #fafafa; --text-muted: #a1a1aa; --accent: #4f46e5;
-        --skeleton: #27272a; --skeleton-shimmer: #3f3f46;
-        --scrollbar-track: #18181b; --scrollbar-thumb: #3f3f46;
+        --bg: #0b0b18; --panel: #10101f; --border: #2d2d4a; --surface-200: #18182a;
+        --text: #fafafa; --text-muted: #a1a1aa; --accent: #3a9996; --accent-border: #5dd4cf;
+        --skeleton: #2d2d4a; --skeleton-shimmer: #3d3d5c;
+        --scrollbar-track: #18182a; --scrollbar-thumb: #2d2d4a;
         color-scheme: dark;
       }
       [data-theme="light"] {
         --bg: #fafafa; --panel: #ffffff; --border: #e4e4e7; --surface-200: #f4f4f5;
-        --text: #09090b; --text-muted: #71717a; --accent: #4f46e5;
+        --text: #09090b; --text-muted: #52525b; --accent: #0a6963; --accent-border: #0fa8a1;
         --skeleton: #e5e5e5; --skeleton-shimmer: #f5f5f5;
         --scrollbar-track: #f4f4f5; --scrollbar-thumb: #d4d4d8;
         color-scheme: light;
       }
       *, *::before, *::after { box-sizing: border-box; margin: 0; }
-      body { background: var(--bg); color: var(--text); font-family: 'Inter', ui-sans-serif, system-ui, -apple-system, sans-serif; }
+      body { background: var(--bg); color: var(--text); font-family: 'Geist', ui-sans-serif, system-ui, -apple-system, sans-serif; }
       .shell-skeleton { display: flex; flex-direction: column; height: 100vh; height: 100dvh; }
       .shell-skeleton__header {
         height: 48px; display: flex; align-items: center; justify-content: space-between;
@@ -70,7 +70,7 @@
       <!-- Shell skeleton: renders instantly while JS loads. React replaces on hydrate. -->
       <div class="shell-skeleton" aria-hidden="true">
         <div class="shell-skeleton__header">
-          <span class="shell-skeleton__wordmark">rorca</span>
+          <span class="shell-skeleton__wordmark">Rorca</span>
           <div class="shell-skeleton__header-right">
             <div class="shell-skeleton__pill"></div>
             <div class="shell-skeleton__pill" style="width:32px"></div>

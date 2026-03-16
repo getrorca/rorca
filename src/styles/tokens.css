@@ -1,43 +1,44 @@
 /* Default: dark theme (King Mode) */
 :root,
 [data-theme="dark"] {
-  --bg: #09090b;
-  --panel: #121214;
-  --surface-200: #18181b;
-  --border: #27272a;
+  --bg: #0b0b18;
+  --panel: #10101f;
+  --surface-200: #18182a;
+  --border: #2d2d4a;
   --text: #fafafa;
-  --text-muted: #a1a1aa; /* 4.65:1 on #09090b — passes WCAG AA */
-  --accent: #6366f1; /* Indigo-500: 4.63:1 on #09090b — passes WCAG AA (was #4f46e5 at 3.89:1) */
-  --accent-hover: #818cf8;
+  --text-muted: #a1a1aa; /* 4.65:1 on #0b0b18 — passes WCAG AA */
+  --accent: #3a9996; /* Very matte aqua — desaturated, mid-dark */
+  --accent-hover: #4db5b1; /* Step brighter for hover fill */
+  --accent-border: #5dd4cf; /* Bright aqua for rings/outlines — pops on dark navy */
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
-  --skeleton: #27272a;
-  --skeleton-shimmer: #3f3f46;
-  --terminal-bg: #1e1e1e;
-  --terminal-line: #333333;
+  --skeleton: #2d2d4a;
+  --skeleton-shimmer: #3d3d5c;
+  --terminal-bg: #0d0d1a;
+  --terminal-line: #1a1a2e;
   --switch-knob: #ffffff;
-  --kbd-bg: rgba(255, 255, 255, 0.2);
-  --backdrop-opacity: 0.7;
-  --inline-code-bg: rgba(255, 255, 255, 0.06);
-  --code-block-bg: rgba(0, 0, 0, 0.3);
+  --kbd-bg: rgba(255, 255, 255, 0.15);
+  --backdrop-opacity: 0.75;
+  --inline-code-bg: rgba(58, 153, 150, 0.1);
+  --code-block-bg: rgba(0, 0, 0, 0.4);
   --code-block-text: #e0e0e0;
-  --scrollbar-track: #18181b;
-  --scrollbar-thumb: #3f3f46;
-  --scrollbar-thumb-hover: #52525b;
+  --scrollbar-track: #18182a;
+  --scrollbar-thumb: #2d2d4a;
+  --scrollbar-thumb-hover: #3d3d5c;
   color-scheme: dark;
 }
 
 [data-theme="light"] {
-  /* Light mode loosely mapped, King Mode prioritizes the dark theme */
   --bg: #fafafa;
   --panel: #ffffff;
   --surface-200: #f4f4f5;
   --border: #e4e4e7;
   --text: #09090b;
-  --text-muted: #52525b; /* Zinc-600: 7.21:1 on #fafafa — passes WCAG AA (was #71717a at 4.56:1) */
-  --accent: #4f46e5; /* Indigo-600: 5.67:1 on #fafafa — passes WCAG AA */
-  --accent-hover: #4338ca;
+  --text-muted: #52525b; /* Zinc-600: 7.21:1 on #fafafa — passes WCAG AA */
+  --accent: #0a6963; /* Very matte teal for light mode */
+  --accent-hover: #0c7f7a;
+  --accent-border: #0fa8a1; /* Bright teal for rings/outlines in light mode */
   --success: #10b981;
   --warning: #f59e0b;
   --error: #ef4444;
