@@ -5,6 +5,7 @@ import { motion } from 'framer-motion';
 import { Check, X, RefreshCw, Server, Zap, Building2 } from 'lucide-react';
 import { Nav } from '@/components/Nav';
 import { Footer } from '@/components/Footer';
+import { trackPricingToggle, trackCtaClick } from '@/lib/analytics';
 
 // ─── Static pricing data ───────────────────────────────────────────────────
 
@@ -180,7 +181,7 @@ export default function PricingClient() {
                 >
                     <div className="flex items-center gap-3 bg-white/5 border border-white/10 rounded-full px-1.5 py-1.5">
                         <button
-                            onClick={() => setAnnual(false)}
+                            onClick={() => { setAnnual(false); trackPricingToggle('monthly'); }}
                             className={`px-5 py-1.5 rounded-full text-sm font-medium transition-all ${
                                 !annual
                                     ? 'bg-white text-zinc-950 shadow-sm'
@@ -190,7 +191,7 @@ export default function PricingClient() {
                             Monthly
                         </button>
                         <button
-                            onClick={() => setAnnual(true)}
+                            onClick={() => { setAnnual(true); trackPricingToggle('annual'); }}
                             className={`px-5 py-1.5 rounded-full text-sm font-medium transition-all flex items-center gap-2 ${
                                 annual
                                     ? 'bg-white text-zinc-950 shadow-sm'
@@ -248,6 +249,7 @@ export default function PricingClient() {
                                 </div>
                                 <a
                                     href="/download"
+                                    onClick={() => trackCtaClick('free_get_started', '/pricing')}
                                     className="block w-full text-center px-6 py-2.5 rounded-lg border border-white/10 text-zinc-300 text-sm font-medium hover:bg-white/5 hover:border-white/20 transition-colors"
                                 >
                                     Get Started
@@ -332,6 +334,7 @@ export default function PricingClient() {
                                 </div>
                                 <a
                                     href="mailto:hello@rorca.app?subject=Team%20plan%20inquiry"
+                                    onClick={() => trackCtaClick('team_contact_sales', '/pricing')}
                                     className="block w-full text-center px-6 py-2.5 rounded-lg border border-white/10 text-zinc-300 text-sm font-medium hover:bg-white/5 hover:border-white/20 transition-colors"
                                 >
                                     Contact Sales
@@ -363,6 +366,7 @@ export default function PricingClient() {
                                 </div>
                                 <a
                                     href="/download"
+                                    onClick={() => trackCtaClick('free_get_started', '/pricing')}
                                     className="block text-center px-5 py-2.5 rounded-lg border border-white/10 text-zinc-300 text-sm font-medium hover:bg-white/5 transition-colors"
                                 >
                                     Get Started
@@ -404,6 +408,7 @@ export default function PricingClient() {
                                 </div>
                                 <a
                                     href="mailto:hello@rorca.app?subject=Team%20plan%20inquiry"
+                                    onClick={() => trackCtaClick('team_contact_sales', '/pricing')}
                                     className="block text-center px-5 py-2.5 rounded-lg border border-white/10 text-zinc-300 text-sm font-medium hover:bg-white/5 transition-colors"
                                 >
                                     Contact Sales

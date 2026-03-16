@@ -5,6 +5,7 @@ import { Nav } from '@/components/Nav';
 import { Footer } from '@/components/Footer';
 import { Download, Copy, Check, Monitor, Terminal, Database, Globe, ChevronRight, AlertTriangle, CheckCircle } from 'lucide-react';
 import { useState, useEffect } from 'react';
+import { trackDownload } from '@/lib/analytics';
 
 type Platform = 'macos-arm64' | 'macos-x64' | 'linux-x64' | 'windows-x64';
 
@@ -58,6 +59,13 @@ const PLATFORMS: PlatformAsset[] = [
 ];
 
 const GITHUB_RELEASES_BASE = 'https://github.com/getrorca/rorca/releases/latest/download';
+
+const PLATFORM_TO_ANALYTICS: Record<Platform, string> = {
+  'macos-arm64': 'darwin-arm64',
+  'macos-x64': 'darwin-x64',
+  'linux-x64': 'linux-x64',
+  'windows-x64': 'win32-x64',
+};
 
 const CURL_ONELINER = 'curl -fsSL https://get.rorca.app | sh';
 
@@ -273,6 +281,7 @@ export default function DownloadClient() {
                         <a
                           href={href}
                           download
+                          onClick={() => trackDownload(PLATFORM_TO_ANALYTICS[platform.id])}
                           className={`flex items-center gap-1.5 px-4 py-2 rounded-lg text-sm font-medium transition-all ${
                             isActive
                               ? 'bg-white text-zinc-950 hover:bg-zinc-100'
