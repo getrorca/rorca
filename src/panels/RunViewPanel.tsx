@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight, Sparkles, Files, Cpu, MailWarning, Clock, Check, GitMerge, GitPullRequest } from 'lucide-react';
+import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight, Sparkles, Files, Cpu, MailWarning, Clock, Check, GitMerge, GitPullRequest, Zap } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -809,6 +809,57 @@ function PrStatusSection({ prInfo, owner, repo }: {
   );
 }
 
+// ─── WorkflowDispatchStatusSection (US-026) ──────────────────────────────────
+
+type WorkflowDispatchState = 'dispatching' | 'dispatched' | 'failed';
+
+interface WorkflowDispatchInfo {
+  state: WorkflowDispatchState;
+  workflowId?: string;
+  errorMsg?: string;
+}
+
+function WorkflowDispatchStatusSection({ dispatchInfo }: { dispatchInfo: WorkflowDispatchInfo }) {
+  const { state, workflowId, errorMsg } = dispatchInfo;
+  return (
+    <div data-testid="workflow-dispatch-status-section" className="shrink-0 px-3 md:px-4 py-2 border-b border-border bg-panel">
+      <div className="flex items-center gap-2 text-xs">
+        <Zap size={13} className="text-muted shrink-0" />
+        <span className="text-muted font-medium">Workflow Dispatch</span>
+
+        {state === 'dispatching' && (
+          <span data-testid="workflow-badge-dispatching" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-amber-500/10 text-amber-500">
+            <Loader2 size={10} className="animate-spin" />
+            Triggering workflow...
+          </span>
+        )}
+
+        {state === 'dispatched' && (
+          <span data-testid="workflow-badge-dispatched" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-emerald-500/10 text-emerald-500">
+            <Check size={10} />
+            Workflow triggered{workflowId ? ` — ${workflowId}` : ''}
+          </span>
+        )}
+
+        {state === 'failed' && (
+          <span data-testid="workflow-badge-failed" className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded bg-amber-500/10 text-amber-500">
+            <AlertTriangle size={10} />
+            Workflow dispatch failed{workflowId ? ` — ${workflowId}` : ''}
+          </span>
+        )}
+      </div>
+
+      {state === 'failed' && errorMsg && (
+        <div className="mt-1.5">
+          <pre className="text-[10px] text-amber-300/80 font-mono whitespace-pre-wrap break-all leading-relaxed bg-amber-500/5 border border-amber-500/10 rounded px-2 py-1.5 max-h-16 overflow-y-auto">
+            {errorMsg}
+          </pre>
+        </div>
+      )}
+    </div>
+  );
+}
+
 // ─── RunViewPanel ───────────────────────────────────────────────────────────
 
 interface RunViewPanelProps {
@@ -852,6 +903,8 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
 
   // PR status — base state seeded from pipeline_runs, derived state from SSE (US-028)
   const [prInfoBase, setPrInfoBase] = useState<PrInfo | null>(null);
+
+  // Workflow dispatch status — derived from SSE events only (US-026), no DB seed needed
 
   // Resume badge — shown when previously_passed stories were pre-seeded by the trigger
   const [showResumeBadge, setShowResumeBadge] = useState(false);
@@ -967,6 +1020,36 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     }
     return info;
   }, [prInfoBase, walEvents]);
+
+  // Derive workflow dispatch status from SSE events (US-026)
+  const workflowInfo = useMemo<WorkflowDispatchInfo | null>(() => {
+    let info: WorkflowDispatchInfo | null = null;
+    for (const evt of walEvents) {
+      if (evt.event_type === 'workflow_dispatching') {
+        try {
+          const p = JSON.parse(evt.payload ?? '{}');
+          info = { state: 'dispatching', workflowId: p.workflow_id };
+        } catch {
+          info = { state: 'dispatching' };
+        }
+      } else if (evt.event_type === 'workflow_dispatched') {
+        try {
+          const p = JSON.parse(evt.payload ?? '{}');
+          info = { state: 'dispatched', workflowId: p.workflow_id };
+        } catch {
+          info = { ...info, state: 'dispatched' };
+        }
+      } else if (evt.event_type === 'workflow_dispatch_failed') {
+        try {
+          const p = JSON.parse(evt.payload ?? '{}');
+          info = { state: 'failed', workflowId: p.workflow_id, errorMsg: p.error };
+        } catch {
+          info = { state: 'failed' };
+        }
+      }
+    }
+    return info;
+  }, [walEvents]);
 
   const fetchRun = useCallback(async () => {
     if (!workspaceId) return;
@@ -1550,6 +1633,11 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
       {/* PR status — visible when auto-PR is in progress, created, or failed (US-028) */}
       {prInfo && (
         <PrStatusSection prInfo={prInfo} />
+      )}
+
+      {/* Workflow dispatch status — visible when dispatch is triggered (US-026) */}
+      {workflowInfo && (
+        <WorkflowDispatchStatusSection dispatchInfo={workflowInfo} />
       )}
 
       {/* Tab bar — scrollable horizontal strip on mobile */}
