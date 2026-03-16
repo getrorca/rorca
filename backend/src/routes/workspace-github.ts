@@ -436,6 +436,7 @@ router.get('/account', async (req: Request, res: Response) => {
     }
 
     const scopes = conn.scopes ? conn.scopes.split(/[,\s]+/).filter(Boolean) : [];
+    const hasRepoScope = scopes.includes('repo') || scopes.includes('public_repo');
 
     res.json({
       connected: true,
@@ -443,6 +444,7 @@ router.get('/account', async (req: Request, res: Response) => {
       avatarUrl: conn.avatar_url || `https://github.com/${conn.github_username}.png`,
       connectedAt: conn.created_at,
       scopes,
+      hasRepoScope,
     });
   } catch (error: any) {
     logger.error('[GitHub] Account error:', error);

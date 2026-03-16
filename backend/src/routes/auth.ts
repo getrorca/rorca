@@ -43,7 +43,9 @@ const VERIFICATION_RATE_LIMIT_PER_HOUR = 3;
 const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
 const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
 const GITHUB_CALLBACK_URL = process.env.GITHUB_CALLBACK_URL || 'http://localhost:3030/api/auth/github/callback';
-const GITHUB_SCOPES = 'user:email,public_repo';
+const GITHUB_SCOPES = 'read:user user:email';
+// Elevated scopes requested only when connecting a workspace to GitHub (lazy scope elevation)
+const GITHUB_REPO_SCOPES = 'read:user user:email repo';
 
 // In-memory CSRF state store (TTL: 10 minutes). Not persisted — ephemeral tokens only.
 const oauthStateCache = new Map<string, number>();
@@ -1417,6 +1419,43 @@ router.get('/github/callback', async (req: Request, res: Response) => {
     logger.error({ err }, '[auth] GitHub OAuth callback error');
     res.redirect(`${frontendUrl}/auth/github/callback?error=github_error`);
   }
+});
+
+// ─── GET /api/auth/github/elevate — Incremental OAuth for repo scope ────────
+
+/**
+ * @swagger
+ * /api/auth/github/elevate:
+ *   get:
+ *     tags: [Auth]
+ *     summary: Elevate GitHub OAuth scope to include repo access
+ *     operationId: elevateGithubScope
+ *     description: >
+ *       Triggers an incremental GitHub OAuth flow requesting the additional `repo` scope.
+ *       Used when a user connects a workspace to GitHub and needs repo access for PRs and commits.
+ *       The user already has a session token with read:user — this flow only asks for the additional repo scope.
+ *     security: []
+ *     responses:
+ *       302: { description: "Redirect to GitHub authorization URL with repo scope" }
+ *       503: { description: "GitHub OAuth not configured" }
+ */
+router.get('/github/elevate', (_req: Request, res: Response) => {
+  if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
+    res.status(503).json({ error: 'GitHub OAuth not configured' });
+    return;
+  }
+
+  const state = crypto.randomBytes(32).toString('hex');
+  storeOAuthState(state);
+
+  const params = new URLSearchParams({
+    client_id: GITHUB_CLIENT_ID,
+    redirect_uri: GITHUB_CALLBACK_URL,
+    scope: GITHUB_REPO_SCOPES,
+    state,
+  });
+
+  res.redirect(`https://github.com/login/oauth/authorize?${params.toString()}`);
 });
 
 // Auth middleware — verifies JWT access token from Authorization header

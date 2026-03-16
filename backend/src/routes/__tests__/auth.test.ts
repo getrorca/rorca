@@ -868,7 +868,7 @@ describe('GET /api/auth/github', () => {
     expect(res.status).toBe(302);
     expect(res.headers.location).toContain('https://github.com/login/oauth/authorize');
     expect(res.headers.location).toContain('client_id=test-client-id');
-    expect(res.headers.location).toContain('scope=user%3Aemail+repo');
+    expect(res.headers.location).toContain('scope=read%3Auser+user%3Aemail');
     expect(res.headers.location).toContain('state=');
 
     delete process.env.GITHUB_CLIENT_ID;
@@ -897,7 +897,7 @@ describe('GET /api/auth/github/callback', () => {
     const tokenResponse = {
       access_token: 'gho_test_access_token_123',
       token_type: 'bearer',
-      scope: 'user:email,repo',
+      scope: 'read:user user:email',
       ...opts.tokenResponse,
     };
     const userResponse = {
@@ -1114,5 +1114,59 @@ describe('GET /api/auth/github/callback', () => {
     expect(refreshRes.status).toBe(200);
     expect(refreshRes.body.accessToken).toBeDefined();
     expect(refreshRes.body.refreshToken).toBeDefined();
+  });
+
+  test('initial OAuth callback stores read:user scope', async () => {
+    setupGitHubEnv();
+    mockGitHubOAuthFlow(); // default scope is 'read:user user:email'
+
+    await request(ghApp).get('/api/auth/github/callback?code=test-code');
+
+    const user = await queryOne(`SELECT id FROM users WHERE email = $1`, ['octocat@github.com']) as Record<string, unknown>;
+    const conn = await queryOne(`SELECT scopes FROM github_connections WHERE user_id = $1`, [user!.id as string]) as Record<string, unknown>;
+    expect(conn).toBeDefined();
+    expect(conn.scopes).toBe('read:user user:email');
+    // Should NOT contain 'repo' scope on initial sign-in
+    expect((conn.scopes as string)).not.toContain('repo');
+  });
+
+  test('workspace GitHub connection flow requests repo scope after elevation', async () => {
+    setupGitHubEnv();
+    // Simulate initial login with minimal scopes
+    mockGitHubOAuthFlow({ tokenResponse: { scope: 'read:user user:email' } });
+    await request(ghApp).get('/api/auth/github/callback?code=initial-code');
+
+    const user = await queryOne(`SELECT id FROM users WHERE email = $1`, ['octocat@github.com']) as Record<string, unknown>;
+    let conn = await queryOne(`SELECT scopes FROM github_connections WHERE user_id = $1`, [user!.id as string]) as Record<string, unknown>;
+    expect(conn.scopes).toBe('read:user user:email');
+
+    // Simulate elevation flow — user re-authorizes with repo scope
+    mockGitHubOAuthFlow({ tokenResponse: { access_token: 'gho_elevated_token', scope: 'read:user user:email repo' } });
+    await request(ghApp).get('/api/auth/github/callback?code=elevated-code');
+
+    // Verify scopes were updated to include repo
+    conn = await queryOne(`SELECT scopes FROM github_connections WHERE user_id = $1`, [user!.id as string]) as Record<string, unknown>;
+    expect(conn.scopes).toBe('read:user user:email repo');
+    expect((conn.scopes as string)).toContain('repo');
+  });
+});
+
+// ─── GET /api/auth/github/elevate ───
+
+describe('GET /api/auth/github/elevate', () => {
+  test('redirects to GitHub with repo scope when configured', async () => {
+    jest.resetModules();
+    process.env.GITHUB_CLIENT_ID = 'test-client-id';
+    process.env.GITHUB_CLIENT_SECRET = 'test-client-secret';
+    const localApp = require('../../server').default;
+
+    const res = await request(localApp).get('/api/auth/github/elevate');
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain('https://github.com/login/oauth/authorize');
+    expect(res.headers.location).toContain('scope=read%3Auser+user%3Aemail+repo');
+    expect(res.headers.location).toContain('state=');
+
+    delete process.env.GITHUB_CLIENT_ID;
+    delete process.env.GITHUB_CLIENT_SECRET;
   });
 });

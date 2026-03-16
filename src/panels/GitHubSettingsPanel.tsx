@@ -101,6 +101,7 @@ interface GithubAccount {
   avatarUrl?: string;
   connectedAt?: string;
   scopes?: string[];
+  hasRepoScope?: boolean;
 }
 
 interface TestResult {
@@ -546,6 +547,38 @@ export default function GitHubSettingsPanel() {
               <div className={`flex items-center gap-1.5 text-xs ${testResult.valid ? 'text-emerald-400' : 'text-red-400'}`}>
                 {testResult.valid ? <CheckCircle2 size={12} /> : <AlertCircle size={12} />}
                 {testResult.valid ? `Token valid (${testResult.username})` : `Token invalid: ${testResult.error}`}
+              </div>
+            )}
+
+            {/* Scope badge */}
+            <div className="flex items-center gap-2">
+              {account.hasRepoScope ? (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-emerald-500/10 text-emerald-400 border border-emerald-500/30">
+                  <Shield size={10} />
+                  full repo access
+                </span>
+              ) : (
+                <span className="inline-flex items-center gap-1 px-2 py-0.5 text-xs rounded-full bg-surface-200 text-muted border border-border">
+                  <Shield size={10} />
+                  read:user
+                </span>
+              )}
+            </div>
+
+            {/* Upgrade access button — visible when connection has only read:user scope */}
+            {!account.hasRepoScope && (
+              <div className="rounded-lg border border-amber-500/30 bg-amber-500/5 p-3">
+                <p className="text-xs text-amber-300 mb-2">
+                  Rorca needs repo access to create PRs and read commits for this workspace.
+                </p>
+                <a
+                  href={`${BASE_URL}/api/auth/github/elevate`}
+                  className="inline-flex items-center gap-1.5 px-3 py-1.5 text-xs rounded bg-amber-600 text-white hover:bg-amber-500 transition-colors"
+                >
+                  <Shield size={12} />
+                  Upgrade access
+                  <ExternalLink size={10} />
+                </a>
               </div>
             )}
 

@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T20:23:16.653Z",
+  "lastUpdatedAt": "2026-03-16T21:22:26.237Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -81,6 +81,15 @@
       "finishedAt": "2026-03-16T20:23:16.653Z",
       "agentType": "claude",
       "elapsedMs": 318107
+    },
+    {
+      "storyId": "BL-014",
+      "title": "GitHub OAuth minimal scope strategy — request only read:user + user:email",
+      "status": "passed",
+      "startedAt": "2026-03-16T21:15:58.862Z",
+      "finishedAt": "2026-03-16T21:22:26.236Z",
+      "agentType": "claude",
+      "elapsedMs": 387374
     }
   ],
   "failedStories": [],
