@@ -45,6 +45,9 @@ process.env.NODE_ENV = 'test';
     "INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path",
     ['ws-hr', 'Hook Runner WS', tmpDir],
   );
+
+  // Clean up any hooks from previous test to prevent cross-test accumulation
+  await execute("DELETE FROM pipeline_hooks WHERE workspace_id = 'ws-hr'");
 });
 
 afterEach(() => {
@@ -60,7 +63,7 @@ test('returns empty array when no hooks exist', async () => {
 test('runs a successful hook and captures output', async () => {
   await execute(
     `INSERT INTO pipeline_hooks (workspace_id, hook_type, command, enabled) VALUES ($1, $2, $3, $4)`,
-    ['ws-hr', 'pre_run', 'echo hello_world', 1],
+    ['ws-hr', 'pre_run', 'echo hello_world', true],
   );
 
   const results = await runHooks('ws-hr', 'pre_run', tmpDir, { PATH: process.env.PATH! });
@@ -72,7 +75,7 @@ test('runs a successful hook and captures output', async () => {
 test('captures non-zero exit code', async () => {
   await execute(
     `INSERT INTO pipeline_hooks (workspace_id, hook_type, command, enabled) VALUES ($1, $2, $3, $4)`,
-    ['ws-hr', 'post_run', 'exit 42', 1],
+    ['ws-hr', 'post_run', 'exit 42', true],
   );
 
   const results = await runHooks('ws-hr', 'post_run', tmpDir, { PATH: process.env.PATH! });
@@ -83,11 +86,11 @@ test('captures non-zero exit code', async () => {
 test('pre_run hooks abort on first failure', async () => {
   await execute(
     `INSERT INTO pipeline_hooks (workspace_id, hook_type, command, enabled) VALUES ($1, $2, $3, $4)`,
-    ['ws-hr', 'pre_run', 'exit 1', 1],
+    ['ws-hr', 'pre_run', 'exit 1', true],
   );
   await execute(
     `INSERT INTO pipeline_hooks (workspace_id, hook_type, command, enabled) VALUES ($1, $2, $3, $4)`,
-    ['ws-hr', 'pre_run', 'echo should_not_run', 1],
+    ['ws-hr', 'pre_run', 'echo should_not_run', true],
   );
 
   const results = await runHooks('ws-hr', 'pre_run', tmpDir, { PATH: process.env.PATH! });
@@ -98,11 +101,11 @@ test('pre_run hooks abort on first failure', async () => {
 test('post_run hooks continue after failure', async () => {
   await execute(
     `INSERT INTO pipeline_hooks (workspace_id, hook_type, command, enabled) VALUES ($1, $2, $3, $4)`,
-    ['ws-hr', 'post_run', 'exit 1', 1],
+    ['ws-hr', 'post_run', 'exit 1', true],
   );
   await execute(
     `INSERT INTO pipeline_hooks (workspace_id, hook_type, command, enabled) VALUES ($1, $2, $3, $4)`,
-    ['ws-hr', 'post_run', 'echo second_hook', 1],
+    ['ws-hr', 'post_run', 'echo second_hook', true],
   );
 
   const results = await runHooks('ws-hr', 'post_run', tmpDir, { PATH: process.env.PATH! });
@@ -115,11 +118,11 @@ test('post_run hooks continue after failure', async () => {
 test('skips disabled hooks', async () => {
   await execute(
     `INSERT INTO pipeline_hooks (workspace_id, hook_type, command, enabled) VALUES ($1, $2, $3, $4)`,
-    ['ws-hr', 'pre_run', 'echo disabled', 0],
+    ['ws-hr', 'pre_run', 'echo disabled', false],
   );
   await execute(
     `INSERT INTO pipeline_hooks (workspace_id, hook_type, command, enabled) VALUES ($1, $2, $3, $4)`,
-    ['ws-hr', 'pre_run', 'echo enabled', 1],
+    ['ws-hr', 'pre_run', 'echo enabled', true],
   );
 
   const results = await runHooks('ws-hr', 'pre_run', tmpDir, { PATH: process.env.PATH! });
@@ -130,7 +133,7 @@ test('skips disabled hooks', async () => {
 test('passes environment variables to hooks', async () => {
   await execute(
     `INSERT INTO pipeline_hooks (workspace_id, hook_type, command, enabled) VALUES ($1, $2, $3, $4)`,
-    ['ws-hr', 'post_run', 'echo $RUN_STATUS-$RUN_ID', 1],
+    ['ws-hr', 'post_run', 'echo $RUN_STATUS-$RUN_ID', true],
   );
 
   const results = await runHooks('ws-hr', 'post_run', tmpDir, {

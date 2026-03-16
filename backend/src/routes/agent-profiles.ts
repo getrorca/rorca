@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { query, queryOne, execute } from '../db/index';
+import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router({ mergeParams: true });
 
@@ -142,14 +143,14 @@ router.post('/', async (req: Request, res: Response) => {
   const { name, system_prompt_override, allowed_tools, model_override, is_active } = req.body;
 
   if (!name) {
-    res.status(400).json({ error: 'Missing required field: name' });
+    throw new ValidationError('Missing required field: name');
     return;
   }
 
   // Verify workspace exists
   const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
   if (!workspace) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -182,7 +183,7 @@ router.post('/', async (req: Request, res: Response) => {
     res.status(201).json({ profile: formatProfile(profile!) });
   } catch (err: any) {
     if (err.message?.includes('UNIQUE constraint failed') || err.message?.includes('duplicate key value')) {
-      res.status(409).json({ error: `Profile '${name}' already exists for this workspace` });
+      throw new ConflictError(`Profile '${name}' already exists for this workspace`);
       return;
     }
     throw err;
@@ -229,7 +230,7 @@ router.post('/', async (req: Request, res: Response) => {
 router.put('/:profileId', async (req: Request, res: Response) => {
   const profileId = parseInt(String(req.params.profileId), 10);
   if (isNaN(profileId)) {
-    res.status(400).json({ error: 'Invalid profile ID' });
+    throw new ValidationError('Invalid profile ID');
     return;
   }
 
@@ -239,7 +240,7 @@ router.put('/:profileId', async (req: Request, res: Response) => {
   );
 
   if (!existing) {
-    res.status(404).json({ error: 'Profile not found' });
+    throw new NotFoundError('Profile not found');
     return;
   }
 
@@ -296,7 +297,7 @@ router.put('/:profileId', async (req: Request, res: Response) => {
 router.delete('/:profileId', async (req: Request, res: Response) => {
   const profileId = parseInt(String(req.params.profileId), 10);
   if (isNaN(profileId)) {
-    res.status(400).json({ error: 'Invalid profile ID' });
+    throw new ValidationError('Invalid profile ID');
     return;
   }
 
@@ -306,7 +307,7 @@ router.delete('/:profileId', async (req: Request, res: Response) => {
   );
 
   if (!existing) {
-    res.status(404).json({ error: 'Profile not found' });
+    throw new NotFoundError('Profile not found');
     return;
   }
 

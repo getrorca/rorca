@@ -11,6 +11,7 @@ import {
   GripVertical, Trash2, Palette, Pencil, AlignJustify,
   Sparkles,
   Paperclip,
+  Github,
 } from 'lucide-react';
 import EmptyState from '../components/EmptyState';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -36,6 +37,7 @@ import AgentPicker, { type AgentType } from '../components/AgentPicker';
 import ModelSearchSelect, { type ModelOption } from '../components/ModelSearchSelect';
 import { useBoardNav, type BoardNavColumn } from '../hooks/useBoardNav';
 import ContextSummaryCard from '../components/ContextSummaryCard';
+import GitHubImportModal from '../components/GitHubImportModal';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -108,6 +110,7 @@ interface KanbanSpec {
   model?: string;
   attachments?: import('../types').Attachment[];
   attachmentCount?: number;
+  source?: string;
 }
 
 interface CustomColumnData {
@@ -297,6 +300,10 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
   // New Spec slide-over
   const [showNewSpec, setShowNewSpec] = useState(false);
 
+  // GitHub Import modal
+  const [showGitHubImport, setShowGitHubImport] = useState(false);
+  const [githubConnected, setGithubConnected] = useState(false);
+
   // Spec detail slide-over
   const [detailSpecId, setDetailSpecId] = useState<string | null>(null);
   const [detailSpecSummary, setDetailSpecSummary] = useState<ArchiveSpec | null>(null);
@@ -306,6 +313,14 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
   useEffect(() => {
     try { localStorage.setItem(VIEW_MODE_KEY, viewMode); } catch { /* quota */ }
   }, [viewMode]);
+
+  // Check GitHub connection status for Import button visibility
+  useEffect(() => {
+    if (!workspaceId) return;
+    apiFetch<{ connected: boolean }>(`/api/workspaces/${workspaceId}/github`, { silent: true })
+      .then(data => setGithubConnected(data.connected))
+      .catch(() => setGithubConnected(false));
+  }, [workspaceId]);
 
   // Apply initialBrief from command palette
   useEffect(() => {
@@ -369,6 +384,18 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
               </button>
             </div>
 
+            {/* Import from GitHub button — only shown when GitHub is connected */}
+            {githubConnected && (
+              <button
+                onClick={() => setShowGitHubImport(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-surface border border-border hover:bg-panel transition-colors text-[var(--text)]"
+                title="Import issues from GitHub as spec stories"
+              >
+                <Github size={14} />
+                <span className="hidden sm:inline">Import from GitHub</span>
+              </button>
+            )}
+
             {/* New Spec button */}
             <button
               onClick={() => setShowNewSpec(true)}
@@ -420,6 +447,16 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
         onNavigate={onNavigate}
         onNavigateToRun={onNavigateToRun}
         onDeleted={(id) => { handleDetailClose(); }}
+      />
+
+      {/* GitHub Import Modal */}
+      <GitHubImportModal
+        isOpen={showGitHubImport}
+        onClose={() => setShowGitHubImport(false)}
+        onSpecCreated={(specId) => {
+          setShowGitHubImport(false);
+          handleSpecClick(specId);
+        }}
       />
     </div>
   );
@@ -678,7 +715,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
 
   useWalSSE((event) => {
     if (workspaceId && event.workspace_id && event.workspace_id !== String(workspaceId)) return;
-    const KANBAN_EVENTS = ['spec_approved', 'run_started', 'run_finished', 'spec_rejected', 'story_passed', 'story_failed'];
+    const KANBAN_EVENTS = ['spec_approved', 'run_started', 'run_finished', 'spec_rejected', 'story_passed', 'story_failed', 'spec_discovered', 'spec_updated'];
     if (!KANBAN_EVENTS.includes(event.event_type)) return;
     if (event.event_type === 'run_started' && event.spec_id) {
       setActiveRunSpecs((prev) => new Map(prev).set(event.spec_id!, 'running'));
@@ -1496,11 +1533,17 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
             </div>
           )}
 
-          {/* Row 3: Model badge + time-ago + tag pills + attachment badge */}
+          {/* Row 3: Model badge + source badge + time-ago + tag pills + attachment badge */}
           <div className="flex items-center gap-1.5 min-w-0 flex-wrap">
             {modelName && (
               <span className={`shrink-0 inline-flex items-center text-[10px] font-semibold px-1.5 py-0.5 rounded border ${modelColorClass(spec.model)}`}>
                 {modelName}
+              </span>
+            )}
+            {spec.source === 'github' && (
+              <span className="shrink-0 inline-flex items-center gap-0.5 text-[10px] font-medium px-1.5 py-0.5 rounded-full bg-purple-500/15 text-purple-400 border border-purple-500/30">
+                <Github size={8} />
+                From GitHub
               </span>
             )}
             <span className="shrink-0 text-[10px] text-muted flex items-center gap-0.5">

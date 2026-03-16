@@ -23,6 +23,7 @@ import type { ScaffoldFile } from '../lib/workspace-scaffold';
 import { logger } from '../lib/logger';
 import { requirePlan } from '../lib/require-plan';
 import { inferDomain } from '../lib/domain-inference';
+import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -117,7 +118,7 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
     const { id, label, path, domains } = req.body;
 
     if (!fs.existsSync(path)) {
-      res.status(400).json({ error: `Path does not exist on filesystem: ${path}` });
+      throw new ValidationError(`Path does not exist on filesystem: ${path}`);
       return;
     }
 
@@ -128,7 +129,7 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
       );
     } catch (err: any) {
       if (err.code === '23505' || err.message?.includes('duplicate key value violates unique constraint')) {
-        res.status(409).json({ error: `Workspace '${id}' already exists` });
+        throw new ConflictError(`Workspace '${id}' already exists`);
         return;
       }
       throw err;
@@ -178,6 +179,56 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces:
+ *   get:
+ *     tags: [Workspaces]
+ *     summary: List all workspaces
+ *     operationId: listWorkspaces
+ *     description: >
+ *       Returns all registered workspace entries ordered by creation date descending.
+ *       Supports cursor-based pagination via query parameters.
+ *     parameters:
+ *       - in: query
+ *         name: limit
+ *         schema:
+ *           type: integer
+ *           default: 50
+ *         description: Maximum number of items to return
+ *       - in: query
+ *         name: cursor
+ *         schema:
+ *           type: string
+ *         description: Cursor for the next page (from previous response)
+ *     responses:
+ *       200:
+ *         description: Paginated list of workspaces
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 items:
+ *                   type: array
+ *                   items:
+ *                     $ref: '#/components/schemas/Workspace'
+ *                 total:
+ *                   type: integer
+ *                   example: 3
+ *                 hasMore:
+ *                   type: boolean
+ *                   example: false
+ *                 cursor:
+ *                   type: string
+ *                   nullable: true
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 // GET /api/workspaces
 router.get('/', async (req, res, next) => {
   try {
@@ -293,7 +344,7 @@ router.post('/:id/hydrate', async (req, res, next) => {
     // 1. Fetch workspace
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -348,7 +399,7 @@ router.post('/:id/hydrate', async (req, res, next) => {
         });
       } catch (err: any) {
         if (err.message?.includes('Not a git repository')) {
-          res.status(422).json({ error: err.message });
+          throw new UnprocessableError(err.message);
           return;
         }
         res.status(502).json({ error: `Git map step failed: ${err.message}` });
@@ -444,7 +495,7 @@ router.get('/:id/files', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -561,7 +612,7 @@ router.get('/:id', async (req, res, next) => {
   try {
     const row = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!row) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
     res.json({ workspace: parseWorkspace(row) });
@@ -570,12 +621,86 @@ router.get('/:id', async (req, res, next) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}:
+ *   patch:
+ *     tags: [Workspaces]
+ *     summary: Update workspace settings
+ *     operationId: updateWorkspace
+ *     description: >
+ *       Partially updates a workspace. All body fields are optional — only provided
+ *       fields are updated. If path is supplied, it must exist on the filesystem.
+ *       Domains should be an array of domain strings (e.g. ["saas", "fintech"]).
+ *       pr_template can be set to null or empty string to clear the PR template.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *         example: cashflow-ai
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             properties:
+ *               label:
+ *                 type: string
+ *                 description: Human-readable workspace name
+ *                 example: CashflowAI (updated)
+ *               path:
+ *                 type: string
+ *                 description: Absolute filesystem path to the workspace
+ *                 example: /Users/dev/cashflow-ai
+ *               domains:
+ *                 type: array
+ *                 items:
+ *                   type: string
+ *                 description: Domain tags for this workspace (affects L2 direction layer)
+ *                 example: ["saas", "fintech"]
+ *               pr_template:
+ *                 type: string
+ *                 nullable: true
+ *                 description: Markdown template for auto-generated pull request bodies
+ *     responses:
+ *       200:
+ *         description: Workspace updated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 workspace:
+ *                   $ref: '#/components/schemas/Workspace'
+ *       400:
+ *         description: Supplied path does not exist on the filesystem
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       404:
+ *         description: Workspace not found
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 // PATCH /api/workspaces/:id — Update workspace settings
 router.patch('/:id', async (req, res, next) => {
   try {
     const row = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!row) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -587,7 +712,7 @@ router.patch('/:id', async (req, res, next) => {
 
     if (wsPath !== undefined) {
       if (!fs.existsSync(wsPath)) {
-        res.status(400).json({ error: `Path does not exist on filesystem: ${wsPath}` });
+        throw new ValidationError(`Path does not exist on filesystem: ${wsPath}`);
         return;
       }
       await execute('UPDATE workspaces SET path = $1 WHERE id = $2', [String(wsPath), req.params.id]);
@@ -648,7 +773,7 @@ router.get('/:id/pipeline-config', async (req, res, next) => {
       [req.params.id]
     );
     if (!row) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
     const config = JSON.parse(row.pipeline_config || '{}');
@@ -707,7 +832,7 @@ router.put('/:id/pipeline-config', async (req, res, next) => {
   try {
     const row = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [req.params.id]);
     if (!row) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
     const { autoWorktree, storyTimeoutMin, maxRetries, defaultParallelism } = req.body;
@@ -778,7 +903,7 @@ router.get('/:id/stats', async (req, res, next) => {
     const workspaceId = req.params.id;
     const row = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [workspaceId]);
     if (!row) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -921,7 +1046,7 @@ router.get('/:id/team-members', async (req, res, next) => {
     const workspaceId = req.params.id;
     const row = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [workspaceId]);
     if (!row) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -1012,12 +1137,12 @@ router.post('/:id/scan-direction', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (!fs.existsSync(workspace.path)) {
-      res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+      throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
       return;
     }
 
@@ -1209,12 +1334,12 @@ router.get('/:id/health', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (!fs.existsSync(workspace.path)) {
-      res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+      throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
       return;
     }
 
@@ -1361,12 +1486,12 @@ router.post('/:id/echolocate', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (!fs.existsSync(workspace.path)) {
-      res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+      throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
       return;
     }
 
@@ -1431,12 +1556,12 @@ router.post('/:id/monorepo/discover', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (!fs.existsSync(workspace.path)) {
-      res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+      throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
       return;
     }
 
@@ -1444,7 +1569,7 @@ router.post('/:id/monorepo/discover', async (req, res, next) => {
       const result = discoverMonorepo(workspace.path);
 
       if (!result.apps.length) {
-        res.status(400).json({ error: 'No monorepo structure detected', tool: result.tool });
+        throw new ValidationError('No monorepo structure detected');
         return;
       }
 
@@ -1571,12 +1696,12 @@ router.post('/:id/scaffold', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (!fs.existsSync(workspace.path)) {
-      res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+      throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
       return;
     }
 
@@ -1608,19 +1733,19 @@ router.post('/:id/scaffold', async (req, res, next) => {
     if (mode === 'write') {
       const files = req.body.files as Array<{ relativePath: string; content: string }> | undefined;
       if (!files || !Array.isArray(files) || files.length === 0) {
-        res.status(400).json({ error: 'mode=write requires a non-empty files array' });
+        throw new ValidationError('mode=write requires a non-empty files array');
         return;
       }
 
       // Validate file paths — prevent directory traversal
       for (const f of files) {
         if (!f.relativePath || !f.content) {
-          res.status(400).json({ error: 'Each file must have relativePath and content' });
+          throw new ValidationError('Each file must have relativePath and content');
           return;
         }
         const resolved = path.resolve(workspace.path, f.relativePath);
         if (!resolved.startsWith(workspace.path)) {
-          res.status(400).json({ error: `Path traversal detected: ${f.relativePath}` });
+          throw new ValidationError(`Path traversal detected: ${f.relativePath}`);
           return;
         }
       }
@@ -1672,7 +1797,7 @@ router.post('/:id/scaffold', async (req, res, next) => {
       return;
     }
 
-    res.status(400).json({ error: `Unknown mode: ${mode}. Use "preview" or "write".` });
+    throw new ValidationError(`Unknown mode: ${mode}. Use "preview" or "write".`);
   } catch (err) {
     next(err);
   }
@@ -1751,12 +1876,12 @@ router.post('/:id/bootstrap', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (!fs.existsSync(workspace.path)) {
-      res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+      throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
       return;
     }
 
@@ -1990,7 +2115,7 @@ router.post('/:id/bootstrap/commit', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -2187,7 +2312,7 @@ router.get('/:id/context-health', async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -2237,6 +2362,35 @@ router.get('/:id/context-health', async (req, res, next) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/workspaces/{id}:
+ *   delete:
+ *     tags: [Workspaces]
+ *     summary: Delete a workspace
+ *     operationId: deleteWorkspace
+ *     description: >
+ *       Permanently deletes a workspace record from the database and emits a
+ *       workspace_delete WAL event. Does not delete files on disk. Any active
+ *       pipeline runs associated with this workspace should be cancelled first.
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *         example: cashflow-ai
+ *     responses:
+ *       204:
+ *         description: Workspace deleted successfully (no content)
+ *       500:
+ *         description: Internal server error
+ *         content:
+ *           application/json:
+ *             schema:
+ *               $ref: '#/components/schemas/Error'
+ */
 // DELETE /api/workspaces/:id
 router.delete('/:id', async (req, res, next) => {
   try {
