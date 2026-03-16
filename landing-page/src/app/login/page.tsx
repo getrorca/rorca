@@ -4,6 +4,7 @@ import { useState } from 'react';
 import Link from 'next/link';
 import { motion } from 'framer-motion';
 import { Nav } from '@/components/Nav';
+import { Footer } from '@/components/Footer';
 
 const GITHUB_CLIENT_ID = process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID;
 
@@ -89,6 +90,7 @@ export default function LoginPage() {
             <div className="absolute top-0 left-1/2 -translate-x-1/2 w-[600px] h-[400px] bg-accent/10 blur-[120px] pointer-events-none -z-10 rounded-full" />
 
             <div className="flex-grow flex items-center justify-center px-4 pt-20 pb-12">
+
                 <motion.div
                     initial={{ opacity: 0, y: 24 }}
                     animate={{ opacity: 1, y: 0 }}
@@ -187,6 +189,8 @@ export default function LoginPage() {
                     </div>
                 </motion.div>
             </div>
+
+            <Footer />
         </main>
     );
 }
