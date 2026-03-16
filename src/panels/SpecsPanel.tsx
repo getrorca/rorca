@@ -11,6 +11,7 @@ import {
   GripVertical, Trash2, Palette, Pencil, AlignJustify,
   Sparkles,
   Paperclip,
+  Github,
 } from 'lucide-react';
 import EmptyState from '../components/EmptyState';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -36,6 +37,7 @@ import AgentPicker, { type AgentType } from '../components/AgentPicker';
 import ModelSearchSelect, { type ModelOption } from '../components/ModelSearchSelect';
 import { useBoardNav, type BoardNavColumn } from '../hooks/useBoardNav';
 import ContextSummaryCard from '../components/ContextSummaryCard';
+import GitHubImportModal from '../components/GitHubImportModal';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -297,6 +299,10 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
   // New Spec slide-over
   const [showNewSpec, setShowNewSpec] = useState(false);
 
+  // GitHub Import modal
+  const [showGitHubImport, setShowGitHubImport] = useState(false);
+  const [githubConnected, setGithubConnected] = useState(false);
+
   // Spec detail slide-over
   const [detailSpecId, setDetailSpecId] = useState<string | null>(null);
   const [detailSpecSummary, setDetailSpecSummary] = useState<ArchiveSpec | null>(null);
@@ -306,6 +312,14 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
   useEffect(() => {
     try { localStorage.setItem(VIEW_MODE_KEY, viewMode); } catch { /* quota */ }
   }, [viewMode]);
+
+  // Check GitHub connection status for Import button visibility
+  useEffect(() => {
+    if (!workspaceId) return;
+    apiFetch<{ connected: boolean }>(`/api/workspaces/${workspaceId}/github`, { silent: true })
+      .then(data => setGithubConnected(data.connected))
+      .catch(() => setGithubConnected(false));
+  }, [workspaceId]);
 
   // Apply initialBrief from command palette
   useEffect(() => {
@@ -369,6 +383,18 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
               </button>
             </div>
 
+            {/* Import from GitHub button — only shown when GitHub is connected */}
+            {githubConnected && (
+              <button
+                onClick={() => setShowGitHubImport(true)}
+                className="flex items-center gap-1.5 px-3 py-1.5 rounded-lg text-sm font-medium bg-surface border border-border hover:bg-panel transition-colors text-[var(--text)]"
+                title="Import issues from GitHub as spec stories"
+              >
+                <Github size={14} />
+                <span className="hidden sm:inline">Import from GitHub</span>
+              </button>
+            )}
+
             {/* New Spec button */}
             <button
               onClick={() => setShowNewSpec(true)}
@@ -420,6 +446,16 @@ export default function SpecsPanel({ onNavigate, onNavigateToRun, onNavigateToSp
         onNavigate={onNavigate}
         onNavigateToRun={onNavigateToRun}
         onDeleted={(id) => { handleDetailClose(); }}
+      />
+
+      {/* GitHub Import Modal */}
+      <GitHubImportModal
+        isOpen={showGitHubImport}
+        onClose={() => setShowGitHubImport(false)}
+        onSpecCreated={(specId) => {
+          setShowGitHubImport(false);
+          handleSpecClick(specId);
+        }}
       />
     </div>
   );
