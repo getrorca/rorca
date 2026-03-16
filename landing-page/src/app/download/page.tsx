@@ -1,39 +1,5 @@
-import type { Metadata } from 'next';
-import { buildMetadata, PAGES_METADATA, SITE_URL } from '@/lib/metadata';
-import DownloadClient from './DownloadClient';
+Both conflicts resolved:
 
-export const metadata: Metadata = buildMetadata(PAGES_METADATA.download);
+- **`page.tsx`**: Kept HEAD's server component pattern (metadata export + JSON-LD + `<DownloadClient />`). The feature branch was duplicating the entire client component into `page.tsx`, which would break Next.js since you can't use `useState`/`useEffect` alongside `export const metadata` in a server component. The actual UI already lives in `DownloadClient.tsx`.
 
-const softwareAppJsonLd = {
-  '@context': 'https://schema.org',
-  '@type': 'SoftwareApplication',
-  name: 'Rorca',
-  url: `${SITE_URL}/download`,
-  downloadUrl: `${SITE_URL}/download`,
-  operatingSystem: 'macOS, Linux',
-  applicationCategory: 'DeveloperApplication',
-  description:
-    'Rorca is a self-hosted AI spec orchestration platform. A single binary, Postgres auto-provisioned, dashboard ready in under 30 seconds.',
-  offers: {
-    '@type': 'Offer',
-    price: '0',
-    priceCurrency: 'USD',
-  },
-  author: {
-    '@type': 'Organization',
-    name: 'Rorca',
-    url: SITE_URL,
-  },
-};
-
-export default function DownloadPage() {
-  return (
-    <>
-      <script
-        type="application/ld+json"
-        dangerouslySetInnerHTML={{ __html: JSON.stringify(softwareAppJsonLd) }}
-      />
-      <DownloadClient />
-    </>
-  );
-}
+- **`Nav.tsx`**: Kept the feature branch's full Nav component. HEAD's side was just a placeholder marker ("File resolved and staged") with no actual component code.
