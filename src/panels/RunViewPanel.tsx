@@ -941,6 +941,31 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
     return status;
   }, [run, walEvents]);
 
+  // Derive setup phase state for wave parallel runs (worktree creation before stories start)
+  const { isInSetupPhase, setupStoryCount } = useMemo(() => {
+    let setupStarted = false;
+    let storyCount = 0;
+    let setupDone = false;
+    let anyStoryStarted = false;
+    for (const evt of walEvents) {
+      if (evt.event_type === 'run_setup_started') {
+        setupStarted = true;
+        try {
+          const p = typeof evt.payload === 'string' ? JSON.parse(evt.payload) : evt.payload;
+          storyCount = p?.story_count ?? 0;
+        } catch { /* ignore */ }
+      } else if (evt.event_type === 'run_setup_done') {
+        setupDone = true;
+      } else if (evt.event_type === 'story_started') {
+        anyStoryStarted = true;
+      }
+    }
+    return {
+      isInSetupPhase: setupStarted && !setupDone && !anyStoryStarted,
+      setupStoryCount: storyCount,
+    };
+  }, [walEvents]);
+
   // Derive per-story live statuses: seed from DB results, then overlay live SSE events
   const liveStatuses = useMemo(() => {
     // Start with DB-seeded statuses (covers stories that ran before we subscribed to SSE)
@@ -1662,6 +1687,18 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
           );
         })}
       </div>
+
+      {/* Wave setup phase banner — shown while worktrees are being created */}
+      {isInSetupPhase && (
+        <div className="shrink-0 border-b border-blue-500/30 bg-blue-500/10" role="status" aria-live="polite">
+          <div className="px-4 py-2.5 flex items-center gap-2">
+            <Loader2 size={16} className="text-blue-400 shrink-0 animate-spin" />
+            <span className="text-sm font-medium text-blue-400">
+              Preparing {setupStoryCount || ''} parallel worktree{setupStoryCount !== 1 ? 's' : ''}…
+            </span>
+          </div>
+        </div>
+      )}
 
       {/* HITL blocked banner */}
       {effectiveStatus === 'blocked' && (
