@@ -40,6 +40,15 @@ export function errorHandler(
     return;
   }
 
+  // PostgreSQL unique constraint — map to 409 Conflict
+  if (err.message?.includes('duplicate key value violates unique constraint')) {
+    res.status(409).json({
+      error: 'Resource already exists',
+      code: 'CONFLICT',
+    });
+    return;
+  }
+
   // Unhandled / unexpected errors — 500
   logger.error({ err, stack: err.stack }, '[ErrorHandler] Unhandled error');
   const body: Record<string, unknown> = {

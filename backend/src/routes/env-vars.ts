@@ -3,6 +3,7 @@ import { randomUUID } from 'crypto';
 import { query, queryOne, execute } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router({ mergeParams: true });
 
@@ -59,7 +60,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -124,23 +125,23 @@ router.post('/', async (req: Request, res: Response) => {
     const { key, value, isSecret } = req.body;
 
     if (!key || typeof key !== 'string') {
-      res.status(400).json({ error: 'Missing required field: key' });
+      throw new ValidationError('Missing required field: key');
       return;
     }
     if (value === undefined || value === null || typeof value !== 'string') {
-      res.status(400).json({ error: 'Missing required field: value' });
+      throw new ValidationError('Missing required field: value');
       return;
     }
 
     // Validate key format: alphanumeric + underscores, typical env var name
     if (!/^[A-Za-z_][A-Za-z0-9_]*$/.test(key)) {
-      res.status(400).json({ error: 'Invalid key format. Use letters, numbers, and underscores only (must start with letter or underscore).' });
+      throw new ValidationError('Invalid key format. Use letters, numbers, and underscores only (must start with letter or underscore).');
       return;
     }
 
     const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -223,7 +224,7 @@ router.delete('/:key', async (req: Request, res: Response) => {
     );
 
     if (result.rowCount === 0) {
-      res.status(404).json({ error: 'Env var not found' });
+      throw new NotFoundError('Env var not found');
       return;
     }
 

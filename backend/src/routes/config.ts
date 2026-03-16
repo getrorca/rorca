@@ -11,6 +11,7 @@ import { getProviderAsync, getProviderSource, invalidateProviderCache } from '..
 import { loadRorcaConfig, writeRorcaConfig, invalidateConfigCache } from '../lib/rorca-config';
 import * as fs from 'fs';
 import * as path from 'path';
+import { AuthError, NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -383,7 +384,7 @@ router.get('/openrouter-models', async (_req: Request, res: Response) => {
 
   const apiKey = await resolveOpenRouterKey();
   if (!apiKey) {
-    res.status(401).json({ error: 'No OpenRouter API key configured. Add one in Settings > Provider Configuration.' });
+    throw new AuthError('No OpenRouter API key configured. Add one in Settings > Provider Configuration.');
     return;
   }
 
@@ -403,11 +404,11 @@ router.get('/openrouter-models', async (_req: Request, res: Response) => {
     if (!response.ok) {
       const status = response.status;
       if (status === 401 || status === 403) {
-        res.status(401).json({ error: 'Invalid OpenRouter API key.' });
+        throw new AuthError('Invalid OpenRouter API key.');
         return;
       }
       if (status === 429) {
-        res.status(429).json({ error: 'OpenRouter rate limited. Try again later.' });
+        throw new TooManyRequestsError('OpenRouter rate limited. Try again later.');
         return;
       }
       res.status(502).json({ error: `OpenRouter API returned ${status}` });
@@ -479,7 +480,7 @@ router.post('/openrouter-test', async (req: Request, res: Response) => {
   const apiKey = key || await resolveOpenRouterKey();
 
   if (!apiKey) {
-    res.status(400).json({ ok: false, error: 'No API key provided or stored.' });
+    throw new ValidationError('No API key provided or stored.');
     return;
   }
 
@@ -567,9 +568,7 @@ router.put('/agent', async (req: Request, res: Response) => {
   // Validate agentType
   if (newType !== undefined) {
     if (!(VALID_AGENT_TYPES as readonly string[]).includes(newType)) {
-      res.status(400).json({
-        error: `Invalid agentType "${newType}". Must be one of: ${VALID_AGENT_TYPES.join(', ')}`,
-      });
+      throw new ValidationError(`Invalid agentType "${newType}". Must be one of: ${VALID_AGENT_TYPES.join(', ')}`);
       return;
     }
 
@@ -577,9 +576,7 @@ router.put('/agent', async (req: Request, res: Response) => {
     if (newType === 'opencode') {
       const status = detectOpenCode();
       if (!status.opencodeInstalled) {
-        res.status(400).json({
-          error: 'OpenCode binary not found. Install it first: npm i -g opencode',
-        });
+        throw new ValidationError('OpenCode binary not found. Install it first: npm i -g opencode');
         return;
       }
     }
@@ -588,9 +585,7 @@ router.put('/agent', async (req: Request, res: Response) => {
     if (newType === 'codex') {
       const status = detectCodex();
       if (!status.codexInstalled) {
-        res.status(400).json({
-          error: 'Codex CLI not found. Install it first: npm i -g @openai/codex',
-        });
+        throw new ValidationError('Codex CLI not found. Install it first: npm i -g @openai/codex');
         return;
       }
     }
@@ -605,9 +600,7 @@ router.put('/agent', async (req: Request, res: Response) => {
     if (effectiveModel.startsWith('ollama/')) {
       const ollamaStatus = await detectOllama();
       if (!ollamaStatus.available) {
-        res.status(400).json({
-          error: 'Ollama not detected. Start with: ollama serve',
-        });
+        throw new ValidationError('Ollama not detected. Start with: ollama serve');
         return;
       }
     } else {
@@ -618,9 +611,7 @@ router.put('/agent', async (req: Request, res: Response) => {
     if (effectiveModel.startsWith('openrouter/') && !OPENCODE_MODELS.find(m => m.id === effectiveModel)) {
       const orKey = await resolveOpenRouterKey();
       if (!orKey) {
-        res.status(400).json({
-          error: 'OpenRouter models require an API key. Add one in the OpenRouter card above.',
-        });
+        throw new ValidationError('OpenRouter models require an API key. Add one in the OpenRouter card above.');
         return;
       }
     }
@@ -633,9 +624,7 @@ router.put('/agent', async (req: Request, res: Response) => {
           `SELECT 1 FROM integration_credentials WHERE provider = 'github_copilot' LIMIT 1`
         );
         if (!copilotRow) {
-          res.status(400).json({
-            error: 'GitHub Copilot requires connecting your GitHub account first. Use "Sign in with GitHub" below.',
-          });
+          throw new ValidationError('GitHub Copilot requires connecting your GitHub account first. Use "Sign in with GitHub" below.');
           return;
         }
       } else {
@@ -648,9 +637,7 @@ router.put('/agent', async (req: Request, res: Response) => {
             requiredProviders
           );
           if (!hasKey) {
-            res.status(400).json({
-              error: `Model "${effectiveModel}" requires a ${modelEntry.provider} API key. Add one in Provider Configuration above.`,
-            });
+            throw new ValidationError(`Model "${effectiveModel}" requires a ${modelEntry.provider} API key. Add one in Provider Configuration above.`);
             return;
           }
         }
@@ -761,14 +748,14 @@ router.put('/orchestration', async (req: Request, res: Response) => {
 
   const cwd = await resolveWorkspacePath(workspaceId);
   if (!cwd) {
-    res.status(404).json({ error: 'Workspace not found. Select a workspace first.' });
+    throw new NotFoundError('Workspace not found. Select a workspace first.');
     return;
   }
 
   // Validate
   const validationErrors = validateOrchestrationConfig(orchestration);
   if (validationErrors.length > 0) {
-    res.status(400).json({ error: 'Orchestration config validation failed', details: validationErrors });
+    throw new ValidationError('Orchestration config validation failed');
     return;
   }
 
@@ -848,7 +835,7 @@ router.get('/claude-auth', (_req: Request, res: Response) => {
 router.post('/claude-auth/login', (_req: Request, res: Response) => {
   const result = triggerClaudeLogin();
   if (!result.spawned) {
-    res.status(400).json({ error: result.error });
+    throw new ValidationError(result.error || 'Operation failed');
     return;
   }
   res.json({ ok: true, message: 'Claude auth login triggered. Complete sign-in in your browser.' });
@@ -871,7 +858,7 @@ router.post('/claude-auth/login', (_req: Request, res: Response) => {
 router.post('/claude-auth/logout', async (_req: Request, res: Response) => {
   const result = await triggerClaudeLogout();
   if (!result.success) {
-    res.status(400).json({ error: result.error });
+    throw new ValidationError(result.error || 'Operation failed');
     return;
   }
   res.json({ ok: true, message: 'Claude account disconnected.' });
@@ -913,7 +900,7 @@ router.get('/codex-auth', (_req: Request, res: Response) => {
 router.post('/codex-auth/login', (_req: Request, res: Response) => {
   const result = triggerCodexLogin();
   if (!result.spawned) {
-    res.status(400).json({ error: result.error });
+    throw new ValidationError(result.error || 'Operation failed');
     return;
   }
   res.json({ ok: true, message: 'Codex login triggered. Complete sign-in in your browser.' });
@@ -936,7 +923,7 @@ router.post('/codex-auth/login', (_req: Request, res: Response) => {
 router.post('/codex-auth/logout', async (_req: Request, res: Response) => {
   const result = await triggerCodexLogout();
   if (!result.success) {
-    res.status(400).json({ error: result.error });
+    throw new ValidationError(result.error || 'Operation failed');
     return;
   }
   res.json({ ok: true, message: 'ChatGPT account disconnected.' });
@@ -1018,7 +1005,7 @@ router.put('/embedding-provider', async (req: Request, res: Response) => {
   const { provider, workspaceId, model } = req.body ?? {};
   const valid = ['auto', 'openai', 'openai-large', 'openrouter', 'voyage', 'google', 'local'];
   if (!provider || !valid.includes(provider)) {
-    res.status(400).json({ error: `Invalid provider. Must be one of: ${valid.join(', ')}` });
+    throw new ValidationError(`Invalid provider. Must be one of: ${valid.join(', ')}`);
     return;
   }
 

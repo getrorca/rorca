@@ -4,6 +4,7 @@ import { z } from 'zod';
 import { queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { getEffectiveUser } from '../lib/get-user';
+import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -59,7 +60,7 @@ router.get('/profile', async (req: Request, res: Response) => {
   );
 
   if (!row) {
-    res.status(404).json({ error: 'User not found' });
+    throw new NotFoundError('User not found');
     return;
   }
 
@@ -128,7 +129,7 @@ router.put('/profile', validateBody(ProfileUpdateSchema), async (req: Request, r
   }
 
   if (updates.length === 0) {
-    res.status(400).json({ error: 'No fields to update' });
+    throw new ValidationError('No fields to update');
     return;
   }
 
@@ -183,11 +184,11 @@ router.put('/password', async (req: Request, res: Response) => {
   const { currentPassword, newPassword } = req.body;
 
   if (!currentPassword || typeof currentPassword !== 'string') {
-    res.status(400).json({ error: 'currentPassword is required' });
+    throw new ValidationError('currentPassword is required');
     return;
   }
   if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 6) {
-    res.status(400).json({ error: 'newPassword must be at least 6 characters' });
+    throw new ValidationError('newPassword must be at least 6 characters');
     return;
   }
 
@@ -196,12 +197,12 @@ router.put('/password', async (req: Request, res: Response) => {
     [user.id],
   );
   if (!row) {
-    res.status(404).json({ error: 'User not found' });
+    throw new NotFoundError('User not found');
     return;
   }
 
   if (!bcrypt.compareSync(currentPassword, row.password_hash)) {
-    res.status(403).json({ error: 'Current password is incorrect' });
+    throw new ForbiddenError('Current password is incorrect');
     return;
   }
 
