@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T09:23:00.668Z",
+  "lastUpdatedAt": "2026-03-16T08:52:11.369Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -15,14 +15,14 @@
       "elapsedMs": 156379
     },
     {
-      "storyId": "US-046",
-      "title": "Structured error responses audit — replace raw error strings with AppError",
+      "storyId": "US-047",
+      "title": "Health check hardening — include all component statuses",
       "status": "passed",
-      "startedAt": "2026-03-16T08:49:22.905Z",
-      "finishedAt": "2026-03-16T09:23:00.667Z",
+      "startedAt": "2026-03-16T08:49:43.462Z",
+      "finishedAt": "2026-03-16T08:52:11.369Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 2017762
+      "elapsedMs": 147906
     }
   ],
   "failedStories": [],
