@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T08:49:10.815Z",
+  "lastUpdatedAt": "2026-03-16T08:52:20.199Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -15,14 +15,14 @@
       "elapsedMs": 156379
     },
     {
-      "storyId": "US-003",
-      "title": "Commit untracked database migration files",
+      "storyId": "US-004",
+      "title": "Landing page auth pages — /login and /signup with GitHub OAuth",
       "status": "passed",
-      "startedAt": "2026-03-16T08:47:51.778Z",
-      "finishedAt": "2026-03-16T08:49:10.815Z",
+      "startedAt": "2026-03-16T08:47:53.274Z",
+      "finishedAt": "2026-03-16T08:52:20.198Z",
       "agentType": "claude",
-      "model": "claude-haiku-4-5-20251001",
-      "elapsedMs": 79037
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 266924
     }
   ],
   "failedStories": [],
