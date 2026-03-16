@@ -78,6 +78,7 @@ import { startGraphPopulator } from './lib/graph-populator';
 import workspaceDriftRouter from './routes/workspace-drift';
 import { startDriftSubscriber } from './lib/drift-subscriber';
 import { startMarkerInjector } from './lib/marker-injector';
+import { startCommitStatusPoster } from './lib/commit-status-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 import { initBoss } from './lib/pg-boss';
@@ -328,6 +329,9 @@ startDriftSubscriber();
 
 // US-008: Subscribe marker injector to write story completion markers into run_output_chunks
 startMarkerInjector();
+
+// US-027: Subscribe commit status poster to post GitHub status checks for story progress
+startCommitStatusPoster();
 
 // PR-019: Auto-rotate memory after each pipeline run completion
 // PR-018: Auto-deduplicate memory after rotation (post-run)
