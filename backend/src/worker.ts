@@ -1306,7 +1306,7 @@ async function handlePipelineMerge(jobs: PgBoss.Job<Record<string, unknown>>[]):
 // We do NOT re-queue — a partially-executed run may have committed code;
 // re-running it would create duplicate commits.
 
-async function recoverStaleJobs(): Promise<void> {
+export async function recoverStaleJobs(): Promise<void> {
   type StaleJobRow = {
     id: string;
     name: string;
@@ -1853,21 +1853,12 @@ process.on('unhandledRejection', (reason) => {
   void shutdown('unhandledRejection');
 });
 
-// ── Startup ──────────────────────────────────────────────────────────────
+// ── Singleton guard ──────────────────────────────────────────────────────
+// Prevents duplicate workers from competing for the same pg-boss queue,
+// which causes orphan sweep / stale-job recovery to kill each other's
+// engine processes (the root cause of runs dying mid-story).
 
-async function start(): Promise<void> {
-  // 1. Run pending SQL migrations (001–NNN) against the main public schema
-  try {
-    await initDb();
-  } catch (err) {
-    logger.error({ err }, '[worker] database initialisation failed');
-    process.exit(1);
-  }
-
-  // 1b. Singleton guard — exit if another worker has a fresh heartbeat.
-  // Prevents duplicate workers from competing for the same pg-boss queue,
-  // which causes orphan sweep / stale-job recovery to kill each other's
-  // engine processes (the root cause of runs dying mid-story).
+export async function checkSingletonGuard(): Promise<void> {
   try {
     type LiveWorkerRow = { worker_id: string; pid: number; last_seen: string };
     const liveWorkers = await query<LiveWorkerRow>(
@@ -1879,7 +1870,6 @@ async function start(): Promise<void> {
     );
 
     if (liveWorkers.length > 0) {
-      // Check if any of them are actually alive (PID check)
       for (const w of liveWorkers) {
         try {
           process.kill(w.pid, 0); // throws ESRCH if dead
@@ -1889,7 +1879,6 @@ async function start(): Promise<void> {
           );
           process.exit(0);
         } catch {
-          // PID is dead — stale heartbeat. Clean it up and continue.
           logger.info({ stalePid: w.pid }, '[worker] Cleaning stale heartbeat from dead worker');
           await execute(
             `DELETE FROM worker_heartbeat WHERE worker_id = $1`,

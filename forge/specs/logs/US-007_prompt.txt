@@ -1399,6 +1399,8 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
 Follow this workflow for implementation:
+## Agent Role: Frontend
+
 ---
 name: rorca
 description: Implement and validate changes to the Rorca codebase with subagent-assisted context management.
@@ -1550,24 +1552,24 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-007):
-The flush timer logic added in US-001 is embedded inside the worker's process spawning code, making it hard to unit test in isolation. Extract the buffering + flushing logic into a standalone `FlushBuffer` class in `backend/src/lib/flush-buffer.ts` that can be instantiated and tested independently.
+Audit all existing CTA buttons and navigation links across the 4 existing landing pages (home, architecture, engine, compute) and wire them to real routes. Mappings: 'Start Building' / 'Get Started' → /download, 'Read the Docs' → /docs (or /download if docs not built), 'Log In' in nav → /login, 'Sign Up' in nav → /signup, 'View Pricing' → /pricing, 'Learn More' (architecture) → /architecture, 'Learn More' (engine) → /engine. Remove any placeholder href='#' or onClick={()=>{}} handlers. Ensure all links use Next.js Link component for client-side navigation (internal) or <a> with target='_blank' for external.
 
-The class should encapsulate:
-- `pending: Buffer` — the accumulation buffer
-- `CHUNK_SIZE: number` — configurable (default 4096)
-- `FLUSH_INTERVAL_MS: number` — configurable (default 500)
-- `onFlush: (data: Buffer) => Promise<void>` — callback invoked when flushing
-- `write(data: Buffer): void` — append data, trigger size-based flush if threshold reached, reset/start timer
-- `close(): Promise<void>` — flush remaining, clear timer
-- Internal timer management (setTimeout/clearTimeout)
-
-Then refactor worker.ts `handleData()` to use `new FlushBuffer({ chunkSize: 4096, flushInterval: 500, onFlush: writeChunk })` instead of inline buffer management. The behavioral contract must remain identical — this is a refactor, not a feature change.
-
-Update the Jest tests from US-004 to test FlushBuffer directly (simpler, no worker mocking needed).
+## Context
+- **Landing pages are Next.js 14** (separate from the React 18 + Vite main app) — they live under a different directory structure. Use `next/link` for all internal navigation, not `react-router-dom`'s `Link`. Check the landing page root for the actual file locations (likely `src/app/` or `pages/` depending on whether App Router or Pages Router is used).
+- **Four pages to audit**: home, architecture, engine, compute. Grep for `href="#"`, `href=""`, `onClick={() => {}}`, and `onClick={()=>{}}` across all landing page files to find every placeholder link. Also check for `href="javascript:void(0)"`.
+- **Next.js `Link` component** requires `import Link from 'next/link'` — do NOT use `<a>` tags for internal routes. For external links (GitHub repo, external docs), use plain `<a target="_blank" rel="noopener noreferrer">`. Never mix the two patterns.
+- **Route fallback strategy**: For routes that don't exist yet (`/docs`, `/login`, `/signup`, `/pricing`), point to `/download` as fallback and add a `// TODO: Update to real route when page is built` comment. Check which routes actually have page components before deciding — some may already exist.
+- **Nav component is likely shared** across all 4 pages (header/navbar). Fixing auth links (`Log In` → `/login`, `Sign Up` → `/signup`) in the shared nav component fixes all pages at once. Don't duplicate fixes per page.
+- **Graceful degradation for auth links**: When `/login` and `/signup` don't exist yet, the AC requires a "Coming Soon" tooltip. Use the `title` attribute or a lightweight tooltip component already in the landing page codebase — don't install new dependencies for this.
+- **Loading indicator via `prefetch`**: Next.js App Router `Link` prefetches by default. The "loading indicator in browser tab" AC refers to standard Next.js `loading.tsx` conventions. If using App Router, ensure `loading.tsx` files exist in relevant route segments. If Pages Router, use `next/router` events for NProgress or similar.
+- **Test thoroughly by clicking every CTA** after wiring — the AC explicitly requires "zero placeholder links" which means a full audit pass, not just fixing the ones you find in a quick grep. Check button components that may wrap links (e.g., a `<Button>` component with an `href` or `onClick` prop that navigates).
 
 Acceptance Criteria:
-- FlushBuffer class exists in backend/src/lib/flush-buffer.ts with write(), close(), and configurable onFlush callback
-- worker.ts handleData() uses FlushBuffer instead of inline buffer + timer management
-- FlushBuffer supports configurable CHUNK_SIZE (default 4096) and FLUSH_INTERVAL_MS (default 500)
-- The behavioral contract is identical — no change in observable flushing behavior from US-001
-- Jest tests from US-004 are updated to test FlushBuffer class directly
+- Zero placeholder links (no href='#', no empty onClick handlers) across all 4 existing landing pages (home, architecture, engine, compute)
+- Nav 'Log In' links to /login, nav 'Sign Up' links to /signup — verified by automated route check
+- 'Start Building' / 'Get Started' CTAs link to /download on all pages where they appear
+- All internal links use Next.js Link component for client-side navigation (no full page reloads)
+- External links (GitHub, docs) open in new tab with rel='noopener noreferrer' and target='_blank'
+- If a linked route does not exist yet (e.g., /docs not built), the link points to /download as fallback and a // TODO comment marks the temporary redirect (error prevention)
+- While navigating between pages via internal links, Next.js shows a loading indicator in the browser tab (loading state via Link prefetch)
+- When no auth pages exist yet (empty state), nav auth links gracefully degrade to /download with 'Coming Soon' tooltip

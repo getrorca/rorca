@@ -58,7 +58,7 @@ async function handleWalEvent(event: WalEvent): Promise<void> {
   if (isNaN(numericRunId)) return;
 
   // Resolve story title — try payload first, fall back to story_results
-  let title = (payload.title as string) || '';
+  let title = (payload.story_title as string) || (payload.title as string) || '';
   if (!title) {
     const sr = await queryOne<{ story_title: string }>(
       'SELECT story_title FROM story_results WHERE run_id = $1 AND story_id = $2',

@@ -1,114 +1,9 @@
 {
   "title": "rorca-integrations",
   "model": "claude-opus-4-6",
-  "_notes": "PRIORITY: GitHub is the ONLY launch blocker. Story grouping: INT-001\u2013005,007 = shared infrastructure, INT-008\u2013017,053 = Linear (post-launch), INT-018\u2013023,026\u2013028 = GitHub (launch blocker), INT-029\u2013038 = Vercel (post-launch), INT-039\u2013048,050\u2013051 = Slack (post-launch). REMOVED: INT-006 (premature toggle), INT-024 (workspace-echolocation.ts already does this), INT-025 (generateActionsYaml() already exists at workspace-github.ts:639), INT-049 (over-engineered automation chains \u2014 separate spec), INT-052 (GitHub OAuth already 100% complete at workspace-github.ts:352 + github_connections table). GitHub OAuth, webhooks, commit status checks, auto-PR settings UI, and Actions YAML generation are already built \u2014 this spec covers the REMAINING gaps.",
+  "_notes": "POST-CONSOLIDATION (2026-03-15): 16 stories removed — covered by rorca-go-to-market-v1 (GTM). Removed: shared infra (INT-001–005, INT-007 → GTM US-017, US-020–024) and GitHub integration (INT-018–023, INT-026–028, INT-054 → GTM US-025–034). REMAINING: Linear (INT-008–017, INT-053), Vercel (INT-029–038), Slack (INT-039–048, INT-050–051, INT-055). This spec should run AFTER rorca-go-to-market-v1. ORIGINAL NOTE: PRIORITY: GitHub is the ONLY launch blocker. INT-006, INT-024, INT-025, INT-049, INT-052 were previously removed (see original _audit note).",
   "_audit": "Audited 2026-03-09. Fixed: wrong _notes grouping (was 'INT-001-015 = GitHub' which was false), wrong migration numbers (was 037/038, now 047+), stale path in INT-027 (was scripts/ralph/specs/pending/), dependency on deleted INT-052 removed from INT-018/020/028. Existing infrastructure: vault.ts (AES-256-GCM), webhooks.ts (GitHub receiver), workspace-github.ts (OAuth+webhooks+auto-PR settings+Actions YAML), github-checks.ts (commit status), workspace-echolocation.ts (repo scan). Highest existing migration: 046.",
   "userStories": [
-    {
-      "id": "INT-001",
-      "title": "Integration Settings Hub Page",
-      "description": "A unified integrations page within Settings showing all provider connection statuses and management controls. GitHub is the primary integration for launch; Linear, Vercel, Slack are post-launch.",
-      "acceptanceCriteria": [
-        "New 'Integrations' tab in Settings (alongside Direction Stack, Model, Account)",
-        "Each integration card: provider logo, name, status badge (Connected/Disconnected/Error), Connect/Disconnect button",
-        "Cards: GitHub (primary, deeper), Linear, Vercel, Slack",
-        "Error state shows last error message with retry option",
-        "'Test connection' button per integration sends ping and shows latency",
-        "Integration cards sorted: connected first, then disconnected",
-        "GitHub card pulls existing connection status from GET /api/workspaces/:id/github/account (already built)"
-      ],
-      "dependsOn": [],
-      "passes": false
-    },
-    {
-      "id": "INT-002",
-      "title": "Integration Credentials \u2014 Extend Existing Vault for OAuth Tokens",
-      "description": "Extend the existing vault infrastructure (backend/src/routes/vault.ts, AES-256-GCM encryption, api_key_vault table) to support OAuth token storage for integrations. The integration_credentials table already exists (migration 038) for GitHub Copilot OAuth \u2014 extend it for Linear, Vercel, and Slack OAuth tokens. Do NOT create a new encryption system \u2014 reuse vault.ts encrypt/decrypt helpers which derive the key from JWT_SECRET via SHA-256.",
-      "acceptanceCriteria": [
-        "vault.ts encrypt/decrypt helpers reused for all integration OAuth tokens \u2014 no new encryption system",
-        "integration_credentials table (migration 038, already exists) used for OAuth tokens \u2014 verify it supports Linear, Vercel, Slack provider values",
-        "API never returns raw tokens \u2014 only masked last 4 chars (existing vault pattern)",
-        "Credentials rotate: new encrypt+store replaces old without downtime (existing vault pattern)",
-        "No new migration needed if integration_credentials schema is sufficient \u2014 otherwise migration 047",
-        "Decryption only in-memory, never logged or exposed in API responses"
-      ],
-      "dependsOn": [
-        "INT-001"
-      ],
-      "passes": false
-    },
-    {
-      "id": "INT-003",
-      "title": "Webhook Infrastructure \u2014 Generic Provider Router and Dead Letter Queue",
-      "description": "Upgrade the existing GitHub-only webhook receiver (backend/src/routes/webhooks.ts) to a generic provider router. Currently POST /api/webhooks/github handles GitHub webhooks with signature verification and async processing. Extend to POST /api/webhooks/:provider with provider-specific signature verification dispatch. Add dead letter queue for failed webhook processing.",
-      "acceptanceCriteria": [
-        "POST /api/webhooks/:provider routes to provider-specific handlers (github handler already exists)",
-        "Provider-specific signature verification dispatched by provider param (GitHub HMAC-SHA256 already implemented in workspace-github.ts:803)",
-        "Existing async processing pattern preserved (setImmediate after 200 response)",
-        "New webhook_failures table for dead letter queue \u2014 failed payloads stored for retry",
-        "Retry up to 3 times with exponential backoff (1m, 5m, 15m)",
-        "Webhook delivery logged to wal_events (existing pattern) with event_type='webhook_received'",
-        "Migration 047_webhook_infrastructure.sql creates webhook_failures table (highest existing migration is 046)"
-      ],
-      "dependsOn": [
-        "INT-002"
-      ],
-      "passes": false
-    },
-    {
-      "id": "INT-004",
-      "title": "Integration Health Dashboard",
-      "description": "A real-time dashboard showing the health of all connected integrations. POST-LAUNCH nice-to-have \u2014 not needed for any integration to function.",
-      "acceptanceCriteria": [
-        "Health panel in Integration Settings: last sync time, error count (24h), status indicator",
-        "Status: Healthy (green), Degraded (amber, >1 error in 24h), Down (red, last sync >1h ago)",
-        "'Refresh' button triggers live health check for all integrations",
-        "Error log expandable: last 10 errors with timestamp and message",
-        "Auto-refresh every 60 seconds",
-        "Health data derived from wal_events (webhook_received, sync_completed, sync_failed) \u2014 no separate integration_health table needed"
-      ],
-      "dependsOn": [
-        "INT-001",
-        "INT-003"
-      ],
-      "passes": false
-    },
-    {
-      "id": "INT-005",
-      "title": "Integration Audit Log",
-      "description": "Append-only log of all integration actions for debugging and compliance. Leverages existing wal_events infrastructure where possible.",
-      "acceptanceCriteria": [
-        "integration_audit_log table: id, provider, action, workspace_id, payload_summary, status, created_at",
-        "Actions logged: token_stored, token_rotated, webhook_received, sync_triggered, sync_completed, sync_failed",
-        "API endpoint GET /api/integrations/audit-log with pagination (reuse paginate.ts helper)",
-        "Audit log viewable in Settings > Integrations > Audit Log tab",
-        "Log entries never deleted (append-only), retained 90 days",
-        "Sensitive data redacted from payload_summary (tokens replaced with [REDACTED])",
-        "Migration 048_integration_audit_log.sql creates table"
-      ],
-      "dependsOn": [
-        "INT-003"
-      ],
-      "passes": false
-    },
-    {
-      "id": "INT-007",
-      "title": "Rate Limit Handler with Exponential Backoff",
-      "description": "All outbound integration API calls respect provider rate limits with automatic backoff. Extend existing backend/src/lib/rate-limiter.ts pattern for outbound calls (current rate-limiter handles inbound requests only).",
-      "acceptanceCriteria": [
-        "New backend/src/lib/integration-rate-limiter.ts for outbound API calls (separate from inbound rate-limiter.ts)",
-        "HTTP 429 responses trigger retry with Retry-After header respected",
-        "If no Retry-After: exponential backoff 1s, 2s, 4s, 8s (max 4 retries)",
-        "Rate limit events logged to integration_audit_log",
-        "Per-provider rate limit config: Linear (400 req/min), GitHub (5000 req/hr), Vercel (200 req/min), Slack (1 req/sec per method)",
-        "In-memory rate limit counter per provider per workspace",
-        "Circuit breaker: disable provider after 10 consecutive failures, auto-retry after 5 minutes"
-      ],
-      "dependsOn": [
-        "INT-003"
-      ],
-      "passes": false
-    },
     {
       "id": "INT-008",
       "title": "Linear OAuth 2.0 Connection with PKCE",
@@ -122,10 +17,7 @@
         "Connection success: Linear user email and workspace name shown in settings",
         "Token refresh handled automatically before expiry"
       ],
-      "dependsOn": [
-        "INT-002",
-        "INT-001"
-      ],
+      "dependsOn": [],
       "passes": false
     },
     {
@@ -148,7 +40,7 @@
     {
       "id": "INT-053",
       "title": "Linear Story Mapping Table Migration",
-      "description": "Create the story_linear_map table needed by INT-013 (story pass \u2192 Linear sub-issue done) and INT-016 (story failure \u2192 Linear comment). Also creates the integration_settings table needed by INT-009 and other stories.",
+      "description": "Create the story_linear_map table needed by INT-013 (story pass → Linear sub-issue done) and INT-016 (story failure → Linear comment). Also creates the integration_settings table needed by INT-009 and other stories.",
       "acceptanceCriteria": [
         "Migration 049_linear_tables.sql creates story_linear_map table (id, run_id FK, rorca_story_id, linear_issue_id, created_at)",
         "Index on story_linear_map(run_id) and story_linear_map(rorca_story_id)",
@@ -164,7 +56,7 @@
     },
     {
       "id": "INT-010",
-      "title": "Linear Issue Import \u2014 Browse and Convert to Spec",
+      "title": "Linear Issue Import — Browse and Convert to Spec",
       "description": "Users can browse Linear issues and convert one or more into a Rorca spec brief.",
       "acceptanceCriteria": [
         "'Import from Linear' button in Forge screen",
@@ -193,14 +85,13 @@
         "Linear webhook URL shown in Settings: https://app/api/webhooks/linear"
       ],
       "dependsOn": [
-        "INT-003",
         "INT-009"
       ],
       "passes": false
     },
     {
       "id": "INT-012",
-      "title": "Linear \u2192 Rorca Auto-Sync: New Issue Creates Draft Spec",
+      "title": "Linear → Rorca Auto-Sync: New Issue Creates Draft Spec",
       "description": "Optionally, a new Linear issue automatically creates a draft spec in Rorca.",
       "acceptanceCriteria": [
         "Configurable per workspace: auto-sync on/off, filter by label/status",
@@ -217,10 +108,10 @@
     },
     {
       "id": "INT-013",
-      "title": "Story Pass \u2192 Linear Sub-Issue Marked Done",
+      "title": "Story Pass → Linear Sub-Issue Marked Done",
       "description": "When a Rorca story passes, the corresponding Linear sub-issue is updated.",
       "acceptanceCriteria": [
-        "Mapping stored: rorca story_id \u2192 linear issue_id in story_linear_map table (created by INT-053)",
+        "Mapping stored: rorca story_id → linear issue_id in story_linear_map table (created by INT-053)",
         "WAL story_passed event triggers PATCH to Linear API to update issue status to Done",
         "Linear issue state resolved by looking up team's 'Done' state",
         "Mapping created when spec was imported from Linear (INT-010)",
@@ -235,7 +126,7 @@
     },
     {
       "id": "INT-014",
-      "title": "Rorca Run Completion \u2192 Linear Parent Issue Update",
+      "title": "Rorca Run Completion → Linear Parent Issue Update",
       "description": "When a run completes, the parent Linear issue status is updated with a summary comment.",
       "acceptanceCriteria": [
         "WAL run_finished event triggers Linear parent issue status update",
@@ -252,7 +143,7 @@
     },
     {
       "id": "INT-015",
-      "title": "Linear Cycle Sync \u2014 Tag Stories to Active Cycle",
+      "title": "Linear Cycle Sync — Tag Stories to Active Cycle",
       "description": "Stories in a run are linked to the active Linear cycle.",
       "acceptanceCriteria": [
         "Fetch active cycle for team from Linear API at run start",
@@ -276,7 +167,7 @@
         "Comment includes: story ID, failure reason (last 500 chars of output), retry count",
         "Comment formatted with code block for error output",
         "Comment only on final failure (after all retries exhausted)",
-        "Reaction emoji added to comment: \u274c",
+        "Reaction emoji added to comment: ❌",
         "Comment creation logged to audit log"
       ],
       "dependsOn": [
@@ -304,170 +195,6 @@
       "passes": false
     },
     {
-      "id": "INT-018",
-      "title": "GitHub Issues Import \u2014 Browse Repo Issues and Convert to Spec",
-      "description": "Browse a linked GitHub repository's issues and convert to Rorca specs. GitHub OAuth is already complete (workspace-github.ts:352, github_connections table) \u2014 this story builds on top of the existing connection.",
-      "acceptanceCriteria": [
-        "'Import from GitHub Issue' button in Forge",
-        "Modal shows repo issue list: title, labels, body excerpt, state",
-        "Search by keyword, filter by label/milestone/assignee",
-        "Select issue: populates Forge brief with title + body",
-        "Multi-select creates combined spec",
-        "'View on GitHub' link per issue",
-        "Import event logged to audit log",
-        "Uses existing GitHub token from workspace-github.ts connection (GET /api/workspaces/:id/github/account)"
-      ],
-      "dependsOn": [
-        "INT-001"
-      ],
-      "passes": false
-    },
-    {
-      "id": "INT-019",
-      "title": "GitHub Actions Workflow Dispatch Trigger",
-      "description": "A GitHub Action can trigger a Rorca pipeline run via workflow_dispatch event.",
-      "acceptanceCriteria": [
-        "POST /api/integrations/github/trigger accepts workflow_dispatch payload",
-        "Payload includes: spec_id, workspace_id, autoWorktree flag",
-        "Authenticates via GitHub webhook secret (HMAC-SHA256, reuse verifyWebhookSignature from workspace-github.ts:803)",
-        "Triggers pipeline run and returns run_id in response",
-        "Example workflow YAML references existing generateActionsYaml() output (workspace-github.ts:639)",
-        "Trigger event logged to audit log"
-      ],
-      "dependsOn": [
-        "INT-003"
-      ],
-      "passes": false
-    },
-    {
-      "id": "INT-020",
-      "title": "Per-Story GitHub Commit Status Checks",
-      "description": "Each story completion posts a GitHub commit status check on the worktree branch. Wires existing postCommitStatus() from github-checks.ts:61 to WAL events from the execution engine.",
-      "acceptanceCriteria": [
-        "WAL story_passed/failed events trigger POST to GitHub Statuses API (reuse postCommitStatus() from github-checks.ts:61)",
-        "Status context: 'rorca/story-{story_id}'",
-        "State: 'success' for pass, 'failure' for fail, 'pending' for running",
-        "Description: 'V2-048: Sprint Velocity Chart \u2014 passed in 8m 22s'",
-        "Target URL links to Rorca Run View",
-        "Only fires when run is in a git worktree (has branch)",
-        "Commit SHA from most recent commit in worktree"
-      ],
-      "dependsOn": [
-        "INT-001"
-      ],
-      "passes": false
-    },
-    {
-      "id": "INT-021",
-      "title": "Auto PR Creation on Run Completion",
-      "description": "When a run completes successfully, a GitHub PR is automatically created for the worktree branch. Auto-PR settings UI already exists (workspace-github.ts:566, PUT /api/workspaces/:id/github/auto-pr) \u2014 this story implements the actual PR creation logic.",
-      "acceptanceCriteria": [
-        "WAL run_finished (status=done) triggers GitHub PR creation via POST /repos/{owner}/{repo}/pulls",
-        "PR title: 'feat: [spec title]'",
-        "PR body: table of stories (ID, title, status, elapsed), total pass rate, run duration",
-        "PR base: auto_pr_target_branch from workspace_github_webhooks (already stored), head: worktree branch",
-        "Labels: ['rorca', 'automated']",
-        "PR URL stored in pipeline_runs table (add pr_url column via migration 050)",
-        "PR URL shown in Run View metadata and Hub recent runs row",
-        "PR creation skipped if no worktree or if PR already exists",
-        "auto_pr_enabled flag from workspace_github_webhooks checked before creating PR",
-        "Migration 050_pipeline_runs_integration_columns.sql adds pr_url, vercel_deployment_id, vercel_preview_url, check_run_id, slack_thread_ts columns"
-      ],
-      "dependsOn": [
-        "INT-020"
-      ],
-      "passes": false
-    },
-    {
-      "id": "INT-022",
-      "title": "PR Description Template Population",
-      "description": "Auto-generated PRs use a configurable template with spec metadata.",
-      "acceptanceCriteria": [
-        "PR template stored in workspace settings (Markdown with template variables)",
-        "Variables: {{spec_title}}, {{story_count}}, {{pass_count}}, {{fail_count}}, {{duration}}, {{run_id}}, {{preview_url}}",
-        "Default template if none configured: standard Rorca PR format",
-        "Template editor in Settings > GitHub tab",
-        "Preview button shows rendered template with sample data",
-        "Template version stored so changes don't affect in-flight runs"
-      ],
-      "dependsOn": [
-        "INT-021"
-      ],
-      "passes": false
-    },
-    {
-      "id": "INT-023",
-      "title": "GitHub Check Run Integration",
-      "description": "The entire Rorca run is represented as a single GitHub Check Run on the worktree branch. This is an upgrade from the per-story Status API (INT-020, using existing postCommitStatus) to the richer Check Runs API with annotations and summary updates.",
-      "acceptanceCriteria": [
-        "Check Run created at run start: status=in_progress, title='Rorca: [spec title]'",
-        "Check Run summary updated every 60 seconds with story progress",
-        "Check Run completed at run end: conclusion=success or failure",
-        "Check Run output: summary table of all stories with status",
-        "Check Run annotations: failed stories marked as 'failure' annotations",
-        "Check Run URL shown in Run View metadata",
-        "Check Run links to Rorca Run View as 'Details'",
-        "Check Run ID stored in pipeline_runs.check_run_id (column from INT-021 migration)"
-      ],
-      "dependsOn": [
-        "INT-020"
-      ],
-      "passes": false
-    },
-    {
-      "id": "INT-026",
-      "title": "GitHub PR Review Request Automation",
-      "description": "Auto-created PRs can automatically request reviews from configured team members. Uses existing auto_pr_reviewers from workspace_github_webhooks table.",
-      "acceptanceCriteria": [
-        "Reviewer list from auto_pr_reviewers in workspace_github_webhooks (already stored via PUT /api/workspaces/:id/github/auto-pr)",
-        "CODEOWNERS file in target repo respected if no explicit reviewers configured",
-        "POST to GitHub PR review_requests endpoint after PR creation (INT-021)",
-        "Reviewers notified via GitHub's native notification system",
-        "'No reviewers configured' skipped gracefully",
-        "Reviewer assignment logged to audit log"
-      ],
-      "dependsOn": [
-        "INT-021"
-      ],
-      "passes": false
-    },
-    {
-      "id": "INT-027",
-      "title": "GitHub Webhook Receiver \u2014 Push Events for Spec Discovery",
-      "description": "Push events to the main branch trigger a spec scan for any new or changed spec files. Extends existing push handler in webhook-handlers.ts (handlePush, line 160+).",
-      "acceptanceCriteria": [
-        "Extend existing handlePush handler in webhook-handlers.ts",
-        "GitHub webhook push event on default branch scans for new .json files in forge/specs/pending/",
-        "New spec files discovered: notify via Rorca toast and Hub pending review",
-        "Webhook processes only default branch pushes (configurable)",
-        "Push events logged to audit log",
-        "Reuses existing webhook signature verification from webhooks.ts"
-      ],
-      "dependsOn": [
-        "INT-003"
-      ],
-      "passes": false
-    },
-    {
-      "id": "INT-028",
-      "title": "GitHub Disconnect and App Uninstall",
-      "description": "Full GitHub integration disconnection removes all stored data. Extends existing disconnect-oauth endpoint (workspace-github.ts:470).",
-      "acceptanceCriteria": [
-        "'Disconnect GitHub' button in Settings > GitHub tab (or Integration Settings hub)",
-        "Confirmation with list of what will be deleted",
-        "Calls existing POST /api/workspaces/:id/github/disconnect-oauth (revokes token, deletes github_connections)",
-        "Calls existing POST /api/workspaces/:id/github/disconnect (deletes webhook, cleans workspace_github_webhooks)",
-        "Remove all GitHub-specific integration_settings",
-        "Future webhooks from GitHub rejected with 401",
-        "Disconnect logged to audit log",
-        "Integration card shows Disconnected state immediately"
-      ],
-      "dependsOn": [
-        "INT-001"
-      ],
-      "passes": false
-    },
-    {
       "id": "INT-029",
       "title": "Vercel API Token Storage and Validation",
       "description": "Store a Vercel API token per workspace for deployment automation.",
@@ -480,10 +207,7 @@
         "Token can be rotated: new token input replaces old",
         "Token masked: shows only last 4 chars after saving"
       ],
-      "dependsOn": [
-        "INT-002",
-        "INT-001"
-      ],
+      "dependsOn": [],
       "passes": false
     },
     {
@@ -546,7 +270,7 @@
         "Poll Vercel GET /v13/deployments/:id every 30 seconds after deploy trigger",
         "States: QUEUED, BUILDING, READY, ERROR",
         "Deployment status shown in Run View metadata: 'Vercel: Building...' with spinner",
-        "On READY: status changes to 'Vercel: Live \u2713' with preview URL link",
+        "On READY: status changes to 'Vercel: Live ✓' with preview URL link",
         "On ERROR: status shows 'Vercel: Build failed' with link to Vercel dashboard",
         "Polling stops after READY or ERROR state",
         "Last status persisted in DB so reload shows correct state"
@@ -562,7 +286,7 @@
       "description": "The Vercel preview URL is prominently displayed wherever the run is visible.",
       "acceptanceCriteria": [
         "Preview URL shown in Run View metadata panel with globe icon",
-        "'Open preview \u2192' link opens URL in new tab",
+        "'Open preview →' link opens URL in new tab",
         "URL also shown in Hub recent runs row (truncated)",
         "URL shown in auto-generated GitHub PR description (via {{preview_url}} template variable from INT-022)",
         "Copy URL button next to link",
@@ -641,7 +365,6 @@
         "Webhook events logged to audit log"
       ],
       "dependsOn": [
-        "INT-003",
         "INT-033"
       ],
       "passes": false
@@ -659,10 +382,7 @@
         "'Reinstall' button available to refresh scopes",
         "OAuth flow handles already-installed case gracefully"
       ],
-      "dependsOn": [
-        "INT-002",
-        "INT-001"
-      ],
+      "dependsOn": [],
       "passes": false
     },
     {
@@ -689,7 +409,7 @@
       "description": "A Slack message is sent when a pipeline run starts.",
       "acceptanceCriteria": [
         "WAL run_started event triggers Slack message via chat.postMessage",
-        "Message Block Kit: Rorca logo, spec name, story count, estimated duration, 'View Run \u2192' button",
+        "Message Block Kit: Rorca logo, spec name, story count, estimated duration, 'View Run →' button",
         "Message posted to configured workspace channel",
         "Thread TS stored in pipeline_runs.slack_thread_ts (column from INT-021 migration 050)",
         "Configurable per workspace: run_started notifications on/off",
@@ -724,32 +444,31 @@
       "description": "A rich summary message is posted when a run completes.",
       "acceptanceCriteria": [
         "WAL run_finished triggers summary update to the run thread",
-        "Block Kit message: status emoji (\u2705/\u274c/\u26a0\ufe0f), pass count, fail count, duration",
+        "Block Kit message: status emoji (✅/❌/⚠️), pass count, fail count, duration",
         "Table section: top 3 failed stories with error excerpt",
-        "'View full results \u2192' button linking to Run View",
+        "'View full results →' button linking to Run View",
         "GitHub PR link included if PR was auto-created (INT-021)",
         "Vercel preview URL included if deployment is ready (INT-034)",
         "Summary posted as new message in thread AND updates original message status badge"
       ],
       "dependsOn": [
         "INT-041",
-        "INT-021",
         "INT-034"
       ],
       "passes": false
     },
     {
       "id": "INT-044",
-      "title": "Spec Approval Request \u2014 Interactive Slack Message",
+      "title": "Spec Approval Request — Interactive Slack Message",
       "description": "When a spec is generated, an interactive Slack message with Approve/Reject buttons is posted.",
       "acceptanceCriteria": [
         "Spec generation completion triggers Slack message (configurable: auto or manual)",
-        "Block Kit: spec title, story count, model, 'Approve \u2713' and 'Reject \u2717' action buttons",
-        "'Review stories \u2192' link to Spec Review screen",
+        "Block Kit: spec title, story count, model, 'Approve ✓' and 'Reject ✗' action buttons",
+        "'Review stories →' link to Spec Review screen",
         "Button actions POST to /api/integrations/slack/actions (Slack interactivity endpoint)",
         "Action verified via Slack signing secret",
-        "Approve action moves spec to approved/ and updates Slack message to 'Approved \u2713'",
-        "Reject action deletes spec and updates message to 'Rejected \u2717'"
+        "Approve action moves spec to approved/ and updates Slack message to 'Approved ✓'",
+        "Reject action deletes spec and updates message to 'Rejected ✗'"
       ],
       "dependsOn": [
         "INT-040"
@@ -798,7 +517,7 @@
       "description": "An urgent Slack alert when multiple stories fail in a row.",
       "acceptanceCriteria": [
         "Alert triggers when N consecutive stories fail (default N=3, configurable)",
-        "Alert message: '@channel \u26a0\ufe0f Rorca: 3 consecutive story failures in [run name]'",
+        "Alert message: '@channel ⚠️ Rorca: 3 consecutive story failures in [run name]'",
         "Alert includes: failed story names, error excerpt, 'Pause Run' and 'View Run' buttons",
         "'Pause Run' button pauses the run from Slack (via interactive action)",
         "Alert resets counter on story pass",
@@ -845,10 +564,7 @@
         "Last rotated date shown in Integration Settings card",
         "Reminder shown if credentials not rotated in 90+ days"
       ],
-      "dependsOn": [
-        "INT-002",
-        "INT-005"
-      ],
+      "dependsOn": [],
       "passes": false
     },
     {
@@ -871,46 +587,21 @@
       "passes": false
     },
     {
-      "id": "INT-054",
-      "title": "Draft PR Lifecycle \u2014 Open at Run Start, Convert at Completion, Close on Rejection",
-      "description": "SOTA GitHub-native development workflow: create a Draft PR the moment a pipeline run starts (not when it completes). This gives the team visibility into in-progress work immediately \u2014 like Vercel and Linear do. The draft PR title uses '[WIP] {spec title}' prefix, body links back to the Rorca run URL, and is marked as draft via GitHub's `draft: true` PR creation flag. When the run completes with all stories passing, the PR is automatically converted from draft to ready-for-review via PATCH /repos/{owner}/{repo}/pulls/{pull_number} with `draft: false`. When a spec is rejected (via POST /api/specs/:id/reject), any open draft PR for that spec is automatically closed with a comment explaining the rejection. The PR ID is stored in `pipeline_runs.github_pr_number` (add column if missing) for lifecycle tracking. This replaces the current INT-021 behavior of creating a finished PR at completion \u2014 INT-021 is superseded by this story.",
-      "acceptanceCriteria": [
-        "When POST /api/pipeline/trigger is called and auto-worktree is true, a Draft PR is created on GitHub for the worktree branch immediately (before any stories run)",
-        "Draft PR title: '[WIP] {spec.title}' (e.g., '[WIP] Add OAuth flow')",
-        "Draft PR body includes: link to Rorca run URL (http://localhost:3030/runs/{runId}), spec description, list of stories with checkboxes ([ ] US-001: title)",
-        "Draft PR created via POST /repos/{owner}/{repo}/pulls with draft: true",
-        "pipeline_runs.github_pr_number column (INT or NULL) stores the PR number for lifecycle tracking",
-        "When run status changes to 'completed' (all stories passed), PR converted to ready-for-review via PATCH /repos/{owner}/{repo}/pulls/{pr_number} with { draft: false }",
-        "PR body updated at completion: story checkboxes all checked ([x] US-001), summary of changes appended",
-        "When POST /api/specs/:id/reject is called and a draft PR exists for that spec, the PR is closed with a comment: 'This spec was rejected in Rorca. PR closed automatically.'",
-        "Auto-PR setting (PUT /api/workspaces/:id/github/auto-pr) controls this feature \u2014 when disabled, no draft PR is created",
-        "Existing runs without worktrees are unaffected (draft PR only for autoWorktree: true runs)",
-        "GitHub API errors (rate limit, permission denied) are non-fatal \u2014 logged as WAL events but do not fail the run",
-        "WAL event 'github_pr_opened' emitted with { prNumber, prUrl, isDraft: true } when draft PR is created",
-        "WAL event 'github_pr_ready' emitted when PR converted from draft to ready"
-      ],
-      "dependsOn": [
-        "INT-021",
-        "INT-018"
-      ],
-      "passes": false
-    },
-    {
       "id": "INT-055",
       "title": "Map Rorca Specs to Linear Projects (Not Just Issues)",
-      "description": "Linear Projects (not Cycles) are the right abstraction for mapping a Rorca spec. A Project in Linear is a cross-team initiative with a start/end date, status, and its own issue list \u2014 exactly what a spec represents. When a Rorca spec is approved, create a Linear Project named after the spec title. Each Rorca story becomes a Linear sub-issue under that project. When a story passes, the sub-issue is marked Done. When all stories pass, the project is marked Completed. This is a higher-fidelity integration than issue-level syncing alone because PMs get progress visibility in Linear's Projects view, not just the issue list. The existing story_linear_map table (INT-053) maps story_id + run_id to linear_issue_id \u2014 extend with a spec_to_project_map table that maps spec_id to linear_project_id for project lifecycle management.",
+      "description": "Linear Projects (not Cycles) are the right abstraction for mapping a Rorca spec. A Project in Linear is a cross-team initiative with a start/end date, status, and its own issue list — exactly what a spec represents. When a Rorca spec is approved, create a Linear Project named after the spec title. Each Rorca story becomes a Linear sub-issue under that project. When a story passes, the sub-issue is marked Done. When all stories pass, the project is marked Completed. This is a higher-fidelity integration than issue-level syncing alone because PMs get progress visibility in Linear's Projects view, not just the issue list. The existing story_linear_map table (INT-053) maps story_id + run_id to linear_issue_id — extend with a spec_to_project_map table that maps spec_id to linear_project_id for project lifecycle management.",
       "acceptanceCriteria": [
         "New DB migration: spec_linear_projects table (id, spec_id VARCHAR, workspace_id VARCHAR, linear_project_id VARCHAR, linear_project_url VARCHAR, created_at TIMESTAMPTZ)",
         "When POST /api/specs/:id/approve is called and Linear is connected for the workspace, create a Linear Project via POST /graphql (Linear's GraphQL API) with name=spec.title, description=spec.description, teamId from workspace Linear settings",
         "POST /api/linear/projects endpoint creates a Linear Project and stores the mapping in spec_linear_projects",
-        "Linear Project status lifecycle: 'Planned' on spec approval \u2192 'In Progress' on first story started \u2192 'Completed' when run status = 'completed'",
+        "Linear Project status lifecycle: 'Planned' on spec approval → 'In Progress' on first story started → 'Completed' when run status = 'completed'",
         "Project status updated via PATCH to Linear's GraphQL API when WAL events arrive (story_started, run_finished)",
         "Each story in the spec creates a Linear sub-issue under the project (reuses existing INT-012 story import logic but targets the project's issue list)",
-        "spec_to_project_map referenced in Linear webhook handler (INT-014) \u2014 inbound Linear issue updates propagate to Rorca story status",
+        "spec_to_project_map referenced in Linear webhook handler (INT-014) — inbound Linear issue updates propagate to Rorca story status",
         "Settings > Integrations > Linear shows 'Project sync: enabled/disabled' toggle separate from issue sync",
         "When spec is rejected, the Linear Project is archived (not deleted) via Linear GraphQL API",
         "GET /api/workspaces/:id/integrations/linear/projects returns list of synced projects with spec_id, project status, and Linear URL",
-        "Linear API errors are non-fatal \u2014 logged to integration_audit_log, shown in Settings > Integrations health dashboard (INT-004)"
+        "Linear API errors are non-fatal — logged to integration_audit_log, shown in Settings > Integrations health dashboard (INT-004)"
       ],
       "dependsOn": [
         "INT-008",

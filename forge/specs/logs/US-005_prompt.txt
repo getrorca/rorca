@@ -1399,7 +1399,7 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
 Follow this workflow for implementation:
-## Agent Role: Database
+## Agent Role: Frontend
 
 ---
 name: rorca
@@ -1552,30 +1552,14 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-005):
-Write Jest tests for the worker singleton guard, heartbeat-aware stale job recovery, and heartbeat-aware orphan sweep that were previously added to `worker.ts`. These mechanisms prevent multiple worker instances from competing for the same pg-boss queue and prevent the orphan sweep from killing legitimate engine processes.
-
-Create `backend/src/__tests__/worker-singleton-sweep.test.ts` with test cases:
-
-**Singleton Guard:**
-1. First worker instance acquires the singleton lock (INSERT into worker_heartbeat succeeds)
-2. Second worker instance detects existing live heartbeat (last_seen < 90s ago) and exits with error
-3. Second worker instance detects stale heartbeat (last_seen > 90s ago) and takes over the lock
-
-**Heartbeat-Aware Stale Job Recovery (recoverStaleJobs):**
-4. Jobs with `state='active'` AND no matching live worker heartbeat are marked failed
-5. Jobs with `state='active'` AND a matching live worker heartbeat are left alone (legitimate in-progress work)
-6. Recovery uses correct pg-boss column name `started_on` (NOT `startedon`)
-
-**Heartbeat-Aware Orphan Sweep:**
-7. Orphan sweep only kills processes whose worker_id has a stale heartbeat (last_seen > 90s)
-8. Orphan sweep does NOT kill processes belonging to a live worker (last_seen < 90s)
-
-Mock the database layer (pg Pool) and pg-boss instance. Test the SQL queries directly where possible.
+Create /download page in landing-page/ Next.js app. Shows 4 platform-specific download buttons: macOS ARM64, macOS x64, Linux x64, Windows x64. Each button links to the corresponding asset at github.com/getrorca/rorca/releases/latest. Prominently display the curl|sh one-liner: `curl -fsSL https://get.rorca.app | sh`. Include system requirements section (Node.js >= 20, Git, 2GB RAM, PostgreSQL 16 auto-provisioned). Show a step-by-step visual of what happens when you run `rorca start`: (1) Downloads Postgres if needed, (2) Starts Postgres on :5433, (3) Runs migrations, (4) Opens dashboard at localhost:3030. Auto-detect current platform and pre-select the matching download button.
 
 Acceptance Criteria:
-- Test file backend/src/__tests__/worker-singleton-sweep.test.ts exists with at least 8 test cases covering singleton guard, stale recovery, and orphan sweep
-- Singleton guard tests verify: first worker acquires lock, second worker with live heartbeat is rejected, second worker with stale heartbeat takes over
-- Stale job recovery tests verify: active jobs with dead workers are failed, active jobs with live workers are preserved
-- Orphan sweep tests verify: processes from stale workers are killed, processes from live workers are not killed
-- Tests verify correct pg-boss column names (started_on, completed_on) are used in queries
-- All tests pass when run with: npx jest --testPathPattern=worker-singleton-sweep
+- /download page renders with 4 platform download buttons (macOS ARM64, macOS x64, Linux x64, Windows x64)
+- Each download button links to github.com/getrorca/rorca/releases/latest/download/<asset-name>
+- curl|sh one-liner is displayed in a code block with a copy-to-clipboard button that shows 'Copied!' confirmation
+- System requirements section lists Git and 2GB RAM minimum (Postgres auto-provisioned, Node bundled in binary)
+- Step-by-step 'rorca start' visual shows 4 numbered steps with descriptive text per step
+- While page is loading, a skeleton placeholder renders in place of download buttons (loading state)
+- If no releases exist yet on GitHub, download buttons show 'Coming Soon' with disabled state instead of broken links (empty state)
+- macOS users see an amber info box: 'After downloading, allow Rorca in System Settings > Privacy & Security' (error prevention)
