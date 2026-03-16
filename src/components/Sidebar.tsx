@@ -168,7 +168,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
         <div className="p-3 flex flex-col gap-1.5 border-b border-border shrink-0">
           <div className="flex items-center gap-2 px-1 mb-1">
             <RorcaLogo size={22} variant="gradient" />
-            <span className="font-mono font-bold text-[var(--text)] text-sm tracking-tight">rorca</span>
+            <span className="font-mono font-bold text-[var(--text)] text-sm tracking-tight">Rorca</span>
           </div>
           <WorkspaceSelector />
 
@@ -322,7 +322,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
         <div className="flex items-center justify-center h-12 border-b border-border shrink-0">
           <RorcaLogo size={20} variant="gradient" />
           {tabletExpanded && (
-            <span className="ml-2 font-mono font-bold text-[var(--text)] text-sm tracking-tight">rorca</span>
+            <span className="ml-2 font-mono font-bold text-[var(--text)] text-sm tracking-tight">Rorca</span>
           )}
         </div>
 

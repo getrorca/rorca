@@ -38,7 +38,7 @@ export default function LoginPage({ onSwitchToRegister, onSwitchToForgotPassword
         {/* Logo */}
         <div className="flex flex-col items-center mb-8">
           <RorcaLogo size={48} variant="gradient" className="mb-3" />
-          <h1 className="font-mono font-bold text-[var(--text)] text-2xl tracking-tight">rorca</h1>
+          <h1 className="font-mono font-bold text-[var(--text)] text-2xl tracking-tight">Rorca</h1>
           <p className="text-muted text-sm mt-1">AI spec orchestration</p>
         </div>
 

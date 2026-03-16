@@ -122,7 +122,7 @@
     "capabilityMismatch": "warn"
   },
   "execution": {
-    "waveParallelism": false,
+    "waveParallelism": true,
     "storyTimeoutMin": 45,
     "maxRetries": 3,
     "autoCommit": true,

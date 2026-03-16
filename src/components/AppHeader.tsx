@@ -29,7 +29,7 @@ export default function AppHeader({ onMenuToggle, showMenuButton, breadcrumbs, a
                         breadcrumbs
                     ) : (
                         <span className="font-medium text-[var(--text)] text-sm tracking-tight select-none">
-                            rorca
+                            Rorca
                         </span>
                     )}
                 </div>

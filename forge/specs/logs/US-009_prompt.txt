@@ -1401,67 +1401,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 Follow this workflow for implementation:
 ## Agent Role: Frontend
 
-
-## Skill: react-review (relevance: 7)
----
-name: react-review
-description: Review React components for best practices and performance issues
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers
-  category: development
----
-
-# React Review Skill
-
-Review React components for best practices, performance issues, and common patterns.
-
-## When to use me
-
-Use this skill when:
-- Reviewing React component code
-- Optimizing component performance
-- Checking for React best practices
-- Refactoring legacy components
-- Auditing component architecture
-
-## What I do
-
-- Analyze React components for performance issues (unnecessary re-renders, large bundles)
-- Check for React best practices (hooks usage, prop patterns, state management)
-- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
-- Suggest optimizations (memoization, code splitting, lazy loading)
-- Review TypeScript usage and type safety
-
-## Key Patterns
-
-### Performance
-- Use `React.memo` for components receiving object/function props from parent
-- Memoize expensive calculations with `useMemo`
-- Stabilize callback references with `useCallback`
-- Avoid inline object/array creation in JSX props
-- Use `React.lazy` + `Suspense` for code splitting
-
-### Hooks
-- Always include all dependencies in `useEffect` dependency arrays
-- Never call hooks conditionally or inside loops
-- Extract complex logic into custom hooks
-- Clean up subscriptions and timers in useEffect return
-
-### TypeScript
-- Define explicit interfaces for all component props
-- Use discriminated unions for variant components
-- Prefer `interface` over `type` for component props
-- Use `React.FC` sparingly — prefer explicit return types
-
-## Notes
-
-- Focuses on React 18+ patterns and best practices
-- Considers both class and function components
-- Includes TypeScript and JavaScript variants
-- References official React documentation and community patterns
-
 ---
 name: rorca
 description: Implement and validate changes to the Rorca codebase with subagent-assisted context management.
@@ -1613,21 +1552,23 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-009):
-After US-008 implements backend-side marker injection into `run_output_chunks`, the frontend-only injection from US-003 would cause duplicate markers — one from the persisted chunk stream and one from the frontend `terminal.write()` call.
+Create /terms and /privacy pages in the landing-page/ Next.js app. Both pages render markdown content styled consistently with the landing page dark theme. Content covers: Terms of Service (acceptable use, limitation of liability, BSL-1.1 license terms, data handling for self-hosted vs cloud, termination). Privacy Policy (data collected, local-first architecture means minimal server data, analytics data via Posthog/Plausible, cookies, GDPR considerations, contact email for data requests). Both pages linked from signup flow (checkbox: 'I agree to Terms and Privacy Policy').
 
-Remove or gate the frontend marker injection from US-003. Two approaches (pick the simpler one):
-
-**Option A (preferred — remove entirely):** Delete the WAL event listener in RunViewPanel/RunTerminal that calls `terminal.write()` with marker lines. The backend markers arrive via the existing chunk stream, so no frontend injection is needed.
-
-**Option B (feature flag):** Add a check — if the output stream already contains the marker (detect by matching the story ID pattern in recent chunks), skip the frontend injection. This is more complex and Option A is preferred.
-
-Also verify that the checkmark animations in RunStoryList (from US-002) still fire correctly — they are driven by WAL events independently of the terminal markers and should be unaffected.
-
-This is a cleanup story — small scope, but important to prevent confusing double-markers in the terminal.
+## Context
+- This story targets the **landing-page/** Next.js 14 app (separate from the main React/Vite frontend at `src/`). The landing page uses **Tailwind v4 + Framer Motion** on port `:3002` — ensure styles use the landing page's dark theme tokens, not the main app's Tailwind config.
+- Legal content should be co-located as `.md` or `.mdx` files within the landing-page directory (e.g., `landing-page/content/terms.md`, `landing-page/content/privacy.md`). Use Next.js dynamic imports or `fs.readFileSync` at build time — avoid client-side fetch for static legal text.
+- BSL-1.1 license terms are the chosen license model per CLAUDE.md distribution roadmap. Reference the Business Model section: "source-available via BSL or Commons Clause." Ensure Terms of Service language aligns with BSL-1.1 (Change Date, Change License, Additional Use Grant for self-hosted).
+- Privacy policy must reflect the **local-first architecture**: self-hosted users have zero data sent to Rorca servers. Cloud users (Phase 3 roadmap) will have PostgreSQL-stored data. Clearly distinguish these two modes. Contact email: `privacy@rorca.app` (domain strategy: `rorca.app` is primary).
+- The signup flow consent checkbox ("I agree to Terms and Privacy Policy") implies the landing page has a signup/waitlist form. Ensure links open `/terms` and `/privacy` as standard Next.js `<Link>` navigations (not modals), with a back-navigation path to the signup form.
+- Loading/error/empty states are explicitly required in AC. Use a simple text skeleton (Tailwind `animate-pulse` on gray bars) for loading. For missing content files, render "Content coming soon" — do **not** throw or show a blank page. For parse errors, show the specified error message with a retry link that re-triggers the load.
+- Do **not** over-engineer: no CMS, no database storage, no API route for legal content. Static markdown files rendered at build time (or via `getStaticProps`/RSC) is the right level of complexity for V1.
+- Ensure both pages include a `<head>` with appropriate `<title>` and `meta description` for SEO (e.g., "Terms of Service — Rorca", "Privacy Policy — Rorca").
 
 Acceptance Criteria:
-- Frontend-only marker injection code from US-003 is removed or disabled
-- Story completion markers appear exactly once in the terminal (from backend injection via run_output_chunks)
-- RunStoryList checkmark animations still fire correctly on story_passed WAL events
-- No duplicate marker lines appear when watching the terminal during a live run
-- Late-join terminal replay shows markers at the correct positions in the output stream
+- /terms page renders with full Terms of Service content covering acceptable use, liability, BSL-1.1 license terms
+- /privacy page renders with full Privacy Policy covering data collection, cookies, GDPR Article 17 right-to-erasure, contact email privacy@rorca.app
+- Both pages are accessible from the signup page via links in a consent checkbox
+- Both pages have a 'Last updated: YYYY-MM-DD' date at the top of the content
+- If markdown content fails to parse, page shows error 'Unable to load content — please try again' with a retry link
+- Pages are empty-state safe: if content file is missing, a placeholder 'Content coming soon' message is shown instead of a blank page
+- While markdown content is being loaded/parsed, a text skeleton placeholder is shown (loading state)

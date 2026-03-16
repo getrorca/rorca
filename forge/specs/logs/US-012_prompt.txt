@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Start everything (recommended)
-npm run dev                # Frontend :5210 + Backend :3030 concurrently
+npm run dev                # Frontend :5210 + Backend :3030 + pg-boss Worker concurrently
 
 # Frontend (root)
 npm run dev                # Vite dev server (:5210)
@@ -20,6 +20,7 @@ npx tsc --noEmit           # Frontend type check
 
 # Backend (backend/)
 cd backend && npm run dev  # Express server (:3030) — auto-restarts on file save (tsx watch)
+cd backend && npm run worker  # pg-boss worker (required — picks up queued pipeline runs)
 cd backend && npm run mcp  # Run MCP server standalone (for debugging)
 cd backend && npm test     # Jest test suite
 cd backend && npx tsc --noEmit   # Backend type check
@@ -45,11 +46,14 @@ npm run self-register
 
 ```
 Browser (React :5210)  ←→  Express API (:3030)  ←→  PostgreSQL 16
-                                    ↓
-                            Execution Engine (per-story subprocess)
-                            ├── claude --print      (Claude subscription)
-                            ├── opencode run        (75+ providers via API key)
-                            └── codex               (ChatGPT subscription)
+                                                           ↑
+                                                   Worker Process
+                                                   (npm run worker)
+                                                           ↓
+                                                   execution-engine subprocesses
+                                                   ├── claude --print
+                                                   ├── opencode run
+                                                   └── codex
 
 Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 ```
@@ -141,8 +145,37 @@ Spec files live in the **project workspace** (not Rorca):
 ```
 ⚠️ Key field is `userStories` (NOT `stories`). `id` is always the slug (filename without `.json`), NOT the human-readable title.
 
+### Job Queue Architecture (pg-boss)
+
+Pipeline runs are no longer spawned synchronously by `pipeline.ts`. The flow is:
+
+1. `POST /api/pipeline/trigger` inserts a `pipeline:run` job into pg-boss and returns `{ runId, queued: true, queuePosition }` in ~200ms
+2. The **Worker process** (`backend/src/worker.ts`, `npm run worker`) polls pg-boss and picks up the job ~500ms later (default polling interval, configurable via `pollingIntervalSeconds`)
+3. Worker spawns `execution-engine.ts` as a child process with `RORCA_PROCESS_ROLE=engine`
+
+**Job types**:
+| Queue | Purpose |
+|-------|---------|
+| `pipeline:run` | Trigger a new pipeline run (specPath, workspaceId, runId, options) |
+| `pipeline:retry` | Retry failed stories in a completed run (runId, storyIds) |
+| `pipeline:cancel` | Cancel an active run by sending SIGTERM to the child process |
+| `pipeline:cron` | Meta-cron tick — checks `pipeline_schedules` for due runs |
+| `pipeline:cron:<id>` | Per-schedule cron job — fires a specific scheduled run |
+
+**Worker process** (`backend/src/worker.ts`):
+- Standalone process — completely independent of Express API
+- Connects to the same `DATABASE_URL` as the API
+- Writes heartbeat to `worker_heartbeat` table every 30s (`worker_id`, `pid`, `hostname`, `last_seen`)
+- Graceful shutdown on `SIGTERM` — drains in-flight jobs up to 30s before exiting
+- `RORCA_PROCESS_ROLE=engine` is set in the child process env to prevent nested worker spawning
+
+**Terminal output streaming** (`run_output_chunks`):
+- Worker writes stdout/stderr to `run_output_chunks` table in 4KB chunks with monotonically increasing sequence numbers
+- DB-backed streaming survives backend restarts and enables late-join SSE replay
+- `GET /api/pipeline/runs/:runId/output` SSE endpoint replays all chunks since sequence 0, then streams live
+
 ### The Ralph Loop (`backend/src/lib/execution-engine.ts`)
-The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by `pipeline.ts` via `npx tsx`. The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — `pipeline.ts` uses it only if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all three agent types. **Always edit `execution-engine.ts` for all execution behavior.**
+The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by the **Worker process** (not directly by `pipeline.ts`). The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — only used if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all three agent types. **Always edit `execution-engine.ts` for all execution behavior.**
 
 **Flags**: `--json <path>` (spec file), `--cwd <path>` (workspace root), `--run-id <number>` (required for WAL events), `--story <ID>` (single story), `--dry-run` (preview only), `--port <number>` (default 3030), `--agent <claude|opencode|codex>`, `--model <model>`
 
@@ -185,11 +218,12 @@ rorca/
 │       ├── routes/           # Express route handlers (32 route files)
 │       ├── lib/              # Core services (sse-hub, direction-stack, llm-client,
 │       │                     # errors, scheduler, agent-hook-runner, etc.)
+│       ├── worker.ts         # pg-boss worker process (pipeline job consumer)
 │       ├── mcp/              # MCP stdio server (5 tools)
 │       └── db/
 │           ├── index.ts      # PostgreSQL Pool + async query helpers
 │           ├── pg-index.ts   # Migration runner (schema_migrations tracking)
-│           └── pg-migrations/ # PostgreSQL migration files (001–049)
+│           └── pg-migrations/ # PostgreSQL migration files (001–062)
 ├── forge/
 │   ├── run-loop.sh           # Ralph Loop execution engine
 │   ├── self-register.ts      # Self-hosting bootstrap
@@ -225,7 +259,7 @@ rorca/
 
 ## Database Tables
 
-49 migrations (`backend/src/db/pg-migrations/001-049`). Key tables:
+62 migrations (`backend/src/db/pg-migrations/001-062`). Key tables:
 
 | Table | Purpose |
 |-------|---------|
@@ -258,6 +292,8 @@ rorca/
 | `user_settings` | Per-user preferences |
 | `billing` | Stripe subscription tracking |
 | `provider_defaults` | Default model configs per provider |
+| `run_output_chunks` | DB-backed terminal output streaming — `(run_id, sequence, data)`, monotonically increasing, survives restarts, enables late-join SSE replay |
+| `worker_heartbeat` | Worker liveness — `(worker_id, pid, hostname, started_at, last_seen)`, updated every 30s; stale if `last_seen` > 90s ago |
 
 **WAL event types**: `generate`, `spec_approved`, `spec_rejected`, `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `worktree_created`, `worktree_merged`, `run_blocked` (HITL pause), `context_file_changed` (CIE file watcher), `story_escalated` (CIE model escalation), `skill_installed` (skill added), `skill_removed` (skill deleted), `skill_matched` (LLM skill-to-spec matching)
 
@@ -375,12 +411,13 @@ When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the buil
 
 ## Critical Gotchas
 
-### Top 5
+### Top 6
 1. **`chatComplete` returns `ChatResult { text, usage }`** — always use `.text` accessor. Never treat result as a string.
 2. **pg is async — always `await` DB calls**. `await queryOne<T>(sql, params)` returns T|undefined, `await query<T>(sql, params)` returns T[], `await execute(sql, params)` returns `{ rowCount }`. Use `$1, $2, ...` numbered placeholders (not `?`).
 3. **spec `id` ≠ spec `specName`** — `id` is the filename slug (`rorca-feature-enhancements`), `specName` is the human title. Use `spec.id` to construct file paths.
 4. **run-loop.sh is a bash fallback only** — lives at `workspace.path/forge/run-loop.sh`. Only used if `execution-engine.ts` is missing. Claude-only, no multi-agent support. Do not rely on it.
 5. **Backend auto-restarts** — `tsx watch` detects file changes and restarts automatically. Manual restart only needed if the process itself crashes: `lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev`.
+6. **Worker must be running** — pipeline triggers insert a pg-boss job and return immediately; runs only execute if the worker process is live. Check `GET /api/pipeline/worker/health` before triggering runs. Start with `cd backend && npm run worker` or `npm run dev` (starts both). Stale if `worker_heartbeat.last_seen` > 90s.
 
 ### Auth Middleware — Intentionally Bypassed
 `app.use(authRequired)` in `backend/src/server.ts` line ~78 is **commented out**. This is intentional — Rorca is a local single-user tool and the login wall blocks workspaces API causing onboarding to show incorrectly. Do NOT re-enable globally. Auth routes (`/api/auth/*`) still work for the registered user (`admin@rorca.local` / `rorca123`). If authRequired reappears as a global middleware, comment it out again.
@@ -435,8 +472,37 @@ The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Q
 
 `SUPPORTED_MODELS` list is authoritative — validate before passing to `chatComplete`.
 
-### PostgreSQL Migration Pattern
-Migrations are SQL files in `backend/src/db/pg-migrations/` (49 files, 001–049). They run in numeric order on first startup via `pg-index.ts`, tracked in `schema_migrations` table. Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively — no workarounds needed. New migrations: create `NNN_description.sql` in `pg-migrations/`.
+### Apache AGE — Pool Connection Hygiene (CRITICAL)
+Apache AGE requires `LOAD 'age'` + `SET search_path = ag_catalog, "$user", public` per session before Cypher queries. This **poisons** the pool connection — subsequent queries on that connection hit `ag_catalog.workspaces` (empty) instead of `rorca.workspaces` (real data), causing intermittent "Workspace not found" 404s.
+
+**Rule**: Any code that calls `setupAgeSession()` MUST restore the search_path before releasing:
+```typescript
+const client = await pool.connect();
+try {
+  await setupAgeSession(client);  // sets search_path to ag_catalog
+  await client.query(cypherSQL);
+} finally {
+  await client.query('SET search_path = rorca, public');  // MUST restore
+  client.release();
+}
+```
+
+Three schemas have a `workspaces` table: `rorca.workspaces` (app data), `ag_catalog.workspaces` (AGE system, empty), `public.workspaces` (legacy, empty). The pool has an `on('connect')` safety net in `db/index.ts`, but it does NOT replace proper cleanup in graph code.
+
+### PostgreSQL Migration Pattern — Timestamp Format (CRITICAL)
+Migrations are SQL files in `backend/src/db/pg-migrations/`. They run in numeric prefix order on first startup via `pg-index.ts`, tracked in `schema_migrations` table (BIGINT version column). Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively.
+
+**New migrations MUST use timestamp format**: `YYYYMMDDHHMMSS_description.sql`
+```bash
+# Example: creating a migration on 2026-03-14 at 15:00:00
+20260314150000_add_user_preferences.sql
+```
+
+**Why**: Sequential numbers (001, 002, ...) collide when parallel branches create migrations simultaneously — common with Rorca's worktree-per-spec architecture. Timestamps are structurally unique (two developers/agents can't commit at the exact same second).
+
+**Hybrid coexistence**: Existing sequential migrations (001–079) stay as-is. New timestamp migrations sort after them automatically (numeric sort: `79 < 20260314150000`). The runner supports both formats indefinitely — no renaming needed.
+
+**Duplicate prefix detection**: `pg-index.ts` calls `checkDuplicatePrefixes()` at startup and fails loudly if two files share the same numeric prefix. This catches collisions before any SQL runs.
 
 ### Skills Install Chain (install-from-sh)
 `POST /api/skills/install-from-sh` does NOT shell out to `npx skills add`. It fetches directly:
@@ -558,6 +624,9 @@ CODEX_BIN=/path/to/codex        # Auto-detected if in PATH
 SPEC_PROVIDER=claude          # Options: claude (default), anthropic, openrouter
 ANTHROPIC_API_KEY=sk-ant-...  # Required if SPEC_PROVIDER=anthropic
 OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
+
+# Process role (set automatically by worker — do not set manually)
+RORCA_PROCESS_ROLE=engine     # Set to 'engine' by worker.ts when spawning execution-engine subprocesses
 ```
 
 ### Execution Engine: Claude vs OpenCode vs Codex
@@ -693,10 +762,11 @@ Codex CLI auto-discovers `AGENTS.md` files from the Git root directory and injec
 
 ## Performance Targets
 - Spec generation: < 60s (LLM call)
-- Archive search: < 100ms (SQLite full-text scan)
+- Archive search: < 100ms (pg full-text scan)
 - SSE heartbeat: 15s
 - WAL poll: 3s
 - Story timeout: 45 min (gtimeout --foreground)
+- pg-boss job pickup: ~500ms latency (default polling interval; configurable via `pollingIntervalSeconds` in pg-boss options)
 
 ## CI
 E2E tests: `npm run test:e2e` (Playwright — configured in `rorca-e2e-testing` spec, not yet built).
@@ -1155,9 +1225,12 @@ Rorca is an AI spec orchestration and pipeline management platform for autonomou
 - **Rules**:
   - PostgreSQL 16 via `pg` Pool — all DB calls are **async** (always `await`)
   - `query<T>()` → `T[]`, `queryOne<T>()` → `T | undefined`, `execute()` → `{ rowCount }`
-  - Migrations are SQL in `pg-migrations/`, numbered sequentially (001–049+), tracked via `schema_migrations` table
+  - Migrations are SQL in `pg-migrations/`, numbered sequentially (001–062+), tracked via `schema_migrations` table
   - Use `$1, $2, ...` numbered placeholders (NOT `?`)
   - FK constraints always on, connection pooling (max 20)
+  - **pgboss schema is NOT hand-managed** — `pgboss.*` tables (job, archive, subscription, version) are created and upgraded automatically by `boss.start()`. Never write migrations that touch `pgboss.*`. Migration 062 is a no-op placeholder that documents this.
+  - **pg-boss v10 requires explicit queue creation** — `boss.work('queue:name', handler)` does NOT create the queue or its partition table. You MUST call `await boss.createQueue('queue:name')` before calling `boss.send('queue:name', ...)`, otherwise `send()` returns `null` silently. The `job` table is partitioned by queue name (one partition per queue). In tests, call `createQueue` in `beforeAll` after `boss.start()`.
+  - **pg-boss job `id` must be a valid UUID** — passing an integer string (e.g., `String(runId)`) to the `id` option of `boss.send()` causes a PostgreSQL UUID cast error. Use auto-generated UUIDs (omit the `id` option) and embed `runId` in the job's data payload for correlation.
 
 ### Execution Engine (`backend/src/lib/execution-engine.ts`)
 - **Owner**: Architect
@@ -1265,65 +1338,65 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-02-27 [Convention] Spec ID vs specName
-> Rule: spec.id is the filename slug (use for API calls and path construction). spec.specName is the human-readable title (display only).
+## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
+> Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
 
-## 2026-03-10 [Gotcha] pg is async — always await DB calls
-> Rule: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
+## 2026-03-12 [Decision] rorca-ensure-postgres completed — zero-prereq Postgres provisioning in bin/rorca.ts
+> Rule: bin/rorca.ts now includes a full ensurePostgres() function. On first run, it downloads Postgres 16 binaries from zonkyio/embedded-postgres-binaries, extracts, runs initdb, starts pg_ctl on port 5433, creates rorca user and database. No Docker required. DATABASE_URL env var bypasses this entirely (preserves Docker workflow). --no-postgres flag also skips it. Postgres is stopped on SIGINT/SIGTERM via stopManagedPostgres().
 
-## 2026-02-27 [Convention] chatComplete returns ChatResult
-> Rule: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
+## 2026-03-12 [Bug Fix] tsx watch restarts backend during parallel runs → resilient-post retries exhaust
+> Rule: When a fast worktree run auto-merges into main, tsx watch detects the file changes and restarts the backend (5-10s TypeScript recompile). If resilient-post.ts retry window is shorter than the restart time, execution engine can't report story results and the run shows as failed. Fix: raise POST_MAX_RETRIES to 10 and POST_RETRY_DELAY_MS to 3000 (30s coverage) in backend/src/lib/resilient-post.ts.
 
-## 2026-02-27 [Gotcha] Backend requires restart after changes
-> Rule: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
+## 2026-03-12 [Decision] Distribution format: curl|sh for launch, native installers deferred
+> Rule: Use `curl -fsSL https://get.rorca.app | sh` (macOS/Linux) + PowerShell equivalent (Windows) for launch distribution. Do NOT build .pkg (macOS) or .exe (Windows) installers yet — they require code signing certs (~$400/yr) and unsigned installers trigger OS security warnings (Gatekeeper, SmartScreen) which is worse UX than curl|sh. Native installers and Homebrew tap (`brew install getrorca/tap/rorca`) are deferred until there's user demand.
 
-## 2026-02-28 [Architecture] Context Router uses virtual file assembly
-> Rule: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
+## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
+> Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
 
-## 2026-02-28 [Architecture] Episodic Memory is structured Markdown
-> Rule: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
+## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
+> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
 
-## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure
-> Rule: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
+## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
+> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
 
-## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution
-> Rule: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
+## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
+> Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
 
-## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern
-> Rule: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
+## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
+> Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
 
-## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization
-> Rule: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
+## 2026-03-13 [Gotcha] 150+ unmerged feat/ branches accumulate — audit regularly
+> Rule: Worktree spec runs create feat/ branches that never auto-merge. After several months of development, 150+ branches can accumulate. Most are stale (superseded by later runs of the same spec). When auditing: (1) check remote feat/ branches with commits not in main using `git branch -r | grep feat/ | while read b; do count=$(git log --oneline main.."$b" 2>/dev/null | wc -l | tr -d ' '); if [ "$count" -gt "0" ]; then echo "$count | $b"; fi; done`, (2) skip old pg-boss/scaffolding branches — their work is superseded by WR spec, (3) merge the most recent run of each spec (highest timestamp suffix = most complete), (4) skip convention-agents branches (old stubs, superseded by future spec).
 
-## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table
-> Rule: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
+## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
+> Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
 
-## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model
-> Rule: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
+## 2026-03-13 [Gotcha] Old execution-engine processes from test runs survive indefinitely
+> Rule: Execution-engine subprocesses from old load test runs (WR-019, PG-020) and integration tests in temp paths can survive machine restarts and run for days, consuming CPU/memory. Check with: `ps aux | grep execution-engine | grep -v grep`. Kill PIDs associated with temp paths (/var/folders, /tmp) or old worktree paths. WR-007 graceful shutdown only helps for clean worker exits — kill -9 or machine crash still orphans children. Safe to kill any execution-engine with a temp path or a worktree path that no longer exists.
 
-## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution
-> Rule: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
+## 2026-03-13 [Decision] MCP-native generation: API as context+persistence layer, LLM work in caller's session
+> Rule: Rorca's API should split LLM-heavy operations (spec generation, enrichment) into two phases: (1) context-fetch — API returns the synthesized direction stack, memory, schema, skills as a raw bundle with no LLM call; (2) save — API persists the result the caller's LLM already generated. The LLM reasoning happens IN the caller's MCP session (Claude Code, OpenCode CLI, Codex CLI), not in a server-spawned subprocess. This means: rorca_get_generation_context returns the context bundle, the calling LLM generates the spec JSON in-session using cached/warm context, then rorca_save_spec persists it. The existing server-side generation path (spawning claude --print) is kept as a fallback for browser UI users who have no MCP session. This is the correct long-term architecture for rorca_forge_and_run too — it should orchestrate tool calls that the caller's session handles, not block on a subprocess.
 
-## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
-> Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
+## 2026-03-13 [Architecture] All three CLI coding assistants support MCP — Rorca tools work from any of them
+> Rule: Claude Code, OpenCode CLI, and Codex CLI all support MCP servers. A user working in any of these three can call Rorca MCP tools (rorca_generate_spec, rorca_trigger_run, etc.) from their active session. The only path that does NOT support MCP is the browser UI. This means the MCP-native generation architecture benefits all CLI users regardless of which assistant they use: Claude Code (Claude model), OpenCode CLI (any provider — GPT-4o, Gemini, etc.), Codex CLI (ChatGPT model). Architecture principle: Rorca API = context + persistence. LLM reasoning = caller's session. Browser UI = server-side subprocess fallback only.
 
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture
-> Rule: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
+> Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
 
-## 2026-03-10 [Convention] PostgreSQL Migration Pattern
-> Rule: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
+## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
+> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
 
-## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates
-> Rule: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
+## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
+> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
-> Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
+> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
 
-## 2026-03-12 [Bug Fix] MCP rorca_list_specs and rorca_list_runs wrong response shape
-> Rule: Both tools assumed wrong API response shapes. rorca_list_specs treated response as a bare array but API returns { items: [...] }. rorca_list_runs destructured { runs } but API returns { items: [...] }. Fixed by normalizing: Array.isArray(data) ? data : (data.items ?? []) for list_specs, and payload.runs ?? payload.items ?? [] for list_runs. Also fixed specName field: API uses specName not title — display as s.specName ?? s.title ?? s.id.
+## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
+> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
 
-## 2026-03-12 [Pattern] MCP tools vs prompts — tools are Claude-callable, prompts are user slash commands
-> Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
+## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
+> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
 Follow this workflow for implementation:
 ## Agent Role: Frontend
@@ -1479,12 +1552,31 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-012):
-Display a small badge (paperclip icon + count) on kanban cards if the spec has attachments. Clickable to open spec detail slide-over on Attachments tab.
+Create .github/workflows/release.yml that triggers on git tag push matching v*. Steps: (1) Checkout code, (2) Setup Bun, (3) Install dependencies, (4) Run `bun build --compile` for 4 targets: darwin-arm64, darwin-x64, linux-x64, win32-x64, (5) Name outputs: rorca-darwin-arm64, rorca-darwin-x64, rorca-linux-x64, rorca-win32-x64.exe, (6) Auto-generate release notes from git log since last tag, (7) Create GitHub Release via gh CLI or actions/create-release, (8) Upload all 4 binaries as release assets, (9) Run smoke test on the linux-x64 binary (rorca --version should output the tag version). Matrix build for parallelism.
+
+## Context
+- **Workflow trigger**: Use `on: push: tags: ['v*']` — GitHub Actions native tag filter. No need for `if:` conditionals on `github.ref_type`. The `v*` pattern matches `v1.0.0`, `v0.1.0-beta`, etc.
+
+- **Matrix strategy for parallelism**: Use `strategy.matrix` with `target: [darwin-arm64, darwin-x64, linux-x64, win32-x64]` and map each to the correct `bun build --compile --target` value. Bun's cross-compilation targets use `bun-` prefix format (e.g., `--target=bun-darwin-arm64`). Verify exact target strings against current Bun docs — they've changed between versions.
+
+- **Binary naming convention**: Output filenames must match `rorca-<platform>` exactly (e.g., `rorca-darwin-arm64`, `rorca-linux-x64`, `rorca-win32-x64.exe`). Windows binary MUST have `.exe` extension. Use `--outfile` flag with `bun build --compile` to control output name directly.
+
+- **Release notes generation**: Use `git log --oneline $(git describe --tags --abbrev=0 HEAD^ 2>/dev/null || git rev-list --max-parents=0 HEAD)..HEAD` pattern to handle both normal (previous tag exists) and first-release (no previous tag) cases. The `2>/dev/null || git rev-list --max-parents=0 HEAD` fallback is critical for the empty-state AC.
+
+- **GitHub Release creation**: Prefer `gh release create ${{ github.ref_name }} ./artifacts/* --title "${{ github.ref_name }}" --notes-file release-notes.txt` over `actions/create-release` (deprecated). The `gh` CLI is pre-installed on GitHub-hosted runners. Upload all 4 binaries as glob in one command rather than separate upload steps.
+
+- **Smoke test**: The linux-x64 smoke test step must run AFTER the build step on a Linux runner. Use `chmod +x ./rorca-linux-x64 && ./rorca-linux-x64 --version` and pipe to `grep -q "${{ github.ref_name }}"` to verify version output contains the tag string. This requires the compiled binary to read version from a source that gets the git tag injected at build time (e.g., `package.json` version or a build-time env var).
+
+- **Step naming for progress visibility**: Name each step descriptively: `Building rorca for ${{ matrix.target }}...`, `Uploading assets...`, `Running smoke test...`. GitHub Actions UI shows these as the progress indicator — no custom solution needed.
+
+- **Gotcha — Bun availability**: GitHub-hosted runners don't have Bun pre-installed. Use `oven-sh/setup-bun@v2` action with a pinned version. Cross-compilation for all 4 targets from a single runner is supported by Bun natively — no need for per-OS runners in the matrix (matrix is for parallelism, not platform-specific builds).
 
 Acceptance Criteria:
-- Kanban API (GET /api/specs/kanban) returns attachmentCount: number per spec
-- Backend joins spec_attachments table, counts attachments per spec_id
-- Frontend SpecCard component (or BoardView card) renders badge if attachmentCount > 0
-- Badge: Paperclip icon + count (e.g., '3'), styled as small gray pill below title
-- Clicking badge opens SpecDetailSlideOver with 'Attachments' tab active (to be created in US-013)
-- Tooltip on hover: '<N> attachments'
+- .github/workflows/release.yml exists and triggers on push of tags matching 'v*'
+- Workflow builds 4 platform binaries using bun build --compile (darwin-arm64, darwin-x64, linux-x64, win32-x64)
+- Each binary is uploaded as a GitHub Release asset with filename matching rorca-<platform> pattern
+- Release notes are auto-generated from git log between current and previous tag
+- Linux binary smoke test step runs `./rorca-linux-x64 --version` and verifies output contains the tag version string
+- If bun build --compile fails for any platform, the workflow step exits with non-zero code and the error is visible in GitHub Actions logs
+- If no previous tag exists (empty state / first release), release notes show all commits since initial commit
+- Workflow includes a loading/progress indicator via GitHub Actions step names showing 'Building darwin-arm64...', 'Uploading assets...'

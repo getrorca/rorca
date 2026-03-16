@@ -3948,7 +3948,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     let blockedBy: string[] | null = null;
     if (walEvent?.payload) {
       try {
-        const payload = JSON.parse(walEvent.payload);
+        const payload = typeof walEvent.payload === 'string' ? JSON.parse(walEvent.payload) : walEvent.payload;
         failureReason = payload.reason ?? null;
         failureAttempts = payload.attempts ?? null;
         if (Array.isArray(payload.blockedBy)) blockedBy = payload.blockedBy;
@@ -4106,8 +4106,8 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
   const walRow = await queryOne<{ payload: Record<string, unknown> | string }>(`SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::int = $2 ORDER BY id DESC LIMIT 1`, [storyId, runId]);
   if (walRow?.payload) {
     try {
-      const payload = JSON.parse(walRow.payload);
-      if (payload.log_file && fs.existsSync(payload.log_file)) {
+      const payload = typeof walRow.payload === 'string' ? JSON.parse(walRow.payload) : walRow.payload;
+      if (payload.log_file && fs.existsSync(String(payload.log_file))) {
         storyLogPath = payload.log_file;
       }
     } catch { /* ignore */ }

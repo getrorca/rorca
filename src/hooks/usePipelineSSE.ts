@@ -24,7 +24,7 @@ export function usePipelineSSE(runId: string | null, _workspaceId?: string | nul
     // The shared SSE broadcasts all events — ignore unrelated runs.
     if (event.payload) {
       try {
-        const p = JSON.parse(event.payload);
+        const p = typeof event.payload === 'string' ? JSON.parse(event.payload) : event.payload;
         if (p.run_id != null && String(p.run_id) !== runId) return;
       } catch { /* non-JSON payload — allow through */ }
     }

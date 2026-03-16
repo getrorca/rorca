@@ -1399,68 +1399,104 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
 Follow this workflow for implementation:
-## Agent Role: Frontend
+## Agent Role: Database
 
 
-## Skill: react-review (relevance: 9)
+## Skill: logging-fundamentals (relevance: 3)
 ---
-name: react-review
-description: Review React components for best practices and performance issues
+name: logging-fundamentals
+description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
 license: MIT
 compatibility: opencode
 metadata:
-  audience: developers
-  category: development
+  audience: developers, SREs, DevOps engineers
+  category: observability
 ---
 
-# React Review Skill
+# Logging Fundamentals
 
-Review React components for best practices, performance issues, and common patterns.
+Establish proper logging practices including log levels, structured logging, context propagation, and comprehensive logging strategies for applications, services, and infrastructure.
 
 ## When to use me
 
 Use this skill when:
-- Reviewing React component code
-- Optimizing component performance
-- Checking for React best practices
-- Refactoring legacy components
-- Auditing component architecture
+- Setting up logging for new applications or services
+- Reviewing existing logging implementations
+- Establishing logging standards for teams or projects
+- Debugging issues with incomplete or poor logging
+- Implementing structured logging for better observability
+- Configuring log levels and verbosity for different environments
+- Ensuring logs contain sufficient context for troubleshooting
 
 ## What I do
 
-- Analyze React components for performance issues (unnecessary re-renders, large bundles)
-- Check for React best practices (hooks usage, prop patterns, state management)
-- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
-- Suggest optimizations (memoization, code splitting, lazy loading)
-- Review TypeScript usage and type safety
+### 1. Log Level Management
+- **Define appropriate log levels** (DEBUG, INFO, WARN, ERROR, FATAL)
+- **Configure level filtering** per environment (development, staging, production)
+- **Implement dynamic level adjustment** without application restarts
+- **Establish level usage guidelines** for different types of information
 
-## Key Patterns
+### 2. Structured Logging Implementation
+- **Design log schema** with consistent field naming and types
+- **Implement structured formats** (JSON, key-value pairs, structured text)
+- **Include mandatory context fields** (timestamp, service, trace_id, user_id, etc.)
+- **Handle nested structures and arrays** appropriately in logs
 
-### Performance
-- Use `React.memo` for components receiving object/function props from parent
-- Memoize expensive calculations with `useMemo`
-- Stabilize callback references with `useCallback`
-- Avoid inline object/array creation in JSX props
-- Use `React.lazy` + `Suspense` for code splitting
+### 3. Context Propagation
+- **Implement correlation IDs** for request tracing across services
+- **Propagate context through async operations** (queues, background jobs)
+- **Maintain user/session context** throughout request lifecycle
+- **Include business context** (order_id, transaction_id, etc.) in logs
 
-### Hooks
-- Always include all dependencies in `useEffect` dependency arrays
-- Never call hooks conditionally or inside loops
-- Extract complex logic into custom hooks
-- Clean up subscriptions and timers in useEffect return
+### 4. Log Content Best Practices
+- **Include sufficient context** for debugging without external systems
+- **Balance detail with noise** - log enough but not too much
+- **Use consistent message formats** across the codebase
+- **Log before and after significant operations**
+- **Include error details** (stack traces, error codes, recovery suggestions)
+- **Avoid logging secrets, passwords, or sensitive data**
 
-### TypeScript
-- Define explicit interfaces for all component props
-- Use discriminated unions for variant components
-- Prefer `interface` over `type` for component props
-- Use `React.FC` sparingly — prefer explicit return types
+## Logging Principles
+
+### The 5 Ws of Logging
+1. **WHO** - Which user/service/process generated the log?
+2. **WHAT** - What action/event is being logged?
+3. **WHEN** - Precise timestamp with timezone information
+4. **WHERE** - Which component/function/file generated the log?
+5. **WHY** - What is the significance/severity of the logged event?
+
+### Structured Logging Fields
+```json
+{
+  "timestamp": "2026-02-26T18:00:00Z",
+  "level": "INFO",
+  "service": "spec-generator",
+  "component": "chatComplete",
+  "trace_id": "gen-abc123",
+  "message": "LLM call completed",
+  "duration_ms": 5123,
+  "context": {
+    "model": "claude-sonnet-4-5-20250929",
+    "input_tokens": 12000,
+    "output_tokens": 4500
+  }
+}
+```
+
+### Log Level Guidelines
+- **DEBUG**: Detailed information for debugging, typically disabled in production
+- **INFO**: Routine information about normal operation
+- **WARN**: Warning conditions that might require attention but don't indicate failure
+- **ERROR**: Error conditions that indicate failure of a specific operation
+- **FATAL**: Critical errors that cause application termination
 
 ## Notes
 
-- Focuses on React 18+ patterns and best practices
-- Considers both class and function components
-- Includes TypeScript and JavaScript variants
-- References official React documentation and community patterns
+- **Structured logging is essential** for modern log analysis and observability
+- **Context is more important than message content** - ensure logs can be correlated
+- **Log levels should reflect operational importance**, not developer convenience
+- **Consider log volume** - too many logs can overwhelm systems and teams
+- **Balance human readability with machine parsability** in log formats
 
 ---
 name: rorca
@@ -1613,21 +1649,14 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-002):
-The Run View panel (src/panels/RunViewPanel.tsx) renders a legacy `StoriesListTab` component (defined inline, lines 165-364) for the stories tab. This is a static list with colored dots and plain text — no live elapsed timers, no running story indicator, no micro-animations, no real-time WAL event integration.
-
-Meanwhile, `src/components/RunStoryList.tsx` (1010 lines) already implements all the desired features: live elapsed timers per story, auto-scroll to the currently running story, checkmark pop animation (animate-checkmark-pop), green flash animation (animate-story-pass), WAL event integration for real-time status updates, wave group visualization, and keyboard navigation (j/k).
-
-Replace the `<StoriesListTab />` usage in RunViewPanel's tab rendering with `<RunStoryList />`. Wire the required props:
-- `runId` from the current run
-- `stories` from the run data (story_results or spec userStories)
-- `walEvents` from the `usePipelineSSE` hook already used in RunViewPanel
-- Any other required props (onStoryClick, compact mode, etc.)
-
-After wiring, remove or comment out the legacy `StoriesListTab` function definition (lines 165-364) to prevent confusion. Do NOT delete it entirely yet — mark it as `@deprecated` in case rollback is needed.
+After the merge conflict in worker.ts is resolved, run the full backend test suite (`cd backend && npm test`). The 67 failing test suites all fail because they transitively import the Express app which imports worker.ts — the merge conflict prevented compilation. After the conflict fix, re-run all 1872 tests. Identify and fix any remaining failures unrelated to the merge conflict. Target: at least 1778 tests passing (95%+). Document any tests that are legitimately skipped or need environment-specific setup.
 
 Acceptance Criteria:
-- RunStoryList component is rendered in the Run View stories tab instead of the legacy StoriesListTab
-- RunStoryList receives runId, stories array, and walEvents from usePipelineSSE as props
-- Live elapsed timers appear next to running stories and increment in real-time
-- The currently running story auto-scrolls into view when it starts
-- The legacy StoriesListTab function is marked @deprecated with a comment explaining it was replaced by RunStoryList
+- cd backend && npm test runs to completion without the process crashing
+- Test pass rate is >= 95% (at least 1778 of 1872 tests pass)
+- No test suite fails due to import/compilation errors — every test file resolves all imports successfully
+- Any intentionally skipped tests have a // SKIP: reason comment explaining why they are excluded
+- Test output summary is captured showing total passed/failed/skipped counts in CI-parseable format
+- If a test fails due to missing database tables or connection error, the failure message includes the table name and connection string (not a generic timeout)
+- When test database is empty (no seed data), setup scripts create required fixtures before test execution without manual intervention
+- While tests are running, Jest outputs a progress indicator showing completed/total test suites (loading/progress visibility)
