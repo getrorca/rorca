@@ -8,6 +8,7 @@ import { validateDirectionYaml } from '../lib/direction-validator';
 import { synthesize } from '../lib/direction-stack';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { logger } from '../lib/logger';
+import { ConflictError, NotFoundError, TooManyRequestsError, UnprocessableError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -162,24 +163,24 @@ router.post('/', async (req: Request, res: Response) => {
     const { name, slug } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
-      res.status(400).json({ error: 'Team name is required' });
+      throw new ValidationError('Team name is required');
       return;
     }
     if (!slug || typeof slug !== 'string') {
-      res.status(400).json({ error: 'Team slug is required' });
+      throw new ValidationError('Team slug is required');
       return;
     }
 
     const trimmedSlug = slug.trim().toLowerCase();
     if (!SLUG_REGEX.test(trimmedSlug)) {
-      res.status(400).json({ error: 'Slug must be lowercase alphanumeric with hyphens (e.g. my-team)' });
+      throw new ValidationError('Slug must be lowercase alphanumeric with hyphens (e.g. my-team)');
       return;
     }
 
     // Check slug uniqueness
     const existing = await queryOne<TeamRow>('SELECT id FROM teams WHERE slug = $1', [trimmedSlug]);
     if (existing) {
-      res.status(409).json({ error: 'Team slug already taken' });
+      throw new ConflictError('Team slug already taken');
       return;
     }
 
@@ -264,7 +265,7 @@ router.post('/:id/invites', requireRole('admin'), async (req: Request, res: Resp
     const { email, role } = req.body;
 
     if (!email || typeof email !== 'string') {
-      res.status(400).json({ error: 'Email is required' });
+      throw new ValidationError('Email is required');
       return;
     }
 
@@ -274,7 +275,7 @@ router.post('/:id/invites', requireRole('admin'), async (req: Request, res: Resp
     // Verify team exists
     const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (!team) {
-      res.status(404).json({ error: 'Team not found' });
+      throw new NotFoundError('Team not found');
       return;
     }
 
@@ -284,7 +285,7 @@ router.post('/:id/invites', requireRole('admin'), async (req: Request, res: Resp
       [teamId, trimmedEmail]
     );
     if (existingMember) {
-      res.status(409).json({ error: 'User is already a team member' });
+      throw new ConflictError('User is already a team member');
       return;
     }
 
@@ -294,7 +295,7 @@ router.post('/:id/invites', requireRole('admin'), async (req: Request, res: Resp
       [teamId]
     );
     if (pendingCount && Number(pendingCount.cnt) >= MAX_PENDING_INVITES_FREE) {
-      res.status(429).json({ error: `Free tier limit: maximum ${MAX_PENDING_INVITES_FREE} pending invites at a time` });
+      throw new TooManyRequestsError(`Free tier limit: maximum ${MAX_PENDING_INVITES_FREE} pending invites at a time`);
       return;
     }
 
@@ -304,7 +305,7 @@ router.post('/:id/invites', requireRole('admin'), async (req: Request, res: Resp
       [teamId, trimmedEmail]
     );
     if (existingInvite) {
-      res.status(409).json({ error: 'A pending invite already exists for this email' });
+      throw new ConflictError('A pending invite already exists for this email');
       return;
     }
 
@@ -369,7 +370,7 @@ router.get('/:id/members', requireRole('viewer'), async (req: Request, res: Resp
 
     const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (!team) {
-      res.status(404).json({ error: 'Team not found' });
+      throw new NotFoundError('Team not found');
       return;
     }
 
@@ -453,7 +454,7 @@ router.patch('/:id/members/:userId', requireRole('admin'), async (req: Request, 
     const { role } = req.body;
 
     if (!role || !['admin', 'editor', 'viewer'].includes(role)) {
-      res.status(400).json({ error: 'Valid role is required (admin, editor, viewer)' });
+      throw new ValidationError('Valid role is required (admin, editor, viewer)');
       return;
     }
 
@@ -462,7 +463,7 @@ router.patch('/:id/members/:userId', requireRole('admin'), async (req: Request, 
       [teamId, targetUserId]
     );
     if (!membership) {
-      res.status(404).json({ error: 'Member not found' });
+      throw new NotFoundError('Member not found');
       return;
     }
 
@@ -521,7 +522,7 @@ router.delete('/:id/members/:userId', requireRole('admin'), async (req: Request,
     // Prevent removing yourself if you're the owner
     const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (team && team.owner_id === targetUserId) {
-      res.status(400).json({ error: 'Cannot remove the team owner' });
+      throw new ValidationError('Cannot remove the team owner');
       return;
     }
 
@@ -531,7 +532,7 @@ router.delete('/:id/members/:userId', requireRole('admin'), async (req: Request,
     );
 
     if (result.rowCount === 0) {
-      res.status(404).json({ error: 'Member not found' });
+      throw new NotFoundError('Member not found');
       return;
     }
 
@@ -588,13 +589,13 @@ router.patch('/:id/settings', requireRole('admin'), async (req: Request, res: Re
     const { name } = req.body;
 
     if (!name || typeof name !== 'string' || !name.trim()) {
-      res.status(400).json({ error: 'Team name is required' });
+      throw new ValidationError('Team name is required');
       return;
     }
 
     const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (!team) {
-      res.status(404).json({ error: 'Team not found' });
+      throw new NotFoundError('Team not found');
       return;
     }
 
@@ -645,7 +646,7 @@ router.get('/:id/direction', requireRole('viewer'), async (req: Request, res: Re
 
     const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (!team) {
-      res.status(404).json({ error: 'Team not found' });
+      throw new NotFoundError('Team not found');
       return;
     }
 
@@ -715,18 +716,18 @@ router.put('/:id/direction', requireRole('admin'), async (req: Request, res: Res
     const { layer, contentYaml } = req.body;
 
     if (!layer || ![1, 2].includes(Number(layer))) {
-      res.status(400).json({ error: 'layer must be 1 or 2 for team direction' });
+      throw new ValidationError('layer must be 1 or 2 for team direction');
       return;
     }
 
     if (contentYaml === undefined || contentYaml === null) {
-      res.status(400).json({ error: 'contentYaml is required' });
+      throw new ValidationError('contentYaml is required');
       return;
     }
 
     const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (!team) {
-      res.status(404).json({ error: 'Team not found' });
+      throw new NotFoundError('Team not found');
       return;
     }
 
@@ -735,11 +736,11 @@ router.put('/:id/direction', requireRole('admin'), async (req: Request, res: Res
     // Validate YAML
     const validation = validateDirectionYaml(layerNum, contentYaml);
     if (validation.yamlError) {
-      res.status(422).json({ error: 'Invalid YAML syntax', yamlError: validation.yamlError });
+      throw new UnprocessableError('Invalid YAML syntax');
       return;
     }
     if (!validation.valid) {
-      res.status(422).json({ error: 'Direction content failed schema validation', validationErrors: validation.errors });
+      throw new UnprocessableError('Direction content failed schema validation');
       return;
     }
 
@@ -801,7 +802,7 @@ router.post('/:id/direction/preview', requireRole('viewer'), async (req: Request
 
     const team = await queryOne<TeamRow>('SELECT * FROM teams WHERE id = $1', [teamId]);
     if (!team) {
-      res.status(404).json({ error: 'Team not found' });
+      throw new NotFoundError('Team not found');
       return;
     }
 

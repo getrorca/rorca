@@ -4,6 +4,7 @@ import * as path from 'path';
 import { query, queryOne } from '../db/index';
 import { getEffectiveUser } from '../lib/get-user';
 import { logger } from '../lib/logger';
+import { ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -236,7 +237,7 @@ router.get('/workspace-members', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 

@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { queryOne, execute } from '../db/index';
+import { ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -123,7 +124,7 @@ router.put('/', async (req: Request, res: Response, next: NextFunction) => {
     }
 
     if (updates.length === 0) {
-      res.status(400).json({ error: 'No fields to update' });
+      throw new ValidationError('No fields to update');
       return;
     }
 

@@ -34,7 +34,7 @@ import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftRepo
 import { synthesizeRunMemory } from '../lib/auto-memory';
 import { logger } from '../lib/logger';
 import { getBoss } from '../lib/pg-boss';
-import { ConflictError, NotFoundError } from '../lib/errors';
+import { ConflictError, ForbiddenError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
@@ -925,20 +925,20 @@ router.post('/preflight', async (req: Request, res: Response) => {
   try {
     const { specPath, workspaceId } = req.body;
     if (!specPath || !workspaceId) {
-      res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
+      throw new ValidationError('Missing required fields: specPath, workspaceId');
       return;
     }
 
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
       { id: string; path: string } | undefined;
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     const absSpecPath = path.join(workspace.path, specPath);
     if (!fs.existsSync(absSpecPath)) {
-      res.status(404).json({ error: 'Spec file not found' });
+      throw new NotFoundError('Spec file not found');
       return;
     }
 
@@ -1031,7 +1031,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
       { id: string; label: string; path: string; domain?: string } | undefined;
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -1041,7 +1041,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       const userRow = await queryOne('SELECT plan FROM users WHERE id = $1', [effectiveUser.id]) as { plan: string } | undefined;
       const plan = userRow?.plan || 'free';
       if (plan === 'free' && !dryRun) {
-        res.status(403).json({ error: 'plan_required', message: 'Pipeline execution requires a paid plan. Upgrade to Solo, Pro, or Team.' });
+        throw new ForbiddenError('plan_required');
         return;
       }
     }
@@ -1050,13 +1050,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     if (dryRun) {
       const absSpecPath = path.join(workspace.path, specPath);
       if (!fs.existsSync(absSpecPath)) {
-        res.status(422).json({ error: `Spec file not found at ${absSpecPath}` });
+        throw new UnprocessableError(`Spec file not found at ${absSpecPath}`);
         return;
       }
 
       const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
       if (!specJson.userStories || !Array.isArray(specJson.userStories)) {
-        res.status(422).json({ error: 'Spec has no userStories array' });
+        throw new UnprocessableError('Spec has no userStories array');
         return;
       }
 
@@ -1079,12 +1079,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     // 2. Budget cap guard — block if hard cap exceeded for this period
     const budgetStatus = await checkBudgetThresholds(workspaceId);
     if (budgetStatus.capExceeded) {
-      res.status(409).json({
-        error: 'Budget cap exceeded for this period',
-        spending_usd: Math.round(budgetStatus.spending * 1_000_000) / 1_000_000,
-        hard_cap_usd: budgetStatus.config!.hard_cap_usd,
-        period: budgetStatus.config!.period,
-      });
+      throw new ConflictError('Budget cap exceeded for this period');
       return;
     }
 
@@ -1102,11 +1097,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       const { getClaudeAuthState } = await import('../lib/claude-auth');
       const authState = getClaudeAuthState();
       if (!authState.connected) {
-        res.status(403).json({
-          error: 'claude_not_authenticated',
-          message: 'Claude is not authenticated. Connect your Claude account in Settings > Execution Engine.',
-          settingsDeepLink: '/settings?tab=providers&focus=claude-auth',
-        });
+        throw new ForbiddenError('claude_not_authenticated');
         return;
       }
     }
@@ -1116,11 +1107,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       const { getCodexAuthState } = await import('../lib/codex-auth');
       const authState = getCodexAuthState();
       if (!authState.connected) {
-        res.status(403).json({
-          error: 'codex_not_authenticated',
-          message: 'Codex is not authenticated. Connect your ChatGPT account in Settings > Execution Engine.',
-          settingsDeepLink: '/settings?tab=providers&focus=codex-auth',
-        });
+        throw new ForbiddenError('codex_not_authenticated');
         return;
       }
     }
@@ -1165,12 +1152,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         }
 
         if (authErrors.length > 0) {
-          res.status(403).json({
-            error: 'engine_auth_required',
-            message: 'Some execution engines are not ready',
-            details: authErrors,
-            settingsDeepLink: '/settings?tab=providers',
-          });
+          throw new ForbiddenError('engine_auth_required');
           return;
         }
       } catch {
@@ -1197,12 +1179,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
               missingTools: s.result.missingTools,
               warnings: s.result.warnings,
             }));
-            res.status(400).json({
-              error: 'capability_mismatch',
-              message: 'Some stories require tools not supported by the assigned engine',
-              mode: mismatchMode,
-              incompatibleStories: incompatible,
-            });
+            throw new ValidationError('capability_mismatch');
             return;
           }
 
@@ -1261,11 +1238,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         });
 
         if (hasBlockingViolations(driftReport)) {
-          res.status(409).json({
-            error: 'convention_drift_detected',
-            message: 'Convention drift check found error-severity violations. Fix violations or disable driftCheck in .rorca/config.json.',
-            report: driftReport,
-          });
+          throw new ConflictError('convention_drift_detected');
           return;
         }
       } catch (driftErr: any) {
@@ -1281,7 +1254,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const useExecutionEngine = hasExecutionEngine;
 
     if (!hasExecutionEngine && !hasBashRunLoop) {
-      res.status(422).json({ error: `No execution engine found — execution-engine.ts is missing` });
+      throw new UnprocessableError(`No execution engine found — execution-engine.ts is missing`);
       return;
     }
 
@@ -1506,13 +1479,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         outputBuffers.set(runId, failBuf);
         setTimeout(() => { outputBuffers.delete(runId); }, 30 * 60 * 1000);
 
-        res.status(422).json({
-          error: 'Pre-run hook failed',
-          runId,
-          hookCommand: failed.command,
-          exitCode: failed.exitCode,
-          output: failed.output,
-        });
+        throw new UnprocessableError('Pre-run hook failed');
         return;
       }
     }
@@ -1640,26 +1607,26 @@ router.post('/context-preview', async (req: Request, res: Response) => {
   try {
     const { specPath, workspaceId } = req.body;
     if (!specPath || !workspaceId) {
-      res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
+      throw new ValidationError('Missing required fields: specPath, workspaceId');
       return;
     }
 
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
       { id: string; path: string } | undefined;
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     const absSpecPath = path.join(workspace.path, specPath);
     if (!fs.existsSync(absSpecPath)) {
-      res.status(404).json({ error: 'Spec file not found' });
+      throw new NotFoundError('Spec file not found');
       return;
     }
 
     const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
     if (!specJson.userStories || !Array.isArray(specJson.userStories)) {
-      res.status(422).json({ error: 'Spec has no userStories array' });
+      throw new UnprocessableError('Spec has no userStories array');
       return;
     }
 
@@ -1828,20 +1795,20 @@ router.post('/orchestration-preview', async (req: Request, res: Response) => {
   try {
     const { specPath, workspaceId } = req.body;
     if (!specPath || !workspaceId) {
-      res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
+      throw new ValidationError('Missing required fields: specPath, workspaceId');
       return;
     }
 
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
       { id: string; path: string } | undefined;
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     const absSpecPath = path.join(workspace.path, specPath);
     if (!fs.existsSync(absSpecPath)) {
-      res.status(404).json({ error: 'Spec file not found' });
+      throw new NotFoundError('Spec file not found');
       return;
     }
 
@@ -1917,7 +1884,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     const { workspaceId, brief, model: requestedModel } = req.body;
 
     if (!workspaceId || !brief) {
-      res.status(400).json({ error: 'Missing required fields: workspaceId, brief' });
+      throw new ValidationError('Missing required fields: workspaceId, brief');
       return;
     }
 
@@ -1925,7 +1892,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
       { id: string; label: string; path: string; domain?: string } | undefined;
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -1935,7 +1902,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       const userRow = await queryOne('SELECT plan FROM users WHERE id = $1', [effectiveUser.id]) as { plan: string } | undefined;
       const plan = userRow?.plan || 'free';
       if (plan === 'free') {
-        res.status(403).json({ error: 'plan_required', message: 'Pipeline execution requires a paid plan.' });
+        throw new ForbiddenError('plan_required');
         return;
       }
     }
@@ -1943,12 +1910,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     // 3. Budget cap guard
     const budgetStatus = await checkBudgetThresholds(workspaceId);
     if (budgetStatus.capExceeded) {
-      res.status(409).json({
-        error: 'Budget cap exceeded for this period',
-        spending_usd: Math.round(budgetStatus.spending * 1_000_000) / 1_000_000,
-        hard_cap_usd: budgetStatus.config!.hard_cap_usd,
-        period: budgetStatus.config!.period,
-      });
+      throw new ConflictError('Budget cap exceeded for this period');
       return;
     }
 
@@ -2138,7 +2100,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     const hasBashRunLoop = fs.existsSync(runLoopSh);
     const hasTsRunLoop = fs.existsSync(runLoopTs);
     if (!hasBashRunLoop && !hasTsRunLoop) {
-      res.status(422).json({ error: `No run-loop engine found for workspace` });
+      throw new UnprocessableError(`No run-loop engine found for workspace`);
       return;
     }
     const useTypescriptRunLoop = !hasBashRunLoop && hasTsRunLoop;
@@ -2345,7 +2307,7 @@ router.post('/runs', async (req: Request, res: Response) => {
     const { specPath, workspaceId } = req.body;
 
     if (!specPath || !workspaceId) {
-      res.status(400).json({ error: 'Missing required fields: specPath, workspaceId' });
+      throw new ValidationError('Missing required fields: specPath, workspaceId');
       return;
     }
 
@@ -2398,7 +2360,7 @@ router.get('/runs', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
@@ -2477,12 +2439,12 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
     const run2Id = parseInt(String(req.query.run2), 10);
 
     if (isNaN(run1Id) || isNaN(run2Id)) {
-      res.status(400).json({ error: 'Missing or invalid run1/run2 query params' });
+      throw new ValidationError('Missing or invalid run1/run2 query params');
       return;
     }
 
     if (run1Id === run2Id) {
-      res.status(400).json({ error: 'Cannot compare a run with itself' });
+      throw new ValidationError('Cannot compare a run with itself');
       return;
     }
 
@@ -2490,8 +2452,8 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
     const run1 = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [run1Id]) as PipelineRunRow | undefined;
     const run2 = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [run2Id]) as PipelineRunRow | undefined;
 
-    if (!run1) { res.status(404).json({ error: `Run ${run1Id} not found` }); return; }
-    if (!run2) { res.status(404).json({ error: `Run ${run2Id} not found` }); return; }
+    if (!run1) { throw new NotFoundError(`Run ${run1Id} not found`); return; }
+    if (!run2) { throw new NotFoundError(`Run ${run2Id} not found`); return; }
 
     // Fetch story results for both runs (latest per story_id by highest id)
     const stories1All = await query('SELECT * FROM story_results WHERE run_id = $1 ORDER BY id ASC', [run1Id]) as StoryResultRow[];
@@ -2642,14 +2604,14 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
     const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
 
     if (!run) {
-      res.status(404).json({ error: 'Run not found' });
+      throw new NotFoundError('Run not found');
       return;
     }
 
@@ -2822,7 +2784,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
   try {
     const originalRunId = parseInt(String(req.params.runId), 10);
     if (isNaN(originalRunId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
@@ -2832,13 +2794,13 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     const originalRun = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [originalRunId]) as PipelineRunRow | undefined;
 
     if (!originalRun) {
-      res.status(404).json({ error: 'Run not found' });
+      throw new NotFoundError('Run not found');
       return;
     }
 
     // Only retry runs that have terminal failure states
     if (!['failed', 'done', 'partial_failure'].includes(originalRun.status)) {
-      res.status(409).json({ error: `Cannot retry run with status '${originalRun.status}'` });
+      throw new ConflictError(`Cannot retry run with status '${originalRun.status}'`);
       return;
     }
 
@@ -2882,7 +2844,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     const passedStories = Array.from(latestByStory.values()).filter(s => s.status === 'pass');
 
     if (failedStories.length === 0) {
-      res.status(422).json({ error: 'No failed stories to retry' });
+      throw new UnprocessableError('No failed stories to retry');
       return;
     }
 
@@ -2891,7 +2853,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     if (storyIds && storyIds.length > 0) {
       storiesToRetry = failedStories.filter(s => storyIds.includes(s.story_id));
       if (storiesToRetry.length === 0) {
-        res.status(422).json({ error: 'None of the specified storyIds are failed stories in this run' });
+        throw new UnprocessableError('None of the specified storyIds are failed stories in this run');
         return;
       }
     } else {
@@ -2902,7 +2864,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [originalRun.workspace_id]) as
       { id: string; label: string; path: string } | undefined;
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -2915,11 +2877,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     ).catch(() => undefined); // pgboss schema might not exist yet in test envs
 
     if (existingJob) {
-      res.status(409).json({
-        error: 'A retry job for this run is already queued or active',
-        code: 'CONFLICT',
-        activeJobId: existingJob.id,
-      });
+      throw new ConflictError('A retry job for this run is already queued or active');
       return;
     }
 
@@ -2997,7 +2955,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     //     (passes:true) are skipped naturally by the engine.
     const absSpecPath = path.join(workspace.path, originalRun.spec_path);
     if (!fs.existsSync(absSpecPath)) {
-      res.status(422).json({ error: `Spec file not found at ${absSpecPath}` });
+      throw new UnprocessableError(`Spec file not found at ${absSpecPath}`);
       return;
     }
 
@@ -3099,7 +3057,7 @@ router.post('/runs/:runId/retry-merge', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
@@ -3152,14 +3110,9 @@ router.post('/runs/:runId/retry-merge', async (req: Request, res: Response) => {
 
     res.status(200).json({ ok: true, runId, queued: true });
   } catch (error: any) {
-    if (error instanceof NotFoundError) {
-      res.status(404).json(error.toJSON());
-    } else if (error instanceof ConflictError) {
-      res.status(409).json(error.toJSON());
-    } else {
-      logger.error({ error }, '[Pipeline] retry-merge error');
-      res.status(500).json({ error: error.message });
-    }
+    // AppError subclasses are caught and serialized by the centralized error handler
+    logger.error({ error }, '[Pipeline] retry-merge error');
+    throw error;
   }
 });
 
@@ -3187,24 +3140,24 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
     const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
 
     if (!run) {
-      res.status(404).json({ error: 'Run not found' });
+      throw new NotFoundError('Run not found');
       return;
     }
 
     if (run.status !== 'running') {
-      res.status(409).json({ error: `Cannot pause run with status '${run.status}'` });
+      throw new ConflictError(`Cannot pause run with status '${run.status}'`);
       return;
     }
 
     if (!run.pid || !isPidAlive(run.pid)) {
-      res.status(409).json({ error: 'Process is not alive' });
+      throw new ConflictError('Process is not alive');
       return;
     }
 
@@ -3215,7 +3168,7 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
       process.kill(-run.pid, 'SIGTSTP');
     } catch (err: any) {
       if (err.code === 'ESRCH') {
-        res.status(409).json({ error: 'Process is no longer running' });
+        throw new ConflictError('Process is no longer running');
       } else {
         res.status(500).json({ error: `Failed to send SIGTSTP: ${err.message}` });
       }
@@ -3269,24 +3222,24 @@ router.post('/runs/:runId/resume', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
     const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
 
     if (!run) {
-      res.status(404).json({ error: 'Run not found' });
+      throw new NotFoundError('Run not found');
       return;
     }
 
     if (run.status !== 'paused') {
-      res.status(409).json({ error: `Cannot resume run with status '${run.status}'` });
+      throw new ConflictError(`Cannot resume run with status '${run.status}'`);
       return;
     }
 
     if (!run.pid || !isPidAlive(run.pid)) {
-      res.status(409).json({ error: 'Process is not alive' });
+      throw new ConflictError('Process is not alive');
       return;
     }
 
@@ -3349,26 +3302,26 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
     const { context } = req.body as { context?: string };
     if (!context || context.trim().length === 0) {
-      res.status(400).json({ error: 'Context is required and cannot be empty' });
+      throw new ValidationError('Context is required and cannot be empty');
       return;
     }
 
     const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
 
     if (!run) {
-      res.status(404).json({ error: 'Run not found' });
+      throw new NotFoundError('Run not found');
       return;
     }
 
     // Accept context injection when run is blocked or paused
     if (run.status !== 'paused' && run.status !== 'running') {
-      res.status(409).json({ error: `Cannot inject context into run with status '${run.status}'` });
+      throw new ConflictError(`Cannot inject context into run with status '${run.status}'`);
       return;
     }
 
@@ -3448,7 +3401,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
@@ -3458,7 +3411,7 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     );
 
     if (!run) {
-      res.status(404).json({ error: 'Run not found' });
+      throw new NotFoundError('Run not found');
       return;
     }
 
@@ -3550,12 +3503,9 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
 
     res.json({ ok: true, runId, status: 'cancelling' });
   } catch (error: unknown) {
-    if (error instanceof ConflictError) {
-      res.status(409).json({ error: (error as ConflictError).message });
-      return;
-    }
+    // AppError subclasses are caught and serialized by the centralized error handler
     logger.error({ err: error }, '[Pipeline] Cancel error');
-    res.status(500).json({ error: (error as Error).message });
+    throw error;
   }
 });
 
@@ -3585,19 +3535,19 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
     const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
 
     if (!run) {
-      res.status(404).json({ error: 'Run not found' });
+      throw new NotFoundError('Run not found');
       return;
     }
 
     if (run.status !== 'queued') {
-      res.status(409).json({ error: `Cannot cancel run with status '${run.status}' — only queued runs can be cancelled via DELETE` });
+      throw new ConflictError(`Cannot cancel run with status '${run.status}' — only queued runs can be cancelled via DELETE`);
       return;
     }
 
@@ -3654,7 +3604,7 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
 router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.runId), 10);
   if (isNaN(runId)) {
-    res.status(400).json({ error: 'Invalid runId' });
+    throw new ValidationError('Invalid runId');
     return;
   }
 
@@ -3663,7 +3613,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   if (wsId) {
     const ownerCheck = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: number } | undefined;
     if (ownerCheck && String(ownerCheck.workspace_id) !== wsId) {
-      res.status(403).json({ error: 'Run does not belong to this workspace' });
+      throw new ForbiddenError('Run does not belong to this workspace');
       return;
     }
   }
@@ -3824,12 +3774,12 @@ router.post('/story-result', async (req: Request, res: Response) => {
     };
 
     if (!runId || !storyId || !status) {
-      res.status(400).json({ error: 'runId, storyId, and status are required' });
+      throw new ValidationError('runId, storyId, and status are required');
       return;
     }
 
     if (!['pass', 'fail', 'skip', 'excluded'].includes(status)) {
-      res.status(400).json({ error: `Invalid status: ${status}` });
+      throw new ValidationError(`Invalid status: ${status}`);
       return;
     }
 
@@ -3897,12 +3847,12 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
     const { inputTokens, outputTokens, model } = req.body as { inputTokens?: number; outputTokens?: number; model?: string };
 
     if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
     if (inputTokens == null && outputTokens == null) {
-      res.status(400).json({ error: 'At least one of inputTokens or outputTokens required' });
+      throw new ValidationError('At least one of inputTokens or outputTokens required');
       return;
     }
 
@@ -3910,7 +3860,7 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
     const row = await queryOne(`SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2 ORDER BY id DESC LIMIT 1`, [runId, storyId]) as { id: number } | undefined;
 
     if (!row) {
-      res.status(404).json({ error: 'Story result not found' });
+      throw new NotFoundError('Story result not found');
       return;
     }
 
@@ -3978,7 +3928,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     const lines = Math.min(parseInt(String(req.query.lines ?? '20'), 10) || 20, 100);
 
     if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
@@ -3986,7 +3936,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     const storyResult = await queryOne(`SELECT * FROM story_results WHERE run_id = $1 AND story_id = $2 ORDER BY id DESC LIMIT 1`, [runId, storyId]) as StoryResultRow | undefined;
 
     if (!storyResult) {
-      res.status(404).json({ error: 'Story result not found' });
+      throw new NotFoundError('Story result not found');
       return;
     }
 
@@ -4132,7 +4082,7 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
   const runId = parseInt(String(req.params.runId), 10);
   const storyId = String(req.params.storyId);
   if (isNaN(runId)) {
-    res.status(400).json({ error: 'Invalid runId' });
+    throw new ValidationError('Invalid runId');
     return;
   }
 
@@ -4451,13 +4401,13 @@ router.get('/stream', async (req: Request, res: Response) => {
 router.get('/runs/:runId/log', async (req: Request, res: Response) => {
   const runId = parseInt(String(req.params.runId), 10);
   if (isNaN(runId)) {
-    res.status(400).json({ error: 'Invalid runId' });
+    throw new ValidationError('Invalid runId');
     return;
   }
 
   const logPath = await resolveLogPath(runId);
   if (!logPath) {
-    res.status(404).json({ error: 'Log file not found for this run' });
+    throw new NotFoundError('Log file not found for this run');
     return;
   }
 
@@ -4539,21 +4489,21 @@ router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
     const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
 
     if (!run) {
-      res.status(404).json({ error: 'Run not found' });
+      throw new NotFoundError('Run not found');
       return;
     }
 
     const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
 
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -4637,14 +4587,14 @@ router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(String(req.params.runId), 10);
     if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
     const run = await queryOne('SELECT id, spec_path, workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { id: number; spec_path: string; workspace_id: string } | undefined;
 
     if (!run) {
-      res.status(404).json({ error: 'Run not found' });
+      throw new NotFoundError('Run not found');
       return;
     }
 
@@ -4932,7 +4882,7 @@ router.post('/queue', async (req: Request, res: Response) => {
     const { workspaceId, specId } = req.body as { workspaceId?: string; specId?: string };
 
     if (!workspaceId || !specId) {
-      res.status(400).json({ error: 'workspaceId and specId are required' });
+      throw new ValidationError('workspaceId and specId are required');
       return;
     }
 
@@ -4940,7 +4890,7 @@ router.post('/queue', async (req: Request, res: Response) => {
     const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]) as
       { id: string } | undefined;
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -4950,7 +4900,7 @@ router.post('/queue', async (req: Request, res: Response) => {
     const specPath = `forge/specs/approved/${specId}.json`;
     const absSpecPath = path.join(workspaceRow!.path, specPath);
     if (!fs.existsSync(absSpecPath)) {
-      res.status(404).json({ error: `Spec not found at ${specPath}` });
+      throw new NotFoundError(`Spec not found at ${specPath}`);
       return;
     }
 
@@ -5042,7 +4992,7 @@ router.post('/queue', async (req: Request, res: Response) => {
 router.get('/runs/:id/dlq', async (req: Request, res: Response) => {
   const runId = parseInt(req.params.id as string, 10);
   if (isNaN(runId)) {
-    res.status(400).json({ error: 'Invalid run ID' });
+    throw new ValidationError('Invalid run ID');
     return;
   }
 
@@ -5067,7 +5017,7 @@ router.get('/runs/:id/dlq', async (req: Request, res: Response) => {
     ).catch(() => undefined);
 
     if (!row) {
-      res.status(404).json({ error: 'Run not in DLQ' });
+      throw new NotFoundError('Run not in DLQ');
       return;
     }
 
@@ -5126,7 +5076,7 @@ router.get('/runs/:id/dlq', async (req: Request, res: Response) => {
 router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
   const originalRunId = parseInt(req.params.id as string, 10);
   if (isNaN(originalRunId)) {
-    res.status(400).json({ error: 'Invalid run ID' });
+    throw new ValidationError('Invalid run ID');
     return;
   }
 
@@ -5149,12 +5099,12 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
     );
 
     if (!originalRun) {
-      res.status(404).json({ error: 'Run not found' });
+      throw new NotFoundError('Run not found');
       return;
     }
 
     if (originalRun.status !== 'failed') {
-      res.status(409).json({ error: `Run is in '${originalRun.status}' state — only 'failed' runs can be retried from DLQ` });
+      throw new ConflictError(`Run is in '${originalRun.status}' state — only 'failed' runs can be retried from DLQ`);
       return;
     }
 
@@ -5164,7 +5114,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       [originalRun.workspace_id],
     );
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -5857,7 +5807,7 @@ router.post('/queue/failed-jobs/:jobId/retry', async (req: Request, res: Respons
     );
 
     if (!job) {
-      return res.status(404).json({ error: `Failed job ${jobId} not found` });
+      throw new NotFoundError(`Failed job ${jobId} not found`);
     }
 
     const boss = getBoss();
