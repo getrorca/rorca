@@ -9967,7 +9967,7 @@ router.get('/:specId/attachments', async (req: Request, res: Response) => {
        sa.file_size,
        sa.created_at,
        u.id AS uploader_id,
-       u.name AS uploader_name
+       u.display_name AS uploader_name
      FROM spec_attachments sa
      LEFT JOIN users u ON u.id = sa.uploaded_by
      WHERE sa.spec_id = $1
