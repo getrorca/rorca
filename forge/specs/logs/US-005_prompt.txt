@@ -1338,21 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
-> Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-
-## 2026-03-12 [Bug Fix] MCP rorca_list_specs and rorca_list_runs wrong response shape
-> Rule: Both tools assumed wrong API response shapes. rorca_list_specs treated response as a bare array but API returns { items: [...] }. rorca_list_runs destructured { runs } but API returns { items: [...] }. Fixed by normalizing: Array.isArray(data) ? data : (data.items ?? []) for list_specs, and payload.runs ?? payload.items ?? [] for list_runs. Also fixed specName field: API uses specName not title — display as s.specName ?? s.title ?? s.id.
-
-## 2026-03-12 [Pattern] MCP tools vs prompts — tools are Claude-callable, prompts are user slash commands
-> Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
-
-## 2026-03-12 [Decision] GitHub org is getrorca — repo is github.com/getrorca/rorca (private)
-> Rule: The canonical remote for the Rorca codebase is https://github.com/getrorca/rorca (private repo). The old remote was sysgazer/rorcha — that is dead. All pushes go to getrorca/rorca. The repo is permanently closed source — never suggest open sourcing, BSL, or source-available licensing.
-
-## 2026-03-12 [Gotcha] Merging old SQLite-era branches with "take theirs" clobbers modern PostgreSQL files
-> Rule: NEVER merge old pre-postgres-migration branches (rorca-convention-agents, rorca-frontend-routing, and any branch with timestamp ~1772...) using "git checkout --theirs" on code conflicts. These branches were built on SQLite and will revert db/index.ts to the SQLite version, revert App.tsx/Sidebar.tsx/routes.tsx to the old multi-panel UI, and truncate server.ts. Always restore from a known-good modern commit (e.g. git show <pre-merge-sha>:path/to/file) after any such merge.
-
 ## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
 > Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
 
@@ -1397,6 +1382,21 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 ## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
 > Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
+
+## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
+> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
+
+## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
+> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
+
+## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
+> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
+
+## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
+> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
+
+## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
+> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
 Follow this workflow for implementation:
 ## Agent Role: Database
@@ -1552,61 +1552,30 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-005):
-Job pickup latency (time between `pgboss.job.created_on` and `pgboss.job.started_on`) is the primary indicator of worker responsiveness. If latency spikes above the 500ms target (pg-boss polling interval), it signals worker overload, pg-boss misconfiguration, or database connection exhaustion. This story adds pickup latency metrics to both the health endpoint and the queue health snapshots.
+Write Jest tests for the worker singleton guard, heartbeat-aware stale job recovery, and heartbeat-aware orphan sweep that were previously added to `worker.ts`. These mechanisms prevent multiple worker instances from competing for the same pg-boss queue and prevent the orphan sweep from killing legitimate engine processes.
 
-**SQL to compute latency metrics** (add to US-002's worker/health endpoint and US-004's snapshot capture):
-```sql
-SELECT
-  AVG(EXTRACT(EPOCH FROM (started_on - created_on))) AS avg_pickup_seconds,
-  PERCENTILE_CONT(0.95) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (started_on - created_on))) AS p95_pickup_seconds,
-  PERCENTILE_CONT(0.50) WITHIN GROUP (ORDER BY EXTRACT(EPOCH FROM (started_on - created_on))) AS p50_pickup_seconds,
-  MIN(EXTRACT(EPOCH FROM (started_on - created_on))) AS min_pickup_seconds,
-  MAX(EXTRACT(EPOCH FROM (started_on - created_on))) AS max_pickup_seconds,
-  COUNT(*) AS sample_count
-FROM pgboss.archive
-WHERE
-  started_on IS NOT NULL
-  AND created_on IS NOT NULL
-  AND archived_on > NOW() - INTERVAL '24 hours'
-  AND name IN ('pipeline:run', 'pipeline:retry')
-```
+Create `backend/src/__tests__/worker-singleton-sweep.test.ts` with test cases:
 
-**Add to worker/health response** (extend US-002's `queueStats` object):
-```json
-{
-  "pickupLatency": {
-    "avgSeconds": 0.43,
-    "p50Seconds": 0.38,
-    "p95Seconds": 1.2,
-    "maxSeconds": 4.7,
-    "sampleCount": 23,
-    "windowHours": 24,
-    "status": "healthy"
-  }
-}
-```
+**Singleton Guard:**
+1. First worker instance acquires the singleton lock (INSERT into worker_heartbeat succeeds)
+2. Second worker instance detects existing live heartbeat (last_seen < 90s ago) and exits with error
+3. Second worker instance detects stale heartbeat (last_seen > 90s ago) and takes over the lock
 
-**Latency status classification**:
-- `healthy`: p95 ≤ 2s
-- `degraded`: p95 between 2s and 10s
-- `critical`: p95 > 10s or sample_count = 0 and pending > 0 (jobs stuck, never picked up)
+**Heartbeat-Aware Stale Job Recovery (recoverStaleJobs):**
+4. Jobs with `state='active'` AND no matching live worker heartbeat are marked failed
+5. Jobs with `state='active'` AND a matching live worker heartbeat are left alone (legitimate in-progress work)
+6. Recovery uses correct pg-boss column name `started_on` (NOT `startedon`)
 
-**Add to queue_health_snapshots table**: Add columns `avg_pickup_seconds FLOAT` and `p95_pickup_seconds FLOAT` to the migration in US-004. The monitor-states listener runs the latency query alongside snapshot capture and stores both in the same row.
+**Heartbeat-Aware Orphan Sweep:**
+7. Orphan sweep only kills processes whose worker_id has a stale heartbeat (last_seen > 90s)
+8. Orphan sweep does NOT kill processes belonging to a live worker (last_seen < 90s)
 
-**Alert threshold**: If latency status becomes `degraded` or `critical`, include `latencyAlert: true` in the `broadcastAll` payload from US-004's monitor-states handler so the frontend can show an actionable warning.
-
-## Context
-- **PERCENTILE_CONT is a PostgreSQL ordered-set aggregate**: Syntax is `PERCENTILE_CONT(fraction) WITHIN GROUP (ORDER BY expr)`. Not available in SQLite (not an issue — Rorca uses PostgreSQL 16).
-- **Sample window**: Use `pgboss.archive` (not `pgboss.job`) for latency calculation — completed/failed jobs have both `created_on` and `started_on` set. Active jobs have `started_on` but not yet completed; include them if latency window is short.
-- **Filter to pipeline queues only**: Exclude `pipeline:cron` and `pipeline:cron:<id>` jobs — cron jobs have a deliberately delayed start and would skew latency metrics. Filter `name IN ('pipeline:run', 'pipeline:retry', 'pipeline:cancel')`.
-- **Null handling**: If no jobs completed in the last 24h, `AVG()` returns NULL. Handle with `COALESCE(result, 0)` or return `null` in the response. `sampleCount: 0` indicates insufficient data.
-- **Queue_health_snapshots migration**: Since US-004 creates this table, US-005 must add the two new columns via an ALTER TABLE in a separate migration (073_queue_health_snapshots_latency.sql) or coordinate with US-004 to add them in migration 072. Running after US-004 is simplest — add a migration 073.
-- **Performance**: The PERCENTILE_CONT query against pgboss.archive scans rows in a 24h window. With Rorca's throughput (100s of jobs/day), this is fast. The index on `archived_on` from US-004's migration is essential.
+Mock the database layer (pg Pool) and pg-boss instance. Test the SQL queries directly where possible.
 
 Acceptance Criteria:
-- GET /api/pipeline/worker/health returns pickupLatency object with avgSeconds, p50Seconds, p95Seconds, maxSeconds, sampleCount, windowHours, and status fields
-- Latency status classification is correct: healthy (p95 ≤ 2s), degraded (2s < p95 ≤ 10s), critical (p95 > 10s or stuck jobs detected)
-- Latency query filters to pipeline:run and pipeline:retry queues only, excluding cron queues
-- queue_health_snapshots table includes avg_pickup_seconds and p95_pickup_seconds columns (via migration 073 or folded into 072)
-- When latency is degraded or critical, the monitor-states broadcastAll payload includes latencyAlert: true
-- Returns null latency fields (not error) when no completed jobs exist in the 24h window
+- Test file backend/src/__tests__/worker-singleton-sweep.test.ts exists with at least 8 test cases covering singleton guard, stale recovery, and orphan sweep
+- Singleton guard tests verify: first worker acquires lock, second worker with live heartbeat is rejected, second worker with stale heartbeat takes over
+- Stale job recovery tests verify: active jobs with dead workers are failed, active jobs with live workers are preserved
+- Orphan sweep tests verify: processes from stale workers are killed, processes from live workers are not killed
+- Tests verify correct pg-boss column names (started_on, completed_on) are used in queries
+- All tests pass when run with: npx jest --testPathPattern=worker-singleton-sweep

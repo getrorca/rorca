@@ -33,7 +33,8 @@
         "sre",
         "architect"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-002",
@@ -65,7 +66,8 @@
         "ux-designer",
         "best-practices"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-003",
@@ -99,7 +101,8 @@
         "ux-designer",
         "sre"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-004",
@@ -134,7 +137,8 @@
         "backend",
         "sre"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-005",
@@ -168,7 +172,8 @@
         "sre",
         "security"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-006",
@@ -202,7 +207,8 @@
         "frontend",
         "best-practices"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-007",
@@ -237,7 +243,8 @@
         "architect",
         "best-practices"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-008",
@@ -271,7 +278,8 @@
         "architect",
         "sre"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-009",
@@ -306,7 +314,8 @@
         "best-practices",
         "qa"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-010",
@@ -346,7 +355,8 @@
         "sre",
         "architect"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-011",
@@ -359,7 +369,9 @@
         "The fix does not break specs with only a single run — single-run pass counts remain identical to the previous behavior",
         "A Jest test in `backend/src/__tests__/` covers the multi-run aggregation scenario: inserts story_results across two run_ids for the same spec and asserts the kanban response returns the correct aggregated passed/total counts"
       ],
-      "dependsOn": []
+      "dependsOn": [],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ],
   "mermaidDiagram": "graph LR\n  US-001[\"US-001\"]\n  US-002[\"US-002\"]\n  US-003[\"US-003\"]\n  US-004[\"US-004\"]\n  US-005[\"US-005\"]\n  US-006[\"US-006\"]\n  US-007[\"US-007\"]\n  US-008[\"US-008\"]\n  US-009[\"US-009\"]\n  US-010[\"US-010\"]\n  US-011[\"US-011\"]\n  US-002 --> US-003\n  US-001 --> US-004\n  US-002 --> US-006\n  US-001 --> US-007\n  US-004 --> US-007\n  US-001 --> US-008\n  US-003 --> US-009\n  US-008 --> US-009\n  US-001 --> US-010\n  US-002 --> US-010\n  US-003 --> US-010\n  US-007 --> US-010\n  US-008 --> US-010\n  US-009 --> US-010",

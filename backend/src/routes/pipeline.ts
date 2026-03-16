@@ -2691,7 +2691,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     // OC-029: Enrich specStories with reroute data from WAL events (for historical runs)
     if (specStories.length > 0) {
       try {
-        const rerouteEvents = await query(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_rerouted' AND payload::text LIKE '%"run_id":' || $1 || '%' ORDER BY id ASC`, [runId]) as Array<{ story_id: string; payload: string }>;
+        const rerouteEvents = await query<{ story_id: string; payload: string }>(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_rerouted' AND (payload->>'run_id')::int = $1 ORDER BY id ASC`, [runId]);
         for (const evt of rerouteEvents) {
           const story = specStories.find(s => s.id === evt.story_id);
           if (story && !story.reroute) {
@@ -2749,7 +2749,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
         // Collect actual context_files from story_started WAL events
         const actualMap: Record<string, { contextFiles: string[] }> = {};
         try {
-          const walRows = await query(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_started' AND payload::text LIKE '%"run_id":' || $1 || '%'`, [runId]) as Array<{ story_id: string; payload: string }>;
+          const walRows = await query<{ story_id: string; payload: string }>(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_started' AND (payload->>'run_id')::int = $1`, [runId]);
           for (const row of walRows) {
             try {
               const p = JSON.parse(row.payload);
@@ -3991,7 +3991,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     }
 
     // 2. Try to get failure details from WAL events
-    const walEvent = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'story_failed' AND story_id = $1 AND payload::text LIKE $2 ORDER BY id DESC LIMIT 1`, [storyId, `%"run_id":${runId}%`]) as { payload: string } | undefined;
+    const walEvent = await queryOne<{ payload: Record<string, unknown> | string }>(`SELECT payload FROM wal_events WHERE event_type = 'story_failed' AND story_id = $1 AND (payload->>'run_id')::int = $2 ORDER BY id DESC LIMIT 1`, [storyId, runId]);
 
     let failureReason: string | null = null;
     let failureAttempts: number | null = null;
@@ -4153,7 +4153,7 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
   let storyLogPath: string | null = null;
 
   // 1. Check story_started WAL event for log_file path
-  const walRow = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND payload::text LIKE $2 ORDER BY id DESC LIMIT 1`, [storyId, `%"run_id":${runId}%`]) as { payload: string } | undefined;
+  const walRow = await queryOne<{ payload: Record<string, unknown> | string }>(`SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::int = $2 ORDER BY id DESC LIMIT 1`, [storyId, runId]);
   if (walRow?.payload) {
     try {
       const payload = JSON.parse(walRow.payload);
@@ -4163,21 +4163,28 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
     } catch { /* ignore */ }
   }
 
-  // 2. Fallback: scan forge/logs/ for <storyId>_*.log pattern
+  // 2. Fallback: scan forge/specs/logs/ and forge/logs/ for <storyId>_*.log pattern
   if (!storyLogPath && runRow?.workspace_id) {
     const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [runRow.workspace_id]) as { path: string } | undefined;
     if (workspace) {
-      const logDir = path.join(workspace.path, 'forge', 'logs');
-      if (fs.existsSync(logDir)) {
-        try {
-          const files = fs.readdirSync(logDir)
-            .filter(f => f.startsWith(`${storyId}_`) && f.endsWith('.log'))
-            .sort()
-            .reverse(); // most recent first
-          if (files.length > 0) {
-            storyLogPath = path.join(logDir, files[0]);
-          }
-        } catch { /* ignore */ }
+      // Check both log directories — execution-engine writes to forge/specs/logs/ (relative to spec JSON path)
+      const logDirs = [
+        path.join(workspace.path, 'forge', 'specs', 'logs'),
+        path.join(workspace.path, 'forge', 'logs'),
+      ];
+      for (const logDir of logDirs) {
+        if (storyLogPath) break;
+        if (fs.existsSync(logDir)) {
+          try {
+            const files = fs.readdirSync(logDir)
+              .filter(f => f.startsWith(`${storyId}_`) && f.endsWith('.log'))
+              .sort()
+              .reverse(); // most recent first
+            if (files.length > 0) {
+              storyLogPath = path.join(logDir, files[0]);
+            }
+          } catch { /* ignore */ }
+        }
       }
     }
   }
@@ -4186,31 +4193,68 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
     // No log file yet — send waiting status, then poll until it appears or story finishes
     res.write(`event: status\ndata: waiting\n\n`);
 
-    // Poll every 500ms for the log file to appear
+    // Poll every 3s for the log file to appear (slow interval to avoid pool exhaustion under parallelism)
+    const wsPath = runRow?.workspace_id
+      ? (await queryOne('SELECT path FROM workspaces WHERE id = $1', [runRow.workspace_id]) as { path: string } | undefined)?.path
+      : undefined;
     const pollForLog = setInterval(async () => {
-      // Re-check WAL event
-      const freshWal = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND payload::text LIKE $2 ORDER BY id DESC LIMIT 1`, [storyId, `%"run_id":${runId}%`]) as { payload: string } | undefined;
-      if (freshWal?.payload) {
-        try {
-          const payload = JSON.parse(freshWal.payload);
-          if (payload.log_file && fs.existsSync(payload.log_file)) {
-            storyLogPath = payload.log_file;
+      try {
+        // Re-check WAL event — use JSONB accessor instead of payload::text LIKE (10x faster)
+        const freshWal = await queryOne<{ payload: Record<string, unknown> }>(
+          `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::int = $2 ORDER BY id DESC LIMIT 1`,
+          [storyId, runId]
+        );
+        if (freshWal?.payload) {
+          const payload = typeof freshWal.payload === 'string' ? JSON.parse(freshWal.payload) : freshWal.payload;
+          if (payload.log_file && fs.existsSync(String(payload.log_file))) {
+            storyLogPath = String(payload.log_file);
             clearInterval(pollForLog);
             startTailing(storyLogPath!, agent, res, hb, runId, storyId);
             return;
           }
-        } catch { /* ignore */ }
-      }
+        }
 
-      // Check if story already finished (no log will come)
-      const finishEvent = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND payload::text LIKE $2 LIMIT 1`, [storyId, `%"run_id":${runId}%`]);
-      if (finishEvent) {
-        clearInterval(pollForLog);
-        clearInterval(hb);
-        res.write('event: done\ndata: \n\n');
-        res.end();
+        // Filesystem fallback: scan forge/specs/logs/ and forge/logs/ for the log file
+        if (!storyLogPath && wsPath) {
+          const fallbackDirs = [
+            path.join(wsPath, 'forge', 'specs', 'logs'),
+            path.join(wsPath, 'forge', 'logs'),
+          ];
+          for (const dir of fallbackDirs) {
+            if (storyLogPath) break;
+            if (fs.existsSync(dir)) {
+              try {
+                const files = fs.readdirSync(dir)
+                  .filter(f => f.startsWith(`${storyId}_`) && f.endsWith('.log'))
+                  .sort()
+                  .reverse();
+                if (files.length > 0) {
+                  storyLogPath = path.join(dir, files[0]);
+                  clearInterval(pollForLog);
+                  startTailing(storyLogPath!, agent, res, hb, runId, storyId);
+                  return;
+                }
+              } catch { /* ignore */ }
+            }
+          }
+        }
+
+        // Check if story already finished (no log will come)
+        const finishEvent = await queryOne(
+          `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::int = $2 LIMIT 1`,
+          [storyId, runId]
+        );
+        if (finishEvent) {
+          clearInterval(pollForLog);
+          clearInterval(hb);
+          res.write('event: done\ndata: \n\n');
+          res.end();
+        }
+      } catch (err) {
+        // Swallow DB connection errors — they're transient under heavy load.
+        // The next poll tick will retry.
       }
-    }, 500);
+    }, 3000);
 
     req.on('close', () => {
       clearInterval(pollForLog);
@@ -4241,7 +4285,7 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
   } catch { /* file may have disappeared */ }
 
   // Check if story already finished
-  const finishEvent = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND payload::text LIKE $2 LIMIT 1`, [storyId, `%"run_id":${runId}%`]);
+  const finishEvent = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::int = $2 LIMIT 1`, [storyId, runId]);
   if (finishEvent) {
     clearInterval(hb);
     res.write('event: done\ndata: \n\n');
@@ -4265,7 +4309,7 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
       }
 
       // Check if story finished
-      const done = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND payload::text LIKE $2 LIMIT 1`, [storyId, `%"run_id":${runId}%`]);
+      const done = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::int = $2 LIMIT 1`, [storyId, runId]);
       if (done) {
         // Read any final bytes
         const finalStat = fs.statSync(logPath);
@@ -4358,17 +4402,17 @@ router.get('/stream', async (req: Request, res: Response) => {
         events = await query(`SELECT * FROM wal_events
            WHERE id > $1
              AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND payload::text LIKE $2
+             AND (payload->>'run_id')::int = $2
              AND workspace_id = $3
            ORDER BY id ASC
-           LIMIT 50`, [lastSeenId, `%"run_id":${runId}%`, resolvedWsId]);
+           LIMIT 50`, [lastSeenId, runId, resolvedWsId]);
       } else if (runId) {
         events = await query(`SELECT * FROM wal_events
            WHERE id > $1
              AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND payload::text LIKE $2
+             AND (payload->>'run_id')::int = $2
            ORDER BY id ASC
-           LIMIT 50`, [lastSeenId, `%"run_id":${runId}%`]);
+           LIMIT 50`, [lastSeenId, runId]);
       } else if (resolvedWsId) {
         events = await query(`SELECT * FROM wal_events
            WHERE id > $1

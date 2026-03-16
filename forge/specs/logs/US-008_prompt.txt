@@ -1338,21 +1338,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
-> Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-
-## 2026-03-12 [Bug Fix] MCP rorca_list_specs and rorca_list_runs wrong response shape
-> Rule: Both tools assumed wrong API response shapes. rorca_list_specs treated response as a bare array but API returns { items: [...] }. rorca_list_runs destructured { runs } but API returns { items: [...] }. Fixed by normalizing: Array.isArray(data) ? data : (data.items ?? []) for list_specs, and payload.runs ?? payload.items ?? [] for list_runs. Also fixed specName field: API uses specName not title — display as s.specName ?? s.title ?? s.id.
-
-## 2026-03-12 [Pattern] MCP tools vs prompts — tools are Claude-callable, prompts are user slash commands
-> Rule: MCP tools (server.registerTool) are called by Claude automatically during conversation. MCP prompts (server.registerPrompt) become user-invocable slash commands: /mcp__rorca__<name> [args]. Prompts use argsSchema (ZodRawShape, same as inputSchema for tools) and return { messages: [{ role: 'user', content: { type: 'text', text: '...' } }] }. All 24 Rorca tools now have corresponding prompt slash commands in backend/src/mcp/server.ts. Exceptions: edit_story, update_direction, create_workspace, team_members left as tools-only (complex multi-line inputs awkward as CLI args). generate_spec added as both tool AND prompt — takes quoted args: /mcp__rorca__generate_spec "slug" "brief".
-
-## 2026-03-12 [Decision] GitHub org is getrorca — repo is github.com/getrorca/rorca (private)
-> Rule: The canonical remote for the Rorca codebase is https://github.com/getrorca/rorca (private repo). The old remote was sysgazer/rorcha — that is dead. All pushes go to getrorca/rorca. The repo is permanently closed source — never suggest open sourcing, BSL, or source-available licensing.
-
-## 2026-03-12 [Gotcha] Merging old SQLite-era branches with "take theirs" clobbers modern PostgreSQL files
-> Rule: NEVER merge old pre-postgres-migration branches (rorca-convention-agents, rorca-frontend-routing, and any branch with timestamp ~1772...) using "git checkout --theirs" on code conflicts. These branches were built on SQLite and will revert db/index.ts to the SQLite version, revert App.tsx/Sidebar.tsx/routes.tsx to the old multi-panel UI, and truncate server.ts. Always restore from a known-good modern commit (e.g. git show <pre-merge-sha>:path/to/file) after any such merge.
-
 ## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
 > Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
 
@@ -1398,69 +1383,23 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
 > Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
 
+## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
+> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
+
+## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
+> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
+
+## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
+> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
+
+## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
+> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
+
+## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
+> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
+
 Follow this workflow for implementation:
 ## Agent Role: Frontend
-
-
-## Skill: react-review (relevance: 9)
----
-name: react-review
-description: Review React components for best practices and performance issues
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers
-  category: development
----
-
-# React Review Skill
-
-Review React components for best practices, performance issues, and common patterns.
-
-## When to use me
-
-Use this skill when:
-- Reviewing React component code
-- Optimizing component performance
-- Checking for React best practices
-- Refactoring legacy components
-- Auditing component architecture
-
-## What I do
-
-- Analyze React components for performance issues (unnecessary re-renders, large bundles)
-- Check for React best practices (hooks usage, prop patterns, state management)
-- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
-- Suggest optimizations (memoization, code splitting, lazy loading)
-- Review TypeScript usage and type safety
-
-## Key Patterns
-
-### Performance
-- Use `React.memo` for components receiving object/function props from parent
-- Memoize expensive calculations with `useMemo`
-- Stabilize callback references with `useCallback`
-- Avoid inline object/array creation in JSX props
-- Use `React.lazy` + `Suspense` for code splitting
-
-### Hooks
-- Always include all dependencies in `useEffect` dependency arrays
-- Never call hooks conditionally or inside loops
-- Extract complex logic into custom hooks
-- Clean up subscriptions and timers in useEffect return
-
-### TypeScript
-- Define explicit interfaces for all component props
-- Use discriminated unions for variant components
-- Prefer `interface` over `type` for component props
-- Use `React.FC` sparingly — prefer explicit return types
-
-## Notes
-
-- Focuses on React 18+ patterns and best practices
-- Considers both class and function components
-- Includes TypeScript and JavaScript variants
-- References official React documentation and community patterns
 
 ---
 name: rorca
@@ -1613,49 +1552,25 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-008):
-Add a 'Dead-letter Queue' sub-section to the Settings > System tab (`src/panels/SettingsPanel.tsx`, `systemTab` or similar) that provides operators full visibility into failed pg-boss jobs with actions to retry or discard them. This is the operational control plane for the queue — the place you go when the analytics amber badge says 'N failed jobs'.
+US-003 injects markers on the frontend by writing to the xterm instance. This works for live viewers but not for late-joiners who replay from `run_output_chunks`. Move the marker injection to the backend so markers are persisted in the DB and replayed correctly.
 
-**Panel sections**:
+In `backend/src/routes/pipeline.ts`, the SSE endpoint `GET /api/pipeline/runs/:runId/output` already streams chunks from `run_output_chunks`. Subscribe to WAL events (via sse-hub) for the current run. When a `story_passed`, `story_failed`, or `story_skipped` event arrives:
+1. Format an ANSI-colored marker line (same format as US-003)
+2. Write it to `run_output_chunks` as a new chunk with the next sequence number
+3. The SSE stream will naturally pick it up and deliver it to all connected clients
 
-**1. Summary row**: '3 failed jobs in queue · 2 in last 24h · 0 in last hour' with a Refresh button and timestamp of last refresh.
+This ensures:
+- Live viewers see markers in real-time
+- Late-joiners see markers during replay
+- The marker is part of the persistent terminal history
 
-**2. Failed jobs table**:
-| Job ID | Queue | Failed At | Retries | Error | Run | Actions |
-|--------|-------|-----------|---------|-------|-----|---------|
-| 3f9a... | pipeline:run | 5min ago | 3/3 | OOM killed | Run #42 | [Retry] [Discard] |
+The story title and elapsed time come from the WAL event payload. If the WAL event doesn't include the story title, look it up from `story_results` table.
 
-- Job ID: first 8 chars of UUID, full on hover tooltip
-- Queue: badge showing queue name
-- Failed At: relative time ('5 minutes ago') with absolute on hover
-- Retries: `retry_count / retry_limit` — shows '3/3' for exhausted retries
-- Error: truncated error message (100 chars), expandable inline to show full stack trace in a `<pre>` block
-- Run: link to `pipeline_runs` record if `runId` exists in job data — clicking navigates to `/runs/:runId`
-- Actions: 'Retry' (re-enqueues via POST /api/pipeline/queue/failed-jobs/:jobId/retry) and 'Discard' (marks acknowledged, removes from failed list — does NOT delete from DB, just sets a flag or adds to a local dismissed set)
-
-**3. Bulk actions**: 'Retry All' button (retries all jobs in current filtered view), 'Discard All' button (removes all from list view). Both show a confirmation modal before executing.
-
-**4. Filter controls**: Filter by queue name (dropdown), time range (last 1h, 6h, 24h, 7d), and status (all failed vs only unarchived).
-
-**Error expansion**: Clicking a row expands an inline detail panel showing:
-- Full error stack trace (monospace, scrollable)
-- Job data payload (formatted JSON)
-- Timing: created_on, started_on, completed_on (failed at)
-- Retry history: how many times it was attempted and when
-
-## Context
-- **Settings panel location**: `src/panels/SettingsPanel.tsx`. Settings tab IDs include `system` — add the dead-letter queue as a section within the system tab, below the existing system info sections.
-- **Data source**: `GET /api/pipeline/queue/failed-jobs` (US-003). Pass `?page=&pageSize=50` for initial load. Support pagination within the table.
-- **Retry action**: `POST /api/pipeline/queue/failed-jobs/:jobId/retry` (US-003). On success, remove the job from the list and show a toast 'Job requeued successfully'. On error, show inline error.
-- **Discard action**: Client-side — add jobId to a local `discardedJobIds` Set in component state. The job stays in the DB (pg-boss archive) but is filtered from the view. A 'Show discarded' toggle reveals them. This keeps the UI clean without requiring a new API endpoint.
-- **'Retry All' safety**: Confirm modal must show count: 'Retry 3 failed jobs?' with a list of queue names. Retrying many jobs simultaneously could overload the worker — add a 500ms delay between each retry call.
-- **Error scrubbing**: The error output displayed must be scrubbed of API keys (same scrubbing as US-003 backend). Frontend should additionally escape HTML before rendering in the `<pre>` block to prevent XSS.
-- **Empty state**: When no failed jobs exist, show: 'Queue is healthy — no failed jobs' with a green checkmark. Do not show the table at all in this state.
+After this is implemented, US-003's frontend-only injection becomes redundant but harmless (markers would appear twice). US-003 should be updated to check if the backend is already injecting markers and skip frontend injection to avoid duplicates — or simply remove the frontend injection entirely since backend injection is strictly superior.
 
 Acceptance Criteria:
-- Settings > System tab has a Dead-letter Queue section showing count summary and a table of failed jobs from /api/pipeline/queue/failed-jobs
-- Each table row shows job ID, queue name, failed timestamp, retry count, truncated error message, and a link to the associated pipeline run if runId is available
-- Expanding a row shows full error stack trace, job data payload, and timing information
-- Retry button calls POST /api/pipeline/queue/failed-jobs/:jobId/retry and removes the job from the table on success with a toast notification
-- Retry All button shows a confirmation modal with job count before executing, and retries jobs with a 500ms delay between calls
-- Error output is HTML-escaped before rendering in the stack trace panel to prevent XSS
-- Empty state shows 'Queue is healthy — no failed jobs' with a green checkmark when no failures exist
+- The output SSE endpoint subscribes to WAL events for the current run and injects story completion markers into run_output_chunks
+- Markers use ANSI color codes: green for passed, red for failed, yellow for skipped
+- Markers are persisted in run_output_chunks with correct sequence numbers so late-joiners see them during replay
+- Each marker includes story ID, title, status, and elapsed time
+- No duplicate markers are written if the same WAL event is processed twice (idempotency guard)

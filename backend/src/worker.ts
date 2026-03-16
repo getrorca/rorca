@@ -36,7 +36,7 @@ import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
-import { FlushBuffer } from './lib/flush-buffer';
+import { advanceQueue } from './lib/run-queue';
 
 // ── Post-merge smoke test ─────────────────────────────────────────────────────
 
@@ -187,6 +187,22 @@ async function writeChunk(runId: number, sequence: number, data: Buffer): Promis
     );
   } catch (err) {
     logger.warn({ err, runId, sequence }, '[worker] Failed to write output chunk');
+  }
+}
+
+// ── Helper: split a Buffer into ≤CHUNK_SIZE pieces and write them all ────
+
+async function writeBufferAsChunks(
+  runId: number,
+  buf: Buffer,
+  sequenceRef: { value: number },
+): Promise<void> {
+  let offset = 0;
+  while (offset < buf.length) {
+    const slice = buf.slice(offset, offset + CHUNK_SIZE);
+    await writeChunk(runId, sequenceRef.value, slice);
+    sequenceRef.value += 1;
+    offset += CHUNK_SIZE;
   }
 }
 
@@ -614,17 +630,27 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
     // 6. Pipe stdout/stderr to run_output_chunks in ≤4 KB chunks
     const sequenceRef = { value: 1 };
-    const outputBuffer = new FlushBuffer({
-      chunkSize: CHUNK_SIZE,
-      flushInterval: 500,
-      onFlush: async (data) => {
-        await writeChunk(runId, sequenceRef.value, data);
-        sequenceRef.value += 1;
-      },
-    });
+    let pending = Buffer.alloc(0);
 
-    child.stdout?.on('data', (data: Buffer) => { void outputBuffer.write(data); });
-    child.stderr?.on('data', (data: Buffer) => { void outputBuffer.write(data); });
+    const flushPending = async (): Promise<void> => {
+      if (pending.length === 0) return;
+      await writeBufferAsChunks(runId, pending, sequenceRef);
+      pending = Buffer.alloc(0);
+    };
+
+    const handleData = async (data: Buffer): Promise<void> => {
+      pending = Buffer.concat([pending, data]);
+      // Write complete 4KB chunks immediately; keep the tail for next round
+      while (pending.length >= CHUNK_SIZE) {
+        const slice = pending.slice(0, CHUNK_SIZE);
+        await writeChunk(runId, sequenceRef.value, slice);
+        sequenceRef.value += 1;
+        pending = pending.slice(CHUNK_SIZE);
+      }
+    };
+
+    child.stdout?.on('data', (data: Buffer) => { void handleData(data); });
+    child.stderr?.on('data', (data: Buffer) => { void handleData(data); });
 
     // 7. Wait for close (not exit), flush remaining bytes, update run status.
     //
@@ -646,7 +672,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
       child.on('close', async () => {
         // All stdout/stderr data has been received — safe to flush the tail.
-        await outputBuffer.close();
+        await flushPending();
 
         const code = capturedCode;
         activeProcesses.delete(runId);
@@ -698,12 +724,17 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           logger.error({ err, runId }, '[worker] Failed to update run status on exit');
         }
 
+        // Advance run queue — promote next queued run for this workspace
+        advanceQueue(String(workspaceId)).catch(err =>
+          logger.error({ err, runId, workspaceId }, '[worker] advanceQueue failed after run completion'),
+        );
+
         resolve();
       });
 
       child.on('error', async (err) => {
         logger.error({ err, runId }, '[worker] execution-engine spawn error');
-        await outputBuffer.close();
+        await flushPending();
         activeProcesses.delete(runId);
         cancellingRuns.delete(runId);
 
@@ -721,6 +752,10 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         } catch (dbErr) {
           logger.error({ dbErr, runId }, '[worker] Failed to update run status after spawn error');
         }
+
+        advanceQueue(String(workspaceId)).catch(qErr =>
+          logger.error({ err: qErr, runId, workspaceId }, '[worker] advanceQueue failed after spawn error'),
+        );
 
         resolve();
       });
@@ -840,17 +875,26 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
     // 6. Pipe stdout/stderr to run_output_chunks, continuing sequence from sequenceOffset
     const sequenceRef = { value: sequenceOffset + 1 };
-    const outputBuffer = new FlushBuffer({
-      chunkSize: CHUNK_SIZE,
-      flushInterval: 500,
-      onFlush: async (data) => {
-        await writeChunk(runId, sequenceRef.value, data);
-        sequenceRef.value += 1;
-      },
-    });
+    let pending = Buffer.alloc(0);
 
-    child.stdout?.on('data', (data: Buffer) => { void outputBuffer.write(data); });
-    child.stderr?.on('data', (data: Buffer) => { void outputBuffer.write(data); });
+    const flushPending = async (): Promise<void> => {
+      if (pending.length === 0) return;
+      await writeBufferAsChunks(runId, pending, sequenceRef);
+      pending = Buffer.alloc(0);
+    };
+
+    const handleData = async (data: Buffer): Promise<void> => {
+      pending = Buffer.concat([pending, data]);
+      while (pending.length >= CHUNK_SIZE) {
+        const slice = pending.slice(0, CHUNK_SIZE);
+        await writeChunk(runId, sequenceRef.value, slice);
+        sequenceRef.value += 1;
+        pending = pending.slice(CHUNK_SIZE);
+      }
+    };
+
+    child.stdout?.on('data', (data: Buffer) => { void handleData(data); });
+    child.stderr?.on('data', (data: Buffer) => { void handleData(data); });
 
     // 7. Wait for close (not exit), flush remaining bytes, update run status.
     // Same fix as handlePipelineRun (US-007): use 'close' so all stdout/stderr
@@ -861,7 +905,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
       child.on('close', async () => {
         // Flush bytes < CHUNK_SIZE remaining in the buffer before marking done
-        await outputBuffer.close();
+        await flushPending();
 
         const code = capturedCode;
         activeProcesses.delete(runId);
@@ -914,6 +958,10 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
           logger.error({ err, runId }, '[worker] Failed to update retry run status on exit');
         }
 
+        advanceQueue(workspaceId).catch(qErr =>
+          logger.error({ err: qErr, runId, workspaceId }, '[worker] advanceQueue failed after retry completion'),
+        );
+
         // Clean up the temporary retry spec file
         try { fs.unlinkSync(retrySpecPath); } catch { /* best-effort */ }
 
@@ -922,7 +970,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
       child.on('error', async (err) => {
         logger.error({ err, runId }, '[worker] retry execution-engine spawn error');
-        await outputBuffer.close();
+        await flushPending();
         activeProcesses.delete(runId);
         cancellingRuns.delete(runId);
 
@@ -941,6 +989,10 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         } catch (dbErr) {
           logger.error({ dbErr, runId }, '[worker] Failed to update retry run status after spawn error');
         }
+
+        advanceQueue(workspaceId).catch(qErr =>
+          logger.error({ err: qErr, runId, workspaceId }, '[worker] advanceQueue failed after retry spawn error'),
+        );
 
         try { fs.unlinkSync(retrySpecPath); } catch { /* best-effort */ }
 
@@ -1078,7 +1130,7 @@ async function handlePipelineMerge(jobs: PgBoss.Job<Record<string, unknown>>[]):
 // We do NOT re-queue — a partially-executed run may have committed code;
 // re-running it would create duplicate commits.
 
-export async function recoverStaleJobs(): Promise<void> {
+async function recoverStaleJobs(): Promise<void> {
   type StaleJobRow = {
     id: string;
     name: string;
@@ -1163,6 +1215,13 @@ export async function recoverStaleJobs(): Promise<void> {
         pgboss_job_id: job.id,
         recovered_at: new Date().toISOString(),
       });
+    }
+
+    // Advance queue — a queued run may have been waiting behind this stale one
+    if (runRow) {
+      advanceQueue(String(runRow.workspace_id)).catch(qErr =>
+        logger.error({ err: qErr, runId }, '[worker] advanceQueue failed after stale job recovery'),
+      );
     }
 
     logger.warn(
@@ -1335,6 +1394,11 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
         '[worker] sweepOrphanProcesses — orphan run swept',
       );
 
+      // Advance queue — a queued run may have been blocked behind this orphan
+      advanceQueue(String(workspaceId)).catch(qErr =>
+        logger.error({ err: qErr, runId }, '[worker] advanceQueue failed after orphan sweep'),
+      );
+
       results.push({ runId, pid: pid ?? 0, killed });
     } catch (err) {
       logger.error({ err, runId, pid }, '[worker] sweepOrphanProcesses — error processing orphan run, continuing');
@@ -1365,7 +1429,9 @@ const RECONCILE_INTERVAL_MS = 60_000;
 async function reconcileState(): Promise<void> {
   logger.info('[worker] reconcileState — starting check');
 
-  // ── Case A: pipeline_runs stuck in running/queued with no live pgboss job ──
+  // ── Case A: pipeline_runs stuck in 'running' with no live pgboss job ──
+  // NOTE: 'queued' runs are excluded — they intentionally have no pg-boss job.
+  // Queued runs are promoted via advanceQueue() when the active run completes.
 
   type StuckRunRow = {
     id: number;
@@ -1377,7 +1443,7 @@ async function reconcileState(): Promise<void> {
     stuckRuns = await query<StuckRunRow>(
       `SELECT pr.id, pr.workspace_id
        FROM pipeline_runs pr
-       WHERE pr.status IN ('running', 'queued')
+       WHERE pr.status = 'running'
          AND NOT EXISTS (
            SELECT 1 FROM pgboss.job j
            WHERE j.name IN ('pipeline:run', 'pipeline:retry')
@@ -1392,7 +1458,7 @@ async function reconcileState(): Promise<void> {
 
   for (const run of stuckRuns) {
     logger.warn(
-      { runId: run.id, currentStatus: 'running/queued' },
+      { runId: run.id, currentStatus: 'running' },
       '[worker] reconcileState — Case A: pipeline_run has no live pgboss job, marking failed',
     );
 
@@ -1400,7 +1466,7 @@ async function reconcileState(): Promise<void> {
       await execute(
         `UPDATE pipeline_runs
          SET status = 'failed', finished_at = NOW()
-         WHERE id = $1 AND status IN ('running', 'queued')`,
+         WHERE id = $1 AND status = 'running'`,
         [run.id],
       );
 
@@ -1414,6 +1480,10 @@ async function reconcileState(): Promise<void> {
       logger.warn(
         { runId: run.id, workspaceId: run.workspace_id },
         '[worker] reconcileState — Case A: run marked failed, WAL emitted',
+      );
+
+      advanceQueue(String(run.workspace_id)).catch(qErr =>
+        logger.error({ err: qErr, runId: run.id }, '[worker] advanceQueue failed after state reconciliation'),
       );
     } catch (err) {
       logger.warn({ err, runId: run.id }, '[worker] reconcileState — Case A: failed to update run');
@@ -1607,12 +1677,21 @@ process.on('unhandledRejection', (reason) => {
   void shutdown('unhandledRejection');
 });
 
-// ── Singleton guard ──────────────────────────────────────────────────────
-// Exported for testing. Prevents duplicate workers from competing for the
-// same pg-boss queue, which causes orphan sweep / stale-job recovery to
-// kill each other's engine processes (the root cause of runs dying mid-story).
+// ── Startup ──────────────────────────────────────────────────────────────
 
-export async function checkSingletonGuard(): Promise<void> {
+async function start(): Promise<void> {
+  // 1. Run pending SQL migrations (001–NNN) against the main public schema
+  try {
+    await initDb();
+  } catch (err) {
+    logger.error({ err }, '[worker] database initialisation failed');
+    process.exit(1);
+  }
+
+  // 1b. Singleton guard — exit if another worker has a fresh heartbeat.
+  // Prevents duplicate workers from competing for the same pg-boss queue,
+  // which causes orphan sweep / stale-job recovery to kill each other's
+  // engine processes (the root cause of runs dying mid-story).
   try {
     type LiveWorkerRow = { worker_id: string; pid: number; last_seen: string };
     const liveWorkers = await query<LiveWorkerRow>(
@@ -1646,21 +1725,6 @@ export async function checkSingletonGuard(): Promise<void> {
   } catch {
     // worker_heartbeat table might not exist yet — continue startup
   }
-}
-
-// ── Startup ──────────────────────────────────────────────────────────────
-
-async function start(): Promise<void> {
-  // 1. Run pending SQL migrations (001–NNN) against the main public schema
-  try {
-    await initDb();
-  } catch (err) {
-    logger.error({ err }, '[worker] database initialisation failed');
-    process.exit(1);
-  }
-
-  // 1b. Singleton guard — exit if another worker has a fresh heartbeat.
-  await checkSingletonGuard();
 
   // 2. Start pg-boss — creates/upgrades pgboss.* schema automatically
   try {

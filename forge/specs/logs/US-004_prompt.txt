@@ -1399,7 +1399,7 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
 Follow this workflow for implementation:
-## Agent Role: Frontend
+## Agent Role: Database
 
 ---
 name: rorca
@@ -1552,11 +1552,23 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-004):
-Write a Jest integration test (backend/src/__tests__/worker-concurrency.test.ts) that verifies the full round-trip: PUT /api/settings/worker persists the value, GET reads it back, and a mock of the worker polling mechanism detects the change and triggers the reload path. Also add a Vitest unit test for the UI component verifying it renders the fetched value and calls the API on save.
+Write comprehensive Jest tests for the flush timer added in US-001. The tests should verify the timer-based flushing behavior in isolation using Jest fake timers.
+
+Create `backend/src/__tests__/worker-flush-timer.test.ts` with test cases covering:
+
+1. **Sub-4KB data flushes after 500ms**: Send 100 bytes of data, advance timer 500ms, verify `run_output_chunks` INSERT was called with those 100 bytes
+2. **Timer resets on new data**: Send 50 bytes, wait 300ms, send 50 more bytes, verify no flush at 500ms from first send, verify flush at 500ms from second send (800ms total) with 100 bytes
+3. **Size-based flush cancels timer**: Send 4096+ bytes, verify immediate flush AND timer is cleared (no second flush)
+4. **Process exit flushes remaining**: Send 200 bytes, trigger process close event, verify immediate flush without waiting for timer
+5. **No empty flushes**: Verify that if pending buffer is empty when timer fires, no DB write occurs
+6. **Concurrent data + timer race**: Rapid sequential writes that cross the 4KB boundary mid-timer
+
+Mock the database `execute()` function to capture INSERT calls. Use `jest.useFakeTimers()` for deterministic timer control. Extract the handleData logic into a testable unit if it's currently tightly coupled to the worker process setup.
 
 Acceptance Criteria:
-- Jest test calls PUT /api/settings/worker with { max_concurrent_runs: 5 } and asserts 200 + returned value equals 5. A subsequent GET /api/settings/worker returns 5.
-- Jest test calls PUT /api/settings/worker with { max_concurrent_runs: 0 } and asserts 422 with error referencing 'range'.
-- Jest test calls PUT /api/settings/worker with { max_concurrent_runs: 11 } and asserts 422.
-- Vitest test for the Settings UI component mocks apiFetch GET to return { max_concurrent_runs: 4 } and asserts the input renders with value 4. A simulated user change to 7 followed by save triggers apiFetch PUT with { max_concurrent_runs: 7 }.
-- Both test files are runnable with existing test commands (`cd backend && npm test` for Jest, `npx vitest run` for Vitest) without additional setup.
+- Test file backend/src/__tests__/worker-flush-timer.test.ts exists with at least 6 test cases
+- Tests use jest.useFakeTimers() and jest.advanceTimersByTime() for deterministic timer verification
+- A test verifies sub-4KB data (e.g. 100 bytes) is flushed after 500ms timeout
+- A test verifies the timer resets when new data arrives before the timeout
+- A test verifies size-based flush (4KB+) cancels the pending timer to prevent double-write
+- All tests pass when run with: npx jest --testPathPattern=worker-flush-timer

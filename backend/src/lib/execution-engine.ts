@@ -2127,6 +2127,7 @@ async function executeStory(
       story_id: story.id,
       story_title: story.title,
       agent_type: effectiveAgent,
+      log_file: storyLogFile,
       ...(currentModel !== config.agentModel ? { model_override: currentModel, model_tier: escState?.currentTier } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
       ...(injectedContextFiles.length > 0 ? { context_files: injectedContextFiles } : {}),
