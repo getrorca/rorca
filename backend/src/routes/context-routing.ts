@@ -26,6 +26,7 @@ import {
 } from '../lib/rorca-config';
 import { invalidateConfig } from '../lib/context-cache';
 import { populateConventionsFromConfig } from '../lib/knowledge-graph';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -82,7 +83,7 @@ const IGNORED_DIRS = new Set([
 router.get('/:id/directory-tree', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -92,12 +93,12 @@ router.get('/:id/directory-tree', async (req: Request, res: Response) => {
   // Security: prevent path traversal
   const resolved = path.resolve(absPath);
   if (!resolved.startsWith(path.resolve(wsPath))) {
-    res.status(400).json({ error: 'Invalid path' });
+    throw new ValidationError('Invalid path');
     return;
   }
 
   if (!fs.existsSync(resolved) || !fs.statSync(resolved).isDirectory()) {
-    res.status(404).json({ error: 'Directory not found' });
+    throw new NotFoundError('Directory not found');
     return;
   }
 
@@ -145,7 +146,7 @@ router.get('/:id/directory-tree', async (req: Request, res: Response) => {
 router.get('/:id/skills', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -208,7 +209,7 @@ router.get('/:id/skills', async (req: Request, res: Response) => {
 router.get('/:id/rorca-config', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -254,7 +255,7 @@ const RorcaConfigBodySchema = z.object({
 router.put('/:id/rorca-config', validateBody(RorcaConfigBodySchema), async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -285,7 +286,7 @@ router.put('/:id/rorca-config', validateBody(RorcaConfigBodySchema), async (req:
 router.get('/:id/rorca-config/raw', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -316,13 +317,13 @@ router.get('/:id/rorca-config/raw', async (req: Request, res: Response) => {
 router.put('/:id/rorca-config/raw', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
   const { raw } = req.body as { raw: string };
   if (typeof raw !== 'string') {
-    res.status(400).json({ error: 'Missing raw JSON string' });
+    throw new ValidationError('Missing raw JSON string');
     return;
   }
 
@@ -332,7 +333,7 @@ router.put('/:id/rorca-config/raw', async (req: Request, res: Response) => {
     parsed = JSON.parse(raw);
   } catch (err: unknown) {
     const msg = err instanceof SyntaxError ? err.message : 'Invalid JSON';
-    res.status(400).json({ error: 'JSON parse error', details: [{ path: '', message: msg }] });
+    throw new ValidationError('JSON parse error', { parseError: msg });
     return;
   }
 
@@ -343,7 +344,7 @@ router.put('/:id/rorca-config/raw', async (req: Request, res: Response) => {
       path: i.path.join('.'),
       message: i.message,
     }));
-    res.status(400).json({ error: 'Schema validation failed', details: errors });
+    throw new ValidationError('Schema validation failed');
     return;
   }
 
@@ -371,7 +372,7 @@ router.put('/:id/rorca-config/raw', async (req: Request, res: Response) => {
 router.post('/:id/rorca-config/eject', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -405,7 +406,7 @@ router.post('/:id/rorca-config/eject', async (req: Request, res: Response) => {
 router.get('/:id/rorca-config/export', async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 

@@ -3,6 +3,7 @@ import path from 'path';
 import fs from 'fs';
 import { query, queryOne, execute } from '../db/index';
 import { logger } from '../lib/logger';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -78,7 +79,7 @@ router.get('/usage', async (req: Request, res: Response) => {
 
     const validGroupBy = ['spec', 'story', 'model', 'user'];
     if (!validGroupBy.includes(groupBy)) {
-      res.status(400).json({ error: `group_by must be one of: ${validGroupBy.join(', ')}` });
+      throw new ValidationError(`group_by must be one of: ${validGroupBy.join(', ')}`);
       return;
     }
 
@@ -272,7 +273,7 @@ router.get('/costs', async (req: Request, res: Response) => {
 
     const validGroupBy = ['spec', 'run', 'model', 'period'];
     if (!validGroupBy.includes(groupBy)) {
-      res.status(400).json({ error: `group_by must be one of: ${validGroupBy.join(', ')}` });
+      throw new ValidationError(`group_by must be one of: ${validGroupBy.join(', ')}`);
       return;
     }
 
@@ -523,12 +524,12 @@ router.put('/pricing/:modelId', async (req: Request, res: Response) => {
     };
 
     if (input_cost_per_1m_tokens == null || output_cost_per_1m_tokens == null) {
-      res.status(400).json({ error: 'input_cost_per_1m_tokens and output_cost_per_1m_tokens are required' });
+      throw new ValidationError('input_cost_per_1m_tokens and output_cost_per_1m_tokens are required');
       return;
     }
 
     if (input_cost_per_1m_tokens < 0 || output_cost_per_1m_tokens < 0) {
-      res.status(400).json({ error: 'Costs cannot be negative' });
+      throw new ValidationError('Costs cannot be negative');
       return;
     }
 
@@ -611,7 +612,7 @@ router.delete('/pricing/:modelId', async (req: Request, res: Response) => {
     const result = await execute('DELETE FROM model_pricing WHERE model_id = $1', [modelId]);
 
     if (result.rowCount === 0) {
-      res.status(404).json({ error: 'Model pricing not found' });
+      throw new NotFoundError('Model pricing not found');
       return;
     }
 
@@ -1438,13 +1439,13 @@ router.get('/export', async (req: Request, res: Response) => {
     const workspaceId = req.query.workspace_id as string | undefined;
 
     if (!format || !['csv', 'json'].includes(format)) {
-      res.status(400).json({ error: 'format must be "csv" or "json"' });
+      throw new ValidationError('format must be "csv" or "json"');
       return;
     }
 
     const validDataTypes = ['usage', 'costs', 'velocity', 'completion'];
     if (!dataType || !validDataTypes.includes(dataType)) {
-      res.status(400).json({ error: `data_type must be one of: ${validDataTypes.join(', ')}` });
+      throw new ValidationError(`data_type must be one of: ${validDataTypes.join(', ')}`);
       return;
     }
 
@@ -1476,7 +1477,7 @@ router.get('/export', async (req: Request, res: Response) => {
         result = await buildCompletionExport(from, to, workspaceId, limit, offset);
         break;
       default:
-        res.status(400).json({ error: 'Invalid data_type' });
+        throw new ValidationError('Invalid data_type');
         return;
     }
 
@@ -1592,7 +1593,7 @@ router.get('/roi', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspace_id as string;
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspace_id' });
+      throw new ValidationError('Missing required query param: workspace_id');
       return;
     }
 
@@ -1603,7 +1604,7 @@ router.get('/roi', async (req: Request, res: Response) => {
     );
 
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -1761,7 +1762,7 @@ router.put('/roi/config', async (req: Request, res: Response) => {
     };
 
     if (!workspace_id) {
-      res.status(400).json({ error: 'workspace_id is required' });
+      throw new ValidationError('workspace_id is required');
       return;
     }
 
@@ -1770,13 +1771,13 @@ router.put('/roi/config', async (req: Request, res: Response) => {
       [workspace_id]
     );
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
     if (hours_per_story != null) {
       if (hours_per_story < 0 || hours_per_story > 100) {
-        res.status(400).json({ error: 'hours_per_story must be between 0 and 100' });
+        throw new ValidationError('hours_per_story must be between 0 and 100');
         return;
       }
       await execute(
@@ -1787,7 +1788,7 @@ router.put('/roi/config', async (req: Request, res: Response) => {
 
     if (hourly_rate != null) {
       if (hourly_rate < 0 || hourly_rate > 1000) {
-        res.status(400).json({ error: 'hourly_rate must be between 0 and 1000' });
+        throw new ValidationError('hourly_rate must be between 0 and 1000');
         return;
       }
       await execute(
@@ -1883,7 +1884,7 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
   try {
     const runId = parseInt(req.params.runId as string, 10);
     if (isNaN(runId)) {
-      res.status(400).json({ error: 'Invalid runId' });
+      throw new ValidationError('Invalid runId');
       return;
     }
 
@@ -1894,7 +1895,7 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
     );
 
     if (!run) {
-      res.status(404).json({ error: 'Run not found' });
+      throw new NotFoundError('Run not found');
       return;
     }
 
@@ -2469,7 +2470,7 @@ router.get('/skills/effectiveness', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string | undefined;
     if (!workspaceId) {
-      return res.status(400).json({ error: 'workspaceId query parameter is required' });
+      throw new ValidationError('workspaceId query parameter is required');
     }
 
     const now = new Date();

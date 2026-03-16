@@ -3,6 +3,7 @@ import Stripe from 'stripe';
 import { query, queryOne, execute } from '../db/index';
 import type { AuthUser } from './auth';
 import { logger } from '../lib/logger';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -251,7 +252,7 @@ router.post('/checkout', async (req: Request, res: Response) => {
   const { plan } = req.body as { plan?: string };
 
   if (!plan || !(plan in PLANS)) {
-    res.status(400).json({ error: `Invalid plan. Choose one of: ${Object.keys(PLANS).join(', ')}` });
+    throw new ValidationError(`Invalid plan. Choose one of: ${Object.keys(PLANS).join(', ')}`);
     return;
   }
 
@@ -333,7 +334,7 @@ router.post('/portal', async (req: Request, res: Response) => {
   const sub = await getOrCreateCustomer(authReq.user.id);
 
   if (!sub?.stripe_customer_id) {
-    res.status(404).json({ error: 'No billing account found. Subscribe to a plan first.' });
+    throw new NotFoundError('No billing account found. Subscribe to a plan first.');
     return;
   }
 
@@ -482,7 +483,7 @@ webhookRouter.post('/webhook', async (req: Request, res: Response) => {
   const rawBody = (req as any).rawBody as Buffer | undefined;
 
   if (!sig || !rawBody) {
-    res.status(400).json({ error: 'Missing signature or body' });
+    throw new ValidationError('Missing signature or body');
     return;
   }
 
@@ -491,7 +492,7 @@ webhookRouter.post('/webhook', async (req: Request, res: Response) => {
     event = stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET);
   } catch (err) {
     logger.error({ err }, 'Webhook signature verification failed');
-    res.status(400).json({ error: 'Invalid signature' });
+    throw new ValidationError('Invalid signature');
     return;
   }
 

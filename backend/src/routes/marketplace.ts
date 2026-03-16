@@ -5,7 +5,7 @@ import * as crypto from 'crypto';
 import { queryOne, query, execute } from '../db/index';
 import { sanitizeSpec } from '../lib/spec-sanitizer';
 import { getEffectiveUser } from '../lib/get-user';
-import { ValidationError, NotFoundError, ForbiddenError } from '../lib/errors';
+import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
 import { requirePlan } from '../lib/require-plan';
 
 const router = Router();
@@ -107,7 +107,7 @@ router.post('/preview-sanitize', (req: Request, res: Response) => {
   const { spec } = req.body as { spec?: unknown };
 
   if (spec === undefined || spec === null) {
-    res.status(400).json({ error: 'Missing required field: spec' });
+    throw new ValidationError('Missing required field: spec');
     return;
   }
 
@@ -442,7 +442,7 @@ router.get('/', async (req: Request, res: Response) => {
   const spec_id = String(req.query.spec_id || '').trim();
 
   if (!spec_id) {
-    res.status(400).json({ error: 'Missing required query param: spec_id' });
+    throw new ValidationError('Missing required query param: spec_id');
     return;
   }
 
