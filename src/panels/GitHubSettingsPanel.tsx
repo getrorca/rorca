@@ -1,4 +1,4 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, useDeferredValue } from 'react';
 import {
   Github, Link2, Unlink, Loader2, CheckCircle2, AlertCircle,
   Webhook, FileText, RotateCcw, Download, Shield, ExternalLink,
@@ -6,6 +6,78 @@ import {
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, BASE_URL, getAccessToken } from '../lib/apiFetch';
+
+// ─── PR Template (duplicated from backend/src/lib/github/pr-template.ts) ──────
+
+const DEFAULT_PR_TEMPLATE = `## Summary
+
+{{spec.brief}}
+
+## Stories
+
+{{run.storiesPassed}}/{{run.storiesTotal}} stories passed
+
+| Outcome | Count |
+|---------|-------|
+| ✅ Passed | {{run.storiesPassed}} |
+| ❌ Failed | {{run.storiesFailed}} |
+| ⏭ Skipped | {{run.storiesSkipped}} |
+
+## Changes
+
+\`\`\`
+{{run.diffStats}}
+\`\`\`
+
+## Token Usage
+
+| Metric | Value |
+|--------|-------|
+| Input tokens | {{run.tokensInput}} |
+| Output tokens | {{run.tokensOutput}} |
+| Total tokens | {{run.tokensTotal}} |
+| Estimated cost | {{run.costUsd}} |
+
+## Run Details
+
+| Field | Value |
+|-------|-------|
+| Run ID | {{run.id}} |
+| Duration | {{run.duration}} |
+| Agent | {{run.agentType}} |
+| Model | {{run.model}} |
+| Spec | {{spec.title}} |
+
+---
+*Generated automatically by [Rorca](https://rorca.app)*`;
+
+const SAMPLE_DATA: Record<string, string> = {
+  'spec.title': 'rorca-go-to-market-v1',
+  'spec.brief': 'Add GitHub integration with auto-PR creation and PR description templates.',
+  'run.id': '42',
+  'run.storiesPassed': '8',
+  'run.storiesTotal': '10',
+  'run.storiesFailed': '1',
+  'run.storiesSkipped': '1',
+  'run.tokensInput': '125,000',
+  'run.tokensOutput': '18,000',
+  'run.tokensTotal': '143,000',
+  'run.costUsd': '$1.43',
+  'run.duration': '12m 34s',
+  'run.agentType': 'claude',
+  'run.model': 'claude-opus-4-6',
+  'run.diffStats': '12 files changed, 487 insertions(+), 23 deletions(-)',
+};
+
+function renderPreview(template: string): string {
+  const tpl = template.trim() ? template : DEFAULT_PR_TEMPLATE;
+  return tpl.replace(/\{\{([^}]+)\}\}/g, (match: string, key: string) => {
+    const trimmed = key.trim();
+    return Object.prototype.hasOwnProperty.call(SAMPLE_DATA, trimmed)
+      ? SAMPLE_DATA[trimmed]
+      : match;
+  });
+}
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -102,6 +174,10 @@ export default function GitHubSettingsPanel() {
   const [prTemplateSaving, setPrTemplateSaving] = useState(false);
   const [prTemplateSaved, setPrTemplateSaved] = useState(false);
   const [prTemplateLoaded, setPrTemplateLoaded] = useState(false);
+  const [prTemplatePreviewVisible, setPrTemplatePreviewVisible] = useState(false);
+  // Deferred so the preview update doesn't block keystrokes
+  const deferredPrTemplate = useDeferredValue(prTemplate);
+  const previewText = renderPreview(deferredPrTemplate);
 
   // ─── Fetch workspace connection status ─────────────────────────────────────
 
@@ -140,13 +216,13 @@ export default function GitHubSettingsPanel() {
 
   useEffect(() => { fetchStatus(); fetchAccount(); }, [fetchStatus, fetchAccount]);
 
-  // ─── Fetch PR template ───────────────────────────────────────────────────
+  // ─── Fetch PR template from rorca-config ────────────────────────────────
 
   useEffect(() => {
     if (!workspaceId || prTemplateLoaded) return;
-    apiFetch<{ workspace: { pr_template: string | null } }>(`/api/workspaces/${workspaceId}`)
+    apiFetch<{ config: { github?: { prTemplate?: string } } }>(`/api/workspaces/${workspaceId}/rorca-config`)
       .then(data => {
-        setPrTemplate(data.workspace.pr_template ?? '');
+        setPrTemplate(data.config.github?.prTemplate ?? '');
         setPrTemplateLoaded(true);
       })
       .catch(() => { setPrTemplateLoaded(true); });
@@ -247,10 +323,19 @@ export default function GitHubSettingsPanel() {
     if (!workspaceId || prTemplateSaving) return;
     setPrTemplateSaving(true);
     try {
-      await apiFetch(`/api/workspaces/${workspaceId}`, {
-        method: 'PATCH',
+      // Read-merge-write to avoid clobbering other config sections
+      const current = await apiFetch<{ config: Record<string, unknown> }>(`/api/workspaces/${workspaceId}/rorca-config`);
+      const merged = {
+        ...current.config,
+        github: {
+          ...(typeof current.config.github === 'object' && current.config.github !== null ? current.config.github : {}),
+          prTemplate: prTemplate || undefined,
+        },
+      };
+      await apiFetch(`/api/workspaces/${workspaceId}/rorca-config`, {
+        method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ pr_template: prTemplate || null }),
+        body: JSON.stringify({ config: merged }),
       });
       setPrTemplateSaved(true);
       setTimeout(() => setPrTemplateSaved(false), 2000);
@@ -710,32 +795,91 @@ export default function GitHubSettingsPanel() {
 
       {/* ─── Section 5: PR Template ───────────────────────────────────── */}
       <section className="border-t border-border pt-6 pb-6">
-        <div className="flex items-center gap-2 mb-3">
-          <FileText size={18} />
-          <h2 className="text-sm font-semibold text-[var(--text)]">PR Description Template</h2>
+        <div className="flex items-center justify-between mb-3">
+          <div className="flex items-center gap-2">
+            <FileText size={18} />
+            <h2 className="text-sm font-semibold text-[var(--text)]">PR Description Template</h2>
+          </div>
+          <button
+            onClick={() => setPrTemplatePreviewVisible(v => !v)}
+            className="text-xs text-muted hover:text-[var(--text)] transition-colors border border-border rounded px-2 py-1"
+          >
+            {prTemplatePreviewVisible ? 'Hide Preview' : 'Show Preview'}
+          </button>
         </div>
+
         <p className="text-xs text-muted mb-3">
-          Customize the PR description generated by "Copy PR Body" on story cards.
-          Use <code className="bg-surface px-1 rounded">{'{{storyId}}'}</code>,{' '}
-          <code className="bg-surface px-1 rounded">{'{{storyTitle}}'}</code>,{' '}
-          <code className="bg-surface px-1 rounded">{'{{storyDescription}}'}</code>,{' '}
-          <code className="bg-surface px-1 rounded">{'{{acceptanceCriteriaChecklist}}'}</code>,{' '}
-          <code className="bg-surface px-1 rounded">{'{{dependencyList}}'}</code>,{' '}
-          <code className="bg-surface px-1 rounded">{'{{specId}}'}</code>,{' '}
-          <code className="bg-surface px-1 rounded">{'{{specLink}}'}</code>.
-          Wrap optional sections with <code className="bg-surface px-1 rounded">{'{{#if dependencies}}...{{/if}}'}</code>.
+          Customize the PR description used by auto-PR creation (US-028).
+          Supported variables:{' '}
+          {[
+            '{{spec.title}}', '{{spec.brief}}',
+            '{{run.storiesPassed}}', '{{run.storiesTotal}}',
+            '{{run.storiesFailed}}', '{{run.storiesSkipped}}',
+            '{{run.tokensInput}}', '{{run.tokensOutput}}', '{{run.tokensTotal}}',
+            '{{run.costUsd}}', '{{run.duration}}',
+            '{{run.agentType}}', '{{run.model}}',
+            '{{run.id}}', '{{run.diffStats}}',
+          ].map((v, i) => (
+            <span key={v}>
+              <code className="bg-surface px-1 rounded">{v}</code>
+              {i < 14 ? ', ' : ''}
+            </span>
+          ))}
+          . Unrecognized variables are left as-is.
         </p>
-        <textarea
-          value={prTemplate}
-          onChange={e => { setPrTemplate(e.target.value); setPrTemplateSaved(false); }}
-          placeholder="Leave empty to use the default template"
-          rows={12}
-          className="w-full px-3 py-2 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent resize-y"
-        />
+
+        {!prTemplateLoaded ? (
+          /* Loading skeleton */
+          <div className="space-y-2 mb-3" aria-busy="true" aria-label="Loading PR template">
+            {[80, 60, 90, 70, 50].map((w, i) => (
+              <div
+                key={i}
+                className="h-3 rounded bg-border animate-pulse"
+                style={{ width: `${w}%` }}
+              />
+            ))}
+          </div>
+        ) : (
+          <div className={`${prTemplatePreviewVisible ? 'grid grid-cols-2 gap-3' : 'block'}`}>
+            {/* Editor */}
+            <div>
+              <label className="block text-xs text-muted mb-1">Template</label>
+              <textarea
+                value={prTemplate}
+                onChange={e => { setPrTemplate(e.target.value); setPrTemplateSaved(false); }}
+                placeholder="Leave empty to use the default template"
+                rows={16}
+                className="w-full px-3 py-2 rounded bg-bg border border-border text-sm font-mono text-[var(--text)] focus:outline-none focus:border-accent resize-y"
+              />
+            </div>
+
+            {/* Live preview */}
+            {prTemplatePreviewVisible && (
+              <div>
+                <div className="flex items-center justify-between mb-1">
+                  <label className="block text-xs text-muted">Preview (sample data)</label>
+                </div>
+                {deferredPrTemplate !== prTemplate ? (
+                  /* Skeleton while deferred value is stale */
+                  <div className="rounded bg-bg border border-border p-3 space-y-2 h-[calc(16*1.5rem+0.5rem)] overflow-auto" aria-busy="true" aria-label="Preview loading">
+                    {[90, 70, 80, 60, 75, 55, 85, 65].map((w, i) => (
+                      <div key={i} className="h-3 rounded bg-border animate-pulse" style={{ width: `${w}%` }} />
+                    ))}
+                  </div>
+                ) : (
+                  <pre className="rounded bg-bg border border-border p-3 text-xs font-mono text-[var(--text)] overflow-auto whitespace-pre-wrap h-[calc(16*1.5rem+0.5rem)]">
+                    {previewText}
+                  </pre>
+                )}
+              </div>
+            )}
+          </div>
+        )}
+
         <div className="flex items-center gap-2 mt-2">
           <button
             onClick={handleSavePrTemplate}
-            disabled={prTemplateSaving}
+            disabled={prTemplateSaving || !prTemplateLoaded}
             className="px-3 py-1.5 text-sm rounded bg-accent text-white hover:opacity-90 disabled:opacity-50 transition-opacity flex items-center gap-1.5"
           >
             {prTemplateSaving ? <Loader2 size={14} className="animate-spin" /> : null}
@@ -743,7 +887,8 @@ export default function GitHubSettingsPanel() {
           </button>
           <button
             onClick={() => { setPrTemplate(''); setPrTemplateSaved(false); }}
-            className="px-3 py-1.5 text-sm rounded border border-border hover:bg-panel transition-colors flex items-center gap-1.5 text-muted"
+            disabled={!prTemplateLoaded}
+            className="px-3 py-1.5 text-sm rounded border border-border hover:bg-panel transition-colors flex items-center gap-1.5 text-muted disabled:opacity-50"
             title="Reset to default template"
           >
             <RotateCcw size={12} />
