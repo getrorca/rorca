@@ -9,6 +9,7 @@ import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { queryOne, query } from '../db/index';
+import { NotFoundError, ValidationError } from '../lib/errors';
 import {
   loadAgentsMd,
   parseAgentsMd,
@@ -67,10 +68,10 @@ async function getWorkspacePath(workspaceId: string): Promise<string | null> {
  */
 router.get('/', async (req: Request, res: Response) => {
   const { workspaceId } = req.query;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   const wsPath = await getWorkspacePath(workspaceId as string);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const result = loadAgentsMd(wsPath);
   const agentsPath = path.join(wsPath, 'AGENTS.md');
@@ -129,10 +130,10 @@ router.get('/', async (req: Request, res: Response) => {
  */
 router.put('/', async (req: Request, res: Response) => {
   const { workspaceId, roles, raw } = req.body;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   const wsPath = await getWorkspacePath(workspaceId as string);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const agentsPath = path.join(wsPath, 'AGENTS.md');
 
@@ -145,13 +146,13 @@ router.put('/', async (req: Request, res: Response) => {
 
   // Otherwise serialize from roles array
   if (!Array.isArray(roles)) {
-    return res.status(400).json({ error: 'Either roles array or raw string required' });
+    throw new ValidationError('Either roles array or raw string required');
   }
 
   // Validate role structure
   for (const role of roles) {
     if (!role.name || typeof role.name !== 'string') {
-      return res.status(400).json({ error: 'Each role requires a name string' });
+      throw new ValidationError('Each role requires a name string');
     }
     if (!Array.isArray(role.owns)) role.owns = [];
     if (!Array.isArray(role.avoids)) role.avoids = [];
@@ -197,10 +198,10 @@ router.put('/', async (req: Request, res: Response) => {
  */
 router.post('/generate', async (req: Request, res: Response) => {
   const { workspaceId } = req.body;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   const wsPath = await getWorkspacePath(workspaceId as string);
-  if (!wsPath) return res.status(404).json({ error: 'Workspace not found' });
+  if (!wsPath) throw new NotFoundError('Workspace not found');
 
   const content = generateAgentsMd(wsPath);
   const parsed = parseAgentsMd(content);
@@ -256,7 +257,7 @@ router.post('/generate', async (req: Request, res: Response) => {
  */
 router.get('/violations', async (req: Request, res: Response) => {
   const { workspaceId, runId, limit } = req.query;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   const maxResults = parseInt(limit as string, 10) || 50;
 

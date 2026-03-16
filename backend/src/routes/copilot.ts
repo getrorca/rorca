@@ -12,6 +12,7 @@ import crypto from 'crypto';
 import { queryOne, execute } from '../db';
 import { encryptToken, decryptToken } from './auth';
 import type { AuthUser } from './auth';
+import { AuthError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -114,7 +115,7 @@ router.get('/callback', async (req: Request, res: Response) => {
   const { code } = req.query;
 
   if (!code || typeof code !== 'string') {
-    res.status(400).json({ error: 'Missing authorization code' });
+    throw new ValidationError('Missing authorization code');
     return;
   }
 
@@ -125,7 +126,7 @@ router.get('/callback', async (req: Request, res: Response) => {
 
   const user = await getEffectiveUser(req);
   if (!user) {
-    res.status(401).json({ error: 'No user found' });
+    throw new AuthError('No user found');
     return;
   }
 
@@ -154,10 +155,7 @@ router.get('/callback', async (req: Request, res: Response) => {
     };
 
     if (tokenData.error || !tokenData.access_token) {
-      res.status(400).json({
-        error: tokenData.error_description || tokenData.error || 'Failed to obtain GitHub token',
-      });
-      return;
+      throw new ValidationError(tokenData.error_description || tokenData.error || 'Failed to obtain GitHub token');
     }
 
     const githubToken = tokenData.access_token;
@@ -288,7 +286,7 @@ router.get('/status', async (req: Request, res: Response) => {
 router.delete('/disconnect', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) {
-    res.status(401).json({ error: 'No user found' });
+    throw new AuthError('No user found');
     return;
   }
 
@@ -298,7 +296,7 @@ router.delete('/disconnect', async (req: Request, res: Response) => {
   );
 
   if (!existing) {
-    res.status(404).json({ error: 'No GitHub Copilot connection found' });
+    throw new NotFoundError('No GitHub Copilot connection found');
     return;
   }
 

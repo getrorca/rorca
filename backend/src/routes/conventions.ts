@@ -14,6 +14,7 @@ import * as path from 'path';
 import { query, queryOne, execute } from '../db/index';
 import { discoverConventions } from '../lib/convention-agent';
 import type { ConventionProposal } from '../lib/convention-agent';
+import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -91,7 +92,7 @@ router.post('/discover', async (req: Request, res: Response) => {
   const { workspaceId } = req.body;
 
   if (!workspaceId) {
-    res.status(400).json({ error: 'Missing required field: workspaceId' });
+    throw new ValidationError('Missing required field: workspaceId');
     return;
   }
 
@@ -101,12 +102,12 @@ router.post('/discover', async (req: Request, res: Response) => {
   );
 
   if (!workspace) {
-    res.status(404).json({ error: `Workspace '${workspaceId}' not found` });
+    throw new NotFoundError(`Workspace '${workspaceId}' not found`);
     return;
   }
 
   if (!fs.existsSync(workspace.path)) {
-    res.status(400).json({ error: `Workspace path does not exist: ${workspace.path}` });
+    throw new ValidationError(`Workspace path does not exist: ${workspace.path}`);
     return;
   }
 
@@ -229,7 +230,7 @@ router.get('/proposals/:workspaceId/:id', async (req: Request, res: Response) =>
   );
 
   if (!row) {
-    res.status(404).json({ error: 'Proposal not found' });
+    throw new NotFoundError('Proposal not found');
     return;
   }
 
@@ -275,12 +276,12 @@ router.post('/proposals/:id/approve', async (req: Request, res: Response) => {
   );
 
   if (!row) {
-    res.status(404).json({ error: 'Proposal not found' });
+    throw new NotFoundError('Proposal not found');
     return;
   }
 
   if (row.status !== 'pending') {
-    res.status(409).json({ error: `Proposal already ${row.status}` });
+    throw new ConflictError(`Proposal already ${row.status}`);
     return;
   }
 
@@ -291,7 +292,7 @@ router.post('/proposals/:id/approve', async (req: Request, res: Response) => {
   );
 
   if (!workspace) {
-    res.status(404).json({ error: 'Workspace not found' });
+    throw new NotFoundError('Workspace not found');
     return;
   }
 
@@ -400,12 +401,12 @@ router.post('/proposals/:id/reject', async (req: Request, res: Response) => {
   );
 
   if (!row) {
-    res.status(404).json({ error: 'Proposal not found' });
+    throw new NotFoundError('Proposal not found');
     return;
   }
 
   if (row.status !== 'pending') {
-    res.status(409).json({ error: `Proposal already ${row.status}` });
+    throw new ConflictError(`Proposal already ${row.status}`);
     return;
   }
 

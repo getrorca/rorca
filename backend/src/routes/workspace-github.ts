@@ -3,6 +3,7 @@ import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
 import { queryOne, execute } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
+import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router({ mergeParams: true });
 
@@ -61,7 +62,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -148,13 +149,13 @@ router.post('/connect', async (req: Request, res: Response) => {
     const { repoOwner, repoName, githubToken } = req.body;
 
     if (!repoOwner || !repoName || !githubToken) {
-      res.status(400).json({ error: 'Missing required fields: repoOwner, repoName, githubToken' });
+      throw new ValidationError('Missing required fields: repoOwner, repoName, githubToken');
       return;
     }
 
     const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -164,7 +165,7 @@ router.post('/connect', async (req: Request, res: Response) => {
       [workspaceId]
     );
     if (existing) {
-      res.status(409).json({ error: 'GitHub already connected for this workspace. Disconnect first.' });
+      throw new ConflictError('GitHub already connected for this workspace. Disconnect first.');
       return;
     }
 
@@ -278,7 +279,7 @@ router.post('/disconnect', async (req: Request, res: Response) => {
     const { githubToken } = req.body;
 
     if (!githubToken) {
-      res.status(400).json({ error: 'Missing required field: githubToken' });
+      throw new ValidationError('Missing required field: githubToken');
       return;
     }
 
@@ -288,7 +289,7 @@ router.post('/disconnect', async (req: Request, res: Response) => {
     );
 
     if (!row) {
-      res.status(404).json({ error: 'No GitHub connection found for this workspace' });
+      throw new NotFoundError('No GitHub connection found for this workspace');
       return;
     }
 
@@ -482,7 +483,7 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
     const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
     const userId = userRow?.id;
     if (!userId) {
-      res.status(404).json({ error: 'No user configured' });
+      throw new NotFoundError('No user configured');
       return;
     }
 
@@ -492,7 +493,7 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
     );
 
     if (!conn) {
-      res.status(404).json({ error: 'No GitHub connection found' });
+      throw new NotFoundError('No GitHub connection found');
       return;
     }
 
@@ -587,7 +588,7 @@ router.put('/auto-pr', async (req: Request, res: Response) => {
     );
 
     if (!row) {
-      res.status(404).json({ error: 'No GitHub connection found for this workspace' });
+      throw new NotFoundError('No GitHub connection found for this workspace');
       return;
     }
 
@@ -661,7 +662,7 @@ router.get('/actions-yaml', async (req: Request, res: Response) => {
       [workspaceId]
     );
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 

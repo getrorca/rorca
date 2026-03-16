@@ -4,6 +4,7 @@ import * as path from 'path';
 import { query, queryOne } from '../db/index';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { logger } from '../lib/logger';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -105,7 +106,7 @@ router.get('/search', async (req: Request, res: Response) => {
     const filterTags = tagsParam ? tagsParam.split(',').map(t => t.trim()).filter(Boolean) : [];
 
     if (!q) {
-      res.status(400).json({ error: 'Missing required query param: q' });
+      throw new ValidationError('Missing required query param: q');
       return;
     }
 
@@ -114,7 +115,7 @@ router.get('/search', async (req: Request, res: Response) => {
     if (workspaceId) {
       const ws = await queryOne<WorkspaceRow>('SELECT id, label, path FROM workspaces WHERE id = $1', [workspaceId]);
       if (!ws) {
-        res.status(404).json({ error: 'Workspace not found' });
+        throw new NotFoundError('Workspace not found');
         return;
       }
       workspaces = [ws];

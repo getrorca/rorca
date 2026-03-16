@@ -3,6 +3,7 @@ import { queryOne, execute } from '../db/index';
 import { decryptToken } from './auth';
 import { verifyWebhookSignature } from './workspace-github';
 import { logger } from '../lib/logger';
+import { AuthError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -104,7 +105,7 @@ router.post('/github', async (req: Request, res: Response) => {
   const deliveryId = req.headers['x-github-delivery'] as string | undefined;
 
   if (!signature || !event) {
-    res.status(400).json({ error: 'Missing GitHub webhook headers' });
+    throw new ValidationError('Missing GitHub webhook headers');
     return;
   }
 
@@ -112,7 +113,7 @@ router.post('/github', async (req: Request, res: Response) => {
   // This is the exact bytes GitHub used to compute its HMAC — not re-serialized JSON.
   const rawBody: Buffer | undefined = (req as any).rawBody;
   if (!rawBody) {
-    res.status(400).json({ error: 'Missing raw body for signature verification' });
+    throw new ValidationError('Missing raw body for signature verification');
     return;
   }
 
@@ -121,7 +122,7 @@ router.post('/github', async (req: Request, res: Response) => {
   const repoFullName = payload?.repository?.full_name as string | undefined;
 
   if (!repoFullName) {
-    res.status(400).json({ error: 'Missing repository info in payload' });
+    throw new ValidationError('Missing repository info in payload');
     return;
   }
 
@@ -134,20 +135,20 @@ router.post('/github', async (req: Request, res: Response) => {
   );
 
   if (!row) {
-    res.status(404).json({ error: 'No workspace connected to this repository' });
+    throw new NotFoundError('No workspace connected to this repository');
     return;
   }
 
   // Reject if no webhook secret is configured (defensive — should always be set on connect)
   if (!row.encrypted_webhook_secret) {
-    res.status(403).json({ error: 'Webhook secret not configured' });
+    throw new ForbiddenError('Webhook secret not configured');
     return;
   }
 
   // Verify webhook signature using the raw body
   const secret = decryptToken(row.encrypted_webhook_secret);
   if (!verifyWebhookSignature(rawBody.toString('utf8'), signature, secret)) {
-    res.status(401).json({ error: 'Invalid webhook signature' });
+    throw new AuthError('Invalid webhook signature');
     return;
   }
 
