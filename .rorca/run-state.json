@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T08:29:44.855Z",
+  "lastUpdatedAt": "2026-03-16T08:50:24.732Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 156379
+    },
+    {
+      "storyId": "US-013",
+      "title": "Update install script URLs from sysgazer/rorca to getrorca/rorca",
+      "status": "passed",
+      "startedAt": "2026-03-16T08:47:51.206Z",
+      "finishedAt": "2026-03-16T08:50:24.732Z",
+      "agentType": "claude",
+      "model": "claude-haiku-4-5-20251001",
+      "elapsedMs": 153526
     }
   ],
   "failedStories": [],
