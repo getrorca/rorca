@@ -2,7 +2,7 @@
   "specId": "rorca-go-to-market-v1",
   "runId": 129,
   "startedAt": "2026-03-16T08:27:07.845Z",
-  "lastUpdatedAt": "2026-03-16T09:51:30.196Z",
+  "lastUpdatedAt": "2026-03-16T09:58:43.075Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -25,14 +25,14 @@
       "elapsedMs": 1152753
     },
     {
-      "storyId": "US-007",
-      "title": "Wire all landing page CTA buttons to real destinations",
+      "storyId": "US-008",
+      "title": "SEO and social sharing — OG tags, sitemap, robots.txt, JSON-LD",
       "status": "passed",
-      "startedAt": "2026-03-16T09:47:23.735Z",
-      "finishedAt": "2026-03-16T09:51:30.196Z",
+      "startedAt": "2026-03-16T09:47:23.819Z",
+      "finishedAt": "2026-03-16T09:58:43.074Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 246461
+      "elapsedMs": 679255
     }
   ],
   "failedStories": [],
