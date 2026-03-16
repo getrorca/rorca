@@ -1,11 +1,76 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import { query } from '../db/index';
+import bcrypt from 'bcryptjs';
+import { z } from 'zod';
+import { query, queryOne, execute, transaction } from '../db/index';
 import { getEffectiveUser } from '../lib/get-user';
 import { logger } from '../lib/logger';
+import { ValidationError, AuthError, ConflictError } from '../lib/errors';
+import { validateBody } from '../lib/validate';
 
 const router = Router();
+
+/**
+ * @swagger
+ * /api/users/me:
+ *   get:
+ *     tags: [Users]
+ *     summary: Get current user profile including plan
+ *     operationId: getMe
+ *     description: Returns the current user's profile including their plan tier (free/solo/pro/team). Falls back to the first registered user when auth is bypassed (local single-user mode).
+ *     responses:
+ *       200:
+ *         description: Current user
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 id: { type: string }
+ *                 email: { type: string }
+ *                 displayName: { type: string }
+ *                 plan: { type: string, enum: [free, solo, pro, team] }
+ *                 emailVerified: { type: boolean }
+ *                 avatarUrl: { type: string, nullable: true }
+ *       404:
+ *         description: No user found (empty database)
+ */
+router.get('/me', async (req: Request, res: Response) => {
+  try {
+    const user = await getEffectiveUser(req);
+    if (!user) {
+      res.status(404).json({ error: 'No user found' });
+      return;
+    }
+
+    const row = await queryOne<{
+      id: string;
+      email: string;
+      display_name: string;
+      plan: string;
+      email_verified_at: string | null;
+      avatar_url: string | null;
+    }>('SELECT id, email, display_name, plan, email_verified_at, avatar_url FROM users WHERE id = $1', [user.id]);
+
+    if (!row) {
+      res.status(404).json({ error: 'User not found' });
+      return;
+    }
+
+    res.json({
+      id: row.id,
+      email: row.email,
+      displayName: row.display_name,
+      plan: row.plan ?? 'free',
+      emailVerified: row.email_verified_at !== null,
+      avatarUrl: row.avatar_url ?? null,
+    });
+  } catch (error: any) {
+    logger.error('[Users] Get me error:', error);
+    res.status(500).json({ error: error.message });
+  }
+});
 
 interface AssignmentDbRow {
   spec_id: string;
@@ -175,7 +240,7 @@ router.get('/workspace-members', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
-      res.status(400).json({ error: 'Missing required query param: workspaceId' });
+      throw new ValidationError('Missing required query param: workspaceId');
       return;
     }
 
@@ -197,6 +262,116 @@ router.get('/workspace-members', async (req: Request, res: Response) => {
     logger.error('[Users] List workspace members error:', error);
     res.status(500).json({ error: error.message });
   }
+});
+
+/**
+ * @swagger
+ * /api/users/me:
+ *   delete:
+ *     tags: [Users]
+ *     summary: Permanently delete user account
+ *     operationId: deleteMyAccount
+ *     description: |
+ *       Hard-deletes personal data (refresh_tokens, vault_keys, github_connections,
+ *       notification_subscriptions, notification_history, billing, password_reset_tokens).
+ *       Anonymizes operational records (pipeline_runs.triggered_by → 'deleted_user',
+ *       story_comments.user_id → NULL). Requires password confirmation.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [password]
+ *             properties:
+ *               password: { type: string }
+ *     responses:
+ *       200: { description: Account deleted }
+ *       400: { description: Password confirmation required }
+ *       401: { description: Incorrect password }
+ *       409: { description: Active pipeline run prevents deletion }
+ */
+const deleteBodySchema = z.object({ password: z.string().min(1, 'Password confirmation required') });
+
+router.delete('/me', validateBody(deleteBodySchema), async (req: Request, res: Response) => {
+  const { password } = req.body as z.infer<typeof deleteBodySchema>;
+
+  // Identify user — route-level auth since global auth is bypassed
+  const effectiveUser = await getEffectiveUser(req);
+  if (!effectiveUser) {
+    throw new AuthError('Authentication required');
+  }
+  const userId = effectiveUser.id;
+
+  // Fetch password hash
+  const user = await queryOne<{ id: string; email: string; password_hash: string }>(
+    'SELECT id, email, password_hash FROM users WHERE id = $1',
+    [userId],
+  );
+  if (!user) {
+    throw new AuthError('Authentication required');
+  }
+
+  // Verify password via bcrypt
+  const passwordValid = await bcrypt.compare(password, user.password_hash);
+  if (!passwordValid) {
+    throw new AuthError('Incorrect password');
+  }
+
+  // Block deletion if any pipeline run is active for user's workspaces
+  const activeRun = await queryOne<{ id: number }>(
+    `SELECT id FROM pipeline_runs
+     WHERE status = 'running'
+       AND workspace_id IN (SELECT id FROM workspaces WHERE owner_id = $1)
+     LIMIT 1`,
+    [userId],
+  );
+  if (activeRun) {
+    throw new ConflictError(
+      'Cannot delete account while a pipeline run is active. Cancel all running pipelines first.',
+    );
+  }
+
+  // Emit WAL event before deletion (audit trail)
+  await execute(
+    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('account_deleted', '', $1)",
+    [JSON.stringify({ userId: user.id, email: user.email, deletedAt: new Date().toISOString() })],
+  );
+
+  await transaction(async (client) => {
+    // Anonymize operational records BEFORE user delete (avoids FK violations)
+    await client.query(
+      `UPDATE pipeline_runs SET triggered_by = 'deleted_user'
+       WHERE workspace_id IN (SELECT id FROM workspaces WHERE owner_id = $1)`,
+      [userId],
+    );
+    await client.query(
+      'UPDATE story_comments SET user_id = NULL WHERE user_id = $1',
+      [userId],
+    );
+
+    // Hard-delete personal data (child tables first, respecting FK order)
+    // Most have ON DELETE CASCADE, but explicit deletion ensures completeness
+    // and works even if FK cascades are changed later.
+    await client.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM api_key_vault WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM github_connections WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM notification_subscriptions WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM notification_history WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM subscriptions WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM user_settings WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM email_verification_tokens WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM integration_credentials WHERE user_id = $1', [userId]);
+    await client.query('DELETE FROM provider_defaults WHERE user_id = $1', [userId]);
+
+    // Delete the user row last — CASCADE handles any remaining FKs
+    await client.query('DELETE FROM users WHERE id = $1', [userId]);
+  });
+
+  logger.info(`[Users] Account deleted: ${user.email} (id: ${userId}). Personal data removed, operational records anonymized.`);
+
+  res.json({ message: 'Your account has been deleted.' });
 });
 
 export default router;

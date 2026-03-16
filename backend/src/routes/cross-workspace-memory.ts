@@ -6,6 +6,7 @@
  */
 
 import { Router, Request, Response } from 'express';
+import { NotFoundError, ValidationError } from '../lib/errors';
 import {
   synthesizeCrossWorkspace,
   getPendingSuggestions,
@@ -67,7 +68,7 @@ const router = Router();
  */
 router.get('/:workspaceId', async (req: Request<{ workspaceId: string }>, res: Response) => {
   const workspaceId = req.params.workspaceId as string;
-  if (!workspaceId) return res.status(400).json({ error: 'workspaceId required' });
+  if (!workspaceId) throw new ValidationError('workspaceId required');
 
   const refresh = req.query.refresh === 'true';
 
@@ -126,12 +127,12 @@ router.post('/:workspaceId/accept/:entryId', async (req: Request<{ workspaceId: 
   const workspaceId = req.params.workspaceId as string;
   const entryIdNum = parseInt(req.params.entryId as string, 10);
   if (!workspaceId || isNaN(entryIdNum)) {
-    return res.status(400).json({ error: 'workspaceId and valid entryId required' });
+    throw new ValidationError('workspaceId and valid entryId required');
   }
 
   const result = await acceptCrossWorkspaceEntry(workspaceId, entryIdNum);
   if (!result.accepted) {
-    return res.status(404).json({ error: 'Entry not found or already resolved' });
+    throw new NotFoundError('Entry not found or already resolved');
   }
 
   res.json(result);
@@ -172,12 +173,12 @@ router.post('/:workspaceId/dismiss/:entryId', async (req: Request<{ workspaceId:
   const workspaceId = req.params.workspaceId as string;
   const entryIdNum = parseInt(req.params.entryId as string, 10);
   if (!workspaceId || isNaN(entryIdNum)) {
-    return res.status(400).json({ error: 'workspaceId and valid entryId required' });
+    throw new ValidationError('workspaceId and valid entryId required');
   }
 
   const dismissed = await dismissCrossWorkspaceEntry(workspaceId, entryIdNum);
   if (!dismissed) {
-    return res.status(404).json({ error: 'Entry not found or already resolved' });
+    throw new NotFoundError('Entry not found or already resolved');
   }
 
   res.json({ dismissed: true });

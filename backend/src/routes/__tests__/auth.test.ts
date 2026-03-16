@@ -34,6 +34,7 @@ afterEach(async () => {
   // Clean auth-related tables after each test to prevent state leakage
   await execute('TRUNCATE users CASCADE');
   await execute('DELETE FROM wal_events');
+  await execute('DELETE FROM login_attempts');
 });
 
 afterAll(async () => {
@@ -42,7 +43,7 @@ afterAll(async () => {
 
 const validPayload = {
   email: 'test@example.com',
-  password: 'securepass123',
+  password: 'SecurePass123',
   displayName: 'Test User',
 };
 
@@ -83,37 +84,47 @@ describe('POST /api/auth/register', () => {
     await request(app).post('/api/auth/register').send(validPayload);
     const res = await request(app).post('/api/auth/register').send(validPayload);
     expect(res.status).toBe(409);
-    expect(res.body.error).toBe('Email already registered');
+    expect(res.body.error).toBe('An account with this email already exists');
   });
 
-  test('returns 400 for malformed email', async () => {
+  test('returns 422 for malformed email', async () => {
     const res = await request(app).post('/api/auth/register').send({ ...validPayload, email: 'not-an-email' });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Invalid email format');
+    expect(res.status).toBe(422);
+    expect(res.body.details.some((d: { message: string }) => d.message === 'Invalid email format')).toBe(true);
   });
 
-  test('returns 400 for missing email', async () => {
-    const res = await request(app).post('/api/auth/register').send({ password: 'securepass123', displayName: 'Test User' });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Email is required');
+  test('returns 422 for missing email', async () => {
+    const res = await request(app).post('/api/auth/register').send({ password: 'SecurePass123', displayName: 'Test User' });
+    expect(res.status).toBe(422);
+    expect(res.body.details.some((d: { message: string }) => d.message === 'Email is required')).toBe(true);
   });
 
-  test('returns 400 for missing password', async () => {
+  test('returns 422 for missing password', async () => {
     const res = await request(app).post('/api/auth/register').send({ email: 'test@example.com', displayName: 'Test User' });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Password is required');
+    expect(res.status).toBe(422);
+    expect(res.body.details.some((d: { message: string }) => d.message === 'Password is required')).toBe(true);
   });
 
-  test('returns 400 for missing displayName', async () => {
-    const res = await request(app).post('/api/auth/register').send({ email: 'test@example.com', password: 'securepass123' });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Display name is required');
+  test('returns 422 for missing displayName', async () => {
+    const res = await request(app).post('/api/auth/register').send({ email: 'test@example.com', password: 'SecurePass123' });
+    expect(res.status).toBe(422);
+    expect(res.body.details.some((d: { message: string }) => d.message === 'Display name is required')).toBe(true);
   });
 
-  test('returns 400 for password shorter than 8 characters', async () => {
+  test('returns 422 for password shorter than 8 characters', async () => {
     const res = await request(app).post('/api/auth/register').send({ ...validPayload, password: 'short' });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Password must be at least 8 characters');
+    expect(res.status).toBe(422);
+    expect(res.body.details.some((d: { message: string }) =>
+      d.message === 'Password must be at least 8 characters and contain uppercase, lowercase, and a number'
+    )).toBe(true);
+  });
+
+  test('returns 422 for password without uppercase', async () => {
+    const res = await request(app).post('/api/auth/register').send({ ...validPayload, password: 'securepass123' });
+    expect(res.status).toBe(422);
+    expect(res.body.details.some((d: { message: string }) =>
+      d.message === 'Password must be at least 8 characters and contain uppercase, lowercase, and a number'
+    )).toBe(true);
   });
 
   test('normalizes email to lowercase', async () => {
@@ -157,8 +168,8 @@ describe('POST /api/auth/register', () => {
 
   test('rejects email with spaces', async () => {
     const res = await request(app).post('/api/auth/register').send({ ...validPayload, email: 'test @example.com' });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Invalid email format');
+    expect(res.status).toBe(422);
+    expect(res.body.details.some((d: { message: string }) => d.message === 'Invalid email format')).toBe(true);
   });
 });
 
@@ -170,7 +181,7 @@ describe('POST /api/auth/login', () => {
 
     const res = await request(app).post('/api/auth/login').send({
       email: 'test@example.com',
-      password: 'securepass123',
+      password: 'SecurePass123',
     });
 
     expect(res.status).toBe(200);
@@ -186,7 +197,7 @@ describe('POST /api/auth/login', () => {
 
     const res = await request(app).post('/api/auth/login').send({
       email: 'test@example.com',
-      password: 'securepass123',
+      password: 'SecurePass123',
     });
 
     const decoded = JSON.parse(
@@ -202,7 +213,7 @@ describe('POST /api/auth/login', () => {
 
     await request(app).post('/api/auth/login').send({
       email: 'test@example.com',
-      password: 'securepass123',
+      password: 'SecurePass123',
     });
 
     // Should have 2 refresh tokens now (1 from register, 1 from login)
@@ -233,23 +244,23 @@ describe('POST /api/auth/login', () => {
   test('returns 401 for non-existent email', async () => {
     const res = await request(app).post('/api/auth/login').send({
       email: 'nobody@example.com',
-      password: 'securepass123',
+      password: 'SecurePass123',
     });
 
     expect(res.status).toBe(401);
     expect(res.body.error).toBe('Invalid email or password');
   });
 
-  test('returns 400 for missing email', async () => {
-    const res = await request(app).post('/api/auth/login').send({ password: 'securepass123' });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Email is required');
+  test('returns 422 for missing email', async () => {
+    const res = await request(app).post('/api/auth/login').send({ password: 'SecurePass123' });
+    expect(res.status).toBe(422);
+    expect(res.body.details.some((d: { message: string }) => d.message === 'Email is required')).toBe(true);
   });
 
-  test('returns 400 for missing password', async () => {
+  test('returns 422 for missing password', async () => {
     const res = await request(app).post('/api/auth/login').send({ email: 'test@example.com' });
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Password is required');
+    expect(res.status).toBe(422);
+    expect(res.body.details.some((d: { message: string }) => d.message === 'Password is required')).toBe(true);
   });
 
   test('normalizes email to lowercase', async () => {
@@ -257,7 +268,7 @@ describe('POST /api/auth/login', () => {
 
     const res = await request(app).post('/api/auth/login').send({
       email: 'Test@EXAMPLE.COM',
-      password: 'securepass123',
+      password: 'SecurePass123',
     });
 
     expect(res.status).toBe(200);
@@ -269,7 +280,7 @@ describe('POST /api/auth/login', () => {
 
     await request(app).post('/api/auth/login').send({
       email: 'test@example.com',
-      password: 'securepass123',
+      password: 'SecurePass123',
     });
 
     const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'user_login'`) as Record<string, unknown>;
@@ -675,7 +686,7 @@ describe('POST /api/auth/reset-password', () => {
     // Old password should fail
     const oldRes = await request(app).post('/api/auth/login').send({
       email: 'test@example.com',
-      password: 'securepass123',
+      password: 'SecurePass123',
     });
     expect(oldRes.status).toBe(401);
 
@@ -971,7 +982,7 @@ describe('GET /api/auth/github/callback', () => {
     // First, register a user with email
     await request(ghApp).post('/api/auth/register').send({
       email: 'octocat@github.com',
-      password: 'securepass123',
+      password: 'SecurePass123',
       displayName: 'Email User',
     });
 

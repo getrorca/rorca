@@ -64,7 +64,7 @@ test('POST /api/workspaces missing required field returns 400', async () => {
     .set('Authorization', `Bearer ${authToken}`)
     .send({ id: 'ws-1', label: 'Test' });
 
-  expect(res.status).toBe(400);
+  expect(res.status).toBe(422); // validateBody returns 422 for Zod validation failures
   expect(res.body.error).toBeDefined();
 });
 
@@ -106,10 +106,15 @@ test('DELETE /api/workspaces/:id returns 204 and workspace is gone', async () =>
 });
 
 test('WAL events logged for workspace_create and workspace_delete', async () => {
-  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send(validWorkspace);
-  await request(app).delete('/api/workspaces/ws-test-1').set('Authorization', `Bearer ${authToken}`);
+  // Use a unique ID to avoid accumulating WAL events from other tests using ws-test-1
+  const uniqueId = `ws-wal-test-${Date.now()}`;
+  await request(app).post('/api/workspaces').set('Authorization', `Bearer ${authToken}`).send({ ...validWorkspace, id: uniqueId });
+  await request(app).delete(`/api/workspaces/${uniqueId}`).set('Authorization', `Bearer ${authToken}`);
 
-  const events = await query("SELECT event_type, workspace_id FROM wal_events WHERE workspace_id = 'ws-test-1' ORDER BY id") as { event_type: string; workspace_id: string }[];
+  const events = await query(
+    "SELECT event_type, workspace_id FROM wal_events WHERE workspace_id = $1 AND event_type IN ('workspace_create', 'workspace_delete') ORDER BY id",
+    [uniqueId]
+  ) as { event_type: string; workspace_id: string }[];
 
   expect(events).toHaveLength(2);
   expect(events[0].event_type).toBe('workspace_create');

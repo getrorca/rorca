@@ -10,7 +10,7 @@ export type SettingsTab =
   // Execution group
   | 'providers' | 'direction' | 'pipeline'
   // Integrations group
-  | 'github' | 'slack' | 'linear' | 'vercel'
+  | 'integrations' | 'github' | 'slack' | 'linear' | 'vercel' | 'audit-log'
   // Account group
   | 'account' | 'billing' | 'shortcuts' | 'notifications'
   // System group
@@ -86,6 +86,14 @@ const IntegrationPlaceholder = lazy(() =>
   import('./settings/IntegrationPlaceholder'),
 );
 
+const IntegrationsHubTab = lazy(() =>
+  import('./settings/IntegrationsHubTab').then((m) => ({ default: m.IntegrationsHubTab })),
+);
+
+const IntegrationAuditLogTab = lazy(() =>
+  import('./settings/IntegrationAuditLogTab').then((m) => ({ default: m.IntegrationAuditLogTab })),
+);
+
 // ─── Loading fallback ────────────────────────────────────────────────────────
 
 function TabLoader() {
@@ -120,6 +128,8 @@ export default function SettingsPanel() {
           {activeTab === 'direction' && <DirectionSettings.WsDirectionSection />}
           {activeTab === 'pipeline' && <DirectionSettings.WsPipelineSection />}
           {/* Integrations group */}
+          {activeTab === 'integrations' && <IntegrationsHubTab />}
+          {activeTab === 'audit-log' && <IntegrationAuditLogTab />}
           {activeTab === 'github' && <GitHubSettingsTab />}
           {activeTab === 'slack' && <IntegrationPlaceholder name="Slack" description="Get run notifications, approve specs via interactive buttons, and receive failure alerts — all in your team's Slack channels." />}
           {activeTab === 'linear' && <IntegrationPlaceholder name="Linear" description="Import Linear issues as specs, sync story progress to sub-issues, and auto-update parent issues when runs complete." />}

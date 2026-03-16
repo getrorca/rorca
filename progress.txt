@@ -1,19 +1,14 @@
 # Run State Summary
 
-Spec: rorca-run-view-streaming-fix
-Run ID: 126
-Started: 2026-03-15T20:14:13.214Z
-Last Updated: 2026-03-15T21:10:27.499Z
+Spec: rorca-go-to-market-v1
+Run ID: 129
+Started: 2026-03-16T08:27:07.845Z
+Last Updated: 2026-03-16T11:17:36.545Z
 
-## Completed Stories (11)
-- US-001: Add flush timer to worker handleData() for sub-second terminal output — DONE (claude, 131s)
-- US-002: Replace StoriesListTab with RunStoryList in RunViewPanel — DONE (claude, 130s)
-- US-003: Inject story completion markers into xterm terminal stream — DONE (claude, 160s)
-- US-004: Jest tests for worker flush timer — mock timers, verify sub-4KB writes — DONE (claude, 925s)
-- US-005: Jest tests for worker singleton guard and heartbeat-aware orphan sweep — DONE (claude, 199s)
-- US-006: Vitest integration tests for RunStoryList in Run View with live WAL data — DONE (claude, 352s)
-- US-007: Extract handleData flush logic into testable FlushBuffer class — DONE (claude, 568s)
-- US-008: Backend SSE endpoint injects story markers into output stream — DONE (claude, 636s)
-- US-009: Remove frontend-only marker injection to prevent duplicates with backend markers — DONE (claude, 21s)
-- US-010: End-to-end validation — terminal output within 2s, story transitions visible, animations fire — DONE (claude, 21s)
-- US-011: Aggregate story pass counts across all runs in kanban endpoint — DONE (claude, 14s)
+## Completed Stories (6)
+- US-001: Resolve merge conflict in worker.ts — DONE (claude, claude-sonnet-4-6, 156s)
+- US-051: API documentation completeness — @swagger on all routes — DONE (claude, claude-sonnet-4-6, 1153s)
+- US-053: Installation troubleshooting guide — DONE (claude, claude-haiku-4-5-20251001, 147s)
+- US-070: macOS Binary Notarization Documentation and Gatekeeper Workaround — DONE (claude, claude-haiku-4-5-20251001, 126s)
+- US-057: Password Reset Flow — DONE (claude, claude-opus-4-6, 22s)
+- US-068: Account Deletion and GDPR Right-to-Erasure — DONE (claude, claude-opus-4-6, 1092s)

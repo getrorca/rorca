@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import { query, queryOne, execute, transaction } from '../db/index';
 import { logger } from '../lib/logger';
+import { NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
@@ -46,7 +47,7 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId;
     if (!workspaceId) {
-      res.status(400).json({ error: 'workspaceId query parameter is required' });
+      throw new ValidationError('workspaceId query parameter is required');
       return;
     }
 
@@ -181,13 +182,13 @@ router.post('/', async (req: Request, res: Response) => {
     const { workspaceId, specId, specPath, parallelism, autoWorktree } = req.body;
 
     if (!workspaceId || !specId || !specPath) {
-      res.status(400).json({ error: 'workspaceId, specId, and specPath are required' });
+      throw new ValidationError('workspaceId, specId, and specPath are required');
       return;
     }
 
     const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
     if (!workspace) {
-      res.status(404).json({ error: 'Workspace not found' });
+      throw new NotFoundError('Workspace not found');
       return;
     }
 
@@ -247,13 +248,13 @@ router.delete('/:id', async (req: Request, res: Response) => {
     const idStr = Array.isArray(idParam) ? idParam[0] : idParam;
     const id = parseInt(idStr, 10);
     if (isNaN(id)) {
-      res.status(400).json({ error: 'Invalid queue entry ID' });
+      throw new ValidationError('Invalid queue entry ID');
       return;
     }
 
     const existing = await queryOne('SELECT id FROM run_queue WHERE id = $1', [id]);
     if (!existing) {
-      res.status(404).json({ error: 'Queue entry not found' });
+      throw new NotFoundError('Queue entry not found');
       return;
     }
 
@@ -303,7 +304,7 @@ router.put('/reorder', async (req: Request, res: Response) => {
   try {
     const { orderedIds } = req.body;
     if (!Array.isArray(orderedIds) || orderedIds.length === 0) {
-      res.status(400).json({ error: 'orderedIds must be a non-empty array of queue entry IDs' });
+      throw new ValidationError('orderedIds must be a non-empty array of queue entry IDs');
       return;
     }
 
