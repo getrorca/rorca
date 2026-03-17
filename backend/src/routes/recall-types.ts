@@ -44,6 +44,7 @@ export interface ActiveRun {
 
 export interface SkillPreview {
   name: string;
+  contentPreview: string;
   description: string;
   category: string | null;
   tags: string[];
