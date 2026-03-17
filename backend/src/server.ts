@@ -71,6 +71,7 @@ import skillsRouter from './routes/skills';
 import personasRouter from './routes/personas';
 import marketplaceRouter from './routes/marketplace';
 import searchRouter from './routes/search';
+import recallRouter from './routes/recall';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
 import { createMcpRequestHandler } from './lib/mcp-http';
