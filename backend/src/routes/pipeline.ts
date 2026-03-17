@@ -4340,10 +4340,13 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
 
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
   let closed = false;
+  let pollInterval: ReturnType<typeof setInterval> | null = null;
 
+  // Single close handler — clears all intervals on client disconnect
   req.on('close', () => {
     closed = true;
     clearInterval(hb);
+    if (pollInterval) clearInterval(pollInterval);
   });
 
   // Resolve agent type for semantic parsing
@@ -4385,15 +4388,17 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
   // Check if story already finished before entering poll loop
   if (await isStoryDone(runId, storyId)) {
     clearInterval(hb);
-    res.write('event: done\ndata: \n\n');
-    res.end();
+    if (!closed) {
+      res.write('event: done\ndata: \n\n');
+      res.end();
+    }
     return;
   }
 
   // ── Live poll phase: 200ms interval ──
-  const pollInterval = setInterval(async () => {
+  pollInterval = setInterval(async () => {
     if (closed) {
-      clearInterval(pollInterval);
+      if (pollInterval) clearInterval(pollInterval);
       return;
     }
     try {
@@ -4402,7 +4407,7 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
         [runId, storyId, lastSeq]
       );
       for (const row of newRows) {
-        if (closed) { clearInterval(pollInterval); return; }
+        if (closed) { if (pollInterval) clearInterval(pollInterval); return; }
         const buf = Buffer.from(row.chunk, 'utf8');
         res.write(`event: output\ndata: ${buf.toString('base64')}\n\n`);
         emitSemanticSteps(row.chunk, agent, res);
@@ -4422,7 +4427,7 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
           res.write(`event: output\ndata: ${buf.toString('base64')}\n\n`);
           emitSemanticSteps(row.chunk, agent, res);
         }
-        clearInterval(pollInterval);
+        if (pollInterval) clearInterval(pollInterval);
         clearInterval(hb);
         if (!closed) {
           res.write('event: done\ndata: \n\n');
@@ -4433,10 +4438,6 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
       // Swallow transient DB errors — next tick retries
     }
   }, 200);
-
-  req.on('close', () => {
-    clearInterval(pollInterval);
-  });
 });
 
 /** Check whether a story completion WAL event exists. */
