@@ -3,10 +3,11 @@
 Spec: rorca-mini-terminal-db-output
 Run ID: 20260316000021
 Started: 2026-03-17T21:41:34.003Z
-Last Updated: 2026-03-17T21:56:04.927Z
+Last Updated: 2026-03-17T21:59:25.132Z
 
-## Completed Stories (4)
+## Completed Stories (5)
 - US-001: Add story_output_chunks PostgreSQL table migration — DONE (claude, 11s)
 - US-002: Create story-log-follower.ts WAL subscriber service — DONE (claude, 98s)
 - US-003: Add server startup recovery for in-flight stories in story-log-follower — DONE (claude, 175s)
 - US-004: Register StoryLogFollower in server.ts — DONE (claude, 62s)
+- US-005: Add GET /api/pipeline/runs/:runId/stories/:storyId/stream SSE endpoint — DONE (claude, 186s)

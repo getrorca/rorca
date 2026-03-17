@@ -2,7 +2,7 @@
   "specId": "rorca-mini-terminal-db-output",
   "runId": 20260316000021,
   "startedAt": "2026-03-17T21:41:34.003Z",
-  "lastUpdatedAt": "2026-03-17T21:56:04.927Z",
+  "lastUpdatedAt": "2026-03-17T21:59:25.132Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -39,6 +39,15 @@
       "finishedAt": "2026-03-17T21:56:04.926Z",
       "agentType": "claude",
       "elapsedMs": 61528
+    },
+    {
+      "storyId": "US-005",
+      "title": "Add GET /api/pipeline/runs/:runId/stories/:storyId/stream SSE endpoint",
+      "status": "passed",
+      "startedAt": "2026-03-17T21:56:19.157Z",
+      "finishedAt": "2026-03-17T21:59:25.132Z",
+      "agentType": "claude",
+      "elapsedMs": 185975
     }
   ],
   "failedStories": [],
