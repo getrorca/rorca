@@ -36,6 +36,7 @@ const IDEMPOTENT_TOOLS = new Set([
   'rorca_get_context', 'rorca_synthesize_direction', 'rorca_search_stories',
   'rorca_run_status', 'rorca_pipeline_status', 'rorca_usage_stats',
   'rorca_recall',
+  'rorca_dump',
 ]);
 
 /** Cacheable tool names → { data, cachedAt } */
@@ -3235,6 +3236,35 @@ server.registerTool(
         }],
       };
     }, `recall:${workspaceId}`);
+  }
+);
+
+// ─── Dump MCP Tool (US-013) ──────────────────────────────────────────────────
+
+server.registerTool(
+  'rorca_dump',
+  {
+    description: 'Complete unfiltered brain export — returns ALL memories, raw direction layers (L1-L3), full skill content (no truncation), schema snapshot, last 20 pipeline runs with story aggregation, and active runs. No token budget, no RAG filtering, no LIMIT clauses. Use this when you need the entire workspace context without any filtering.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces or settings)'),
+    },
+  },
+  async ({ workspaceId }) => {
+    return wrapToolCall('rorca_dump', async () => {
+      const params = new URLSearchParams({ workspaceId });
+
+      const res = await fetchWithRetry('rorca_dump', () =>
+        timedFetch(`${RORCA_API}/api/recall/dump?${params.toString()}`)
+      );
+      if (!res.ok) return httpError('rorca_dump', res);
+      const data = await res.json();
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(data, null, 2),
+        }],
+      };
+    }, `dump:${workspaceId}`);
   }
 );
 
