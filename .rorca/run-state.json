@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000012,
   "startedAt": "2026-03-17T18:30:24.225Z",
-  "lastUpdatedAt": "2026-03-17T18:41:04.485Z",
+  "lastUpdatedAt": "2026-03-17T18:43:10.815Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -14,13 +14,13 @@
       "elapsedMs": 17888
     },
     {
-      "storyId": "US-007",
-      "title": "Implement recall route — workspace context (schema snapshot + git memory)",
+      "storyId": "US-008",
+      "title": "Implement recall route — active/queued runs with story progress",
       "status": "passed",
-      "startedAt": "2026-03-17T18:35:36.550Z",
-      "finishedAt": "2026-03-17T18:41:04.485Z",
+      "startedAt": "2026-03-17T18:35:36.219Z",
+      "finishedAt": "2026-03-17T18:43:10.814Z",
       "agentType": "claude",
-      "elapsedMs": 327935
+      "elapsedMs": 454595
     }
   ],
   "failedStories": [],

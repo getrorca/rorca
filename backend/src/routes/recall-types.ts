@@ -30,6 +30,13 @@ export interface RunSummary {
   costUsd: number | null;
 }
 
+export interface StoryProgress {
+  passed: number;
+  failed: number;
+  inProgress: number;
+  total: number;
+}
+
 export interface ActiveRun {
   id: number;
   specPath: string;
@@ -38,8 +45,7 @@ export interface ActiveRun {
   model: string | null;
   startedAt: string;
   queuePosition: number | null;
-  storiesCompleted: number;
-  storiesTotal: number;
+  storyProgress: StoryProgress | null;
 }
 
 export interface SkillPreview {
