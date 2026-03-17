@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000012,
   "startedAt": "2026-03-17T18:30:24.225Z",
-  "lastUpdatedAt": "2026-03-17T18:48:17.162Z",
+  "lastUpdatedAt": "2026-03-17T18:44:05.889Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -14,13 +14,13 @@
       "elapsedMs": 17888
     },
     {
-      "storyId": "US-003",
-      "title": "Implement recall route — memory entries section with category filter",
+      "storyId": "US-004",
+      "title": "Implement recall route — workspace health via echolocation",
       "status": "passed",
-      "startedAt": "2026-03-17T18:35:43.600Z",
-      "finishedAt": "2026-03-17T18:48:17.162Z",
+      "startedAt": "2026-03-17T18:35:36.530Z",
+      "finishedAt": "2026-03-17T18:44:05.888Z",
       "agentType": "claude",
-      "elapsedMs": 753562
+      "elapsedMs": 509358
     }
   ],
   "failedStories": [],
