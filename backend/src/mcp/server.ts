@@ -3178,6 +3178,29 @@ server.registerPrompt(
   }
 );
 
+server.registerPrompt(
+  'recall',
+  {
+    title: 'Recall Workspace Context',
+    description: 'Bootstrap your session with full workspace context — direction stack, memories, health report, recent runs, and installed skills. Invoke at the start of any session to load everything in one shot.',
+    argsSchema: {
+      workspaceId: z.string().optional().describe(`Workspace ID (default: ${DEFAULT_WORKSPACE})`),
+    },
+  },
+  async ({ workspaceId }) => {
+    const ws = workspaceId ?? DEFAULT_WORKSPACE;
+    return {
+      messages: [{
+        role: 'user' as const,
+        content: {
+          type: 'text' as const,
+          text: `Call the rorca_recall tool with workspaceId="${ws}". Read and internalize ALL returned context including the direction stack (L1-L5), memory ledger entries, workspace health report, recent pipeline runs, and installed skills. After loading, confirm to me what workspace context has been loaded and summarize: (1) the workspace health score, (2) number of memory entries, (3) recent run pass rate (passed/total stories across last runs), and (4) whether any run is currently active.`,
+        },
+      }],
+    };
+  }
+);
+
 // ─── Recall MCP Tool (US-010) ────────────────────────────────────────────────
 
 server.registerTool(
