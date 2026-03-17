@@ -3,6 +3,7 @@ import crypto from 'crypto';
 import { queryOne, execute } from '../db';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { authRequired, type AuthUser } from './auth';
+import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { ConflictError, ForbiddenError, GoneError, NotFoundError, TooManyRequestsError } from '../lib/errors';
 
@@ -134,8 +135,7 @@ router.get('/:token', async (req: Request, res: Response) => {
       expiresAt: invite.expires_at,
     });
   } catch (error: unknown) {
-    logger.error({ error }, '[Invites] validate error');
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    handleRouteError(res, error, '[Invites] validate');
   }
 });
 
@@ -257,8 +257,7 @@ router.post('/:token/accept', authRequired, async (req: Request, res: Response) 
       message: 'Successfully joined the team',
     });
   } catch (error: unknown) {
-    logger.error({ error }, '[Invites] accept error');
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    handleRouteError(res, error, '[Invites] accept');
   }
 });
 

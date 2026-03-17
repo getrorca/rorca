@@ -7,6 +7,7 @@ import { isGraphAvailable, graphStats, populateFromSpec, populateFromRun } from 
 import { query } from '../db/index';
 import { logger } from '../lib/logger';
 import { ConflictError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -49,8 +50,7 @@ router.post('/backup', async (_req: Request, res: Response) => {
       pruned,
     });
   } catch (error: any) {
-    logger.error('[Backup] Create error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Backup] Create');
   }
 });
 
@@ -86,8 +86,7 @@ router.get('/backups', (_req: Request, res: Response) => {
     const backups = listBackups();
     res.json({ backups });
   } catch (error: any) {
-    logger.error('[Backup] List error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Backup] List');
   }
 });
 
@@ -131,8 +130,7 @@ router.post('/embed-all', async (req: Request, res: Response) => {
     const result = await backfillAll(workspaceId, !!force);
     res.json(result);
   } catch (error: any) {
-    logger.error({ err: error }, '[Embeddings] Backfill error');
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Embeddings] Backfill');
   }
 });
 
@@ -305,8 +303,7 @@ router.post('/graph-backfill', async (_req: Request, res: Response) => {
 
     res.json({ specsProcessed, runsProcessed, stats });
   } catch (error: any) {
-    logger.error({ err: error }, '[graph-backfill] Backfill error');
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[graph-backfill] Backfill');
   }
 });
 
@@ -338,8 +335,7 @@ router.get('/graph-stats', async (_req: Request, res: Response) => {
     const stats = await graphStats();
     res.json(stats);
   } catch (error: any) {
-    logger.error({ err: error }, '[graph-stats] Error fetching graph stats');
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[graph-stats]');
   }
 });
 

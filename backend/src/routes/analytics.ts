@@ -4,6 +4,7 @@ import fs from 'fs';
 import { query, queryOne, execute } from '../db/index';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -195,8 +196,7 @@ router.get('/usage', async (req: Request, res: Response) => {
       groupBy,
     });
   } catch (error: any) {
-    logger.error('[Analytics] Usage query error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] Usage query');
   }
 });
 
@@ -391,8 +391,7 @@ router.get('/costs', async (req: Request, res: Response) => {
 
     res.json({ groupBy, breakdown, totals, dateRange: { from, to } });
   } catch (error: any) {
-    logger.error('[Analytics] Costs query error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] Costs query');
   }
 });
 
@@ -457,8 +456,7 @@ router.get('/pricing', async (_req: Request, res: Response) => {
 
     res.json({ pricing });
   } catch (error: any) {
-    logger.error('[Analytics] Pricing list error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] Pricing list');
   }
 });
 
@@ -571,8 +569,7 @@ router.put('/pricing/:modelId', async (req: Request, res: Response) => {
       effective_date: effDate,
     });
   } catch (error: any) {
-    logger.error('[Analytics] Pricing update error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] Pricing update');
   }
 });
 
@@ -618,8 +615,7 @@ router.delete('/pricing/:modelId', async (req: Request, res: Response) => {
 
     res.json({ deleted: modelId });
   } catch (error: any) {
-    logger.error('[Analytics] Pricing delete error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] Pricing delete');
   }
 });
 
@@ -750,8 +746,7 @@ router.get('/models', async (req: Request, res: Response) => {
 
     res.json({ models, dateRange: { from, to } });
   } catch (error: any) {
-    logger.error('[Analytics] Models comparison error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] Models comparison');
   }
 });
 
@@ -937,8 +932,7 @@ router.get('/velocity', async (req: Request, res: Response) => {
       dateRange: { from, to },
     });
   } catch (error: any) {
-    logger.error('[Analytics] Velocity query error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] Velocity query');
   }
 });
 
@@ -1188,8 +1182,7 @@ router.get('/completion-rates', async (req: Request, res: Response) => {
       dateRange: { from, to },
     });
   } catch (error: any) {
-    logger.error('[Analytics] Completion rates error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] Completion rates');
   }
 });
 
@@ -1525,8 +1518,7 @@ router.get('/export', async (req: Request, res: Response) => {
       });
     }
   } catch (error: any) {
-    logger.error('[Analytics] Export error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] Export');
   }
 });
 
@@ -1722,8 +1714,7 @@ router.get('/roi', async (req: Request, res: Response) => {
       dateRange: { from, to },
     });
   } catch (error: any) {
-    logger.error('[Analytics] ROI query error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] ROI query');
   }
 });
 
@@ -1808,8 +1799,7 @@ router.put('/roi/config', async (req: Request, res: Response) => {
       hourly_rate: updated?.roi_hourly_rate,
     });
   } catch (error: any) {
-    logger.error('[Analytics] ROI config update error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] ROI config update');
   }
 });
 
@@ -2037,8 +2027,7 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
       escalationLog,
     });
   } catch (error: any) {
-    logger.error('[Analytics] FinOps run query error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] FinOps run query');
   }
 });
 
@@ -2276,8 +2265,7 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
       dateRange: { from, to },
     });
   } catch (error: any) {
-    logger.error('[Analytics] FinOps historical query error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] FinOps historical query');
   }
 });
 
@@ -2390,8 +2378,7 @@ router.get('/finops/export', async (req: Request, res: Response) => {
     res.setHeader('Content-Disposition', `attachment; filename="${filename}.csv"`);
     res.send(toCsvRows(headers, enrichedRows));
   } catch (error: any) {
-    logger.error('[Analytics] FinOps export error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] FinOps export');
   }
 });
 
@@ -2570,8 +2557,7 @@ router.get('/skills/effectiveness', async (req: Request, res: Response) => {
       totalStories,
     });
   } catch (error: any) {
-    logger.error('[Analytics] Skill effectiveness error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Analytics] Skill effectiveness');
   }
 });
 

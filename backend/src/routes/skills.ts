@@ -19,6 +19,7 @@ import { echolocate, inferSkillsFromStack, STACK_TO_SKILLS } from '../lib/worksp
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 import { NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 import { githubRateLimiter } from '../lib/github-rate-limiter';
 
 const router = Router();
@@ -168,8 +169,7 @@ router.get('/', async (req: Request, res: Response) => {
       catalog: registry.getCatalogForPrompt(),
     });
   } catch (error: any) {
-    logger.error('[Skills] List error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] List');
   }
 });
 
@@ -235,8 +235,7 @@ router.post('/install', async (req: Request, res: Response) => {
       tags: skill.metadata.tags || [],
     });
   } catch (error: any) {
-    logger.error('[Skills] Install error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] Install');
   }
 });
 
@@ -407,8 +406,7 @@ router.get('/preview', async (req: Request, res: Response) => {
       estimatedTokens: Math.ceil(wordCount * 1.3),
     });
   } catch (error: any) {
-    logger.error('[Skills] preview error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] preview');
   }
 });
 
@@ -507,8 +505,7 @@ router.get('/:name/content', async (req: Request, res: Response) => {
     // 3) Not found
     throw new NotFoundError(`Skill "${name}" not found`);
   } catch (error: any) {
-    logger.error('[Skills] Content error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] Content');
   }
 });
 
@@ -537,14 +534,27 @@ router.delete('/:name', async (req: Request, res: Response) => {
   try {
     const name = req.params.name as string;
     const registry = new SkillRegistry();
-    const removed = await registry.remove(name);
+    const removedFromDb = await registry.remove(name);
 
-    if (!removed) {
-      throw new NotFoundError(`Skill "${name}" not found in installed skills`);
+    // Also delete from filesystem — skills may exist on disk without a DB entry
+    // (e.g. manually placed files or core skills like rorca.md)
+    let removedFromFs = false;
+    const wsId = await resolveWorkspaceId(req);
+    const workspace = wsId ? await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [wsId]) : null;
+    const fsPaths = [
+      workspace ? path.join(workspace.path, '.rorca', 'skills', `${name}.md`) : null,
+      workspace ? path.join(workspace.path, '.claude', 'skills', `${name}.md`) : null,
+    ].filter(Boolean) as string[];
+
+    for (const p of fsPaths) {
+      try { fs.unlinkSync(p); removedFromFs = true; } catch { /* not present */ }
+    }
+
+    if (!removedFromDb && !removedFromFs) {
+      res.status(404).json({ error: `Skill "${name}" not found in installed skills`, code: 'NOT_FOUND' });
       return;
     }
 
-    const wsId = await resolveWorkspaceId(req);
     await emitSkillWalEvent('skill_removed', wsId, {
       name,
       workspace_id: wsId,
@@ -552,8 +562,7 @@ router.delete('/:name', async (req: Request, res: Response) => {
 
     res.json({ removed: true, name });
   } catch (error: any) {
-    logger.error('[Skills] Remove error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] Remove');
   }
 });
 
@@ -765,8 +774,7 @@ router.post('/install-from-sh', async (req: Request, res: Response) => {
       filePath: rorcaPath,
     });
   } catch (error: any) {
-    logger.error('[Skills] install-from-sh error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] install-from-sh');
   }
 });
 
@@ -893,8 +901,7 @@ router.get('/suggestions', async (req: Request, res: Response) => {
       monorepoApps,
     });
   } catch (error: any) {
-    logger.error('[Skills] suggestions error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] suggestions');
   }
 });
 
@@ -1013,8 +1020,7 @@ router.post('/search', async (req: Request, res: Response) => {
       total: data?.total ?? results.length,
     });
   } catch (error: any) {
-    logger.error('[Skills] search error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] search');
   }
 });
 
@@ -1243,8 +1249,7 @@ router.post('/browse-github', async (req: Request, res: Response) => {
       skills,
     });
   } catch (error: any) {
-    logger.error('[Skills] browse-github error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] browse-github');
   }
 });
 
@@ -1411,8 +1416,7 @@ router.post('/install-from-github', async (req: Request, res: Response) => {
       filePath: rorcaPath,
     });
   } catch (error: any) {
-    logger.error('[Skills] install-from-github error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] install-from-github');
   }
 });
 
@@ -1627,8 +1631,7 @@ router.post('/bulk-install', async (req: Request, res: Response) => {
 
     res.json({ installed, failed, total: skills.length });
   } catch (error: any) {
-    logger.error('[Skills] bulk-install error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] bulk-install');
   }
 });
 
@@ -1727,8 +1730,7 @@ router.post('/bulk-remove', async (req: Request, res: Response) => {
 
     res.json({ removed, notFound });
   } catch (error: any) {
-    logger.error('[Skills] bulk-remove error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] bulk-remove');
   }
 });
 
@@ -1821,8 +1823,7 @@ router.get('/export', async (req: Request, res: Response) => {
       workspacePath: wsPath || null,
     });
   } catch (error: any) {
-    logger.error('[Skills] export error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Skills] export');
   }
 });
 

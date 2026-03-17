@@ -5,6 +5,7 @@ import { query, queryOne } from '../db/index';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -211,8 +212,7 @@ router.get('/search', async (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req, { limit: 50, maxLimit: 200 });
     res.json(paginateArray(allResults, pagination));
   } catch (error: any) {
-    logger.error('[Stories] Search error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Stories] Search');
   }
 });
 

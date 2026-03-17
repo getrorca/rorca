@@ -152,8 +152,3 @@ export const RecallQuerySchema = z.object({
 
 export type RecallQueryParams = z.infer<typeof RecallQuerySchema>;
 
-export const DumpQuerySchema = z.object({
-  workspaceId: z.string().min(1),
-});
-
-export type DumpQueryParams = z.infer<typeof DumpQuerySchema>;

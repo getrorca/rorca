@@ -139,22 +139,22 @@ async function seedRun(overrides: Partial<{ status: string; workspace_id: string
 // ─── POST /api/pipeline/trigger ──────────────────────────────────────────────
 
 describe('POST /api/pipeline/trigger', () => {
-  test('returns 400 when specPath is missing', async () => {
+  test('returns 422 when specPath is missing', async () => {
     const res = await request(app)
       .post('/api/pipeline/trigger')
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-pipe' });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
   });
 
-  test('returns 400 when workspaceId is missing', async () => {
+  test('returns 422 when workspaceId is missing', async () => {
     const res = await request(app)
       .post('/api/pipeline/trigger')
       .set('Authorization', `Bearer ${authToken}`)
       .send({ specPath: 'forge/specs/approved/test.json' });
 
-    expect(res.status).toBe(400);
+    expect(res.status).toBe(422);
   });
 
   test('returns 404 for nonexistent workspace', async () => {

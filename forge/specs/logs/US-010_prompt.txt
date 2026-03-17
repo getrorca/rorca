@@ -1151,9 +1151,9 @@ Phase 6 — React Native Mobile (after cloud)
 
 **The brand statement**: "Every story runs as a fresh isolated subprocess with the full tool set — bash, edit, read, write, glob, grep. No context limits. A spec can run forever. That's the Rorca engine."
 
-## Wave-Based Parallel Execution (Future Roadmap)
+## Wave-Based Parallel Execution
 
-**Status**: Not built. Sequential execution is default for V1. Wave = opt-in V2 feature.
+**Status**: Built. Wave parallel is opt-in per run (toggle in spec detail slide-over). Sequential is still the default.
 
 **The idea**: Instead of running stories one-by-one, compile the `dependsOn` DAG into topological wave groups. Each wave runs its stories in parallel git worktrees, then auto-merges before the next wave starts.
 
@@ -1164,16 +1164,7 @@ Wave 2: US-006 → 1 worktree → merge → done
 Sequential: 40 min total  →  Wave parallel: ~12 min (3.3x speedup on 3-wave spec)
 ```
 
-**What needs to be built** (future `rorca-wave-execution` spec):
-1. Wave compiler — topological sort of `dependsOn` DAG into wave groups (~50 lines)
-2. Wave orchestrator — spawn N parallel subprocesses, one per story per wave
-3. File-touch predictor — pre-analyze stories to detect shared-file conflicts before wave starts
-4. Auto-merge sequence — merge each wave's worktrees in sequence; use Haiku to resolve conflicts
-5. `.rorca/config.json` toggle: `execution.waveParallelism: false` (default) → `true` to enable
-
-**Why not V1**: Shared filesystem race conditions. Two stories editing the same file simultaneously cause merge conflicts. The file-touch predictor + auto-merge resolves most, but adds complexity. Sequential is safer and simpler for initial launch. Wave stays opt-in.
-
-**Trigger**: Build this spec after `rorca-integrations` ships. Requires worktrees (already built) + file-touch predictor (new). Infrastructure is 80% there.
+**How it works**: Wave compiler does a topological sort of the `dependsOn` DAG into wave groups. Each wave runs its stories in parallel git worktrees. Auto-merge fires after each wave before the next starts. Configurable max parallelism (default 20). Toggle visible in the spec detail slide-over — shows wave breakdown before you run.
 
 
 ---
@@ -1338,27 +1329,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
-> Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
-
-## 2026-03-12 [Decision] rorca-ensure-postgres completed — zero-prereq Postgres provisioning in bin/rorca.ts
-> Rule: bin/rorca.ts now includes a full ensurePostgres() function. On first run, it downloads Postgres 16 binaries from zonkyio/embedded-postgres-binaries, extracts, runs initdb, starts pg_ctl on port 5433, creates rorca user and database. No Docker required. DATABASE_URL env var bypasses this entirely (preserves Docker workflow). --no-postgres flag also skips it. Postgres is stopped on SIGINT/SIGTERM via stopManagedPostgres().
-
-## 2026-03-12 [Bug Fix] tsx watch restarts backend during parallel runs → resilient-post retries exhaust
-> Rule: When a fast worktree run auto-merges into main, tsx watch detects the file changes and restarts the backend (5-10s TypeScript recompile). If resilient-post.ts retry window is shorter than the restart time, execution engine can't report story results and the run shows as failed. Fix: raise POST_MAX_RETRIES to 10 and POST_RETRY_DELAY_MS to 3000 (30s coverage) in backend/src/lib/resilient-post.ts.
-
-## 2026-03-12 [Decision] Distribution format: curl|sh for launch, native installers deferred
-> Rule: Use `curl -fsSL https://get.rorca.app | sh` (macOS/Linux) + PowerShell equivalent (Windows) for launch distribution. Do NOT build .pkg (macOS) or .exe (Windows) installers yet — they require code signing certs (~$400/yr) and unsigned installers trigger OS security warnings (Gatekeeper, SmartScreen) which is worse UX than curl|sh. Native installers and Homebrew tap (`brew install getrorca/tap/rorca`) are deferred until there's user demand.
-
-## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
-> Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
-
-## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
-> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
-
-## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
-> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
-
 ## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
 > Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
 
@@ -1398,8 +1368,29 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
+## 2026-03-15 [Bug Fix] Worker never promoted queued runs — advanceQueue() missing from worker.ts
+> Rule: advanceQueue() must be called after EVERY run completion path in worker.ts (main exit, spawn error, retry exit, retry spawn error, stale job recovery, orphan sweep, state reconciliation). Without it, queued runs sit forever until state_reconciliation kills them.
+
+## 2026-03-15 [Bug Fix] reconcileState() killed legitimate queued runs — 'queued' removed from Case A query
+> Rule: reconcileState() Case A must only check status='running' (not 'queued'). Queued runs intentionally have no pg-boss job — they are managed by advanceQueue() which promotes them when the active run completes. Including 'queued' in the NOT EXISTS check causes reconciliation to mark every queued run as failed after 60 seconds.
+
+## 2026-03-15 [Bug Fix] pipeline.ts merge conflicts resolved — queue-observability pickup latency kept
+> Rule: The /api/pipeline/worker/health endpoint uses individual CountRow/AgeRow/QueueRow/LatencyRow queries (not a single QueueStatsRow IIFE). The pickup latency metrics (avg/p50/p95/max over 24h rolling window for pipeline:run + pipeline:retry) are part of the queue-observability spec and must be preserved in any future merge.
+
+## 2026-03-15 [Architecture] Run queue lifecycle: queued runs have NO pg-boss job until promoted
+> Rule: When a run is queued (queue:true in trigger body while another run is active), pipeline.ts creates a pipeline_runs row with status='queued' and queue_position but does NOT call boss.send(). The pg-boss job is only created later when advanceQueue() fires POST /api/pipeline/trigger with queuedRunId, which promotes the existing row and sends the boss job. Any code that checks for 'stuck' runs must account for this: queued runs without pg-boss jobs are normal, not orphaned.
+
+## 2026-03-16 [Bug Fix] payload::text LIKE queries cause pool exhaustion under wave parallelism
+> Rule: Never use `payload::text LIKE '%"run_id":N%'` on wal_events. Always use `(payload->>'run_id')::int = $N` — JSONB accessor is 10x faster and doesn't cause full table scans. Critical under wave parallelism (18+ concurrent SSE connections each polling WAL).
+
+## 2026-03-16 [Bug Fix] specs.ts u.name column does not exist — users table uses display_name
+> Rule: The `users` table column is `display_name`, not `name`. Any JOIN query referencing `u.name` will crash with 'column u.name does not exist'. The go-to-market spec run introduced this bug in the spec_attachments query at specs.ts:9970.
+
+## 2026-03-16 [Gotcha] unhandledRejection in server.ts kills entire process including API
+> Rule: The worker's unhandledRejection handler triggers graceful shutdown of the entire Node process. When server.ts and worker code share a process (via `npm run dev` / concurrently), ANY unhandled promise rejection — even a transient DB connection timeout — kills the API server too. DB queries in setInterval callbacks MUST be wrapped in try-catch.
+
 Follow this workflow for implementation:
-## Agent Role: Frontend
+## Agent Role: Backend Routes
 
 ---
 name: rorca
@@ -1552,24 +1543,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-010):
-Create a shared Footer component in landing-page/ that appears on every page. Four columns: Product (Download, Pricing, Docs, Changelog), Company (About, Blog, Careers), Legal (Terms, Privacy), Community (GitHub, Twitter/X, Discord). Bottom row: © 2026 Rorca. All rights reserved. Links: GitHub → https://github.com/getrorca/rorca, Twitter/X → https://x.com/getrorca, Discord → placeholder (https://discord.gg/rorca), support email → support@rorca.app, Terms → /terms, Privacy → /privacy. Footer uses zinc-900 background, subtle border-top.
-
-## Context
-- **Landing page stack**: The landing page lives in `landing-page/` and uses Next.js 14 + Tailwind v4 + Framer Motion on port 3002 — this is separate from the main React/Vite frontend. Use Next.js layout patterns (e.g., `layout.tsx`) to ensure the Footer renders on every route without per-page imports.
-- **Tailwind v4 specifics**: The landing page uses Tailwind v4 (not v3 like the main app). Use `zinc-900` via Tailwind utility classes. Check existing landing page components for the prevailing color/spacing conventions before introducing new design tokens.
-- **Link architecture**: All internal links (`/terms`, `/privacy`, `/pricing`, `/download`) should use Next.js `<Link>` for client-side navigation. External links (`github.com`, `x.com`, `discord.gg`) must use plain `<a>` tags with `target="_blank" rel="noopener noreferrer"`. Never use `href="#"` — the AC explicitly greps for this.
-- **"Coming Soon" pattern**: For pages that don't exist yet, keep the `<Link>` with the real `href` but render a `(Coming Soon)` span in `text-zinc-500` (or equivalent muted color). Do NOT disable the link or remove the href — the link must be functional for when the page is created later.
-- **Layout shift prevention**: Set `min-height` on the footer container (e.g., `min-h-[280px]` or similar) so the page layout is stable before content paints. This satisfies the "no layout shift" AC.
-- **Responsive columns**: Use a 4-column grid on desktop (`grid-cols-4`) that collapses to 2-col on tablet and 1-col on mobile. Check existing landing page sections for the responsive breakpoint pattern already in use and match it.
-- **Copyright year**: Hardcode `© 2026 Rorca. All rights reserved.` as specified — do not use `new Date().getFullYear()` since the AC checks for the exact string `© 2026`.
-- **No over-engineering**: This is a static footer with no data fetching, no runtime link validation, and no dynamic content. Keep it as a single `Footer.tsx` component — no need for sub-components, context providers, or abstraction layers.
+Add the `rorca_recall` tool to `backend/src/mcp/server.ts` using `server.registerTool()`. Follow the existing pattern: use `wrapToolCall()` for error handling, `fetchWithRetry()` or `timedFetch()` to call `GET /api/recall` on the local API. Input schema: workspaceId (required string, default from DEFAULT_WORKSPACE), category (optional string enum), includeRuns (optional boolean default true), includeHealth (optional boolean default true), storyText (optional string). Add `'rorca_recall'` to the `IDEMPOTENT_TOOLS` Set since it's a GET-equivalent read operation safe to retry. Tool description should clearly state this is the 'brain dump' tool — inject full workspace context into any AI session with a single call. Cache key: `recall:${workspaceId}`. Return the full RecallResponse JSON as the tool result.
 
 Acceptance Criteria:
-- Footer component renders on every landing page route (home, architecture, engine, compute, login, signup, download, pricing, terms, privacy) — verified by navigating each route
-- Four-column layout with Product, Company, Legal, Community sections each containing at least 2 links
-- All links point to real destinations (no href='#' placeholders) — verified by grep for href='#' returning empty
-- GitHub link opens https://github.com/getrorca/rorca in new tab with rel='noopener noreferrer'
-- Copyright line shows '© 2026 Rorca. All rights reserved.'
-- If a linked page does not exist yet (empty state), the link is present but shows '(Coming Soon)' text next to it in muted color
-- Footer renders within 100ms of page load with no layout shift (loading state: footer height is pre-allocated via min-height)
-- If an external link (GitHub, Twitter, Discord) fails to load or returns 404 (error state), the link still renders with the correct href — no broken link detection at runtime since these are static anchor elements
+- rorca_recall tool registered in mcp/server.ts with server.registerTool() and appears in tool listing
+- Input schema accepts workspaceId (required), category (optional), includeRuns (optional boolean), includeHealth (optional boolean), storyText (optional string)
+- 'rorca_recall' is added to the IDEMPOTENT_TOOLS Set
+- Tool calls GET /api/recall with query params built from input, returns parsed JSON response as tool content
+- Tool description includes the phrase 'brain dump' or 'full workspace context' to communicate its purpose

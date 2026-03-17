@@ -5,6 +5,7 @@ import * as path from 'path';
 import { query, queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { getEffectiveUser } from '../lib/get-user';
+import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { GoneError, NotFoundError, ValidationError } from '../lib/errors';
 
@@ -161,8 +162,7 @@ specReviewRouter.post('/:specId/review-link', async (req: Request, res: Response
       expiresAt,
     });
   } catch (error: any) {
-    logger.error('[Review] Create link error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Review] Create link');
   }
 });
 
@@ -284,8 +284,7 @@ publicReviewRouter.get('/:token', async (req: Request, res: Response) => {
       expiresAt: tokenRow.expires_at,
     });
   } catch (error: any) {
-    logger.error('[Review] Get spec error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Review] Get spec');
   }
 });
 
@@ -404,8 +403,7 @@ publicReviewRouter.post('/:token/comments', async (req: Request, res: Response) 
       avatar_url: null,
     });
   } catch (error: any) {
-    logger.error('[Review] Add comment error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Review] Add comment');
   }
 });
 
@@ -479,8 +477,7 @@ publicReviewRouter.post('/comment', async (req: Request, res: Response) => {
 
     res.status(201).json({ id, spec_id, story_id, author_name: displayName, review_persona, review_type });
   } catch (error: any) {
-    logger.error('[Review] Internal comment error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Review] Internal comment');
   }
 });
 

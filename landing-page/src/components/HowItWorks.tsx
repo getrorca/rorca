@@ -1,26 +1,26 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { FileCode, Play, DatabaseZap } from 'lucide-react';
+import { FileText, CheckSquare, Rocket } from 'lucide-react';
 
 const steps = [
     {
         id: "01",
-        title: "The Direction Stack",
-        description: "Every spec is compiled into a YAML Direction Stack. This structured intent ensures the engine knows exactly where it's going, allowing you to manually intervene and steer the course at any time.",
-        icon: FileCode,
+        title: "Write a Brief",
+        description: "Describe what you want to build in plain English. Rorca generates a structured spec—N user stories with acceptance criteria, dependency graph, and model assignments—using your codebase as context.",
+        icon: FileText,
     },
     {
         id: "02",
-        title: "Native Subprocesses",
-        description: "Rorca spawns isolated, native subprocesses for Claude Code, OpenCode, or Codex CLI to execute your tasks. You aren't locked into one provider—use the best CLI for the specific job.",
-        icon: Play,
+        title: "Review & Approve",
+        description: "The kanban board surfaces your spec for review. Edit stories, adjust acceptance criteria, reorder dependencies. Approve when ready—the spec enters the execution queue.",
+        icon: CheckSquare,
     },
     {
         id: "03",
-        title: "Episodic Memory",
-        description: "After a native CLI finishes a task, Rorca extracts the diffs and updates its Episodic Memory. When the next task spawns, the new subprocess inherits the exact context it needs to continue without hallucinating.",
-        icon: DatabaseZap,
+        title: "Watch it Ship",
+        description: "Rorca executes every story as an isolated subprocess, commits passing work, streams live terminal output, and opens a PR on GitHub automatically. Memory updates after every run.",
+        icon: Rocket,
     },
 ];
 

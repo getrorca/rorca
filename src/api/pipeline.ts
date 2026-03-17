@@ -213,7 +213,7 @@ export function getRunDlq(
   runId: number,
   opts?: ApiOptions,
 ): Promise<DlqEntry> {
-  return apiFetch(`/api/pipeline/runs/${runId}/dlq`, { signal: opts?.signal });
+  return apiFetch(`/api/pipeline/runs/${runId}/dlq`, { signal: opts?.signal, silent: true });
 }
 
 export function retryRunFromDlq(

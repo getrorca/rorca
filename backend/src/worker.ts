@@ -633,7 +633,9 @@ async function autoMergeAfterRun(
 // ── Job handler: pipeline:run ─────────────────────────────────────────────
 
 async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
-  for (const job of jobs) {
+  // Process all jobs concurrently — batchSize controls how many are fetched per poll,
+  // but each spawns an independent child process that should run in parallel.
+  await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
     logger.info({ jobId, data: job.data }, '[worker] pipeline:run received');
 
@@ -661,10 +663,10 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
     const { workspace_id: workspaceId, parallelism } = runRow;
 
-    // 2. Mark run as running
+    // 2. Mark run as running — set worker_id so orphan sweep knows this run belongs to us
     await execute(
-      `UPDATE pipeline_runs SET status = 'running', started_at = NOW() WHERE id = $1`,
-      [runId],
+      `UPDATE pipeline_runs SET status = 'running', started_at = NOW(), worker_id = $2 WHERE id = $1`,
+      [runId, WORKER_ID],
     );
 
     await emitWalEvent('run_started', workspaceId, { run_id: runId, spec_path: specPath });
@@ -717,6 +719,11 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     if (startFromStoryId) {
       engineArgs.push('--start-from', startFromStoryId);
     }
+    if (worktreePath && payload.branchName) {
+      engineArgs.push('--worktree-path', worktreePath);
+      engineArgs.push('--branch-name', payload.branchName);
+      engineArgs.push('--workspace-path', workspacePath);
+    }
 
     // 4. Spawn execution-engine.ts with pipe stdio so we can capture chunks
     // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
@@ -765,7 +772,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       }
     });
 
-    // 6. Pipe stdout/stderr to run_output_chunks in ≤4 KB chunks
+    // 6. Pipe stdout/stderr to run_output_chunks — flush every data event immediately.
+    // Large bursts are split into ≤4 KB slices; small events (single JSON lines,
+    // ULTRATHINK marker, etc.) are written as-is without waiting for a full buffer.
     const sequenceRef = { value: 1 };
     let pending = Buffer.alloc(0);
 
@@ -776,14 +785,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     };
 
     const handleData = async (data: Buffer): Promise<void> => {
-      pending = Buffer.concat([pending, data]);
-      // Write complete 4KB chunks immediately; keep the tail for next round
-      while (pending.length >= CHUNK_SIZE) {
-        const slice = pending.slice(0, CHUNK_SIZE);
-        await writeChunk(runId, sequenceRef.value, slice);
-        sequenceRef.value += 1;
-        pending = pending.slice(CHUNK_SIZE);
-      }
+      await writeBufferAsChunks(runId, data, sequenceRef);
     };
 
     child.stdout?.on('data', (data: Buffer) => { void handleData(data); });
@@ -839,8 +841,23 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             });
 
             // Auto-merge worktree into main after run completes (US-004 + US-005)
-            // Only attempt if the run succeeded (status='done') and a worktree was created
+            // Only attempt if the run succeeded (status='done'), a worktree was created,
+            // AND every story in the spec JSON has passes:true — partial runs must not merge.
+            let allSpecStoriesPassed = false;
             if (status === 'done' && payload.autoMerge && worktreePath && payload.branchName) {
+              try {
+                const absSpecPath = path.join(workspacePath, specPath);
+                const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
+                const stories: Array<{ passes?: boolean; excluded?: boolean }> = specJson.userStories ?? [];
+                allSpecStoriesPassed = stories.length > 0 && stories.every(s => s.passes === true || s.excluded === true);
+                if (!allSpecStoriesPassed) {
+                  logger.info({ runId, specPath }, '[worker] Skipping auto-merge — spec not fully complete (not all stories passed)');
+                }
+              } catch (specErr: any) {
+                logger.warn({ runId, err: specErr?.message }, '[worker] Could not read spec JSON for merge check — skipping merge');
+              }
+            }
+            if (status === 'done' && payload.autoMerge && worktreePath && payload.branchName && allSpecStoriesPassed) {
               try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
               const mergeLog = (msg: string) => logger.info({ runId }, msg);
               try {
@@ -936,13 +953,13 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         resolve();
       });
     });
-  }
+  }));
 }
 
 // ── Job handler: pipeline:retry ───────────────────────────────────────────
 
 async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]): Promise<void> {
-  for (const job of jobs) {
+  await Promise.allSettled(jobs.map(async (job) => {
     const jobId = job.id;
     logger.info({ jobId, data: job.data }, '[worker] pipeline:retry received');
 
@@ -970,10 +987,10 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
     const { workspace_id: workspaceId, parallelism } = runRow;
 
-    // 3. Mark the new run as running (route handler set status='running' but worker confirms)
+    // 3. Mark the new run as running — set worker_id so orphan sweep knows this run belongs to us
     await execute(
-      `UPDATE pipeline_runs SET status = 'running', started_at = NOW() WHERE id = $1`,
-      [runId],
+      `UPDATE pipeline_runs SET status = 'running', started_at = NOW(), worker_id = $2 WHERE id = $1`,
+      [runId, WORKER_ID],
     );
 
     await emitWalEvent('run_started', workspaceId, {
@@ -1060,13 +1077,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     };
 
     const handleData = async (data: Buffer): Promise<void> => {
-      pending = Buffer.concat([pending, data]);
-      while (pending.length >= CHUNK_SIZE) {
-        const slice = pending.slice(0, CHUNK_SIZE);
-        await writeChunk(runId, sequenceRef.value, slice);
-        sequenceRef.value += 1;
-        pending = pending.slice(CHUNK_SIZE);
-      }
+      await writeBufferAsChunks(runId, data, sequenceRef);
     };
 
     child.stdout?.on('data', (data: Buffer) => { void handleData(data); });
@@ -1175,7 +1186,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         resolve();
       });
     });
-  }
+  }));
 }
 
 // ── Job handler: pipeline:cron ────────────────────────────────────────────
@@ -1472,7 +1483,9 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
   logger.warn({ count: orphanRuns.length }, '[worker] sweepOrphanProcesses — found orphan runs');
 
   for (const run of orphanRuns) {
-    const { id: runId, pid, workspace_id: workspaceId } = run;
+    // pg driver returns BIGINT as string — coerce to number for activeProcesses Map lookup
+    const runId = Number(run.id);
+    const { pid, workspace_id: workspaceId } = run;
 
     // Belt-and-suspenders: skip runs this worker actively owns in memory
     if (activeProcesses.has(runId)) {
@@ -1624,7 +1637,7 @@ async function reconcileState(): Promise<void> {
            SELECT 1 FROM pgboss.job j
            WHERE j.name IN ('pipeline:run', 'pipeline:retry')
              AND j.state IN ('created', 'active', 'retry')
-             AND (j.data->>'runId')::int = pr.id
+             AND (j.data->>'runId')::bigint = pr.id
          )`,
     );
   } catch (err) {
@@ -1677,14 +1690,14 @@ async function reconcileState(): Promise<void> {
   let orphanJobs: OrphanJobRow[];
   try {
     orphanJobs = await query<OrphanJobRow>(
-      `SELECT j.id, j.name, (j.data->>'runId')::int AS run_id
+      `SELECT j.id, j.name, (j.data->>'runId')::bigint AS run_id
        FROM pgboss.job j
        WHERE j.name IN ('pipeline:run', 'pipeline:retry')
          AND j.state = 'active'
          AND (j.data->>'runId') IS NOT NULL
          AND NOT EXISTS (
            SELECT 1 FROM pipeline_runs pr
-           WHERE pr.id = (j.data->>'runId')::int
+           WHERE pr.id = (j.data->>'runId')::bigint
              AND pr.status = 'running'
          )`,
     );
@@ -2172,7 +2185,7 @@ async function start(): Promise<void> {
 
           currentMaxConcurrent = newMax;
 
-          // Re-register with updated batchSize.
+          // Re-register with updated teamSize + batchSize.
           await boss.work('pipeline:run', { batchSize: currentMaxConcurrent }, handlePipelineRun);
           await boss.work('pipeline:retry', { batchSize: currentMaxConcurrent }, handlePipelineRetry);
 

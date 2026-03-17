@@ -14,6 +14,7 @@ import { query, queryOne, execute } from '../db/index';
 import { installPack, forkPack } from '../lib/pack-installer';
 import { PackRegistry, PackJsonSchema } from '../lib/pack-registry';
 import { broadcastAll } from '../lib/sse-hub';
+import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 
@@ -552,8 +553,7 @@ router.get('/detail', (req: Request, res: Response) => {
       agentsMdPreview,
     });
   } catch (err: any) {
-    logger.error('[Packs] Detail error:', err);
-    res.status(500).json({ error: err.message });
+    handleRouteError(res, err, '[Packs] Detail');
   }
 });
 

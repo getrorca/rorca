@@ -1,5 +1,30 @@
 # Memory Ledger
 
+## 2026-03-17 [Bug Fix] SSE live stream 5-minute delay — root cause and fix
+> Rule: GET /api/pipeline/stream started lastSeenId=0 every connection, replaying ALL historical WAL events at LIMIT 50/tick. Fix: initialize lastSeenId to MAX(id) FROM wal_events on connection open. Historical events served by REST GET /runs/:runId/wal-events. usePipelineSSE seeds from REST on mount, deduplicates live events by id.
+> Context: pipeline.ts ~line 4332. WAL table had 5000+ events causing 5+ minute delay.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Bug Fix] Merge failure leaves passes:true — idempotency gap
+> Rule: When sub-worktree merge fails, markStoryPassed() already wrote passes:true. Must call markStoryMergeFailed() to revert to passes:false in both merge failure paths (single-story ~line 3154, multi-story wave ~line 3219). Without this, next run skips the story but its code is not in the parent branch.
+> Context: Caused run #10 to exit in 760ms — US-001 merge conflicted in run #9, passes:true remained, run #10 skipped all stories immediately.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Bug Fix] Worker premature auto-merge — status=done insufficient guard
+> Rule: Before calling autoMergeAfterRun, read spec JSON and verify ALL stories have passes===true or excluded===true. A run can be done with 0 stories executed. allSpecStoriesPassed check prevents merging partial specs.
+> Context: worker.ts around autoMergeAfterRun call.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Gotcha] Never kill backend while a run is active
+> Rule: Execution engine sends WAL events via fetch to http://localhost:3030/api/wal. Killing the server mid-run silently drops those writes. Always check GET /api/pipeline/worker/health activeJobs=[] before killing backend.
+> Context: Killed backend during run #20260316000012, interrupted wave parallel execution.
+> Source: incident 2026-03-17
+
+## 2026-03-17 [Gotcha] tsx module cache — new routes return 404 until full restart
+> Rule: After adding a new route, tsx watch auto-restart may not invalidate the compiled module cache. Route returns 404 even though it's in source and neighboring routes work. Full kill+restart required: lsof -ti:3030 | xargs kill -9 && npm run dev.
+> Context: GET /runs/:runId/wal-events returned 404 until full restart. touch did not fix it.
+> Source: debugging session 2026-03-17
+
 ## 2026-02-27 [Architecture] Direction Stack 5-Layer Cascade
 > Rule: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
 > Context: L1-L2 are global engineering/domain principles. L3+ are per-workspace. L4/L5 come from spec brief and story annotations.
@@ -249,3 +274,138 @@
 > Rule: The worker's unhandledRejection handler triggers graceful shutdown of the entire Node process. When server.ts and worker code share a process (via `npm run dev` / concurrently), ANY unhandled promise rejection — even a transient DB connection timeout — kills the API server too. DB queries in setInterval callbacks MUST be wrapped in try-catch.
 > Context: Two separate crashes in the same session: (1) u.name column error in specs.ts, (2) pool exhaustion timeouts in pipeline.ts polling loops. Both were unhandled rejections that triggered worker shutdown. The worker shutdown handler is aggressive — it deletes heartbeat row, stops pg-boss, and exits. Any code path that runs async DB queries outside of Express route error handling (timers, SSE polling) must have its own try-catch.
 > Source: debugging session 2026-03-16
+
+## 2026-03-16 [Bug Fix] worker.ts uses batchSize instead of teamSize — only 1 concurrent run despite max_concurrent_runs=3
+> Rule: worker.ts line 2148 calls `boss.work('pipeline:run', { batchSize: currentMaxConcurrent }, handler)`. batchSize controls how many jobs to FETCH per poll, not how many run concurrently. teamSize is the correct pg-boss option for concurrent handler invocations. Fix: change to `{ teamSize: currentMaxConcurrent, batchSize: currentMaxConcurrent }`. Same bug on pipeline:retry at line 2149. Until fixed, only 1 pipeline run executes at a time regardless of max_concurrent_runs setting.
+> Context: Confirmed 2026-03-16: user triggered rorca-billing-launch and rorca-test-ci-hardening simultaneously with autoWorktree=true. max_concurrent_runs=3 in worker_settings table. Second run stayed queued. Worker health showed only 1 activeJob despite batchSize:3. Root cause: wrong pg-boss option. Needs worker restart to take effect after fix.
+> Source: debugging session 2026-03-16
+
+## 2026-03-16 [Bug Fix] Wave parallel terminal blank — backend restart required after rorca-runs-panel-fixes merge
+> Rule: rorca-runs-panel-fixes (run #133, all 5 stories) is merged to main. Fixes include: @refresh reset on RunViewPanel+PipelineMonitorPanel (US-001), usePipelineRuns shared hook (US-002), run_setup_started/run_setup_done WAL events from execution-engine (US-003), setup banner in RunViewPanel (US-004), concurrent story Running indicators (US-005). Backend must be manually restarted (plain tsx, no auto-reload) to activate US-003 (execution-engine WAL events). Cannot restart while runs are active — kills them. Restart after all active runs complete.
+> Context: User saw blank terminal on run #134 (rorca-billing-launch) even after fixes were supposedly applied. Fixes are on main but backend was never restarted post-merge.
+> Source: debugging session 2026-03-16
+
+## 2026-03-16 [Decision] Wave parallel sub-terminals deferred — needs run_output_chunks story_id column
+> Rule: Sub-terminals per wave story are architecturally impossible without adding story_id to run_output_chunks. All parallel stories write to the same (run_id, sequence, chunk) stream with no per-story segregation. MultiPaneTerminal component exists and is wired but cannot split the stream. Deferred to a separate spec. Short-term: concurrent Running indicators in story list (US-005, done) make parallelism visible without splitting the terminal.
+> Context:  
+> Source: mcp-cli
+
+## 2026-03-16 [Decision] pipeline_runs.id widened to BIGINT, sequence restarted at 20260316000000
+> Rule: Applied migration 20260316141659_pipeline_runs_seq_restart.sql on 2026-03-16. pipeline_runs.id and all child run_id columns (story_results, run_output_chunks, token_usage, memory_proposals) widened from INTEGER to BIGINT. pipeline_runs_id_seq widened AS BIGINT and restarted at 20260316000000. Old runs #1–#133 keep sequential IDs. New runs get timestamp-ish IDs (20260316000001, 20260316000002, ...). Mirrors the same "don't rename old, apply going forward" split used for migration filenames.
+> Context:  
+> Source: mcp-cli
+
+## 2026-03-16 [Gotcha] Run ID numbering: old runs #1–#133 sequential, new runs 20260316000001+ timestamp-based
+> Rule: pipeline_runs.id is BIGINT (was INTEGER). Old runs have sequential IDs (#1–#133). New runs triggered after 2026-03-16 get IDs starting at 20260316000001. This is intentional — sequence was restarted at 20260316000000 via migration 20260316141659. Do not be confused by the jump in IDs. All child tables (story_results, run_output_chunks, token_usage, memory_proposals) also use BIGINT run_id.
+> Context: Migration applied directly via psql on 2026-03-16. Registered in schema_migrations so runner won't re-apply on restart.
+> Source: manual migration 2026-03-16
+
+## 2026-03-16 [Bug Fix] pg-boss v10 has no teamSize — concurrent runs need Promise.allSettled in handler
+> Rule: pg-boss v10 WorkOptions only has batchSize (how many jobs fetched per poll) — there is no teamSize or concurrency option. The handler receives Job[] and the original code used `for (const job of jobs)` which processed them sequentially. Fix: wrap handler body in `await Promise.allSettled(jobs.map(async (job) => { ... }))` so all fetched jobs spawn child processes concurrently. Applied to both handlePipelineRun and handlePipelineRetry in worker.ts.
+> Context: Root cause of "two specs queued but only one running" bug. batchSize:3 fetched 3 jobs but the for-loop awaited each child process to completion before starting the next. With Promise.allSettled, all jobs in the batch run their execution-engine subprocesses in parallel. Lines 637 and 948 in worker.ts.
+> Source: debugging session 2026-03-16
+
+## 2026-03-16 [Bug Fix] BIGINT run IDs break ::int casts in WAL queries — must use ::bigint
+> Rule: After widening pipeline_runs.id to BIGINT and restarting the sequence at 20260316000000, all SQL queries that extract run_id from JSON payloads via (payload->>'run_id')::int will overflow INT4 (max 2147483647). Changed 13 occurrences in pipeline.ts and 3 in worker.ts from ::int to ::bigint. This affects per-story SSE endpoint, WAL event lookups, story output queries, and pg-boss job lookups.
+> Context: Latent bug introduced by the BIGINT migration. Old runs (#1-#133) have small IDs that fit in INT4. New runs (20260316000001+) are 14-digit numbers that overflow. The ::int cast would either error or silently return wrong results. Files: backend/src/routes/pipeline.ts, backend/src/worker.ts.
+> Source: debugging session 2026-03-16
+
+## 2026-03-16 [Bug Fix] pg driver returns BIGINT as string — Zod schemas need z.coerce.number()
+> Rule: PostgreSQL's pg driver returns BIGINT columns as JavaScript strings (not numbers) because JS Number can't represent all BIGINT values. After the pipeline_runs.id BIGINT migration, RETURNING id returns "20260316000003" (string). The Zod schema PipelineRunJobPayload used z.number().int().positive() which rejected strings. Fix: changed all runId validators to z.coerce.number().int().positive() in pg-boss-schemas.ts. This coerces string→number safely since our IDs (~2*10^13) are well within Number.MAX_SAFE_INTEGER (~9*10^15).
+> Context: This caused worker to reject ALL pipeline:run jobs with "Invalid input: expected number, received string" after the BIGINT migration. Affected all 4 schemas: PipelineRunJobPayload, PipelineRetryJobPayload, PipelineCancelJobPayload, PipelineMergeJobPayload. File: backend/src/lib/pg-boss-schemas.ts.
+> Source: debugging session 2026-03-16
+
+## 2026-03-16 [Decision] Use Promise.allSettled for pg-boss concurrent job handling instead of teamSize
+> Rule: pg-boss v10 removed the teamSize option that controlled concurrent handler invocations. The handler receives Job[] (batch) and must parallelize internally. We chose Promise.allSettled(jobs.map(...)) over Promise.all because allSettled allows individual job failures without failing the entire batch — critical since pipeline runs can take 45+ minutes and one failure shouldn't abort sibling runs.
+> Context:  
+> Source: mcp-cli
+
+## 2026-03-16 [Bug Fix] worker.ts missing worktree args to execution engine
+> Rule: worker.ts extracted worktreePath, branchName, workspacePath from the pg-boss job payload but never forwarded them as --worktree-path, --branch-name, --workspace-path CLI args to execution-engine.ts. This caused config.worktreePath to always be null, silently preventing auto-merge from ever firing. Fixed by adding the three pushes after the startFromStoryId block (worker.ts ~line 722).
+> Context: Discovered while investigating worktree accumulation ("worktree hell"). The design in pipeline.ts was already correct — deterministic feat/<slug> branch name, reuse-if-exists, merge gate on all-pass — but the wiring between worker and engine was missing. Auto-merge had never actually run in production.
+> Source: debugging session 2026-03-16
+
+## 2026-03-16 [Architecture] Worktree lifecycle design — one worktree per spec, not per run
+> Rule: Branch name is feat/<slug> (no timestamp) — deterministic per spec. On trigger: reuse existing worktree dir if it exists (skip git worktree add). On all stories pass: auto-merge to main + git worktree remove --force. On partial/full fail: leave worktree intact for retry. Retry reuses the same directory and skips already-passing stories. Merge gate: only merges to main when every non-excluded story has passed.
+> Context: The timestamp-based naming (feat/<slug>-<timestamp>) was the old pattern — all 62 stale worktrees are from that era. The deterministic naming was already implemented in pipeline.ts but the auto-merge was broken by the missing arg wiring in worker.ts. Now both are correct.
+> Source: design review 2026-03-16
+
+## 2026-03-16 [Convention] Landing page page names: /memory and /execution (not /engine and /compute)
+> Rule: Landing page deep-dive pages were renamed: /engine → /memory (covers Memory Retrieval Cascade, Virtual Context Routing, Skills Injection), /compute → /execution (covers Three Execution Engines, Model Cascading, Wave-Parallel). Nav labels, metadata keys, directory names, and client component names all updated. Page h1: "The Context Memory." and "Three engines. Zero lock-in."
+> Context: Renamed because the content better matches the new names — /memory leads with the memory retrieval cascade as hero section, /execution accurately describes what the page covers. Files: landing-page/src/app/memory/MemoryClient.tsx, landing-page/src/app/execution/ExecutionClient.tsx.
+> Source: session 2026-03-16
+
+## 2026-03-17 [Bug Fix] Orphan sweep kills all runs — worker_id never set on pipeline_runs
+> Rule: Both handlePipelineRun and handlePipelineRetry must include `worker_id = $2` in the UPDATE pipeline_runs SET status = 'running' statement. Without it, pr.worker_id IS NULL and the orphan sweep matches every active run, killing them after ~5 minutes.
+> Context: Fixed in backend/src/worker.ts. The orphan sweep query: `WHERE (pr.worker_id IS NULL OR (pr.worker_id != $1 AND wh.worker_id IS NULL))`. If worker_id is never written, the first condition always matches. Both handlePipelineRun (~line 666) and handlePipelineRetry (~line 980) needed the fix.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Gotcha] BIGINT from pg driver breaks Map.has() — activeProcesses lookup silently fails
+> Rule: The `pg` driver returns PostgreSQL BIGINT columns as JavaScript strings, not numbers. `activeProcesses` is `Map<number, ChildProcess>`, so `activeProcesses.has("20260316000008")` always returns false even if the key `20260316000008` (number) exists. Always coerce with `Number(run.id)` when using pg-returned IDs as Map keys.
+> Context: Fixed in sweepOrphanProcesses in backend/src/worker.ts — changed `const { id: runId } = run` to `const runId = Number(run.id)`. This was the second half of the orphan sweep bug: even if worker_id had been set, the safety-net `activeProcesses.has(runId)` check would have silently passed because the key type didn't match. Also affects pg-boss-schemas.ts which uses `z.coerce.number()` for the same reason.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Bug Fix] DLQ endpoint throws 500 instead of 404 — throw inside try/catch
+> Rule: In the DLQ route handler (GET /api/pipeline/runs/:id/dlq), do NOT throw NotFoundError inside the try/catch block. The local catch handler returns a 500. Instead use `res.status(404).json({ error: 'Run not in DLQ' }); return;` directly.
+> Context: Fixed in backend/src/routes/pipeline.ts ~line 5063. Pattern applies to any route that has a local try/catch that catches all errors — throwing AppError subclasses inside those blocks won't reach the global error-handler.ts middleware.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Bug Fix] MultiPaneTerminal wave grouping broken — wave_index missing from story_started WAL events
+> Rule: executeStory() must accept a `waveIndex?: number` parameter and include it in the story_started WAL event payload as `wave_index`. Without it, MultiPaneTerminal groups all stories under wave 0 (its fallback default), so all mini-panes pile into one wave header regardless of actual wave assignment.
+> Context: Fixed in backend/src/lib/execution-engine.ts. Added `waveIndex?: number` as last param to executeStory(). In runParallel(), pass `wave.index` when calling executeStory(). In the story_started emitWalEvent call, spread `...(waveIndex != null ? { wave_index: waveIndex } : {})` into the payload. MultiPaneTerminal.tsx reads `payload.wave_index` to determine the wave row.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Bug Fix] WAL SSE delay: seed usePipelineSSE from REST before live stream
+> Rule: usePipelineSSE now fetches GET /api/pipeline/runs/:runId/wal-events on runId change to immediately seed historical events. Without this, /api/pipeline/stream starts replaying from lastSeenId=0 at LIMIT 50/tick — causing a 5+ minute delay before story_started events for the current run arrive. Live SSE events are deduplicated against the seed by event id.
+> Context: src/hooks/usePipelineSSE.ts — useEffect added that fetches the REST endpoint and merges historical events into state. backend/src/routes/pipeline.ts — new GET /runs/:runId/wal-events endpoint: SELECT from wal_events WHERE (payload->>'run_id')::bigint = $1 ORDER BY id ASC. Root cause: useWalSSE connects without query params so backend replays ALL history at 50/tick.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Bug Fix] Semantic log parser: tool_use is inside assistant.message.content[], not top-level
+> Rule: Claude stream-json (--output-format stream-json) NEVER emits standalone {"type":"tool_use",...} events. Tool calls are embedded inside the assistant event at message.content[] as {type:"tool_use", name, input} blocks. The parser must iterate assistant.message.content[] — not look for top-level type=tool_use. parseLine() and all parse functions return SemanticStep[] (not SemanticStep|null).
+> Context: backend/src/lib/semantic-log-parser.ts — rewrote parseStreamJsonLine to extract tool_use from obj.message.content[] when obj.type === 'assistant'. Added parseClaudeToolBlock() helper. Supports multiple tool calls per assistant event (each emits one SemanticStep). backend/src/routes/pipeline.ts emitSemanticSteps() updated to iterate SemanticStep[] with for..of. Verified against actual log files: forge/specs/logs/BL-001_2026-03-16T2115.log shows {type:assistant,message:{content:[{type:tool_use,...}]}}.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Bug Fix] Single-story wave merge fails on .rorca/run-state.json conflict — outer+inner worktree both write it
+> Rule: When a run uses an outer worktree (auto-merge) + inner wave worktrees, `mergeStoryWorktree` pre-commits dirty files in the outer worktree (including `.rorca/run-state.json`), creating a divergence from the inner story worktree which also wrote `run-state.json`. Git cannot auto-merge JSON, so `git merge --no-ff` fails. US-001 (or any single-story wave) is added to `failedIds`, cascade-blocking all downstream stories. Fixed by auto-resolving conflicts on runtime-only files (`--ours`) before falling through to hard failure.
+> Context: Fixed in `mergeStoryWorktree` in backend/src/lib/execution-engine.ts. After merge fails, run `git diff --name-only --diff-filter=U` to get conflicted files. If ALL conflicts are on `.rorca/run-state.json`, `forge/specs/`, or `.rorca/memory/`, resolve with `git checkout --ours`, commit, and return true. The spec JSON `passes:true` is safe to lose here because `markStoryPassed()` at line 3134 force-writes it after every successful merge. Multi-story waves already had this logic via `mergeWave`/`autoResolveConflicts` — single-story waves were missing it. Root cause confirmed by querying `run_output_chunks` for run #20260316000009 and inspecting `git show 6bb8e91`.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Gotcha] execSync merge errors: log err.stderr not err.message — "Command failed" is useless
+> Rule: When `execSync` throws on a failed git command, `err.message` only contains "Command failed: git merge ..." — the actual git error (conflict details, stderr output) is in `err.stderr` as a Buffer. Always log `err.stderr?.toString().trim()` first, fall back to `err.message`. Cast as `Error & { stderr?: Buffer }` for TypeScript.
+> Context: Fixed in `mergeStoryWorktree` in execution-engine.ts. Was the reason merge failures were impossible to diagnose from logs — the full git conflict detail was silently discarded. Discovered when diagnosing run #20260316000009 where the logged error was "Command failed: git merge --no-ff ..." with no indication of which files conflicted.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Pattern] Diagnose run failures: query run_output_chunks + grep msg field from JSON logs
+> Rule: To see the full execution log for any run (including errors scrolled off in the terminal), query: `psql postgres://rorca:rorca@localhost:5433/rorca -t -c "SELECT encode(chunk,'escape') FROM run_output_chunks WHERE run_id = <id> ORDER BY sequence" | grep -o '"msg":"[^"]*"' | sed 's/"msg":"//;s/"$//'`. The column is `chunk` (bytea), not `data`. Port is 5433, database is `rorca`.
+> Context: Used to confirm root cause of run #20260316000009 failure. The terminal UI only shows a scrollable window — actual merge error messages and full cascade-block details are in run_output_chunks. This query reconstructs the full execution log from the DB.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Bug Fix] SSE live stream 5-minute delay — root cause and fix
+> Rule: GET /api/pipeline/stream started lastSeenId=0 every connection, replaying ALL historical WAL events at LIMIT 50/tick. With 5000+ events this caused 5+ minute delay before live events appeared. Fix: initialize lastSeenId to MAX(id) FROM wal_events on connection open. Historical events served instantly by new REST endpoint GET /runs/:runId/wal-events. Combined: usePipelineSSE seeds history from REST (immediate), SSE stream delivers only new events (within 3s).
+> Context: pipeline.ts line ~4332. The fix is a one-liner before the setInterval: `const maxWalRow = await queryOne('SELECT COALESCE(MAX(id), 0) AS max_id FROM wal_events'); let lastSeenId = maxWalRow?.max_id ?? 0;`. The REST endpoint uses `WHERE (payload->>'run_id')::bigint = $1 ORDER BY id ASC`. usePipelineSSE.ts seeds on runId change and deduplicates by event id.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Bug Fix] Merge failure leaves passes:true — idempotency gap causes next run to skip story with no code
+> Rule: When a sub-worktree merge fails, markStoryPassed() had already written passes:true to the spec JSON. The failure path added the story to failedIds and emitted story_failed WAL event, but never reverted passes:true. Next run sees passes:true, skips the story, but the code is not in the parent branch. Fix: call markStoryMergeFailed() in both merge failure paths (single-story wave at line ~3154, multi-story wave failures at line ~3219). markStoryMergeFailed() sets passes:false, clears skipped, adds a note.
+> Context: This was the exact bug that caused run #10 to exit in 760ms — US-001 merge conflicted in run #9, passes:true remained, run #10 pre-skipped US-001 and all downstream blocked stories immediately finished. markStoryMergeFailed() is try/catch wrapped so it never crashes the engine.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Bug Fix] Worker premature auto-merge — status=done without all stories passing triggered merge
+> Rule: worker.ts was merging the parent worktree into main when status==='done' regardless of whether all spec stories passed. A run can be 'done' with 0 stories executed (immediate exit). Fix: before calling autoMergeAfterRun, read the spec JSON and verify every story has passes===true or excluded===true. Only merge if allSpecStoriesPassed is true.
+> Context: In worker.ts around the autoMergeAfterRun call: read absSpecPath, parse JSON, check specJson.userStories.every(s => s.passes === true || s.excluded === true). Log warning and skip merge if not all passed. This ensures worktrees persist across multiple run IDs until the spec is fully complete.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Gotcha] tsx module cache causes routes to return 404 after file edits — fresh restart required
+> Rule: After adding a new route to pipeline.ts, the route returned 404 despite being in the source and other routes in the same file working. tsx watch auto-restarts do not always invalidate the compiled module cache. `touch` on the file does not fix it. A full kill+restart (lsof -ti:3030 | xargs kill -9, then npm run dev) forces tsx to recompile from scratch and register all routes. Never diagnose a 404 for a route that exists in source without first doing a full restart.
+> Context: Observed with GET /runs/:runId/wal-events route in pipeline.ts. Routes before and after it (skills, commits) returned 200. After kill+restart the route returned 200 immediately. The server must have been loaded from a stale tsx compilation cache.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Architecture] WAL event streaming architecture — two-track design for instant history + live events
+> Rule: Two endpoints work together: (1) REST GET /api/pipeline/runs/:runId/wal-events returns all past WAL events for a run instantly via direct DB query. (2) SSE GET /api/pipeline/stream delivers live events only (starts at MAX WAL id). usePipelineSSE.ts: on runId change, immediately seeds from REST then deduplicates live SSE events by id. useWalSSE singleton: single EventSource shared across all components (avoids Chrome 6-connection limit). Never use SSE alone for historical data — always pair with REST seed.
+> Context: The WAL table has 5000+ events. Starting SSE from id=0 caused 5+ minute delay. Starting from MAX(id) means SSE only delivers events created after the connection opens. The REST seed fills the gap for the current run's history instantly. Dedup by event.id in setEvents() prevents duplicates if live events arrive during the REST fetch.
+> Source: architecture decision 2026-03-17
+
+## 2026-03-17 [Gotcha] Never kill backend while a run is active — execution engine WAL writes will fail
+> Rule: The execution engine (child of worker, not of server) sends WAL events via fetch to http://localhost:3030/api/wal. If the server is killed mid-run, those WAL writes fail silently and events are lost. The run continues but story progress disappears from the UI. The run stays stuck as status=running in the DB with no finished_at. Always confirm no active runs (GET /api/pipeline/worker/health activeJobs=[]) before killing the backend.
+> Context: Killed backend during run #20260316000012 while US-003, US-004, US-005, US-006, US-007, US-008 were running in wave parallel. Run was interrupted. The worker process (separate PID) survived but the engine's WAL event writes started failing.
+> Source: incident 2026-03-17

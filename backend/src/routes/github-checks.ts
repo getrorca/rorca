@@ -2,6 +2,7 @@ import { Router, Request, Response } from 'express';
 import { queryOne } from '../db/index';
 import { postCommitStatus, CHECK_NAME, type CheckState } from '../lib/github-checks';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
+import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 
@@ -127,8 +128,7 @@ router.post('/:sha', async (req: Request, res: Response) => {
       description: desc,
     });
   } catch (error: any) {
-    logger.error('[Checks] Manual update error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Checks] Manual update');
   }
 });
 
