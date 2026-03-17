@@ -119,10 +119,19 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
     termRef.current = term;
     fitRef.current = fitAddon;
 
-    // Connect to per-story log stream
-    const es = new EventSource(`${BASE_URL}/api/pipeline/runs/${runId}/stories/${storyId}/log`);
+    // Connect to per-story DB-backed stream (prose output)
+    const es = new EventSource(`${BASE_URL}/api/pipeline/runs/${runId}/stories/${storyId}/stream`);
     esRef.current = es;
 
+    // /stream emits 'output' events (base64-encoded prose text)
+    es.addEventListener('output', (e: MessageEvent) => {
+      try {
+        const text = atob(e.data);
+        term.write(text + '\r\n');
+      } catch { /* ignore malformed chunk */ }
+    });
+
+    // Also accept 'chunk' events (fallback to file-based tailing when DB has no rows yet)
     es.addEventListener('chunk', (e: MessageEvent) => {
       try {
         const binary = atob(e.data);
