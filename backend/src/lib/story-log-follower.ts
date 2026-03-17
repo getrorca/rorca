@@ -41,6 +41,9 @@ function tailKey(runId: number, storyId: string): string {
  *
  * - If the line is valid JSON with type=assistant and message.content[].text,
  *   concatenates all text blocks into a single string.
+ * - If the line is valid JSON with type=tool_use, produces a human-readable
+ *   description like "Read src/foo.ts" or "Editing backend/server.ts".
+ * - If the line is valid JSON with type=result, produces a completion line.
  * - If the line is non-JSON, returns it verbatim.
  * - If the line is JSON but has no extractable text, returns null (skip).
  */
@@ -51,7 +54,7 @@ function extractProse(line: string): string | null {
   try {
     const event = JSON.parse(trimmed);
 
-    // Only extract text from assistant message events
+    // assistant message → extract text blocks
     if (event.type === 'assistant' && event.message?.content) {
       const parts: string[] = [];
       for (const block of event.message.content as { type: string; text?: string }[]) {
@@ -62,7 +65,40 @@ function extractProse(line: string): string | null {
       return parts.length > 0 ? parts.join('') : null;
     }
 
-    // Valid JSON but not an assistant event — skip silently
+    // tool_use → human-readable tool description
+    if (event.type === 'tool_use') {
+      const name: string = event.name ?? '';
+      const input = event.input ?? {};
+      switch (name) {
+        case 'Read':
+        case 'WebFetch':
+          return `Reading ${input.file_path ?? input.url ?? ''}`;
+        case 'Write':
+          return `Writing ${input.file_path ?? ''}`;
+        case 'Edit':
+        case 'NotebookEdit':
+          return `Editing ${input.file_path ?? input.notebook_path ?? ''}`;
+        case 'Bash':
+          return input.description ?? `Running: ${(input.command ?? '').slice(0, 120)}`;
+        case 'Glob':
+          return `Searching files: ${input.pattern ?? ''}`;
+        case 'Grep':
+          return `Searching for: ${input.pattern ?? ''}`;
+        case 'Task':
+          return `Task: ${input.description ?? ''}`;
+        default:
+          return name ? `${name}` : null;
+      }
+    }
+
+    // result → completion line
+    if (event.type === 'result') {
+      if (event.subtype === 'success') return 'Completed successfully';
+      if (event.subtype === 'error') return `Error: ${(event.error ?? '').slice(0, 200)}`;
+      return null;
+    }
+
+    // Valid JSON but not a recognized event — skip silently
     return null;
   } catch {
     // Not valid JSON — pass through verbatim
