@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000012,
   "startedAt": "2026-03-17T18:30:24.225Z",
-  "lastUpdatedAt": "2026-03-17T18:41:41.964Z",
+  "lastUpdatedAt": "2026-03-17T18:47:06.705Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -14,13 +14,13 @@
       "elapsedMs": 17888
     },
     {
-      "storyId": "US-005",
-      "title": "Implement recall route — recent pipeline runs with story result aggregation",
+      "storyId": "US-006",
+      "title": "Implement recall route — installed skills with content preview",
       "status": "passed",
-      "startedAt": "2026-03-17T18:35:45.356Z",
-      "finishedAt": "2026-03-17T18:41:41.963Z",
+      "startedAt": "2026-03-17T18:35:43.934Z",
+      "finishedAt": "2026-03-17T18:47:06.705Z",
       "agentType": "claude",
-      "elapsedMs": 356607
+      "elapsedMs": 682771
     }
   ],
   "failedStories": [],
