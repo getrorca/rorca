@@ -9,6 +9,7 @@ import { synthesize } from '../lib/direction-stack';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { logger } from '../lib/logger';
 import { ConflictError, NotFoundError, TooManyRequestsError, UnprocessableError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -151,8 +152,7 @@ router.get('/', async (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(rows, pagination, { cursorKey: (t) => t.id }));
   } catch (error: unknown) {
-    logger.error({ error }, '[Teams] list error');
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    handleRouteError(res, error, '[Teams] list');
   }
 });
 
@@ -267,8 +267,7 @@ router.post('/', async (req: Request, res: Response) => {
       createdAt: new Date().toISOString(),
     });
   } catch (error: unknown) {
-    logger.error({ error }, '[Teams] create error');
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    handleRouteError(res, error, '[Teams] create');
   }
 });
 
@@ -389,8 +388,7 @@ router.post('/:id/invites', requireRole('admin'), async (req: Request, res: Resp
       teamName: team.name,
     });
   } catch (error: unknown) {
-    logger.error({ error }, '[Teams] invite error');
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    handleRouteError(res, error, '[Teams] invite');
   }
 });
 
@@ -457,8 +455,7 @@ router.get('/:id/members', requireRole('viewer'), async (req: Request, res: Resp
 
     res.json({ teamId, teamName: team.name, members });
   } catch (error: unknown) {
-    logger.error({ error }, '[Teams] members error');
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    handleRouteError(res, error, '[Teams] members');
   }
 });
 
@@ -534,8 +531,7 @@ router.patch('/:id/members/:userId', requireRole('admin'), async (req: Request, 
 
     res.json({ teamId, userId: targetUserId, role });
   } catch (error: unknown) {
-    logger.error({ error }, '[Teams] update member error');
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    handleRouteError(res, error, '[Teams] update member');
   }
 });
 
@@ -598,8 +594,7 @@ router.delete('/:id/members/:userId', requireRole('admin'), async (req: Request,
 
     res.json({ ok: true });
   } catch (error: unknown) {
-    logger.error({ error }, '[Teams] remove member error');
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    handleRouteError(res, error, '[Teams] remove member');
   }
 });
 
@@ -664,8 +659,7 @@ router.patch('/:id/settings', requireRole('admin'), async (req: Request, res: Re
 
     res.json({ id: teamId, name: trimmedName, slug: team.slug });
   } catch (error: unknown) {
-    logger.error({ error }, '[Teams] settings error');
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    handleRouteError(res, error, '[Teams] settings');
   }
 });
 
@@ -725,8 +719,7 @@ router.get('/:id/direction', requireRole('viewer'), async (req: Request, res: Re
       l2: l2Row?.content_yaml ?? '',
     });
   } catch (error: unknown) {
-    logger.error({ error }, '[Teams] get direction error');
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    handleRouteError(res, error, '[Teams] get direction');
   }
 });
 
@@ -814,8 +807,7 @@ router.put('/:id/direction', requireRole('admin'), async (req: Request, res: Res
 
     res.json({ ok: true });
   } catch (error: unknown) {
-    logger.error({ error }, '[Teams] update direction error');
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    handleRouteError(res, error, '[Teams] update direction');
   }
 });
 
@@ -906,8 +898,7 @@ router.post('/:id/direction/preview', requireRole('viewer'), async (req: Request
 
     res.json({ synthesized });
   } catch (error: unknown) {
-    logger.error({ error }, '[Teams] direction preview error');
-    res.status(500).json({ error: error instanceof Error ? error.message : 'Unknown error' });
+    handleRouteError(res, error, '[Teams] direction preview');
   }
 });
 

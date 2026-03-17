@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { query, queryOne, execute, transaction } from '../db/index';
+import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 
@@ -58,8 +59,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     res.json({ items: entries });
   } catch (error: any) {
-    logger.error('[RunQueue] GET error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[RunQueue] GET');
   }
 });
 
@@ -131,8 +131,7 @@ router.get('/status', async (req: Request, res: Response) => {
       runningRunId: runningRun?.id ?? null,
     });
   } catch (error: any) {
-    logger.error('[RunQueue] GET /status error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[RunQueue] GET /status');
   }
 });
 
@@ -208,8 +207,7 @@ router.post('/', async (req: Request, res: Response) => {
     const entry = await queryOne('SELECT * FROM run_queue WHERE id = $1', [inserted?.id]);
     res.status(201).json(entry);
   } catch (error: any) {
-    logger.error('[RunQueue] POST error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[RunQueue] POST');
   }
 });
 
@@ -261,8 +259,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
     await execute('DELETE FROM run_queue WHERE id = $1', [id]);
     res.json({ success: true });
   } catch (error: any) {
-    logger.error('[RunQueue] DELETE error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[RunQueue] DELETE');
   }
 });
 
@@ -316,8 +313,7 @@ router.put('/reorder', async (req: Request, res: Response) => {
 
     res.json({ success: true });
   } catch (error: any) {
-    logger.error('[RunQueue] PUT /reorder error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[RunQueue] PUT /reorder');
   }
 });
 

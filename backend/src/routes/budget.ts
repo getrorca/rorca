@@ -3,6 +3,7 @@ import { queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router({ mergeParams: true });
 
@@ -247,8 +248,7 @@ router.post('/', async (req: Request, res: Response) => {
       cap_exceeded: budgetStatus.capExceeded,
     });
   } catch (error: any) {
-    logger.error('[Budget] Config update error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Budget] Config update');
   }
 });
 
@@ -331,8 +331,7 @@ router.get('/', async (req: Request, res: Response) => {
       cap_exceeded: capExceeded,
     });
   } catch (error: any) {
-    logger.error('[Budget] Get config error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Budget] Get config');
   }
 });
 
@@ -385,8 +384,7 @@ router.delete('/', async (req: Request, res: Response) => {
 
     res.json({ deleted: true });
   } catch (error: any) {
-    logger.error('[Budget] Delete config error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Budget] Delete config');
   }
 });
 

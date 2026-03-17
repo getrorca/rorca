@@ -408,8 +408,7 @@ interface ResolvedSkill {
  * Returns skills sorted by relevance (highest first), with token budget enforcement.
  *
  * For Claude agent: skips skills that also exist in .claude/skills/ (natively auto-discovered).
- * The rorca.md workflow skill is treated as a meta-skill with relevance 10 (always included
- * in the prompt via the existing skillContent mechanism — NOT duplicated here).
+ * Skills are sorted by relevance (highest first) with token budget enforcement.
  */
 function loadMatchedSkills(
   cwd: string,
@@ -427,9 +426,6 @@ function loadMatchedSkills(
   let usedTokens = 0;
 
   for (const skill of sorted) {
-    // Skip the rorca.md meta-skill — it's already injected via the existing skillContent path
-    if (skill.name === 'rorca' || skill.name === 'rorca.md') continue;
-
     // Claude agent: skip skills that exist in .claude/skills/ (auto-discovered natively)
     if (agentType === 'claude') {
       const claudeSkillPath = path.join(cwd, '.claude', 'skills', `${skill.name}.md`);
@@ -573,8 +569,6 @@ function buildPrompt(
 
   // Implementation mode
   // Injection order: contextPreamble → mode → agent instructions → roleSection → matched skills → graph context → workflow → persona → story task
-  const skillContent = readWorkspaceFile(cwd, '.claude', 'skills', 'rorca.md')
-    || readWorkspaceFile(cwd, '.claude', 'skills', 'dimitri.md');
   return [
     contextPreamble,
     'Follow this workflow for implementation:',
@@ -583,7 +577,6 @@ function buildPrompt(
     roleSection ?? '',
     matchedSkills,
     graphBlock,
-    '', skillContent,
     personaSection,
     '', '---', '',
     `Your task (${story.id}):`,
@@ -1163,6 +1156,31 @@ function markStorySkipped(jsonPath: string, storyId: string): void {
   logger.info(`Marked ${storyId} as skipped`);
 }
 
+/** Revert a story's passes:true when its sub-worktree merge fails.
+ *  Without this, the next run sees passes:true and skips the story even
+ *  though its code never made it to the parent branch. */
+function markStoryMergeFailed(jsonPath: string, storyId: string): void {
+  try {
+    const raw = fs.readFileSync(jsonPath, 'utf8');
+    const spec: SpecJson = JSON.parse(raw);
+    const stories = getStories(spec);
+
+    for (const s of stories) {
+      if (s.id === storyId) {
+        s.passes = false;
+        s.skipped = false;
+        s.notes = `Merge conflict — code passed but failed to merge into parent branch. Re-run to retry.`;
+        break;
+      }
+    }
+
+    fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+    logger.info(`Reverted ${storyId} to passes:false after merge failure`);
+  } catch (err: any) {
+    logger.warn({ storyId, err: err?.message }, `Failed to revert ${storyId} passes status after merge failure`);
+  }
+}
+
 /** CA-011: Revert a story's passed status to needs_revision (adversarial review blocked it). */
 function markStoryNeedsRevision(jsonPath: string, storyId: string): void {
   const raw = fs.readFileSync(jsonPath, 'utf8');
@@ -1329,8 +1347,39 @@ function mergeStoryWorktree(workspaceCwd: string, wt: StoryWorktree): boolean {
     );
     logger.info(`  [worktree] Merged ${wt.branchName} into workspace`);
     return true;
-  } catch (err: unknown) {
-    const msg = (err as Error).message ?? String(err);
+  } catch (mergeErr: unknown) {
+    // Check if all conflicts are on runtime-only files (spec JSON, run-state.json).
+    // This happens when an outer auto-merge worktree pre-commits runtime files that the
+    // inner story worktree also modified. Safe to resolve with --ours: the outer worktree's
+    // tracking state is authoritative, and markStoryPassed() re-writes passes:true after merge.
+    try {
+      const conflicted = execSync('git diff --name-only --diff-filter=U', {
+        cwd: workspaceCwd, env, encoding: 'utf8', stdio: ['pipe', 'pipe', 'pipe'],
+      }).trim().split('\n').filter(Boolean);
+
+      const isRuntimeOnly = conflicted.length > 0 && conflicted.every(f =>
+        f.includes('.rorca/run-state.json') ||
+        f.startsWith('forge/specs/') ||
+        f.includes('.rorca/memory/'),
+      );
+
+      if (isRuntimeOnly) {
+        logger.warn(`  [worktree] Runtime-only merge conflicts — auto-resolving (--ours): ${conflicted.join(', ')}`);
+        const quotedFiles = conflicted.map(f => `"${f}"`).join(' ');
+        execSync(`git checkout --ours -- ${quotedFiles}`, { cwd: workspaceCwd, env, stdio: 'pipe' });
+        execSync('git add -A', { cwd: workspaceCwd, env, stdio: 'pipe' });
+        execSync(`git commit -m "merge: ${wt.storyId} from worktree (runtime conflicts auto-resolved)"`, {
+          cwd: workspaceCwd, env, stdio: 'pipe',
+        });
+        logger.info(`  [worktree] Merged ${wt.branchName} (runtime conflicts auto-resolved)`);
+        return true;
+      }
+    } catch {
+      // Fall through to hard failure below
+    }
+
+    const err = mergeErr as (Error & { stderr?: Buffer });
+    const msg = (err.stderr ? err.stderr.toString().trim() : null) ?? err.message ?? String(mergeErr);
     logger.error(`  [worktree] MERGE FAILED for ${wt.branchName}: ${msg}`);
     try { execSync('git merge --abort', { cwd: workspaceCwd, env, stdio: 'pipe' }); } catch { /* already clean */ }
     return false;
@@ -1923,6 +1972,7 @@ async function executeStory(
   storyAgentOverride?: AgentType,
   storyAttachAddr?: string | null,
   personaRegistry?: PersonaRegistry,
+  waveIndex?: number,
 ): Promise<'passed' | 'failed' | 'skipped'> {
   const effectiveCwd = storyCwd ?? config.cwd;
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
@@ -2128,6 +2178,7 @@ async function executeStory(
       story_title: story.title,
       agent_type: effectiveAgent,
       log_file: storyLogFile,
+      ...(waveIndex != null ? { wave_index: waveIndex } : {}),
       ...(currentModel !== config.agentModel ? { model_override: currentModel, model_tier: escState?.currentTier } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
       ...(injectedContextFiles.length > 0 ? { context_files: injectedContextFiles } : {}),
@@ -3085,7 +3136,7 @@ async function runParallel(
     const tasks = storiesWithWorktrees.map(story => {
       const wt = worktreeMap.get(story.id)!;
       return () =>
-        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, escalationStates, stories, undefined, undefined, personaRegistry)
+        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, escalationStates, stories, undefined, undefined, personaRegistry, wave.index)
           .then(result => ({ storyId: story.id, result }));
     });
 
@@ -3119,6 +3170,7 @@ async function runParallel(
         if (!merged) {
           logger.error(`  [worktree] ${wt.storyId} passed but merge failed — marking as failed`);
           failedIds.add(wt.storyId);
+          markStoryMergeFailed(config.jsonPath, wt.storyId);
           if (workspaceId) {
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
               run_id: config.runId, story_id: wt.storyId,
@@ -3158,6 +3210,7 @@ async function runParallel(
           for (const failure of failures) {
             logger.error(`  [merge] Wave ${wave.index} merge FAILED for ${failure.storyId}: ${failure.conflictingFiles.join(', ')}`);
             failedIds.add(failure.storyId);
+            markStoryMergeFailed(config.jsonPath, failure.storyId);
 
             if (workspaceId) {
               await emitWalEvent(config.port, 'story_failed', workspaceId, {

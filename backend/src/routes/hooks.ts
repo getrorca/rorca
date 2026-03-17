@@ -4,6 +4,7 @@ import { query, queryOne, execute } from '../db/index';
 import type { PipelineHookRow } from '../lib/hook-runner';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { encryptToken } from './auth';
+import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 
@@ -46,8 +47,7 @@ router.get('/', async (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(hooks, pagination));
   } catch (error: any) {
-    logger.error('[Hooks] List error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Hooks] List');
   }
 });
 
@@ -123,8 +123,7 @@ router.post('/', async (req: Request, res: Response) => {
 
     res.status(201).json(response);
   } catch (error: any) {
-    logger.error('[Hooks] Create error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Hooks] Create');
   }
 });
 
@@ -194,8 +193,7 @@ router.put('/:id', async (req: Request, res: Response) => {
 
     res.json(updated);
   } catch (error: any) {
-    logger.error('[Hooks] Update error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Hooks] Update');
   }
 });
 
@@ -240,8 +238,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
     await execute('DELETE FROM pipeline_hooks WHERE id = $1', [hookId]);
     res.status(204).send();
   } catch (error: any) {
-    logger.error('[Hooks] Delete error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Hooks] Delete');
   }
 });
 

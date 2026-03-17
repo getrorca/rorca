@@ -5,6 +5,7 @@ import { validateBody } from '../lib/validate';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { logger } from '../lib/logger';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -230,8 +231,7 @@ router.post('/', validateBody(WalEventSchema), async (req: Request, res: Respons
 
     res.status(201).json({ ok: true, id: walEvent!.id });
   } catch (error: any) {
-    logger.error('[WAL] POST error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[WAL] POST');
   }
 });
 

@@ -19,7 +19,7 @@ import { z } from 'zod';
  * Sent by POST /api/pipeline/trigger, consumed by worker handlePipelineRun.
  */
 export const PipelineRunJobPayload = z.object({
-  runId: z.number().int().positive(),
+  runId: z.coerce.number().int().positive(),
   specPath: z.string().min(1),
   workspacePath: z.string().min(1),
   agent: z.enum(['claude', 'opencode', 'codex']),
@@ -41,8 +41,8 @@ export type PipelineRunJobPayloadType = z.infer<typeof PipelineRunJobPayload>;
  * Sent by POST /api/pipeline/runs/:id/retry, consumed by worker handlePipelineRetry.
  */
 export const PipelineRetryJobPayload = z.object({
-  runId: z.number().int().positive(),
-  originalRunId: z.number().int().positive(),
+  runId: z.coerce.number().int().positive(),
+  originalRunId: z.coerce.number().int().positive(),
   storyIds: z.array(z.string()),
   workspacePath: z.string().min(1),
   specPath: z.string().min(1),
@@ -63,7 +63,7 @@ export type PipelineRetryJobPayloadType = z.infer<typeof PipelineRetryJobPayload
  * Sent by DELETE /api/pipeline/runs/:id/cancel when the run is actively executing.
  */
 export const PipelineCancelJobPayload = z.object({
-  runId: z.number().int().positive(),
+  runId: z.coerce.number().int().positive(),
 }).strict();
 
 export type PipelineCancelJobPayloadType = z.infer<typeof PipelineCancelJobPayload>;
@@ -75,7 +75,7 @@ export type PipelineCancelJobPayloadType = z.infer<typeof PipelineCancelJobPaylo
  * Sent by POST /api/pipeline/runs/:id/retry-merge, consumed by worker handlePipelineMerge.
  */
 export const PipelineMergeJobPayload = z.object({
-  runId: z.number().int().positive(),
+  runId: z.coerce.number().int().positive(),
   branch: z.string().min(1),
   workspaceId: z.string().min(1),
 }).strict();

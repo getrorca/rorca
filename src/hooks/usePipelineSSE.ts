@@ -1,5 +1,6 @@
-import { useState, useRef } from 'react';
+import { useState, useRef, useEffect } from 'react';
 import { useWalSSE, type WalEvent } from './useWalSSE';
+import { BASE_URL } from '../lib/apiFetch';
 
 export type { WalEvent };
 
@@ -15,6 +16,38 @@ export function usePipelineSSE(runId: string | null, _workspaceId?: string | nul
     setEvents([]);
   }
 
+  // Seed historical WAL events from REST endpoint when runId changes.
+  // This avoids the 5-minute delay caused by /api/pipeline/stream replaying
+  // thousands of old events at 50/tick from id=0 before reaching this run's events.
+  useEffect(() => {
+    if (!runId) return;
+
+    let cancelled = false;
+
+    async function seedHistoricalEvents() {
+      try {
+        const res = await fetch(`${BASE_URL}/api/pipeline/runs/${runId}/wal-events`);
+        if (!res.ok || cancelled) return;
+        const data = await res.json() as { events: WalEvent[] };
+        if (cancelled) return;
+        if (Array.isArray(data.events) && data.events.length > 0) {
+          setEvents((prev) => {
+            // Merge: historical first, then any live events that arrived in the
+            // meantime. Deduplicate by id (live events may already be in prev).
+            const seenIds = new Set(data.events.map((e) => e.id));
+            const liveOnly = prev.filter((e) => !seenIds.has(e.id));
+            return [...data.events, ...liveOnly];
+          });
+        }
+      } catch {
+        // Non-fatal — live SSE will still work, just with the old delay
+      }
+    }
+
+    seedHistoricalEvents();
+    return () => { cancelled = true; };
+  }, [runId]);
+
   // Register with the shared WAL SSE singleton.
   // useWalSSE keeps the callback in a ref so we don't need useCallback here.
   useWalSSE((event: WalEvent) => {
@@ -29,7 +62,11 @@ export function usePipelineSSE(runId: string | null, _workspaceId?: string | nul
       } catch { /* non-JSON payload — allow through */ }
     }
 
-    setEvents((prev) => [...prev, event]);
+    setEvents((prev) => {
+      // Deduplicate: historical seed may have already added this event
+      if (prev.some((e) => e.id === event.id)) return prev;
+      return [...prev, event];
+    });
   });
 
   return events;

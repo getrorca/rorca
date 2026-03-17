@@ -31,8 +31,8 @@ export const DEFAULT_OG_IMAGE = `${SITE_URL}/og/og-default.png`;
 const KNOWN_OG_PAGES = new Set([
   'home',
   'architecture',
-  'engine',
-  'compute',
+  'memory',
+  'execution',
   'pricing',
   'download',
 ]);
@@ -117,12 +117,12 @@ export const PAGES_METADATA: Record<string, PageMetadata> = {
     path: '/architecture',
     ogKey: 'architecture',
   },
-  compute: {
-    title: 'Compute & Execution',
+  execution: {
+    title: 'Execution',
     description:
-      'Every story runs as a fresh isolated subprocess with the full tool set — bash, edit, read, write, glob, grep. No context limits. A spec can run forever.',
-    path: '/compute',
-    ogKey: 'compute',
+      'Three first-class execution engines — Claude Code, OpenCode, Codex CLI. Model cascading saves 40–60% vs all-Opus. Wave-parallel runs independent stories concurrently across isolated git worktrees.',
+    path: '/execution',
+    ogKey: 'execution',
   },
   download: {
     title: 'Download',
@@ -131,12 +131,12 @@ export const PAGES_METADATA: Record<string, PageMetadata> = {
     path: '/download',
     ogKey: 'download',
   },
-  engine: {
-    title: 'Context-Intent Engine',
+  memory: {
+    title: 'Memory',
     description:
-      "Rorca's Context-Intent Engine bridges 'The Is' (your codebase) and 'The Ought' (what should be built) — automatically routing the right context to every story.",
-    path: '/engine',
-    ogKey: 'engine',
+      'How Rorca remembers and applies knowledge: tiered memory retrieval (CAG→RAG→Graph), virtual context routing via micromatch globs, and LLM-matched skills injection per story.',
+    path: '/memory',
+    ogKey: 'memory',
   },
   pricing: {
     title: 'Pricing',

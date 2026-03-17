@@ -24,6 +24,7 @@ import { logger } from '../lib/logger';
 import { requirePlan } from '../lib/require-plan';
 import { inferDomain } from '../lib/domain-inference';
 import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -139,6 +140,27 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
       "INSERT INTO wal_events (event_type, workspace_id) VALUES ('workspace_create', $1)",
       [id]
     );
+
+    // BL-002: Auto-provision 14-day Pro trial on first workspace registration
+    try {
+      const existingSub = await queryOne<{ id: string }>(
+        'SELECT id FROM subscriptions LIMIT 1'
+      );
+      if (!existingSub) {
+        const trialId = `trial_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+        const user = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
+        if (user) {
+          await execute(
+            `INSERT INTO subscriptions (id, user_id, stripe_customer_id, plan, status, trial_started_at, trial_ends_at)
+             VALUES ($1, $2, '', 'pro', 'trialing', NOW(), NOW() + INTERVAL '14 days')`,
+            [trialId, user.id]
+          );
+          await execute('UPDATE users SET plan = $1 WHERE id = $2', ['pro', user.id]);
+        }
+      }
+    } catch (trialErr) {
+      logger.warn({ err: trialErr }, 'Failed to provision trial — non-fatal');
+    }
 
     // V2-070: Auto-create default agent profile using workspace's L3 direction content
     const l3Row = await queryOne<{ content_yaml: string }>(
@@ -1297,9 +1319,8 @@ Infer the tech stack, project purpose, coding conventions, and domain from the s
         usage: result.usage,
         inferredDomain,
       });
-    } catch (err: any) {
-      logger.error('[scan-direction] error:', err.message);
-      res.status(500).json({ error: err.message || 'Repo scan failed' });
+    } catch (err: unknown) {
+      handleRouteError(res, err, '[Workspaces] Scan direction');
     }
   } catch (err) {
     next(err);
@@ -1414,8 +1435,8 @@ router.get('/:id/health', async (req, res, next) => {
       } catch {}
 
       res.json({ ...report, semantic, trend });
-    } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Health check failed' });
+    } catch (err: unknown) {
+      handleRouteError(res, err, '[Workspaces] Health check');
     }
   } catch (err) {
     next(err);
@@ -1509,8 +1530,8 @@ router.post('/:id/echolocate', async (req, res, next) => {
       );
 
       res.json(report);
-    } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Echolocation scan failed' });
+    } catch (err: unknown) {
+      handleRouteError(res, err, '[Workspaces] Echolocation scan');
     }
   } catch (err) {
     next(err);
@@ -1643,8 +1664,8 @@ router.post('/:id/monorepo/discover', async (req, res, next) => {
 
         res.json({ ...result, applied: false });
       }
-    } catch (err: any) {
-      res.status(500).json({ error: err.message || 'Monorepo discovery failed' });
+    } catch (err: unknown) {
+      handleRouteError(res, err, '[Workspaces] Monorepo discovery');
     }
   } catch (err) {
     next(err);
@@ -1723,9 +1744,8 @@ router.post('/:id/scaffold', async (req, res, next) => {
         );
 
         res.json(preview);
-      } catch (err: any) {
-        logger.error('[scaffold] Preview error:', err.message);
-        res.status(500).json({ error: err.message || 'Scaffold generation failed' });
+      } catch (err: unknown) {
+        handleRouteError(res, err, '[Workspaces] Scaffold preview');
       }
       return;
     }
@@ -1790,9 +1810,8 @@ router.post('/:id/scaffold', async (req, res, next) => {
         }
 
         res.json(result);
-      } catch (err: any) {
-        logger.error('[scaffold] Write error:', err.message);
-        res.status(500).json({ error: err.message || 'Scaffold write failed' });
+      } catch (err: unknown) {
+        handleRouteError(res, err, '[Workspaces] Scaffold write');
       }
       return;
     }
@@ -2048,9 +2067,8 @@ router.post('/:id/bootstrap', async (req, res, next) => {
         healthAfter,
         filesCreated,
       });
-    } catch (err: any) {
-      logger.error('[bootstrap] error:', err.message);
-      res.status(500).json({ error: err.message || 'Bootstrap failed' });
+    } catch (err: unknown) {
+      handleRouteError(res, err, '[Workspaces] Bootstrap');
     }
   } catch (err) {
     next(err);

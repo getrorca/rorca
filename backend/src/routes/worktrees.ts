@@ -3,8 +3,8 @@ import simpleGit from 'simple-git';
 import path from 'path';
 import { queryOne } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
-import { logger } from '../lib/logger';
 import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -164,13 +164,12 @@ router.get('/', async (req: Request, res: Response) => {
 
     res.json({ worktrees });
   } catch (error: any) {
-    logger.error('[Worktrees] List error:', error);
     // Xcode license not accepted (common after macOS/Xcode updates) — return empty list
     if (error.message?.includes('Xcode') || error.message?.includes('xcodebuild')) {
       res.json({ worktrees: [], warning: 'Git unavailable: run `sudo xcodebuild -license accept` in your terminal to fix.' });
       return;
     }
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Worktrees] List');
   }
 });
 
@@ -283,11 +282,10 @@ router.post('/', async (req: Request, res: Response) => {
     res.status(201).json({ ok: true, worktreePath: targetPath, branchName });
   } catch (error: any) {
     if (error.message?.includes('already exists')) {
-      throw new ConflictError(error.message);
+      handleRouteError(res, new ConflictError(error.message), '[Worktrees] Create');
       return;
     }
-    logger.error('[Worktrees] Create error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Worktrees] Create');
   }
 });
 
@@ -347,11 +345,10 @@ router.delete('/:encodedPath', async (req: Request, res: Response) => {
     res.json({ ok: true });
   } catch (error: any) {
     if (error.message?.includes('dirty') || error.message?.includes('untracked') || error.message?.includes('modified')) {
-      throw new ConflictError(error.message);
+      handleRouteError(res, new ConflictError(error.message), '[Worktrees] Remove');
       return;
     }
-    logger.error('[Worktrees] Remove error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Worktrees] Remove');
   }
 });
 
@@ -510,8 +507,7 @@ router.post('/merge/preview', async (req: Request, res: Response) => {
       }
     }
   } catch (error: any) {
-    logger.error('[Worktrees] Merge preview error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Worktrees] Merge preview');
   }
 });
 
@@ -637,8 +633,7 @@ router.post('/merge', async (req: Request, res: Response) => {
 
     res.json({ ok: true, mergeCommitSha, stashedAndRestored: stashed });
   } catch (error: any) {
-    logger.error('[Worktrees] Merge error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Worktrees] Merge');
   }
 });
 
@@ -701,8 +696,7 @@ router.get('/status', async (req: Request, res: Response) => {
       modifiedFiles: status.modified,
     });
   } catch (error: any) {
-    logger.error('[Worktrees] Status error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Worktrees] Status');
   }
 });
 

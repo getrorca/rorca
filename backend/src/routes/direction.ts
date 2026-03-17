@@ -11,6 +11,7 @@ import { getVaultKey } from './vault';
 import { logger } from '../lib/logger';
 import { invalidateDirection } from '../lib/context-cache';
 import { UnprocessableError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -537,10 +538,7 @@ router.post('/models/test', async (req: Request, res: Response, _next: NextFunct
       response: result.text.trim().slice(0, 200),
     });
   } catch (err: any) {
-    res.status(500).json({
-      ok: false,
-      error: err.message || 'Model test failed',
-    });
+    handleRouteError(res, err, '[direction/models/test]');
   }
 });
 
@@ -868,8 +866,7 @@ Generate thoughtful, specific content for each layer based on the user's answers
       usage: result.usage,
     });
   } catch (err: any) {
-    logger.error('[direction/wizard] error:', err.message);
-    res.status(500).json({ error: err.message || 'Wizard generation failed' });
+    handleRouteError(res, err, '[direction/wizard]');
   }
 });
 
