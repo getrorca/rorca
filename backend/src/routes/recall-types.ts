@@ -6,8 +6,8 @@
  */
 
 import { z } from 'zod';
-import type { MemoryEntry } from '../lib/memory-ledger.js';
-import type { EcholocationReport } from '../lib/workspace-echolocation.js';
+import type { MemoryEntry } from '../lib/memory-ledger';
+import type { EcholocationReport } from '../lib/workspace-echolocation';
 
 // ─── Re-exports for consumer convenience ────────────────────────────────────
 
@@ -57,6 +57,22 @@ export interface SkillPreview {
   source: string;
 }
 
+export interface SkillFull {
+  name: string;
+  content: string;
+  description: string;
+  category: string | null;
+  tags: string[];
+  source: string;
+}
+
+export interface DirectionLayer {
+  layer: number;
+  content: string;
+  domain: string | null;
+  workspaceId: string | null;
+}
+
 export interface WorkspaceMetadata {
   id: string;
   label: string;
@@ -90,6 +106,25 @@ export interface RecallResponse {
   meta: RecallMeta;
 }
 
+export interface DumpMeta {
+  latencyMs: number;
+  generatedAt: string;
+}
+
+export interface DumpResponse {
+  memories: MemoryEntry[] | null;
+  directionLayers: DirectionLayer[] | null;
+  skills: SkillFull[] | null;
+  workspaceContext: {
+    schemaSnapshot: string | null;
+    gitMemory: string | null;
+  } | null;
+  recentRuns: RunSummary[] | null;
+  metadata: WorkspaceMetadata;
+  activeRuns: ActiveRun[] | null;
+  meta: DumpMeta;
+}
+
 // ─── Zod query param schema ─────────────────────────────────────────────────
 
 export const RecallQuerySchema = z.object({
@@ -116,3 +151,9 @@ export const RecallQuerySchema = z.object({
 });
 
 export type RecallQueryParams = z.infer<typeof RecallQuerySchema>;
+
+export const DumpQuerySchema = z.object({
+  workspaceId: z.string().min(1),
+});
+
+export type DumpQueryParams = z.infer<typeof DumpQuerySchema>;
