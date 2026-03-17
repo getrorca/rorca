@@ -3,9 +3,9 @@
 Spec: rorca-go-to-market-v1
 Run ID: 129
 Started: 2026-03-16T08:27:07.845Z
-Last Updated: 2026-03-16T20:23:16.653Z
+Last Updated: 2026-03-17T08:31:52.244Z
 
-## Completed Stories (8)
+## Completed Stories (9)
 - US-001: Resolve merge conflict in worker.ts — DONE (claude, claude-sonnet-4-6, 156s)
 - US-051: API documentation completeness — @swagger on all routes — DONE (claude, claude-sonnet-4-6, 1153s)
 - US-053: Installation troubleshooting guide — DONE (claude, claude-haiku-4-5-20251001, 147s)
@@ -14,3 +14,4 @@ Last Updated: 2026-03-16T20:23:16.653Z
 - US-068: Account Deletion and GDPR Right-to-Erasure — DONE (claude, claude-opus-4-6, 1092s)
 - US-003: Emit run_setup_started and run_setup_done WAL events from execution-engine during wave worktree creation — DONE (claude, 19s)
 - US-005: Show simultaneous pulsing Running indicators and parallel count banner in RunStoryList for wave runs — DONE (claude, 318s)
+- US-001: Define RecallResponse TypeScript interface and Zod validation schemas — DONE (claude, 282s)
