@@ -1157,3 +1157,182 @@ describe('POST /api/pipeline/orphan-sweep', () => {
     expect(res.body.error).toContain('Test sweep error');
   });
 });
+
+// ─── GET /api/pipeline/runs/:runId/stories/:storyId/log — backward compat ──
+
+describe('GET /api/pipeline/runs/:runId/stories/:storyId/log (backward compat)', () => {
+  test('endpoint exists and returns SSE headers with text/event-stream content type', async () => {
+    const runId = await seedRun({ status: 'running' });
+
+    // Create a log file so the tailing loop has something to read
+    const logDir = path.join(wsDir, 'forge', 'specs', 'logs');
+    fs.mkdirSync(logDir, { recursive: true });
+    const logPath = path.join(logDir, `US-001_${Date.now()}.log`);
+    fs.writeFileSync(logPath, 'test log content\n');
+
+    // Insert story_started WAL event with log_file path so the endpoint finds it
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('story_started', 'ws-pipe', 'US-001', $1)`,
+      [JSON.stringify({ run_id: runId, story_id: 'US-001', log_file: logPath })]
+    );
+
+    // Insert story_passed WAL event so the tailing loop terminates
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('story_passed', 'ws-pipe', 'US-001', $1)`,
+      [JSON.stringify({ run_id: runId, story_id: 'US-001' })]
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/stories/US-001/log`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .buffer(true)
+      .parse((res, cb) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+        res.on('end', () => cb(null, data));
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toBe('text/event-stream');
+    expect(res.headers['cache-control']).toBe('no-cache');
+    // Should contain the SSE connection comment
+    expect(res.body).toContain(': connected');
+  });
+});
+
+// ─── GET /api/pipeline/runs/:runId/stories/:storyId/stream — DB-backed SSE ──
+
+describe('GET /api/pipeline/runs/:runId/stories/:storyId/stream', () => {
+
+  /** Parse raw SSE text into an array of { event, data } objects. */
+  function parseSSE(raw: string): Array<{ event: string; data: string }> {
+    const events: Array<{ event: string; data: string }> = [];
+    const blocks = raw.split('\n\n').filter(Boolean);
+    for (const block of blocks) {
+      // Skip comments (: connected, : hb)
+      if (block.startsWith(':')) continue;
+      const lines = block.split('\n');
+      let event = 'message';
+      let data = '';
+      for (const line of lines) {
+        if (line.startsWith(':')) continue;
+        if (line.startsWith('event: ')) event = line.slice(7);
+        if (line.startsWith('data: ')) data = line.slice(6);
+        if (line === 'data: ') data = '';
+      }
+      events.push({ event, data });
+    }
+    return events;
+  }
+
+  test('replays 3 existing chunks in sequence order and closes after story_passed WAL event', async () => {
+    const runId = await seedRun({ status: 'running' });
+
+    // Insert 3 story_output_chunks rows
+    const chunks = ['First chunk of prose output', 'Second chunk continues', 'Third and final chunk'];
+    for (let i = 0; i < chunks.length; i++) {
+      await execute(
+        `INSERT INTO story_output_chunks (run_id, story_id, chunk, sequence)
+         VALUES ($1, 'US-001', $2, $3)`,
+        [runId, chunks[i], i + 1]
+      );
+    }
+
+    // Insert story_passed WAL event so isStoryDone() returns true after replay
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+       VALUES ('story_passed', 'ws-pipe', 'US-001', $1)`,
+      [JSON.stringify({ run_id: runId, story_id: 'US-001' })]
+    );
+
+    // Connect to the /stream endpoint — since story is already done, it will replay + close
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/stories/US-001/stream`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .buffer(true)
+      .parse((res, cb) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+        res.on('end', () => cb(null, data));
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.headers['content-type']).toBe('text/event-stream');
+
+    const events = parseSSE(res.body as string);
+
+    // Should have exactly 3 output events + 1 done event
+    const outputEvents = events.filter(e => e.event === 'output');
+    const doneEvents = events.filter(e => e.event === 'done');
+
+    expect(outputEvents).toHaveLength(3);
+    expect(doneEvents).toHaveLength(1);
+
+    // Verify base64 content matches inserted chunks in sequence order
+    for (let i = 0; i < chunks.length; i++) {
+      const decoded = Buffer.from(outputEvents[i].data, 'base64').toString('utf8');
+      expect(decoded).toBe(chunks[i]);
+    }
+  });
+
+  test('closes SSE connection within 1s after story_passed WAL event is emitted mid-stream', async () => {
+    const runId = await seedRun({ status: 'running' });
+
+    // Insert 3 story_output_chunks rows but NO WAL event yet — the endpoint
+    // will replay chunks, find story NOT done, and enter the 200ms poll loop.
+    const chunks = ['Alpha prose', 'Beta prose', 'Gamma prose'];
+    for (let i = 0; i < chunks.length; i++) {
+      await execute(
+        `INSERT INTO story_output_chunks (run_id, story_id, chunk, sequence)
+         VALUES ($1, 'US-002', $2, $3)`,
+        [runId, chunks[i], i + 1]
+      );
+    }
+
+    const startTime = Date.now();
+
+    // We need to insert the WAL event AFTER the endpoint enters the poll loop.
+    // Schedule the insert after 300ms (enough for replay + one poll tick).
+    const walInsertPromise = new Promise<void>((resolve) => {
+      setTimeout(async () => {
+        await execute(
+          `INSERT INTO wal_events (event_type, workspace_id, story_id, payload)
+           VALUES ('story_passed', 'ws-pipe', 'US-002', $1)`,
+          [JSON.stringify({ run_id: runId, story_id: 'US-002' })]
+        );
+        resolve();
+      }, 300);
+    });
+
+    // Connect to the stream — it will replay chunks, then poll until WAL event appears
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/stories/US-002/stream`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .buffer(true)
+      .parse((res, cb) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+        res.on('end', () => cb(null, data));
+      });
+
+    await walInsertPromise;
+
+    const elapsed = Date.now() - startTime;
+    expect(res.status).toBe(200);
+
+    const events = parseSSE(res.body as string);
+    const outputEvents = events.filter(e => e.event === 'output');
+    const doneEvents = events.filter(e => e.event === 'done');
+
+    // Should still have 3 output events from replay
+    expect(outputEvents).toHaveLength(3);
+    // Must have received the done event
+    expect(doneEvents).toHaveLength(1);
+
+    // Connection should close within 1 second of the WAL event (300ms delay + ≤200ms poll + margin)
+    // Total elapsed should be well under 2 seconds
+    expect(elapsed).toBeLessThan(2_000);
+  });
+});

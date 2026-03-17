@@ -85,6 +85,7 @@ import { startGraphPopulator } from './lib/graph-populator';
 import workspaceDriftRouter from './routes/workspace-drift';
 import { startDriftSubscriber } from './lib/drift-subscriber';
 import { startMarkerInjector } from './lib/marker-injector';
+import { StoryLogFollower } from './lib/story-log-follower';
 import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
