@@ -2,8 +2,18 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000012,
   "startedAt": "2026-03-17T18:30:24.225Z",
-  "lastUpdatedAt": "2026-03-17T18:30:24.225Z",
-  "completedStories": [],
+  "lastUpdatedAt": "2026-03-17T18:35:11.601Z",
+  "completedStories": [
+    {
+      "storyId": "US-002",
+      "title": "Implement recall route — direction stack and workspace metadata sections",
+      "status": "passed",
+      "startedAt": "2026-03-17T18:34:53.713Z",
+      "finishedAt": "2026-03-17T18:35:11.601Z",
+      "agentType": "claude",
+      "elapsedMs": 17888
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
