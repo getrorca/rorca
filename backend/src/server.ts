@@ -90,6 +90,7 @@ import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 import { initBoss } from './lib/pg-boss';
+import { StoryLogFollower } from './lib/story-log-follower';
 
 dotenv.config();
 
@@ -349,6 +350,10 @@ startDriftSubscriber();
 // US-008: Subscribe marker injector to write story completion markers into run_output_chunks
 startMarkerInjector();
 
+// US-004: Subscribe story-log-follower to tail story logs and write prose to story_output_chunks
+const storyLogFollower = new StoryLogFollower();
+storyLogFollower.start();
+
 // US-027: Subscribe commit status poster to post GitHub status checks for story progress
 startCommitStatusPoster();
 
@@ -399,6 +404,8 @@ if (process.env.NODE_ENV !== 'test') {
     startFileWatcher();
     // PG-004: Initialise pg-boss so the Express process can send jobs
     initBoss().catch(err => logger.error({ err }, '[pg-boss] startup init failed'));
+    // US-004: Recover in-flight stories from before server restart
+    storyLogFollower.recover().catch(err => logger.error({ err }, '[story-log-follower] Recovery failed'));
     // Startup self-test: verify workspace queries resolve against rorca schema (not ag_catalog)
     queryOne('SELECT id FROM workspaces LIMIT 1').then(row => {
       if (!row) logger.warn('[StartupCheck] No workspaces found — onboarding will show');
