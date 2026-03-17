@@ -3,8 +3,9 @@
 Spec: rorca-mini-terminal-db-output
 Run ID: 20260316000021
 Started: 2026-03-17T21:41:34.003Z
-Last Updated: 2026-03-17T21:51:39.342Z
+Last Updated: 2026-03-17T21:54:47.651Z
 
-## Completed Stories (2)
+## Completed Stories (3)
 - US-001: Add story_output_chunks PostgreSQL table migration — DONE (claude, 11s)
 - US-002: Create story-log-follower.ts WAL subscriber service — DONE (claude, 98s)
+- US-003: Add server startup recovery for in-flight stories in story-log-follower — DONE (claude, 175s)
