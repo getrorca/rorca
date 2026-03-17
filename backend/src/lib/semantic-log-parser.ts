@@ -1,7 +1,7 @@
 // ─── Semantic Log Parser ──────────────────────────────────────────────────────
 // Parses structured JSON output from claude (--output-format stream-json) and
 // OpenCode (--format json) into SemanticStep objects for the Run View UI.
-// Never throws — malformed or non-semantic lines return null.
+// Never throws — malformed or non-semantic lines return [].
 
 export interface SemanticStep {
   type: 'read' | 'write' | 'edit' | 'bash' | 'plan' | 'commit' | 'test' | 'search' | 'unknown';
@@ -35,94 +35,107 @@ const CLAUDE_TOOL_MAP: Record<string, SemanticStep['type']> = {
 };
 
 /**
+ * Parse a single content block from a Claude tool_use block into a SemanticStep.
+ */
+function parseClaudeToolBlock(block: Record<string, unknown>, ts: string): SemanticStep {
+  const toolName: string = (block.name as string) ?? '';
+  const stepType = CLAUDE_TOOL_MAP[toolName] ?? 'unknown';
+  const input = (block.input as Record<string, unknown>) ?? {};
+
+  let label = toolName;
+  let detail: string | undefined;
+
+  switch (stepType) {
+    case 'read':
+      label = `Read ${(input.file_path as string) ?? (input.url as string) ?? ''}`;
+      break;
+    case 'write':
+      label = `Write ${(input.file_path as string) ?? ''}`;
+      break;
+    case 'edit':
+      label = `Edit ${(input.file_path as string) ?? (input.notebook_path as string) ?? ''}`;
+      break;
+    case 'bash':
+      label = (input.description as string) ?? ((input.command as string)?.slice(0, 80)) ?? 'Bash';
+      detail = input.command as string;
+      break;
+    case 'search':
+      label = `${toolName} ${(input.pattern as string) ?? (input.query as string) ?? ''}`;
+      detail = input.path as string;
+      break;
+    case 'plan':
+      label = toolName === 'Task' ? `Task: ${((input.description as string) ?? '').slice(0, 60)}` : 'Planning';
+      break;
+    default:
+      label = toolName;
+  }
+
+  return { type: stepType, label, detail, ts, toolName };
+}
+
+/**
  * Parse a single line of claude `--output-format stream-json` output.
  *
- * Claude stream-json emits one JSON object per line with a `type` field:
- * - `tool_use`: tool invocation with `name` and `input`
- * - `assistant`: text reasoning (maps to 'plan')
+ * Claude stream-json emits one JSON object per line with a `type` field.
+ * Tool calls are embedded inside the `assistant` event at `message.content[]`
+ * (NOT as standalone top-level `tool_use` events). Each assistant event can
+ * contain multiple tool_use blocks, so this returns SemanticStep[].
+ *
+ * Event shapes:
+ * - `assistant`: reasoning + tool calls in message.content[] array
+ *   - content blocks: { type: 'tool_use', name, input } or { type: 'text', text }
  * - `result`: final result with `subtype` ('success'|'error')
- * - `system`, `content_block_start`, `content_block_delta`, etc.
+ * - `system`, `tool_result`, etc.: ignored
  */
-export function parseStreamJsonLine(line: string): SemanticStep | null {
+export function parseStreamJsonLine(line: string): SemanticStep[] {
   try {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith(':')) return null;
+    if (!trimmed || trimmed.startsWith(':')) return [];
 
-    const obj = JSON.parse(trimmed);
+    const obj = JSON.parse(trimmed) as Record<string, unknown>;
     const ts = new Date().toISOString();
 
-    // tool_use → map tool name to step type
-    if (obj.type === 'tool_use') {
-      const toolName: string = obj.name ?? '';
-      const stepType = CLAUDE_TOOL_MAP[toolName] ?? 'unknown';
-      const input = obj.input ?? {};
+    // assistant event — tool calls and text reasoning are in message.content[]
+    if (obj.type === 'assistant') {
+      const message = obj.message as Record<string, unknown> | undefined;
+      const content = message?.content;
+      if (!Array.isArray(content)) return [];
 
-      let label = toolName;
-      let detail: string | undefined;
-
-      switch (stepType) {
-        case 'read':
-          label = `Read ${input.file_path ?? input.url ?? ''}`;
-          break;
-        case 'write':
-          label = `Write ${input.file_path ?? ''}`;
-          break;
-        case 'edit':
-          label = `Edit ${input.file_path ?? input.notebook_path ?? ''}`;
-          break;
-        case 'bash':
-          label = input.description ?? input.command?.slice(0, 80) ?? 'Bash';
-          detail = input.command;
-          break;
-        case 'search':
-          label = `${toolName} ${input.pattern ?? input.query ?? ''}`;
-          detail = input.path;
-          break;
-        case 'plan':
-          label = toolName === 'Task' ? `Task: ${(input.description ?? '').slice(0, 60)}` : 'Planning';
-          break;
-        default:
-          label = toolName;
+      const steps: SemanticStep[] = [];
+      for (const block of content as Array<Record<string, unknown>>) {
+        if (block.type === 'tool_use') {
+          steps.push(parseClaudeToolBlock(block, ts));
+        } else if (block.type === 'text' && typeof block.text === 'string' && block.text.length > 20) {
+          steps.push({
+            type: 'plan',
+            label: 'Reasoning',
+            detail: block.text.slice(0, 200),
+            ts,
+          });
+        }
       }
-
-      return { type: stepType, label, detail, ts };
+      return steps;
     }
 
-    // assistant text → plan step (only if there's substantial content)
-    if (obj.type === 'assistant' && typeof obj.message === 'string' && obj.message.length > 10) {
-      return {
-        type: 'plan',
-        label: 'Reasoning',
-        detail: obj.message.slice(0, 200),
-        ts,
-      };
-    }
-
-    // result → commit (if success) or test (if error)
+    // result → commit (if success) or error
     if (obj.type === 'result') {
       if (obj.subtype === 'success') {
-        const resultText: string = obj.result ?? obj.text ?? '';
-        // Check if the result mentions a git commit
+        const resultText: string = (obj.result as string) ?? (obj.text as string) ?? '';
         const commitMatch = resultText.match(/commit\s+([a-f0-9]{7,})/i)
           ?? resultText.match(/\[(?:feat|fix|chore|test|refactor)[^\]]*\]\s+(.{1,80})/);
         if (commitMatch) {
-          return {
-            type: 'commit',
-            label: commitMatch[1] ?? 'Commit',
-            detail: resultText.slice(0, 200),
-            ts,
-          };
+          return [{ type: 'commit', label: commitMatch[1] ?? 'Commit', detail: resultText.slice(0, 200), ts }];
         }
-        return { type: 'commit', label: 'Run completed', detail: resultText.slice(0, 200), ts };
+        return [{ type: 'commit', label: 'Run completed', detail: resultText.slice(0, 200), ts }];
       }
       if (obj.subtype === 'error') {
-        return { type: 'unknown', label: 'Error', detail: (obj.error ?? obj.result ?? '').slice(0, 200), ts };
+        return [{ type: 'unknown', label: 'Error', detail: ((obj.error as string) ?? (obj.result as string) ?? '').slice(0, 200), ts, isError: true }];
       }
     }
 
-    return null;
+    return [];
   } catch {
-    return null;
+    return [];
   }
 }
 
@@ -149,115 +162,115 @@ const OPENCODE_TOOL_MAP: Record<string, SemanticStep['type']> = {
  * - `completion`: final result
  * - `error`: error
  */
-export function parseOpenCodeLine(line: string): SemanticStep | null {
+export function parseOpenCodeLine(line: string): SemanticStep[] {
   try {
     const trimmed = line.trim();
-    if (!trimmed || trimmed.startsWith(':')) return null;
+    if (!trimmed || trimmed.startsWith(':')) return [];
 
-    const obj = JSON.parse(trimmed);
-    const ts = obj.timestamp ?? new Date().toISOString();
+    const obj = JSON.parse(trimmed) as Record<string, unknown>;
+    const ts = (obj.timestamp as string) ?? new Date().toISOString();
 
     // tool_call → map tool name to step type
     if (obj.type === 'tool_call') {
-      const rawToolName: string = (obj.tool ?? obj.name ?? '').toLowerCase();
+      const rawToolName: string = ((obj.tool as string) ?? (obj.name as string) ?? '').toLowerCase();
       const stepType = OPENCODE_TOOL_MAP[rawToolName] ?? 'unknown';
-      const args = obj.args ?? obj.input ?? {};
+      const args = (obj.args as Record<string, unknown>) ?? (obj.input as Record<string, unknown>) ?? {};
 
-      let label = obj.tool ?? obj.name ?? rawToolName;
+      let label = (obj.tool as string) ?? (obj.name as string) ?? rawToolName;
       let detail: string | undefined;
 
       switch (stepType) {
         case 'read':
-          label = `Read ${args.file_path ?? args.path ?? args.url ?? ''}`;
+          label = `Read ${(args.file_path as string) ?? (args.path as string) ?? (args.url as string) ?? ''}`;
           break;
         case 'write':
-          label = `Write ${args.file_path ?? args.path ?? ''}`;
+          label = `Write ${(args.file_path as string) ?? (args.path as string) ?? ''}`;
           break;
         case 'edit':
-          label = `Edit ${args.file_path ?? args.path ?? ''}`;
+          label = `Edit ${(args.file_path as string) ?? (args.path as string) ?? ''}`;
           break;
         case 'bash':
-          label = args.description ?? (typeof args.command === 'string' ? args.command.slice(0, 80) : 'Bash');
-          detail = args.command;
+          label = (args.description as string) ?? (typeof args.command === 'string' ? (args.command as string).slice(0, 80) : 'Bash');
+          detail = args.command as string;
           break;
         case 'search':
-          label = `${obj.tool ?? 'Search'} ${args.pattern ?? args.query ?? ''}`;
-          detail = args.path;
+          label = `${(obj.tool as string) ?? 'Search'} ${(args.pattern as string) ?? (args.query as string) ?? ''}`;
+          detail = args.path as string;
           break;
         default:
-          label = obj.tool ?? obj.name ?? 'Unknown tool';
+          label = (obj.tool as string) ?? (obj.name as string) ?? 'Unknown tool';
       }
 
-      return { type: stepType, label, detail, ts, toolName: rawToolName };
+      return [{ type: stepType, label, detail, ts, toolName: rawToolName }];
     }
 
     // tool_result → enrich previous step with output and duration
     if (obj.type === 'tool_result') {
-      const output: string = (obj.content ?? obj.result ?? '') as string;
-      const durationMs: number | undefined = typeof obj.duration_ms === 'number' ? obj.duration_ms : undefined;
-      const toolName: string = (obj.tool ?? obj.name ?? '').toLowerCase();
+      const output: string = ((obj.content as string) ?? (obj.result as string) ?? '') as string;
+      const durationMs: number | undefined = typeof obj.duration_ms === 'number' ? (obj.duration_ms as number) : undefined;
+      const toolName: string = ((obj.tool as string) ?? (obj.name as string) ?? '').toLowerCase();
       const stepType = OPENCODE_TOOL_MAP[toolName] || undefined;
-      // Emit as a step so the frontend can attach duration/output to its UI
       if (toolName) {
-        return {
+        return [{
           type: stepType ?? 'unknown',
-          label: `${obj.tool ?? toolName} result`,
+          label: `${(obj.tool as string) ?? toolName} result`,
           detail: output.slice(0, 500),
           ts,
           toolName,
           durationMs,
           output: output.slice(0, 2000),
-        };
+        }];
       }
-      return null;
+      return [];
     }
 
     // assistant → plan
-    if (obj.type === 'assistant' && typeof obj.content === 'string' && obj.content.length > 10) {
-      return {
+    if (obj.type === 'assistant' && typeof obj.content === 'string' && (obj.content as string).length > 10) {
+      return [{
         type: 'plan',
         label: 'Reasoning',
-        detail: obj.content.slice(0, 200),
+        detail: (obj.content as string).slice(0, 200),
         ts,
-      };
+      }];
     }
 
     // completion → commit
     if (obj.type === 'completion') {
-      const text: string = obj.content ?? obj.result ?? '';
-      const exitCode = obj.exitCode ?? obj.exit_code;
+      const text: string = (obj.content as string) ?? (obj.result as string) ?? '';
+      const exitCode = (obj.exitCode as number) ?? (obj.exit_code as number);
       const isFailed = exitCode !== undefined && exitCode !== 0;
-      return {
+      return [{
         type: isFailed ? 'unknown' : 'commit',
         label: isFailed ? 'Failed' : 'Run completed',
         detail: text.slice(0, 200),
         ts,
         isError: isFailed || undefined,
-      };
+      }];
     }
 
     // error
     if (obj.type === 'error') {
-      return {
+      return [{
         type: 'unknown',
         label: 'Error',
-        detail: (obj.message ?? obj.error ?? '').slice(0, 200),
+        detail: ((obj.message as string) ?? (obj.error as string) ?? '').slice(0, 200),
         ts,
         isError: true,
-      };
+      }];
     }
 
-    return null;
+    return [];
   } catch {
-    return null;
+    return [];
   }
 }
 
 /**
  * Parse a log line using the appropriate parser based on agent type.
+ * Returns an array of SemanticStep objects (empty array if nothing to emit).
  * Falls back to claude parser if agent is unknown.
  */
-export function parseLine(line: string, agent: string): SemanticStep | null {
+export function parseLine(line: string, agent: string): SemanticStep[] {
   if (agent === 'opencode') {
     return parseOpenCodeLine(line);
   }

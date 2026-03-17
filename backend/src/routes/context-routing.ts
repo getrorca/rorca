@@ -27,6 +27,7 @@ import {
 import { invalidateConfig } from '../lib/context-cache';
 import { populateConventionsFromConfig } from '../lib/knowledge-graph';
 import { NotFoundError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -118,8 +119,8 @@ router.get('/:id/directory-tree', async (req: Request, res: Response) => {
       });
 
     res.json({ entries: result, root: dirPath || '.' });
-  } catch {
-    res.status(500).json({ error: 'Failed to read directory' });
+  } catch (err: unknown) {
+    handleRouteError(res, err, '[ContextRouting] Read directory');
   }
 });
 

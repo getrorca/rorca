@@ -4,6 +4,7 @@ import { query, queryOne, execute } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router({ mergeParams: true });
 
@@ -80,8 +81,7 @@ router.get('/', async (req: Request, res: Response) => {
 
     res.json({ envVars });
   } catch (error: any) {
-    logger.error('[EnvVars] List error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[EnvVars] List');
   }
 });
 
@@ -185,8 +185,7 @@ router.post('/', async (req: Request, res: Response) => {
       });
     }
   } catch (error: any) {
-    logger.error('[EnvVars] Create/update error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[EnvVars] Create/update');
   }
 });
 
@@ -230,8 +229,7 @@ router.delete('/:key', async (req: Request, res: Response) => {
 
     res.status(204).send();
   } catch (error: any) {
-    logger.error('[EnvVars] Delete error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[EnvVars] Delete');
   }
 });
 

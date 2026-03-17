@@ -7,6 +7,7 @@ import { chatComplete } from '../lib/llm-client';
 import type { ProviderType } from '../lib/llm-client';
 import { invalidateProviderCache } from '../lib/embedding-pipeline';
 import { AuthError, NotFoundError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -323,8 +324,8 @@ router.post('/test', async (req: Request, res: Response) => {
 
       try {
         apiKey = decrypt(row.encrypted_key);
-      } catch {
-        res.status(500).json({ error: 'Failed to decrypt stored API key' });
+      } catch (decryptErr) {
+        handleRouteError(res, decryptErr, '[Vault] Decrypt stored API key');
         return;
       }
       baseUrl = row.base_url || undefined;

@@ -17,6 +17,7 @@ import { getVaultKey } from './vault';
 import { getCopilotToken } from './copilot';
 import type { AuthUser } from './auth';
 import type { AgentProfileRow } from './agent-profiles';
+import { handleRouteError } from '../lib/async-handler';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
@@ -119,8 +120,8 @@ function autoSelectOrchestration(userStories: WaveUserStory[]): {
 function emitSemanticSteps(text: string, agent: string, res: Response): void {
   const lines = text.split('\n');
   for (const line of lines) {
-    const step = parseLine(line, agent);
-    if (step) {
+    const steps = parseLine(line, agent);
+    for (const step of steps) {
       res.write(`event: semantic_step\ndata: ${JSON.stringify(step)}\n\n`);
     }
   }
@@ -961,8 +962,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
       })),
     });
   } catch (error: any) {
-    logger.error('[Pipeline] Preflight error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Preflight');
   }
 });
 
@@ -1568,8 +1568,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       ...(orchestration ? { orchestration } : {}),
     });
   } catch (error: any) {
-    logger.error('[Pipeline] Trigger error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Trigger');
   }
 });
 
@@ -1763,7 +1762,7 @@ router.post('/context-preview', async (req: Request, res: Response) => {
       stories,
     });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Context preview');
   }
 });
 
@@ -1826,7 +1825,7 @@ router.post('/orchestration-preview', async (req: Request, res: Response) => {
     const result = autoSelectOrchestration(orchStories);
     res.json(result);
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Orchestration preview');
   }
 });
 
@@ -2265,8 +2264,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
 
     res.status(202).json({ runId, specId: slug });
   } catch (error: any) {
-    logger.error('[Pipeline] Quick-run error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Quick-run');
   }
 });
 
@@ -2324,8 +2322,7 @@ router.post('/runs', async (req: Request, res: Response) => {
 
     res.status(201).json({ run });
   } catch (error: any) {
-    logger.error('[Pipeline] Create run error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Create run');
   }
 });
 
@@ -2377,8 +2374,7 @@ router.get('/runs', async (req: Request, res: Response) => {
 
     res.json(result);
   } catch (error: any) {
-    logger.error('[Pipeline] List runs error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] List runs');
   }
 });
 
@@ -2566,8 +2562,7 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
 
     res.json({ run1, run2, stories, summary });
   } catch (error: any) {
-    logger.error('[Pipeline] Compare runs error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Compare runs');
   }
 });
 
@@ -2653,7 +2648,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     // OC-029: Enrich specStories with reroute data from WAL events (for historical runs)
     if (specStories.length > 0) {
       try {
-        const rerouteEvents = await query<{ story_id: string; payload: string }>(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_rerouted' AND (payload->>'run_id')::int = $1 ORDER BY id ASC`, [runId]);
+        const rerouteEvents = await query<{ story_id: string; payload: string }>(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_rerouted' AND (payload->>'run_id')::bigint = $1 ORDER BY id ASC`, [runId]);
         for (const evt of rerouteEvents) {
           const story = specStories.find(s => s.id === evt.story_id);
           if (story && !story.reroute) {
@@ -2711,7 +2706,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
         // Collect actual context_files from story_started WAL events
         const actualMap: Record<string, { contextFiles: string[] }> = {};
         try {
-          const walRows = await query<{ story_id: string; payload: string }>(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_started' AND (payload->>'run_id')::int = $1`, [runId]);
+          const walRows = await query<{ story_id: string; payload: string }>(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_started' AND (payload->>'run_id')::bigint = $1`, [runId]);
           for (const row of walRows) {
             try {
               const p = JSON.parse(row.payload);
@@ -2743,8 +2738,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       contextComparison,
     });
   } catch (error: any) {
-    logger.error('[Pipeline] Get run error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Get run');
   }
 });
 
@@ -3027,8 +3021,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       copiedStories: passedStories.map(s => s.story_id),
     });
   } catch (error: any) {
-    logger.error('[Pipeline] Retry error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Retry');
   }
 });
 
@@ -3169,9 +3162,8 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
     } catch (err: any) {
       if (err.code === 'ESRCH') {
         throw new ConflictError('Process is no longer running');
-      } else {
-        res.status(500).json({ error: `Failed to send SIGTSTP: ${err.message}` });
       }
+      handleRouteError(res, err, '[Pipeline] Send SIGTSTP');
       return;
     }
 
@@ -3193,8 +3185,7 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
 
     res.json({ ok: true, runId, status: 'paused' });
   } catch (error: any) {
-    logger.error('[Pipeline] Pause error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Pause');
   }
 });
 
@@ -3247,7 +3238,7 @@ router.post('/runs/:runId/resume', async (req: Request, res: Response) => {
     try {
       process.kill(-run.pid, 'SIGCONT');
     } catch (err: any) {
-      res.status(500).json({ error: `Failed to send SIGCONT: ${err.message}` });
+      handleRouteError(res, err, '[Pipeline] Send SIGCONT');
       return;
     }
 
@@ -3260,8 +3251,7 @@ router.post('/runs/:runId/resume', async (req: Request, res: Response) => {
 
     res.json({ ok: true, runId, status: 'running' });
   } catch (error: any) {
-    logger.error('[Pipeline] Resume error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Resume');
   }
 });
 
@@ -3364,8 +3354,7 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
 
     res.json({ ok: true, runId, status: 'running' });
   } catch (error: any) {
-    logger.error('[Pipeline] Context injection error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Context injection');
   }
 });
 
@@ -3570,8 +3559,7 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
 
     res.json({ ok: true, runId });
   } catch (error: any) {
-    logger.error('[Pipeline] Delete queued run error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Delete queued run');
   }
 });
 
@@ -3799,8 +3787,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
 
     res.status(201).json({ ok: true });
   } catch (error: any) {
-    logger.error('[Pipeline] Story result error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Story result');
   }
 });
 
@@ -3871,8 +3858,7 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
 
     res.json({ ok: true });
   } catch (error: any) {
-    logger.error('[Pipeline] Record tokens error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Record tokens');
   }
 });
 
@@ -3941,7 +3927,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     }
 
     // 2. Try to get failure details from WAL events
-    const walEvent = await queryOne<{ payload: Record<string, unknown> | string }>(`SELECT payload FROM wal_events WHERE event_type = 'story_failed' AND story_id = $1 AND (payload->>'run_id')::int = $2 ORDER BY id DESC LIMIT 1`, [storyId, runId]);
+    const walEvent = await queryOne<{ payload: Record<string, unknown> | string }>(`SELECT payload FROM wal_events WHERE event_type = 'story_failed' AND story_id = $1 AND (payload->>'run_id')::bigint = $2 ORDER BY id DESC LIMIT 1`, [storyId, runId]);
 
     let failureReason: string | null = null;
     let failureAttempts: number | null = null;
@@ -4043,8 +4029,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
       lineCount: outputLines.length,
     });
   } catch (error: any) {
-    logger.error('[Pipeline] Story output error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Story output');
   }
 });
 
@@ -4103,7 +4088,7 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
   let storyLogPath: string | null = null;
 
   // 1. Check story_started WAL event for log_file path
-  const walRow = await queryOne<{ payload: Record<string, unknown> | string }>(`SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::int = $2 ORDER BY id DESC LIMIT 1`, [storyId, runId]);
+  const walRow = await queryOne<{ payload: Record<string, unknown> | string }>(`SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::bigint = $2 ORDER BY id DESC LIMIT 1`, [storyId, runId]);
   if (walRow?.payload) {
     try {
       const payload = typeof walRow.payload === 'string' ? JSON.parse(walRow.payload) : walRow.payload;
@@ -4151,7 +4136,7 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
       try {
         // Re-check WAL event — use JSONB accessor instead of payload::text LIKE (10x faster)
         const freshWal = await queryOne<{ payload: Record<string, unknown> }>(
-          `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::int = $2 ORDER BY id DESC LIMIT 1`,
+          `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::bigint = $2 ORDER BY id DESC LIMIT 1`,
           [storyId, runId]
         );
         if (freshWal?.payload) {
@@ -4191,7 +4176,7 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
 
         // Check if story already finished (no log will come)
         const finishEvent = await queryOne(
-          `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::int = $2 LIMIT 1`,
+          `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::bigint = $2 LIMIT 1`,
           [storyId, runId]
         );
         if (finishEvent) {
@@ -4235,7 +4220,7 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
   } catch { /* file may have disappeared */ }
 
   // Check if story already finished
-  const finishEvent = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::int = $2 LIMIT 1`, [storyId, runId]);
+  const finishEvent = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::bigint = $2 LIMIT 1`, [storyId, runId]);
   if (finishEvent) {
     clearInterval(hb);
     res.write('event: done\ndata: \n\n');
@@ -4259,7 +4244,7 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
       }
 
       // Check if story finished
-      const done = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::int = $2 LIMIT 1`, [storyId, runId]);
+      const done = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::bigint = $2 LIMIT 1`, [storyId, runId]);
       if (done) {
         // Read any final bytes
         const finalStat = fs.statSync(logPath);
@@ -4344,7 +4329,11 @@ router.get('/stream', async (req: Request, res: Response) => {
     if (runRow) resolvedWsId = String(runRow.workspace_id);
   }
 
-  let lastSeenId = 0;
+  // Start from the current max WAL id so new connections only receive live events.
+  // Historical events are served by GET /runs/:runId/wal-events (REST, instant).
+  // Starting from 0 caused minutes-long delays replaying thousands of old events at LIMIT 50/tick.
+  const maxWalRow = await queryOne<{ max_id: number }>('SELECT COALESCE(MAX(id), 0) AS max_id FROM wal_events');
+  let lastSeenId = maxWalRow?.max_id ?? 0;
   const pollInterval = setInterval(async () => {
     try {
       let events;
@@ -4352,7 +4341,7 @@ router.get('/stream', async (req: Request, res: Response) => {
         events = await query(`SELECT * FROM wal_events
            WHERE id > $1
              AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND (payload->>'run_id')::int = $2
+             AND (payload->>'run_id')::bigint = $2
              AND workspace_id = $3
            ORDER BY id ASC
            LIMIT 50`, [lastSeenId, runId, resolvedWsId]);
@@ -4360,7 +4349,7 @@ router.get('/stream', async (req: Request, res: Response) => {
         events = await query(`SELECT * FROM wal_events
            WHERE id > $1
              AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND (payload->>'run_id')::int = $2
+             AND (payload->>'run_id')::bigint = $2
            ORDER BY id ASC
            LIMIT 50`, [lastSeenId, runId]);
       } else if (resolvedWsId) {
@@ -4600,8 +4589,7 @@ router.get('/runs/:runId/commits', async (req: Request, res: Response) => {
 
     res.json({ commits, branchName: branchName || null });
   } catch (error: any) {
-    logger.error('[Pipeline] Get run commits error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Get run commits');
   }
 });
 
@@ -4758,8 +4746,54 @@ router.get('/runs/:runId/skills', async (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    logger.error('[Pipeline] Get run skills error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Pipeline] Get run skills');
+  }
+});
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/wal-events:
+ *   get:
+ *     summary: Get all WAL events for a specific run
+ *     tags: [Pipeline]
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Array of WAL events ordered by id ASC
+ *       400:
+ *         description: Invalid runId
+ */
+router.get('/runs/:runId/wal-events', async (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      throw new ValidationError('Invalid runId');
+    }
+
+    const events = await query<{
+      id: number;
+      ts: string;
+      event_type: string;
+      workspace_id: string | null;
+      spec_id: string | null;
+      story_id: string | null;
+      actor: string;
+      payload: string | null;
+    }>(
+      `SELECT id, ts, event_type, workspace_id, spec_id, story_id, actor, payload
+       FROM wal_events
+       WHERE (payload->>'run_id')::bigint = $1
+       ORDER BY id ASC`,
+      [runId]
+    );
+
+    res.json({ events });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] Get run WAL events');
   }
 });
 
@@ -4993,8 +5027,7 @@ router.post('/queue', async (req: Request, res: Response) => {
       message: `Run queued, position ${queuePosition}`,
     });
   } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    res.status(500).json({ error: msg });
+    handleRouteError(res, err, '[Pipeline] Queue run');
   }
 });
 
@@ -5061,7 +5094,7 @@ router.get('/runs/:id/dlq', async (req: Request, res: Response) => {
     ).catch(() => undefined);
 
     if (!row) {
-      throw new NotFoundError('Run not in DLQ');
+      res.status(404).json({ error: 'Run not in DLQ' });
       return;
     }
 
@@ -5077,8 +5110,7 @@ router.get('/runs/:id/dlq', async (req: Request, res: Response) => {
       originalPayload: row.data,
     });
   } catch (err) {
-    logger.error({ err, runId }, '[Pipeline] DLQ lookup error');
-    res.status(500).json({ error: (err as Error).message });
+    handleRouteError(res, err, '[Pipeline] DLQ lookup');
   }
 });
 
@@ -5222,8 +5254,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
 
     res.status(201).json({ ok: true, runId: newRunId, originalRunId });
   } catch (err) {
-    logger.error({ err, originalRunId }, '[Pipeline] DLQ retry error');
-    res.status(500).json({ error: (err as Error).message });
+    handleRouteError(res, err, '[Pipeline] DLQ retry');
   }
 });
 
@@ -5335,7 +5366,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
               pr.spec_path,
               j.created_on::text AS started_at
        FROM   pgboss.job j
-       LEFT   JOIN pipeline_runs pr ON pr.id = (j.data->>'runId')::int
+       LEFT   JOIN pipeline_runs pr ON pr.id = (j.data->>'runId')::bigint
        WHERE  j.name = 'pipeline:run'
          AND  j.state = 'active'`,
     ).catch(() => [] as ActiveJobRow[]);
@@ -5537,8 +5568,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       },
     });
   } catch (error: unknown) {
-    logger.error({ err: error }, '[Pipeline] worker health check error');
-    res.status(500).json({ error: (error as Error).message });
+    handleRouteError(res, error, '[Pipeline] Worker health check');
   }
 });
 
@@ -5599,8 +5629,7 @@ router.post('/orphan-sweep', async (req: Request, res: Response) => {
       count: results.length,
     });
   } catch (error: unknown) {
-    logger.error({ err: error }, '[Pipeline] orphan sweep error');
-    res.status(500).json({ error: (error as Error).message });
+    handleRouteError(res, error, '[Pipeline] Orphan sweep');
   }
 });
 
@@ -5782,8 +5811,7 @@ router.get('/queue/failed-jobs', async (req: Request, res: Response) => {
 
     res.json({ items, total, page, pageSize });
   } catch (error: unknown) {
-    logger.error({ err: error }, '[Pipeline] failed-jobs list error');
-    res.status(500).json({ error: (error as Error).message });
+    handleRouteError(res, error, '[Pipeline] Failed jobs list');
   }
 });
 
@@ -5864,8 +5892,7 @@ router.post('/queue/failed-jobs/:jobId/retry', async (req: Request, res: Respons
     logger.info({ jobId, newJobId, queueName: job.name }, '[Pipeline] failed job re-enqueued');
     res.json({ newJobId, message: 'Job requeued' });
   } catch (error: unknown) {
-    logger.error({ err: error, jobId }, '[Pipeline] failed job retry error');
-    res.status(500).json({ error: (error as Error).message });
+    handleRouteError(res, error, '[Pipeline] Failed job retry');
   }
 });
 
@@ -5970,8 +5997,7 @@ router.get('/queue/health-history', async (req: Request, res: Response) => {
       windowHours: hours,
     });
   } catch (error: unknown) {
-    logger.error({ err: error }, '[Pipeline] queue health history error');
-    res.status(500).json({ error: (error as Error).message });
+    handleRouteError(res, error, '[Pipeline] Queue health history');
   }
 });
 

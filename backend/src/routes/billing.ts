@@ -3,7 +3,9 @@ import Stripe from 'stripe';
 import { query, queryOne, execute } from '../db/index';
 import type { AuthUser } from './auth';
 import { logger } from '../lib/logger';
-import { NotFoundError, ValidationError } from '../lib/errors';
+import { NotFoundError, ValidationError, UnprocessableError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
+import { verifyLicense } from '../lib/license-verifier';
 
 const router = Router();
 
@@ -53,9 +55,20 @@ interface SubscriptionRow {
   status: string;
   current_period_start: string | null;
   current_period_end: string | null;
+  trial_started_at: string | null;
+  trial_ends_at: string | null;
 }
 
 async function getUserPlan(userId: string): Promise<PlanId> {
+  // BL-002: Check for active trial first
+  const trial = await queryOne<{ plan: string }>(
+    `SELECT plan FROM subscriptions
+     WHERE user_id = $1 AND status = 'trialing' AND trial_ends_at > NOW()
+     ORDER BY created_at DESC LIMIT 1`,
+    [userId]
+  );
+  if (trial) return (trial.plan as PlanId) || 'pro';
+
   const row = await queryOne<{ plan: string }>(
     `SELECT plan FROM users WHERE id = $1`,
     [userId]
@@ -115,6 +128,19 @@ router.get('/status', async (req: Request, res: Response) => {
   const sub = await getOrCreateCustomer(authReq.user.id);
   const seats = await getSeatsUsed(authReq.user.id);
 
+  // Fetch license info if present
+  const licenseRow = await queryOne<{ license_key: string | null; activated_at: string | null; expires_at: string | null }>(
+    `SELECT license_key, activated_at, expires_at FROM subscriptions WHERE user_id = $1 AND license_key IS NOT NULL ORDER BY activated_at DESC LIMIT 1`,
+    [authReq.user.id]
+  );
+
+  // BL-002: Compute trial fields
+  const isTrialing = sub?.status === 'trialing' && sub.trial_ends_at != null && new Date(sub.trial_ends_at) > new Date();
+  const trialEndsAt = sub?.trial_ends_at || null;
+  const daysRemaining = isTrialing && trialEndsAt
+    ? Math.max(0, Math.ceil((new Date(trialEndsAt).getTime() - Date.now()) / (1000 * 60 * 60 * 24)))
+    : null;
+
   res.json({
     plan,
     subscription: sub ? {
@@ -123,6 +149,14 @@ router.get('/status', async (req: Request, res: Response) => {
       currentPeriodStart: sub.current_period_start,
       currentPeriodEnd: sub.current_period_end,
       stripeSubscriptionId: sub.stripe_subscription_id,
+    } : null,
+    isTrialing,
+    trialEndsAt,
+    daysRemaining,
+    license: licenseRow?.license_key ? {
+      licenseKey: '...' + licenseRow.license_key.slice(-8),
+      activatedAt: licenseRow.activated_at,
+      expiresAt: licenseRow.expires_at,
     } : null,
     seats,
     plans: {
@@ -204,8 +238,7 @@ router.get('/invoices', async (req: Request, res: Response) => {
       })),
     });
   } catch (err) {
-    logger.error({ err }, 'Failed to fetch invoices');
-    res.status(500).json({ error: 'Failed to fetch invoice history' });
+    handleRouteError(res, err, '[Billing] Fetch invoices');
   }
 });
 
@@ -295,8 +328,7 @@ router.post('/checkout', async (req: Request, res: Response) => {
 
     res.json({ url: session.url });
   } catch (err) {
-    logger.error({ err }, 'Stripe checkout error');
-    res.status(500).json({ error: 'Failed to create checkout session' });
+    handleRouteError(res, err, '[Billing] Stripe checkout');
   }
 });
 
@@ -345,8 +377,7 @@ router.post('/portal', async (req: Request, res: Response) => {
     });
     res.json({ url: session.url });
   } catch (err) {
-    logger.error({ err }, 'Stripe portal error');
-    res.status(500).json({ error: 'Failed to create billing portal session' });
+    handleRouteError(res, err, '[Billing] Stripe portal');
   }
 });
 
@@ -439,6 +470,91 @@ router.get('/quotas', async (req: Request, res: Response) => {
   }));
 
   res.json({ plan, quotas });
+});
+
+// ─── POST /api/billing/activate-license ──────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/billing/activate-license:
+ *   post:
+ *     tags: [Billing]
+ *     summary: Activate a license key
+ *     operationId: activateLicense
+ *     description: Accepts an RS256-signed JWT license key, verifies it, and activates the corresponding plan. Used by both cloud-issued licenses and self-hosted offline activation. Idempotent — activating the same key twice returns success.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [licenseKey]
+ *             properties:
+ *               licenseKey: { type: string, description: "RS256-signed JWT license key" }
+ *     responses:
+ *       200:
+ *         description: License activated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 activated: { type: boolean }
+ *                 plan: { type: string }
+ *                 expiresAt: { type: string, nullable: true }
+ *       422:
+ *         description: Invalid license key
+ */
+router.post('/activate-license', async (req: Request, res: Response) => {
+  const authReq = req as Request & { user: AuthUser };
+  const { licenseKey } = req.body as { licenseKey?: string };
+
+  if (!licenseKey || typeof licenseKey !== 'string') {
+    throw new ValidationError('licenseKey is required');
+  }
+
+  // Verify the JWT license key
+  let payload;
+  try {
+    payload = verifyLicense(licenseKey);
+  } catch (err) {
+    throw new UnprocessableError('Invalid license key');
+  }
+
+  const userId = authReq.user.id;
+  const plan = payload.plan;
+  const expiresAt = payload.exp ? new Date(payload.exp * 1000).toISOString() : null;
+
+  // Upsert subscription row with license info
+  const existing = await queryOne<{ id: string }>(
+    `SELECT id FROM subscriptions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    [userId]
+  );
+
+  if (existing) {
+    await execute(
+      `UPDATE subscriptions
+       SET plan = $1, status = 'active', license_key = $2, activated_at = NOW(), expires_at = $3, updated_at = NOW()
+       WHERE id = $4`,
+      [plan, licenseKey, expiresAt, existing.id]
+    );
+  } else {
+    const id = `sub_license_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    await execute(
+      `INSERT INTO subscriptions (id, user_id, stripe_customer_id, plan, status, license_key, activated_at, expires_at)
+       VALUES ($1, $2, $3, $4, 'active', $5, NOW(), $6)`,
+      [id, userId, 'license', plan, licenseKey, expiresAt]
+    );
+  }
+
+  // Sync user plan
+  await execute('UPDATE users SET plan = $1, updated_at = NOW() WHERE id = $2', [plan, userId]);
+
+  res.json({
+    activated: true,
+    plan,
+    expiresAt,
+  });
 });
 
 // ─── POST /api/billing/webhook (Stripe webhook — no auth) ───────────────────
@@ -588,8 +704,7 @@ webhookRouter.post('/webhook', async (req: Request, res: Response) => {
 
     res.json({ received: true });
   } catch (err) {
-    logger.error({ err }, 'Webhook processing error');
-    res.status(500).json({ error: 'Webhook processing failed' });
+    handleRouteError(res, err, '[Billing] Webhook processing');
   }
 });
 

@@ -7,6 +7,7 @@ import { query, queryOne, execute, transaction } from '../db/index';
 import { getEffectiveUser } from '../lib/get-user';
 import { logger } from '../lib/logger';
 import { ValidationError, AuthError, ConflictError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 import { validateBody } from '../lib/validate';
 
 const router = Router();
@@ -67,8 +68,7 @@ router.get('/me', async (req: Request, res: Response) => {
       avatarUrl: row.avatar_url ?? null,
     });
   } catch (error: any) {
-    logger.error('[Users] Get me error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Users] Get me');
   }
 });
 
@@ -198,8 +198,7 @@ router.get('/me/assigned', async (req: Request, res: Response) => {
 
     res.json({ assignments: Array.from(specMap.values()) });
   } catch (error: any) {
-    logger.error('[Users] Get assignments error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Users] Get assignments');
   }
 });
 
@@ -259,8 +258,7 @@ router.get('/workspace-members', async (req: Request, res: Response) => {
       })),
     });
   } catch (error: any) {
-    logger.error('[Users] List workspace members error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Users] List workspace members');
   }
 });
 

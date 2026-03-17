@@ -34,6 +34,7 @@ import { score as scoreStory, resolveModelId, type ScorerStory } from '../lib/co
 import { gitMapStep, gitReduceStep, getLatestHash } from '../lib/git-hydrator';
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
+import { handleRouteError } from '../lib/async-handler';
 
 /** Fire-and-forget git memory hydration for a workspace.
  *  Called from POST /api/specs/generate when workspace git memory is stale.
@@ -2627,8 +2628,7 @@ router.post('/generate/batch', async (req: Request, res: Response) => {
 
     res.status(201).json({ batchId, briefCount: briefs.length });
   } catch (error: any) {
-    logger.error('[Specs] Batch create error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Batch create');
   }
 });
 
@@ -2703,8 +2703,7 @@ router.get('/generate/batch/:batchId', (req: Request, res: Response) => {
       items,
     });
   } catch (error: any) {
-    logger.error('[Specs] Batch status error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Batch status');
   }
 });
 
@@ -2927,8 +2926,7 @@ router.get('/', async (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(filtered, pagination, { cursorKey: (s) => s.id }));
   } catch (error: any) {
-    logger.error('[Specs] List error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] List');
   }
 });
 
@@ -3066,16 +3064,34 @@ router.get('/kanban', async (req: Request, res: Response) => {
 
     const { pendingDir, approvedDir } = specsDirs(workspace.path);
 
-    // Fetch attachment counts for all specs
-    const attachmentRows = await query<{ spec_id: string; cnt: string }>(
-      `SELECT spec_id, COUNT(*)::text AS cnt FROM spec_attachments GROUP BY spec_id`
+    // ── Batch DB pre-fetches (replaces per-spec queries in buildSummary loops) ──
+
+    // Tags: one query for all specs in this workspace
+    const allTagRows = await query<{ spec_id: string; tag_name: string }>(
+      `SELECT spec_id, tag_name FROM spec_tags WHERE workspace_id = $1 ORDER BY tag_name`,
+      [workspaceId]
     );
-    const attachmentCountBySpecId = new Map<string, number>();
-    for (const row of attachmentRows) {
-      attachmentCountBySpecId.set(row.spec_id, parseInt(row.cnt, 10));
+    const tagsBySpecId = new Map<string, string[]>();
+    for (const row of allTagRows) {
+      const arr = tagsBySpecId.get(row.spec_id) ?? [];
+      arr.push(row.tag_name);
+      tagsBySpecId.set(row.spec_id, arr);
     }
 
-    // Fetch spec sources (e.g. 'github' for webhook-discovered specs)
+    // Assignees: one query for all specs in this workspace
+    const allAssigneeRows = await query<{ spec_id: string; id: string; display_name: string; email: string; avatar_url: string | null }>(
+      `SELECT sa.spec_id, u.id, u.display_name, u.email, u.avatar_url
+       FROM spec_assignments sa
+       JOIN users u ON u.id = sa.assignee_id
+       WHERE sa.workspace_id = $1 AND sa.story_id = ''`,
+      [workspaceId]
+    );
+    const assigneeBySpecId = new Map<string, { id: string; displayName: string; email: string; avatarUrl: string | null }>();
+    for (const row of allAssigneeRows) {
+      assigneeBySpecId.set(row.spec_id, { id: row.id, displayName: row.display_name, email: row.email, avatarUrl: row.avatar_url });
+    }
+
+    // Spec sources (e.g. 'github' for webhook-discovered specs)
     const sourceRows = await query<{ spec_id: string; source: string }>(
       `SELECT spec_id, source FROM spec_sources WHERE workspace_id = $1`,
       [workspaceId]
@@ -3085,25 +3101,27 @@ router.get('/kanban', async (req: Request, res: Response) => {
       sourceBySpecId.set(row.spec_id, row.source);
     }
 
-    // Build summaries from filesystem
+    // Build summaries from filesystem — skip per-spec DB calls (tags/assignees pre-fetched above)
     const pendingSpecs: KanbanSpec[] = [];
     for (const file of safeReaddir(pendingDir)) {
       try {
         const filePath = path.join(pendingDir, file);
         const content = parseSpecFile(filePath);
-        const s = await buildSummary(filePath, file, 'pending', workspace.path, workspaceId);
+        const s = await buildSummary(filePath, file, 'pending', workspace.path);
+        const specId = s.id;
         pendingSpecs.push({
-          id: s.id,
+          id: specId,
           title: s.specName,
           storyCount: s.storyCount,
           generatedAt: s.generatedAt,
           readinessPercent: s.readinessPercent,
-          tags: s.tags,
+          tags: tagsBySpecId.get(specId) ?? [],
+          ...(assigneeBySpecId.has(specId) ? { assignee: assigneeBySpecId.get(specId) } : {}),
           reviewStatus: s.reviewStatus,
           storyTitles: s.storyTitles,
           model: content.model,
-          attachmentCount: attachmentCountBySpecId.get(s.id) ?? 0,
-          source: sourceBySpecId.get(s.id),
+          attachmentCount: 0, // populated after attachment batch query below
+          source: sourceBySpecId.get(specId),
         });
       } catch { /* skip unparseable */ }
     }
@@ -3115,25 +3133,42 @@ router.get('/kanban', async (req: Request, res: Response) => {
       try {
         const filePath = path.join(approvedDir, file);
         const content = parseSpecFile(filePath);
-        const s = await buildSummary(filePath, file, 'approved', workspace.path, workspaceId);
+        const s = await buildSummary(filePath, file, 'approved', workspace.path);
+        const specId = s.id;
         const stories = (content.userStories ?? []) as { passes?: boolean }[];
         const allPassed = stories.length > 0 && stories.every(st => st.passes === true);
-        allStoriesPassedBySlug.set(s.id, allPassed);
+        allStoriesPassedBySlug.set(specId, allPassed);
         approvedSpecs.push({
-          id: s.id,
+          id: specId,
           title: s.specName,
           storyCount: s.storyCount,
           generatedAt: s.generatedAt,
           approvedAt: s.approvedAt,
           readinessPercent: s.readinessPercent,
-          tags: s.tags,
+          tags: tagsBySpecId.get(specId) ?? [],
+          ...(assigneeBySpecId.has(specId) ? { assignee: assigneeBySpecId.get(specId) } : {}),
           reviewStatus: s.reviewStatus,
           storyTitles: s.storyTitles,
           model: content.model,
-          attachmentCount: attachmentCountBySpecId.get(s.id) ?? 0,
-          source: sourceBySpecId.get(s.id),
+          attachmentCount: 0, // populated after attachment batch query below
+          source: sourceBySpecId.get(specId),
         });
       } catch { /* skip unparseable */ }
+    }
+
+    // Attachment counts: filter by the spec IDs we actually loaded (avoids full table scan)
+    const allSpecIds = [...pendingSpecs.map(s => s.id), ...approvedSpecs.map(s => s.id)];
+    if (allSpecIds.length > 0) {
+      const attachmentRows = await query<{ spec_id: string; cnt: string }>(
+        `SELECT spec_id, COUNT(*)::text AS cnt FROM spec_attachments WHERE spec_id = ANY($1) GROUP BY spec_id`,
+        [allSpecIds]
+      );
+      const attachmentCountBySpecId = new Map<string, number>();
+      for (const row of attachmentRows) {
+        attachmentCountBySpecId.set(row.spec_id, parseInt(row.cnt, 10));
+      }
+      for (const s of pendingSpecs) s.attachmentCount = attachmentCountBySpecId.get(s.id) ?? 0;
+      for (const s of approvedSpecs) s.attachmentCount = attachmentCountBySpecId.get(s.id) ?? 0;
     }
 
     // Detect active runs and completed runs per spec
@@ -3162,23 +3197,27 @@ router.get('/kanban', async (req: Request, res: Response) => {
       manualDoneSlugs.add(row.spec_id);
     }
 
-    // Fetch story pass/fail counts for approved specs with runs
-    const approvedSlugs = approvedSpecs.map(s => s.id);
+    // Batch story pass/fail counts — one query instead of 2×N per approved spec
     const storyProgress = new Map<string, number>();
     const storyFailed = new Map<string, number>();
-    if (approvedSlugs.length > 0) {
-      for (const slug of approvedSlugs) {
-        // Find latest run for this spec
-        const latestRun = runs.find(r =>
-          r.spec_path.replace(/^.*\//, '').replace(/\.json$/, '') === slug
-        );
-        if (latestRun) {
-          const passCount = await queryOne(`SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1 AND status = 'pass'`, [latestRun.id]) as { cnt: number } | undefined;
-          if (passCount) storyProgress.set(slug, passCount.cnt);
-          const failCount = await queryOne(`SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1 AND status = 'fail'`, [latestRun.id]) as { cnt: number } | undefined;
-          if (failCount) storyFailed.set(slug, failCount.cnt);
-        }
-      }
+    const storyCountRows = await query<{ spec_path: string; pass_count: string; fail_count: string }>(
+      `SELECT latest.spec_path,
+              COUNT(*) FILTER (WHERE sr.status = 'pass') AS pass_count,
+              COUNT(*) FILTER (WHERE sr.status = 'fail') AS fail_count
+       FROM (
+         SELECT DISTINCT ON (spec_path) id, spec_path
+         FROM pipeline_runs
+         WHERE workspace_id = $1
+         ORDER BY spec_path, id DESC
+       ) latest
+       LEFT JOIN story_results sr ON sr.run_id = latest.id
+       GROUP BY latest.spec_path`,
+      [workspaceId]
+    );
+    for (const row of storyCountRows) {
+      const slug = row.spec_path.replace(/^.*\//, '').replace(/\.json$/, '');
+      storyProgress.set(slug, parseInt(row.pass_count, 10));
+      storyFailed.set(slug, parseInt(row.fail_count, 10));
     }
 
     // Bucket into columns:
@@ -3246,8 +3285,7 @@ router.get('/kanban', async (req: Request, res: Response) => {
 
     res.json({ draft, inProgress: filteredInProgress, done, customColumns: customColumnData });
   } catch (error: any) {
-    logger.error('[Specs] Kanban grouping error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Kanban grouping');
   }
 });
 
@@ -4288,8 +4326,7 @@ router.get('/archive', async (req: Request, res: Response) => {
     // Paginate
     res.json(paginateArray(filtered, pagination, { cursorKey: (s) => s.id }));
   } catch (error: any) {
-    logger.error({ err: error }, '[Specs] Archive error');
-    res.status(500).json({ error: 'Internal server error' });
+    handleRouteError(res, error, '[Specs] Archive');
   }
 });
 
@@ -4394,8 +4431,7 @@ router.get('/search/stories', async (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(results, pagination));
   } catch (error: any) {
-    logger.error('[Specs] Story search error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Story search');
   }
 });
 
@@ -4613,8 +4649,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
       } : {}),
     });
   } catch (error: any) {
-    logger.error('[Specs] Add stories error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Add stories');
   }
 });
 
@@ -4710,8 +4745,7 @@ router.get('/:specId/versions', async (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(versions, pagination));
   } catch (error: any) {
-    logger.error('[Specs] Versions error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Versions');
   }
 });
 
@@ -4804,8 +4838,7 @@ router.get('/:specId/diff', async (req: Request, res: Response) => {
       diff,
     });
   } catch (error: any) {
-    logger.error('[Specs] Diff error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Diff');
   }
 });
 
@@ -4922,8 +4955,7 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
 
     res.json({ ok: true, newVersion, restoredFromVersion: versionNum });
   } catch (error: any) {
-    logger.error('[Specs] Restore version error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Restore version');
   }
 });
 
@@ -5090,8 +5122,7 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
 
     res.json({ ok: true, story });
   } catch (error: any) {
-    logger.error('[Specs] Toggle exclude error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Toggle exclude');
   }
 });
 
@@ -5234,8 +5265,7 @@ router.put('/:specId/stories/:storyId', async (req: Request, res: Response) => {
 
     res.json({ ok: true, story: stories[storyIndex], version });
   } catch (error: any) {
-    logger.error('[Specs] Story update error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Story update');
   }
 });
 
@@ -5360,8 +5390,7 @@ router.delete('/:specId/stories/:storyId', async (req: Request, res: Response) =
 
     res.json({ ok: true, deletedStory, version, remainingCount: reindexed.length });
   } catch (error: any) {
-    logger.error('[Specs] Story delete error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Story delete');
   }
 });
 
@@ -5508,8 +5537,7 @@ Rewrite the story following the user instructions. Keep the same scope unless to
       usage: llmResult.usage,
     });
   } catch (error: any) {
-    logger.error('[Specs] Story rewrite error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Story rewrite');
   }
 });
 
@@ -5572,8 +5600,7 @@ router.get('/tags/autocomplete', async (req: Request, res: Response) => {
 
     res.json({ tags: rows.map(r => ({ name: r.tag_name, count: r.count })) });
   } catch (error: any) {
-    logger.error('[Specs] Tag autocomplete error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Tag autocomplete');
   }
 });
 
@@ -5635,8 +5662,7 @@ router.get('/:specId', async (req: Request, res: Response) => {
     const stories: any[] = content.userStories ?? content.stories ?? [];
     res.json({ ...content, _status: specStatus, readinessPercent: computeReadiness(stories) });
   } catch (error: any) {
-    logger.error('[Specs] Get error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Get');
   }
 });
 
@@ -5774,8 +5800,7 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
       path: forkFile,
     });
   } catch (error: any) {
-    logger.error('[Specs] Fork error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Fork');
   }
 });
 
@@ -5847,8 +5872,7 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
 
     res.json({ ok: true, approvedPath: approvedFile });
   } catch (error: any) {
-    logger.error('[Specs] Approve error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Approve');
   }
 });
 
@@ -5923,8 +5947,7 @@ router.post('/:specId/reject', async (req: Request, res: Response) => {
 
     res.json({ ok: true });
   } catch (error: any) {
-    logger.error('[Specs] Reject error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Reject');
   }
 });
 
@@ -5973,7 +5996,7 @@ router.get('/:specId/generation-log', async (req: Request, res: Response) => {
 
     res.json(log);
   } catch (err: any) {
-    res.status(500).json({ error: err.message || 'Failed to fetch generation log' });
+    handleRouteError(res, err, '[Specs] Generation log');
   }
 });
 
@@ -6175,8 +6198,7 @@ router.get('/:specId/check', async (req: Request, res: Response) => {
       stats: { totalStories, avgACCount, maxDependencyDepth },
     });
   } catch (error: any) {
-    logger.error('[Specs] Check error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Check');
   }
 });
 
@@ -6339,8 +6361,7 @@ router.get('/:specId/score', async (req: Request, res: Response) => {
 
     res.json({ specScore, stories: storyScores });
   } catch (error: any) {
-    logger.error('[Specs] Score error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Score');
   }
 });
 
@@ -6416,8 +6437,7 @@ router.delete('/:specId', async (req: Request, res: Response) => {
 
     res.json({ ok: true });
   } catch (error: any) {
-    logger.error('[Specs] Delete error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Delete');
   }
 });
 
@@ -6504,8 +6524,7 @@ router.post('/:specId/request-review', async (req: Request, res: Response) => {
 
     res.json({ ok: true, reviewStatus: 'review_requested' });
   } catch (error: any) {
-    logger.error('[Specs] Request review error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Request review');
   }
 });
 
@@ -6609,8 +6628,7 @@ router.post('/:specId/review', async (req: Request, res: Response) => {
 
     res.json({ ok: true, reviewStatus: newStatus });
   } catch (error: any) {
-    logger.error('[Specs] Review error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Review');
   }
 });
 
@@ -6895,8 +6913,7 @@ router.post('/:specId/stories/bulk', async (req: Request, res: Response) => {
       stories: content.userStories,
     });
   } catch (error: any) {
-    logger.error('[Specs] Bulk story action error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Bulk story action');
   }
 });
 
@@ -7049,8 +7066,7 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
 
     res.json({ nodes, edges, parallelGroups } as GraphResponse);
   } catch (error: any) {
-    logger.error('[Specs] Graph error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Graph');
   }
 });
 
@@ -7263,8 +7279,7 @@ router.post('/:specId/detect-dependencies', async (req: Request, res: Response) 
       tokenUsage: llmResult.usage,
     });
   } catch (error: any) {
-    logger.error('[Specs] Detect dependencies error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Detect dependencies');
   }
 });
 
@@ -7399,8 +7414,7 @@ router.post('/:specId/apply-dependencies', async (req: Request, res: Response) =
 
     res.json({ ok: true, appliedCount });
   } catch (error: any) {
-    logger.error('[Specs] Apply dependencies error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Apply dependencies');
   }
 });
 
@@ -7480,8 +7494,7 @@ router.post('/:specId/tags', async (req: Request, res: Response) => {
 
     res.json({ tags: getSpecTags(specId, workspaceId) });
   } catch (error: any) {
-    logger.error('[Specs] Add tags error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Add tags');
   }
 });
 
@@ -7545,8 +7558,7 @@ router.delete('/:specId/tags/:tag', async (req: Request, res: Response) => {
 
     res.json({ tags: getSpecTags(specId, workspaceId) });
   } catch (error: any) {
-    logger.error('[Specs] Remove tag error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Remove tag');
   }
 });
 
@@ -7622,8 +7634,7 @@ router.get('/:specId/stories/:storyId/commits', async (req: Request, res: Respon
 
     res.json({ commits });
   } catch (error: any) {
-    logger.error('[Specs] Story commits error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Story commits');
   }
 });
 
@@ -7722,8 +7733,7 @@ router.post('/:specId/stories/:storyId/branch', async (req: Request, res: Respon
       checkoutCommand: `git checkout ${branchName}`,
     });
   } catch (error: any) {
-    logger.error('[Specs] Create story branch error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Create story branch');
   }
 });
 
@@ -7876,8 +7886,7 @@ router.post('/:specId/stories/:storyId/pr-body', async (req: Request, res: Respo
 
     res.json({ body });
   } catch (error: any) {
-    logger.error('[Specs] PR body generation error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] PR body generation');
   }
 });
 
@@ -8165,8 +8174,7 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
       errors,
     });
   } catch (error: any) {
-    logger.error('[Specs] GitHub issues import error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] GitHub issues import');
   }
 });
 
@@ -8534,8 +8542,7 @@ router.post('/:specId/import', async (req: Request, res: Response) => {
       errors: importErrors,
     });
   } catch (error: any) {
-    logger.error('[Specs] Issue import error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Issue import');
   }
 });
 
@@ -8611,8 +8618,7 @@ router.get('/:specId/stories/:storyId/comments', async (req: Request, res: Respo
 
     res.json({ comments });
   } catch (error: any) {
-    logger.error('[StoryComments] List error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[StoryComments] List');
   }
 });
 
@@ -8725,8 +8731,7 @@ router.post('/:specId/stories/:storyId/comments', async (req: Request, res: Resp
 
     res.status(201).json(comment);
   } catch (error: any) {
-    logger.error('[StoryComments] Create error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[StoryComments] Create');
   }
 });
 
@@ -8805,8 +8810,7 @@ router.post('/:specId/stories/:storyId/comments/:commentId/resolve', async (req:
 
     res.json(comment);
   } catch (error: any) {
-    logger.error('[StoryComments] Resolve error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[StoryComments] Resolve');
   }
 });
 
@@ -8854,8 +8858,7 @@ router.get('/:specId/comments/counts', async (req: Request, res: Response) => {
 
     res.json({ counts });
   } catch (error: any) {
-    logger.error('[StoryComments] Counts error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[StoryComments] Counts');
   }
 });
 
@@ -8998,8 +9001,7 @@ router.put('/:specId/assign', async (req: Request, res: Response) => {
 
     res.json({ ok: true, assignee: { id: assignee.id, displayName: assignee.display_name, email: assignee.email, avatarUrl: assignee.avatar_url } });
   } catch (error: any) {
-    logger.error('[Specs] Assign spec error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Assign spec');
   }
 });
 
@@ -9150,8 +9152,7 @@ router.put('/:specId/stories/:storyId/assign', async (req: Request, res: Respons
 
     res.json({ ok: true, assignee: { id: assignee.id, displayName: assignee.display_name, email: assignee.email, avatarUrl: assignee.avatar_url } });
   } catch (error: any) {
-    logger.error('[Specs] Assign story error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Assign story');
   }
 });
 
@@ -9239,8 +9240,7 @@ router.get('/:specId/assignments', async (req: Request, res: Response) => {
 
     res.json({ assignments });
   } catch (error: any) {
-    logger.error('[Specs] Get assignments error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Get assignments');
   }
 });
 
@@ -9407,8 +9407,7 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
       suggestions: parsed.suggestions,
     });
   } catch (error: any) {
-    logger.error('[Specs] Enhance criteria error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Enhance criteria');
   }
 });
 
@@ -9515,8 +9514,7 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
       totalCriteria: targetStory.acceptanceCriteria.length,
     });
   } catch (error: any) {
-    logger.error('[Specs] Accept criteria error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Accept criteria');
   }
 });
 
@@ -9843,8 +9841,7 @@ ${storyList}`;
       } : {}),
     });
   } catch (error: any) {
-    logger.error('[Specs] match-skills error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] match-skills');
   }
 });
 
@@ -10016,8 +10013,7 @@ ${storyList}`;
 
     res.json({ suggestions });
   } catch (error: any) {
-    logger.error('[Specs] suggest-models error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] suggest-models');
   }
 });
 
@@ -10208,8 +10204,7 @@ Respond with ONLY valid JSON, no markdown fences, no prose. Format:
 
     res.json(result);
   } catch (error: any) {
-    logger.error('[Specs] validate error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] validate');
   }
 });
 
@@ -10342,8 +10337,7 @@ router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
       stories: result.stories,
     });
   } catch (error: any) {
-    logger.error('[Specs] suggest-skills error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] suggest-skills');
   }
 });
 
@@ -10495,8 +10489,7 @@ router.post('/:specId/fix', async (req: Request, res: Response) => {
 
     res.json({ fixed, changes });
   } catch (error: any) {
-    logger.error('[Specs] fix error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] fix');
   }
 });
 
@@ -10941,7 +10934,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
       storyCount: userStories.length,
     });
   } catch (error: any) {
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Specs] Update spec');
   }
 });
 
@@ -11227,8 +11220,7 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
 
     res.json({ success: true, retrieval_method: highestTier, storiesEnriched });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : String(error);
-    res.status(500).json({ error: msg });
+    handleRouteError(res, error, '[Specs] Enrich context');
   }
 });
 
@@ -11393,8 +11385,7 @@ router.post('/:id/assign-models', async (req: Request, res: Response) => {
       breakdown,
     });
   } catch (error: unknown) {
-    const msg = error instanceof Error ? error.message : String(error);
-    res.status(500).json({ error: msg });
+    handleRouteError(res, error, '[Specs] Assign models');
   }
 });
 

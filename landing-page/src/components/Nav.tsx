@@ -41,8 +41,8 @@ export function Nav() {
                 <div className="hidden md:flex items-center gap-8">
                     <Link href="/" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Home</Link>
                     <Link href="/architecture" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Architecture</Link>
-                    <Link href="/engine" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Engine</Link>
-                    <Link href="/compute" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Compute</Link>
+                    <Link href="/memory" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Memory</Link>
+                    <Link href="/execution" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Execution</Link>
                     <Link href="/pricing" className="text-sm font-medium text-zinc-400 hover:text-white transition-colors">Pricing</Link>
                 </div>
                 <div className="flex items-center gap-4">
