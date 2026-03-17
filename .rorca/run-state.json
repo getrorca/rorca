@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000012,
   "startedAt": "2026-03-17T18:30:24.225Z",
-  "lastUpdatedAt": "2026-03-17T19:08:50.023Z",
+  "lastUpdatedAt": "2026-03-17T19:09:27.868Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-17T19:08:50.023Z",
       "agentType": "claude",
       "elapsedMs": 762339
+    },
+    {
+      "storyId": "US-012",
+      "title": "Jest integration tests for recall route — happy path, 404, and partial failure",
+      "status": "passed",
+      "startedAt": "2026-03-17T19:09:10.994Z",
+      "finishedAt": "2026-03-17T19:09:27.868Z",
+      "agentType": "claude",
+      "elapsedMs": 16874
     }
   ],
   "failedStories": [],
