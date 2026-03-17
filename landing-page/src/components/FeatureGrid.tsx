@@ -1,7 +1,7 @@
 'use client';
 
 import { motion } from 'framer-motion';
-import { Layers, BrainCircuit, LineChart, Network } from 'lucide-react';
+import { Layers, BrainCircuit, LineChart, Network, GitPullRequest, Database } from 'lucide-react';
 import { SiAnthropic, SiOpenai } from 'react-icons/si';
 
 export function FeatureGrid() {
@@ -10,13 +10,13 @@ export function FeatureGrid() {
             <div className="mb-16">
                 <h2 className="text-3xl font-medium tracking-tight text-white mb-4">Orchestrate complexity.</h2>
                 <p className="text-zinc-400 text-lg max-w-2xl">
-                    Rorca isn't just an agent—it's an execution platform. Built to handle massive context windows and parallel processing in a cost-effective way.
+                    Rorca isn't just an agent—it's an execution platform. Spec-driven, GitHub-native, and built to ship production code autonomously.
                 </p>
             </div>
 
             <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
 
-                {/* Large Card: Consolidation Engine */}
+                {/* Large Card: Execution Engines */}
                 <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     whileInView={{ opacity: 1, y: 0 }}
@@ -30,13 +30,12 @@ export function FeatureGrid() {
                         <div className="h-10 w-10 rounded-lg bg-zinc-800/50 border border-white/5 flex items-center justify-center mb-6">
                             <Layers className="w-5 h-5 text-zinc-300" strokeWidth={1.5} />
                         </div>
-                        <h3 className="text-2xl font-medium text-zinc-100 mb-3 tracking-tight">The Unified Orchestration Engine</h3>
+                        <h3 className="text-2xl font-medium text-zinc-100 mb-3 tracking-tight">Three Execution Engines. One Platform.</h3>
                         <p className="text-zinc-400 leading-relaxed text-base max-w-md">
-                            Consolidate Claude Code, OpenCode, and Codex CLI into a single, cohesive workflow. Whether you bring APIs or subscriptions, Rorca coordinates them all flawlessly.
+                            Bring your Claude subscription, OpenCode with any of 75+ models, or Codex CLI with your ChatGPT plan. Every story runs as a fresh isolated subprocess with the full tool set—edit, bash, read, write, glob, grep. No context limits.
                         </p>
                     </div>
 
-                    {/* Visual representation of the tools */}
                     <div className="flex items-center gap-4 mt-auto">
                         <div className="flex items-center gap-2 bg-zinc-950 border border-white/10 px-4 py-2 rounded-full shadow-inner">
                             <SiAnthropic className="w-4 h-4 text-[#d97757]" />
@@ -46,7 +45,6 @@ export function FeatureGrid() {
                             <div className="absolute top-1/2 left-1/2 -translate-x-1/2 -translate-y-1/2 w-1.5 h-1.5 rounded-full bg-accent/50 animate-pulse"></div>
                         </div>
                         <div className="flex items-center gap-2 bg-zinc-950 border border-white/10 px-4 py-2 rounded-full shadow-inner">
-                            {/* OpenCode actual brand mark — dark frame, split inner rect */}
                             <svg className="w-4 h-4" viewBox="0 0 14 18" fill="none" xmlns="http://www.w3.org/2000/svg">
                                 <rect width="14" height="18" fill="#1c1c1c" />
                                 <rect x="3" y="3" width="8" height="5" fill="white" />
@@ -78,11 +76,11 @@ export function FeatureGrid() {
                     </div>
                     <h3 className="text-xl font-medium text-zinc-100 mb-2 tracking-tight">Wave-Parallel Execution</h3>
                     <p className="text-zinc-400 leading-relaxed text-sm">
-                        Agents iterate on all tasks within a spec concurrently across isolated worktrees until absolute completion. Extreme velocity, zero state collision.
+                        Rorca compiles your spec's dependency graph into topological waves. Independent stories run in parallel across isolated git worktrees, auto-merging between waves. A 40-minute sequential spec becomes 12 minutes.
                     </p>
                 </motion.div>
 
-                {/* Small Card: Cost Optimization */}
+                {/* Small Card: Model Cascading */}
                 <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     whileInView={{ opacity: 1, y: 0 }}
@@ -94,13 +92,31 @@ export function FeatureGrid() {
                     <div className="h-10 w-10 rounded-lg bg-zinc-800/50 border border-white/5 flex items-center justify-center mb-6">
                         <LineChart className="w-5 h-5 text-zinc-300" strokeWidth={1.5} />
                     </div>
-                    <h3 className="text-xl font-medium text-zinc-100 mb-2 tracking-tight">Cost-Optimized Routing</h3>
+                    <h3 className="text-xl font-medium text-zinc-100 mb-2 tracking-tight">Model Cascading &amp; FinOps</h3>
                     <p className="text-zinc-400 leading-relaxed text-sm">
-                        Smart delegation. Rorca routes repository reading and globbing to cheaper models, reserving flagship intelligence strictly for high-order logic and coding.
+                        Every story is scored by complexity and assigned Haiku, Sonnet, or Opus automatically. Failures escalate up the tier. Saves 40–60% vs all-flagship baseline. The FinOps dashboard tracks realized savings per run.
                     </p>
                 </motion.div>
 
-                {/* Large Card: Directional Intent & Memory */}
+                {/* Small Card: GitHub Native */}
+                <motion.div
+                    initial={{ opacity: 0, y: 20 }}
+                    whileInView={{ opacity: 1, y: 0 }}
+                    viewport={{ once: true }}
+                    transition={{ duration: 0.5, delay: 0.25 }}
+                    className="group relative bg-surface border border-border rounded-2xl p-8 overflow-hidden transition-colors hover:border-zinc-700 md:col-span-1"
+                >
+                    <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none" />
+                    <div className="h-10 w-10 rounded-lg bg-zinc-800/50 border border-white/5 flex items-center justify-center mb-6">
+                        <GitPullRequest className="w-5 h-5 text-zinc-300" strokeWidth={1.5} />
+                    </div>
+                    <h3 className="text-xl font-medium text-zinc-100 mb-2 tracking-tight">GitHub Native</h3>
+                    <p className="text-zinc-400 leading-relaxed text-sm">
+                        Import GitHub issues directly as specs. Rorca opens a draft PR at run start, posts per-story commit status checks, and converts to a ready-for-review PR on completion—with full run metadata in the description.
+                    </p>
+                </motion.div>
+
+                {/* Large Card: Direction Stack & Memory */}
                 <motion.div
                     initial={{ opacity: 0, y: 20 }}
                     whileInView={{ opacity: 1, y: 0 }}
@@ -112,22 +128,37 @@ export function FeatureGrid() {
                     <div className="h-10 w-10 rounded-lg bg-zinc-800/50 border border-white/5 flex items-center justify-center mb-6">
                         <BrainCircuit className="w-5 h-5 text-zinc-300" strokeWidth={1.5} />
                     </div>
-                    <h3 className="text-2xl font-medium text-zinc-100 mb-3 tracking-tight">Directional Intent & Episodic Memory</h3>
+                    <h3 className="text-2xl font-medium text-zinc-100 mb-3 tracking-tight">5-Layer Direction Stack &amp; Episodic Memory</h3>
                     <p className="text-zinc-400 leading-relaxed text-base max-w-lg mb-6">
-                        You are always in control. Context engineering structures intent, while manual user intervention checkpoints guarantee precision. Persistent episodic memory ensures the orchestrator never loses context—even in massive mono-repos.
+                        L1 global principles → L2 domain conventions → L3 project brief → L4 spec context → L5 story annotations. Every story inherits the full cascade. Post-run memory synthesis extracts architectural decisions, bug patterns, and conventions into a pgvector-indexed ledger—semantically searched and injected per story.
                     </p>
 
-                    {/* Visual abstract timeline */}
                     <div className="flex items-center w-full h-12 rounded-lg bg-zinc-950/50 border border-white/5 px-4 overflow-hidden relative">
                         <div className="w-2 h-2 rounded-full bg-zinc-500 z-10"></div>
                         <div className="flex-grow h-[1px] bg-white/10 z-0"></div>
                         <div className="w-3 h-3 rounded-full bg-accent z-10 shadow-[0_0_10px_rgba(139,92,246,0.8)]"></div>
                         <div className="flex-grow h-[1px] bg-white/10 z-0"></div>
                         <div className="w-2 h-2 rounded-full bg-zinc-500 z-10"></div>
-
-                        {/* Sweeping scanline effect */}
                         <div className="absolute top-0 bottom-0 w-24 bg-gradient-to-r from-transparent via-accent/20 to-transparent -translate-x-full animate-[text-shimmer_3s_infinite]" />
                     </div>
+                </motion.div>
+
+                {/* Small Card: Knowledge Graph */}
+                <motion.div
+                    initial={{ opacity: 0, y: 20 }}
+                    whileInView={{ opacity: 1, y: 0 }}
+                    viewport={{ once: true }}
+                    transition={{ duration: 0.5, delay: 0.35 }}
+                    className="group relative bg-surface border border-border rounded-2xl p-8 overflow-hidden transition-colors hover:border-zinc-700 md:col-span-1"
+                >
+                    <div className="absolute inset-0 bg-gradient-to-br from-white/5 to-transparent opacity-0 group-hover:opacity-100 transition-opacity duration-500 pointer-events-none" />
+                    <div className="h-10 w-10 rounded-lg bg-zinc-800/50 border border-white/5 flex items-center justify-center mb-6">
+                        <Database className="w-5 h-5 text-zinc-300" strokeWidth={1.5} />
+                    </div>
+                    <h3 className="text-xl font-medium text-zinc-100 mb-2 tracking-tight">Knowledge Graph</h3>
+                    <p className="text-zinc-400 leading-relaxed text-sm">
+                        Apache AGE maps relationships between specs, stories, files, and memories. Tiered retrieval: CAG (0ms cache) → RAG (pgvector cosine similarity) → Graph (relationship traversal). Context that gets smarter with every run.
+                    </p>
                 </motion.div>
 
             </div>

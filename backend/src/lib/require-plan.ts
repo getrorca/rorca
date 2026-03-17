@@ -19,6 +19,15 @@ interface QuotaRow {
 const _PLAN_TIER: Record<string, number> = { free: 0, solo: 1, pro: 2, team: 3 };
 
 async function getUserPlan(userId: string): Promise<PlanId> {
+  // BL-002: Check for active trial first
+  const trial = await queryOne<{ plan: string; trial_ends_at: string }>(
+    `SELECT plan, trial_ends_at FROM subscriptions
+     WHERE user_id = $1 AND status = 'trialing' AND trial_ends_at > NOW()
+     ORDER BY created_at DESC LIMIT 1`,
+    [userId]
+  );
+  if (trial) return (trial.plan as PlanId) || 'pro';
+
   const row = await queryOne<{ plan: string }>('SELECT plan FROM users WHERE id = $1', [userId]);
   return (row?.plan as PlanId) || 'free';
 }
@@ -94,6 +103,25 @@ export function requirePlan(feature: string) {
     try {
       const user = await getEffectiveUser(req);
       const userId = user?.id || 'local-admin';
+
+      // BL-002: Check for expired trial before plan resolution
+      const expiredTrial = await queryOne<{ trial_ends_at: string }>(
+        `SELECT trial_ends_at FROM subscriptions
+         WHERE user_id = $1 AND status = 'trialing' AND trial_ends_at <= NOW()
+         LIMIT 1`,
+        [userId]
+      );
+      if (expiredTrial) {
+        res.status(402).json({
+          error: 'Trial expired',
+          feature,
+          currentPlan: 'free',
+          requiredPlan: 'pro',
+          trialExpired: true,
+        });
+        return;
+      }
+
       const plan = await getUserPlan(userId);
       const limit = await getQuotaLimit(plan, feature);
 

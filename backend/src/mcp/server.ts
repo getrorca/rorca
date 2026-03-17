@@ -3244,7 +3244,7 @@ server.registerTool(
 server.registerTool(
   'rorca_dump',
   {
-    description: 'Complete unfiltered brain export — returns ALL memories, raw direction layers (L1-L3), full skill content (no truncation), schema snapshot, last 20 pipeline runs with story aggregation, and active runs. No token budget, no RAG filtering, no LIMIT clauses. Use this when you need the entire workspace context without any filtering.',
+    description: 'Unfiltered brain export — returns the complete workspace brain with no token budget, no RAG filtering, and no LIMIT clauses. ALL memories (WHERE deleted_at IS NULL), ALL direction layers (L1-L3 raw content, not synthesized), ALL installed skills with full markdown content (no truncation), full schema_snapshot, full git_memory, last 20 pipeline runs with story result aggregation, and full workspace metadata.',
     inputSchema: {
       workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces or settings)'),
     },

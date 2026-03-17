@@ -1151,9 +1151,9 @@ Phase 6 — React Native Mobile (after cloud)
 
 **The brand statement**: "Every story runs as a fresh isolated subprocess with the full tool set — bash, edit, read, write, glob, grep. No context limits. A spec can run forever. That's the Rorca engine."
 
-## Wave-Based Parallel Execution (Future Roadmap)
+## Wave-Based Parallel Execution
 
-**Status**: Not built. Sequential execution is default for V1. Wave = opt-in V2 feature.
+**Status**: Built. Wave parallel is opt-in per run (toggle in spec detail slide-over). Sequential is still the default.
 
 **The idea**: Instead of running stories one-by-one, compile the `dependsOn` DAG into topological wave groups. Each wave runs its stories in parallel git worktrees, then auto-merges before the next wave starts.
 
@@ -1164,16 +1164,7 @@ Wave 2: US-006 → 1 worktree → merge → done
 Sequential: 40 min total  →  Wave parallel: ~12 min (3.3x speedup on 3-wave spec)
 ```
 
-**What needs to be built** (future `rorca-wave-execution` spec):
-1. Wave compiler — topological sort of `dependsOn` DAG into wave groups (~50 lines)
-2. Wave orchestrator — spawn N parallel subprocesses, one per story per wave
-3. File-touch predictor — pre-analyze stories to detect shared-file conflicts before wave starts
-4. Auto-merge sequence — merge each wave's worktrees in sequence; use Haiku to resolve conflicts
-5. `.rorca/config.json` toggle: `execution.waveParallelism: false` (default) → `true` to enable
-
-**Why not V1**: Shared filesystem race conditions. Two stories editing the same file simultaneously cause merge conflicts. The file-touch predictor + auto-merge resolves most, but adds complexity. Sequential is safer and simpler for initial launch. Wave stays opt-in.
-
-**Trigger**: Build this spec after `rorca-integrations` ships. Requires worktrees (already built) + file-touch predictor (new). Infrastructure is 80% there.
+**How it works**: Wave compiler does a topological sort of the `dependsOn` DAG into wave groups. Each wave runs its stories in parallel git worktrees. Auto-merge fires after each wave before the next starts. Configurable max parallelism (default 20). Toggle visible in the spec detail slide-over — shows wave breakdown before you run.
 
 
 ---
@@ -1338,27 +1329,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
-> Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
-
-## 2026-03-12 [Decision] rorca-ensure-postgres completed — zero-prereq Postgres provisioning in bin/rorca.ts
-> Rule: bin/rorca.ts now includes a full ensurePostgres() function. On first run, it downloads Postgres 16 binaries from zonkyio/embedded-postgres-binaries, extracts, runs initdb, starts pg_ctl on port 5433, creates rorca user and database. No Docker required. DATABASE_URL env var bypasses this entirely (preserves Docker workflow). --no-postgres flag also skips it. Postgres is stopped on SIGINT/SIGTERM via stopManagedPostgres().
-
-## 2026-03-12 [Bug Fix] tsx watch restarts backend during parallel runs → resilient-post retries exhaust
-> Rule: When a fast worktree run auto-merges into main, tsx watch detects the file changes and restarts the backend (5-10s TypeScript recompile). If resilient-post.ts retry window is shorter than the restart time, execution engine can't report story results and the run shows as failed. Fix: raise POST_MAX_RETRIES to 10 and POST_RETRY_DELAY_MS to 3000 (30s coverage) in backend/src/lib/resilient-post.ts.
-
-## 2026-03-12 [Decision] Distribution format: curl|sh for launch, native installers deferred
-> Rule: Use `curl -fsSL https://get.rorca.app | sh` (macOS/Linux) + PowerShell equivalent (Windows) for launch distribution. Do NOT build .pkg (macOS) or .exe (Windows) installers yet — they require code signing certs (~$400/yr) and unsigned installers trigger OS security warnings (Gatekeeper, SmartScreen) which is worse UX than curl|sh. Native installers and Homebrew tap (`brew install getrorca/tap/rorca`) are deferred until there's user demand.
-
-## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
-> Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
-
-## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
-> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
-
-## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
-> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
-
 ## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
 > Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
 
@@ -1398,69 +1368,29 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
+## 2026-03-15 [Bug Fix] Worker never promoted queued runs — advanceQueue() missing from worker.ts
+> Rule: advanceQueue() must be called after EVERY run completion path in worker.ts (main exit, spawn error, retry exit, retry spawn error, stale job recovery, orphan sweep, state reconciliation). Without it, queued runs sit forever until state_reconciliation kills them.
+
+## 2026-03-15 [Bug Fix] reconcileState() killed legitimate queued runs — 'queued' removed from Case A query
+> Rule: reconcileState() Case A must only check status='running' (not 'queued'). Queued runs intentionally have no pg-boss job — they are managed by advanceQueue() which promotes them when the active run completes. Including 'queued' in the NOT EXISTS check causes reconciliation to mark every queued run as failed after 60 seconds.
+
+## 2026-03-15 [Bug Fix] pipeline.ts merge conflicts resolved — queue-observability pickup latency kept
+> Rule: The /api/pipeline/worker/health endpoint uses individual CountRow/AgeRow/QueueRow/LatencyRow queries (not a single QueueStatsRow IIFE). The pickup latency metrics (avg/p50/p95/max over 24h rolling window for pipeline:run + pipeline:retry) are part of the queue-observability spec and must be preserved in any future merge.
+
+## 2026-03-15 [Architecture] Run queue lifecycle: queued runs have NO pg-boss job until promoted
+> Rule: When a run is queued (queue:true in trigger body while another run is active), pipeline.ts creates a pipeline_runs row with status='queued' and queue_position but does NOT call boss.send(). The pg-boss job is only created later when advanceQueue() fires POST /api/pipeline/trigger with queuedRunId, which promotes the existing row and sends the boss job. Any code that checks for 'stuck' runs must account for this: queued runs without pg-boss jobs are normal, not orphaned.
+
+## 2026-03-16 [Bug Fix] payload::text LIKE queries cause pool exhaustion under wave parallelism
+> Rule: Never use `payload::text LIKE '%"run_id":N%'` on wal_events. Always use `(payload->>'run_id')::int = $N` — JSONB accessor is 10x faster and doesn't cause full table scans. Critical under wave parallelism (18+ concurrent SSE connections each polling WAL).
+
+## 2026-03-16 [Bug Fix] specs.ts u.name column does not exist — users table uses display_name
+> Rule: The `users` table column is `display_name`, not `name`. Any JOIN query referencing `u.name` will crash with 'column u.name does not exist'. The go-to-market spec run introduced this bug in the spec_attachments query at specs.ts:9970.
+
+## 2026-03-16 [Gotcha] unhandledRejection in server.ts kills entire process including API
+> Rule: The worker's unhandledRejection handler triggers graceful shutdown of the entire Node process. When server.ts and worker code share a process (via `npm run dev` / concurrently), ANY unhandled promise rejection — even a transient DB connection timeout — kills the API server too. DB queries in setInterval callbacks MUST be wrapped in try-catch.
+
 Follow this workflow for implementation:
-## Agent Role: Frontend
-
-
-## Skill: react-review (relevance: 7)
----
-name: react-review
-description: Review React components for best practices and performance issues
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers
-  category: development
----
-
-# React Review Skill
-
-Review React components for best practices, performance issues, and common patterns.
-
-## When to use me
-
-Use this skill when:
-- Reviewing React component code
-- Optimizing component performance
-- Checking for React best practices
-- Refactoring legacy components
-- Auditing component architecture
-
-## What I do
-
-- Analyze React components for performance issues (unnecessary re-renders, large bundles)
-- Check for React best practices (hooks usage, prop patterns, state management)
-- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
-- Suggest optimizations (memoization, code splitting, lazy loading)
-- Review TypeScript usage and type safety
-
-## Key Patterns
-
-### Performance
-- Use `React.memo` for components receiving object/function props from parent
-- Memoize expensive calculations with `useMemo`
-- Stabilize callback references with `useCallback`
-- Avoid inline object/array creation in JSX props
-- Use `React.lazy` + `Suspense` for code splitting
-
-### Hooks
-- Always include all dependencies in `useEffect` dependency arrays
-- Never call hooks conditionally or inside loops
-- Extract complex logic into custom hooks
-- Clean up subscriptions and timers in useEffect return
-
-### TypeScript
-- Define explicit interfaces for all component props
-- Use discriminated unions for variant components
-- Prefer `interface` over `type` for component props
-- Use `React.FC` sparingly — prefer explicit return types
-
-## Notes
-
-- Focuses on React 18+ patterns and best practices
-- Considers both class and function components
-- Includes TypeScript and JavaScript variants
-- References official React documentation and community patterns
+## Agent Role: Backend Routes
 
 ---
 name: rorca
@@ -1613,24 +1543,10 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-004):
-Create /login and /signup pages in the landing-page/ Next.js app. Both pages use the dark theme (zinc-950 background, violet-500 accent color). Primary auth method: 'Sign in with GitHub' button that initiates GitHub OAuth flow (redirects to github.com/login/oauth/authorize with client_id, redirect_uri, scope=user:email,repo). Secondary: email/password form fields with validation. /signup includes name field. Both pages link to each other ('Already have an account?' / 'Create an account'). Mobile responsive. Loading states on submit.
-
-## Context
-- **Stack context**: This is a Next.js 14 landing page app (`landing-page/` directory), separate from the main React 18 Vite app. Uses Tailwind v4 + Framer Motion. Auth pages should follow Next.js App Router conventions (`app/login/page.tsx`, `app/signup/page.tsx`).
-- **GitHub OAuth flow**: The main app already has GitHub OAuth infrastructure — see `backend/src/routes/github.ts` and `github_connections` table. The landing page OAuth should redirect to `github.com/login/oauth/authorize` with `client_id` from `GITHUB_CLIENT_ID` env var (Next.js: `NEXT_PUBLIC_GITHUB_CLIENT_ID` for client-side access). The `redirect_uri` should point back to a callback route (e.g., `/api/auth/github/callback`) that exchanges the code for a token via the backend.
-- **Auth middleware is globally disabled** in the backend (`server.ts` ~line 78, intentional). The email/password login endpoint (`POST /api/auth/login`) and register endpoint (`POST /api/auth/register`) still work. Default test credentials: `admin@rorca.local` / `rorca123`. Route responses follow `{ error, code, details }` shape on failure.
-- **Theme tokens**: zinc-950 background and violet-500 accent are landing page specific — do NOT import or reference the main Vite app's Tailwind config. The landing page has its own `tailwind.config.ts`. Ensure dark mode classes are consistent with existing landing page sections.
-- **Validation approach**: Use client-side validation only for these static pages (no zod dependency needed in the landing page). Standard HTML5 validation + React state for inline error messages. Keep it simple — no over-engineering with form libraries unless already in `landing-page/package.json`.
-- **Gotcha — env var fallback**: AC requires hiding the GitHub OAuth button when `GITHUB_CLIENT_ID` is missing. In Next.js, env vars prefixed with `NEXT_PUBLIC_` are inlined at build time. If the var is missing at build time, the button must be conditionally rendered based on the value being truthy (not just checking `process.env` at runtime).
-- **Loading/error states**: Use Framer Motion for button spinner transitions (already a dependency). Error messages render below the form, not as toast notifications — the landing page likely doesn't have the main app's `ToastContext`. Keep error UI self-contained within each page component.
-- **Mobile responsive**: Landing page already uses responsive Tailwind classes. Auth pages should use `max-w-md mx-auto` centered card layout, full-width on mobile (`px-4 sm:px-0`). Test at 375px viewport minimum.
+Add the health section to the recall route. When `includeHealth` query param is true (default), call `echolocate()` from `backend/src/lib/workspace-echolocation.ts` with the workspace filesystem path. Wrap the call in a try-catch — if echolocation fails (e.g., workspace path doesn't exist on disk), set health to null and continue returning other sections (partial failure tolerance). The health section includes: score (0-100), detectedStack (array of framework/language/tool strings), contextFiles (object with claudeMd, agentsMd, memoryMd, rorcaConfig — each with exists boolean and lineCount number), monorepoApps (array if detected), suggestions (actionable improvement strings).
 
 Acceptance Criteria:
-- /login page renders with GitHub OAuth button as primary CTA and email/password form as secondary
-- /signup page renders with GitHub OAuth button, name/email/password fields, and link to /login
-- GitHub OAuth button redirects to github.com/login/oauth/authorize with correct query params (client_id from env, redirect_uri, scope=user:email,repo)
-- Pages use zinc-950 background and violet-500 accent consistent with landing page theme
-- Form validation shows inline errors for empty/invalid fields before submission (e.g., 'Email is required', 'Password must be at least 8 characters')
-- If GITHUB_CLIENT_ID env var is missing, the GitHub OAuth button is hidden and only email/password form is shown (empty state fallback)
-- While OAuth redirect or form submission is in progress, the submit button shows a spinner and is disabled to prevent double-submit (loading state)
-- If login fails with 401, an error toast shows 'Invalid email or password' below the form; if signup fails with 409, shows 'Account already exists' (error states)
+- GET /api/recall?workspaceId=rorcha returns health object with score (number 0-100), detectedStack (string[]), contextFiles (object), suggestions (string[])
+- GET /api/recall?workspaceId=rorcha&includeHealth=false returns health as null and skips echolocation entirely
+- If workspace path does not exist on disk, health is null but response still returns 200 with all other sections populated
+- contextFiles sub-object includes claudeMd, agentsMd, memoryMd, rorcaConfig — each with exists (boolean) and lineCount (number)

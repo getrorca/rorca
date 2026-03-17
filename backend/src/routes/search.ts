@@ -9,6 +9,7 @@ import { Router, Request, Response } from 'express';
 import { hybridSearch, type SearchOptions, type SourceType } from '../lib/search';
 import { logger } from '../lib/logger';
 import { ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -140,8 +141,7 @@ router.get('/', async (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    logger.error({ err: error }, '[Search] Hybrid search error');
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Search] Hybrid search');
   }
 });
 

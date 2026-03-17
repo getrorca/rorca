@@ -12,6 +12,7 @@ import type { GraphDriftReport } from '../lib/graph-drift-detector';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 import { NotFoundError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router({ mergeParams: true });
 
@@ -253,8 +254,7 @@ router.post('/:id/drift/check', async (req: Request, res: Response) => {
 
     res.json({ ok: true, specId, report });
   } catch (err: any) {
-    logger.error({ err, workspaceId, specId }, '[workspace-drift] Drift detection failed');
-    res.status(500).json({ error: 'Drift detection failed', details: err.message });
+    handleRouteError(res, err, '[workspace-drift] Drift detection');
   }
 });
 

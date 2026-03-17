@@ -1151,9 +1151,9 @@ Phase 6 — React Native Mobile (after cloud)
 
 **The brand statement**: "Every story runs as a fresh isolated subprocess with the full tool set — bash, edit, read, write, glob, grep. No context limits. A spec can run forever. That's the Rorca engine."
 
-## Wave-Based Parallel Execution (Future Roadmap)
+## Wave-Based Parallel Execution
 
-**Status**: Not built. Sequential execution is default for V1. Wave = opt-in V2 feature.
+**Status**: Built. Wave parallel is opt-in per run (toggle in spec detail slide-over). Sequential is still the default.
 
 **The idea**: Instead of running stories one-by-one, compile the `dependsOn` DAG into topological wave groups. Each wave runs its stories in parallel git worktrees, then auto-merges before the next wave starts.
 
@@ -1164,16 +1164,7 @@ Wave 2: US-006 → 1 worktree → merge → done
 Sequential: 40 min total  →  Wave parallel: ~12 min (3.3x speedup on 3-wave spec)
 ```
 
-**What needs to be built** (future `rorca-wave-execution` spec):
-1. Wave compiler — topological sort of `dependsOn` DAG into wave groups (~50 lines)
-2. Wave orchestrator — spawn N parallel subprocesses, one per story per wave
-3. File-touch predictor — pre-analyze stories to detect shared-file conflicts before wave starts
-4. Auto-merge sequence — merge each wave's worktrees in sequence; use Haiku to resolve conflicts
-5. `.rorca/config.json` toggle: `execution.waveParallelism: false` (default) → `true` to enable
-
-**Why not V1**: Shared filesystem race conditions. Two stories editing the same file simultaneously cause merge conflicts. The file-touch predictor + auto-merge resolves most, but adds complexity. Sequential is safer and simpler for initial launch. Wave stays opt-in.
-
-**Trigger**: Build this spec after `rorca-integrations` ships. Requires worktrees (already built) + file-touch predictor (new). Infrastructure is 80% there.
+**How it works**: Wave compiler does a topological sort of the `dependsOn` DAG into wave groups. Each wave runs its stories in parallel git worktrees. Auto-merge fires after each wave before the next starts. Configurable max parallelism (default 20). Toggle visible in the spec detail slide-over — shows wave breakdown before you run.
 
 
 ---
@@ -1338,27 +1329,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
-> Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
-
-## 2026-03-12 [Decision] rorca-ensure-postgres completed — zero-prereq Postgres provisioning in bin/rorca.ts
-> Rule: bin/rorca.ts now includes a full ensurePostgres() function. On first run, it downloads Postgres 16 binaries from zonkyio/embedded-postgres-binaries, extracts, runs initdb, starts pg_ctl on port 5433, creates rorca user and database. No Docker required. DATABASE_URL env var bypasses this entirely (preserves Docker workflow). --no-postgres flag also skips it. Postgres is stopped on SIGINT/SIGTERM via stopManagedPostgres().
-
-## 2026-03-12 [Bug Fix] tsx watch restarts backend during parallel runs → resilient-post retries exhaust
-> Rule: When a fast worktree run auto-merges into main, tsx watch detects the file changes and restarts the backend (5-10s TypeScript recompile). If resilient-post.ts retry window is shorter than the restart time, execution engine can't report story results and the run shows as failed. Fix: raise POST_MAX_RETRIES to 10 and POST_RETRY_DELAY_MS to 3000 (30s coverage) in backend/src/lib/resilient-post.ts.
-
-## 2026-03-12 [Decision] Distribution format: curl|sh for launch, native installers deferred
-> Rule: Use `curl -fsSL https://get.rorca.app | sh` (macOS/Linux) + PowerShell equivalent (Windows) for launch distribution. Do NOT build .pkg (macOS) or .exe (Windows) installers yet — they require code signing certs (~$400/yr) and unsigned installers trigger OS security warnings (Gatekeeper, SmartScreen) which is worse UX than curl|sh. Native installers and Homebrew tap (`brew install getrorca/tap/rorca`) are deferred until there's user demand.
-
-## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
-> Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
-
-## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
-> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
-
-## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
-> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
-
 ## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
 > Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
 
@@ -1398,8 +1368,29 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
+## 2026-03-15 [Bug Fix] Worker never promoted queued runs — advanceQueue() missing from worker.ts
+> Rule: advanceQueue() must be called after EVERY run completion path in worker.ts (main exit, spawn error, retry exit, retry spawn error, stale job recovery, orphan sweep, state reconciliation). Without it, queued runs sit forever until state_reconciliation kills them.
+
+## 2026-03-15 [Bug Fix] reconcileState() killed legitimate queued runs — 'queued' removed from Case A query
+> Rule: reconcileState() Case A must only check status='running' (not 'queued'). Queued runs intentionally have no pg-boss job — they are managed by advanceQueue() which promotes them when the active run completes. Including 'queued' in the NOT EXISTS check causes reconciliation to mark every queued run as failed after 60 seconds.
+
+## 2026-03-15 [Bug Fix] pipeline.ts merge conflicts resolved — queue-observability pickup latency kept
+> Rule: The /api/pipeline/worker/health endpoint uses individual CountRow/AgeRow/QueueRow/LatencyRow queries (not a single QueueStatsRow IIFE). The pickup latency metrics (avg/p50/p95/max over 24h rolling window for pipeline:run + pipeline:retry) are part of the queue-observability spec and must be preserved in any future merge.
+
+## 2026-03-15 [Architecture] Run queue lifecycle: queued runs have NO pg-boss job until promoted
+> Rule: When a run is queued (queue:true in trigger body while another run is active), pipeline.ts creates a pipeline_runs row with status='queued' and queue_position but does NOT call boss.send(). The pg-boss job is only created later when advanceQueue() fires POST /api/pipeline/trigger with queuedRunId, which promotes the existing row and sends the boss job. Any code that checks for 'stuck' runs must account for this: queued runs without pg-boss jobs are normal, not orphaned.
+
+## 2026-03-16 [Bug Fix] payload::text LIKE queries cause pool exhaustion under wave parallelism
+> Rule: Never use `payload::text LIKE '%"run_id":N%'` on wal_events. Always use `(payload->>'run_id')::int = $N` — JSONB accessor is 10x faster and doesn't cause full table scans. Critical under wave parallelism (18+ concurrent SSE connections each polling WAL).
+
+## 2026-03-16 [Bug Fix] specs.ts u.name column does not exist — users table uses display_name
+> Rule: The `users` table column is `display_name`, not `name`. Any JOIN query referencing `u.name` will crash with 'column u.name does not exist'. The go-to-market spec run introduced this bug in the spec_attachments query at specs.ts:9970.
+
+## 2026-03-16 [Gotcha] unhandledRejection in server.ts kills entire process including API
+> Rule: The worker's unhandledRejection handler triggers graceful shutdown of the entire Node process. When server.ts and worker code share a process (via `npm run dev` / concurrently), ANY unhandled promise rejection — even a transient DB connection timeout — kills the API server too. DB queries in setInterval callbacks MUST be wrapped in try-catch.
+
 Follow this workflow for implementation:
-## Agent Role: Frontend
+## Agent Role: Backend Routes
 
 ---
 name: rorca
@@ -1552,24 +1543,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-013):
-Search the entire codebase for references to the old GitHub org/repo (sysgazer/rorca or sysgazer/rorcha) and update to getrorca/rorca. Key files: bin/install.sh (curl download URLs), bin/install.ps1 (PowerShell download URLs), any README references, CLAUDE.md references, landing page download links. Ensure the install scripts download from https://github.com/getrorca/rorca/releases/latest/download/<binary-name>. Test both scripts parse the GitHub API response correctly for the new repo path.
-
-## Context
-- **Scope is a global find-and-replace across the entire repo** — use `grep -r 'sysgazer' .` from the repo root to find all occurrences. Key targets: `bin/install.sh`, `bin/install.ps1`, landing page source (`landing-page/src/`), `CLAUDE.md`, any `README.md` files, and potentially `forge/` or `.github/` workflow files. Check for both `sysgazer/rorca` and `sysgazer/rorcha` (historical typo variant).
-- **Install scripts must use the GitHub releases download pattern**: `https://github.com/getrorca/rorca/releases/latest/download/<binary-name>`. If the scripts also call the GitHub API (e.g., to resolve `latest` tag), update those API URLs too: `https://api.github.com/repos/getrorca/rorca/releases/latest`.
-- **Error handling in shell scripts**: The AC requires specific error messages for 404 (release not found) and empty assets. Use `curl -sfL` with HTTP status checking — `curl -w '%{http_code}'` to capture status codes. Exit code 1 on failure. PowerShell equivalent: check `$response.StatusCode` from `Invoke-WebRequest`.
-- **Progress indicator**: `curl --progress-bar` or `curl -#` provides a built-in progress bar for bash. For the specific `Downloading rorca {version} for {platform}... {percent}%` format, you may need `curl -w` with a custom write-out or parse Content-Length and track bytes. PowerShell: use `Invoke-WebRequest` with `-OutFile` and a `Write-Progress` wrapper.
-- **Dry-run flag**: The AC expects `bash bin/install.sh --dry-run` to print URLs without downloading. Add argument parsing (`case "$1" in --dry-run)`) that echoes the resolved download URL and exits 0 without fetching the binary.
-- **Landing page is a separate Next.js app** at `landing-page/` — check `landing-page/src/` for any hardcoded GitHub URLs in components (download buttons, hero sections, footer links). These are likely in JSX/TSX files, not markdown.
-- **Verification is exhaustive**: The AC explicitly requires `grep -r 'sysgazer' .` to return empty. After all edits, run this as a final check. Don't forget hidden files (`.github/`, `.rorca/`), JSON files, and YAML configs that may contain the old org name.
-- **No test infrastructure changes needed** — this is a string replacement + shell script enhancement story. However, if `bin/install.sh` has no `--dry-run` mode yet, that's new functionality to add and manually verify (there's no Jest/Vitest harness for shell scripts).
+Add a rorca_dump MCP tool and corresponding GET /api/recall/dump route that returns the complete, unfiltered brain export with no token budget, no RAG filtering, and no LIMIT clauses. The route reads ALL memories (WHERE deleted_at IS NULL), ALL direction layers (L1-L3 raw content, not synthesized), ALL installed skills with full content (no 200-char preview truncation), full schema_snapshot, full git_memory, last 20 pipeline runs (not 5) with story result aggregation, and full workspace metadata. The route must be added to backend/src/routes/recall.ts alongside the existing recall route. Register rorca_dump in backend/src/mcp/server.ts using server.registerTool() with workspaceId as the only required input (no storyText param). Add rorca_dump to the IDEMPOTENT_TOOLS set. Write a Jest integration test in the recall test file covering the dump happy path, workspace not found (404), and partial DB failure (500). The dump response shape mirrors RecallResponse but omits the meta.tokenEstimate budget enforcement and removes all LIMIT clauses.
 
 Acceptance Criteria:
-- Zero references to 'sysgazer/rorca' or 'sysgazer/rorcha' exist anywhere in the codebase (verified by `grep -r 'sysgazer' .` returning empty)
-- bin/install.sh downloads from github.com/getrorca/rorca/releases/latest/download/
-- bin/install.ps1 downloads from github.com/getrorca/rorca/releases/latest/download/
-- Running `bash bin/install.sh --dry-run` (or equivalent) shows correct getrorca/rorca URLs in output
-- If the GitHub API returns a 404 for the release URL, the install script shows error 'Release not found at getrorca/rorca — check https://github.com/getrorca/rorca/releases for available versions' (error state)
-- Landing page /download links reference getrorca/rorca (not sysgazer) — verified by grep in landing-page/src/
-- If no binary assets exist in the latest release (empty state), the install script shows error 'No binaries found in latest release — check that the release workflow completed' and exits with code 1
-- While the install script is downloading the binary (loading state), it shows a progress indicator: 'Downloading rorca {version} for {platform}... {percent}%' updated every second
+- GET /api/recall/dump?workspaceId=<id> returns HTTP 200 with JSON body containing: ALL memories (no LIMIT, WHERE deleted_at IS NULL only), ALL direction layers L1-L3 as raw content strings (not synthesized), ALL installed skills with FULL markdown content (no 200-char truncation), full schema_snapshot and git_memory strings, last 20 pipeline runs (not 5) with per-story pass/fail/skip counts, workspace metadata, and active/queued runs
+- rorca_dump is registered via server.registerTool() in mcp/server.ts, accepts workspaceId (required string) as the only input param (no storyText, no category, no includeRuns, no includeHealth), is added to IDEMPOTENT_TOOLS, and returns the full dump payload when called
+- GET /api/recall/dump returns 404 with { error: 'Workspace not found' } when the workspaceId does not exist in the workspaces table
+- Jest tests in backend/src/routes/__tests__/recall.test.ts cover: (a) happy-path dump returns all sections with no truncation and skills contain full markdown content, (b) 404 for unknown workspace, (c) partial DB failure still returns 200 with failed sections as null
+- The dump route lives in backend/src/routes/recall.ts alongside the existing recall route — no new route files created. MCP tool registered in backend/src/mcp/server.ts alongside rorca_recall

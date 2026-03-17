@@ -15,6 +15,7 @@ import { query, queryOne, execute } from '../db/index';
 import { discoverConventions } from '../lib/convention-agent';
 import type { ConventionProposal } from '../lib/convention-agent';
 import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -142,8 +143,8 @@ router.post('/discover', async (req: Request, res: Response) => {
       proposal,
       status: 'pending',
     });
-  } catch (err: any) {
-    res.status(500).json({ error: `Convention discovery failed: ${err.message}` });
+  } catch (err: unknown) {
+    handleRouteError(res, err, '[Conventions] Discover');
   }
 });
 

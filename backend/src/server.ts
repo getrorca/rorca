@@ -1,3 +1,6 @@
+// Patch Express 4 to catch async route handler rejections — must be first import
+import './lib/async-handler';
+
 import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';

@@ -6,6 +6,7 @@ import { getBoss } from '../lib/pg-boss';
 import { scheduleName } from '../lib/scheduler';
 import { logger } from '../lib/logger';
 import { NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -70,8 +71,7 @@ router.get('/', async (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(schedules, pagination));
   } catch (error: any) {
-    logger.error('[Schedules] List error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Schedules] List');
   }
 });
 
@@ -167,8 +167,7 @@ router.post('/', async (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    logger.error('[Schedules] Create error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Schedules] Create');
   }
 });
 
@@ -272,8 +271,7 @@ router.patch('/:id', async (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    logger.error('[Schedules] Update error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Schedules] Update');
   }
 });
 
@@ -334,8 +332,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
 
     res.json({ ok: true });
   } catch (error: any) {
-    logger.error('[Schedules] Delete error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Schedules] Delete');
   }
 });
 

@@ -17,6 +17,7 @@ import { queryOne, query } from '../db/index';
 import { loadRorcaConfig } from '../lib/rorca-config';
 import { markWriting } from '../lib/file-watcher';
 import { AuthError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -397,8 +398,8 @@ router.get('/:id/context-files/diff', async (req: Request, res: Response) => {
       hasChanges,
       isTracked: committedContent !== null,
     });
-  } catch {
-    res.status(500).json({ error: 'Failed to compute diff' });
+  } catch (err: unknown) {
+    handleRouteError(res, err, '[ContextFiles] Compute diff');
   }
 });
 

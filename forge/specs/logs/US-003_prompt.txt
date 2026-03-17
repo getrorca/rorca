@@ -1151,9 +1151,9 @@ Phase 6 — React Native Mobile (after cloud)
 
 **The brand statement**: "Every story runs as a fresh isolated subprocess with the full tool set — bash, edit, read, write, glob, grep. No context limits. A spec can run forever. That's the Rorca engine."
 
-## Wave-Based Parallel Execution (Future Roadmap)
+## Wave-Based Parallel Execution
 
-**Status**: Not built. Sequential execution is default for V1. Wave = opt-in V2 feature.
+**Status**: Built. Wave parallel is opt-in per run (toggle in spec detail slide-over). Sequential is still the default.
 
 **The idea**: Instead of running stories one-by-one, compile the `dependsOn` DAG into topological wave groups. Each wave runs its stories in parallel git worktrees, then auto-merges before the next wave starts.
 
@@ -1164,16 +1164,7 @@ Wave 2: US-006 → 1 worktree → merge → done
 Sequential: 40 min total  →  Wave parallel: ~12 min (3.3x speedup on 3-wave spec)
 ```
 
-**What needs to be built** (future `rorca-wave-execution` spec):
-1. Wave compiler — topological sort of `dependsOn` DAG into wave groups (~50 lines)
-2. Wave orchestrator — spawn N parallel subprocesses, one per story per wave
-3. File-touch predictor — pre-analyze stories to detect shared-file conflicts before wave starts
-4. Auto-merge sequence — merge each wave's worktrees in sequence; use Haiku to resolve conflicts
-5. `.rorca/config.json` toggle: `execution.waveParallelism: false` (default) → `true` to enable
-
-**Why not V1**: Shared filesystem race conditions. Two stories editing the same file simultaneously cause merge conflicts. The file-touch predictor + auto-merge resolves most, but adds complexity. Sequential is safer and simpler for initial launch. Wave stays opt-in.
-
-**Trigger**: Build this spec after `rorca-integrations` ships. Requires worktrees (already built) + file-touch predictor (new). Infrastructure is 80% there.
+**How it works**: Wave compiler does a topological sort of the `dependsOn` DAG into wave groups. Each wave runs its stories in parallel git worktrees. Auto-merge fires after each wave before the next starts. Configurable max parallelism (default 20). Toggle visible in the spec detail slide-over — shows wave breakdown before you run.
 
 
 ---
@@ -1338,27 +1329,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
-> Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
-
-## 2026-03-12 [Decision] rorca-ensure-postgres completed — zero-prereq Postgres provisioning in bin/rorca.ts
-> Rule: bin/rorca.ts now includes a full ensurePostgres() function. On first run, it downloads Postgres 16 binaries from zonkyio/embedded-postgres-binaries, extracts, runs initdb, starts pg_ctl on port 5433, creates rorca user and database. No Docker required. DATABASE_URL env var bypasses this entirely (preserves Docker workflow). --no-postgres flag also skips it. Postgres is stopped on SIGINT/SIGTERM via stopManagedPostgres().
-
-## 2026-03-12 [Bug Fix] tsx watch restarts backend during parallel runs → resilient-post retries exhaust
-> Rule: When a fast worktree run auto-merges into main, tsx watch detects the file changes and restarts the backend (5-10s TypeScript recompile). If resilient-post.ts retry window is shorter than the restart time, execution engine can't report story results and the run shows as failed. Fix: raise POST_MAX_RETRIES to 10 and POST_RETRY_DELAY_MS to 3000 (30s coverage) in backend/src/lib/resilient-post.ts.
-
-## 2026-03-12 [Decision] Distribution format: curl|sh for launch, native installers deferred
-> Rule: Use `curl -fsSL https://get.rorca.app | sh` (macOS/Linux) + PowerShell equivalent (Windows) for launch distribution. Do NOT build .pkg (macOS) or .exe (Windows) installers yet — they require code signing certs (~$400/yr) and unsigned installers trigger OS security warnings (Gatekeeper, SmartScreen) which is worse UX than curl|sh. Native installers and Homebrew tap (`brew install getrorca/tap/rorca`) are deferred until there's user demand.
-
-## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
-> Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
-
-## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
-> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
-
-## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
-> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
-
 ## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
 > Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
 
@@ -1398,8 +1368,29 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
 > Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
 
+## 2026-03-15 [Bug Fix] Worker never promoted queued runs — advanceQueue() missing from worker.ts
+> Rule: advanceQueue() must be called after EVERY run completion path in worker.ts (main exit, spawn error, retry exit, retry spawn error, stale job recovery, orphan sweep, state reconciliation). Without it, queued runs sit forever until state_reconciliation kills them.
+
+## 2026-03-15 [Bug Fix] reconcileState() killed legitimate queued runs — 'queued' removed from Case A query
+> Rule: reconcileState() Case A must only check status='running' (not 'queued'). Queued runs intentionally have no pg-boss job — they are managed by advanceQueue() which promotes them when the active run completes. Including 'queued' in the NOT EXISTS check causes reconciliation to mark every queued run as failed after 60 seconds.
+
+## 2026-03-15 [Bug Fix] pipeline.ts merge conflicts resolved — queue-observability pickup latency kept
+> Rule: The /api/pipeline/worker/health endpoint uses individual CountRow/AgeRow/QueueRow/LatencyRow queries (not a single QueueStatsRow IIFE). The pickup latency metrics (avg/p50/p95/max over 24h rolling window for pipeline:run + pipeline:retry) are part of the queue-observability spec and must be preserved in any future merge.
+
+## 2026-03-15 [Architecture] Run queue lifecycle: queued runs have NO pg-boss job until promoted
+> Rule: When a run is queued (queue:true in trigger body while another run is active), pipeline.ts creates a pipeline_runs row with status='queued' and queue_position but does NOT call boss.send(). The pg-boss job is only created later when advanceQueue() fires POST /api/pipeline/trigger with queuedRunId, which promotes the existing row and sends the boss job. Any code that checks for 'stuck' runs must account for this: queued runs without pg-boss jobs are normal, not orphaned.
+
+## 2026-03-16 [Bug Fix] payload::text LIKE queries cause pool exhaustion under wave parallelism
+> Rule: Never use `payload::text LIKE '%"run_id":N%'` on wal_events. Always use `(payload->>'run_id')::int = $N` — JSONB accessor is 10x faster and doesn't cause full table scans. Critical under wave parallelism (18+ concurrent SSE connections each polling WAL).
+
+## 2026-03-16 [Bug Fix] specs.ts u.name column does not exist — users table uses display_name
+> Rule: The `users` table column is `display_name`, not `name`. Any JOIN query referencing `u.name` will crash with 'column u.name does not exist'. The go-to-market spec run introduced this bug in the spec_attachments query at specs.ts:9970.
+
+## 2026-03-16 [Gotcha] unhandledRejection in server.ts kills entire process including API
+> Rule: The worker's unhandledRejection handler triggers graceful shutdown of the entire Node process. When server.ts and worker code share a process (via `npm run dev` / concurrently), ANY unhandled promise rejection — even a transient DB connection timeout — kills the API server too. DB queries in setInterval callbacks MUST be wrapped in try-catch.
+
 Follow this workflow for implementation:
-## Agent Role: Database
+## Agent Role: Backend Routes
 
 ---
 name: rorca
@@ -1552,23 +1543,11 @@ At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (US-003):
-Three untracked migration files exist in the backend that need to be committed and verified: 072_workspace_context_git_memory_hydrated_at.sql, 073_fix_retrieval_method_constraint.sql, 074_add_memories_embedding_column.sql. Verify each migration file has valid SQL syntax, uses IF NOT EXISTS guards where appropriate, and applies cleanly against the current schema. Ensure they don't conflict with any existing migrations (check schema_migrations table for applied versions).
-
-## Context
-- **Migration naming**: These use sequential prefixes (072–074) which is legacy format. Per CLAUDE.md, new migrations MUST use timestamp format `YYYYMMDDHHMMSS`. However, since these files already exist as 072/073/074 and coexist with the 001–079 sequential range, do NOT rename them — just verify no duplicate prefix collision via `checkDuplicatePrefixes()` in `pg-index.ts`.
-- **Idempotency guards are critical**: PostgreSQL natively supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes. For `ALTER TABLE ... ADD COLUMN`, use `DO $$ BEGIN ... EXCEPTION WHEN duplicate_column THEN NULL; END $$` pattern if `IF NOT EXISTS` isn't supported for the specific DDL statement.
-- **Migration runner behavior** (`backend/src/db/pg-index.ts`): Each migration runs inside a transaction. The runner tracks applied versions in `schema_migrations` table (BIGINT version column). Verify the numeric prefixes 072/073/074 don't collide with any existing files — the duplicate migration 069 collision (2026-03-13) is a known process gap.
-- **pgvector context**: Migration 074 adds an embedding column — ensure `CREATE EXTENSION IF NOT EXISTS vector` is present (likely in an earlier migration) before referencing the `vector` type. Check existing migrations for the pgvector extension setup.
-- **`workspace_context` table gotcha**: The `workspace_context` table stores cached git memory + schema snapshots. Migration 072 adds `git_memory_hydrated_at` — this should be a nullable `TIMESTAMPTZ` column (not `TIMESTAMP`) to match PostgreSQL best practices used elsewhere in the schema.
-- **Test approach**: Run `npx tsx backend/src/db/pg-index.ts` (or the migration path used by the runner) to verify clean application. Then run again to confirm idempotency — no errors on re-run. Check `SELECT * FROM schema_migrations ORDER BY version DESC LIMIT 5` to confirm all three versions are recorded.
-- **Git commit**: Stage only the three migration files specifically by name (`git add backend/src/db/pg-migrations/072_*.sql 073_*.sql 074_*.sql`) — do NOT use `git add .` which could pick up unrelated changes visible in the dirty working tree (merge conflicts in `worker.ts` and `run-state.json`).
+Add the memories section to the recall route handler. Query the `memories` PostgreSQL table for the given workspace, filtering by `deleted_at IS NULL` and optionally by category if the `category` query param is provided. Order by `pinned DESC, created_at DESC`. Return each memory with fields: id, category, title, content (rule text), confidence, source_type, related_files (JSON array), pinned (boolean), created_at. If the `storyText` param is provided, use the 3-tier memory-router retrieval chain: check CAG cache first, fall back to RAG semantic search, then Graph traversal — set `meta.retrievalTier` to whichever tier returned results. If no storyText, use direct SQL query and set retrievalTier to 'none'.
 
 Acceptance Criteria:
-- All three migration files (072, 073, 074) are tracked by git (not in untracked status)
-- Each migration file contains valid PostgreSQL SQL that parses without syntax errors
-- Migrations use IF NOT EXISTS / IF EXISTS guards for idempotency
-- Running the migration runner (`pg-index.ts`) applies all three without errors on a database that has migrations 001-071 already applied
-- If a migration fails (e.g., syntax error or constraint violation), the transaction rolls back and the error message includes the migration filename and SQL line number (error state)
-- Running migrations a second time (re-run) produces no errors due to idempotency guards (empty state: already applied)
-- If the database connection is unavailable when migrations attempt to run (error state), the migration runner exits with error 'Database connection failed: {host}:{port}' and does not partially apply
-- While migrations are being applied sequentially (loading state), each migration logs 'Applying migration NNN_description.sql...' before execution and 'Applied migration NNN in {ms}ms' after completion
+- GET /api/recall?workspaceId=rorcha returns memories array with each entry containing id, category, title, content, confidence, sourceType, relatedFiles, pinned, createdAt
+- Memories are ordered by pinned DESC then createdAt DESC — pinned entries appear first
+- GET /api/recall?workspaceId=rorcha&category=Architecture returns only Architecture-category memories
+- When storyText is provided, memory retrieval attempts CAG→RAG→Graph cascade and meta.retrievalTier reflects which tier was used
+- Deleted memories (deleted_at IS NOT NULL) are excluded from results

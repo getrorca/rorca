@@ -5,6 +5,7 @@ import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { logger } from '../lib/logger';
 import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
@@ -189,8 +190,7 @@ router.post('/', async (req: Request, res: Response) => {
     const row = await queryOne<TemplateRow>('SELECT * FROM templates WHERE id = $1', [id]);
     res.status(201).json(await formatTemplate(row!, true));
   } catch (error: any) {
-    logger.error('[Templates] Create error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Templates] Create');
   }
 });
 
@@ -292,8 +292,7 @@ router.get('/', async (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(templates, pagination, { cursorKey: (t) => t.id as string }));
   } catch (error: any) {
-    logger.error('[Templates] List error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Templates] List');
   }
 });
 
@@ -375,8 +374,7 @@ router.post('/:id/rate', async (req: Request, res: Response) => {
     const { avgRating, ratingCount } = await getTemplateRating(templateId);
     res.json({ avgRating, ratingCount, userRating: rating });
   } catch (error: any) {
-    logger.error('[Templates] Rate error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Templates] Rate');
   }
 });
 
@@ -419,8 +417,7 @@ router.post('/:id/use', async (req: Request, res: Response) => {
 
     res.json({ ok: true });
   } catch (error: any) {
-    logger.error('[Templates] Use error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Templates] Use');
   }
 });
 
@@ -480,8 +477,7 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     res.json(result);
   } catch (error: any) {
-    logger.error('[Templates] Get error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Templates] Get');
   }
 });
 
@@ -530,8 +526,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
 
     res.status(204).send();
   } catch (error: any) {
-    logger.error('[Templates] Delete error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[Templates] Delete');
   }
 });
 

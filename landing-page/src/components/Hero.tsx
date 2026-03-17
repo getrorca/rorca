@@ -16,7 +16,7 @@ export function Hero() {
                 className="flex items-center gap-2 px-3 py-1 mb-8 rounded-full bg-white/5 border border-white/10 backdrop-blur-md text-sm font-medium text-zinc-300 cursor-pointer hover:bg-white/10 transition-colors"
             >
                 <span className="flex h-2 w-2 rounded-full bg-accent animate-pulse"></span>
-                Introducing Rorca V1 Architecture
+                GitHub integration, knowledge graph &amp; MCP now live
                 <ChevronRight className="w-4 h-4 text-zinc-500" />
             </motion.div>
 
@@ -39,7 +39,7 @@ export function Hero() {
                 transition={{ duration: 0.8, delay: 0.2, ease: "easeOut" }}
                 className="mt-8 text-xl text-zinc-400 max-w-2xl font-normal leading-relaxed tracking-wide"
             >
-                The unified orchestration engine for Claude Code, OpenCode, and Codex CLI. Rorca deploys cost-optimized, wave-parallel execution with deep episodic memory to turn plain-English into production code.
+                Write a plain-English brief. Rorca generates a structured spec, routes each story to the right model, and executes with Claude Code, OpenCode, or Codex CLI—committing code, opening PRs, and updating GitHub automatically.
             </motion.p>
 
             {/* CTAs */}

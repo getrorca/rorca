@@ -6,6 +6,7 @@ import { queryOne, execute, transaction } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
 import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
 import { githubRateLimiter } from '../lib/github-rate-limiter';
 import { insertAuditEntry } from './integration-audit-log';
 
@@ -93,8 +94,7 @@ router.get('/', async (req: Request, res: Response) => {
       },
     });
   } catch (error: any) {
-    logger.error('[GitHub] Status error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[GitHub] Status');
   }
 });
 
@@ -274,12 +274,7 @@ router.post('/connect', async (req: Request, res: Response) => {
       ...(manualSetupUrl ? { manualSetupUrl } : {}),
     });
   } catch (error: any) {
-    if (error.statusCode) {
-      res.status(error.statusCode).json({ error: error.message });
-      return;
-    }
-    logger.error('[GitHub] Connect error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[GitHub] Connect');
   }
 });
 
@@ -387,8 +382,7 @@ router.post('/disconnect', async (req: Request, res: Response) => {
 
     res.json({ connected: false });
   } catch (error: any) {
-    logger.error('[GitHub] Disconnect error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[GitHub] Disconnect');
   }
 });
 
@@ -445,8 +439,7 @@ router.get('/account', async (req: Request, res: Response) => {
       scopes,
     });
   } catch (error: any) {
-    logger.error('[GitHub] Account error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[GitHub] Account');
   }
 });
 
@@ -599,8 +592,7 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
 
     res.json({ disconnected: true });
   } catch (error: any) {
-    logger.error('[GitHub] Disconnect OAuth error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[GitHub] Disconnect OAuth');
   }
 });
 
@@ -777,12 +769,7 @@ router.delete('/', async (req: Request, res: Response) => {
 
     res.json({ disconnected: true });
   } catch (error: any) {
-    if (error instanceof NotFoundError) {
-      res.status(404).json({ error: error.message });
-      return;
-    }
-    logger.error('[GitHub] Full disconnect error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[GitHub] Full disconnect');
   }
 });
 
@@ -868,8 +855,7 @@ router.put('/auto-pr', async (req: Request, res: Response) => {
       reviewers: Array.isArray(reviewers) ? reviewers : [],
     });
   } catch (error: any) {
-    logger.error('[GitHub] Auto-PR update error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[GitHub] Auto-PR update');
   }
 });
 
@@ -922,8 +908,7 @@ router.get('/actions-yaml', async (req: Request, res: Response) => {
     res.setHeader('Content-Disposition', `attachment; filename="rorca-pipeline.yml"`);
     res.send(yaml);
   } catch (error: any) {
-    logger.error('[GitHub] Actions YAML generation error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[GitHub] Actions YAML generation');
   }
 });
 
@@ -1190,8 +1175,7 @@ router.get('/repos', async (req: Request, res: Response) => {
       })),
     });
   } catch (error: any) {
-    logger.error('[GitHub] Repos error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[GitHub] Repos');
   }
 });
 
@@ -1285,8 +1269,7 @@ router.get('/repos/:owner/:repo/issues', async (req: Request, res: Response) => 
       })),
     });
   } catch (error: any) {
-    logger.error('[GitHub] Issues error:', error);
-    res.status(500).json({ error: error.message });
+    handleRouteError(res, error, '[GitHub] Issues');
   }
 });
 
@@ -1484,12 +1467,7 @@ router.post('/import-issues', async (req: Request, res: Response) => {
       storyCount: userStories.length,
     });
   } catch (error: any) {
-    logger.error('[GitHub] Import issues error:', error);
-    if (error.statusCode) {
-      res.status(error.statusCode).json({ error: error.message });
-    } else {
-      res.status(500).json({ error: error.message });
-    }
+    handleRouteError(res, error, '[GitHub] Import issues');
   }
 });
 

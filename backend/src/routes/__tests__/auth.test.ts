@@ -518,11 +518,13 @@ describe('GET /api/auth/me', () => {
     expect(res.body.user.id).toBeDefined();
   });
 
-  test('returns 401 without auth token', async () => {
+  test('returns LOCAL_ADMIN fallback without auth token (local single-user mode)', async () => {
+    // afterEach truncates users, so no DB users exist.
+    // In local mode (AUTH_REQUIRED not set), /me falls back to LOCAL_ADMIN synthetic user.
     const res = await request(app).get('/api/auth/me');
-    expect(res.status).toBe(401);
-    // Auth is intentionally bypassed globally; /me falls back to first user or returns a 401 error
-    expect(res.body.error).toBeDefined();
+    expect(res.status).toBe(200);
+    expect(res.body.user.id).toBe('local-admin');
+    expect(res.body.user.email).toBe('admin@rorca.local');
   });
 });
 
@@ -530,18 +532,18 @@ describe('GET /api/auth/me', () => {
 
 describe('Global auth middleware', () => {
   test('public routes are accessible without auth', async () => {
-    // Health endpoint
+    // Health endpoint — status is 'ok' or 'degraded' (worker not running in tests)
     const healthRes = await request(app).get('/api/health');
     expect(healthRes.status).toBe(200);
-    expect(healthRes.body.status).toBe('healthy');
+    expect(['ok', 'degraded']).toContain(healthRes.body.status);
 
     // Auth endpoints — login returns 401 for bad creds but with route-specific error, not middleware's "Authentication required"
     const loginRes = await request(app).post('/api/auth/login').send({ email: 'x@y.com', password: 'test' });
     expect(loginRes.body.error).not.toBe('Authentication required');
 
-    // Register is accessible without auth (returns 400 for missing fields, not 401)
+    // Register is accessible without auth (returns 422 for Zod validation failure, not 401)
     const registerRes = await request(app).post('/api/auth/register').send({});
-    expect(registerRes.status).toBe(400);
+    expect(registerRes.status).toBe(422);
   });
 
   test('protected routes are accessible since auth is intentionally bypassed', async () => {
@@ -595,9 +597,9 @@ describe('POST /api/auth/forgot-password', () => {
     await request(app).post('/api/auth/forgot-password').send({ email: 'test@example.com' });
 
     const token = await queryOne(`SELECT * FROM password_reset_tokens`) as Record<string, unknown>;
-    // SQLite NOW() stores UTC without timezone suffix — append 'Z' for correct JS parsing
-    const expiresAt = new Date((token.expires_at as string) + 'Z').getTime();
-    const createdAt = new Date((token.created_at as string) + 'Z').getTime();
+    // PostgreSQL returns proper ISO timestamps
+    const expiresAt = new Date(token.expires_at as string).getTime();
+    const createdAt = new Date(token.created_at as string).getTime();
     const hoursUntilExpiry = (expiresAt - createdAt) / (1000 * 60 * 60);
     expect(hoursUntilExpiry).toBeGreaterThan(0.9);
     expect(hoursUntilExpiry).toBeLessThan(1.1);
@@ -851,11 +853,11 @@ describe('encryptToken / decryptToken', () => {
 // ─── GET /api/auth/github ───
 
 describe('GET /api/auth/github', () => {
-  test('returns 500 when GITHUB_CLIENT_ID is not configured', async () => {
+  test('returns 503 when GITHUB_CLIENT_ID is not configured', async () => {
     // By default in tests, GITHUB_CLIENT_ID is not set
     const res = await request(app).get('/api/auth/github');
-    expect(res.status).toBe(500);
-    expect(res.body.error).toContain('GITHUB_CLIENT_ID missing');
+    expect(res.status).toBe(503);
+    expect(res.body.error).toContain('GitHub OAuth not configured');
   });
 
   test('redirects to GitHub OAuth URL when configured', async () => {
@@ -868,7 +870,7 @@ describe('GET /api/auth/github', () => {
     expect(res.status).toBe(302);
     expect(res.headers.location).toContain('https://github.com/login/oauth/authorize');
     expect(res.headers.location).toContain('client_id=test-client-id');
-    expect(res.headers.location).toContain('scope=user%3Aemail+repo');
+    expect(res.headers.location).toContain('scope=user%3Aemail%2Cpublic_repo');
     expect(res.headers.location).toContain('state=');
 
     delete process.env.GITHUB_CLIENT_ID;
@@ -887,6 +889,15 @@ describe('GET /api/auth/github/callback', () => {
     process.env.GITHUB_CLIENT_SECRET = 'test-client-secret';
     mockFetch.mockReset();
     ghApp = require('../../server').default;
+  }
+
+  /** Helper: initiate OAuth flow to get a valid CSRF state token */
+  async function getOAuthState(): Promise<string> {
+    const initRes = await request(ghApp).get('/api/auth/github');
+    expect(initRes.status).toBe(302);
+    const location = initRes.headers.location as string;
+    const url = new URL(location);
+    return url.searchParams.get('state')!;
   }
 
   function mockGitHubOAuthFlow(opts: {
@@ -929,11 +940,11 @@ describe('GET /api/auth/github/callback', () => {
     delete process.env.GITHUB_CLIENT_SECRET;
   });
 
-  test('returns 400 when code query param is missing', async () => {
+  test('redirects with error when code query param is missing', async () => {
     setupGitHubEnv();
     const res = await request(ghApp).get('/api/auth/github/callback');
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('Authorization code is required');
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain('error=missing_code');
   });
 
   /** Helper: parse tokens from redirect URL fragment */
@@ -950,9 +961,10 @@ describe('GET /api/auth/github/callback', () => {
 
   test('creates new user and redirects with tokens on first GitHub login', async () => {
     setupGitHubEnv();
+    const state = await getOAuthState();
     mockGitHubOAuthFlow();
 
-    const res = await request(ghApp).get('/api/auth/github/callback?code=test-auth-code');
+    const res = await request(ghApp).get(`/api/auth/github/callback?code=test-auth-code&state=${state}`);
 
     expect(res.status).toBe(302);
     expect(res.headers.location).toContain('/auth/github/callback#');
@@ -987,9 +999,10 @@ describe('GET /api/auth/github/callback', () => {
     });
 
     // Now login via GitHub with the same email
+    const state = await getOAuthState();
     mockGitHubOAuthFlow();
 
-    const res = await request(ghApp).get('/api/auth/github/callback?code=test-auth-code');
+    const res = await request(ghApp).get(`/api/auth/github/callback?code=test-auth-code&state=${state}`);
 
     expect(res.status).toBe(302);
     const tokens = parseRedirectTokens(res);
@@ -1007,18 +1020,20 @@ describe('GET /api/auth/github/callback', () => {
 
   test('returning GitHub user updates token and reuses account', async () => {
     setupGitHubEnv();
+    const state1 = await getOAuthState();
     mockGitHubOAuthFlow();
 
     // First login
-    await request(ghApp).get('/api/auth/github/callback?code=first-code');
+    await request(ghApp).get(`/api/auth/github/callback?code=first-code&state=${state1}`);
 
     // Get user ID from DB
     const user1 = await queryOne(`SELECT id FROM users WHERE email = $1`, ['octocat@github.com']) as Record<string, unknown>;
     const userId = user1.id as string;
 
     // Second login (returning user) with new token
+    const state2 = await getOAuthState();
     mockGitHubOAuthFlow({ tokenResponse: { access_token: 'gho_new_token_456' } });
-    await request(ghApp).get('/api/auth/github/callback?code=second-code');
+    await request(ghApp).get(`/api/auth/github/callback?code=second-code&state=${state2}`);
 
     // Token should be updated
     const conn = await queryOne(`SELECT * FROM github_connections WHERE user_id = $1`, [userId]) as Record<string, unknown>;
@@ -1028,6 +1043,7 @@ describe('GET /api/auth/github/callback', () => {
 
   test('redirects with error when GitHub token exchange fails', async () => {
     setupGitHubEnv();
+    const state = await getOAuthState();
     mockFetch.mockImplementation((url: string) => {
       if (url === 'https://github.com/login/oauth/access_token') {
         return Promise.resolve({
@@ -1038,34 +1054,33 @@ describe('GET /api/auth/github/callback', () => {
       return Promise.resolve({ ok: false, status: 404, statusText: 'Not Found' });
     });
 
-    const res = await request(ghApp).get('/api/auth/github/callback?code=invalid-code');
-    // The error path still goes through the catch block which now redirects
-    // But the 'no access_token' case returns res.status(401).json(...) directly — need to check
-    expect(res.status).toBe(401);
-    expect(res.body.error).toBe('The code passed is incorrect');
+    const res = await request(ghApp).get(`/api/auth/github/callback?code=invalid-code&state=${state}`);
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain('error=token_exchange_failed');
   });
 
   test('redirects with error when no verified primary email on GitHub', async () => {
     setupGitHubEnv();
+    const state = await getOAuthState();
     mockGitHubOAuthFlow({
       emailsResponse: [
         { email: 'unverified@github.com', primary: true, verified: false },
       ],
     });
 
-    const res = await request(ghApp).get('/api/auth/github/callback?code=test-code');
-    // 'no verified email' returns 400 JSON before the redirect section
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBe('No verified primary email found on GitHub account');
+    const res = await request(ghApp).get(`/api/auth/github/callback?code=test-code&state=${state}`);
+    expect(res.status).toBe(302);
+    expect(res.headers.location).toContain('error=no_verified_email');
   });
 
   test('uses email from user profile if available', async () => {
     setupGitHubEnv();
+    const state = await getOAuthState();
     mockGitHubOAuthFlow({
       userResponse: { id: 99999, login: 'directemail', email: 'Direct@Example.Com' },
     });
 
-    const res = await request(ghApp).get('/api/auth/github/callback?code=test-code');
+    const res = await request(ghApp).get(`/api/auth/github/callback?code=test-code&state=${state}`);
     expect(res.status).toBe(302);
 
     // Verify user email was normalized in DB
@@ -1075,9 +1090,10 @@ describe('GET /api/auth/github/callback', () => {
 
   test('emits github_login WAL event', async () => {
     setupGitHubEnv();
+    const state = await getOAuthState();
     mockGitHubOAuthFlow();
 
-    await request(ghApp).get('/api/auth/github/callback?code=test-code');
+    await request(ghApp).get(`/api/auth/github/callback?code=test-code&state=${state}`);
 
     const event = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'github_login'`) as Record<string, unknown>;
     expect(event).toBeDefined();
@@ -1088,9 +1104,10 @@ describe('GET /api/auth/github/callback', () => {
 
   test('access token in redirect is a valid JWT', async () => {
     setupGitHubEnv();
+    const state = await getOAuthState();
     mockGitHubOAuthFlow();
 
-    const res = await request(ghApp).get('/api/auth/github/callback?code=test-code');
+    const res = await request(ghApp).get(`/api/auth/github/callback?code=test-code&state=${state}`);
     const tokens = parseRedirectTokens(res);
     expect(tokens.accessToken).toBeDefined();
 
@@ -1103,9 +1120,10 @@ describe('GET /api/auth/github/callback', () => {
 
   test('refresh token from redirect is stored and usable', async () => {
     setupGitHubEnv();
+    const state = await getOAuthState();
     mockGitHubOAuthFlow();
 
-    const res = await request(ghApp).get('/api/auth/github/callback?code=test-code');
+    const res = await request(ghApp).get(`/api/auth/github/callback?code=test-code&state=${state}`);
     const tokens = parseRedirectTokens(res);
     expect(tokens.refreshToken).toBeDefined();
 
