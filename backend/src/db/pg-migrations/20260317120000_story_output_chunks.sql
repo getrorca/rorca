@@ -12,7 +12,7 @@
 
 CREATE TABLE IF NOT EXISTS story_output_chunks (
   id         BIGSERIAL PRIMARY KEY,
-  run_id     INT NOT NULL REFERENCES pipeline_runs(id) ON DELETE CASCADE,
+  run_id     BIGINT NOT NULL REFERENCES pipeline_runs(id) ON DELETE CASCADE,
   story_id   TEXT NOT NULL,
   chunk      TEXT NOT NULL,
   sequence   INT NOT NULL,

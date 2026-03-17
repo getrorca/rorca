@@ -2653,7 +2653,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     // OC-029: Enrich specStories with reroute data from WAL events (for historical runs)
     if (specStories.length > 0) {
       try {
-        const rerouteEvents = await query<{ story_id: string; payload: string }>(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_rerouted' AND (payload->>'run_id')::int = $1 ORDER BY id ASC`, [runId]);
+        const rerouteEvents = await query<{ story_id: string; payload: string }>(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_rerouted' AND (payload->>'run_id')::bigint = $1 ORDER BY id ASC`, [runId]);
         for (const evt of rerouteEvents) {
           const story = specStories.find(s => s.id === evt.story_id);
           if (story && !story.reroute) {
@@ -2711,7 +2711,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
         // Collect actual context_files from story_started WAL events
         const actualMap: Record<string, { contextFiles: string[] }> = {};
         try {
-          const walRows = await query<{ story_id: string; payload: string }>(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_started' AND (payload->>'run_id')::int = $1`, [runId]);
+          const walRows = await query<{ story_id: string; payload: string }>(`SELECT story_id, payload FROM wal_events WHERE event_type = 'story_started' AND (payload->>'run_id')::bigint = $1`, [runId]);
           for (const row of walRows) {
             try {
               const p = JSON.parse(row.payload);
@@ -3941,7 +3941,7 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     }
 
     // 2. Try to get failure details from WAL events
-    const walEvent = await queryOne<{ payload: Record<string, unknown> | string }>(`SELECT payload FROM wal_events WHERE event_type = 'story_failed' AND story_id = $1 AND (payload->>'run_id')::int = $2 ORDER BY id DESC LIMIT 1`, [storyId, runId]);
+    const walEvent = await queryOne<{ payload: Record<string, unknown> | string }>(`SELECT payload FROM wal_events WHERE event_type = 'story_failed' AND story_id = $1 AND (payload->>'run_id')::bigint = $2 ORDER BY id DESC LIMIT 1`, [storyId, runId]);
 
     let failureReason: string | null = null;
     let failureAttempts: number | null = null;
@@ -4103,7 +4103,7 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
   let storyLogPath: string | null = null;
 
   // 1. Check story_started WAL event for log_file path
-  const walRow = await queryOne<{ payload: Record<string, unknown> | string }>(`SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::int = $2 ORDER BY id DESC LIMIT 1`, [storyId, runId]);
+  const walRow = await queryOne<{ payload: Record<string, unknown> | string }>(`SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::bigint = $2 ORDER BY id DESC LIMIT 1`, [storyId, runId]);
   if (walRow?.payload) {
     try {
       const payload = typeof walRow.payload === 'string' ? JSON.parse(walRow.payload) : walRow.payload;
@@ -4151,7 +4151,7 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
       try {
         // Re-check WAL event — use JSONB accessor instead of payload::text LIKE (10x faster)
         const freshWal = await queryOne<{ payload: Record<string, unknown> }>(
-          `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::int = $2 ORDER BY id DESC LIMIT 1`,
+          `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::bigint = $2 ORDER BY id DESC LIMIT 1`,
           [storyId, runId]
         );
         if (freshWal?.payload) {
@@ -4191,7 +4191,7 @@ router.get('/runs/:runId/stories/:storyId/log', async (req: Request, res: Respon
 
         // Check if story already finished (no log will come)
         const finishEvent = await queryOne(
-          `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::int = $2 LIMIT 1`,
+          `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::bigint = $2 LIMIT 1`,
           [storyId, runId]
         );
         if (finishEvent) {
@@ -4235,7 +4235,7 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
   } catch { /* file may have disappeared */ }
 
   // Check if story already finished
-  const finishEvent = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::int = $2 LIMIT 1`, [storyId, runId]);
+  const finishEvent = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::bigint = $2 LIMIT 1`, [storyId, runId]);
   if (finishEvent) {
     clearInterval(hb);
     res.write('event: done\ndata: \n\n');
@@ -4259,7 +4259,7 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
       }
 
       // Check if story finished
-      const done = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::int = $2 LIMIT 1`, [storyId, runId]);
+      const done = await queryOne(`SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::bigint = $2 LIMIT 1`, [storyId, runId]);
       if (done) {
         // Read any final bytes
         const finalStat = fs.statSync(logPath);
@@ -4442,7 +4442,7 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
 /** Check whether a story completion WAL event exists. */
 async function isStoryDone(runId: number, storyId: string): Promise<boolean> {
   const row = await queryOne(
-    `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::int = $2 LIMIT 1`,
+    `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::bigint = $2 LIMIT 1`,
     [storyId, runId]
   );
   return !!row;
@@ -4452,7 +4452,7 @@ async function isStoryDone(runId: number, storyId: string): Promise<boolean> {
 async function resolveStoryLogPath(runId: number, storyId: string, workspaceId: string | null): Promise<string> {
   // 1. Check story_started WAL event for log_file path
   const walRow = await queryOne<{ payload: Record<string, unknown> | string }>(
-    `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::int = $2 ORDER BY id DESC LIMIT 1`,
+    `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::bigint = $2 ORDER BY id DESC LIMIT 1`,
     [storyId, runId]
   );
   if (walRow?.payload) {
@@ -4554,7 +4554,7 @@ router.get('/stream', async (req: Request, res: Response) => {
         events = await query(`SELECT * FROM wal_events
            WHERE id > $1
              AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND (payload->>'run_id')::int = $2
+             AND (payload->>'run_id')::bigint = $2
              AND workspace_id = $3
            ORDER BY id ASC
            LIMIT 50`, [lastSeenId, runId, resolvedWsId]);
@@ -4562,7 +4562,7 @@ router.get('/stream', async (req: Request, res: Response) => {
         events = await query(`SELECT * FROM wal_events
            WHERE id > $1
              AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND (payload->>'run_id')::int = $2
+             AND (payload->>'run_id')::bigint = $2
            ORDER BY id ASC
            LIMIT 50`, [lastSeenId, runId]);
       } else if (resolvedWsId) {
