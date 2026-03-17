@@ -1,13 +1,7 @@
-Both files are clean. Here's what the merge resolution does:
+Resolved. The merged file combines both sides:
 
-**`recall-types.ts`** — keeps both sides:
-- `RecallMemory` interface (from HEAD/US-003) — DB-backed memory shape with id, title, confidence, pinned, etc.
-- `RecallHealth` + `ContextFileStatus` interfaces (from branch/US-004) — transformed health report for MCP consumers
-- `RecallResponse.memories` typed as `RecallMemory[]` (HEAD's richer type)
-- `RecallResponse.health` typed as `RecallHealth | null` (branch's transformed type, not raw `EcholocationReport`)
-
-**`recall.ts`** — combines the complete implementations:
-- DB-backed memories with `memory-router` 3-tier retrieval (CAG→RAG→Graph) from HEAD/US-003
-- Direction stack synthesis, health transform, recent runs, skills, workspace context, and metadata sections from branch/US-004
-- Swagger JSDoc annotation from branch
-- Better validation error reporting from branch (`flatten().fieldErrors` with details)
+- **`RecallMemory`** interface from US-003 (DB-backed memory shape with id, title, confidence, pinned, etc.)
+- **`RecallHealth`** + **`ContextFileStatus`** interfaces from US-004 (transformed health report for MCP consumers)
+- `RecallResponse.memories` typed as `RecallMemory[]` (US-003's richer type instead of raw `MemoryEntry[]`)
+- `RecallResponse.health` typed as `RecallHealth | null` (US-004's transformed type instead of raw `EcholocationReport`)
+- `RunSummary` uses the shared shape from US-003/US-004 (with `passedStories`/`failedStories`/`skippedStories`/`totalTokens`/`costUsd`)
