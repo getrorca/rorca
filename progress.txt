@@ -3,8 +3,9 @@
 Spec: rorca-mcp-recall-tool
 Run ID: 20260316000012
 Started: 2026-03-17T18:30:24.225Z
-Last Updated: 2026-03-17T18:43:10.815Z
+Last Updated: 2026-03-17T19:08:50.023Z
 
-## Completed Stories (2)
+## Completed Stories (3)
 - US-002: Implement recall route — direction stack and workspace metadata sections — DONE (claude, 18s)
 - US-008: Implement recall route — active/queued runs with story progress — DONE (claude, 455s)
+- US-009: Compose all sections with Promise.all, add meta with token estimation — DONE (claude, 762s)

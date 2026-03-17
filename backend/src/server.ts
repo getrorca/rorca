@@ -86,7 +86,6 @@ import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
-import recallRouter from './routes/recall';
 import { initBoss } from './lib/pg-boss';
 
 dotenv.config();
