@@ -2,8 +2,18 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000009,
   "startedAt": "2026-03-17T08:27:07.044Z",
-  "lastUpdatedAt": "2026-03-17T08:27:07.044Z",
-  "completedStories": [],
+  "lastUpdatedAt": "2026-03-17T18:34:35.141Z",
+  "completedStories": [
+    {
+      "storyId": "US-001",
+      "title": "Define RecallResponse TypeScript interface and Zod validation schemas",
+      "status": "passed",
+      "startedAt": "2026-03-17T18:30:28.404Z",
+      "finishedAt": "2026-03-17T18:34:35.141Z",
+      "agentType": "claude",
+      "elapsedMs": 246737
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
