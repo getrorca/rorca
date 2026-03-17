@@ -1,9 +1,9 @@
 # Run State Summary
 
 Spec: rorca-mcp-recall-tool
-Run ID: 20260316000009
-Started: 2026-03-17T08:27:07.044Z
-Last Updated: 2026-03-17T18:34:35.141Z
+Run ID: 20260316000012
+Started: 2026-03-17T18:30:24.225Z
+Last Updated: 2026-03-17T18:35:11.601Z
 
 ## Completed Stories (1)
-- US-001: Define RecallResponse TypeScript interface and Zod validation schemas — DONE (claude, 247s)
+- US-002: Implement recall route — direction stack and workspace metadata sections — DONE (claude, 18s)
