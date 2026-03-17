@@ -13,6 +13,26 @@ import type { EcholocationReport } from '../lib/workspace-echolocation.js';
 
 export type { MemoryEntry, EcholocationReport };
 
+// ─── Health section (transformed from EcholocationReport for MCP consumers) ─
+
+export interface ContextFileStatus {
+  exists: boolean;
+  lineCount: number;
+}
+
+export interface RecallHealth {
+  score: number;
+  detectedStack: string[];
+  contextFiles: {
+    claudeMd: ContextFileStatus;
+    agentsMd: ContextFileStatus;
+    memoryMd: ContextFileStatus;
+    rorcaConfig: ContextFileStatus;
+  };
+  monorepoApps: string[];
+  suggestions: string[];
+}
+
 // ─── Domain types (defined here to avoid coupling to internal DB row shapes) ─
 
 export interface RunSummary {
@@ -71,7 +91,7 @@ export interface RecallMeta {
 export interface RecallResponse {
   directionStack: string;
   memories: MemoryEntry[];
-  health: EcholocationReport | null;
+  health: RecallHealth | null;
   recentRuns: RunSummary[];
   skills: SkillPreview[];
   workspaceContext: {
