@@ -17,7 +17,7 @@
 
 import * as fs from 'node:fs';
 import { subscribe, type WalEvent } from './sse-hub';
-import { execute } from '../db/index';
+import { execute, query, queryOne } from '../db/index';
 import { logger } from './logger';
 
 const TAIL_INTERVAL_MS = 200;
@@ -121,6 +121,108 @@ export class StoryLogFollower {
       this.unsubscribe();
       this.unsubscribe = null;
     }
+  }
+
+  /**
+   * Recover in-flight stories on server startup.
+   *
+   * Queries WAL events for story_started events on currently running
+   * pipeline_runs that have no matching completion event
+   * (story_passed/story_failed/story_skipped). For each in-flight story,
+   * resumes tailing from where story_output_chunks left off.
+   */
+  async recover(): Promise<void> {
+    // Find story_started events for running runs that have no completion event
+    const inFlightRows = await query<{
+      run_id: number;
+      story_id: string;
+      payload: string;
+    }>(
+      `SELECT
+         (ws.payload->>'run_id')::int AS run_id,
+         COALESCE(ws.payload->>'story_id', ws.story_id) AS story_id,
+         ws.payload::text AS payload
+       FROM wal_events ws
+       WHERE ws.event_type = 'story_started'
+         AND (ws.payload->>'run_id')::int IN (
+           SELECT id FROM pipeline_runs WHERE status = 'running'
+         )
+         AND NOT EXISTS (
+           SELECT 1 FROM wal_events wc
+           WHERE wc.event_type IN ('story_passed', 'story_failed', 'story_skipped')
+             AND (wc.payload->>'run_id')::int = (ws.payload->>'run_id')::int
+             AND COALESCE(wc.payload->>'story_id', wc.story_id)
+               = COALESCE(ws.payload->>'story_id', ws.story_id)
+         )`,
+    );
+
+    let recovered = 0;
+
+    for (const row of inFlightRows) {
+      let parsed: Record<string, unknown> = {};
+      try {
+        parsed = JSON.parse(row.payload ?? '{}');
+      } catch {
+        continue;
+      }
+
+      const logFile = parsed.log_file as string | undefined;
+      const runId = row.run_id;
+      const storyId = row.story_id;
+
+      if (!logFile || !runId || !storyId) continue;
+
+      // Check that the log file exists on disk
+      if (!fs.existsSync(logFile)) {
+        logger.warn(
+          { runId, storyId, logFile },
+          '[story-log-follower] Log file not found on disk during recovery, skipping',
+        );
+        continue;
+      }
+
+      const key = tailKey(runId, storyId);
+      if (this.activeTails.has(key)) continue;
+
+      // Determine resume offset from existing chunks
+      const resumeRow = await queryOne<{ max_seq: number; total_bytes: string }>(
+        `SELECT
+           COALESCE(MAX(sequence), 0) AS max_seq,
+           COALESCE(SUM(LENGTH(chunk)), 0)::text AS total_bytes
+         FROM story_output_chunks
+         WHERE run_id = $1 AND story_id = $2`,
+        [runId, storyId],
+      );
+
+      const maxSeq = resumeRow?.max_seq ?? 0;
+      // total_bytes comes back as string from SUM — coerce to number
+      const totalBytes = Number(resumeRow?.total_bytes ?? '0');
+
+      // Resume sequence is max_seq + 1 (or 1 if no chunks exist)
+      const resumeSequence = maxSeq > 0 ? maxSeq + 1 : 1;
+      // Resume byte offset: best-effort estimate from stored chunk sizes.
+      // Falls back to 0 if no chunks exist.
+      const resumeOffset = totalBytes > 0 ? totalBytes : 0;
+
+      const state: TailState = {
+        logFile,
+        offset: resumeOffset,
+        sequence: resumeSequence,
+        timer: null!,
+        lineBuf: '',
+      };
+
+      state.timer = setInterval(() => {
+        this.tailRead(runId, storyId, state).catch((err) => {
+          logger.warn({ err, runId, storyId }, '[story-log-follower] Tail read error');
+        });
+      }, TAIL_INTERVAL_MS);
+
+      this.activeTails.set(key, state);
+      recovered++;
+    }
+
+    logger.info(`StoryLogFollower: recovered ${recovered} in-flight stories`);
   }
 
   private async handleEvent(event: WalEvent): Promise<void> {
