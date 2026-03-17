@@ -10,30 +10,34 @@
  * entire response.
  */
 
-import { Router, Request, Response } from 'express';
+import { Router, Request, Response, NextFunction } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import * as fsPromises from 'fs/promises';
 import * as yaml from 'js-yaml';
-import { query as dbQuery, queryOne } from '../db/index.js';
-import { synthesizeDirectionStack } from '../lib/direction-stack.js';
-import { readMemory, query as queryMemory } from '../lib/memory-ledger.js';
-import { retrieveContext } from '../lib/memory-router.js';
-import { echolocate } from '../lib/workspace-echolocation.js';
-import { parseFrontmatter, inferCategory } from '../lib/skill-registry.js';
-import { ValidationError, NotFoundError } from '../lib/errors.js';
+import { query as dbQuery, queryOne } from '../db/index';
+import { synthesizeDirectionStack } from '../lib/direction-stack';
+import { readMemory, query as queryMemory } from '../lib/memory-ledger';
+import { retrieveContext } from '../lib/memory-router';
+import { echolocate } from '../lib/workspace-echolocation';
+import { parseFrontmatter, inferCategory } from '../lib/skill-registry';
+import { ValidationError, NotFoundError } from '../lib/errors';
 import {
   RecallQuerySchema,
+  DumpQuerySchema,
   type RecallResponse,
+  type DumpResponse,
   type RunSummary,
   type ActiveRun,
   type StoryProgress,
   type SkillPreview,
+  type SkillFull,
+  type DirectionLayer,
   type WorkspaceMetadata,
   type RetrievalTier,
   type MemoryEntry,
-} from './recall-types.js';
-import type { EcholocationReport } from '../lib/workspace-echolocation.js';
+} from './recall-types';
+import type { EcholocationReport } from '../lib/workspace-echolocation';
 
 const router = Router();
 
@@ -43,7 +47,7 @@ interface WorkspaceRow {
   id: string;
   label: string;
   path: string;
-  domain: string | null;
+  domains: string;
 }
 
 interface RunRow {
@@ -387,7 +391,8 @@ async function fetchActiveRuns(
  *       404:
  *         description: Workspace not found
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', async (req: Request, res: Response, next: NextFunction) => {
+  try {
   const start = Date.now();
 
   // Validate query params
@@ -401,7 +406,7 @@ router.get('/', async (req: Request, res: Response) => {
 
   // Verify workspace exists (required before parallel fetchers)
   const workspace = await queryOne<WorkspaceRow>(
-    'SELECT id, label, path, domain FROM workspaces WHERE id = $1',
+    'SELECT id, label, path, domains FROM workspaces WHERE id = $1',
     [workspaceId],
   );
   if (!workspace) {
@@ -412,7 +417,7 @@ router.get('/', async (req: Request, res: Response) => {
     id: workspace.id,
     label: workspace.label,
     path: workspace.path,
-    domain: workspace.domain,
+    domain: workspace.domains || null,
   };
 
   // ── Execute all 8 section fetchers concurrently ─────────────────────────
@@ -496,6 +501,238 @@ router.get('/', async (req: Request, res: Response) => {
   );
 
   res.json(response);
+  } catch (err) { next(err); }
+});
+
+// ─── Dump-specific fetchers ──────────────────────────────────────────────────
+
+async function fetchAllMemories(workspacePath: string): Promise<MemoryEntry[]> {
+  return readMemory(workspacePath);
+}
+
+async function fetchDirectionLayers(workspaceId: string): Promise<DirectionLayer[]> {
+  const rows = await dbQuery<{
+    layer: number;
+    content_yaml: string;
+    domain: string | null;
+    workspace_id: string | null;
+  }>(
+    `SELECT layer, content_yaml, domain, workspace_id
+     FROM direction_layers
+     WHERE (workspace_id = $1 AND layer = 3)
+        OR (layer IN (1, 2) AND COALESCE(workspace_id, '') = '')
+     ORDER BY layer ASC`,
+    [workspaceId],
+  );
+  return rows.map((r) => ({
+    layer: r.layer,
+    content: r.content_yaml,
+    domain: r.domain,
+    workspaceId: r.workspace_id,
+  }));
+}
+
+async function fetchFullSkills(workspacePath: string): Promise<SkillFull[]> {
+  const skillsDir = path.join(workspacePath, '.rorca', 'skills');
+  const fsSkills = await readSkillFiles(skillsDir);
+
+  const seen = new Map<string, SkillFull>();
+  for (const { name, content } of fsSkills) {
+    const parsed = parseFrontmatter(content);
+    let description = '';
+    let category: string | null = null;
+    let tags: string[] = [];
+    let skillName = name;
+
+    if (parsed) {
+      try {
+        const raw = yaml.load(parsed.yaml) as Record<string, unknown> | null;
+        if (raw && typeof raw === 'object') {
+          if (typeof raw['description'] === 'string') description = raw['description'];
+          if (typeof raw['name'] === 'string') skillName = raw['name'];
+          if (typeof raw['category'] === 'string') category = raw['category'].trim();
+          if (Array.isArray(raw['tags'])) {
+            tags = raw['tags'].filter((t: unknown): t is string => typeof t === 'string');
+          } else if (typeof raw['tags'] === 'string') {
+            tags = raw['tags'].split(',').map((t: string) => t.trim()).filter(Boolean);
+          }
+        }
+      } catch {
+        // YAML parse failure
+      }
+    }
+
+    if (!category) category = inferCategory(skillName, description);
+    seen.set(skillName.toLowerCase(), { name: skillName, content, description, category, tags, source: 'rorca-skills' });
+  }
+
+  const dbSkills = await dbQuery<{
+    name: string;
+    description: string;
+    source: string;
+    content: string;
+    category: string | null;
+    tags: string | null;
+  }>('SELECT name, description, source, content, category, tags FROM installed_skills');
+
+  for (const row of dbSkills) {
+    const key = row.name.toLowerCase();
+    if (seen.has(key)) continue;
+
+    let tags: string[] = [];
+    if (row.tags) {
+      try { tags = JSON.parse(row.tags); } catch { tags = []; }
+    }
+
+    seen.set(key, {
+      name: row.name,
+      content: row.content,
+      description: row.description,
+      category: row.category || inferCategory(row.name, row.description),
+      tags,
+      source: row.source || 'db',
+    });
+  }
+
+  return Array.from(seen.values());
+}
+
+async function fetchRecentRunsDump(workspaceId: string): Promise<RunSummary[]> {
+  const sql = `
+    SELECT
+      pr.id,
+      pr.spec_path,
+      pr.status,
+      COALESCE(pr.agent_type, 'claude') AS agent_type,
+      pr.agent_model,
+      pr.started_at,
+      pr.finished_at,
+      COALESCE(SUM(CASE WHEN sr.status = 'pass' THEN 1 ELSE 0 END), 0)::text AS pass_count,
+      COALESCE(SUM(CASE WHEN sr.status = 'fail' THEN 1 ELSE 0 END), 0)::text AS fail_count,
+      COALESCE(SUM(CASE WHEN sr.status IN ('skip', 'excluded') THEN 1 ELSE 0 END), 0)::text AS skip_count,
+      COALESCE(COUNT(sr.id), 0)::text AS total_stories
+    FROM pipeline_runs pr
+    LEFT JOIN story_results sr ON sr.run_id = pr.id
+    WHERE pr.workspace_id = $1
+      AND pr.status IN ('done', 'failed', 'partial_failure', 'cancelled')
+    GROUP BY pr.id
+    ORDER BY pr.started_at DESC
+    LIMIT 20
+  `;
+  const rows = await dbQuery<RunRow>(sql, [workspaceId]);
+  return rows.map((r) => ({
+    id: r.id,
+    specPath: r.spec_path,
+    status: r.status,
+    agent: r.agent_type,
+    model: r.agent_model,
+    startedAt: r.started_at,
+    finishedAt: r.finished_at,
+    passedStories: Number(r.pass_count),
+    failedStories: Number(r.fail_count),
+    skippedStories: Number(r.skip_count),
+    totalTokens: null,
+    costUsd: null,
+  }));
+}
+
+// ─── Dump Route ─────────────────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/recall/dump:
+ *   get:
+ *     operationId: getRecallDump
+ *     summary: Complete unfiltered brain export
+ *     description: >
+ *       Returns the full, unfiltered workspace brain — all memories, raw
+ *       direction layers (L1-L3), full skill content (no truncation), schema
+ *       snapshot, last 20 runs with story aggregation, and active runs.
+ *       No token budget, no RAG filtering, no LIMIT on memories/skills.
+ *     tags: [Recall]
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID
+ *     responses:
+ *       200:
+ *         description: Full dump payload
+ *       400:
+ *         description: Missing or invalid workspaceId
+ *       404:
+ *         description: Workspace not found
+ */
+router.get('/dump', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+  const start = Date.now();
+
+  const parsed = DumpQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    throw new ValidationError(
+      parsed.error.issues.map(i => i.message).join('; '),
+    );
+  }
+  const { workspaceId } = parsed.data;
+
+  const workspace = await queryOne<WorkspaceRow>(
+    'SELECT id, label, path, domains FROM workspaces WHERE id = $1',
+    [workspaceId],
+  );
+  if (!workspace) {
+    throw new NotFoundError('Workspace not found');
+  }
+
+  const metadata: WorkspaceMetadata = {
+    id: workspace.id,
+    label: workspace.label,
+    path: workspace.path,
+    domain: workspace.domains || null,
+  };
+
+  const timed = async <T>(name: string, fn: () => Promise<T> | T): Promise<T | null> => {
+    try {
+      return await fn();
+    } catch (err) {
+      console.warn(`[recall/dump] ${name} failed:`, (err as Error).message);
+      return null;
+    }
+  };
+
+  const [
+    memoriesResult,
+    directionLayersResult,
+    skillsResult,
+    workspaceContextResult,
+    recentRunsResult,
+    activeRunsResult,
+  ] = await Promise.all([
+    timed('memories', () => fetchAllMemories(workspace.path)),
+    timed('directionLayers', () => fetchDirectionLayers(workspaceId)),
+    timed('skills', () => fetchFullSkills(workspace.path)),
+    timed('workspaceContext', () => fetchWorkspaceContext(workspaceId)),
+    timed('recentRuns', () => fetchRecentRunsDump(workspaceId)),
+    timed('activeRuns', () => fetchActiveRuns(workspaceId, workspace.path)),
+  ]);
+
+  const response: DumpResponse = {
+    memories: memoriesResult,
+    directionLayers: directionLayersResult,
+    skills: skillsResult,
+    workspaceContext: workspaceContextResult,
+    recentRuns: recentRunsResult,
+    metadata,
+    activeRuns: activeRunsResult,
+    meta: {
+      latencyMs: Date.now() - start,
+      generatedAt: new Date().toISOString(),
+    },
+  };
+
+  res.json(response);
+  } catch (err) { next(err); }
 });
 
 export default router;
