@@ -1,0 +1,257 @@
+/**
+ * story-log-follower.ts — WAL subscriber that tails story log files during
+ * execution, extracts human-readable prose from stream-json output, and writes
+ * it to the story_output_chunks table.
+ *
+ * On story_started: starts a 200ms setInterval tail loop reading new bytes from
+ * the log file referenced in the WAL payload's log_file field.
+ *
+ * Stream-json lines with type=assistant are parsed and
+ * event.message.content[].text blocks are concatenated into prose.
+ * Non-JSON lines pass through verbatim. Lines with no extractable text are
+ * silently skipped.
+ *
+ * On story_passed/story_failed/story_skipped: performs one final drain read of
+ * remaining log bytes then clears the tail interval for that (run_id, story_id).
+ */
+
+import * as fs from 'node:fs';
+import { subscribe, type WalEvent } from './sse-hub';
+import { execute } from '../db/index';
+import { logger } from './logger';
+
+const TAIL_INTERVAL_MS = 200;
+
+/** Tracks per-(run_id, story_id) tail state. */
+interface TailState {
+  logFile: string;
+  offset: number;
+  sequence: number;
+  timer: ReturnType<typeof setInterval>;
+  lineBuf: string;
+}
+
+/** Composite key for the active tails map. */
+function tailKey(runId: number, storyId: string): string {
+  return `${runId}:${storyId}`;
+}
+
+/**
+ * Extract prose text from a single line of log output.
+ *
+ * - If the line is valid JSON with type=assistant and message.content[].text,
+ *   concatenates all text blocks into a single string.
+ * - If the line is non-JSON, returns it verbatim.
+ * - If the line is JSON but has no extractable text, returns null (skip).
+ */
+function extractProse(line: string): string | null {
+  const trimmed = line.trim();
+  if (!trimmed) return null;
+
+  try {
+    const event = JSON.parse(trimmed);
+
+    // Only extract text from assistant message events
+    if (event.type === 'assistant' && event.message?.content) {
+      const parts: string[] = [];
+      for (const block of event.message.content as { type: string; text?: string }[]) {
+        if (block.type === 'text' && block.text) {
+          parts.push(block.text);
+        }
+      }
+      return parts.length > 0 ? parts.join('') : null;
+    }
+
+    // Valid JSON but not an assistant event — skip silently
+    return null;
+  } catch {
+    // Not valid JSON — pass through verbatim
+    return trimmed;
+  }
+}
+
+/**
+ * Write a prose chunk to story_output_chunks. Non-fatal on failure.
+ */
+async function writeChunk(
+  runId: number,
+  storyId: string,
+  sequence: number,
+  chunk: string,
+): Promise<void> {
+  try {
+    await execute(
+      `INSERT INTO story_output_chunks (run_id, story_id, chunk, sequence)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (run_id, story_id, sequence) DO NOTHING`,
+      [runId, storyId, chunk, sequence],
+    );
+  } catch (err) {
+    logger.warn({ err, runId, storyId, sequence }, '[story-log-follower] Failed to write chunk');
+  }
+}
+
+export class StoryLogFollower {
+  private activeTails = new Map<string, TailState>();
+  private unsubscribe: (() => void) | null = null;
+
+  /**
+   * Start subscribing to WAL events. Call once at startup.
+   */
+  start(): void {
+    if (this.unsubscribe) return; // already started
+    this.unsubscribe = subscribe((event) => {
+      this.handleEvent(event).catch((err) => {
+        logger.warn({ err }, '[story-log-follower] Error handling WAL event');
+      });
+    });
+  }
+
+  /**
+   * Stop all active tail loops and unsubscribe from WAL events.
+   */
+  stop(): void {
+    // Clear all active tail intervals
+    for (const [key, state] of this.activeTails) {
+      clearInterval(state.timer);
+      this.activeTails.delete(key);
+    }
+    // Unsubscribe from SSE hub
+    if (this.unsubscribe) {
+      this.unsubscribe();
+      this.unsubscribe = null;
+    }
+  }
+
+  private async handleEvent(event: WalEvent): Promise<void> {
+    const { event_type } = event;
+
+    if (event_type === 'story_started') {
+      await this.onStoryStarted(event);
+    } else if (
+      event_type === 'story_passed' ||
+      event_type === 'story_failed' ||
+      event_type === 'story_skipped'
+    ) {
+      await this.onStoryFinished(event);
+    }
+  }
+
+  private async onStoryStarted(event: WalEvent): Promise<void> {
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = JSON.parse(event.payload ?? '{}');
+    } catch {
+      return;
+    }
+
+    const logFile = payload.log_file as string | undefined;
+    const runId = payload.run_id as number | undefined;
+    const storyId = (payload.story_id as string) || event.story_id;
+
+    if (!logFile || !runId || !storyId) return;
+
+    const key = tailKey(runId, storyId);
+
+    // If already tailing this story, skip (idempotency for rebroadcast)
+    if (this.activeTails.has(key)) return;
+
+    const state: TailState = {
+      logFile,
+      offset: 0,
+      sequence: 1,
+      timer: null!,  // assigned immediately below
+      lineBuf: '',
+    };
+
+    state.timer = setInterval(() => {
+      this.tailRead(runId, storyId, state).catch((err) => {
+        logger.warn({ err, runId, storyId }, '[story-log-follower] Tail read error');
+      });
+    }, TAIL_INTERVAL_MS);
+
+    this.activeTails.set(key, state);
+  }
+
+  private async onStoryFinished(event: WalEvent): Promise<void> {
+    let payload: Record<string, unknown> = {};
+    try {
+      payload = JSON.parse(event.payload ?? '{}');
+    } catch {
+      return;
+    }
+
+    const runId = (payload.run_id ?? payload.runId) as number | undefined;
+    const storyId = (payload.story_id as string) || event.story_id;
+
+    if (!runId || !storyId) return;
+
+    const key = tailKey(runId, storyId);
+    const state = this.activeTails.get(key);
+    if (!state) return;
+
+    // Stop the interval
+    clearInterval(state.timer);
+
+    // Final drain: read remaining bytes
+    await this.tailRead(runId, storyId, state);
+
+    // Flush any remaining partial line in the buffer
+    if (state.lineBuf.trim()) {
+      const prose = extractProse(state.lineBuf);
+      if (prose) {
+        await writeChunk(runId, storyId, state.sequence, prose);
+        state.sequence++;
+      }
+    }
+
+    this.activeTails.delete(key);
+  }
+
+  /**
+   * Read new bytes from the log file starting at the tracked offset,
+   * split into lines, extract prose, and write chunks.
+   */
+  private async tailRead(
+    runId: number,
+    storyId: string,
+    state: TailState,
+  ): Promise<void> {
+    let fd: number | undefined;
+    try {
+      fd = fs.openSync(state.logFile, 'r');
+      const stat = fs.fstatSync(fd);
+
+      if (stat.size <= state.offset) return; // no new data
+
+      const bytesToRead = stat.size - state.offset;
+      const buf = Buffer.alloc(bytesToRead);
+      fs.readSync(fd, buf, 0, bytesToRead, state.offset);
+      state.offset = stat.size;
+
+      // Append to line buffer and split
+      state.lineBuf += buf.toString('utf8');
+      const lines = state.lineBuf.split('\n');
+      // Last element is an incomplete line (or empty string if ends with \n)
+      state.lineBuf = lines.pop() ?? '';
+
+      for (const line of lines) {
+        const prose = extractProse(line);
+        if (prose) {
+          await writeChunk(runId, storyId, state.sequence, prose);
+          state.sequence++;
+        }
+      }
+    } catch (err) {
+      // File might not exist yet (race between WAL event and file creation)
+      const code = (err as NodeJS.ErrnoException).code;
+      if (code !== 'ENOENT') {
+        logger.warn({ err, runId, storyId, logFile: state.logFile }, '[story-log-follower] File read error');
+      }
+    } finally {
+      if (fd !== undefined) {
+        try { fs.closeSync(fd); } catch { /* ignore */ }
+      }
+    }
+  }
+}
