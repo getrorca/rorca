@@ -85,6 +85,7 @@ import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
+import recallRouter from './routes/recall';
 import { initBoss } from './lib/pg-boss';
 
 dotenv.config();
@@ -302,6 +303,7 @@ app.use('/api/attachments', attachmentsRouter);
 app.use('/api/personas', personasRouter);
 app.use('/api/marketplace', marketplaceRouter);
 app.use('/api/search', searchRouter);
+app.use('/api/recall', recallRouter);
 
 // V2-108: Serve frontend static files when running via `rorca start`
 if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
