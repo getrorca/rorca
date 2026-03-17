@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000012,
   "startedAt": "2026-03-17T18:30:24.225Z",
-  "lastUpdatedAt": "2026-03-17T18:43:10.815Z",
+  "lastUpdatedAt": "2026-03-17T19:08:50.023Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-17T18:43:10.814Z",
       "agentType": "claude",
       "elapsedMs": 454595
+    },
+    {
+      "storyId": "US-009",
+      "title": "Compose all sections with Promise.all, add meta with token estimation",
+      "status": "passed",
+      "startedAt": "2026-03-17T18:56:07.684Z",
+      "finishedAt": "2026-03-17T19:08:50.023Z",
+      "agentType": "claude",
+      "elapsedMs": 762339
     }
   ],
   "failedStories": [],

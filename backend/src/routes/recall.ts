@@ -1,4 +1,501 @@
-Resolved. The merged file combines:
+/**
+ * recall.ts — GET /api/recall
+ *
+ * Single-call context retrieval for MCP and CLI consumers.
+ * Returns direction stack, memories, health, recent runs, skills,
+ * workspace context, metadata, and active runs in one payload.
+ *
+ * All 8 data fetchers run concurrently via Promise.all — each wrapped
+ * in its own try-catch so a failure in one section doesn't crash the
+ * entire response.
+ */
 
-- **Feature branch (US-008)**: Full implementation — direction stack synthesis, active runs with story progress, `ValidationError` for bad params, typed DB row interfaces, `query` + `queryOne` imports, `fs`/`path` imports
-- **HEAD**: Swagger JSDoc block, workspace context query (schema_snapshot from `workspace_context` table), `.js` import extensions, final `totalTokens` recompute over full JSON payload
+import { Router, Request, Response } from 'express';
+import * as fs from 'fs';
+import * as path from 'path';
+import * as fsPromises from 'fs/promises';
+import * as yaml from 'js-yaml';
+import { query as dbQuery, queryOne } from '../db/index.js';
+import { synthesizeDirectionStack } from '../lib/direction-stack.js';
+import { readMemory, query as queryMemory } from '../lib/memory-ledger.js';
+import { retrieveContext } from '../lib/memory-router.js';
+import { echolocate } from '../lib/workspace-echolocation.js';
+import { parseFrontmatter, inferCategory } from '../lib/skill-registry.js';
+import { ValidationError, NotFoundError } from '../lib/errors.js';
+import {
+  RecallQuerySchema,
+  type RecallResponse,
+  type RunSummary,
+  type ActiveRun,
+  type StoryProgress,
+  type SkillPreview,
+  type WorkspaceMetadata,
+  type RetrievalTier,
+  type MemoryEntry,
+} from './recall-types.js';
+import type { EcholocationReport } from '../lib/workspace-echolocation.js';
+
+const router = Router();
+
+// ─── DB row shapes (internal) ────────────────────────────────────────────────
+
+interface WorkspaceRow {
+  id: string;
+  label: string;
+  path: string;
+  domain: string | null;
+}
+
+interface RunRow {
+  id: number;
+  spec_path: string;
+  status: string;
+  agent_type: string;
+  agent_model: string | null;
+  started_at: string;
+  finished_at: string | null;
+  pass_count: string;
+  fail_count: string;
+  skip_count: string;
+  total_stories: string;
+}
+
+interface PipelineRunRow {
+  id: number;
+  spec_path: string;
+  status: string;
+  agent_type: string;
+  agent_model: string | null;
+  started_at: string;
+  queue_position: number | null;
+}
+
+interface StoryResultCountRow {
+  status: string;
+  cnt: string;
+}
+
+// ─── Skills helpers ─────────────────────────────────────────────────────────
+
+function truncateAtWord(text: string, maxLen: number): string {
+  if (text.length <= maxLen) return text;
+  const truncated = text.slice(0, maxLen);
+  const lastSpace = truncated.lastIndexOf(' ');
+  if (lastSpace <= 0) return truncated;
+  return truncated.slice(0, lastSpace);
+}
+
+async function readSkillFiles(dirPath: string): Promise<Array<{ name: string; content: string }>> {
+  let entries: string[];
+  try {
+    entries = await fsPromises.readdir(dirPath);
+  } catch {
+    return [];
+  }
+  const mdFiles = entries.filter(f => f.endsWith('.md'));
+  const results = await Promise.all(
+    mdFiles.map(async (filename) => {
+      try {
+        const content = await fsPromises.readFile(path.join(dirPath, filename), 'utf-8');
+        return { name: path.basename(filename, '.md'), content };
+      } catch {
+        return null;
+      }
+    }),
+  );
+  return results.filter((r): r is { name: string; content: string } => r !== null);
+}
+
+function fileToPreview(name: string, content: string, source: string): SkillPreview {
+  const parsed = parseFrontmatter(content);
+  let description = '';
+  let category: string | null = null;
+  let tags: string[] = [];
+  let bodyText = content;
+
+  if (parsed) {
+    try {
+      const raw = yaml.load(parsed.yaml) as Record<string, unknown> | null;
+      if (raw && typeof raw === 'object') {
+        if (typeof raw['description'] === 'string') description = raw['description'];
+        if (typeof raw['name'] === 'string') name = raw['name'];
+        if (typeof raw['category'] === 'string') category = raw['category'].trim();
+        if (Array.isArray(raw['tags'])) {
+          tags = raw['tags'].filter((t: unknown): t is string => typeof t === 'string');
+        } else if (typeof raw['tags'] === 'string') {
+          tags = raw['tags'].split(',').map((t: string) => t.trim()).filter(Boolean);
+        }
+      }
+    } catch {
+      // YAML parse failure — treat entire content as body
+    }
+    bodyText = parsed.body;
+  }
+
+  if (!category) category = inferCategory(name, description);
+
+  return { name, contentPreview: truncateAtWord(bodyText.trim(), 200), description, category, tags, source };
+}
+
+// ─── Section fetchers ───────────────────────────────────────────────────────
+
+async function fetchDirectionStack(
+  workspaceId: string,
+  storyText?: string,
+): Promise<{ directionStack: string; retrievalTier: RetrievalTier }> {
+  const synthesized = await synthesizeDirectionStack(workspaceId, storyText ? { storyText } : undefined);
+  return { directionStack: synthesized.text, retrievalTier: 'cag' };
+}
+
+async function fetchMemories(
+  workspacePath: string,
+  workspaceId: string,
+  category?: string,
+  storyText?: string,
+): Promise<{ memories: MemoryEntry[]; retrievalTier: RetrievalTier }> {
+  let retrievalTier: RetrievalTier = 'none';
+
+  if (storyText) {
+    const ctx = await retrieveContext(workspaceId, storyText, { includeGraph: true });
+    retrievalTier = ctx.meta.tier === 'cache' ? 'cag'
+      : ctx.meta.tier === 'search' || ctx.meta.tier === 'hybrid' ? 'rag'
+      : 'none';
+    if (ctx.meta.graphHits > 0) retrievalTier = 'graph';
+  }
+
+  const all = category
+    ? queryMemory(workspacePath, category as Parameters<typeof queryMemory>[1])
+    : readMemory(workspacePath);
+
+  return { memories: all, retrievalTier };
+}
+
+function fetchHealth(workspacePath: string): EcholocationReport | null {
+  return echolocate(workspacePath);
+}
+
+async function fetchRecentRuns(workspaceId: string): Promise<RunSummary[]> {
+  const sql = `
+    SELECT
+      pr.id,
+      pr.spec_path,
+      pr.status,
+      COALESCE(pr.agent_type, 'claude') AS agent_type,
+      pr.agent_model,
+      pr.started_at,
+      pr.finished_at,
+      COALESCE(SUM(CASE WHEN sr.status = 'pass' THEN 1 ELSE 0 END), 0)::text AS pass_count,
+      COALESCE(SUM(CASE WHEN sr.status = 'fail' THEN 1 ELSE 0 END), 0)::text AS fail_count,
+      COALESCE(SUM(CASE WHEN sr.status IN ('skip', 'excluded') THEN 1 ELSE 0 END), 0)::text AS skip_count,
+      COALESCE(COUNT(sr.id), 0)::text AS total_stories
+    FROM pipeline_runs pr
+    LEFT JOIN story_results sr ON sr.run_id = pr.id
+    WHERE pr.workspace_id = $1
+      AND pr.status IN ('done', 'failed', 'partial_failure', 'cancelled')
+    GROUP BY pr.id
+    ORDER BY pr.started_at DESC
+    LIMIT 5
+  `;
+  const rows = await dbQuery<RunRow>(sql, [workspaceId]);
+  return rows.map((r) => ({
+    id: r.id,
+    specPath: r.spec_path,
+    status: r.status,
+    agent: r.agent_type,
+    model: r.agent_model,
+    startedAt: r.started_at,
+    finishedAt: r.finished_at,
+    passedStories: Number(r.pass_count),
+    failedStories: Number(r.fail_count),
+    skippedStories: Number(r.skip_count),
+    totalTokens: null,
+    costUsd: null,
+  }));
+}
+
+async function fetchSkills(workspacePath: string): Promise<SkillPreview[]> {
+  const skillsDir = path.join(workspacePath, '.rorca', 'skills');
+  const fsSkills = await readSkillFiles(skillsDir);
+
+  const seen = new Map<string, SkillPreview>();
+  for (const { name, content } of fsSkills) {
+    const preview = fileToPreview(name, content, 'rorca-skills');
+    seen.set(preview.name.toLowerCase(), preview);
+  }
+
+  const dbSkills = await dbQuery<{
+    name: string;
+    description: string;
+    source: string;
+    content: string;
+    category: string | null;
+    tags: string | null;
+  }>('SELECT name, description, source, content, category, tags FROM installed_skills');
+
+  for (const row of dbSkills) {
+    const key = row.name.toLowerCase();
+    if (seen.has(key)) continue;
+
+    let tags: string[] = [];
+    if (row.tags) {
+      try { tags = JSON.parse(row.tags); } catch { tags = []; }
+    }
+
+    const parsed = parseFrontmatter(row.content);
+    const bodyText = parsed ? parsed.body.trim() : row.content.trim();
+
+    seen.set(key, {
+      name: row.name,
+      contentPreview: truncateAtWord(bodyText, 200),
+      description: row.description,
+      category: row.category || inferCategory(row.name, row.description),
+      tags,
+      source: row.source || 'db',
+    });
+  }
+
+  return Array.from(seen.values());
+}
+
+async function fetchWorkspaceContext(workspaceId: string): Promise<{
+  schemaSnapshot: string | null;
+  gitMemory: string | null;
+}> {
+  const ctxRow = await queryOne<{
+    schema_snapshot: string | null;
+  }>(
+    'SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1',
+    [workspaceId],
+  );
+  return {
+    schemaSnapshot: ctxRow?.schema_snapshot ?? null,
+    gitMemory: null, // git_memory column dropped (migration 075)
+  };
+}
+
+async function fetchActiveRuns(
+  workspaceId: string,
+  workspacePath: string,
+): Promise<ActiveRun[]> {
+  const runs = await dbQuery<PipelineRunRow>(
+    `SELECT id, spec_path, status, agent_type, agent_model, started_at, queue_position
+     FROM pipeline_runs
+     WHERE workspace_id = $1 AND status IN ('running', 'queued')
+     ORDER BY started_at ASC`,
+    [workspaceId],
+  );
+
+  return Promise.all(
+    runs.map(async (run): Promise<ActiveRun> => {
+      let storyProgress: StoryProgress | null = null;
+
+      if (run.status === 'running') {
+        let total = 0;
+        try {
+          const absSpecPath = path.join(workspacePath, run.spec_path);
+          const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
+          const stories: unknown[] = specJson.userStories ?? [];
+          total = stories.length;
+        } catch {
+          // Spec file missing or unreadable
+        }
+
+        const counts = await dbQuery<StoryResultCountRow>(
+          `SELECT status, COUNT(*)::text AS cnt
+           FROM story_results
+           WHERE run_id = $1
+           GROUP BY status`,
+          [run.id],
+        );
+
+        let passed = 0;
+        let failed = 0;
+        for (const row of counts) {
+          const c = parseInt(row.cnt, 10);
+          if (row.status === 'pass') passed = c;
+          else if (row.status === 'fail' || row.status === 'timeout') failed += c;
+        }
+
+        const completed = counts.reduce((sum, r) => sum + parseInt(r.cnt, 10), 0);
+        const inProgress = Math.max(0, total - completed);
+
+        storyProgress = { passed, failed, inProgress, total };
+      }
+
+      return {
+        id: run.id,
+        specPath: run.spec_path,
+        status: run.status as 'running' | 'queued',
+        agent: run.agent_type,
+        model: run.agent_model,
+        startedAt: run.started_at,
+        queuePosition: run.status === 'queued' ? run.queue_position : null,
+        storyProgress,
+      };
+    }),
+  );
+}
+
+// ─── Route ──────────────────────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/recall:
+ *   get:
+ *     operationId: getRecall
+ *     summary: Full workspace context recall ("brain dump")
+ *     description: >
+ *       Composes the entire Rorca workspace brain into a single JSON payload —
+ *       direction stack, memories, health, recent runs, skills, workspace context,
+ *       metadata, and active runs. All 8 data sources are fetched concurrently.
+ *     tags: [Recall]
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Workspace ID to recall context for
+ *       - in: query
+ *         name: category
+ *         schema:
+ *           type: string
+ *           enum: [Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha]
+ *         description: Optional memory category filter
+ *       - in: query
+ *         name: includeRuns
+ *         schema:
+ *           type: string
+ *           default: 'true'
+ *         description: Include recent pipeline runs (default true)
+ *       - in: query
+ *         name: includeHealth
+ *         schema:
+ *           type: string
+ *           default: 'true'
+ *         description: Include workspace health report (default true)
+ *       - in: query
+ *         name: storyText
+ *         schema:
+ *           type: string
+ *         description: Optional story text for semantic memory retrieval
+ *     responses:
+ *       200:
+ *         description: Full recall payload
+ *       400:
+ *         description: Missing or invalid workspaceId
+ *       404:
+ *         description: Workspace not found
+ */
+router.get('/', async (req: Request, res: Response) => {
+  const start = Date.now();
+
+  // Validate query params
+  const parsed = RecallQuerySchema.safeParse(req.query);
+  if (!parsed.success) {
+    throw new ValidationError(
+      parsed.error.issues.map(i => i.message).join('; '),
+    );
+  }
+  const { workspaceId, category, includeRuns, includeHealth, storyText } = parsed.data;
+
+  // Verify workspace exists (required before parallel fetchers)
+  const workspace = await queryOne<WorkspaceRow>(
+    'SELECT id, label, path, domain FROM workspaces WHERE id = $1',
+    [workspaceId],
+  );
+  if (!workspace) {
+    throw new NotFoundError(`Workspace ${workspaceId} not found`);
+  }
+
+  const metadata: WorkspaceMetadata = {
+    id: workspace.id,
+    label: workspace.label,
+    path: workspace.path,
+    domain: workspace.domain,
+  };
+
+  // ── Execute all 8 section fetchers concurrently ─────────────────────────
+
+  const sectionTimings: Record<string, number> = {};
+
+  const timed = async <T>(name: string, fn: () => Promise<T> | T): Promise<T | null> => {
+    const t0 = Date.now();
+    try {
+      const result = await fn();
+      sectionTimings[name] = Date.now() - t0;
+      return result;
+    } catch (err) {
+      sectionTimings[name] = Date.now() - t0;
+      console.warn(`[recall] ${name} failed (${sectionTimings[name]}ms):`, (err as Error).message);
+      return null;
+    }
+  };
+
+  const [
+    directionResult,
+    memoryResult,
+    healthResult,
+    recentRunsResult,
+    skillsResult,
+    workspaceContextResult,
+    activeRunsResult,
+  ] = await Promise.all([
+    // 1. Direction stack synthesis
+    timed('directionStack', () => fetchDirectionStack(workspaceId, storyText)),
+    // 2. Memories (may trigger 3-tier retrieval if storyText provided)
+    timed('memories', () => fetchMemories(workspace.path, workspaceId, category, storyText)),
+    // 3. Health / echolocation
+    timed('health', () => includeHealth ? fetchHealth(workspace.path) : null),
+    // 4. Recent completed runs
+    timed('recentRuns', () => includeRuns ? fetchRecentRuns(workspaceId) : []),
+    // 5. Installed skills
+    timed('skills', () => fetchSkills(workspace.path)),
+    // 6. Workspace context (schema snapshot)
+    timed('workspaceContext', () => fetchWorkspaceContext(workspaceId)),
+    // 7. Active/queued runs with story progress
+    timed('activeRuns', () => includeRuns ? fetchActiveRuns(workspaceId, workspace.path) : []),
+  ]);
+
+  // ── Derive retrieval tier from whichever section produced the highest tier ─
+  let retrievalTier: RetrievalTier = 'none';
+  if (directionResult) retrievalTier = directionResult.retrievalTier;
+  if (memoryResult) {
+    // Memory tier can upgrade the overall tier
+    const tierRank: Record<RetrievalTier, number> = { none: 0, cag: 1, rag: 2, graph: 3 };
+    if (tierRank[memoryResult.retrievalTier] > tierRank[retrievalTier]) {
+      retrievalTier = memoryResult.retrievalTier;
+    }
+  }
+
+  // ── Assemble response ────────────────────────────────────────────────────
+  const response: RecallResponse = {
+    directionStack: directionResult?.directionStack ?? '',
+    memories: memoryResult?.memories ?? [],
+    health: healthResult ?? null,
+    recentRuns: (recentRunsResult as RunSummary[] | null) ?? [],
+    skills: (skillsResult as SkillPreview[] | null) ?? [],
+    workspaceContext: workspaceContextResult ?? { schemaSnapshot: null, gitMemory: null },
+    metadata,
+    activeRuns: (activeRunsResult as ActiveRun[] | null) ?? [],
+    meta: {
+      totalTokens: 0,
+      latencyMs: 0,
+      retrievalTier,
+      generatedAt: new Date().toISOString(),
+    },
+  };
+
+  // Compute token estimate over the full serialized response
+  response.meta.totalTokens = Math.ceil(JSON.stringify(response).length / 4);
+  response.meta.latencyMs = Date.now() - start;
+
+  // Log individual section timings for verification
+  console.log(
+    `[recall] workspaceId=${workspaceId} total=${response.meta.latencyMs}ms sections=${JSON.stringify(sectionTimings)}`,
+  );
+
+  res.json(response);
+});
+
+export default router;
