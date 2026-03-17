@@ -15,19 +15,23 @@ export type { MemoryEntry, EcholocationReport };
 
 // ─── Domain types (defined here to avoid coupling to internal DB row shapes) ─
 
+export interface StoryResultsSummary {
+  passCount: number;
+  failCount: number;
+  skipCount: number;
+  totalStories: number;
+  passRate: number; // 0.0–1.0
+}
+
 export interface RunSummary {
   id: number;
   specPath: string;
   status: string;
-  agent: string;
+  agentType: string;
   model: string | null;
   startedAt: string;
   finishedAt: string | null;
-  passedStories: number;
-  failedStories: number;
-  skippedStories: number;
-  totalTokens: number | null;
-  costUsd: number | null;
+  storyResults: StoryResultsSummary;
 }
 
 export interface ActiveRun {
