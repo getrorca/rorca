@@ -1,8 +1,8 @@
 {
   "specId": "rorca-mcp-recall-tool",
-  "runId": 20260316000012,
-  "startedAt": "2026-03-17T18:30:24.225Z",
-  "lastUpdatedAt": "2026-03-17T19:17:41.772Z",
+  "runId": 20260316000019,
+  "startedAt": "2026-03-17T21:03:11.254Z",
+  "lastUpdatedAt": "2026-03-17T21:35:14.623Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -48,11 +48,20 @@
       "finishedAt": "2026-03-17T19:17:41.772Z",
       "agentType": "claude",
       "elapsedMs": 269216
+    },
+    {
+      "storyId": "US-013",
+      "title": "Implement rorca_dump MCP tool and GET /api/recall/dump route — full unfiltered brain export",
+      "status": "passed",
+      "startedAt": "2026-03-17T21:03:17.962Z",
+      "finishedAt": "2026-03-17T21:35:14.623Z",
+      "agentType": "claude",
+      "elapsedMs": 1916661
     }
   ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
-  "resumedFromStory": null
+  "resumedFromStory": "US-011"
 }
