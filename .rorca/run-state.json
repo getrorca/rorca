@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000012,
   "startedAt": "2026-03-17T18:30:24.225Z",
-  "lastUpdatedAt": "2026-03-17T19:09:27.868Z",
+  "lastUpdatedAt": "2026-03-17T19:17:41.772Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -39,6 +39,15 @@
       "finishedAt": "2026-03-17T19:09:27.868Z",
       "agentType": "claude",
       "elapsedMs": 16874
+    },
+    {
+      "storyId": "US-011",
+      "title": "Register recall MCP prompt as slash-command shorthand",
+      "status": "passed",
+      "startedAt": "2026-03-17T19:13:12.556Z",
+      "finishedAt": "2026-03-17T19:17:41.772Z",
+      "agentType": "claude",
+      "elapsedMs": 269216
     }
   ],
   "failedStories": [],
