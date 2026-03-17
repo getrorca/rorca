@@ -2,7 +2,7 @@
   "specId": "rorca-mini-terminal-db-output",
   "runId": 20260316000021,
   "startedAt": "2026-03-17T21:41:34.003Z",
-  "lastUpdatedAt": "2026-03-17T21:41:46.128Z",
+  "lastUpdatedAt": "2026-03-17T21:51:39.342Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-17T21:41:46.128Z",
       "agentType": "claude",
       "elapsedMs": 10910
+    },
+    {
+      "storyId": "US-002",
+      "title": "Create story-log-follower.ts WAL subscriber service",
+      "status": "passed",
+      "startedAt": "2026-03-17T21:50:01.612Z",
+      "finishedAt": "2026-03-17T21:51:39.342Z",
+      "agentType": "claude",
+      "elapsedMs": 97730
     }
   ],
   "failedStories": [],
