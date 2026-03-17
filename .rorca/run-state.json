@@ -2,7 +2,7 @@
   "specId": "rorca-mini-terminal-db-output",
   "runId": 20260316000021,
   "startedAt": "2026-03-17T21:41:34.003Z",
-  "lastUpdatedAt": "2026-03-17T21:54:47.651Z",
+  "lastUpdatedAt": "2026-03-17T21:56:04.927Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-17T21:54:47.651Z",
       "agentType": "claude",
       "elapsedMs": 175062
+    },
+    {
+      "storyId": "US-004",
+      "title": "Register StoryLogFollower in server.ts",
+      "status": "passed",
+      "startedAt": "2026-03-17T21:55:03.398Z",
+      "finishedAt": "2026-03-17T21:56:04.926Z",
+      "agentType": "claude",
+      "elapsedMs": 61528
     }
   ],
   "failedStories": [],
