@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000012,
   "startedAt": "2026-03-17T18:30:24.225Z",
-  "lastUpdatedAt": "2026-03-17T19:08:50.023Z",
+  "lastUpdatedAt": "2026-03-17T19:12:51.757Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-17T19:08:50.023Z",
       "agentType": "claude",
       "elapsedMs": 762339
+    },
+    {
+      "storyId": "US-010",
+      "title": "Register rorca_recall MCP tool in mcp/server.ts",
+      "status": "passed",
+      "startedAt": "2026-03-17T19:09:10.812Z",
+      "finishedAt": "2026-03-17T19:12:51.756Z",
+      "agentType": "claude",
+      "elapsedMs": 220944
     }
   ],
   "failedStories": [],

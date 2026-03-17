@@ -35,6 +35,7 @@ const IDEMPOTENT_TOOLS = new Set([
   'rorca_list_workspaces', 'rorca_get_memories', 'rorca_workspace_stats',
   'rorca_get_context', 'rorca_synthesize_direction', 'rorca_search_stories',
   'rorca_run_status', 'rorca_pipeline_status', 'rorca_usage_stats',
+  'rorca_recall',
 ]);
 
 /** Cacheable tool names → { data, cachedAt } */
@@ -3174,6 +3175,43 @@ server.registerPrompt(
         },
       }],
     };
+  }
+);
+
+// ─── Recall MCP Tool (US-010) ────────────────────────────────────────────────
+
+server.registerTool(
+  'rorca_recall',
+  {
+    description: 'Brain dump — inject full workspace context into any AI session with a single call. Returns the direction stack, memory ledger, workspace health, recent runs, installed skills, workspace context (schema + git), active runs, and metadata in one payload. Use this at the start of any session to bootstrap context.',
+    inputSchema: {
+      workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces or settings)'),
+      category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).optional().describe('Filter memories to a specific category'),
+      includeRuns: z.boolean().optional().default(true).describe('Include recent pipeline runs in response (default: true)'),
+      includeHealth: z.boolean().optional().default(true).describe('Include workspace health report (default: true)'),
+      storyText: z.string().optional().describe('Optional story text for context-aware memory retrieval (RAG tier)'),
+    },
+  },
+  async ({ workspaceId, category, includeRuns, includeHealth, storyText }) => {
+    return wrapToolCall('rorca_recall', async () => {
+      const params = new URLSearchParams({ workspaceId });
+      if (category) params.set('category', category);
+      if (includeRuns !== undefined) params.set('includeRuns', String(includeRuns));
+      if (includeHealth !== undefined) params.set('includeHealth', String(includeHealth));
+      if (storyText) params.set('storyText', storyText);
+
+      const res = await fetchWithRetry('rorca_recall', () =>
+        timedFetch(`${RORCA_API}/api/recall?${params.toString()}`)
+      );
+      if (!res.ok) return httpError('rorca_recall', res);
+      const data = await res.json();
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify(data, null, 2),
+        }],
+      };
+    }, `recall:${workspaceId}`);
   }
 );
 
