@@ -13,6 +13,20 @@ import type { EcholocationReport } from '../lib/workspace-echolocation.js';
 
 export type { MemoryEntry, EcholocationReport };
 
+// ─── DB-backed memory shape (matches memories table, not MEMORY.md file) ────
+
+export interface RecallMemory {
+  id: number;
+  category: string;
+  title: string;
+  content: string;
+  confidence: string;
+  sourceType: string;
+  relatedFiles: string[];
+  pinned: boolean;
+  createdAt: string;
+}
+
 // ─── Domain types (defined here to avoid coupling to internal DB row shapes) ─
 
 export interface RunSummary {
@@ -70,7 +84,7 @@ export interface RecallMeta {
 
 export interface RecallResponse {
   directionStack: string;
-  memories: MemoryEntry[];
+  memories: RecallMemory[];
   health: EcholocationReport | null;
   recentRuns: RunSummary[];
   skills: SkillPreview[];
