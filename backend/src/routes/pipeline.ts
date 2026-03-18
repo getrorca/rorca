@@ -881,6 +881,7 @@ interface PipelineRunRow {
   auto_merge: boolean;
   merge_status: string | null;
   merge_commit_sha: string | null;
+  triggered_via: 'queue' | 'run_now';
 }
 
 interface StoryResultRow {
@@ -1380,16 +1381,18 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
     // Enforce constraint: auto_merge is only true when autoWorktree is true
     const computedAutoMerge = needsWorktree && (autoMerge !== false);
+    // US-002: Track trigger source — 'queue' when promoted from run queue, 'run_now' for direct triggers
+    const triggeredVia = queuedRunId ? 'queue' : 'run_now';
     let runId: number;
 
     if (queuedRunId) {
       // Promote queued run to running — worker will actually execute it
       await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
-         branch_name = $5, worktree_path = $6, auto_merge = $7 WHERE id = $8 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, queuedRunId]);
+         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8 WHERE id = $9 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, queuedRunId]);
       runId = queuedRunId;
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia]);
       runId = runResult!.id;
     }
 
@@ -1536,6 +1539,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       autoMerge: computedAutoMerge,
       envOverrides,
       ...(startFromStoryId ? { startFromStoryId } : {}),
+      triggeredVia,
     };
 
     await getBoss().send('pipeline:run', jobPayload, {
