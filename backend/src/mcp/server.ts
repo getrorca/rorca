@@ -32,11 +32,10 @@ export const server = new McpServer({
 /** Tools that are safe to retry on ECONNREFUSED (GET-equivalent, idempotent). */
 const IDEMPOTENT_TOOLS = new Set([
   'rorca_list_specs', 'rorca_list_runs', 'rorca_get_direction',
-  'rorca_list_workspaces', 'rorca_get_memories', 'rorca_workspace_stats',
+  'rorca_list_workspaces', 'rorca_recall_memories', 'rorca_workspace_stats',
   'rorca_get_context', 'rorca_synthesize_direction', 'rorca_search_stories',
   'rorca_run_status', 'rorca_pipeline_status', 'rorca_usage_stats',
-  'rorca_recall',
-  'rorca_dump',
+  'rorca_recall_workspace',
 ]);
 
 /** Cacheable tool names → { data, cachedAt } */
@@ -1100,26 +1099,31 @@ server.registerTool(
 );
 
 server.registerTool(
-  'rorca_get_memories',
+  'rorca_recall_memories',
   {
-    description: 'Retrieve memories from the Rorca memory ledger for a workspace. Returns recent memories or filters by category. Use this to check what conventions, decisions, and patterns have been recorded for a project before making changes.',
+    description: 'Retrieve memories from the Rorca memory ledger for a workspace. Returns recent memories or filters by category. Deterministic DB query tool — no fuzzy/semantic search. Use this to check what conventions, decisions, and patterns have been recorded for a project before making changes.',
     inputSchema: {
       workspaceId: z.string().describe('Rorca workspace ID'),
       category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).optional().describe('Filter by category. If omitted, returns recent memories across all categories.'),
-      limit: z.number().min(1).max(100).optional().default(20).describe('Maximum entries to return (default 20)'),
+      limit: z.number().min(1).max(100).optional().default(20).describe('Maximum entries to return (default 20). Ignored when fetchAll is true.'),
+      fetchAll: z.boolean().optional().default(false).describe('When true, returns ALL memories with no pagination limit. Overrides the limit parameter.'),
     },
   },
-  async ({ workspaceId, category, limit }) => {
-    const cacheKey = `get_memories:${workspaceId}:${category ?? 'all'}`;
-    return wrapToolCall('rorca_get_memories', async () => {
+  async ({ workspaceId, category, limit, fetchAll }) => {
+    const cacheKey = `recall_memories:${workspaceId}:${category ?? 'all'}:${fetchAll ? 'all' : limit}`;
+    return wrapToolCall('rorca_recall_memories', async () => {
       const params = new URLSearchParams({ workspaceId });
       if (category) params.set('category', category);
-      if (limit) params.set('limit', String(limit ?? 20));
+      if (fetchAll) {
+        params.set('limit', '9999');
+      } else if (limit) {
+        params.set('limit', String(limit ?? 20));
+      }
 
-      const res = await fetchWithRetry('rorca_get_memories', () =>
+      const res = await fetchWithRetry('rorca_recall_memories', () =>
         timedFetch(`${RORCA_API}/api/memory?${params.toString()}`)
       );
-      if (!res.ok) return httpError('rorca_get_memories', res);
+      if (!res.ok) return httpError('rorca_recall_memories', res);
 
       const data = await res.json() as {
         items: Array<{ date: string; category: string; title: string; rule: string; context?: string }>;
@@ -1129,7 +1133,7 @@ server.registerTool(
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ ok: true, workspaceId, category: category ?? null, items: data.items, total: data.total }, null, 2),
+          text: JSON.stringify({ ok: true, workspaceId, category: category ?? null, fetchAll: fetchAll ?? false, items: data.items, total: data.total }, null, 2),
         }]
       };
     }, cacheKey);
@@ -3202,32 +3206,32 @@ server.registerPrompt(
   }
 );
 
-// ─── Recall MCP Tool (US-010) ────────────────────────────────────────────────
+// ─── Recall Workspace MCP Tool ───────────────────────────────────────────────
 
 server.registerTool(
-  'rorca_recall',
+  'rorca_recall_workspace',
   {
-    description: 'Brain dump — inject full workspace context into any AI session with a single call. Returns the direction stack, memory ledger, workspace health, recent runs, installed skills, workspace context (schema + git), active runs, and metadata in one payload. Use this at the start of any session to bootstrap context.',
+    description: 'Workspace bootstrapper — inject full workspace context into any AI session with a single call. Returns the direction stack, semantically relevant memories (top 10 when currentTask is provided), workspace health, recent runs, installed skills, workspace context (schema + git), active runs, and metadata in one payload. Use this at the start of any session to bootstrap context.',
     inputSchema: {
       workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces or settings)'),
       category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).optional().describe('Filter memories to a specific category'),
       includeRuns: z.boolean().optional().default(true).describe('Include recent pipeline runs in response (default: true)'),
       includeHealth: z.boolean().optional().default(true).describe('Include workspace health report (default: true)'),
-      storyText: z.string().optional().describe('Optional story text for context-aware memory retrieval (RAG tier)'),
+      currentTask: z.string().optional().describe('Description of the current task or story — when provided, memories are semantically ranked and filtered to top 10 most relevant'),
     },
   },
-  async ({ workspaceId, category, includeRuns, includeHealth, storyText }) => {
-    return wrapToolCall('rorca_recall', async () => {
+  async ({ workspaceId, category, includeRuns, includeHealth, currentTask }) => {
+    return wrapToolCall('rorca_recall_workspace', async () => {
       const params = new URLSearchParams({ workspaceId });
       if (category) params.set('category', category);
       if (includeRuns !== undefined) params.set('includeRuns', String(includeRuns));
       if (includeHealth !== undefined) params.set('includeHealth', String(includeHealth));
-      if (storyText) params.set('storyText', storyText);
+      if (currentTask) params.set('storyText', currentTask);
 
-      const res = await fetchWithRetry('rorca_recall', () =>
+      const res = await fetchWithRetry('rorca_recall_workspace', () =>
         timedFetch(`${RORCA_API}/api/recall?${params.toString()}`)
       );
-      if (!res.ok) return httpError('rorca_recall', res);
+      if (!res.ok) return httpError('rorca_recall_workspace', res);
       const data = await res.json();
       return {
         content: [{
@@ -3235,36 +3239,7 @@ server.registerTool(
           text: JSON.stringify(data, null, 2),
         }],
       };
-    }, `recall:${workspaceId}`);
-  }
-);
-
-// ─── Dump MCP Tool (US-013) ──────────────────────────────────────────────────
-
-server.registerTool(
-  'rorca_dump',
-  {
-    description: 'Unfiltered brain export — returns the complete workspace brain with no token budget, no RAG filtering, and no LIMIT clauses. ALL memories (WHERE deleted_at IS NULL), ALL direction layers (L1-L3 raw content, not synthesized), ALL installed skills with full markdown content (no truncation), full schema_snapshot, full git_memory, last 20 pipeline runs with story result aggregation, and full workspace metadata.',
-    inputSchema: {
-      workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces or settings)'),
-    },
-  },
-  async ({ workspaceId }) => {
-    return wrapToolCall('rorca_dump', async () => {
-      const params = new URLSearchParams({ workspaceId });
-
-      const res = await fetchWithRetry('rorca_dump', () =>
-        timedFetch(`${RORCA_API}/api/recall/dump?${params.toString()}`)
-      );
-      if (!res.ok) return httpError('rorca_dump', res);
-      const data = await res.json();
-      return {
-        content: [{
-          type: 'text' as const,
-          text: JSON.stringify(data, null, 2),
-        }],
-      };
-    }, `dump:${workspaceId}`);
+    }, `recall_workspace:${workspaceId}`);
   }
 );
 

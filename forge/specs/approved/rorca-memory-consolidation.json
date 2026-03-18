@@ -5,16 +5,16 @@
   "userStories": [
     {
       "id": "US-001",
-      "title": "Switch rorca_recall to DB query; add fetchAll param to rorca_get_memories; deprecate rorca_dump",
-      "description": "Three changes to backend/src/mcp/server.ts:\n\n1. **rorca_recall**: Replace `readMemory(workspacePath)` file read with a direct DB query against the `memories` table (same query `rorca_dump` already uses: `SELECT * FROM memories WHERE workspace_id = $1 ORDER BY created_at DESC`). rorca_recall now reads memories from DB, not the filesystem.\n\n2. **rorca_get_memories**: Add an optional `fetchAll: boolean` parameter (default false) to the existing tool schema. When `fetchAll: true`, the DB query omits the LIMIT clause entirely — returning all rows. When `fetchAll: false` (default), the existing `limit` param (default 20, max 100) applies as before. This replaces the need for any separate \"dump memories\" tool.\n\n3. **rorca_dump**: Remove the tool registration entirely from server.ts and remove it from the ALLOWED_TOOLS / IDEMPOTENT_TOOLS sets. rorca_dump is fully covered by rorca_recall (full workspace context) and rorca_get_memories with fetchAll:true (all memories). Do not create rorca_get_memories_all — the fetchAll parameter on rorca_get_memories is the correct pattern (parameter overloading, not tool sprawl).",
+      "title": "Fix semantic leak in GET /api/recall — use retrieveContext() results to filter and rank memories",
+      "description": "**IMPORTANT: The mcp/server.ts changes (tool renames, fetchAll param, rorca_dump removal, IDEMPOTENT_TOOLS updates) have ALREADY been completed manually. Do NOT modify backend/src/mcp/server.ts — those changes are done and committed. This story covers ONLY the recall.ts semantic leak fix.**\n\nIn `backend/src/routes/recall.ts`, the `fetchMemories()` function currently calls `retrieveContext(workspaceId, storyText, { includeGraph: true })` but throws the results away — it only uses the call to set a `retrievalTier` metadata badge. This is a performance leak: paying full RAG + graph latency with zero benefit to the response.\n\n**Fix**: When `storyText` is provided (maps to `currentTask` param from `rorca_recall_workspace`):\n1. Call `retrieveContext(workspaceId, storyText, { includeGraph: true })` as before\n2. Use `ctx.memory` (array of `MemoryEntryResult { text: string; score: number; source: 'cache' | 'search' }`) to filter and rank memories\n3. Match scored memory texts against `memories` DB table rows by content/rule field to return full structured `MemoryEntry` objects\n4. Return top 10 most relevant memories (sorted by score descending), not all memories\n5. Set `retrievalTier` from the actual retrieval tier used (same as today)\n\nWhen `storyText` is NOT provided:\n1. Query DB `SELECT * FROM memories WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 20`\n2. Map rows to `MemoryEntry` format\n3. Set `retrievalTier = 'none'`\n\n**Remove** all calls to `readMemory(workspacePath)` and `queryMemory()` (file-based reads from memory-ledger.ts) — the DB is now the single source of truth for the recall endpoint.\n\nAlso verify `npx tsc --noEmit` passes in backend/ after the change.",
       "acceptanceCriteria": [
-        "rorca_recall queries the memories DB table — no readMemory() or fs.readFileSync call for MEMORY.md in the recall tool path",
-        "rorca_get_memories schema has a new optional fetchAll: z.boolean().optional().default(false) parameter",
-        "When fetchAll:true, the DB query has no LIMIT clause — all memories for the workspace are returned",
-        "When fetchAll:false (default), limit param (default 20, max 100) applies exactly as before — no behavior change for existing callers",
-        "rorca_dump tool is unregistered from the MCP server — removed from server.registerTool calls, ALLOWED_TOOLS set, and IDEMPOTENT_TOOLS set",
-        "No rorca_get_memories_all tool is created — the fetchAll boolean on rorca_get_memories is the only addition",
-        "npx tsc --noEmit in backend/ passes with no new errors"
+        "GET /api/recall: when storyText is provided, retrieveContext() results are used to filter and rank memories — top 10 most relevant are returned instead of all memories",
+        "GET /api/recall: when storyText is NOT provided, returns most recent 20 memories from the DB memories table (NOT from MEMORY.md file)",
+        "retrievalTier in meta reflects the actual tier used by retrieveContext() — cag/rag/graph/none",
+        "fetchMemories() no longer calls readMemory() or queryMemory() from memory-ledger.ts — all reads come from DB",
+        "Memory entries in the response are full structured MemoryEntry objects (date, category, title, rule, context, source) matched from DB rows",
+        "backend/src/mcp/server.ts is NOT modified by this story — those changes are already done",
+        "npx tsc --noEmit passes in backend/ with no new errors"
       ],
       "dependsOn": [],
       "complexity": 2,
