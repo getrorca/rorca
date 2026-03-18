@@ -3,12 +3,13 @@
 Spec: rorca-pipeline-queueing-and-worktrees
 Run ID: 20260316000031
 Started: 2026-03-18T19:15:18.101Z
-Last Updated: 2026-03-18T20:38:45.665Z
+Last Updated: 2026-03-18T20:45:00.959Z
 
-## Completed Stories (6)
+## Completed Stories (7)
 - US-001: Add queue_max_concurrent and run_now_max_concurrent worker settings — DONE (claude, 389s)
 - US-002: Add triggered_via field to pipeline_runs and pg-boss job payload — DONE (claude, 146s)
 - US-006: Update Settings UI — expose queue_max_concurrent and run_now_max_concurrent controls — DONE (claude, 266s)
 - US-004: Add autoWorktree option to sequential (non-wave) pipeline runs — DONE (claude, 422s)
 - US-007: Update Spec Detail slide-over Run button to show Queue vs Run Now options — DONE (claude, 13s)
 - US-010: Add queue depth limit and per-workspace queue status endpoint — DONE (claude, 714s)
+- US-011: Add Runs panel queue position column and worktree badge — DONE (claude, 355s)
