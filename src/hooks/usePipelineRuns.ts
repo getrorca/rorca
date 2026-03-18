@@ -19,6 +19,8 @@ export interface PipelineRun {
   worktree_path?: string | null;
   queue_position?: number | null;
   queued_at?: string | null;
+  triggered_via?: 'queue' | 'run_now';
+  auto_worktree?: boolean;
 }
 
 interface RunsResponse {
