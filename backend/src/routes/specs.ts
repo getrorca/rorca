@@ -10894,7 +10894,7 @@ router.delete('/:specId/attachments/:attachmentId', async (req: Request, res: Re
 router.put('/:specId', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
-    const { workspaceId, model, title, _notes } = req.body;
+    const { workspaceId, model, title, _notes, autoWorktree } = req.body;
 
     if (!workspaceId) {
       throw new ValidationError('Missing required body param: workspaceId');
@@ -10927,6 +10927,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
     if (model !== undefined) content.model = model;
     if (title !== undefined) content.title = title;
     if (_notes !== undefined) content._notes = _notes;
+    if (autoWorktree !== undefined) content.autoWorktree = !!autoWorktree;
 
     const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
     fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
@@ -10938,6 +10939,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
       title: content.title,
       model: content.model,
       _notes: content._notes,
+      autoWorktree: content.autoWorktree,
       storyCount: userStories.length,
     });
   } catch (error: any) {
