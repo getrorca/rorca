@@ -1,8 +1,8 @@
 {
   "specId": "rorca-pipeline-queueing-and-worktrees",
-  "runId": 20260316000033,
-  "startedAt": "2026-03-18T20:03:31.384Z",
-  "lastUpdatedAt": "2026-03-18T20:03:31.384Z",
+  "runId": 20260316000031,
+  "startedAt": "2026-03-18T19:15:18.101Z",
+  "lastUpdatedAt": "2026-03-18T20:03:54.827Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -21,11 +21,20 @@
       "finishedAt": "2026-03-18T19:48:57.774Z",
       "agentType": "claude",
       "elapsedMs": 146226
+    },
+    {
+      "storyId": "US-003",
+      "title": "Refactor conflict detection to distinguish queue vs run-now operations",
+      "status": "passed",
+      "startedAt": "2026-03-18T20:03:39.624Z",
+      "finishedAt": "2026-03-18T20:03:54.827Z",
+      "agentType": "claude",
+      "elapsedMs": 15203
     }
   ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
-  "resumedFromStory": "US-002"
+  "resumedFromStory": null
 }
