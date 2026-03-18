@@ -708,6 +708,13 @@ function spawnClaude(
       stdio: ['ignore', 'pipe', 'pipe'],
     });
 
+    const idleMinutes = Math.round(LLM_IDLE_TIMEOUT_MS / 60_000);
+    const watchdog = createIdleWatchdog(child, LLM_IDLE_TIMEOUT_MS, () => {
+      const msg = `[System] Watchdog triggered: No output received for ${idleMinutes} minutes. Killing process...\n`;
+      logStream.write(msg);
+      process.stdout.write(msg);
+    });
+
     // Real-time stream-json token parsing + human-readable terminal output
     let stdoutLineBuf = '';
     let cumulativeInput = 0;
@@ -715,6 +722,7 @@ function spawnClaude(
     let turnCount = 0;
 
     child.stdout?.on('data', (chunk: Buffer) => {
+      watchdog.reset();
       // Always write raw stream-json to the log file for debugging
       logStream.write(chunk);
 
@@ -769,6 +777,7 @@ function spawnClaude(
     const MAX_STDERR = 4096;
 
     child.stderr?.on('data', (chunk: Buffer) => {
+      watchdog.reset();
       logStream.write(chunk);
       process.stdout.write(chunk);
       stderrChunks.push(chunk);
@@ -790,6 +799,7 @@ function spawnClaude(
     }, timeoutMs);
 
     child.on('error', (err) => {
+      watchdog.clear();
       clearTimeout(timer);
       logStream.end();
       logger.error(`[engine] Failed to spawn claude: ${err.message}`);
@@ -797,6 +807,7 @@ function spawnClaude(
     });
 
     child.on('exit', (code) => {
+      watchdog.clear();
       clearTimeout(timer);
       logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
@@ -806,6 +817,11 @@ function spawnClaude(
       } else {
         resolve({ exitCode: code, stderrTail, elapsedMs });
       }
+    });
+
+    child.on('close', () => {
+      watchdog.clear();
+      clearTimeout(timer);
     });
   });
 }
@@ -849,6 +865,13 @@ function spawnOpenCode(
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
+    const idleMinutes = Math.round(LLM_IDLE_TIMEOUT_MS / 60_000);
+    const watchdog = createIdleWatchdog(child, LLM_IDLE_TIMEOUT_MS, () => {
+      const msg = `[System] Watchdog triggered: No output received for ${idleMinutes} minutes. Killing process...\n`;
+      logStream.write(msg);
+      process.stdout.write(msg);
+    });
+
     // Write prompt to stdin then close
     if (child.stdin) {
       child.stdin.write(prompt);
@@ -856,6 +879,7 @@ function spawnOpenCode(
     }
 
     child.stdout?.on('data', (chunk: Buffer) => {
+      watchdog.reset();
       logStream.write(chunk);
       process.stdout.write(chunk);
     });
@@ -865,6 +889,7 @@ function spawnOpenCode(
     const MAX_STDERR = 4096;
 
     child.stderr?.on('data', (chunk: Buffer) => {
+      watchdog.reset();
       logStream.write(chunk);
       process.stdout.write(chunk);
       stderrChunks.push(chunk);
@@ -886,6 +911,7 @@ function spawnOpenCode(
     }, timeoutMs);
 
     child.on('error', (err) => {
+      watchdog.clear();
       clearTimeout(timer);
       logStream.end();
       logger.error(`[engine] Failed to spawn opencode: ${err.message}`);
@@ -893,6 +919,7 @@ function spawnOpenCode(
     });
 
     child.on('exit', (code) => {
+      watchdog.clear();
       clearTimeout(timer);
       logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
@@ -902,6 +929,11 @@ function spawnOpenCode(
       } else {
         resolve({ exitCode: code, stderrTail, elapsedMs });
       }
+    });
+
+    child.on('close', () => {
+      watchdog.clear();
+      clearTimeout(timer);
     });
   });
 }
@@ -930,6 +962,13 @@ function spawnCodex(
       stdio: ['pipe', 'pipe', 'pipe'],
     });
 
+    const idleMinutes = Math.round(LLM_IDLE_TIMEOUT_MS / 60_000);
+    const watchdog = createIdleWatchdog(child, LLM_IDLE_TIMEOUT_MS, () => {
+      const msg = `[System] Watchdog triggered: No output received for ${idleMinutes} minutes. Killing process...\n`;
+      logStream.write(msg);
+      process.stdout.write(msg);
+    });
+
     // Write prompt to stdin then close
     if (child.stdin) {
       child.stdin.write(prompt);
@@ -937,6 +976,7 @@ function spawnCodex(
     }
 
     child.stdout?.on('data', (chunk: Buffer) => {
+      watchdog.reset();
       logStream.write(chunk);
       process.stdout.write(chunk);
     });
@@ -946,6 +986,7 @@ function spawnCodex(
     const MAX_STDERR = 4096;
 
     child.stderr?.on('data', (chunk: Buffer) => {
+      watchdog.reset();
       logStream.write(chunk);
       process.stdout.write(chunk);
       stderrChunks.push(chunk);
@@ -967,6 +1008,7 @@ function spawnCodex(
     }, timeoutMs);
 
     child.on('error', (err) => {
+      watchdog.clear();
       clearTimeout(timer);
       logStream.end();
       logger.error(`[engine] Failed to spawn codex: ${err.message}`);
@@ -974,6 +1016,7 @@ function spawnCodex(
     });
 
     child.on('exit', (code) => {
+      watchdog.clear();
       clearTimeout(timer);
       logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
@@ -983,6 +1026,11 @@ function spawnCodex(
       } else {
         resolve({ exitCode: code, stderrTail, elapsedMs });
       }
+    });
+
+    child.on('close', () => {
+      watchdog.clear();
+      clearTimeout(timer);
     });
   });
 }
