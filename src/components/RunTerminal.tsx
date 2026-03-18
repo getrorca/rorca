@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState, useCallback, useImperativeHandle, forwardRef } from 'react';
+import { useEffect, useRef, useState, useCallback, useImperativeHandle, forwardRef, useMemo } from 'react';
 import AnsiToHtml from 'ansi-to-html';
 import {
   Copy, Check, Terminal as TerminalIcon, Layers,
@@ -75,16 +75,45 @@ function resolveStepVisual(step: SemanticStep, isOpenCode: boolean): StepVisual 
   return STEP_CONFIG[step.type];
 }
 
-// ─── Theme colors ─────────────────────────────────────────────────────────────
+// ─── ANSI color palettes per theme ───────────────────────────────────────────
+// Indices 0-7: standard colors, 8-15: bright variants
 
-const darkTheme = {
-  background: '#0d0d0d',
-  foreground: '#d4d4d4',
+const ANSI_COLORS_DARK: Record<number, string> = {
+  0: '#1e1e1e',   // black
+  1: '#f87171',   // red
+  2: '#4ade80',   // green
+  3: '#facc15',   // yellow
+  4: '#60a5fa',   // blue
+  5: '#c084fc',   // magenta
+  6: '#22d3ee',   // cyan
+  7: '#d4d4d4',   // white
+  8: '#525252',   // bright black
+  9: '#fca5a5',   // bright red
+  10: '#86efac',  // bright green
+  11: '#fde68a',  // bright yellow
+  12: '#93c5fd',  // bright blue
+  13: '#d8b4fe',  // bright magenta
+  14: '#67e8f9',  // bright cyan
+  15: '#fafafa',  // bright white
 };
 
-const lightTheme = {
-  background: '#f5f5f5',
-  foreground: '#1e1e1e',
+const ANSI_COLORS_LIGHT: Record<number, string> = {
+  0: '#1e1e1e',   // black
+  1: '#dc2626',   // red
+  2: '#16a34a',   // green
+  3: '#ca8a04',   // yellow
+  4: '#2563eb',   // blue
+  5: '#9333ea',   // magenta
+  6: '#0891b2',   // cyan
+  7: '#f5f5f5',   // white
+  8: '#737373',   // bright black
+  9: '#ef4444',   // bright red
+  10: '#22c55e',  // bright green
+  11: '#eab308',  // bright yellow
+  12: '#3b82f6',  // bright blue
+  13: '#a855f7',  // bright magenta
+  14: '#06b6d4',  // bright cyan
+  15: '#fafafa',  // bright white
 };
 
 // ─── stream-json → readable text formatter (for Raw terminal display) ────────
@@ -411,21 +440,18 @@ function ClaudeStepRow({
   );
 }
 
-// ─── ANSI converter singleton ────────────────────────────────────────────────
+// ─── ANSI converter factory ──────────────────────────────────────────────────
 
-const ansiConverterDark = new AnsiToHtml({
-  fg: '#d4d4d4',
-  bg: '#0d0d0d',
-  escapeXML: true,
-  newline: true,
-});
-
-const ansiConverterLight = new AnsiToHtml({
-  fg: '#1e1e1e',
-  bg: '#f5f5f5',
-  escapeXML: true,
-  newline: true,
-});
+function createAnsiConverter(theme: 'light' | 'dark'): AnsiToHtml {
+  const isLight = theme === 'light';
+  return new AnsiToHtml({
+    fg: isLight ? '#1e1e1e' : '#d4d4d4',
+    bg: isLight ? '#f5f5f5' : '#0d0d1a',
+    escapeXML: true,
+    newline: true,
+    colors: isLight ? ANSI_COLORS_LIGHT : ANSI_COLORS_DARK,
+  });
+}
 
 // ─── Flush buffer interval ───────────────────────────────────────────────────
 
@@ -503,10 +529,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     try { localStorage.setItem(lsKey(runId), m); } catch { /* noop */ }
   }, [runId]);
 
-  // Get the right converter for the current theme
-  const getConverter = useCallback(() => {
-    return resolved === 'light' ? ansiConverterLight : ansiConverterDark;
-  }, [resolved]);
+  // Recreate ansi-to-html converter when theme changes
+  const ansiConverter = useMemo(() => createAnsiConverter(resolved), [resolved]);
 
   // Flush pending text buffer → convert via ansi-to-html → append to accumulated HTML
   const flushBuffer = useCallback(() => {
@@ -515,8 +539,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     if (!pending) return;
     pendingTextRef.current = '';
 
-    const converter = getConverter();
-    let newHtml = converter.toHtml(pending);
+    let newHtml = ansiConverter.toHtml(pending);
 
     // Inject story ID anchors at first occurrence of each story ID
     newHtml = injectStoryAnchors(newHtml, seenStoryIdsRef.current);
@@ -531,7 +554,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         pre.scrollTop = pre.scrollHeight;
       }
     }
-  }, [getConverter]);
+  }, [ansiConverter]);
 
   // Schedule a flush if not already scheduled
   const scheduleFlush = useCallback(() => {
@@ -681,8 +704,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       const pending = pendingTextRef.current;
       if (pending) {
         pendingTextRef.current = '';
-        const converter = resolved === 'light' ? ansiConverterLight : ansiConverterDark;
-        let newHtml = converter.toHtml(pending);
+        let newHtml = ansiConverter.toHtml(pending);
         newHtml = injectStoryAnchors(newHtml, seenStoryIdsRef.current);
         accumulatedHtmlRef.current += newHtml;
         accumulatedHtmlRef.current = trimOldestLines(accumulatedHtmlRef.current);
@@ -714,7 +736,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         flushTimerRef.current = null;
       }
     };
-  }, [runId, resolved, workspaceId, scheduleFlush]);
+  }, [runId, ansiConverter, workspaceId, scheduleFlush]);
 
   // Track scroll position for auto-scroll on raw <pre>
   const handlePreScroll = useCallback(() => {
@@ -747,8 +769,6 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
   const firstTs = steps.length > 0 ? steps[0].ts : null;
   const isOpenCode = agentType === 'opencode' || agentType === 'codex';
-
-  const themeColors = resolved === 'light' ? lightTheme : darkTheme;
 
   return (
     <div className="h-full w-full flex flex-col">
@@ -808,8 +828,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           onScroll={handlePreScroll}
           className="h-full w-full overflow-y-auto font-mono text-xs leading-[1.3] whitespace-pre-wrap break-words"
           style={{
-            background: themeColors.background,
-            color: themeColors.foreground,
+            background: 'var(--terminal-bg)',
+            color: 'var(--terminal-fg)',
             padding: '8px 12px',
             margin: 0,
             display: mode === 'raw' ? 'block' : 'none',
