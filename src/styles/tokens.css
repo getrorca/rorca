@@ -16,6 +16,7 @@
   --skeleton: #2d2d4a;
   --skeleton-shimmer: #3d3d5c;
   --terminal-bg: #0d0d1a;
+  --terminal-fg: #d4d4d4;
   --terminal-line: #1a1a2e;
   --switch-knob: #ffffff;
   --kbd-bg: rgba(255, 255, 255, 0.15);
@@ -44,8 +45,9 @@
   --error: #ef4444;
   --skeleton: #e5e5e5;
   --skeleton-shimmer: #f5f5f5;
-  --terminal-bg: #1e1e1e;
-  --terminal-line: #333333;
+  --terminal-bg: #f5f5f5;
+  --terminal-fg: #1e1e1e;
+  --terminal-line: #e0e0e0;
   --switch-knob: #ffffff;
   --kbd-bg: rgba(255, 255, 255, 0.2);
   --backdrop-opacity: 0.5;
