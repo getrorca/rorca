@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback } from 'react';
 import {
   Settings2, Layers, Github, Variable, Play, Webhook,
   Save, Loader2, Check, FolderOpen, Plus, Trash2, X, Users, Route, FileText, Wrench,
-  Package,
+  Package, Info,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
@@ -790,7 +790,14 @@ export function WsPipelineSection({ workspaceId, showToast }: WsSectionProps) {
   const [storyTimeout, setStoryTimeout] = useState(45);
   const [maxRetries, setMaxRetries] = useState(0);
 
+  // Worker-level concurrency settings
+  const [queueMaxConcurrent, setQueueMaxConcurrent] = useState(1);
+  const [runNowMaxConcurrent, setRunNowMaxConcurrent] = useState(3);
+  const [savingWorker, setSavingWorker] = useState(false);
+  const [savedWorker, setSavedWorker] = useState(false);
+
   useEffect(() => {
+    // Fetch workspace pipeline config
     apiFetch<{ config: { autoWorktree: boolean; storyTimeoutMin: number; maxRetries: number } }>(`/api/workspaces/${workspaceId}/pipeline-config`)
       .then(data => {
         setAutoWorktree(data.config.autoWorktree ?? true);
@@ -799,6 +806,14 @@ export function WsPipelineSection({ workspaceId, showToast }: WsSectionProps) {
       })
       .catch(() => { /* Use defaults */ })
       .finally(() => setLoading(false));
+
+    // Fetch worker concurrency settings
+    apiFetch<{ queue_max_concurrent: number; run_now_max_concurrent: number }>('/api/settings/worker')
+      .then(data => {
+        setQueueMaxConcurrent(data.queue_max_concurrent ?? 1);
+        setRunNowMaxConcurrent(data.run_now_max_concurrent ?? 3);
+      })
+      .catch(() => { /* Use defaults */ });
   }, [workspaceId]);
 
   const savePipeline = async () => {
@@ -817,6 +832,31 @@ export function WsPipelineSection({ workspaceId, showToast }: WsSectionProps) {
       showToast('Failed to save pipeline configuration', 'error');
     } finally {
       setSaving(false);
+    }
+  };
+
+  const saveWorkerSettings = async () => {
+    // Client-side validation
+    const qVal = Math.max(1, Math.min(5, queueMaxConcurrent));
+    const rVal = Math.max(1, Math.min(10, runNowMaxConcurrent));
+    setQueueMaxConcurrent(qVal);
+    setRunNowMaxConcurrent(rVal);
+
+    setSavingWorker(true);
+    setSavedWorker(false);
+    try {
+      await apiFetch('/api/settings/worker', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ queue_max_concurrent: qVal, run_now_max_concurrent: rVal }),
+      });
+      setSavedWorker(true);
+      showToast('Worker concurrency settings saved');
+      setTimeout(() => setSavedWorker(false), 2000);
+    } catch {
+      showToast('Failed to save worker settings', 'error');
+    } finally {
+      setSavingWorker(false);
     }
   };
 
@@ -882,6 +922,66 @@ export function WsPipelineSection({ workspaceId, showToast }: WsSectionProps) {
         {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
         {saved ? 'Saved' : 'Save Pipeline Config'}
       </button>
+
+      {/* Worker Concurrency Settings */}
+      <div className="border-t border-border pt-6">
+        <h2 className="text-sm font-semibold text-[var(--text)] mb-4">Worker Concurrency</h2>
+
+        <div className="space-y-5">
+          <div>
+            <div className="flex items-center gap-1.5 mb-1">
+              <label htmlFor="queue-max-concurrent" className="block text-xs text-muted">Queue Concurrency</label>
+              <span title="Controls how many queued pipeline runs the worker processes at the same time. Queued runs are triggered via the UI or API and wait in a FIFO queue. Sequential (1) is recommended to avoid merge conflicts on the same branch.">
+                <Info size={12} className="text-muted cursor-help" />
+              </span>
+            </div>
+            <input
+              id="queue-max-concurrent"
+              type="number"
+              min={1}
+              max={5}
+              value={queueMaxConcurrent}
+              onChange={e => {
+                const v = Number(e.target.value);
+                if (v >= 1 && v <= 5) setQueueMaxConcurrent(v);
+              }}
+              className="w-32 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+            />
+            <p className="text-xs text-muted mt-1">Sequential queuing recommended (default: 1, range: 1–5)</p>
+          </div>
+
+          <div>
+            <div className="flex items-center gap-1.5 mb-1">
+              <label htmlFor="run-now-max-concurrent" className="block text-xs text-muted">Parallel Run Concurrency</label>
+              <span title="Controls how many 'Run Now' (immediate) pipeline runs can execute in parallel. Each parallel run uses a separate git worktree for isolation — worktrees must be enabled for values above 1.">
+                <Info size={12} className="text-muted cursor-help" />
+              </span>
+            </div>
+            <input
+              id="run-now-max-concurrent"
+              type="number"
+              min={1}
+              max={10}
+              value={runNowMaxConcurrent}
+              onChange={e => {
+                const v = Number(e.target.value);
+                if (v >= 1 && v <= 10) setRunNowMaxConcurrent(v);
+              }}
+              className="w-32 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+            />
+            <p className="text-xs text-muted mt-1">Requires worktrees (default: 3, range: 1–10)</p>
+          </div>
+        </div>
+
+        <button
+          onClick={saveWorkerSettings}
+          disabled={savingWorker}
+          className="flex items-center gap-2 px-4 py-2 mt-5 text-sm bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+        >
+          {savingWorker ? <Loader2 size={14} className="animate-spin" /> : savedWorker ? <Check size={14} /> : <Save size={14} />}
+          {savedWorker ? 'Saved' : 'Save Worker Settings'}
+        </button>
+      </div>
     </div>
   );
 }
