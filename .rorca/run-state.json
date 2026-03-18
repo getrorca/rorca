@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000019,
   "startedAt": "2026-03-17T21:03:11.254Z",
-  "lastUpdatedAt": "2026-03-18T00:38:20.476Z",
+  "lastUpdatedAt": "2026-03-18T00:46:48.657Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -84,6 +84,15 @@
       "finishedAt": "2026-03-18T00:38:20.476Z",
       "agentType": "claude",
       "elapsedMs": 263794
+    },
+    {
+      "storyId": "US-007",
+      "title": "Remove all remaining xterm references and clean up imports",
+      "status": "passed",
+      "startedAt": "2026-03-18T00:43:50.267Z",
+      "finishedAt": "2026-03-18T00:46:48.657Z",
+      "agentType": "claude",
+      "elapsedMs": 178390
     }
   ],
   "failedStories": [],
