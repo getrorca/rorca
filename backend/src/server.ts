@@ -45,6 +45,7 @@ import { startQueueConsumer } from './lib/queue-consumer';
 import { startMemorySynthesis } from './lib/memory-synthesis';
 import { startFileWatcher } from './lib/file-watcher';
 import { startEmbeddingPipeline } from './lib/embedding-pipeline';
+import { startWalListener, stopWalListener } from './lib/wal-listener';
 import { subscribe, type WalEvent } from './lib/sse-hub';
 import { rotateMemory } from './lib/memory-ledger';
 import { deduplicateMemory } from './lib/memory-dedup';
@@ -396,6 +397,8 @@ if (process.env.NODE_ENV !== 'test') {
     startFileWatcher();
     // PG-004: Initialise pg-boss so the Express process can send jobs
     initBoss().catch(err => logger.error({ err }, '[pg-boss] startup init failed'));
+    // US-003: Start dedicated LISTEN/NOTIFY client for real-time WAL event push
+    startWalListener();
     // Startup self-test: verify workspace queries resolve against rorca schema (not ag_catalog)
     queryOne('SELECT id FROM workspaces LIMIT 1').then(row => {
       if (!row) logger.warn('[StartupCheck] No workspaces found — onboarding will show');
