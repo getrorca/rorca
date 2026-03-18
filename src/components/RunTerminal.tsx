@@ -430,6 +430,38 @@ const ansiConverterLight = new AnsiToHtml({
 // ─── Flush buffer interval ───────────────────────────────────────────────────
 
 const FLUSH_INTERVAL_MS = 80;
+const SCROLL_LOCK_THRESHOLD = 50;
+const MAX_LINES = 20_000;
+
+/**
+ * Trim the oldest lines from an accumulated HTML string so the total
+ * newline count stays at or below MAX_LINES.  Truncation always happens
+ * at a newline boundary so we never break a mid-tag ANSI-color span.
+ */
+function trimOldestLines(html: string): string {
+  // Count total newlines
+  let count = 0;
+  for (let i = 0; i < html.length; i++) {
+    if (html.charCodeAt(i) === 10) count++;
+  }
+  if (count <= MAX_LINES) return html;
+
+  // Need to drop (count - MAX_LINES) oldest lines — find the byte offset
+  // just past the (count - MAX_LINES)-th newline from the start.
+  const toDrop = count - MAX_LINES;
+  let dropped = 0;
+  let offset = 0;
+  for (; offset < html.length; offset++) {
+    if (html.charCodeAt(offset) === 10) {
+      dropped++;
+      if (dropped === toDrop) {
+        offset++; // skip past the newline itself
+        break;
+      }
+    }
+  }
+  return html.slice(offset);
+}
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
@@ -490,6 +522,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     newHtml = injectStoryAnchors(newHtml, seenStoryIdsRef.current);
 
     accumulatedHtmlRef.current += newHtml;
+    accumulatedHtmlRef.current = trimOldestLines(accumulatedHtmlRef.current);
 
     const pre = preRef.current;
     if (pre) {
@@ -529,6 +562,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     writeMarker(text: string) {
       const markerHtml = `<div style="padding:4px 8px;margin:4px 0;background:rgba(59,130,246,0.15);border-left:3px solid #3b82f6;color:#93c5fd;font-size:11px;font-family:monospace;">${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>`;
       accumulatedHtmlRef.current += markerHtml;
+      accumulatedHtmlRef.current = trimOldestLines(accumulatedHtmlRef.current);
       const pre = preRef.current;
       if (pre) {
         pre.innerHTML = accumulatedHtmlRef.current;
@@ -651,6 +685,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         let newHtml = converter.toHtml(pending);
         newHtml = injectStoryAnchors(newHtml, seenStoryIdsRef.current);
         accumulatedHtmlRef.current += newHtml;
+        accumulatedHtmlRef.current = trimOldestLines(accumulatedHtmlRef.current);
         const pre = preRef.current;
         if (pre) {
           pre.innerHTML = accumulatedHtmlRef.current;
@@ -685,7 +720,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const handlePreScroll = useCallback(() => {
     const el = preRef.current;
     if (!el) return;
-    autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+    autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_LOCK_THRESHOLD;
   }, []);
 
   // Auto-scroll semantic step list
