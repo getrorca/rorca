@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000019,
   "startedAt": "2026-03-17T21:03:11.254Z",
-  "lastUpdatedAt": "2026-03-18T00:37:27.195Z",
+  "lastUpdatedAt": "2026-03-18T00:38:20.476Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -77,13 +77,13 @@
       "elapsedMs": 400172
     },
     {
-      "storyId": "US-005",
-      "title": "Implement scroll-lock awareness and 20,000-line buffer cap",
+      "storyId": "US-006",
+      "title": "Add dark/light theme support to RunTerminal via ThemeContext",
       "status": "passed",
-      "startedAt": "2026-03-18T00:33:50.194Z",
-      "finishedAt": "2026-03-18T00:37:27.195Z",
+      "startedAt": "2026-03-18T00:33:56.682Z",
+      "finishedAt": "2026-03-18T00:38:20.476Z",
       "agentType": "claude",
-      "elapsedMs": 217001
+      "elapsedMs": 263794
     }
   ],
   "failedStories": [],
