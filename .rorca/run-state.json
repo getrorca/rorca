@@ -2,7 +2,7 @@
   "specId": "rorca-pipeline-queueing-and-worktrees",
   "runId": 20260316000031,
   "startedAt": "2026-03-18T19:15:18.101Z",
-  "lastUpdatedAt": "2026-03-18T20:26:27.711Z",
+  "lastUpdatedAt": "2026-03-18T20:15:59.426Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -41,13 +41,13 @@
       "elapsedMs": 421532
     },
     {
-      "storyId": "US-005",
-      "title": "Update advanceQueue to pass triggered_via='queue' and respect queue_max_concurrent",
+      "storyId": "US-007",
+      "title": "Update Spec Detail slide-over Run button to show Queue vs Run Now options",
       "status": "passed",
-      "startedAt": "2026-03-18T20:15:46.677Z",
-      "finishedAt": "2026-03-18T20:26:27.710Z",
+      "startedAt": "2026-03-18T20:15:46.590Z",
+      "finishedAt": "2026-03-18T20:15:59.426Z",
       "agentType": "claude",
-      "elapsedMs": 641033
+      "elapsedMs": 12836
     }
   ],
   "failedStories": [],
