@@ -3,9 +3,10 @@
 Spec: rorca-subprocess-watchdog
 Run ID: 20260316000030
 Started: 2026-03-18T07:55:23.497Z
-Last Updated: 2026-03-18T08:01:45.912Z
+Last Updated: 2026-03-18T08:13:54.370Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - US-001: Extract createIdleWatchdog shared helper function — DONE (claude, 106s)
 - US-002: Wire createIdleWatchdog into all three spawn functions — DONE (claude, 146s)
 - US-003: Classify idle_timeout in WAL events and retry logic — DONE (claude, 16s)
+- US-004: Integration test: watchdog fires, logs, and triggers retry — DONE (claude, 706s)

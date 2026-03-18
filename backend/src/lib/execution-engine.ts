@@ -2835,8 +2835,8 @@ async function executeStory(
 
 // ─── Exported helpers for pipeline.ts ────────────────────────────────────────
 
-export { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories };
-export type { UserStory as EngineUserStory, RerouteInfo };
+export { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, createIdleWatchdog };
+export type { UserStory as EngineUserStory, RerouteInfo, IdleWatchdog };
 
 // ─── Bounded Concurrency ────────────────────────────────────────────────────
 
