@@ -2638,6 +2638,8 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
  *                 stories:
  *                   type: array
  *                   items: { $ref: '#/components/schemas/StoryResult' }
+ *                 worktreePath: { type: string, nullable: true, description: "Worktree path (if run uses worktree isolation)" }
+ *                 branchName: { type: string, nullable: true, description: "Git branch name (if run uses worktree isolation)" }
  *       404: { description: "Run not found" }
  */
 router.get('/runs/:runId', async (req: Request, res: Response) => {
@@ -2773,6 +2775,9 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       specModel,
       agentType: run.agent_type || run.agent || 'claude',
       agentModel: run.agent_model || null,
+      // US-004: Expose worktree fields at top level for easy frontend access
+      worktreePath: run.worktree_path || null,
+      branchName: run.branch_name || null,
       tokenSummary: {
         inputTokens: tokenRow.total_input,
         outputTokens: tokenRow.total_output,
