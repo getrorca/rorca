@@ -30,6 +30,7 @@ export const PipelineRunJobPayload = z.object({
   autoMerge: z.boolean().optional().default(false),
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
   startFromStoryId: z.string().optional(),
+  triggeredVia: z.enum(['queue', 'run_now']).default('run_now'),
 }).strict();
 
 export type PipelineRunJobPayloadType = z.infer<typeof PipelineRunJobPayload>;

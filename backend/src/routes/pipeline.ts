@@ -882,6 +882,8 @@ interface PipelineRunRow {
   auto_merge: boolean;
   merge_status: string | null;
   merge_commit_sha: string | null;
+  triggered_via: 'queue' | 'run_now';
+  auto_worktree: boolean;
 }
 
 interface StoryResultRow {
@@ -1258,29 +1260,65 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       return;
     }
 
-    // 4. Conflict check — is there already an active run for this workspace?
-    //    If queuedRunId is set, this is an internal promotion call — skip conflict check
-    const activeRun = queuedRunId ? undefined : await queryOne(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') LIMIT 1`, [workspaceId]) as PipelineRunRow | undefined;
+    // 4. Conflict check — workspace-scoped, respects queue vs run_now semantics
+    //    If queuedRunId is set, this is an internal promotion call — skip conflict check entirely
+    const { queue } = req.body;
 
-    if (activeRun && !autoWorktree) {
-      // Check if user explicitly requested queueing
-      const { queue } = req.body;
+    if (!queuedRunId) {
+      // ── 4a. Queue operations: always accepted up to max queue depth ──────────
       if (queue) {
-        // Explicit queue request — insert with status='queued'
-        const queueCount = (await queryOne(`SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`, [workspaceId]) as { count: number }).count;
-        const position = queueCount + 1;
+        const MAX_QUEUE_DEPTH = 10;
+        const queueCount = Number((await queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`, [workspaceId]))?.count ?? '0');
 
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position]);
+        if (queueCount >= MAX_QUEUE_DEPTH) {
+          res.status(429).json({ error: 'Queue full', currentDepth: queueCount, maxQueueDepth: MAX_QUEUE_DEPTH });
+          return;
+        }
+
+        // Idempotent re-queue warning: same spec already queued for this workspace
+        const specSlugForQueue = path.basename(specPath, '.json');
+        const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
+
+        const position = queueCount + 1;
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree)
+           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree]);
         const queuedId = queueResult!.id;
 
-        res.status(202).json({ queued: true, runId: queuedId, position });
+        res.status(202).json({
+          queued: true,
+          runId: queuedId,
+          queuePosition: position,
+          ...(existingQueued ? { warning: `Spec "${specSlugForQueue}" is already queued (run #${existingQueued.id}). This creates an additional queued run.` } : {}),
+        });
         return;
       }
 
-      // No explicit queue — return conflict so user can choose
-      res.json({ conflict: true, activeRunId: activeRun.id });
-      return;
+      // ── 4b. Run Now with autoWorktree: allow up to run_now_max_concurrent ──
+      if (autoWorktree) {
+        const concurrencyRows = await query<{ key: string; value: string }>(
+          `SELECT key, value FROM worker_settings WHERE key = 'run_now_max_concurrent'`,
+        );
+        const runNowMaxConcurrent = concurrencyRows.length > 0 ? parseInt(concurrencyRows[0].value, 10) : 3;
+
+        const activeWorktreeCount = Number((await queryOne<{ count: string }>(
+          `SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') AND worktree_path IS NOT NULL`,
+          [workspaceId],
+        ))?.count ?? '0');
+
+        if (activeWorktreeCount >= runNowMaxConcurrent) {
+          const activeRun = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') AND worktree_path IS NOT NULL LIMIT 1`, [workspaceId]);
+          res.json({ conflict: true, activeRunId: activeRun?.id, reason: `Maximum ${runNowMaxConcurrent} concurrent worktree runs reached. Wait for an active run to complete or increase run_now_max_concurrent.` });
+          return;
+        }
+        // Fall through — allowed, will create worktree below
+      } else {
+        // ── 4c. Run Now without autoWorktree: conflict if any run active ──────
+        const activeRun = await queryOne<PipelineRunRow>(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') LIMIT 1`, [workspaceId]);
+        if (activeRun) {
+          res.json({ conflict: true, activeRunId: activeRun.id });
+          return;
+        }
+      }
     }
 
     // 4. Build absolute spec path: workspace/<specPath>
@@ -1380,16 +1418,18 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
     // Enforce constraint: auto_merge is only true when autoWorktree is true
     const computedAutoMerge = needsWorktree && (autoMerge !== false);
+    // US-002: Track trigger source — 'queue' when promoted from run queue, 'run_now' for direct triggers
+    const triggeredVia = queuedRunId ? 'queue' : 'run_now';
     let runId: number;
 
     if (queuedRunId) {
       // Promote queued run to running — worker will actually execute it
       await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
-         branch_name = $5, worktree_path = $6, auto_merge = $7 WHERE id = $8 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, queuedRunId]);
+         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9 WHERE id = $10 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, queuedRunId]);
       runId = queuedRunId;
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree]);
       runId = runResult!.id;
     }
 
@@ -1536,6 +1576,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       autoMerge: computedAutoMerge,
       envOverrides,
       ...(startFromStoryId ? { startFromStoryId } : {}),
+      triggeredVia,
     };
 
     await getBoss().send('pipeline:run', jobPayload, {
@@ -2593,6 +2634,8 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
  *                 stories:
  *                   type: array
  *                   items: { $ref: '#/components/schemas/StoryResult' }
+ *                 worktreePath: { type: string, nullable: true, description: "Worktree path (if run uses worktree isolation)" }
+ *                 branchName: { type: string, nullable: true, description: "Git branch name (if run uses worktree isolation)" }
  *       404: { description: "Run not found" }
  */
 router.get('/runs/:runId', async (req: Request, res: Response) => {
@@ -2728,6 +2771,9 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       specModel,
       agentType: run.agent_type || run.agent || 'claude',
       agentModel: run.agent_model || null,
+      // US-004: Expose worktree fields at top level for easy frontend access
+      worktreePath: run.worktree_path || null,
+      branchName: run.branch_name || null,
       tokenSummary: {
         inputTokens: tokenRow.total_input,
         outputTokens: tokenRow.total_output,
@@ -5455,6 +5501,70 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/pipeline/queue/:workspaceId — Workspace queue state ─────────────
+
+/**
+ * @swagger
+ * /api/pipeline/queue/{workspaceId}:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Get queue state for a workspace
+ *     operationId: getWorkspaceQueueState
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Queue state
+ */
+router.get('/queue/:workspaceId', async (req: Request, res: Response) => {
+  try {
+    const { workspaceId } = req.params;
+
+    const MAX_QUEUE_DEPTH = 10;
+
+    // Fetch concurrency settings
+    const concurrencyRows = await query<{ key: string; value: string }>(
+      `SELECT key, value FROM worker_settings WHERE key IN ('queue_max_concurrent', 'run_now_max_concurrent')`,
+    );
+    const settingsMap = Object.fromEntries(concurrencyRows.map(r => [r.key, r.value]));
+    const queueMaxConcurrent = settingsMap['queue_max_concurrent'] ? parseInt(settingsMap['queue_max_concurrent'], 10) : 1;
+    const runNowMaxConcurrent = settingsMap['run_now_max_concurrent'] ? parseInt(settingsMap['run_now_max_concurrent'], 10) : 3;
+
+    // Active runs for this workspace
+    const activeRuns = await query<{ id: number; spec_path: string; status: string; started_at: string; triggered_via: string; branch_name: string | null; worktree_path: string | null; agent_type: string }>(
+      `SELECT id, spec_path, status, started_at, triggered_via, branch_name, worktree_path, agent_type
+       FROM pipeline_runs
+       WHERE workspace_id = $1 AND status IN ('running', 'paused')
+       ORDER BY started_at ASC`,
+      [workspaceId],
+    );
+
+    // Queued runs for this workspace
+    const queuedRuns = await query<{ id: number; spec_path: string; status: string; queued_at: string; queue_position: number; triggered_via: string; auto_worktree: boolean }>(
+      `SELECT id, spec_path, status, queued_at, queue_position, triggered_via, auto_worktree
+       FROM pipeline_runs
+       WHERE workspace_id = $1 AND status = 'queued'
+       ORDER BY queue_position ASC, queued_at ASC`,
+      [workspaceId],
+    );
+
+    res.json({
+      active: activeRuns,
+      queued: queuedRuns,
+      queueDepth: queuedRuns.length,
+      maxQueueDepth: MAX_QUEUE_DEPTH,
+      queueMaxConcurrent,
+      runNowMaxConcurrent,
+    });
+  } catch (err) {
+    logger.error({ err }, '[Pipeline] queue state error');
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 // ─── GET /api/pipeline/worker/health — Worker health check ───────────────────
 // Queries Postgres directly — no IPC with the worker process.
 // Accessible without authentication (health checks must be unauthenticated).
@@ -5483,6 +5593,8 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
  *                 workerPid: { type: integer, nullable: true }
  *                 workerStartedAt: { type: string, nullable: true, format: date-time }
  *                 activeChildProcesses: { type: integer, description: "Number of active execution-engine child processes (from latest heartbeat)" }
+ *                 queueMaxConcurrent: { type: integer, description: "Max concurrent queued (non-worktree) pipeline:run jobs" }
+ *                 runNowMaxConcurrent: { type: integer, description: "Max concurrent immediate worktree-isolated runs" }
  *                 lastReconciliationErrors: { type: integer, description: "Number of state mismatches fixed in last reconcile cycle (last 90s)" }
  *                 activeJobs:
  *                   type: array
@@ -5739,11 +5851,44 @@ router.get('/worker/health', async (req: Request, res: Response) => {
     }
 
 
+    // ── Concurrency settings from worker_settings ──────────────────────────
+    const concurrencyRows = await query<{ key: string; value: string }>(
+      `SELECT key, value FROM worker_settings WHERE key IN ('queue_max_concurrent', 'run_now_max_concurrent')`,
+    );
+    const concurrencyMap = Object.fromEntries(concurrencyRows.map(r => [r.key, r.value]));
+    const queueMaxConcurrent = concurrencyMap['queue_max_concurrent'] ? parseInt(concurrencyMap['queue_max_concurrent'], 10) : 1;
+    const runNowMaxConcurrent = concurrencyMap['run_now_max_concurrent'] ? parseInt(concurrencyMap['run_now_max_concurrent'], 10) : 3;
+
+    // ── Per-workspace queue depths ─────────────────────────────────────────────
+    const MAX_QUEUE_DEPTH = 10;
+    interface WorkspaceQueueRow {
+      workspace_id: string;
+      queued_count: string;
+      active_count: string;
+    }
+    const workspaceQueueRows = await query<WorkspaceQueueRow>(
+      `SELECT workspace_id,
+              COUNT(*) FILTER (WHERE status = 'queued')::text AS queued_count,
+              COUNT(*) FILTER (WHERE status IN ('running', 'paused'))::text AS active_count
+       FROM pipeline_runs
+       WHERE status IN ('queued', 'running', 'paused')
+       GROUP BY workspace_id`,
+    ).catch(() => [] as WorkspaceQueueRow[]);
+
+    const workspaceQueueDepths = workspaceQueueRows.map(r => ({
+      workspaceId: r.workspace_id,
+      queuedCount: parseInt(r.queued_count, 10),
+      activeCount: parseInt(r.active_count, 10),
+      maxQueueDepth: MAX_QUEUE_DEPTH,
+    }));
+
     res.json({
       workerActive,
       workerPid: heartbeat?.pid ?? null,
       workerStartedAt: heartbeat?.started_at ?? null,
       activeChildProcesses: heartbeat?.active_jobs ?? 0,
+      queueMaxConcurrent,
+      runNowMaxConcurrent,
       activeJobs,
       queueDepth,
       scheduledJobs,
@@ -5751,6 +5896,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       pgBossVersion,
       lastReconciliationErrors,
       queueHealth,
+      workspaceQueueDepths,
       queueStats: {
         pending,
         active,

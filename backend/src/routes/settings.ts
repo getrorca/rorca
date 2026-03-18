@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import bcrypt from 'bcryptjs';
 import { z } from 'zod';
-import { queryOne, execute } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { getEffectiveUser } from '../lib/get-user';
 import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
@@ -331,13 +331,29 @@ interface WorkerSettingRow {
  *                   minimum: 1
  *                   maximum: 10
  *                   example: 3
+ *                   description: "Deprecated — kept for backwards compatibility. Use queue_max_concurrent and run_now_max_concurrent instead."
+ *                 queue_max_concurrent:
+ *                   type: integer
+ *                   minimum: 1
+ *                   maximum: 10
+ *                   example: 1
+ *                   description: "Max concurrent queued (non-worktree) pipeline:run jobs"
+ *                 run_now_max_concurrent:
+ *                   type: integer
+ *                   minimum: 1
+ *                   maximum: 10
+ *                   example: 3
+ *                   description: "Max concurrent immediate worktree-isolated runs"
  */
 router.get('/worker', async (_req: Request, res: Response) => {
-  const row = await queryOne<WorkerSettingRow>(
-    "SELECT value FROM worker_settings WHERE key = 'max_concurrent_runs'",
+  const rows = await query<WorkerSettingRow>(
+    "SELECT key, value FROM worker_settings WHERE key IN ('max_concurrent_runs', 'queue_max_concurrent', 'run_now_max_concurrent')",
   );
-  const max_concurrent_runs = row ? parseInt(row.value, 10) : 3;
-  res.json({ max_concurrent_runs });
+  const settings = Object.fromEntries(rows.map(r => [r.key, r.value]));
+  const max_concurrent_runs = settings['max_concurrent_runs'] ? parseInt(settings['max_concurrent_runs'], 10) : 3;
+  const queue_max_concurrent = settings['queue_max_concurrent'] ? parseInt(settings['queue_max_concurrent'], 10) : 1;
+  const run_now_max_concurrent = settings['run_now_max_concurrent'] ? parseInt(settings['run_now_max_concurrent'], 10) : 3;
+  res.json({ max_concurrent_runs, queue_max_concurrent, run_now_max_concurrent });
 });
 
 /**
@@ -347,20 +363,32 @@ router.get('/worker', async (_req: Request, res: Response) => {
  *     tags: [Settings]
  *     summary: Update worker settings
  *     operationId: updateWorkerSettings
- *     description: Persists configurable worker parameters to the database. Changes take effect on the next worker poll cycle.
+ *     description: Persists configurable worker parameters to the database. Changes take effect on the next worker poll cycle (~30s).
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             required: [max_concurrent_runs]
  *             properties:
  *               max_concurrent_runs:
  *                 type: integer
  *                 minimum: 1
  *                 maximum: 10
  *                 example: 3
+ *                 description: "Deprecated — kept for backwards compatibility"
+ *               queue_max_concurrent:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 10
+ *                 example: 1
+ *                 description: "Max concurrent queued (non-worktree) pipeline:run jobs"
+ *               run_now_max_concurrent:
+ *                 type: integer
+ *                 minimum: 1
+ *                 maximum: 10
+ *                 example: 3
+ *                 description: "Max concurrent immediate worktree-isolated runs"
  *     responses:
  *       200:
  *         description: Worker settings updated
@@ -371,28 +399,63 @@ router.get('/worker', async (_req: Request, res: Response) => {
  *               properties:
  *                 max_concurrent_runs:
  *                   type: integer
+ *                 queue_max_concurrent:
+ *                   type: integer
+ *                 run_now_max_concurrent:
+ *                   type: integer
  *       422:
- *         description: max_concurrent_runs out of range (must be 1–10)
+ *         description: Value out of range (must be 1–10)
  */
 const WorkerSettingsSchema = z.object({
   max_concurrent_runs: z
     .number()
     .int('max_concurrent_runs must be an integer')
     .min(1, 'max_concurrent_runs must be at least 1')
-    .max(10, 'max_concurrent_runs must be at most 10'),
-});
+    .max(10, 'max_concurrent_runs must be at most 10')
+    .optional(),
+  queue_max_concurrent: z
+    .number()
+    .int('queue_max_concurrent must be an integer')
+    .min(1, 'queue_max_concurrent must be at least 1')
+    .max(5, 'queue_max_concurrent must be at most 5')
+    .optional(),
+  run_now_max_concurrent: z
+    .number()
+    .int('run_now_max_concurrent must be an integer')
+    .min(1, 'run_now_max_concurrent must be at least 1')
+    .max(10, 'run_now_max_concurrent must be at most 10')
+    .optional(),
+}).refine(
+  data => data.max_concurrent_runs !== undefined || data.queue_max_concurrent !== undefined || data.run_now_max_concurrent !== undefined,
+  { message: 'At least one setting must be provided' },
+);
 
 router.put('/worker', validateBody(WorkerSettingsSchema), async (req: Request, res: Response) => {
-  const { max_concurrent_runs } = req.body as z.infer<typeof WorkerSettingsSchema>;
+  const { max_concurrent_runs, queue_max_concurrent, run_now_max_concurrent } = req.body as z.infer<typeof WorkerSettingsSchema>;
 
-  await execute(
-    `INSERT INTO worker_settings (key, value, updated_at)
-     VALUES ('max_concurrent_runs', $1, NOW())
-     ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
-    [String(max_concurrent_runs)],
+  const upsert = async (key: string, value: number) => {
+    await execute(
+      `INSERT INTO worker_settings (key, value, updated_at)
+       VALUES ($1, $2, NOW())
+       ON CONFLICT (key) DO UPDATE SET value = excluded.value, updated_at = excluded.updated_at`,
+      [key, String(value)],
+    );
+  };
+
+  if (max_concurrent_runs !== undefined) await upsert('max_concurrent_runs', max_concurrent_runs);
+  if (queue_max_concurrent !== undefined) await upsert('queue_max_concurrent', queue_max_concurrent);
+  if (run_now_max_concurrent !== undefined) await upsert('run_now_max_concurrent', run_now_max_concurrent);
+
+  // Return current state of all settings
+  const rows = await query<WorkerSettingRow>(
+    "SELECT key, value FROM worker_settings WHERE key IN ('max_concurrent_runs', 'queue_max_concurrent', 'run_now_max_concurrent')",
   );
-
-  res.json({ max_concurrent_runs });
+  const settings = Object.fromEntries(rows.map(r => [r.key, r.value]));
+  res.json({
+    max_concurrent_runs: settings['max_concurrent_runs'] ? parseInt(settings['max_concurrent_runs'], 10) : 3,
+    queue_max_concurrent: settings['queue_max_concurrent'] ? parseInt(settings['queue_max_concurrent'], 10) : 1,
+    run_now_max_concurrent: settings['run_now_max_concurrent'] ? parseInt(settings['run_now_max_concurrent'], 10) : 3,
+  });
 });
 
 export default router;

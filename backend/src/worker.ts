@@ -220,6 +220,11 @@ const HEARTBEAT_INTERVAL_MS = 30_000; // 30 s
 
 const activeProcesses = new Map<number, ChildProcess>();
 
+// ── US-002: Track triggered_via per active run for per-type concurrency ───
+// Maps runId → 'queue' | 'run_now' so the handler can count active jobs of
+// each type and enforce queue_max_concurrent vs run_now_max_concurrent.
+const activeTriggeredVia = new Map<number, 'queue' | 'run_now'>();
+
 // ── Cancelling runs set (runId) ───────────────────────────────────────────
 // Tracks which runs are being intentionally cancelled so the exit handler
 // writes status='cancelled' (not 'failed') and emits run_cancelled WAL event.
@@ -647,7 +652,29 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, triggeredVia } = payload;
+
+    // US-002: Enforce per-type concurrency limits before spawning.
+    // Count currently active jobs of this trigger type and check against the limit.
+    const settings = await getConcurrencySettings();
+    const activeOfType = Array.from(activeTriggeredVia.values()).filter(v => v === triggeredVia).length;
+    const maxForType = triggeredVia === 'queue' ? settings.queueMaxConcurrent : settings.runNowMaxConcurrent;
+
+    if (activeOfType >= maxForType) {
+      // At capacity for this trigger type — re-enqueue with a short delay so
+      // pg-boss picks it up again after some active jobs finish.
+      // Cannot throw (retryLimit=0 would permanently fail the job).
+      logger.info(
+        { jobId, runId, triggeredVia, activeOfType, maxForType },
+        '[worker] pipeline:run — at capacity for trigger type, re-enqueueing with 5s delay',
+      );
+      await getBoss().send('pipeline:run', job.data as Record<string, unknown>, {
+        retryLimit: 0,
+        expireInSeconds: 7200,
+        startAfter: 5, // delay 5s before becoming eligible again
+      });
+      continue; // skip to next job in batch
+    }
 
     // Determine effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
@@ -719,9 +746,15 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     if (startFromStoryId) {
       engineArgs.push('--start-from', startFromStoryId);
     }
-    if (worktreePath && payload.branchName) {
+    // US-004: Pass worktree context to execution-engine so it can log worktree info
+    // and perform engine-side auto-merge as a fallback.
+    if (worktreePath) {
       engineArgs.push('--worktree-path', worktreePath);
+    }
+    if (payload.branchName) {
       engineArgs.push('--branch-name', payload.branchName);
+    }
+    if (worktreePath) {
       engineArgs.push('--workspace-path', workspacePath);
     }
 
@@ -748,8 +781,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       await execute('UPDATE pipeline_runs SET pid = $1 WHERE id = $2', [child.pid, runId]);
     }
 
-    // Register in active processes map for cancellation
+    // Register in active processes map for cancellation + concurrency tracking
     activeProcesses.set(runId, child);
+    activeTriggeredVia.set(runId, triggeredVia);
 
     // Listen for IPC message from execution-engine reporting its own PID.
     // tsx compiles TypeScript and forks a Node.js child — the tsx wrapper PID
@@ -815,6 +849,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
         const code = capturedCode;
         activeProcesses.delete(runId);
+        activeTriggeredVia.delete(runId);
 
         const wasCancelled = cancellingRuns.delete(runId);
         const status = wasCancelled ? 'cancelled' : (code === 0 ? 'done' : 'failed');
@@ -929,6 +964,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         logger.error({ err, runId }, '[worker] execution-engine spawn error');
         await flushPending();
         activeProcesses.delete(runId);
+        activeTriggeredVia.delete(runId);
         cancellingRuns.delete(runId);
 
         try {
@@ -1096,6 +1132,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
         const code = capturedCode;
         activeProcesses.delete(runId);
+        activeTriggeredVia.delete(runId);
 
         const wasCancelled = cancellingRuns.delete(runId);
 
@@ -1159,6 +1196,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         logger.error({ err, runId }, '[worker] retry execution-engine spawn error');
         await flushPending();
         activeProcesses.delete(runId);
+        activeTriggeredVia.delete(runId);
         cancellingRuns.delete(runId);
 
         try {
@@ -1739,27 +1777,52 @@ async function reconcileState(): Promise<void> {
   }
 }
 
-// ── Worker settings (max_concurrent_runs) ───────────────────────────────
+// ── Worker settings (split concurrency) ─────────────────────────────────
 
-const DEFAULT_MAX_CONCURRENT_RUNS = 5;
+const DEFAULT_QUEUE_MAX_CONCURRENT = 1;
+const DEFAULT_RUN_NOW_MAX_CONCURRENT = 3;
+
+interface ConcurrencySettings {
+  queueMaxConcurrent: number;
+  runNowMaxConcurrent: number;
+}
 
 /**
- * Fetch max_concurrent_runs from worker_settings table.
- * Falls back to RORCA_MAX_CONCURRENT_RUNS env var, then DEFAULT_MAX_CONCURRENT_RUNS.
+ * Fetch queue_max_concurrent and run_now_max_concurrent from worker_settings table.
+ * Falls back to legacy max_concurrent_runs, then env var, then defaults.
  */
-async function getMaxConcurrentRuns(): Promise<number> {
+async function getConcurrencySettings(): Promise<ConcurrencySettings> {
   try {
-    const row = await queryOne<{ value: string }>(
-      `SELECT value FROM worker_settings WHERE key = 'max_concurrent_runs'`,
+    const rows = await query<{ key: string; value: string }>(
+      `SELECT key, value FROM worker_settings WHERE key IN ('queue_max_concurrent', 'run_now_max_concurrent', 'max_concurrent_runs')`,
     );
-    if (row) {
-      const parsed = parseInt(row.value, 10);
-      if (!isNaN(parsed) && parsed > 0) return parsed;
-    }
+    const settings = Object.fromEntries(rows.map(r => [r.key, r.value]));
+
+    const parsePositiveInt = (val: string | undefined, fallback: number): number => {
+      if (!val) return fallback;
+      const parsed = parseInt(val, 10);
+      return !isNaN(parsed) && parsed > 0 ? parsed : fallback;
+    };
+
+    // Use new split settings if present, otherwise fall back to legacy max_concurrent_runs
+    const legacyMax = parsePositiveInt(settings['max_concurrent_runs'], 0);
+    const queueMaxConcurrent = parsePositiveInt(
+      settings['queue_max_concurrent'],
+      legacyMax > 0 ? legacyMax : DEFAULT_QUEUE_MAX_CONCURRENT,
+    );
+    const runNowMaxConcurrent = parsePositiveInt(
+      settings['run_now_max_concurrent'],
+      legacyMax > 0 ? legacyMax : DEFAULT_RUN_NOW_MAX_CONCURRENT,
+    );
+
+    return { queueMaxConcurrent, runNowMaxConcurrent };
   } catch (err) {
-    logger.warn({ err }, '[worker] getMaxConcurrentRuns — DB query failed, using env/default');
+    logger.warn({ err }, '[worker] getConcurrencySettings — DB query failed, using defaults');
   }
-  return parseInt(process.env.RORCA_MAX_CONCURRENT_RUNS ?? String(DEFAULT_MAX_CONCURRENT_RUNS), 10);
+  return {
+    queueMaxConcurrent: DEFAULT_QUEUE_MAX_CONCURRENT,
+    runNowMaxConcurrent: DEFAULT_RUN_NOW_MAX_CONCURRENT,
+  };
 }
 
 // ── Graceful shutdown ────────────────────────────────────────────────────
@@ -2155,27 +2218,39 @@ async function start(): Promise<void> {
   const boss = getBoss();
 
   // Fetch initial concurrency from DB (falls back to env var / default).
-  let currentMaxConcurrent = await getMaxConcurrentRuns();
-  logger.info({ maxConcurrent: currentMaxConcurrent }, '[worker] initial max_concurrent_runs');
+  let currentSettings = await getConcurrencySettings();
+  logger.info(
+    { queueMax: currentSettings.queueMaxConcurrent, runNowMax: currentSettings.runNowMaxConcurrent },
+    '[worker] initial concurrency settings (queue_max_concurrent / run_now_max_concurrent)',
+  );
 
-  await boss.work('pipeline:run', { batchSize: currentMaxConcurrent }, handlePipelineRun);
-  await boss.work('pipeline:retry', { batchSize: currentMaxConcurrent }, handlePipelineRetry);
+  // batchSize = sum of both limits so the handler can pick up both job types.
+  const computeBatchSize = (s: ConcurrencySettings) => s.queueMaxConcurrent + s.runNowMaxConcurrent;
+
+  await boss.work('pipeline:run', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRun);
+  await boss.work('pipeline:retry', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRetry);
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
 
   // Poll worker_settings every WORKER_SETTINGS_POLL_MS (default 30s).
-  // If max_concurrent_runs changed, hot-reload the pipeline:run and pipeline:retry subscriptions.
+  // If concurrency settings changed, hot-reload the pipeline:run and pipeline:retry subscriptions.
   const WORKER_SETTINGS_POLL_MS = parseInt(process.env.WORKER_SETTINGS_POLL_MS ?? '30000', 10);
 
   settingsPollIntervalId = setInterval(() => {
     void (async () => {
       if (stopping) return;
       try {
-        const newMax = await getMaxConcurrentRuns();
-        if (newMax !== currentMaxConcurrent) {
+        const newSettings = await getConcurrencySettings();
+        if (
+          newSettings.queueMaxConcurrent !== currentSettings.queueMaxConcurrent ||
+          newSettings.runNowMaxConcurrent !== currentSettings.runNowMaxConcurrent
+        ) {
           logger.info(
-            { from: currentMaxConcurrent, to: newMax },
-            `[worker] max_concurrent_runs changed ${currentMaxConcurrent} → ${newMax}, reloading work subscription`,
+            {
+              queueFrom: currentSettings.queueMaxConcurrent, queueTo: newSettings.queueMaxConcurrent,
+              runNowFrom: currentSettings.runNowMaxConcurrent, runNowTo: newSettings.runNowMaxConcurrent,
+            },
+            '[worker] concurrency settings changed, reloading work subscription',
           );
 
           // Stop current subscriptions gracefully (pg-boss drains in-flight batch
@@ -2183,16 +2258,19 @@ async function start(): Promise<void> {
           await boss.offWork('pipeline:run');
           await boss.offWork('pipeline:retry');
 
-          currentMaxConcurrent = newMax;
+          currentSettings = newSettings;
 
-          // Re-register with updated teamSize + batchSize.
-          await boss.work('pipeline:run', { batchSize: currentMaxConcurrent }, handlePipelineRun);
-          await boss.work('pipeline:retry', { batchSize: currentMaxConcurrent }, handlePipelineRetry);
+          // Re-register with updated batchSize.
+          await boss.work('pipeline:run', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRun);
+          await boss.work('pipeline:retry', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRetry);
 
-          logger.info({ maxConcurrent: currentMaxConcurrent }, '[worker] work subscription reloaded successfully');
+          logger.info(
+            { queueMax: currentSettings.queueMaxConcurrent, runNowMax: currentSettings.runNowMaxConcurrent, batchSize: computeBatchSize(currentSettings) },
+            '[worker] work subscription reloaded successfully',
+          );
         }
       } catch (err) {
-        logger.warn({ err }, '[worker] settings poll: failed to check/reload max_concurrent_runs');
+        logger.warn({ err }, '[worker] settings poll: failed to check/reload concurrency settings');
       }
     })();
   }, WORKER_SETTINGS_POLL_MS);
