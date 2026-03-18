@@ -3065,9 +3065,12 @@ async function main(): Promise<void> {
       writeProgressTxt(config.cwd);
       archiveRunState(config.cwd, config.runId);
 
-      // Auto-merge run-level worktree back into the workspace main branch
-      // Only fires when: worktreePath + branchName + workspacePath are set AND all non-excluded stories passed
-      if (config.worktreePath && config.branchName && config.workspacePath) {
+      // Auto-merge run-level worktree back into the workspace main branch.
+      // Only fires as a standalone fallback — when spawned by the worker
+      // (RORCA_PROCESS_ROLE=engine), the worker handles the more sophisticated
+      // autoMergeAfterRun() with agentic conflict resolution, WAL events, and
+      // merge_status tracking. Running both would cause a double-merge race.
+      if (config.worktreePath && config.branchName && config.workspacePath && process.env.RORCA_PROCESS_ROLE !== 'engine') {
         const allPassed = currentStories.every(s => s.excluded || isPassed(s));
         if (allPassed) {
           autoMergeRunWorktree(config.workspacePath, config.worktreePath, config.branchName);

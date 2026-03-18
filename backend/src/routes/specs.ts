@@ -2947,6 +2947,8 @@ interface KanbanSpec {
   activeRunId?: number;
   activeRunStatus?: 'running' | 'queued';
   queuePosition?: number;
+  triggeredVia?: 'queue' | 'run_now';
+  isParallelRun?: boolean;
   model?: string;
   attachmentCount: number;
   source?: string;
@@ -3172,19 +3174,27 @@ router.get('/kanban', async (req: Request, res: Response) => {
     }
 
     // Detect active runs and completed runs per spec
-    const runs = await query(`SELECT id, spec_path, status, queue_position FROM pipeline_runs WHERE workspace_id = $1 ORDER BY id DESC`, [workspaceId]) as { id: number; spec_path: string; status: string; queue_position: number | null }[];
+    const runs = await query(`SELECT id, spec_path, status, queue_position, triggered_via FROM pipeline_runs WHERE workspace_id = $1 ORDER BY id DESC`, [workspaceId]) as { id: number; spec_path: string; status: string; queue_position: number | null; triggered_via: string | null }[];
 
-    const activeRunBySlug = new Map<string, { id: number; status: 'running' | 'queued'; queuePosition?: number }>();
+    const activeRunBySlug = new Map<string, { id: number; status: 'running' | 'queued'; queuePosition?: number; triggeredVia?: 'queue' | 'run_now' }>();
     const completedSlugs = new Set<string>();
+    // Count active run_now runs across the workspace (for parallel badge)
+    let activeRunNowCount = 0;
     for (const run of runs) {
       const slug = run.spec_path.replace(/^.*\//, '').replace(/\.json$/, '');
       if ((run.status === 'running' || run.status === 'queued') && !activeRunBySlug.has(slug)) {
-        activeRunBySlug.set(slug, { id: run.id, status: run.status as 'running' | 'queued', queuePosition: run.queue_position ?? undefined });
+        const triggeredVia = (run.triggered_via === 'queue' ? 'queue' : 'run_now') as 'queue' | 'run_now';
+        activeRunBySlug.set(slug, { id: run.id, status: run.status as 'running' | 'queued', queuePosition: run.queue_position ?? undefined, triggeredVia });
+      }
+      if (run.status === 'running' && run.triggered_via !== 'queue') {
+        activeRunNowCount++;
       }
       if (run.status === 'done' || run.status === 'completed') {
         completedSlugs.add(slug);
       }
     }
+    // If multiple run_now runs are active, mark them as parallel
+    const isParallel = activeRunNowCount > 1;
 
     // Include manually-done specs
     const manualDone = await query<{ spec_id: string }>(
@@ -3248,7 +3258,13 @@ router.get('/kanban', async (req: Request, res: Response) => {
           ...spec,
           passedStories: passed,
           failedStories: failed,
-          ...(activeRun ? { activeRunId: activeRun.id, activeRunStatus: activeRun.status, ...(activeRun.queuePosition ? { queuePosition: activeRun.queuePosition } : {}) } : {}),
+          ...(activeRun ? {
+            activeRunId: activeRun.id,
+            activeRunStatus: activeRun.status,
+            ...(activeRun.queuePosition ? { queuePosition: activeRun.queuePosition } : {}),
+            triggeredVia: activeRun.triggeredVia,
+            ...(isParallel && activeRun.status === 'running' && activeRun.triggeredVia !== 'queue' ? { isParallelRun: true } : {}),
+          } : {}),
         });
       }
     }
@@ -10887,7 +10903,7 @@ router.delete('/:specId/attachments/:attachmentId', async (req: Request, res: Re
 router.put('/:specId', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
-    const { workspaceId, model, title, _notes } = req.body;
+    const { workspaceId, model, title, _notes, autoWorktree } = req.body;
 
     if (!workspaceId) {
       throw new ValidationError('Missing required body param: workspaceId');
@@ -10920,6 +10936,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
     if (model !== undefined) content.model = model;
     if (title !== undefined) content.title = title;
     if (_notes !== undefined) content._notes = _notes;
+    if (autoWorktree !== undefined) content.autoWorktree = !!autoWorktree;
 
     const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
     fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
@@ -10931,6 +10948,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
       title: content.title,
       model: content.model,
       _notes: content._notes,
+      autoWorktree: content.autoWorktree,
       storyCount: userStories.length,
     });
   } catch (error: any) {
