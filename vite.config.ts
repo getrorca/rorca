@@ -26,10 +26,6 @@ export default defineConfig({
           if (id.includes('node_modules/recharts') || id.includes('node_modules/d3-')) {
             return 'charts';
           }
-          // Terminal — only pulled by RunView
-          if (id.includes('node_modules/@xterm/')) {
-            return 'xterm';
-          }
           // Command palette — lazy loaded, separate chunk
           if (id.includes('node_modules/cmdk')) {
             return 'cmdk';
