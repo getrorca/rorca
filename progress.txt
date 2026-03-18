@@ -3,9 +3,9 @@
 Spec: rorca-mcp-recall-tool
 Run ID: 20260316000019
 Started: 2026-03-17T21:03:11.254Z
-Last Updated: 2026-03-18T00:20:46.877Z
+Last Updated: 2026-03-18T00:33:20.482Z
 
-## Completed Stories (7)
+## Completed Stories (8)
 - US-002: Implement recall route — direction stack and workspace metadata sections — DONE (claude, 18s)
 - US-008: Implement recall route — active/queued runs with story progress — DONE (claude, 455s)
 - US-009: Compose all sections with Promise.all, add meta with token estimation — DONE (claude, 762s)
@@ -13,3 +13,4 @@ Last Updated: 2026-03-18T00:20:46.877Z
 - US-011: Register recall MCP prompt as slash-command shorthand — DONE (claude, 269s)
 - US-013: Implement rorca_dump MCP tool and GET /api/recall/dump route — full unfiltered brain export — DONE (claude, 1917s)
 - US-002: Create Postgres LISTEN/NOTIFY migration and trigger — DONE (claude, 33s)
+- US-009: Rewrite MiniTerminalPane.tsx to use ansi-to-html instead of xterm.js — DONE (claude, 400s)

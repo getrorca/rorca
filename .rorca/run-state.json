@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000019,
   "startedAt": "2026-03-17T21:03:11.254Z",
-  "lastUpdatedAt": "2026-03-18T00:20:46.877Z",
+  "lastUpdatedAt": "2026-03-18T00:33:20.482Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -66,6 +66,15 @@
       "finishedAt": "2026-03-18T00:20:46.877Z",
       "agentType": "claude",
       "elapsedMs": 33090
+    },
+    {
+      "storyId": "US-009",
+      "title": "Rewrite MiniTerminalPane.tsx to use ansi-to-html instead of xterm.js",
+      "status": "passed",
+      "startedAt": "2026-03-18T00:26:40.310Z",
+      "finishedAt": "2026-03-18T00:33:20.482Z",
+      "agentType": "claude",
+      "elapsedMs": 400172
     }
   ],
   "failedStories": [],
