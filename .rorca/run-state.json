@@ -2,7 +2,7 @@
   "specId": "rorca-subprocess-watchdog",
   "runId": 20260316000030,
   "startedAt": "2026-03-18T07:55:23.497Z",
-  "lastUpdatedAt": "2026-03-18T07:57:16.535Z",
+  "lastUpdatedAt": "2026-03-18T08:01:05.836Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-18T07:57:16.534Z",
       "agentType": "claude",
       "elapsedMs": 106043
+    },
+    {
+      "storyId": "US-002",
+      "title": "Wire createIdleWatchdog into all three spawn functions",
+      "status": "passed",
+      "startedAt": "2026-03-18T07:58:40.281Z",
+      "finishedAt": "2026-03-18T08:01:05.836Z",
+      "agentType": "claude",
+      "elapsedMs": 145555
     }
   ],
   "failedStories": [],
