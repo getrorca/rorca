@@ -1329,76 +1329,171 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
-> Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
+## 2026-03-17 [Bug Fix] Single-story wave merge fails on .rorca/run-state.json conflict — outer+inner worktree both write it
+> Rule: When a run uses an outer worktree (auto-merge) + inner wave worktrees, `mergeStoryWorktree` pre-commits dirty files in the outer worktree (including `.rorca/run-state.json`), creating a divergence from the inner story worktree which also wrote `run-state.json`. Git cannot auto-merge JSON, so `git merge --no-ff` fails. US-001 (or any single-story wave) is added to `failedIds`, cascade-blocking all downstream stories. Fixed by auto-resolving conflicts on runtime-only files (`--ours`) before falling through to hard failure.
 
-## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
-> Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
+## 2026-03-17 [Gotcha] execSync merge errors: log err.stderr not err.message — "Command failed" is useless
+> Rule: When `execSync` throws on a failed git command, `err.message` only contains "Command failed: git merge ..." — the actual git error (conflict details, stderr output) is in `err.stderr` as a Buffer. Always log `err.stderr?.toString().trim()` first, fall back to `err.message`. Cast as `Error & { stderr?: Buffer }` for TypeScript.
 
-## 2026-03-13 [Gotcha] 150+ unmerged feat/ branches accumulate — audit regularly
-> Rule: Worktree spec runs create feat/ branches that never auto-merge. After several months of development, 150+ branches can accumulate. Most are stale (superseded by later runs of the same spec). When auditing: (1) check remote feat/ branches with commits not in main using `git branch -r | grep feat/ | while read b; do count=$(git log --oneline main.."$b" 2>/dev/null | wc -l | tr -d ' '); if [ "$count" -gt "0" ]; then echo "$count | $b"; fi; done`, (2) skip old pg-boss/scaffolding branches — their work is superseded by WR spec, (3) merge the most recent run of each spec (highest timestamp suffix = most complete), (4) skip convention-agents branches (old stubs, superseded by future spec).
+## 2026-03-17 [Pattern] Diagnose run failures: query run_output_chunks + grep msg field from JSON logs
+> Rule: To see the full execution log for any run (including errors scrolled off in the terminal), query: `psql postgres://rorca:rorca@localhost:5433/rorca -t -c "SELECT encode(chunk,'escape') FROM run_output_chunks WHERE run_id = <id> ORDER BY sequence" | grep -o '"msg":"[^"]*"' | sed 's/"msg":"//;s/"$//'`. The column is `chunk` (bytea), not `data`. Port is 5433, database is `rorca`.
 
-## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
-> Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
+## 2026-03-17 [Bug Fix] SSE live stream 5-minute delay — root cause and fix
+> Rule: GET /api/pipeline/stream started lastSeenId=0 every connection, replaying ALL historical WAL events at LIMIT 50/tick. With 5000+ events this caused 5+ minute delay before live events appeared. Fix: initialize lastSeenId to MAX(id) FROM wal_events on connection open. Historical events served instantly by new REST endpoint GET /runs/:runId/wal-events. Combined: usePipelineSSE seeds history from REST (immediate), SSE stream delivers only new events (within 3s).
 
-## 2026-03-13 [Gotcha] Old execution-engine processes from test runs survive indefinitely
-> Rule: Execution-engine subprocesses from old load test runs (WR-019, PG-020) and integration tests in temp paths can survive machine restarts and run for days, consuming CPU/memory. Check with: `ps aux | grep execution-engine | grep -v grep`. Kill PIDs associated with temp paths (/var/folders, /tmp) or old worktree paths. WR-007 graceful shutdown only helps for clean worker exits — kill -9 or machine crash still orphans children. Safe to kill any execution-engine with a temp path or a worktree path that no longer exists.
+## 2026-03-17 [Bug Fix] Merge failure leaves passes:true — idempotency gap causes next run to skip story with no code
+> Rule: When a sub-worktree merge fails, markStoryPassed() had already written passes:true to the spec JSON. The failure path added the story to failedIds and emitted story_failed WAL event, but never reverted passes:true. Next run sees passes:true, skips the story, but the code is not in the parent branch. Fix: call markStoryMergeFailed() in both merge failure paths (single-story wave at line ~3154, multi-story wave failures at line ~3219). markStoryMergeFailed() sets passes:false, clears skipped, adds a note.
 
-## 2026-03-13 [Decision] MCP-native generation: API as context+persistence layer, LLM work in caller's session
-> Rule: Rorca's API should split LLM-heavy operations (spec generation, enrichment) into two phases: (1) context-fetch — API returns the synthesized direction stack, memory, schema, skills as a raw bundle with no LLM call; (2) save — API persists the result the caller's LLM already generated. The LLM reasoning happens IN the caller's MCP session (Claude Code, OpenCode CLI, Codex CLI), not in a server-spawned subprocess. This means: rorca_get_generation_context returns the context bundle, the calling LLM generates the spec JSON in-session using cached/warm context, then rorca_save_spec persists it. The existing server-side generation path (spawning claude --print) is kept as a fallback for browser UI users who have no MCP session. This is the correct long-term architecture for rorca_forge_and_run too — it should orchestrate tool calls that the caller's session handles, not block on a subprocess.
+## 2026-03-17 [Bug Fix] Worker premature auto-merge — status=done without all stories passing triggered merge
+> Rule: worker.ts was merging the parent worktree into main when status==='done' regardless of whether all spec stories passed. A run can be 'done' with 0 stories executed (immediate exit). Fix: before calling autoMergeAfterRun, read the spec JSON and verify every story has passes===true or excluded===true. Only merge if allSpecStoriesPassed is true.
 
-## 2026-03-13 [Architecture] All three CLI coding assistants support MCP — Rorca tools work from any of them
-> Rule: Claude Code, OpenCode CLI, and Codex CLI all support MCP servers. A user working in any of these three can call Rorca MCP tools (rorca_generate_spec, rorca_trigger_run, etc.) from their active session. The only path that does NOT support MCP is the browser UI. This means the MCP-native generation architecture benefits all CLI users regardless of which assistant they use: Claude Code (Claude model), OpenCode CLI (any provider — GPT-4o, Gemini, etc.), Codex CLI (ChatGPT model). Architecture principle: Rorca API = context + persistence. LLM reasoning = caller's session. Browser UI = server-side subprocess fallback only.
+## 2026-03-17 [Gotcha] tsx module cache causes routes to return 404 after file edits — fresh restart required
+> Rule: After adding a new route to pipeline.ts, the route returned 404 despite being in the source and other routes in the same file working. tsx watch auto-restarts do not always invalidate the compiled module cache. `touch` on the file does not fix it. A full kill+restart (lsof -ti:3030 | xargs kill -9, then npm run dev) forces tsx to recompile from scratch and register all routes. Never diagnose a 404 for a route that exists in source without first doing a full restart.
 
-## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
-> Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
+## 2026-03-17 [Architecture] WAL event streaming architecture — two-track design for instant history + live events
+> Rule: Two endpoints work together: (1) REST GET /api/pipeline/runs/:runId/wal-events returns all past WAL events for a run instantly via direct DB query. (2) SSE GET /api/pipeline/stream delivers live events only (starts at MAX WAL id). usePipelineSSE.ts: on runId change, immediately seeds from REST then deduplicates live SSE events by id. useWalSSE singleton: single EventSource shared across all components (avoids Chrome 6-connection limit). Never use SSE alone for historical data — always pair with REST seed.
 
-## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
-> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
+## 2026-03-17 [Gotcha] Never kill backend while a run is active — execution engine WAL writes will fail
+> Rule: The execution engine (child of worker, not of server) sends WAL events via fetch to http://localhost:3030/api/wal. If the server is killed mid-run, those WAL writes fail silently and events are lost. The run continues but story progress disappears from the UI. The run stays stuck as status=running in the DB with no finished_at. Always confirm no active runs (GET /api/pipeline/worker/health activeJobs=[]) before killing the backend.
 
-## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
-> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
+## 2026-03-17 [Gotcha] Worker process must be manually restarted after worker.ts changes
+> Rule: Plain `tsx` (not `tsx watch`) is used for the worker — it does NOT hot-reload on file changes. Any change to `backend/src/worker.ts` requires killing the worker process and restarting it. The backend (Express) auto-restarts via tsx watch, but the worker is completely separate. Always verify worker PID start time vs file modification time before assuming a fix is live.
 
-## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
-> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
+## 2026-03-17 [Bug Fix] handlePipelineRetry also had the 4KB buffer bug — now fixed
+> Rule: The immediate-flush fix (write every data event directly instead of buffering to 4KB) was only applied to `handlePipelineRun` initially. `handlePipelineRetry` (around line 1079) still had the old accumulating buffer. Both handlers now call `writeBufferAsChunks(runId, data, sequenceRef)` directly in `handleData` with no pending buffer accumulation.
 
-## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
-> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
+## 2026-03-17 [Architecture] Wave parallel mini-terminal silence fixed by rorca-mini-terminal-db-output spec
+> Rule: Wave parallel runs show no per-story output in mini-terminals because `run_output_chunks` has no `story_id` column — all stories write to the same table keyed by `run_id` only. The approved spec `rorca-mini-terminal-db-output` (7 stories) fixes this by: (1) adding a separate `story_output_chunks` table, (2) a `StoryLogFollower` WAL subscriber that fans out per-story, (3) a new SSE endpoint `GET /api/pipeline/runs/:runId/stories/:storyId/stream`, (4) US-007 validates wave parallel mini-terminals show prose. Sequential runs already stream fine after the immediate-flush worker fix.
 
-## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
-> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
+## 2026-03-17 [Decision] Remove hardcoded rorca.md injection from execution-engine.ts
+> Rule: rorca.md must NOT be hardcoded-injected in buildPrompt(). It was previously always injected via readWorkspaceFile(.claude/skills/rorca.md) regardless of suggestedSkills. Removed in this session. Now rorca goes through normal loadMatchedSkills() like every other skill — only injected if in a story's suggestedSkills array, and tracked in active_skills for the Skills tab.
 
-## 2026-03-15 [Bug Fix] Worker never promoted queued runs — advanceQueue() missing from worker.ts
-> Rule: advanceQueue() must be called after EVERY run completion path in worker.ts (main exit, spawn error, retry exit, retry spawn error, stale job recovery, orphan sweep, state reconciliation). Without it, queued runs sit forever until state_reconciliation kills them.
+## 2026-03-17 [Architecture] rorca-terminal-sse-overhaul spec — 10 stories, run AFTER rorca-mini-terminal-db-output
+> Rule: Spec rorca-terminal-sse-overhaul replaces xterm.js with ansi-to-html + pre tag (RunTerminal + MiniTerminalPane) and WAL polling with Postgres LISTEN/NOTIFY. Must run AFTER rorca-mini-terminal-db-output because US-009 connects MiniTerminalPane to /stream endpoint (created by mini-terminal spec). Migration timestamp: 20260317100000 (avoids collision with mini-terminal's 20260317000001). RunTerminal must preserve RunTerminalHandle type with scrollToStory() and writeMarker() via useImperativeHandle — RunViewPanel depends on these. WAL polling side effects (recordTokenUsage, story_results token updates) must be migrated into LISTEN/NOTIFY handler in US-003.
 
-## 2026-03-15 [Bug Fix] reconcileState() killed legitimate queued runs — 'queued' removed from Case A query
-> Rule: reconcileState() Case A must only check status='running' (not 'queued'). Queued runs intentionally have no pg-boss job — they are managed by advanceQueue() which promotes them when the active run completes. Including 'queued' in the NOT EXISTS check causes reconciliation to mark every queued run as failed after 60 seconds.
+## 2026-03-17 [Decision] GTM worktree branches US-018/031/036 — do NOT merge, let billing-launch redo
+> Rule: Three unmerged GTM story worktrees (feat/rorca-go-to-market-v1-US-018, US-031, US-036) contain unique code not in main (github-token-validator.ts, github-review-requests.test.ts, license.ts). However they diverged from main at c9709e75 — well before 63 subsequent merges. Merging would clobber current main (~18k line deletions). These are failed story worktrees from the GTM run. The billing-launch spec will re-implement this work cleanly against current main. Delete worktrees, do not merge.
 
-## 2026-03-15 [Bug Fix] pipeline.ts merge conflicts resolved — queue-observability pickup latency kept
-> Rule: The /api/pipeline/worker/health endpoint uses individual CountRow/AgeRow/QueueRow/LatencyRow queries (not a single QueueStatsRow IIFE). The pickup latency metrics (avg/p50/p95/max over 24h rolling window for pipeline:run + pipeline:retry) are part of the queue-observability spec and must be preserved in any future merge.
+## 2026-03-17 [Gotcha] git worktree merged check — use merge-base --is-ancestor SHA main, NOT git branch --merged
+> Rule: To check if a worktree is merged into main, use: git merge-base --is-ancestor &lt;SHA&gt; main. Do NOT use git branch --merged main with shell pattern matching — it has zsh escaping bugs and gave wrong results (reported all 63 as merged when 7 were not). The merge-base approach checks the actual commit SHA from git worktree list against main's ancestry chain.
 
-## 2026-03-15 [Architecture] Run queue lifecycle: queued runs have NO pg-boss job until promoted
-> Rule: When a run is queued (queue:true in trigger body while another run is active), pipeline.ts creates a pipeline_runs row with status='queued' and queue_position but does NOT call boss.send(). The pg-boss job is only created later when advanceQueue() fires POST /api/pipeline/trigger with queuedRunId, which promotes the existing row and sends the boss job. Any code that checks for 'stuck' runs must account for this: queued runs without pg-boss jobs are normal, not orphaned.
+## 2026-03-17 [Architecture] rorca-mcp-recall-tool spec complete — all 13 stories on main
+> Rule: rorca-mcp-recall-tool (13 stories) fully merged to main as of 2026-03-17. Run #20260316000019 (32 min, 1 pass / 12 skip / 0 fail). Auto-merge completed (merge_commit_sha: 75d44d9). The 12 skips were already-implemented stories from prior runs 17+18. US-013 (rorca_dump MCP tool + GET /api/recall/dump) was the only story that ran. All code on main, no stale worktrees.
 
-## 2026-03-16 [Bug Fix] payload::text LIKE queries cause pool exhaustion under wave parallelism
-> Rule: Never use `payload::text LIKE '%"run_id":N%'` on wal_events. Always use `(payload->>'run_id')::int = $N` — JSONB accessor is 10x faster and doesn't cause full table scans. Critical under wave parallelism (18+ concurrent SSE connections each polling WAL).
+## 2026-03-17 [Architecture] rorca-mini-terminal-db-output spec — run BEFORE rorca-terminal-sse-overhaul
+> Rule: rorca-mini-terminal-db-output (7 stories after US-006 deletion) creates story_output_chunks table, story-log-follower WAL subscriber (filters stream-json → prose, writes to DB), and GET /api/pipeline/runs/:runId/stories/:storyId/stream SSE endpoint. This fixes raw stream-json in wave parallel mini-terminals. Must run BEFORE rorca-terminal-sse-overhaul because US-009 of overhaul spec connects MiniTerminalPane to /stream. US-006 (MiniTerminalPane → /stream xterm update) was deleted from this spec to avoid conflict with overhaul's US-009 rewrite.
 
-## 2026-03-16 [Bug Fix] specs.ts u.name column does not exist — users table uses display_name
-> Rule: The `users` table column is `display_name`, not `name`. Any JOIN query referencing `u.name` will crash with 'column u.name does not exist'. The go-to-market spec run introduced this bug in the spec_attachments query at specs.ts:9970.
+## 2026-03-18 [Gotcha] Worktree auto-merge fails silently when concurrent specs touch overlapping files
+> Rule: When two specs run concurrently in separate worktrees and edit the same files, the auto-merge of the second worktree fails with real merge conflicts. The run is left stuck as 'running' and implementation files remain stranded in the feature branch. Recovery requires: (1) manual git merge with conflict resolution, (2) restoring dropped files via `git show <sha>:path > file`, (3) manually marking the run as failed in the DB.
 
-## 2026-03-16 [Gotcha] unhandledRejection in server.ts kills entire process including API
-> Rule: The worker's unhandledRejection handler triggers graceful shutdown of the entire Node process. When server.ts and worker code share a process (via `npm run dev` / concurrently), ANY unhandled promise rejection — even a transient DB connection timeout — kills the API server too. DB queries in setInterval callbacks MUST be wrapped in try-catch.
+## 2026-03-18 [Architecture] Memory consolidation: DB is source of truth, MEMORY.md is optional projection
+> Rule: DB memories table is the single source of truth. MEMORY.md is a generated read-only projection rebuilt pre/post run — never written by agents directly. rorca_recall and rorca_get_memories (with fetchAll:true) both read from DB. rorca_dump is deprecated. MEMORY.md is only worth keeping if the workspace is used outside Rorca (Cursor, Copilot, raw Claude Code) — it is redundant in a Rorca-only workflow.
 
 Follow this workflow for implementation:
-## Agent Role: Database
+
+## Skill: logging-fundamentals (relevance: 8)
+---
+name: logging-fundamentals
+description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers, SREs, DevOps engineers
+  category: observability
+---
+
+# Logging Fundamentals
+
+Establish proper logging practices including log levels, structured logging, context propagation, and comprehensive logging strategies for applications, services, and infrastructure.
+
+## When to use me
+
+Use this skill when:
+- Setting up logging for new applications or services
+- Reviewing existing logging implementations
+- Establishing logging standards for teams or projects
+- Debugging issues with incomplete or poor logging
+- Implementing structured logging for better observability
+- Configuring log levels and verbosity for different environments
+- Ensuring logs contain sufficient context for troubleshooting
+
+## What I do
+
+### 1. Log Level Management
+- **Define appropriate log levels** (DEBUG, INFO, WARN, ERROR, FATAL)
+- **Configure level filtering** per environment (development, staging, production)
+- **Implement dynamic level adjustment** without application restarts
+- **Establish level usage guidelines** for different types of information
+
+### 2. Structured Logging Implementation
+- **Design log schema** with consistent field naming and types
+- **Implement structured formats** (JSON, key-value pairs, structured text)
+- **Include mandatory context fields** (timestamp, service, trace_id, user_id, etc.)
+- **Handle nested structures and arrays** appropriately in logs
+
+### 3. Context Propagation
+- **Implement correlation IDs** for request tracing across services
+- **Propagate context through async operations** (queues, background jobs)
+- **Maintain user/session context** throughout request lifecycle
+- **Include business context** (order_id, transaction_id, etc.) in logs
+
+### 4. Log Content Best Practices
+- **Include sufficient context** for debugging without external systems
+- **Balance detail with noise** - log enough but not too much
+- **Use consistent message formats** across the codebase
+- **Log before and after significant operations**
+- **Include error details** (stack traces, error codes, recovery suggestions)
+- **Avoid logging secrets, passwords, or sensitive data**
+
+## Logging Principles
+
+### The 5 Ws of Logging
+1. **WHO** - Which user/service/process generated the log?
+2. **WHAT** - What action/event is being logged?
+3. **WHEN** - Precise timestamp with timezone information
+4. **WHERE** - Which component/function/file generated the log?
+5. **WHY** - What is the significance/severity of the logged event?
+
+### Structured Logging Fields
+```json
+{
+  "timestamp": "2026-02-26T18:00:00Z",
+  "level": "INFO",
+  "service": "spec-generator",
+  "component": "chatComplete",
+  "trace_id": "gen-abc123",
+  "message": "LLM call completed",
+  "duration_ms": 5123,
+  "context": {
+    "model": "claude-sonnet-4-5-20250929",
+    "input_tokens": 12000,
+    "output_tokens": 4500
+  }
+}
+```
+
+### Log Level Guidelines
+- **DEBUG**: Detailed information for debugging, typically disabled in production
+- **INFO**: Routine information about normal operation
+- **WARN**: Warning conditions that might require attention but don't indicate failure
+- **ERROR**: Error conditions that indicate failure of a specific operation
+- **FATAL**: Critical errors that cause application termination
+
+## Notes
+
+- **Structured logging is essential** for modern log analysis and observability
+- **Context is more important than message content** - ensure logs can be correlated
+- **Log levels should reflect operational importance**, not developer convenience
+- **Consider log volume** - too many logs can overwhelm systems and teams
+- **Balance human readability with machine parsability** in log formats
 
 ---
 Your task (US-002):
-Create a new timestamp-format migration file named 20260317100000_wal_events_listen_notify.sql in backend/src/db/pg-migrations/ that creates a PL/pgSQL trigger function notify_wal_event() which calls pg_notify('wal_events', row_to_json(NEW)::text), and an AFTER INSERT FOR EACH ROW trigger on the wal_events table that invokes it. Migration must be idempotent using CREATE OR REPLACE FUNCTION and DROP TRIGGER IF EXISTS / CREATE TRIGGER. Note: timestamp 20260317100000 chosen to avoid collision with 20260317000001_story_output_chunks.sql from rorca-mini-terminal-db-output spec.
+Update `spawnClaude`, `spawnOpenCode`, and `spawnCodex` in `backend/src/lib/execution-engine.ts` to use `createIdleWatchdog`. Each spawn function must: (1) call `createIdleWatchdog` after the child process is created, passing `LLM_IDLE_TIMEOUT_MS` and a log callback that writes a visible `[System] Watchdog triggered: No output received for N minutes. Killing process...` line into the terminal output stream; (2) call `watchdog.reset()` inside both `child.stdout.on('data')` and `child.stderr.on('data')` handlers; (3) call `watchdog.clear()` inside `child.on('close')`, `child.on('exit')`, AND `child.on('error')` handlers — all three, not just close. The existing 45-minute wall-clock `setTimeout` stays as a safety net and is also cleared in all three event handlers.
 
 Acceptance Criteria:
-- Migration file named 20260317100000_wal_events_listen_notify.sql exists in backend/src/db/pg-migrations/ (timestamp chosen to sort after 20260317000001_story_output_chunks.sql)
-- notify_wal_event() function calls pg_notify('wal_events', row_to_json(NEW)::text)
-- AFTER INSERT FOR EACH ROW trigger named wal_events_notify is created on wal_events table
-- Migration is idempotent: running it twice does not error (CREATE OR REPLACE FUNCTION, DROP TRIGGER IF EXISTS before CREATE TRIGGER)
-- Migration runner applies it on backend startup and records it in schema_migrations
+- All three spawn functions (`spawnClaude`, `spawnOpenCode`, `spawnCodex`) call `createIdleWatchdog` immediately after child process creation
+- `watchdog.reset()` is called in both `stdout.on('data')` and `stderr.on('data')` handlers — confirmed by code inspection
+- `watchdog.clear()` is called in `child.on('close')`, `child.on('exit')`, AND `child.on('error')` in all three spawn functions — all three event handlers, not just `close`
+- The existing 45-minute wall-clock `setTimeout` is also cleared in `close`, `exit`, and `error` handlers (additive cleanup — both timers cleaned)
+- The `onFire` log callback writes a line matching pattern `[System] Watchdog triggered: No output received for N minutes. Killing process...` into the same stream as normal agent output
