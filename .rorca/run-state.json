@@ -2,7 +2,7 @@
   "specId": "rorca-pipeline-queueing-and-worktrees",
   "runId": 20260316000031,
   "startedAt": "2026-03-18T19:15:18.101Z",
-  "lastUpdatedAt": "2026-03-18T19:21:47.980Z",
+  "lastUpdatedAt": "2026-03-18T19:48:57.774Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-18T19:21:47.980Z",
       "agentType": "claude",
       "elapsedMs": 389184
+    },
+    {
+      "storyId": "US-002",
+      "title": "Add triggered_via field to pipeline_runs and pg-boss job payload",
+      "status": "passed",
+      "startedAt": "2026-03-18T19:46:31.548Z",
+      "finishedAt": "2026-03-18T19:48:57.774Z",
+      "agentType": "claude",
+      "elapsedMs": 146226
     }
   ],
   "failedStories": [],

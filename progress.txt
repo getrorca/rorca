@@ -3,7 +3,8 @@
 Spec: rorca-pipeline-queueing-and-worktrees
 Run ID: 20260316000031
 Started: 2026-03-18T19:15:18.101Z
-Last Updated: 2026-03-18T19:21:47.980Z
+Last Updated: 2026-03-18T19:48:57.774Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Add queue_max_concurrent and run_now_max_concurrent worker settings — DONE (claude, 389s)
+- US-002: Add triggered_via field to pipeline_runs and pg-boss job payload — DONE (claude, 146s)

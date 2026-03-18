@@ -220,6 +220,11 @@ const HEARTBEAT_INTERVAL_MS = 30_000; // 30 s
 
 const activeProcesses = new Map<number, ChildProcess>();
 
+// ── US-002: Track triggered_via per active run for per-type concurrency ───
+// Maps runId → 'queue' | 'run_now' so the handler can count active jobs of
+// each type and enforce queue_max_concurrent vs run_now_max_concurrent.
+const activeTriggeredVia = new Map<number, 'queue' | 'run_now'>();
+
 // ── Cancelling runs set (runId) ───────────────────────────────────────────
 // Tracks which runs are being intentionally cancelled so the exit handler
 // writes status='cancelled' (not 'failed') and emits run_cancelled WAL event.
@@ -645,7 +650,29 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, triggeredVia } = payload;
+
+    // US-002: Enforce per-type concurrency limits before spawning.
+    // Count currently active jobs of this trigger type and check against the limit.
+    const settings = await getConcurrencySettings();
+    const activeOfType = Array.from(activeTriggeredVia.values()).filter(v => v === triggeredVia).length;
+    const maxForType = triggeredVia === 'queue' ? settings.queueMaxConcurrent : settings.runNowMaxConcurrent;
+
+    if (activeOfType >= maxForType) {
+      // At capacity for this trigger type — re-enqueue with a short delay so
+      // pg-boss picks it up again after some active jobs finish.
+      // Cannot throw (retryLimit=0 would permanently fail the job).
+      logger.info(
+        { jobId, runId, triggeredVia, activeOfType, maxForType },
+        '[worker] pipeline:run — at capacity for trigger type, re-enqueueing with 5s delay',
+      );
+      await getBoss().send('pipeline:run', job.data as Record<string, unknown>, {
+        retryLimit: 0,
+        expireInSeconds: 7200,
+        startAfter: 5, // delay 5s before becoming eligible again
+      });
+      continue; // skip to next job in batch
+    }
 
     // Determine effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
@@ -741,8 +768,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       await execute('UPDATE pipeline_runs SET pid = $1 WHERE id = $2', [child.pid, runId]);
     }
 
-    // Register in active processes map for cancellation
+    // Register in active processes map for cancellation + concurrency tracking
     activeProcesses.set(runId, child);
+    activeTriggeredVia.set(runId, triggeredVia);
 
     // Listen for IPC message from execution-engine reporting its own PID.
     // tsx compiles TypeScript and forks a Node.js child — the tsx wrapper PID
@@ -813,6 +841,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
         const code = capturedCode;
         activeProcesses.delete(runId);
+        activeTriggeredVia.delete(runId);
 
         const wasCancelled = cancellingRuns.delete(runId);
         const status = wasCancelled ? 'cancelled' : (code === 0 ? 'done' : 'failed');
@@ -912,6 +941,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
         logger.error({ err, runId }, '[worker] execution-engine spawn error');
         await flushPending();
         activeProcesses.delete(runId);
+        activeTriggeredVia.delete(runId);
         cancellingRuns.delete(runId);
 
         try {
@@ -1085,6 +1115,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
         const code = capturedCode;
         activeProcesses.delete(runId);
+        activeTriggeredVia.delete(runId);
 
         const wasCancelled = cancellingRuns.delete(runId);
 
@@ -1148,6 +1179,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         logger.error({ err, runId }, '[worker] retry execution-engine spawn error');
         await flushPending();
         activeProcesses.delete(runId);
+        activeTriggeredVia.delete(runId);
         cancellingRuns.delete(runId);
 
         try {
