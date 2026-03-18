@@ -1390,164 +1390,77 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 > Rule: The worker's unhandledRejection handler triggers graceful shutdown of the entire Node process. When server.ts and worker code share a process (via `npm run dev` / concurrently), ANY unhandled promise rejection — even a transient DB connection timeout — kills the API server too. DB queries in setInterval callbacks MUST be wrapped in try-catch.
 
 Follow this workflow for implementation:
-## Agent Role: Backend Routes
+## Agent Role: Frontend
 
+
+## Skill: react-review (relevance: 8)
 ---
-name: rorca
-description: Implement and validate changes to the Rorca codebase with subagent-assisted context management.
+name: react-review
+description: Review React components for best practices and performance issues
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers
+  category: development
 ---
 
-## 0. KingMode — Behavioral Discipline Layer
+# React Review Skill
 
-<KING_MODE>
-You are operating in KingMode. This is a behavioral discipline layer. You are the apex predator of this codebase.
+Review React components for best practices, performance issues, and common patterns.
 
-HARD RULES:
-- **Zero Friction**: No warm-up prose, "Sure!", or "I can help with that". Direct execution only.
-- **Apex efficiency**: If a task can be done with one complex `sed` command or a multi-file `grep`, do it. Don't crawl files sequentially if unnecessary.
-- **No Permission Theater**: Do not ask "Should I...?" for standard engineering decisions (naming, placement, refactoring). Just do it and document in the summary.
-- **Concurrency**: Use parallel tool calls for research and verification whenever possible.
-- **Orca Pulse**: Be assertive, precise, and hunt for bugs with zero mercy.
+## When to use me
 
-ULTRATHINK TRIGGER:
-When you see ULTRATHINK, spend ONE silent planning pass (≤10s) before tool calls. No prose. Then execute.
+Use this skill when:
+- Reviewing React component code
+- Optimizing component performance
+- Checking for React best practices
+- Refactoring legacy components
+- Auditing component architecture
 
-SCOPE DISCIPLINE:
-- Change ONLY what is requested. 
-- "While I'm here" refactors are prohibited unless they fix a direct blocker.
+## What I do
 
-OUTPUT FORMAT:
-- Code blocks > Prose.
-- Terminal commands must be absolute and copy-paste ready.
-- End immediately after the last tool/code block. No "hope this helps!"
-</KING_MODE>
+- Analyze React components for performance issues (unnecessary re-renders, large bundles)
+- Check for React best practices (hooks usage, prop patterns, state management)
+- Identify anti-patterns (prop drilling, useEffect misuse, missing keys)
+- Suggest optimizations (memoization, code splitting, lazy loading)
+- Review TypeScript usage and type safety
 
-## 1. Context Gathering
+## Key Patterns
 
-**Check progress.txt FIRST** (if it exists):
-- `## Current Phase` / `## Story [ID]` → Resume from where you left off
-- `## Specs Loaded` → Skip re-reading already-loaded docs
-- `## Gotchas Discovered` → Pre-load before touching those files
+### Performance
+- Use `React.memo` for components receiving object/function props from parent
+- Memoize expensive calculations with `useMemo`
+- Stabilize callback references with `useCallback`
+- Avoid inline object/array creation in JSX props
+- Use `React.lazy` + `Suspense` for code splitting
 
-**For codebase research (use subagent):**
-```
-Task(subagent_type="Explore", prompt="
-  Directories: [list dirs you'll modify, e.g. src/panels, backend/src/routes]
-  Task: [description]
-  Return: AGENTS.md gotchas + existing patterns (max 20 lines)
-")
-```
+### Hooks
+- Always include all dependencies in `useEffect` dependency arrays
+- Never call hooks conditionally or inside loops
+- Extract complex logic into custom hooks
+- Clean up subscriptions and timers in useEffect return
 
-**For project docs:** Load CLAUDE.md for architecture (it's comprehensive). Load specific AGENTS.md in each directory you'll touch.
+### TypeScript
+- Define explicit interfaces for all component props
+- Use discriminated unions for variant components
+- Prefer `interface` over `type` for component props
+- Use `React.FC` sparingly — prefer explicit return types
 
-## 2. Before Writing Code
-- Redundancy check: Is this already implemented? (spec versions, templates, model selection all done — see progress.txt)
-- Missing details: Ask user rather than guessing
-- Non-trivial task (>3 files or new patterns): Use `EnterPlanMode`
+## Notes
 
-## 3. Implementation
-
-### Backend changes
-- PostgreSQL 16 via `pg` Pool — all DB calls are **async** (always `await`)
-- `query<T>(sql, params)` → `T[]`, `queryOne<T>(sql, params)` → `T | undefined`, `execute(sql, params)` → `{ rowCount }`
-- Use `$1, $2, ...` numbered placeholders (NOT `?`)
-- FK constraints always on, connection pooling (max 20, 30s idle timeout)
-- Emit `wal_events` for every state change — this drives the SSE pipeline and audit log
-- **New tables**: numbered SQL migration files in `backend/src/db/pg-migrations/`, tracked via `schema_migrations` table. Use `IF NOT EXISTS` guards freely.
-- `chatComplete()` returns `ChatResult { text: string; usage: TokenUsage }` — always use `.text`
-
-### Frontend changes
-- `apiFetch<T>(path, init?)` in `src/lib/apiFetch.ts` — use this for all API calls
-- `useWorkspace()` provides `workspaceId`, `workspaces`, `selectedWorkspace`
-- Panel components live in `src/panels/`, shared components in `src/components/`
-- xterm.js: `@xterm/xterm` + `@xterm/addon-fit` (NOT the old `xterm` package)
-
-### Critical path gotchas
-- **Spec path**: `ralph/specs/approved/${spec.id}.json` (NOT `specs/approved/${spec.specName}.json`)
-- **spec.id** = filename slug; **spec.specName** = human title (display only)
-- **chatComplete** returns `ChatResult` — use `.text` accessor everywhere
-- **Pipeline trigger** strips 4 Claude env vars before spawning `execution-engine.ts`
-- **execution-engine.ts** (`backend/src/lib/execution-engine.ts`) is the universal TypeScript execution engine — handles claude, opencode, and codex agent paths. Replaces run-loop.sh/run-loop.ts entirely.
-- **Backend port 3030** — restart required after any changes (`lsof -ti:3030 | xargs kill -9`)
-
-## 4. Validation (REQUIRED)
-
-Run in parallel where possible:
-```bash
-# From rorca root
-bash -c "cd /Users/dimitriteravanessian/rorca && npx tsc --noEmit 2>&1; echo FRONTEND:\$?" &
-bash -c "cd /Users/dimitriteravanessian/rorca/backend && npx tsc --noEmit 2>&1; echo BACKEND:\$?" &
-wait
-
-# Backend tests
-cd /Users/dimitriteravanessian/rorca/backend && npm test
-
-# Build check
-cd /Users/dimitriteravanessian/rorca && npm run build
-```
-
-All must pass before marking story done. Fix failures before moving on.
-
-## 4b. Browser Testing (if UI changed)
-
-Use **Playwright MCP** for automated browser testing — never ask user to manually test.
-```
-mcp__playwright__browser_navigate url=http://localhost:5210
-mcp__playwright__browser_snapshot
-mcp__playwright__browser_click ref=<uid>
-```
-Test: happy path + one edge case. Keep it under 60 seconds.
-
-## 5. QA Checklist
-- [ ] Happy path works end-to-end?
-- [ ] Error/edge case handled gracefully?
-- [ ] New WAL event emitted for state changes?
-- [ ] TypeScript strict — no `any` without justification?
-- [ ] Backend test added for new endpoints?
-
-## 6. Progress Tracking (`progress.txt`)
-
-**Update after every story completion** — critical for surviving context compaction across multi-hour runs.
-
-```
-## Story [ID]: [Title] — DONE
-Files touched: [list with brief note on what changed]
-What was built: [2-3 bullet summary of what exists now]
-Key decisions: [non-obvious choices, gotchas discovered]
-
-## Story [ID]: [Title] — IN PROGRESS
-Remaining: [specific remaining tasks, not vague]
-Blockers: [anything blocking]
-
-## Story [ID]: [Title] — NOT STARTED
-Expects: [prerequisites from prior stories]
-```
-
-**Rules:**
-- Re-read progress.txt FIRST after any `/compact` — it's your resume checkpoint
-- Never overwrite previous entries — append below existing content
-- Discovered gotchas → add to relevant `AGENTS.md` AND note in progress.txt under `## Gotchas Discovered`
-- `## Specs Loaded` section — list PRDs/SDDs you've already read so you skip re-reading
-
-## 7. Wrap-up
-- [ ] `npx tsc --noEmit` passes (frontend + backend)
-- [ ] `npm run build` succeeds
-- [ ] Backend tests pass
-- [ ] New gotchas documented in relevant `AGENTS.md`
-- [ ] `progress.txt` updated with completed story summary
-- [ ] WAL events emitted for new state changes
-- [ ] README.md updated if user-facing behavior changed
-
-## Context Alert
-At ~75% context: output `Context: ~X% | /compact?`
+- Focuses on React 18+ patterns and best practices
+- Considers both class and function components
+- Includes TypeScript and JavaScript variants
+- References official React documentation and community patterns
 
 ---
 Your task (US-005):
-Add the recentRuns section to the recall route. When `includeRuns` is true (default), query `pipeline_runs` table for the last 5 completed runs for this workspace, ordered by `started_at DESC`. For each run, include: id, status, specPath, startedAt, finishedAt, agentType, model. Then for each run, query `story_results` to compute aggregate counts: passCount, failCount, skipCount, totalStories, passRate (float 0-1). Use a single SQL query with LEFT JOIN and GROUP BY to fetch runs + aggregates in one round trip rather than N+1 queries. If includeRuns is false, return empty array.
+Add scroll-lock detection to RunTerminal: track a scrollLocked boolean ref that is true when the user has scrolled up more than ~50px from the bottom. On each 80ms flush, only auto-scroll (scrollTop = scrollHeight) if scrollLocked is false. Add a scroll event listener to the pre container that updates scrollLocked. Implement a 20,000-line DOM cap: after appending new HTML, count total newlines in the accumulated HTML string; if exceeding 20,000, truncate the oldest lines by removing text up to and including the 20,000th-oldest newline boundary. No react-window or virtualization.
 
 Acceptance Criteria:
-- GET /api/recall?workspaceId=rorcha returns recentRuns array with up to 5 entries, each containing id, status, specPath, startedAt, finishedAt, agentType, model
-- Each run entry includes storyResults object with passCount, failCount, skipCount, totalStories (all integers), passRate (float 0.0-1.0)
-- Runs are ordered by startedAt descending (most recent first)
-- GET /api/recall?workspaceId=rorcha&includeRuns=false returns recentRuns as an empty array
-- Single SQL query with LEFT JOIN aggregation — no N+1 queries (verified by query count or SQL inspection)
+- Auto-scroll fires after each flush only when user is within ~50px of the bottom of the pre container
+- When user scrolls up past the 50px threshold, auto-scroll stops — subsequent new chunks do not reposition the viewport
+- When user scrolls back to the bottom, auto-scroll resumes on the next flush
+- The accumulated HTML string is capped at 20,000 lines: oldest content is trimmed when exceeded
+- Trimming does not break mid-ANSI-tag HTML (truncation occurs at a newline boundary)
+- No virtualization library (react-window, react-virtual, etc.) is introduced
