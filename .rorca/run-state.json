@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000019,
   "startedAt": "2026-03-17T21:03:11.254Z",
-  "lastUpdatedAt": "2026-03-18T00:26:09.245Z",
+  "lastUpdatedAt": "2026-03-18T00:20:46.877Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -59,13 +59,13 @@
       "elapsedMs": 1916661
     },
     {
-      "storyId": "US-001",
-      "title": "Add ansi-to-html dependency and remove xterm packages",
+      "storyId": "US-002",
+      "title": "Create Postgres LISTEN/NOTIFY migration and trigger",
       "status": "passed",
-      "startedAt": "2026-03-18T00:20:20.048Z",
-      "finishedAt": "2026-03-18T00:26:09.244Z",
+      "startedAt": "2026-03-18T00:20:13.787Z",
+      "finishedAt": "2026-03-18T00:20:46.877Z",
       "agentType": "claude",
-      "elapsedMs": 349196
+      "elapsedMs": 33090
     }
   ],
   "failedStories": [],
