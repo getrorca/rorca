@@ -2,7 +2,7 @@
   "specId": "rorca-pipeline-queueing-and-worktrees",
   "runId": 20260316000031,
   "startedAt": "2026-03-18T19:15:18.101Z",
-  "lastUpdatedAt": "2026-03-18T20:03:54.827Z",
+  "lastUpdatedAt": "2026-03-18T20:08:04.237Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -23,13 +23,13 @@
       "elapsedMs": 146226
     },
     {
-      "storyId": "US-003",
-      "title": "Refactor conflict detection to distinguish queue vs run-now operations",
+      "storyId": "US-006",
+      "title": "Update Settings UI — expose queue_max_concurrent and run_now_max_concurrent controls",
       "status": "passed",
-      "startedAt": "2026-03-18T20:03:39.624Z",
-      "finishedAt": "2026-03-18T20:03:54.827Z",
+      "startedAt": "2026-03-18T20:03:38.505Z",
+      "finishedAt": "2026-03-18T20:08:04.237Z",
       "agentType": "claude",
-      "elapsedMs": 15203
+      "elapsedMs": 265732
     }
   ],
   "failedStories": [],
