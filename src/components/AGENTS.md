@@ -7,21 +7,14 @@ Shared UI components used across multiple panels.
 |------|---------|
 | `Shell.tsx` | App shell: Sidebar + panel content area layout |
 | `Sidebar.tsx` | Left icon nav bar; defines `PanelId` type exported throughout the app |
-| `RunTerminal.tsx` | xterm.js terminal that streams live pipeline output via SSE |
+| `RunTerminal.tsx` | Pure React terminal that streams live pipeline output via SSE |
 | `StoryCard.tsx` | Collapsible story display (id, title, description, AC, dependsOn) |
 | `AddWorkspaceModal.tsx` | Modal for registering a new workspace (path + label + domain) |
 | `BootstrapContextModal.tsx` | Multi-source context ingestion wizard (paste, file, URL, Q&A) |
 | `Toast.tsx` | Simple toast notification system |
 
 ## RunTerminal.tsx — Critical Details
-xterm.js terminal that connects to `/api/pipeline/runs/:runId/output` SSE.
-
-**Package imports** (use scoped names — NOT old `xterm`):
-```typescript
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
-import '@xterm/xterm/css/xterm.css';
-```
+Pure React/CSS terminal that connects to `/api/pipeline/runs/:runId/output` SSE. No xterm.js dependency.
 
 **SSE chunk format**: `event: chunk`, data is base64-encoded text. Decode: `atob(e.data)`.
 **Done signal**: `event: done` — close EventSource.
@@ -30,9 +23,7 @@ import '@xterm/xterm/css/xterm.css';
 
 **Key props**: `runId: number`. Always mount with `key={runId}` from parent to force remount on run switch.
 
-**Theme**: VS Code-inspired dark theme with ANSI color mapping. `disableStdin: true` (read-only).
-
-**ResizeObserver**: keeps the terminal fitted to its container div — always attached in the effect.
+**Features**: Semantic log view with tool-type icons, scroll-lock awareness, 20,000-line buffer cap, dark/light theme via ThemeContext.
 
 ## Sidebar.tsx — PanelId
 `PanelId` type is defined here and exported — import it for any component that needs `onNavigate`:
