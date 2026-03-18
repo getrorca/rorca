@@ -1259,29 +1259,65 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       return;
     }
 
-    // 4. Conflict check — is there already an active run for this workspace?
-    //    If queuedRunId is set, this is an internal promotion call — skip conflict check
-    const activeRun = queuedRunId ? undefined : await queryOne(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') LIMIT 1`, [workspaceId]) as PipelineRunRow | undefined;
+    // 4. Conflict check — workspace-scoped, respects queue vs run_now semantics
+    //    If queuedRunId is set, this is an internal promotion call — skip conflict check entirely
+    const { queue } = req.body;
 
-    if (activeRun && !autoWorktree) {
-      // Check if user explicitly requested queueing
-      const { queue } = req.body;
+    if (!queuedRunId) {
+      // ── 4a. Queue operations: always accepted up to max queue depth ──────────
       if (queue) {
-        // Explicit queue request — insert with status='queued'
-        const queueCount = (await queryOne(`SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`, [workspaceId]) as { count: number }).count;
-        const position = queueCount + 1;
+        const MAX_QUEUE_DEPTH = 10;
+        const queueCount = Number((await queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`, [workspaceId]))?.count ?? '0');
 
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position]);
+        if (queueCount >= MAX_QUEUE_DEPTH) {
+          throw new ConflictError(`Queue is full — maximum ${MAX_QUEUE_DEPTH} queued runs per workspace. Cancel or wait for existing runs to complete.`);
+          return;
+        }
+
+        // Idempotent re-queue warning: same spec already queued for this workspace
+        const specSlugForQueue = path.basename(specPath, '.json');
+        const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
+
+        const position = queueCount + 1;
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via)
+           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue') RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position]);
         const queuedId = queueResult!.id;
 
-        res.status(202).json({ queued: true, runId: queuedId, position });
+        res.status(202).json({
+          queued: true,
+          runId: queuedId,
+          queuePosition: position,
+          ...(existingQueued ? { warning: `Spec "${specSlugForQueue}" is already queued (run #${existingQueued.id}). This creates an additional queued run.` } : {}),
+        });
         return;
       }
 
-      // No explicit queue — return conflict so user can choose
-      res.json({ conflict: true, activeRunId: activeRun.id });
-      return;
+      // ── 4b. Run Now with autoWorktree: allow up to run_now_max_concurrent ──
+      if (autoWorktree) {
+        const concurrencyRows = await query<{ key: string; value: string }>(
+          `SELECT key, value FROM worker_settings WHERE key = 'run_now_max_concurrent'`,
+        );
+        const runNowMaxConcurrent = concurrencyRows.length > 0 ? parseInt(concurrencyRows[0].value, 10) : 3;
+
+        const activeWorktreeCount = Number((await queryOne<{ count: string }>(
+          `SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') AND worktree_path IS NOT NULL`,
+          [workspaceId],
+        ))?.count ?? '0');
+
+        if (activeWorktreeCount >= runNowMaxConcurrent) {
+          const activeRun = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') AND worktree_path IS NOT NULL LIMIT 1`, [workspaceId]);
+          res.json({ conflict: true, activeRunId: activeRun?.id, reason: `Maximum ${runNowMaxConcurrent} concurrent worktree runs reached. Wait for an active run to complete or increase run_now_max_concurrent.` });
+          return;
+        }
+        // Fall through — allowed, will create worktree below
+      } else {
+        // ── 4c. Run Now without autoWorktree: conflict if any run active ──────
+        const activeRun = await queryOne<PipelineRunRow>(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') LIMIT 1`, [workspaceId]);
+        if (activeRun) {
+          res.json({ conflict: true, activeRunId: activeRun.id });
+          return;
+        }
+      }
     }
 
     // 4. Build absolute spec path: workspace/<specPath>

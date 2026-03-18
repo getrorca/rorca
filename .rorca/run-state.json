@@ -1,8 +1,8 @@
 {
   "specId": "rorca-pipeline-queueing-and-worktrees",
-  "runId": 20260316000031,
-  "startedAt": "2026-03-18T19:15:18.101Z",
-  "lastUpdatedAt": "2026-03-18T19:48:57.774Z",
+  "runId": 20260316000033,
+  "startedAt": "2026-03-18T20:03:31.384Z",
+  "lastUpdatedAt": "2026-03-18T20:03:31.384Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -27,5 +27,5 @@
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
-  "resumedFromStory": null
+  "resumedFromStory": "US-002"
 }
