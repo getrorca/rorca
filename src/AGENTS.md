@@ -73,7 +73,7 @@ Returns WAL events from `/api/pipeline/stream`. Drives story progress in Pipelin
 - `onNavigate` prop: used to switch to Pipeline Monitor after "Run in Pipeline" success
 
 ## RunTerminal Component (`src/components/RunTerminal.tsx`)
-- Pure React/CSS terminal — no xterm.js dependency
+- Uses ansi-to-html to render ANSI escape sequences into styled `<pre>` tags — no xterm.js dependency
 - Connects to `/api/pipeline/runs/:runId/output` SSE
 - Chunks arrive base64-encoded: `atob(e.data)` → rendered as styled log lines
 - Semantic log view parses `[Read]`, `[Write]`, `[Bash]`, `[Planning]` prefixes with icons
