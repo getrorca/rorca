@@ -63,7 +63,8 @@
         "sre",
         "red-team"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-003",
