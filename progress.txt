@@ -3,9 +3,9 @@
 Spec: rorca-mcp-recall-tool
 Run ID: 20260316000019
 Started: 2026-03-17T21:03:11.254Z
-Last Updated: 2026-03-18T00:38:20.476Z
+Last Updated: 2026-03-18T00:46:48.657Z
 
-## Completed Stories (9)
+## Completed Stories (10)
 - US-002: Implement recall route — direction stack and workspace metadata sections — DONE (claude, 18s)
 - US-008: Implement recall route — active/queued runs with story progress — DONE (claude, 455s)
 - US-009: Compose all sections with Promise.all, add meta with token estimation — DONE (claude, 762s)
@@ -15,3 +15,4 @@ Last Updated: 2026-03-18T00:38:20.476Z
 - US-002: Create Postgres LISTEN/NOTIFY migration and trigger — DONE (claude, 33s)
 - US-009: Rewrite MiniTerminalPane.tsx to use ansi-to-html instead of xterm.js — DONE (claude, 400s)
 - US-006: Add dark/light theme support to RunTerminal via ThemeContext — DONE (claude, 264s)
+- US-007: Remove all remaining xterm references and clean up imports — DONE (claude, 178s)
