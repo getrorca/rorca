@@ -107,6 +107,8 @@ interface KanbanSpec {
   activeRunId?: number;
   activeRunStatus?: 'running' | 'queued';
   queuePosition?: number;
+  triggeredVia?: 'queue' | 'run_now';
+  isParallelRun?: boolean;
   model?: string;
   attachments?: import('../types').Attachment[];
   attachmentCount?: number;
@@ -715,7 +717,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
 
   useWalSSE((event) => {
     if (workspaceId && event.workspace_id && event.workspace_id !== String(workspaceId)) return;
-    const KANBAN_EVENTS = ['spec_approved', 'run_started', 'run_finished', 'spec_rejected', 'story_passed', 'story_failed', 'spec_discovered', 'spec_updated'];
+    const KANBAN_EVENTS = ['spec_approved', 'run_started', 'run_finished', 'run_queued_promoted', 'spec_rejected', 'story_passed', 'story_failed', 'spec_discovered', 'spec_updated'];
     if (!KANBAN_EVENTS.includes(event.event_type)) return;
     if (event.event_type === 'run_started' && event.spec_id) {
       setActiveRunSpecs((prev) => new Map(prev).set(event.spec_id!, 'running'));
@@ -1376,8 +1378,9 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   }
 
   // Status icon for card
-  const statusIcon = (colKey: string, colColor: string, hasActiveRun: boolean, isQueued: boolean) => {
+  const statusIcon = (colKey: string, colColor: string, hasActiveRun: boolean, isQueued: boolean, isParallel = false) => {
     if (hasActiveRun && isQueued) return <Clock size={10} className="text-amber-400" />;
+    if (hasActiveRun && isParallel) return <Play size={10} className="fill-blue-400 text-blue-400" />;
     if (hasActiveRun) return <Play size={10} className="fill-accent text-accent" />;
     if (colKey === 'draft') return <Pencil size={10} className="text-muted" />;
     if (colKey === 'done') return <CheckCircle2 size={10} className="text-success" />;
@@ -1398,6 +1401,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     const runStatus = activeRunSpecs.get(spec.id);
     const hasActiveRun = runStatus !== undefined;
     const isQueued = runStatus === 'queued';
+    const isParallelRun = spec.isParallelRun === true;
     const modelName = modelShortName(spec.model);
     const tags = spec.tags || [];
     const visibleTags = tags.slice(0, 2);
@@ -1446,7 +1450,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
               ${isActioning ? 'opacity-60 pointer-events-none' : ''} border-border`}
             style={{ borderLeftWidth: 3, borderLeftColor: colColor }}
           >
-            {statusIcon(colKey, colColor, hasActiveRun, isQueued)}
+            {statusIcon(colKey, colColor, hasActiveRun, isQueued, isParallelRun)}
             <span className="text-[13px] font-medium text-[var(--text)] truncate flex-1">{slugToTitle(spec.id)}</span>
             <span className="shrink-0 text-[10px] text-muted">{total}s</span>
           </div>
@@ -1490,13 +1494,24 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
           {/* Row 1: Status icon + Title + Running badge */}
           <div className="min-w-0">
             <div className="flex items-start gap-1.5">
-              <span className="shrink-0 mt-0.5">{statusIcon(colKey, colColor, hasActiveRun, isQueued)}</span>
+              <span className="shrink-0 mt-0.5">{statusIcon(colKey, colColor, hasActiveRun, isQueued, isParallelRun)}</span>
               <h3 className="text-[14px] font-bold text-[var(--text)] line-clamp-2 leading-[1.3] flex-1">
                 {slugToTitle(spec.id)}
               </h3>
               {hasActiveRun && (
-                <span className={`shrink-0 mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${isQueued ? 'bg-amber-400/15 text-amber-400 border-amber-400/30' : 'bg-accent/15 text-accent border-accent/30 animate-pulse'}`}>
-                  {isQueued ? <><Clock size={8} /> Queued{spec.queuePosition ? ` #${spec.queuePosition}` : ''}</> : <><Play size={8} className="fill-current" /> Running</>}
+                <span className={`shrink-0 mt-0.5 inline-flex items-center gap-1 text-[10px] font-medium px-1.5 py-0.5 rounded-full border ${
+                  isQueued
+                    ? 'bg-amber-400/15 text-amber-400 border-amber-400/30'
+                    : isParallelRun
+                      ? 'bg-blue-400/15 text-blue-400 border-blue-400/30 animate-pulse'
+                      : 'bg-accent/15 text-accent border-accent/30 animate-pulse'
+                }`}>
+                  {isQueued
+                    ? <><Clock size={8} /> Queued{spec.queuePosition ? ` #${spec.queuePosition}` : ''}</>
+                    : isParallelRun
+                      ? <><Play size={8} className="fill-current" /> Running (parallel)</>
+                      : <><Play size={8} className="fill-current" /> Running</>
+                  }
                 </span>
               )}
             </div>
