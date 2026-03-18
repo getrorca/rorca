@@ -206,6 +206,23 @@ function parseVerboseLine(line: string): SemanticStep | null {
   return null;
 }
 
+// ─── Story ID detection ──────────────────────────────────────────────────────
+
+/** Match story IDs like US-001, CIE-014, SL-003 etc. in text */
+const STORY_ID_PATTERN = /\b([A-Z]{1,6}-\d{3,4})\b/g;
+
+/**
+ * Inject data-story-id anchor spans at story boundary mentions in HTML.
+ * Only injects an anchor for the FIRST occurrence of each story ID.
+ */
+function injectStoryAnchors(html: string, seenIds: Set<string>): string {
+  return html.replace(STORY_ID_PATTERN, (match, id: string) => {
+    if (seenIds.has(id)) return match;
+    seenIds.add(id);
+    return `<span data-story-id="${id}">${match}</span>`;
+  });
+}
+
 // ─── Helpers ──────────────────────────────────────────────────────────────────
 
 function lsKey(runId: number): string {
@@ -396,35 +413,43 @@ function ClaudeStepRow({
 
 // ─── ANSI converter singleton ────────────────────────────────────────────────
 
-const ansiConverter = new AnsiToHtml({
+const ansiConverterDark = new AnsiToHtml({
   fg: '#d4d4d4',
   bg: '#0d0d0d',
   escapeXML: true,
   newline: true,
 });
 
+const ansiConverterLight = new AnsiToHtml({
+  fg: '#1e1e1e',
+  bg: '#f5f5f5',
+  escapeXML: true,
+  newline: true,
+});
+
+// ─── Flush buffer interval ───────────────────────────────────────────────────
+
+const FLUSH_INTERVAL_MS = 80;
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-/**
- * Renders pipeline run output using ansi-to-html for ANSI color rendering.
- * Includes a Raw/Semantic toggle. In Semantic mode, structured `semantic_step` SSE
- * events are rendered as a step list instead of the raw terminal.
- *
- * When agent_type=opencode, the semantic view uses a richer renderer with:
- * - Tool-specific icons (Globe for webfetch, FilePlus for write, etc.)
- * - Duration badges per event
- * - Collapsible stdout/stderr for bash events
- * - Error events highlighted in red
- *
- * When agent_type=claude (default), the existing parsing semantic view is unchanged.
- */
 const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId, workspaceId }, ref) {
   const preRef = useRef<HTMLPreElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const { resolved } = useTheme();
   const [copied, setCopied] = useState(false);
-  const rawLinesRef = useRef<string[]>([]);
   const autoScrollRef = useRef(true);
+
+  // Accumulated raw text buffer (pending flush)
+  const pendingTextRef = useRef('');
+  // Timer ID for the 80ms flush
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Accumulated HTML string rendered so far
+  const accumulatedHtmlRef = useRef('');
+  // Set of story IDs already anchored (to avoid duplicate anchors)
+  const seenStoryIdsRef = useRef(new Set<string>());
+  // SSE line buffer for incomplete lines across chunks
+  const lineBufferRef = useRef('');
 
   // Agent type detected from backend run_meta SSE event
   const [agentType, setAgentType] = useState<'claude' | 'opencode' | 'codex'>('claude');
@@ -446,33 +471,73 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     try { localStorage.setItem(lsKey(runId), m); } catch { /* noop */ }
   }, [runId]);
 
+  // Get the right converter for the current theme
+  const getConverter = useCallback(() => {
+    return resolved === 'light' ? ansiConverterLight : ansiConverterDark;
+  }, [resolved]);
+
+  // Flush pending text buffer → convert via ansi-to-html → append to accumulated HTML
+  const flushBuffer = useCallback(() => {
+    flushTimerRef.current = null;
+    const pending = pendingTextRef.current;
+    if (!pending) return;
+    pendingTextRef.current = '';
+
+    const converter = getConverter();
+    let newHtml = converter.toHtml(pending);
+
+    // Inject story ID anchors at first occurrence of each story ID
+    newHtml = injectStoryAnchors(newHtml, seenStoryIdsRef.current);
+
+    accumulatedHtmlRef.current += newHtml;
+
+    const pre = preRef.current;
+    if (pre) {
+      pre.innerHTML = accumulatedHtmlRef.current;
+      if (autoScrollRef.current) {
+        pre.scrollTop = pre.scrollHeight;
+      }
+    }
+  }, [getConverter]);
+
+  // Schedule a flush if not already scheduled
+  const scheduleFlush = useCallback(() => {
+    if (flushTimerRef.current === null) {
+      flushTimerRef.current = setTimeout(flushBuffer, FLUSH_INTERVAL_MS);
+    }
+  }, [flushBuffer]);
+
   // Expose scrollToStory + writeMarker via ref
   useImperativeHandle(ref, () => ({
     scrollToStory(storyId: string) {
       const pre = preRef.current;
       if (!pre) return;
+      const anchor = pre.querySelector(`[data-story-id="${storyId}"]`);
+      if (anchor) {
+        anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
+      }
+      // Fallback: search text content for the story ID
       const text = pre.textContent ?? '';
       const idx = text.indexOf(storyId);
       if (idx === -1) return;
-      // Approximate scroll position based on character offset
       const totalHeight = pre.scrollHeight;
       const totalLen = text.length;
       const ratio = idx / totalLen;
       pre.scrollTop = ratio * totalHeight;
     },
     writeMarker(text: string) {
-      rawLinesRef.current.push(text);
-      if (preRef.current) {
-        const converter = resolved === 'light'
-          ? new AnsiToHtml({ fg: lightTheme.foreground, bg: lightTheme.background, escapeXML: true, newline: true })
-          : ansiConverter;
-        preRef.current.innerHTML += converter.toHtml(text);
+      const markerHtml = `<div style="padding:4px 8px;margin:4px 0;background:rgba(59,130,246,0.15);border-left:3px solid #3b82f6;color:#93c5fd;font-size:11px;font-family:monospace;">${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>`;
+      accumulatedHtmlRef.current += markerHtml;
+      const pre = preRef.current;
+      if (pre) {
+        pre.innerHTML = accumulatedHtmlRef.current;
         if (autoScrollRef.current) {
-          preRef.current.scrollTop = preRef.current.scrollHeight;
+          pre.scrollTop = pre.scrollHeight;
         }
       }
     },
-  }), [resolved]);
+  }), []);
 
   const handleCopy = useCallback(async () => {
     const pre = preRef.current;
@@ -486,15 +551,18 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     } catch { /* clipboard not available */ }
   }, []);
 
-  // SSE setup — streams output and renders to <pre> via ansi-to-html
+  // SSE setup — streams output chunks into pending buffer, flushes every 80ms
   useEffect(() => {
     esRef.current?.close();
-    rawLinesRef.current = [];
+    pendingTextRef.current = '';
+    accumulatedHtmlRef.current = '';
+    seenStoryIdsRef.current = new Set();
+    lineBufferRef.current = '';
+    if (flushTimerRef.current !== null) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
     if (preRef.current) preRef.current.innerHTML = '';
-
-    const converter = resolved === 'light'
-      ? new AnsiToHtml({ fg: lightTheme.foreground, bg: lightTheme.background, escapeXML: true, newline: true })
-      : ansiConverter;
 
     // Connect to live output stream — scoped to workspace
     const outputParams = new URLSearchParams();
@@ -502,7 +570,6 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     const outputUrl = `${BASE_URL}/api/pipeline/runs/${runId}/output${outputParams.toString() ? '?' + outputParams : ''}`;
     const es = new EventSource(outputUrl);
     esRef.current = es;
-    let lineBuffer = '';
 
     // Listen for run metadata (agent type detection)
     es.addEventListener('run_meta', (e: MessageEvent) => {
@@ -520,11 +587,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
-        // Convert stream-json lines to readable text before rendering
         const text = new TextDecoder().decode(bytes);
-        lineBuffer += text;
-        const parts = lineBuffer.split('\n');
-        lineBuffer = parts.pop() ?? '';
+
+        // Split into lines for semantic parsing and stream-json formatting
+        lineBufferRef.current += text;
+        const parts = lineBufferRef.current.split('\n');
+        lineBufferRef.current = parts.pop() ?? '';
 
         const displayLines: string[] = [];
         const newSteps: SemanticStep[] = [];
@@ -541,14 +609,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           }
         }
 
-        // Render formatted text via ansi-to-html to <pre>
-        if (displayLines.length > 0 && preRef.current) {
-          const output = displayLines.join('\n') + '\n';
-          rawLinesRef.current.push(output);
-          preRef.current.innerHTML += converter.toHtml(output);
-          if (autoScrollRef.current) {
-            preRef.current.scrollTop = preRef.current.scrollHeight;
-          }
+        // Append formatted text to pending buffer (NOT converted yet)
+        if (displayLines.length > 0) {
+          pendingTextRef.current += displayLines.join('\n') + '\n';
+          scheduleFlush();
         }
 
         if (newSteps.length > 0) {
@@ -566,6 +630,35 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     });
 
     es.addEventListener('done', () => {
+      // Flush remaining buffer immediately on done — don't wait for 80ms timer
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      // Flush any remaining line buffer content
+      if (lineBufferRef.current) {
+        const formatted = formatStreamJsonForDisplay(lineBufferRef.current);
+        if (formatted !== null) {
+          pendingTextRef.current += formatted + '\n';
+        }
+        lineBufferRef.current = '';
+      }
+      // Convert and render remaining pending text
+      const pending = pendingTextRef.current;
+      if (pending) {
+        pendingTextRef.current = '';
+        const converter = resolved === 'light' ? ansiConverterLight : ansiConverterDark;
+        let newHtml = converter.toHtml(pending);
+        newHtml = injectStoryAnchors(newHtml, seenStoryIdsRef.current);
+        accumulatedHtmlRef.current += newHtml;
+        const pre = preRef.current;
+        if (pre) {
+          pre.innerHTML = accumulatedHtmlRef.current;
+          if (autoScrollRef.current) {
+            pre.scrollTop = pre.scrollHeight;
+          }
+        }
+      }
       setStreamDone(true);
       es.close();
     });
@@ -581,8 +674,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
     return () => {
       es.close();
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
     };
-  }, [runId, resolved, workspaceId]);
+  }, [runId, resolved, workspaceId, scheduleFlush]);
 
   // Track scroll position for auto-scroll on raw <pre>
   const handlePreScroll = useCallback(() => {
@@ -674,7 +771,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         <pre
           ref={preRef}
           onScroll={handlePreScroll}
-          className="h-full w-full overflow-auto font-mono text-xs leading-[1.3] whitespace-pre-wrap break-words"
+          className="h-full w-full overflow-y-auto font-mono text-xs leading-[1.3] whitespace-pre-wrap break-words"
           style={{
             background: themeColors.background,
             color: themeColors.foreground,
