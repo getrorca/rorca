@@ -14,7 +14,7 @@ Shared UI components used across multiple panels.
 | `Toast.tsx` | Simple toast notification system |
 
 ## RunTerminal.tsx — Critical Details
-Pure React/CSS terminal that connects to `/api/pipeline/runs/:runId/output` SSE. No xterm.js dependency.
+Pure React terminal that connects to `/api/pipeline/runs/:runId/output` SSE. Uses ansi-to-html to convert ANSI escape sequences into styled HTML rendered in `<pre>` tags — no xterm.js dependency.
 
 **SSE chunk format**: `event: chunk`, data is base64-encoded text. Decode: `atob(e.data)`.
 **Done signal**: `event: done` — close EventSource.
