@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000019,
   "startedAt": "2026-03-17T21:03:11.254Z",
-  "lastUpdatedAt": "2026-03-18T00:32:13.338Z",
+  "lastUpdatedAt": "2026-03-18T00:33:20.482Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -68,13 +68,13 @@
       "elapsedMs": 33090
     },
     {
-      "storyId": "US-004",
-      "title": "Implement core RunTerminal component with ansi-to-html and incremental append",
+      "storyId": "US-009",
+      "title": "Rewrite MiniTerminalPane.tsx to use ansi-to-html instead of xterm.js",
       "status": "passed",
-      "startedAt": "2026-03-18T00:26:41.448Z",
-      "finishedAt": "2026-03-18T00:32:13.338Z",
+      "startedAt": "2026-03-18T00:26:40.310Z",
+      "finishedAt": "2026-03-18T00:33:20.482Z",
       "agentType": "claude",
-      "elapsedMs": 331890
+      "elapsedMs": 400172
     }
   ],
   "failedStories": [],
