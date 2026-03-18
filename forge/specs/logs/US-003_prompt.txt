@@ -1392,162 +1392,112 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 Follow this workflow for implementation:
 ## Agent Role: Backend Routes
 
+
+## Skill: logging-fundamentals (relevance: 6)
 ---
-name: rorca
-description: Implement and validate changes to the Rorca codebase with subagent-assisted context management.
+name: logging-fundamentals
+description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers, SREs, DevOps engineers
+  category: observability
 ---
 
-## 0. KingMode — Behavioral Discipline Layer
+# Logging Fundamentals
 
-<KING_MODE>
-You are operating in KingMode. This is a behavioral discipline layer. You are the apex predator of this codebase.
+Establish proper logging practices including log levels, structured logging, context propagation, and comprehensive logging strategies for applications, services, and infrastructure.
 
-HARD RULES:
-- **Zero Friction**: No warm-up prose, "Sure!", or "I can help with that". Direct execution only.
-- **Apex efficiency**: If a task can be done with one complex `sed` command or a multi-file `grep`, do it. Don't crawl files sequentially if unnecessary.
-- **No Permission Theater**: Do not ask "Should I...?" for standard engineering decisions (naming, placement, refactoring). Just do it and document in the summary.
-- **Concurrency**: Use parallel tool calls for research and verification whenever possible.
-- **Orca Pulse**: Be assertive, precise, and hunt for bugs with zero mercy.
+## When to use me
 
-ULTRATHINK TRIGGER:
-When you see ULTRATHINK, spend ONE silent planning pass (≤10s) before tool calls. No prose. Then execute.
+Use this skill when:
+- Setting up logging for new applications or services
+- Reviewing existing logging implementations
+- Establishing logging standards for teams or projects
+- Debugging issues with incomplete or poor logging
+- Implementing structured logging for better observability
+- Configuring log levels and verbosity for different environments
+- Ensuring logs contain sufficient context for troubleshooting
 
-SCOPE DISCIPLINE:
-- Change ONLY what is requested. 
-- "While I'm here" refactors are prohibited unless they fix a direct blocker.
+## What I do
 
-OUTPUT FORMAT:
-- Code blocks > Prose.
-- Terminal commands must be absolute and copy-paste ready.
-- End immediately after the last tool/code block. No "hope this helps!"
-</KING_MODE>
+### 1. Log Level Management
+- **Define appropriate log levels** (DEBUG, INFO, WARN, ERROR, FATAL)
+- **Configure level filtering** per environment (development, staging, production)
+- **Implement dynamic level adjustment** without application restarts
+- **Establish level usage guidelines** for different types of information
 
-## 1. Context Gathering
+### 2. Structured Logging Implementation
+- **Design log schema** with consistent field naming and types
+- **Implement structured formats** (JSON, key-value pairs, structured text)
+- **Include mandatory context fields** (timestamp, service, trace_id, user_id, etc.)
+- **Handle nested structures and arrays** appropriately in logs
 
-**Check progress.txt FIRST** (if it exists):
-- `## Current Phase` / `## Story [ID]` → Resume from where you left off
-- `## Specs Loaded` → Skip re-reading already-loaded docs
-- `## Gotchas Discovered` → Pre-load before touching those files
+### 3. Context Propagation
+- **Implement correlation IDs** for request tracing across services
+- **Propagate context through async operations** (queues, background jobs)
+- **Maintain user/session context** throughout request lifecycle
+- **Include business context** (order_id, transaction_id, etc.) in logs
 
-**For codebase research (use subagent):**
-```
-Task(subagent_type="Explore", prompt="
-  Directories: [list dirs you'll modify, e.g. src/panels, backend/src/routes]
-  Task: [description]
-  Return: AGENTS.md gotchas + existing patterns (max 20 lines)
-")
-```
+### 4. Log Content Best Practices
+- **Include sufficient context** for debugging without external systems
+- **Balance detail with noise** - log enough but not too much
+- **Use consistent message formats** across the codebase
+- **Log before and after significant operations**
+- **Include error details** (stack traces, error codes, recovery suggestions)
+- **Avoid logging secrets, passwords, or sensitive data**
 
-**For project docs:** Load CLAUDE.md for architecture (it's comprehensive). Load specific AGENTS.md in each directory you'll touch.
+## Logging Principles
 
-## 2. Before Writing Code
-- Redundancy check: Is this already implemented? (spec versions, templates, model selection all done — see progress.txt)
-- Missing details: Ask user rather than guessing
-- Non-trivial task (>3 files or new patterns): Use `EnterPlanMode`
+### The 5 Ws of Logging
+1. **WHO** - Which user/service/process generated the log?
+2. **WHAT** - What action/event is being logged?
+3. **WHEN** - Precise timestamp with timezone information
+4. **WHERE** - Which component/function/file generated the log?
+5. **WHY** - What is the significance/severity of the logged event?
 
-## 3. Implementation
-
-### Backend changes
-- PostgreSQL 16 via `pg` Pool — all DB calls are **async** (always `await`)
-- `query<T>(sql, params)` → `T[]`, `queryOne<T>(sql, params)` → `T | undefined`, `execute(sql, params)` → `{ rowCount }`
-- Use `$1, $2, ...` numbered placeholders (NOT `?`)
-- FK constraints always on, connection pooling (max 20, 30s idle timeout)
-- Emit `wal_events` for every state change — this drives the SSE pipeline and audit log
-- **New tables**: numbered SQL migration files in `backend/src/db/pg-migrations/`, tracked via `schema_migrations` table. Use `IF NOT EXISTS` guards freely.
-- `chatComplete()` returns `ChatResult { text: string; usage: TokenUsage }` — always use `.text`
-
-### Frontend changes
-- `apiFetch<T>(path, init?)` in `src/lib/apiFetch.ts` — use this for all API calls
-- `useWorkspace()` provides `workspaceId`, `workspaces`, `selectedWorkspace`
-- Panel components live in `src/panels/`, shared components in `src/components/`
-- xterm.js: `@xterm/xterm` + `@xterm/addon-fit` (NOT the old `xterm` package)
-
-### Critical path gotchas
-- **Spec path**: `ralph/specs/approved/${spec.id}.json` (NOT `specs/approved/${spec.specName}.json`)
-- **spec.id** = filename slug; **spec.specName** = human title (display only)
-- **chatComplete** returns `ChatResult` — use `.text` accessor everywhere
-- **Pipeline trigger** strips 4 Claude env vars before spawning `execution-engine.ts`
-- **execution-engine.ts** (`backend/src/lib/execution-engine.ts`) is the universal TypeScript execution engine — handles claude, opencode, and codex agent paths. Replaces run-loop.sh/run-loop.ts entirely.
-- **Backend port 3030** — restart required after any changes (`lsof -ti:3030 | xargs kill -9`)
-
-## 4. Validation (REQUIRED)
-
-Run in parallel where possible:
-```bash
-# From rorca root
-bash -c "cd /Users/dimitriteravanessian/rorca && npx tsc --noEmit 2>&1; echo FRONTEND:\$?" &
-bash -c "cd /Users/dimitriteravanessian/rorca/backend && npx tsc --noEmit 2>&1; echo BACKEND:\$?" &
-wait
-
-# Backend tests
-cd /Users/dimitriteravanessian/rorca/backend && npm test
-
-# Build check
-cd /Users/dimitriteravanessian/rorca && npm run build
+### Structured Logging Fields
+```json
+{
+  "timestamp": "2026-02-26T18:00:00Z",
+  "level": "INFO",
+  "service": "spec-generator",
+  "component": "chatComplete",
+  "trace_id": "gen-abc123",
+  "message": "LLM call completed",
+  "duration_ms": 5123,
+  "context": {
+    "model": "claude-sonnet-4-5-20250929",
+    "input_tokens": 12000,
+    "output_tokens": 4500
+  }
+}
 ```
 
-All must pass before marking story done. Fix failures before moving on.
+### Log Level Guidelines
+- **DEBUG**: Detailed information for debugging, typically disabled in production
+- **INFO**: Routine information about normal operation
+- **WARN**: Warning conditions that might require attention but don't indicate failure
+- **ERROR**: Error conditions that indicate failure of a specific operation
+- **FATAL**: Critical errors that cause application termination
 
-## 4b. Browser Testing (if UI changed)
+## Notes
 
-Use **Playwright MCP** for automated browser testing — never ask user to manually test.
-```
-mcp__playwright__browser_navigate url=http://localhost:5210
-mcp__playwright__browser_snapshot
-mcp__playwright__browser_click ref=<uid>
-```
-Test: happy path + one edge case. Keep it under 60 seconds.
-
-## 5. QA Checklist
-- [ ] Happy path works end-to-end?
-- [ ] Error/edge case handled gracefully?
-- [ ] New WAL event emitted for state changes?
-- [ ] TypeScript strict — no `any` without justification?
-- [ ] Backend test added for new endpoints?
-
-## 6. Progress Tracking (`progress.txt`)
-
-**Update after every story completion** — critical for surviving context compaction across multi-hour runs.
-
-```
-## Story [ID]: [Title] — DONE
-Files touched: [list with brief note on what changed]
-What was built: [2-3 bullet summary of what exists now]
-Key decisions: [non-obvious choices, gotchas discovered]
-
-## Story [ID]: [Title] — IN PROGRESS
-Remaining: [specific remaining tasks, not vague]
-Blockers: [anything blocking]
-
-## Story [ID]: [Title] — NOT STARTED
-Expects: [prerequisites from prior stories]
-```
-
-**Rules:**
-- Re-read progress.txt FIRST after any `/compact` — it's your resume checkpoint
-- Never overwrite previous entries — append below existing content
-- Discovered gotchas → add to relevant `AGENTS.md` AND note in progress.txt under `## Gotchas Discovered`
-- `## Specs Loaded` section — list PRDs/SDDs you've already read so you skip re-reading
-
-## 7. Wrap-up
-- [ ] `npx tsc --noEmit` passes (frontend + backend)
-- [ ] `npm run build` succeeds
-- [ ] Backend tests pass
-- [ ] New gotchas documented in relevant `AGENTS.md`
-- [ ] `progress.txt` updated with completed story summary
-- [ ] WAL events emitted for new state changes
-- [ ] README.md updated if user-facing behavior changed
-
-## Context Alert
-At ~75% context: output `Context: ~X% | /compact?`
+- **Structured logging is essential** for modern log analysis and observability
+- **Context is more important than message content** - ensure logs can be correlated
+- **Log levels should reflect operational importance**, not developer convenience
+- **Consider log volume** - too many logs can overwhelm systems and teams
+- **Balance human readability with machine parsability** in log formats
 
 ---
 Your task (US-003):
-Add the memories section to the recall route handler. Query the `memories` PostgreSQL table for the given workspace, filtering by `deleted_at IS NULL` and optionally by category if the `category` query param is provided. Order by `pinned DESC, created_at DESC`. Return each memory with fields: id, category, title, content (rule text), confidence, source_type, related_files (JSON array), pinned (boolean), created_at. If the `storyText` param is provided, use the 3-tier memory-router retrieval chain: check CAG cache first, fall back to RAG semantic search, then Graph traversal — set `meta.retrievalTier` to whichever tier returned results. If no storyText, use direct SQL query and set retrievalTier to 'none'.
+In backend/src/routes/pipeline.ts (or a new lib module), establish a dedicated long-lived pg.Client connection (NOT from the pool) that runs LISTEN wal_events. On each pg notification, parse the JSON payload and call sse-hub broadcastAll() with the event. Implement exponential backoff reconnection (1s, 2s, 4s, max 30s) if the connection drops. Remove the setInterval polling loop, lastSeenId tracking, and the periodic SELECT from wal_events in the /api/pipeline/stream SSE handler. The SSE endpoint itself remains but only writes headers and attaches to the hub — no polling logic inside it.
 
 Acceptance Criteria:
-- GET /api/recall?workspaceId=rorcha returns memories array with each entry containing id, category, title, content, confidence, sourceType, relatedFiles, pinned, createdAt
-- Memories are ordered by pinned DESC then createdAt DESC — pinned entries appear first
-- GET /api/recall?workspaceId=rorcha&category=Architecture returns only Architecture-category memories
-- When storyText is provided, memory retrieval attempts CAG→RAG→Graph cascade and meta.retrievalTier reflects which tier was used
-- Deleted memories (deleted_at IS NOT NULL) are excluded from results
+- A dedicated pg.Client (not pool) connects and calls LISTEN wal_events on backend startup
+- On pg notification, the payload is JSON.parse'd and passed to broadcastAll() in sse-hub.ts
+- The setInterval polling loop and lastSeenId variable are deleted from /api/pipeline/stream handler
+- Reconnection uses exponential backoff: 1s → 2s → 4s → ... → max 30s delay between attempts
+- When the LISTEN connection drops and reconnects, live events resume flowing to SSE clients within the backoff window
+- The recordTokenUsage() calls and story_results.input_tokens/output_tokens updates that currently live inside the polling loop are migrated into the LISTEN/NOTIFY handler — token tracking must not silently break when the polling loop is deleted
+- npx tsc --noEmit passes in backend after changes

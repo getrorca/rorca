@@ -26,7 +26,7 @@
  *   --attach <addr>         OpenCode server socket address (passed by pipeline.ts)
  */
 
-import { spawn, execSync } from 'child_process';
+import { spawn, execSync, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as path from 'path';
 import { compileWaves, isCycleError } from './wave-compiler';
@@ -594,6 +594,65 @@ interface AgentResult {
 
 /** Callback for real-time token usage updates during agent execution. */
 type TokenUpdateCallback = (update: { inputTokens: number; outputTokens: number; turn: number; cumulativeInput: number; cumulativeOutput: number }) => void;
+
+// ─── Idle Watchdog ──────────────────────────────────────────────────────────
+
+/** Default idle timeout: 5 minutes. Overridden by LLM_IDLE_TIMEOUT_MS env var. */
+const LLM_IDLE_TIMEOUT_MS: number = (() => {
+  const parsed = parseInt(process.env.LLM_IDLE_TIMEOUT_MS ?? '', 10);
+  return Number.isNaN(parsed) ? 300_000 : parsed;
+})();
+
+interface IdleWatchdog {
+  /** Clear the current idle timer and start a new one. Call on every stdout/stderr data event. */
+  reset(): void;
+  /** Permanently tear down the idle timer. Call on process exit/error. */
+  clear(): void;
+}
+
+/**
+ * Create an idle-timeout watchdog for a child process.
+ *
+ * The watchdog fires when no stdout/stderr data has been received for `timeoutMs` ms.
+ * On fire it calls `onFire` (so the caller can emit log lines), then sends SIGTERM
+ * followed by SIGKILL after 10s.
+ *
+ * @param child      The spawned child process to monitor.
+ * @param timeoutMs  Idle timeout in milliseconds (from LLM_IDLE_TIMEOUT_MS).
+ * @param onFire     Callback invoked before SIGTERM — use to emit visible error messages.
+ */
+function createIdleWatchdog(
+  child: ChildProcess,
+  timeoutMs: number,
+  onFire: () => void,
+): IdleWatchdog {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+
+  function fire() {
+    onFire();
+    try {
+      child.kill('SIGTERM');
+      setTimeout(() => {
+        try { child.kill('SIGKILL'); } catch { /* already dead */ }
+      }, 10_000);
+    } catch { /* already dead */ }
+  }
+
+  function reset() {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = setTimeout(fire, timeoutMs);
+  }
+
+  function clear() {
+    if (timer !== undefined) clearTimeout(timer);
+    timer = undefined;
+  }
+
+  // Start the initial timer immediately
+  reset();
+
+  return { reset, clear };
+}
 
 /**
  * Spawn a story subprocess using the configured agent type.

@@ -2990,7 +2990,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     });
 
     const jobPayload = PipelineRetryJobPayloadSchema.parse({
-      runId: newRunId,
+      runId: Number(newRunId),
       originalRunId,
       storyIds: storiesToRetry.map(s => s.story_id),
       workspacePath: workspace.path,
@@ -4309,10 +4309,11 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
  *       400: { description: "Invalid runId" }
  */
 router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Response) => {
-  const runId = parseInt(String(req.params.runId), 10);
+  try {
+  const runId = Number(req.params.runId);
   const storyId = String(req.params.storyId);
-  if (isNaN(runId)) {
-    throw new ValidationError('Invalid runId');
+  if (!Number.isFinite(runId) || runId <= 0) {
+    res.status(400).json({ error: 'Invalid runId' });
     return;
   }
 
@@ -4340,23 +4341,8 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
   );
   const agent = runRow?.agent ?? 'claude';
 
-  // Check if story_output_chunks has any rows for this (run_id, story_id)
-  const countRow = await queryOne<{ cnt: string }>(
-    'SELECT COUNT(*)::text AS cnt FROM story_output_chunks WHERE run_id = $1 AND story_id = $2',
-    [runId, storyId]
-  );
-  const chunkCount = Number(countRow?.cnt ?? '0');
-
-  if (chunkCount === 0) {
-    // No DB chunks — fall back to file-based tailing (same as /log endpoint)
-    startTailing(
-      await resolveStoryLogPath(runId, storyId, runRow?.workspace_id ?? null),
-      agent, res, hb, runId, storyId
-    );
-    return;
-  }
-
   // ── Replay phase: send all existing chunks ──
+  // (may be empty if StoryLogFollower hasn't written yet — poll loop will pick them up)
   let lastSeq = -1;
   const existingRows = await query<{ chunk: string; sequence: number }>(
     'SELECT chunk, sequence FROM story_output_chunks WHERE run_id = $1 AND story_id = $2 ORDER BY sequence',
@@ -4423,6 +4409,14 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
       // Swallow transient DB errors — next tick retries
     }
   }, 200);
+  } catch (err) {
+    clearInterval(hb);
+    if (!res.headersSent) {
+      res.status(500).json({ error: 'Stream setup failed' });
+    } else {
+      res.end();
+    }
+  }
 });
 
 /** Check whether a story completion WAL event exists. */
@@ -6203,207 +6197,4 @@ router.get('/queue/health-history', async (req: Request, res: Response) => {
     handleRouteError(res, error, '[Pipeline] Queue health history');
   }
 });
-
-// ─── GET /api/pipeline/runs/:runId/stories/:storyId/stream — DB-backed story output SSE ───
-
-/**
- * @swagger
- * /api/pipeline/runs/{runId}/stories/{storyId}/stream:
- *   get:
- *     tags: [Pipeline]
- *     summary: Stream per-story prose output via SSE (DB-backed)
- *     operationId: streamStoryOutput
- *     description: >
- *       Opens an SSE connection that replays all existing story_output_chunks rows
- *       for the given (runId, storyId), then polls for new rows every 200ms.
- *       Emits base64-encoded output chunks and semantic_step events.
- *       Terminates when the story has a completion WAL event.
- *       Falls back to file-based tailing if no DB chunks exist.
- *     parameters:
- *       - in: path
- *         name: runId
- *         required: true
- *         schema: { type: integer }
- *       - in: path
- *         name: storyId
- *         required: true
- *         schema: { type: string }
- *     responses:
- *       200:
- *         description: SSE stream of output chunks
- *         content:
- *           text/event-stream:
- *             schema:
- *               type: string
- *       400: { description: "Invalid runId" }
- */
-router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Response) => {
-  const runId = parseInt(String(req.params.runId), 10);
-  const storyId = String(req.params.storyId);
-  if (isNaN(runId)) {
-    throw new ValidationError('Invalid runId');
-    return;
-  }
-
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-  });
-  res.write(': connected\n\n');
-
-  const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
-  let closed = false;
-
-  req.on('close', () => {
-    closed = true;
-    clearInterval(hb);
-  });
-
-  // Resolve agent type for semantic parsing
-  const runRow = await queryOne<{ agent: string; workspace_id: string }>(
-    'SELECT agent, workspace_id FROM pipeline_runs WHERE id = $1', [runId]
-  );
-  const agent = runRow?.agent ?? 'claude';
-
-  // Check if story_output_chunks has any rows for this (run_id, story_id)
-  const countRow = await queryOne<{ cnt: string }>(
-    'SELECT COUNT(*)::text AS cnt FROM story_output_chunks WHERE run_id = $1 AND story_id = $2',
-    [runId, storyId]
-  );
-  const chunkCount = Number(countRow?.cnt ?? '0');
-
-  if (chunkCount === 0) {
-    // No DB chunks — fall back to file-based tailing (same as /log endpoint)
-    startTailing(
-      await resolveStoryLogPath(runId, storyId, runRow?.workspace_id ?? null),
-      agent, res, hb, runId, storyId
-    );
-    return;
-  }
-
-  // ── Replay phase: send all existing chunks ──
-  let lastSeq = -1;
-  const existingRows = await query<{ chunk: string; sequence: number }>(
-    'SELECT chunk, sequence FROM story_output_chunks WHERE run_id = $1 AND story_id = $2 ORDER BY sequence',
-    [runId, storyId]
-  );
-  for (const row of existingRows) {
-    if (closed) return;
-    const buf = Buffer.from(row.chunk, 'utf8');
-    res.write(`event: output\ndata: ${buf.toString('base64')}\n\n`);
-    emitSemanticSteps(row.chunk, agent, res);
-    lastSeq = row.sequence;
-  }
-
-  // Check if story already finished before entering poll loop
-  if (await isStoryDone(runId, storyId)) {
-    clearInterval(hb);
-    res.write('event: done\ndata: \n\n');
-    res.end();
-    return;
-  }
-
-  // ── Live poll phase: 200ms interval ──
-  const pollInterval = setInterval(async () => {
-    if (closed) {
-      clearInterval(pollInterval);
-      return;
-    }
-    try {
-      const newRows = await query<{ chunk: string; sequence: number }>(
-        'SELECT chunk, sequence FROM story_output_chunks WHERE run_id = $1 AND story_id = $2 AND sequence > $3 ORDER BY sequence',
-        [runId, storyId, lastSeq]
-      );
-      for (const row of newRows) {
-        if (closed) { clearInterval(pollInterval); return; }
-        const buf = Buffer.from(row.chunk, 'utf8');
-        res.write(`event: output\ndata: ${buf.toString('base64')}\n\n`);
-        emitSemanticSteps(row.chunk, agent, res);
-        lastSeq = row.sequence;
-      }
-
-      // Check for story completion
-      if (await isStoryDone(runId, storyId)) {
-        // Drain any remaining chunks
-        const finalRows = await query<{ chunk: string; sequence: number }>(
-          'SELECT chunk, sequence FROM story_output_chunks WHERE run_id = $1 AND story_id = $2 AND sequence > $3 ORDER BY sequence',
-          [runId, storyId, lastSeq]
-        );
-        for (const row of finalRows) {
-          if (closed) break;
-          const buf = Buffer.from(row.chunk, 'utf8');
-          res.write(`event: output\ndata: ${buf.toString('base64')}\n\n`);
-          emitSemanticSteps(row.chunk, agent, res);
-        }
-        clearInterval(pollInterval);
-        clearInterval(hb);
-        if (!closed) {
-          res.write('event: done\ndata: \n\n');
-          res.end();
-        }
-      }
-    } catch {
-      // Swallow transient DB errors — next tick retries
-    }
-  }, 200);
-
-  req.on('close', () => {
-    clearInterval(pollInterval);
-  });
-});
-
-/** Check whether a story completion WAL event exists. */
-async function isStoryDone(runId: number, storyId: string): Promise<boolean> {
-  const row = await queryOne(
-    `SELECT id FROM wal_events WHERE event_type IN ('story_passed', 'story_failed', 'story_skipped') AND story_id = $1 AND (payload->>'run_id')::int = $2 LIMIT 1`,
-    [storyId, runId]
-  );
-  return !!row;
-}
-
-/** Resolve story log file path from WAL event or filesystem scan. Returns path or triggers waiting-mode SSE. */
-async function resolveStoryLogPath(runId: number, storyId: string, workspaceId: string | null): Promise<string> {
-  // 1. Check story_started WAL event for log_file path
-  const walRow = await queryOne<{ payload: Record<string, unknown> | string }>(
-    `SELECT payload FROM wal_events WHERE event_type = 'story_started' AND story_id = $1 AND (payload->>'run_id')::int = $2 ORDER BY id DESC LIMIT 1`,
-    [storyId, runId]
-  );
-  if (walRow?.payload) {
-    try {
-      const payload = typeof walRow.payload === 'string' ? JSON.parse(walRow.payload) : walRow.payload;
-      if (payload.log_file && fs.existsSync(String(payload.log_file))) {
-        return String(payload.log_file);
-      }
-    } catch { /* ignore */ }
-  }
-
-  // 2. Filesystem fallback: scan forge/specs/logs/ and forge/logs/
-  if (workspaceId) {
-    const workspace = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
-    if (workspace) {
-      const logDirs = [
-        path.join(workspace.path, 'forge', 'specs', 'logs'),
-        path.join(workspace.path, 'forge', 'logs'),
-      ];
-      for (const logDir of logDirs) {
-        if (fs.existsSync(logDir)) {
-          try {
-            const files = fs.readdirSync(logDir)
-              .filter(f => f.startsWith(`${storyId}_`) && f.endsWith('.log'))
-              .sort()
-              .reverse();
-            if (files.length > 0) {
-              return path.join(logDir, files[0]);
-            }
-          } catch { /* ignore */ }
-        }
-      }
-    }
-  }
-
-  // 3. No log file found — return a placeholder that startTailing handles gracefully
-  return path.join(os.tmpdir(), `rorca-story-${runId}-${storyId}.log`);
-}
-
 export default router;

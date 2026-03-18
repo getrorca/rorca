@@ -91,7 +91,6 @@ import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 import { initBoss } from './lib/pg-boss';
-import { StoryLogFollower } from './lib/story-log-follower';
 
 dotenv.config();
 
