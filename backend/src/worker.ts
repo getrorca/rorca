@@ -744,6 +744,17 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     if (startFromStoryId) {
       engineArgs.push('--start-from', startFromStoryId);
     }
+    // US-004: Pass worktree context to execution-engine so it can log worktree info
+    // and perform engine-side auto-merge as a fallback.
+    if (worktreePath) {
+      engineArgs.push('--worktree-path', worktreePath);
+    }
+    if (payload.branchName) {
+      engineArgs.push('--branch-name', payload.branchName);
+    }
+    if (worktreePath) {
+      engineArgs.push('--workspace-path', workspacePath);
+    }
 
     // 4. Spawn execution-engine.ts with pipe stdio so we can capture chunks
     // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
