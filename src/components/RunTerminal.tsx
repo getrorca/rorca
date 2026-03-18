@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState, useCallback, useImperativeHandle, forwardRef } from 'react';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
+import AnsiToHtml from 'ansi-to-html';
 import {
   Copy, Check, Terminal as TerminalIcon, Layers,
   ChevronDown, ChevronRight,
@@ -9,7 +8,6 @@ import {
 } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { BASE_URL } from '../lib/apiFetch';
-import '@xterm/xterm/css/xterm.css';
 
 export interface RunTerminalHandle {
   scrollToStory: (storyId: string) => void;
@@ -77,50 +75,16 @@ function resolveStepVisual(step: SemanticStep, isOpenCode: boolean): StepVisual 
   return STEP_CONFIG[step.type];
 }
 
-// ─── xterm themes ─────────────────────────────────────────────────────────────
+// ─── Theme colors ─────────────────────────────────────────────────────────────
 
 const darkTheme = {
   background: '#0d0d0d',
   foreground: '#d4d4d4',
-  cursor: '#d4d4d4',
-  black: '#1e1e1e',
-  brightBlack: '#808080',
-  red: '#f44747',
-  brightRed: '#f44747',
-  green: '#4ec9b0',
-  brightGreen: '#4ec9b0',
-  yellow: '#dcdcaa',
-  brightYellow: '#dcdcaa',
-  blue: '#569cd6',
-  brightBlue: '#9cdcfe',
-  magenta: '#c586c0',
-  brightMagenta: '#c586c0',
-  cyan: '#9cdcfe',
-  brightCyan: '#9cdcfe',
-  white: '#d4d4d4',
-  brightWhite: '#e6e6e6',
 };
 
 const lightTheme = {
   background: '#f5f5f5',
   foreground: '#1e1e1e',
-  cursor: '#1e1e1e',
-  black: '#1e1e1e',
-  brightBlack: '#6e6e6e',
-  red: '#cd3131',
-  brightRed: '#cd3131',
-  green: '#00873a',
-  brightGreen: '#00873a',
-  yellow: '#795e26',
-  brightYellow: '#795e26',
-  blue: '#0451a5',
-  brightBlue: '#0451a5',
-  magenta: '#af00db',
-  brightMagenta: '#af00db',
-  cyan: '#0598bc',
-  brightCyan: '#0598bc',
-  white: '#d4d4d4',
-  brightWhite: '#1e1e1e',
 };
 
 // ─── stream-json → readable text formatter (for Raw terminal display) ────────
@@ -197,7 +161,7 @@ function formatStreamJsonForDisplay(line: string): string | null {
 
 /** Strip ANSI escape codes */
 function stripAnsi(s: string): string {
-   
+
   return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
 }
 
@@ -430,10 +394,19 @@ function ClaudeStepRow({
   );
 }
 
+// ─── ANSI converter singleton ────────────────────────────────────────────────
+
+const ansiConverter = new AnsiToHtml({
+  fg: '#d4d4d4',
+  bg: '#0d0d0d',
+  escapeXML: true,
+  newline: true,
+});
+
 // ─── Main Component ───────────────────────────────────────────────────────────
 
 /**
- * Embeds an xterm.js terminal that streams live stdout/stderr from a pipeline run.
+ * Renders pipeline run output using ansi-to-html for ANSI color rendering.
  * Includes a Raw/Semantic toggle. In Semantic mode, structured `semantic_step` SSE
  * events are rendered as a step list instead of the raw terminal.
  *
@@ -443,15 +416,15 @@ function ClaudeStepRow({
  * - Collapsible stdout/stderr for bash events
  * - Error events highlighted in red
  *
- * When agent_type=claude (default), the existing xterm-parsing semantic view is unchanged.
+ * When agent_type=claude (default), the existing parsing semantic view is unchanged.
  */
 const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId, workspaceId }, ref) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const termRef = useRef<Terminal | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
+  const preRef = useRef<HTMLPreElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const { resolved } = useTheme();
   const [copied, setCopied] = useState(false);
+  const rawLinesRef = useRef<string[]>([]);
+  const autoScrollRef = useRef(true);
 
   // Agent type detected from backend run_meta SSE event
   const [agentType, setAgentType] = useState<'claude' | 'opencode' | 'codex'>('claude');
@@ -476,40 +449,36 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   // Expose scrollToStory + writeMarker via ref
   useImperativeHandle(ref, () => ({
     scrollToStory(storyId: string) {
-      const term = termRef.current;
-      if (!term) return;
-      const buffer = term.buffer.active;
-      for (let i = 0; i < buffer.length; i++) {
-        const line = buffer.getLine(i);
-        if (!line) continue;
-        const text = line.translateToString(true);
-        if (text.includes(storyId)) {
-          term.scrollToLine(i);
-          return;
+      const pre = preRef.current;
+      if (!pre) return;
+      const text = pre.textContent ?? '';
+      const idx = text.indexOf(storyId);
+      if (idx === -1) return;
+      // Approximate scroll position based on character offset
+      const totalHeight = pre.scrollHeight;
+      const totalLen = text.length;
+      const ratio = idx / totalLen;
+      pre.scrollTop = ratio * totalHeight;
+    },
+    writeMarker(text: string) {
+      rawLinesRef.current.push(text);
+      if (preRef.current) {
+        const converter = resolved === 'light'
+          ? new AnsiToHtml({ fg: lightTheme.foreground, bg: lightTheme.background, escapeXML: true, newline: true })
+          : ansiConverter;
+        preRef.current.innerHTML += converter.toHtml(text);
+        if (autoScrollRef.current) {
+          preRef.current.scrollTop = preRef.current.scrollHeight;
         }
       }
     },
-    writeMarker(text: string) {
-      const term = termRef.current;
-      if (!term) return;
-      term.write(text);
-    },
-  }), []);
+  }), [resolved]);
 
   const handleCopy = useCallback(async () => {
-    const term = termRef.current;
-    if (!term) return;
-    const buffer = term.buffer.active;
-    const lines: string[] = [];
-    for (let i = 0; i < buffer.length; i++) {
-      const line = buffer.getLine(i);
-      if (line) lines.push(line.translateToString(true));
-    }
-    while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
-      lines.pop();
-    }
-    const text = lines.join('\n');
-    if (!text) return;
+    const pre = preRef.current;
+    if (!pre) return;
+    const text = pre.textContent ?? '';
+    if (!text.trim()) return;
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
@@ -517,34 +486,15 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     } catch { /* clipboard not available */ }
   }, []);
 
-  // xterm + SSE setup — always runs (xterm writes happen even when hidden)
+  // SSE setup — streams output and renders to <pre> via ansi-to-html
   useEffect(() => {
-    if (!containerRef.current) return;
-
-    termRef.current?.dispose();
     esRef.current?.close();
+    rawLinesRef.current = [];
+    if (preRef.current) preRef.current.innerHTML = '';
 
-    const xtermTheme = resolved === 'light' ? lightTheme : darkTheme;
-    const isMobile = window.innerWidth < 768;
-
-    const term = new Terminal({
-      theme: xtermTheme,
-      fontSize: isMobile ? 10 : 12,
-      fontFamily: '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Monaco, monospace',
-      lineHeight: 1.3,
-      scrollback: 50000,
-      convertEol: true,
-      cursorBlink: false,
-      disableStdin: true,
-    });
-
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(containerRef.current);
-    requestAnimationFrame(() => fitAddon.fit());
-
-    termRef.current = term;
-    fitRef.current = fitAddon;
+    const converter = resolved === 'light'
+      ? new AnsiToHtml({ fg: lightTheme.foreground, bg: lightTheme.background, escapeXML: true, newline: true })
+      : ansiConverter;
 
     // Connect to live output stream — scoped to workspace
     const outputParams = new URLSearchParams();
@@ -570,7 +520,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
-        // Convert stream-json lines to readable text before writing to xterm
+        // Convert stream-json lines to readable text before rendering
         const text = new TextDecoder().decode(bytes);
         lineBuffer += text;
         const parts = lineBuffer.split('\n');
@@ -591,10 +541,14 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           }
         }
 
-        // Write formatted text to xterm (instead of raw JSON bytes)
-        if (displayLines.length > 0) {
-          const output = displayLines.join('\r\n') + '\r\n';
-          term.write(output);
+        // Render formatted text via ansi-to-html to <pre>
+        if (displayLines.length > 0 && preRef.current) {
+          const output = displayLines.join('\n') + '\n';
+          rawLinesRef.current.push(output);
+          preRef.current.innerHTML += converter.toHtml(output);
+          if (autoScrollRef.current) {
+            preRef.current.scrollTop = preRef.current.scrollHeight;
+          }
         }
 
         if (newSteps.length > 0) {
@@ -625,22 +579,17 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       }
     };
 
-    const ro = new ResizeObserver(() => fitAddon.fit());
-    ro.observe(containerRef.current);
-
     return () => {
       es.close();
-      term.dispose();
-      ro.disconnect();
     };
-  }, [runId, resolved]);
+  }, [runId, resolved, workspaceId]);
 
-  // Re-fit xterm when switching back to raw mode (container was display:none)
-  useEffect(() => {
-    if (mode === 'raw') {
-      requestAnimationFrame(() => fitRef.current?.fit());
-    }
-  }, [mode]);
+  // Track scroll position for auto-scroll on raw <pre>
+  const handlePreScroll = useCallback(() => {
+    const el = preRef.current;
+    if (!el) return;
+    autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  }, []);
 
   // Auto-scroll semantic step list
   useEffect(() => {
@@ -666,6 +615,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
   const firstTs = steps.length > 0 ? steps[0].ts : null;
   const isOpenCode = agentType === 'opencode' || agentType === 'codex';
+
+  const themeColors = resolved === 'light' ? lightTheme : darkTheme;
 
   return (
     <div className="h-full w-full flex flex-col">
@@ -719,15 +670,19 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
       {/* ─── Content area ────────────────────────────────────────────────── */}
       <div className="flex-1 min-h-0 relative">
-        {/* Raw terminal — always mounted, hidden via CSS when semantic */}
-        <div
-          ref={containerRef}
-          className="h-full w-full overflow-x-auto"
+        {/* Raw terminal — ansi-to-html rendered <pre> */}
+        <pre
+          ref={preRef}
+          onScroll={handlePreScroll}
+          className="h-full w-full overflow-auto font-mono text-xs leading-[1.3] whitespace-pre-wrap break-words"
           style={{
-            background: resolved === 'light' ? lightTheme.background : darkTheme.background,
-            padding: '8px 4px',
-            WebkitOverflowScrolling: 'touch',
+            background: themeColors.background,
+            color: themeColors.foreground,
+            padding: '8px 12px',
+            margin: 0,
             display: mode === 'raw' ? 'block' : 'none',
+            fontFamily: '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Monaco, monospace',
+            fontSize: window.innerWidth < 768 ? '10px' : '12px',
           }}
         />
 
