@@ -9,7 +9,7 @@ import { useState, useEffect, useCallback, useRef, useMemo } from 'react';
 import { createPortal } from 'react-dom';
 import {
   X, Clock, CheckCircle2, XCircle, AlertCircle,
-  Download, Copy, Check, Play, GitFork,
+  Download, Copy, Check, Play, GitFork, GitBranch,
   Loader2, Plus, Sparkles, Trash2, History, FileSearch, Paperclip,
   FileText, FileImage, File, ZoomIn, Cpu,
 } from 'lucide-react';
@@ -387,6 +387,9 @@ function SpecDetailContent({
   const [showTriggerPopover, setShowTriggerPopover] = useState(false);
   const [hasActiveRun, setHasActiveRun] = useState(false);
 
+  // Branch isolation preference (persisted to spec JSON)
+  const [isolateInBranch, setIsolateInBranch] = useState(true);
+
   // Add stories
   const [addState, setAddState] = useState<'idle' | 'form' | 'generating' | 'done' | 'error'>('idle');
   const [addCount, setAddCount] = useState(3);
@@ -437,6 +440,9 @@ function SpecDetailContent({
 
   // Sync stories from detail
   useEffect(() => { setLocalStories(detail?.userStories ?? detail?.stories ?? []); }, [detail]);
+
+  // Sync autoWorktree from detail (default true for specs without the field)
+  useEffect(() => { setIsolateInBranch(detail?.autoWorktree !== false); }, [detail]);
 
   // Reset tab on spec change
   useEffect(() => { setActiveTab(initialTab ?? 'stories'); }, [specId, initialTab]);
@@ -505,6 +511,20 @@ function SpecDetailContent({
       else if (res.queued) { setQueuePosition(res.position ?? 1); setRunState('queued'); setTimeout(() => { onClose(); onNavigate?.('runs'); }, 2000); }
       else { setRunState('success'); setTimeout(() => { onClose(); onNavigate?.('runs'); }, 1200); }
     } catch (err) { setRunError(err instanceof Error ? err.message : 'Failed to trigger run'); setRunState('error'); }
+  };
+
+  const handleToggleIsolation = async (enabled: boolean) => {
+    setIsolateInBranch(enabled);
+    if (!workspaceId || !specId) return;
+    try {
+      await apiFetch(`/api/specs/${specId}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ workspaceId, autoWorktree: enabled }),
+      });
+    } catch {
+      setIsolateInBranch(!enabled); // revert on failure
+    }
   };
 
   const handleExportJson = () => {
@@ -703,6 +723,30 @@ function SpecDetailContent({
       {/* Footer actions */}
       {detail && (
         <div className="px-4 py-3 border-t border-border shrink-0 bg-bg space-y-2">
+          {/* Branch isolation toggle */}
+          {canRun && (
+            <label className="flex items-center justify-between gap-2 px-1 cursor-pointer">
+              <span className="flex items-center gap-1.5 text-xs text-[var(--text)]">
+                <GitBranch size={12} className="text-muted" />
+                Isolate in branch
+              </span>
+              <div className="flex items-center gap-2">
+                {isolateInBranch && summary?.id && (
+                  <span className="text-[10px] font-mono text-muted truncate max-w-[180px]">feat/{summary.id}</span>
+                )}
+                <button
+                  type="button"
+                  role="switch"
+                  aria-checked={isolateInBranch}
+                  onClick={() => handleToggleIsolation(!isolateInBranch)}
+                  className={`relative inline-flex h-5 w-9 shrink-0 rounded-full border-2 border-transparent transition-colors ${isolateInBranch ? 'bg-accent' : 'bg-[var(--border)]'}`}
+                >
+                  <span className={`pointer-events-none inline-block h-4 w-4 rounded-full bg-white shadow transition-transform ${isolateInBranch ? 'translate-x-4' : 'translate-x-0'}`} />
+                </button>
+              </div>
+            </label>
+          )}
+
           {/* Run in Pipeline */}
           {canRun && (
             <div className="relative">
@@ -733,7 +777,7 @@ function SpecDetailContent({
                     </button>
                     {hasActiveRun && (
                       <button
-                        onClick={() => handleRun(false, { queue: true })}
+                        onClick={() => handleRun(isolateInBranch, { queue: true })}
                         disabled={runState === 'triggering'}
                         className="flex-1 flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-amber-500/15 text-amber-300 border border-amber-500/30 hover:bg-amber-500/25 disabled:opacity-60 transition-colors"
                       >
