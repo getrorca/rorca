@@ -1,6 +1,5 @@
 import { useEffect, useRef, useState } from 'react';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
+import AnsiToHtml from 'ansi-to-html';
 import {
   Terminal as TerminalIcon, Layers, CheckCircle2, XCircle,
   FileText, Pencil, Brain, GitCommitHorizontal, Search, Hash, AlertCircle,
@@ -8,7 +7,6 @@ import {
 } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { BASE_URL } from '../lib/apiFetch';
-import '@xterm/xterm/css/xterm.css';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -40,43 +38,33 @@ const STEP_CONFIG: Record<SemanticStep['type'], { icon: typeof FileText; color: 
   unknown: { icon: AlertCircle,         color: 'text-gray-400' },
 };
 
-// ─── xterm themes ────────────────────────────────────────────────────────────
+// ─── Theme colors ────────────────────────────────────────────────────────────
 
 const darkTheme = {
   background: '#0d0d0d',
   foreground: '#d4d4d4',
-  cursor: '#d4d4d4',
-  black: '#1e1e1e', brightBlack: '#808080',
-  red: '#f44747', brightRed: '#f44747',
-  green: '#4ec9b0', brightGreen: '#4ec9b0',
-  yellow: '#dcdcaa', brightYellow: '#dcdcaa',
-  blue: '#569cd6', brightBlue: '#9cdcfe',
-  magenta: '#c586c0', brightMagenta: '#c586c0',
-  cyan: '#9cdcfe', brightCyan: '#9cdcfe',
-  white: '#d4d4d4', brightWhite: '#e6e6e6',
 };
 
 const lightTheme = {
   background: '#f5f5f5',
   foreground: '#1e1e1e',
-  cursor: '#1e1e1e',
-  black: '#1e1e1e', brightBlack: '#6e6e6e',
-  red: '#cd3131', brightRed: '#cd3131',
-  green: '#00873a', brightGreen: '#00873a',
-  yellow: '#795e26', brightYellow: '#795e26',
-  blue: '#0451a5', brightBlue: '#0451a5',
-  magenta: '#af00db', brightMagenta: '#af00db',
-  cyan: '#0598bc', brightCyan: '#0598bc',
-  white: '#d4d4d4', brightWhite: '#1e1e1e',
 };
+
+// ─── ANSI converter singleton ────────────────────────────────────────────────
+
+const ansiConverter = new AnsiToHtml({
+  fg: '#d4d4d4',
+  bg: '#0d0d0d',
+  escapeXML: true,
+  newline: true,
+});
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function MiniTerminalPane({ runId, storyId, storyTitle, status }: MiniTerminalPaneProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const termRef = useRef<Terminal | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
+  const preRef = useRef<HTMLPreElement>(null);
   const esRef = useRef<EventSource | null>(null);
+  const autoScrollRef = useRef(true);
   const { resolved } = useTheme();
 
   const [mode, setMode] = useState<'raw' | 'semantic'>('raw');
@@ -91,33 +79,16 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
     }
   }, [steps, mode]);
 
-  // xterm + SSE setup
+  // SSE setup — streams output and renders to <pre> via ansi-to-html
   useEffect(() => {
-    if (!containerRef.current || status === 'waiting') return;
+    if (status === 'waiting') return;
 
-    termRef.current?.dispose();
     esRef.current?.close();
+    if (preRef.current) preRef.current.innerHTML = '';
 
-    const xtermTheme = resolved === 'light' ? lightTheme : darkTheme;
-
-    const term = new Terminal({
-      theme: xtermTheme,
-      fontSize: 10,
-      fontFamily: '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Monaco, monospace',
-      lineHeight: 1.2,
-      scrollback: 10000,
-      convertEol: true,
-      cursorBlink: false,
-      disableStdin: true,
-    });
-
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(containerRef.current);
-    requestAnimationFrame(() => fitAddon.fit());
-
-    termRef.current = term;
-    fitRef.current = fitAddon;
+    const converter = resolved === 'light'
+      ? new AnsiToHtml({ fg: lightTheme.foreground, bg: lightTheme.background, escapeXML: true, newline: true })
+      : ansiConverter;
 
     // Connect to per-story log stream
     const es = new EventSource(`${BASE_URL}/api/pipeline/runs/${runId}/stories/${storyId}/log`);
@@ -128,7 +99,13 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
         const binary = atob(e.data);
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        term.write(bytes);
+        const text = new TextDecoder().decode(bytes);
+        if (preRef.current) {
+          preRef.current.innerHTML += converter.toHtml(text);
+          if (autoScrollRef.current) {
+            preRef.current.scrollTop = preRef.current.scrollHeight;
+          }
+        }
       } catch { /* ignore malformed chunk */ }
     });
 
@@ -149,24 +126,20 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
       es.close();
     };
 
-    const ro = new ResizeObserver(() => fitAddon.fit());
-    ro.observe(containerRef.current);
-
     return () => {
       es.close();
-      term.dispose();
-      ro.disconnect();
     };
   }, [runId, storyId, resolved, status]);
 
-  // Re-fit xterm when switching back to raw mode
-  useEffect(() => {
-    if (mode === 'raw') {
-      requestAnimationFrame(() => fitRef.current?.fit());
-    }
-  }, [mode]);
+  // Track scroll position for auto-scroll
+  const handlePreScroll = () => {
+    const el = preRef.current;
+    if (!el) return;
+    autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
+  };
 
   const statusBanner = status === 'passed' || status === 'failed';
+  const themeColors = resolved === 'light' ? lightTheme : darkTheme;
 
   return (
     <div className="flex flex-col border border-[var(--border)] rounded-lg overflow-hidden bg-[var(--bg)] h-full">
@@ -215,15 +188,19 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
           </div>
         )}
 
-        {/* Raw terminal */}
+        {/* Raw terminal — ansi-to-html rendered <pre> */}
         {status !== 'waiting' && (
-          <div
-            ref={containerRef}
-            className="h-full w-full"
+          <pre
+            ref={preRef}
+            onScroll={handlePreScroll}
+            className="h-full w-full overflow-auto font-mono text-[10px] leading-[1.2] whitespace-pre-wrap break-words"
             style={{
-              background: resolved === 'light' ? lightTheme.background : darkTheme.background,
-              padding: '4px 2px',
+              background: themeColors.background,
+              color: themeColors.foreground,
+              padding: '4px 8px',
+              margin: 0,
               display: mode === 'raw' ? 'block' : 'none',
+              fontFamily: '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Monaco, monospace',
             }}
           />
         )}
