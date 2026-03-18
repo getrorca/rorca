@@ -1,71 +1,17 @@
 {
-  "specId": "rorca-mini-terminal-db-output",
-  "runId": 20260316000021,
-  "startedAt": "2026-03-17T21:41:34.003Z",
-  "lastUpdatedAt": "2026-03-17T23:23:22.383Z",
+  "specId": "rorca-subprocess-watchdog",
+  "runId": 20260316000030,
+  "startedAt": "2026-03-18T07:55:23.497Z",
+  "lastUpdatedAt": "2026-03-18T07:57:16.535Z",
   "completedStories": [
     {
       "storyId": "US-001",
-      "title": "Add story_output_chunks PostgreSQL table migration",
+      "title": "Extract createIdleWatchdog shared helper function",
       "status": "passed",
-      "startedAt": "2026-03-17T21:41:35.218Z",
-      "finishedAt": "2026-03-17T21:41:46.128Z",
+      "startedAt": "2026-03-18T07:55:30.491Z",
+      "finishedAt": "2026-03-18T07:57:16.534Z",
       "agentType": "claude",
-      "elapsedMs": 10910
-    },
-    {
-      "storyId": "US-002",
-      "title": "Create story-log-follower.ts WAL subscriber service",
-      "status": "passed",
-      "startedAt": "2026-03-17T21:50:01.612Z",
-      "finishedAt": "2026-03-17T21:51:39.342Z",
-      "agentType": "claude",
-      "elapsedMs": 97730
-    },
-    {
-      "storyId": "US-003",
-      "title": "Add server startup recovery for in-flight stories in story-log-follower",
-      "status": "passed",
-      "startedAt": "2026-03-17T21:51:52.589Z",
-      "finishedAt": "2026-03-17T21:54:47.651Z",
-      "agentType": "claude",
-      "elapsedMs": 175062
-    },
-    {
-      "storyId": "US-004",
-      "title": "Register StoryLogFollower in server.ts",
-      "status": "passed",
-      "startedAt": "2026-03-17T21:55:03.398Z",
-      "finishedAt": "2026-03-17T21:56:04.926Z",
-      "agentType": "claude",
-      "elapsedMs": 61528
-    },
-    {
-      "storyId": "US-005",
-      "title": "Add GET /api/pipeline/runs/:runId/stories/:storyId/stream SSE endpoint",
-      "status": "passed",
-      "startedAt": "2026-03-17T21:56:19.157Z",
-      "finishedAt": "2026-03-17T21:59:25.132Z",
-      "agentType": "claude",
-      "elapsedMs": 185975
-    },
-    {
-      "storyId": "US-006",
-      "title": "Verify /log endpoint unchanged and write integration test for /stream",
-      "status": "passed",
-      "startedAt": "2026-03-17T22:44:41.974Z",
-      "finishedAt": "2026-03-17T23:10:33.802Z",
-      "agentType": "claude",
-      "elapsedMs": 1551828
-    },
-    {
-      "storyId": "US-007",
-      "title": "End-to-end validation: wave parallel run shows prose in mini-terminals",
-      "status": "passed",
-      "startedAt": "2026-03-17T23:10:55.245Z",
-      "finishedAt": "2026-03-17T23:23:22.383Z",
-      "agentType": "claude",
-      "elapsedMs": 747138
+      "elapsedMs": 106043
     }
   ],
   "failedStories": [],
