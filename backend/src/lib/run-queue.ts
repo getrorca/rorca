@@ -8,29 +8,60 @@ interface QueuedRunRow {
   workspace_id: string;
   queued_at: string;
   queue_position: number;
+  auto_worktree: boolean;
+}
+
+const DEFAULT_QUEUE_MAX_CONCURRENT = 1;
+
+/**
+ * Read queue_max_concurrent from worker_settings.
+ * Returns the configured limit or DEFAULT_QUEUE_MAX_CONCURRENT.
+ */
+async function getQueueMaxConcurrent(): Promise<number> {
+  const row = await queryOne<{ value: string }>(
+    `SELECT value FROM worker_settings WHERE key = 'queue_max_concurrent'`,
+  );
+  if (row) {
+    const parsed = parseInt(row.value, 10);
+    if (parsed > 0) return parsed;
+  }
+  return DEFAULT_QUEUE_MAX_CONCURRENT;
 }
 
 /**
  * Advance the run queue for a workspace: find the next queued run,
  * promote it to 'running' by triggering the pipeline internally.
  *
+ * US-005: Checks queue_max_concurrent before promoting. Only promotes if
+ * currently active queue-triggered runs for this workspace are below the limit.
+ * Passes auto_worktree from the queued run row so worktree isolation is preserved.
+ *
  * Called after a run transitions to 'done' or 'failed'.
  */
 export async function advanceQueue(workspaceId: string): Promise<void> {
   try {
-    // Check if there's still an active run — don't double-start
-    const activeRun = await queryOne<{ id: number }>(
-      `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') LIMIT 1`,
-      [workspaceId],
+    // US-005: Read queue_max_concurrent from worker_settings
+    const queueMaxConcurrent = await getQueueMaxConcurrent();
+
+    // Count active runs triggered via 'queue' for this workspace
+    const activeQueueCount = Number(
+      (await queryOne<{ count: string }>(
+        `SELECT COUNT(*) as count FROM pipeline_runs
+         WHERE workspace_id = $1 AND status IN ('running', 'paused') AND triggered_via = 'queue'`,
+        [workspaceId],
+      ))?.count ?? '0',
     );
-    if (activeRun) {
-      logger.info(`[RunQueue] Workspace ${workspaceId} still has active run, skipping queue advance`);
+
+    if (activeQueueCount >= queueMaxConcurrent) {
+      logger.info(
+        `[RunQueue] Workspace ${workspaceId} has ${activeQueueCount}/${queueMaxConcurrent} active queue runs, skipping advance`,
+      );
       return;
     }
 
-    // Find the next queued run (oldest first)
+    // Find the next queued run (oldest first), including auto_worktree
     const nextQueued = await queryOne<QueuedRunRow>(
-      `SELECT id, spec_path, workspace_id, queued_at, queue_position FROM pipeline_runs
+      `SELECT id, spec_path, workspace_id, queued_at, queue_position, auto_worktree FROM pipeline_runs
        WHERE workspace_id = $1 AND status = 'queued'
        ORDER BY queued_at ASC LIMIT 1`,
       [workspaceId],
@@ -41,7 +72,9 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
       return;
     }
 
-    logger.info(`[RunQueue] Promoting queued run ${nextQueued.id} for workspace ${workspaceId}`);
+    logger.info(
+      `[RunQueue] Promoting queued run ${nextQueued.id} for workspace ${workspaceId} (autoWorktree=${nextQueued.auto_worktree})`,
+    );
 
     // Emit WAL event for promotion
     const walEvent = await queryOne<WalEvent>(
@@ -50,13 +83,16 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
         runId: nextQueued.id,
         workspaceId: nextQueued.workspace_id,
         specPath: nextQueued.spec_path,
+        autoWorktree: nextQueued.auto_worktree,
       })],
     );
     if (walEvent) {
       broadcastAll(walEvent);
     }
 
-    // Trigger the run via internal HTTP call to reuse all spawn logic
+    // Trigger the run via internal HTTP call to reuse all spawn logic.
+    // US-005: Pass autoWorktree from the queued run row so worktree isolation is preserved.
+    // triggered_via='queue' is derived by pipeline.ts from the presence of queuedRunId.
     const port = process.env.PORT || '3030';
     fetch(`http://localhost:${port}/api/pipeline/trigger`, {
       method: 'POST',
@@ -65,6 +101,7 @@ export async function advanceQueue(workspaceId: string): Promise<void> {
         specPath: nextQueued.spec_path,
         workspaceId: nextQueued.workspace_id,
         queuedRunId: nextQueued.id,
+        autoWorktree: nextQueued.auto_worktree,
       }),
     }).then(async (resp) => {
       if (!resp.ok) {
