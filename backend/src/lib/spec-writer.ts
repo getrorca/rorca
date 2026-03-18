@@ -72,6 +72,7 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
     title: spec.title,
     generatedAt: new Date().toISOString(),
     ...(spec.model ? { model: spec.model } : {}),
+    autoWorktree: true,
     userStories: spec.stories.map(s => ({
       id: s.id,
       title: s.title,
