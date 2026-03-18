@@ -1270,7 +1270,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const queueCount = Number((await queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`, [workspaceId]))?.count ?? '0');
 
         if (queueCount >= MAX_QUEUE_DEPTH) {
-          throw new ConflictError(`Queue is full — maximum ${MAX_QUEUE_DEPTH} queued runs per workspace. Cancel or wait for existing runs to complete.`);
+          res.status(429).json({ error: 'Queue full', currentDepth: queueCount, maxQueueDepth: MAX_QUEUE_DEPTH });
           return;
         }
 
@@ -5272,6 +5272,70 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/pipeline/queue/:workspaceId — Workspace queue state ─────────────
+
+/**
+ * @swagger
+ * /api/pipeline/queue/{workspaceId}:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Get queue state for a workspace
+ *     operationId: getWorkspaceQueueState
+ *     parameters:
+ *       - in: path
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Queue state
+ */
+router.get('/queue/:workspaceId', async (req: Request, res: Response) => {
+  try {
+    const { workspaceId } = req.params;
+
+    const MAX_QUEUE_DEPTH = 10;
+
+    // Fetch concurrency settings
+    const concurrencyRows = await query<{ key: string; value: string }>(
+      `SELECT key, value FROM worker_settings WHERE key IN ('queue_max_concurrent', 'run_now_max_concurrent')`,
+    );
+    const settingsMap = Object.fromEntries(concurrencyRows.map(r => [r.key, r.value]));
+    const queueMaxConcurrent = settingsMap['queue_max_concurrent'] ? parseInt(settingsMap['queue_max_concurrent'], 10) : 1;
+    const runNowMaxConcurrent = settingsMap['run_now_max_concurrent'] ? parseInt(settingsMap['run_now_max_concurrent'], 10) : 3;
+
+    // Active runs for this workspace
+    const activeRuns = await query<{ id: number; spec_path: string; status: string; started_at: string; triggered_via: string; branch_name: string | null; worktree_path: string | null; agent_type: string }>(
+      `SELECT id, spec_path, status, started_at, triggered_via, branch_name, worktree_path, agent_type
+       FROM pipeline_runs
+       WHERE workspace_id = $1 AND status IN ('running', 'paused')
+       ORDER BY started_at ASC`,
+      [workspaceId],
+    );
+
+    // Queued runs for this workspace
+    const queuedRuns = await query<{ id: number; spec_path: string; status: string; queued_at: string; queue_position: number; triggered_via: string; auto_worktree: boolean }>(
+      `SELECT id, spec_path, status, queued_at, queue_position, triggered_via, auto_worktree
+       FROM pipeline_runs
+       WHERE workspace_id = $1 AND status = 'queued'
+       ORDER BY queue_position ASC, queued_at ASC`,
+      [workspaceId],
+    );
+
+    res.json({
+      active: activeRuns,
+      queued: queuedRuns,
+      queueDepth: queuedRuns.length,
+      maxQueueDepth: MAX_QUEUE_DEPTH,
+      queueMaxConcurrent,
+      runNowMaxConcurrent,
+    });
+  } catch (err) {
+    logger.error({ err }, '[Pipeline] queue state error');
+    res.status(500).json({ error: (err as Error).message });
+  }
+});
+
 // ─── GET /api/pipeline/worker/health — Worker health check ───────────────────
 // Queries Postgres directly — no IPC with the worker process.
 // Accessible without authentication (health checks must be unauthenticated).
@@ -5566,6 +5630,29 @@ router.get('/worker/health', async (req: Request, res: Response) => {
     const queueMaxConcurrent = concurrencyMap['queue_max_concurrent'] ? parseInt(concurrencyMap['queue_max_concurrent'], 10) : 1;
     const runNowMaxConcurrent = concurrencyMap['run_now_max_concurrent'] ? parseInt(concurrencyMap['run_now_max_concurrent'], 10) : 3;
 
+    // ── Per-workspace queue depths ─────────────────────────────────────────────
+    const MAX_QUEUE_DEPTH = 10;
+    interface WorkspaceQueueRow {
+      workspace_id: string;
+      queued_count: string;
+      active_count: string;
+    }
+    const workspaceQueueRows = await query<WorkspaceQueueRow>(
+      `SELECT workspace_id,
+              COUNT(*) FILTER (WHERE status = 'queued')::text AS queued_count,
+              COUNT(*) FILTER (WHERE status IN ('running', 'paused'))::text AS active_count
+       FROM pipeline_runs
+       WHERE status IN ('queued', 'running', 'paused')
+       GROUP BY workspace_id`,
+    ).catch(() => [] as WorkspaceQueueRow[]);
+
+    const workspaceQueueDepths = workspaceQueueRows.map(r => ({
+      workspaceId: r.workspace_id,
+      queuedCount: parseInt(r.queued_count, 10),
+      activeCount: parseInt(r.active_count, 10),
+      maxQueueDepth: MAX_QUEUE_DEPTH,
+    }));
+
     res.json({
       workerActive,
       workerPid: heartbeat?.pid ?? null,
@@ -5580,6 +5667,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
       pgBossVersion,
       lastReconciliationErrors,
       queueHealth,
+      workspaceQueueDepths,
       queueStats: {
         pending,
         active,
