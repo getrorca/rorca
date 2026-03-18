@@ -3,12 +3,13 @@
 Spec: rorca-mcp-recall-tool
 Run ID: 20260316000019
 Started: 2026-03-17T21:03:11.254Z
-Last Updated: 2026-03-17T21:35:14.623Z
+Last Updated: 2026-03-18T00:26:09.245Z
 
-## Completed Stories (6)
+## Completed Stories (7)
 - US-002: Implement recall route — direction stack and workspace metadata sections — DONE (claude, 18s)
 - US-008: Implement recall route — active/queued runs with story progress — DONE (claude, 455s)
 - US-009: Compose all sections with Promise.all, add meta with token estimation — DONE (claude, 762s)
 - US-012: Jest integration tests for recall route — happy path, 404, and partial failure — DONE (claude, 17s)
 - US-011: Register recall MCP prompt as slash-command shorthand — DONE (claude, 269s)
 - US-013: Implement rorca_dump MCP tool and GET /api/recall/dump route — full unfiltered brain export — DONE (claude, 1917s)
+- US-001: Add ansi-to-html dependency and remove xterm packages — DONE (claude, 349s)
