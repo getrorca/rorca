@@ -417,7 +417,7 @@ const WorkerSettingsSchema = z.object({
     .number()
     .int('queue_max_concurrent must be an integer')
     .min(1, 'queue_max_concurrent must be at least 1')
-    .max(10, 'queue_max_concurrent must be at most 10')
+    .max(5, 'queue_max_concurrent must be at most 5')
     .optional(),
   run_now_max_concurrent: z
     .number()
