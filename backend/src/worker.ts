@@ -1726,27 +1726,52 @@ async function reconcileState(): Promise<void> {
   }
 }
 
-// ── Worker settings (max_concurrent_runs) ───────────────────────────────
+// ── Worker settings (split concurrency) ─────────────────────────────────
 
-const DEFAULT_MAX_CONCURRENT_RUNS = 5;
+const DEFAULT_QUEUE_MAX_CONCURRENT = 1;
+const DEFAULT_RUN_NOW_MAX_CONCURRENT = 3;
+
+interface ConcurrencySettings {
+  queueMaxConcurrent: number;
+  runNowMaxConcurrent: number;
+}
 
 /**
- * Fetch max_concurrent_runs from worker_settings table.
- * Falls back to RORCA_MAX_CONCURRENT_RUNS env var, then DEFAULT_MAX_CONCURRENT_RUNS.
+ * Fetch queue_max_concurrent and run_now_max_concurrent from worker_settings table.
+ * Falls back to legacy max_concurrent_runs, then env var, then defaults.
  */
-async function getMaxConcurrentRuns(): Promise<number> {
+async function getConcurrencySettings(): Promise<ConcurrencySettings> {
   try {
-    const row = await queryOne<{ value: string }>(
-      `SELECT value FROM worker_settings WHERE key = 'max_concurrent_runs'`,
+    const rows = await query<{ key: string; value: string }>(
+      `SELECT key, value FROM worker_settings WHERE key IN ('queue_max_concurrent', 'run_now_max_concurrent', 'max_concurrent_runs')`,
     );
-    if (row) {
-      const parsed = parseInt(row.value, 10);
-      if (!isNaN(parsed) && parsed > 0) return parsed;
-    }
+    const settings = Object.fromEntries(rows.map(r => [r.key, r.value]));
+
+    const parsePositiveInt = (val: string | undefined, fallback: number): number => {
+      if (!val) return fallback;
+      const parsed = parseInt(val, 10);
+      return !isNaN(parsed) && parsed > 0 ? parsed : fallback;
+    };
+
+    // Use new split settings if present, otherwise fall back to legacy max_concurrent_runs
+    const legacyMax = parsePositiveInt(settings['max_concurrent_runs'], 0);
+    const queueMaxConcurrent = parsePositiveInt(
+      settings['queue_max_concurrent'],
+      legacyMax > 0 ? legacyMax : DEFAULT_QUEUE_MAX_CONCURRENT,
+    );
+    const runNowMaxConcurrent = parsePositiveInt(
+      settings['run_now_max_concurrent'],
+      legacyMax > 0 ? legacyMax : DEFAULT_RUN_NOW_MAX_CONCURRENT,
+    );
+
+    return { queueMaxConcurrent, runNowMaxConcurrent };
   } catch (err) {
-    logger.warn({ err }, '[worker] getMaxConcurrentRuns — DB query failed, using env/default');
+    logger.warn({ err }, '[worker] getConcurrencySettings — DB query failed, using defaults');
   }
-  return parseInt(process.env.RORCA_MAX_CONCURRENT_RUNS ?? String(DEFAULT_MAX_CONCURRENT_RUNS), 10);
+  return {
+    queueMaxConcurrent: DEFAULT_QUEUE_MAX_CONCURRENT,
+    runNowMaxConcurrent: DEFAULT_RUN_NOW_MAX_CONCURRENT,
+  };
 }
 
 // ── Graceful shutdown ────────────────────────────────────────────────────
@@ -2142,27 +2167,39 @@ async function start(): Promise<void> {
   const boss = getBoss();
 
   // Fetch initial concurrency from DB (falls back to env var / default).
-  let currentMaxConcurrent = await getMaxConcurrentRuns();
-  logger.info({ maxConcurrent: currentMaxConcurrent }, '[worker] initial max_concurrent_runs');
+  let currentSettings = await getConcurrencySettings();
+  logger.info(
+    { queueMax: currentSettings.queueMaxConcurrent, runNowMax: currentSettings.runNowMaxConcurrent },
+    '[worker] initial concurrency settings (queue_max_concurrent / run_now_max_concurrent)',
+  );
 
-  await boss.work('pipeline:run', { batchSize: currentMaxConcurrent }, handlePipelineRun);
-  await boss.work('pipeline:retry', { batchSize: currentMaxConcurrent }, handlePipelineRetry);
+  // batchSize = sum of both limits so the handler can pick up both job types.
+  const computeBatchSize = (s: ConcurrencySettings) => s.queueMaxConcurrent + s.runNowMaxConcurrent;
+
+  await boss.work('pipeline:run', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRun);
+  await boss.work('pipeline:retry', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRetry);
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
 
   // Poll worker_settings every WORKER_SETTINGS_POLL_MS (default 30s).
-  // If max_concurrent_runs changed, hot-reload the pipeline:run and pipeline:retry subscriptions.
+  // If concurrency settings changed, hot-reload the pipeline:run and pipeline:retry subscriptions.
   const WORKER_SETTINGS_POLL_MS = parseInt(process.env.WORKER_SETTINGS_POLL_MS ?? '30000', 10);
 
   settingsPollIntervalId = setInterval(() => {
     void (async () => {
       if (stopping) return;
       try {
-        const newMax = await getMaxConcurrentRuns();
-        if (newMax !== currentMaxConcurrent) {
+        const newSettings = await getConcurrencySettings();
+        if (
+          newSettings.queueMaxConcurrent !== currentSettings.queueMaxConcurrent ||
+          newSettings.runNowMaxConcurrent !== currentSettings.runNowMaxConcurrent
+        ) {
           logger.info(
-            { from: currentMaxConcurrent, to: newMax },
-            `[worker] max_concurrent_runs changed ${currentMaxConcurrent} → ${newMax}, reloading work subscription`,
+            {
+              queueFrom: currentSettings.queueMaxConcurrent, queueTo: newSettings.queueMaxConcurrent,
+              runNowFrom: currentSettings.runNowMaxConcurrent, runNowTo: newSettings.runNowMaxConcurrent,
+            },
+            '[worker] concurrency settings changed, reloading work subscription',
           );
 
           // Stop current subscriptions gracefully (pg-boss drains in-flight batch
@@ -2170,16 +2207,19 @@ async function start(): Promise<void> {
           await boss.offWork('pipeline:run');
           await boss.offWork('pipeline:retry');
 
-          currentMaxConcurrent = newMax;
+          currentSettings = newSettings;
 
           // Re-register with updated batchSize.
-          await boss.work('pipeline:run', { batchSize: currentMaxConcurrent }, handlePipelineRun);
-          await boss.work('pipeline:retry', { batchSize: currentMaxConcurrent }, handlePipelineRetry);
+          await boss.work('pipeline:run', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRun);
+          await boss.work('pipeline:retry', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRetry);
 
-          logger.info({ maxConcurrent: currentMaxConcurrent }, '[worker] work subscription reloaded successfully');
+          logger.info(
+            { queueMax: currentSettings.queueMaxConcurrent, runNowMax: currentSettings.runNowMaxConcurrent, batchSize: computeBatchSize(currentSettings) },
+            '[worker] work subscription reloaded successfully',
+          );
         }
       } catch (err) {
-        logger.warn({ err }, '[worker] settings poll: failed to check/reload max_concurrent_runs');
+        logger.warn({ err }, '[worker] settings poll: failed to check/reload concurrency settings');
       }
     })();
   }, WORKER_SETTINGS_POLL_MS);
