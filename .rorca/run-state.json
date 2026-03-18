@@ -2,7 +2,7 @@
   "specId": "rorca-pipeline-queueing-and-worktrees",
   "runId": 20260316000031,
   "startedAt": "2026-03-18T19:15:18.101Z",
-  "lastUpdatedAt": "2026-03-18T20:33:50.267Z",
+  "lastUpdatedAt": "2026-03-18T20:32:40.173Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -50,13 +50,13 @@
       "elapsedMs": 12836
     },
     {
-      "storyId": "US-008",
-      "title": "Update Kanban board to show queue position badges and run type indicators",
+      "storyId": "US-009",
+      "title": "Add autoWorktree toggle to SpecDetailSlideOver and persist preference per spec",
       "status": "passed",
-      "startedAt": "2026-03-18T20:26:50.566Z",
-      "finishedAt": "2026-03-18T20:33:50.267Z",
+      "startedAt": "2026-03-18T20:26:50.610Z",
+      "finishedAt": "2026-03-18T20:32:40.173Z",
       "agentType": "claude",
-      "elapsedMs": 419701
+      "elapsedMs": 349563
     }
   ],
   "failedStories": [],
