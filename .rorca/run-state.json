@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000019,
   "startedAt": "2026-03-17T21:03:11.254Z",
-  "lastUpdatedAt": "2026-03-18T00:32:16.582Z",
+  "lastUpdatedAt": "2026-03-18T00:32:13.338Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -68,13 +68,13 @@
       "elapsedMs": 33090
     },
     {
-      "storyId": "US-003",
-      "title": "Implement LISTEN/NOTIFY subscriber in backend and replace WAL polling",
+      "storyId": "US-004",
+      "title": "Implement core RunTerminal component with ansi-to-html and incremental append",
       "status": "passed",
-      "startedAt": "2026-03-18T00:26:33.577Z",
-      "finishedAt": "2026-03-18T00:32:16.582Z",
+      "startedAt": "2026-03-18T00:26:41.448Z",
+      "finishedAt": "2026-03-18T00:32:13.338Z",
       "agentType": "claude",
-      "elapsedMs": 343005
+      "elapsedMs": 331890
     }
   ],
   "failedStories": [],
