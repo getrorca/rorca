@@ -175,18 +175,18 @@ export class StoryLogFollower {
       payload: string;
     }>(
       `SELECT
-         (ws.payload->>'run_id')::int AS run_id,
+         (ws.payload->>'run_id')::bigint AS run_id,
          COALESCE(ws.payload->>'story_id', ws.story_id) AS story_id,
          ws.payload::text AS payload
        FROM wal_events ws
        WHERE ws.event_type = 'story_started'
-         AND (ws.payload->>'run_id')::int IN (
+         AND (ws.payload->>'run_id')::bigint IN (
            SELECT id FROM pipeline_runs WHERE status = 'running'
          )
          AND NOT EXISTS (
            SELECT 1 FROM wal_events wc
            WHERE wc.event_type IN ('story_passed', 'story_failed', 'story_skipped')
-             AND (wc.payload->>'run_id')::int = (ws.payload->>'run_id')::int
+             AND (wc.payload->>'run_id')::bigint = (ws.payload->>'run_id')::bigint
              AND COALESCE(wc.payload->>'story_id', wc.story_id)
                = COALESCE(ws.payload->>'story_id', ws.story_id)
          )`,
