@@ -5255,6 +5255,8 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
  *                 workerPid: { type: integer, nullable: true }
  *                 workerStartedAt: { type: string, nullable: true, format: date-time }
  *                 activeChildProcesses: { type: integer, description: "Number of active execution-engine child processes (from latest heartbeat)" }
+ *                 queueMaxConcurrent: { type: integer, description: "Max concurrent queued (non-worktree) pipeline:run jobs" }
+ *                 runNowMaxConcurrent: { type: integer, description: "Max concurrent immediate worktree-isolated runs" }
  *                 lastReconciliationErrors: { type: integer, description: "Number of state mismatches fixed in last reconcile cycle (last 90s)" }
  *                 activeJobs:
  *                   type: array
@@ -5511,11 +5513,21 @@ router.get('/worker/health', async (req: Request, res: Response) => {
     }
 
 
+    // ── Concurrency settings from worker_settings ──────────────────────────
+    const concurrencyRows = await query<{ key: string; value: string }>(
+      `SELECT key, value FROM worker_settings WHERE key IN ('queue_max_concurrent', 'run_now_max_concurrent')`,
+    );
+    const concurrencyMap = Object.fromEntries(concurrencyRows.map(r => [r.key, r.value]));
+    const queueMaxConcurrent = concurrencyMap['queue_max_concurrent'] ? parseInt(concurrencyMap['queue_max_concurrent'], 10) : 1;
+    const runNowMaxConcurrent = concurrencyMap['run_now_max_concurrent'] ? parseInt(concurrencyMap['run_now_max_concurrent'], 10) : 3;
+
     res.json({
       workerActive,
       workerPid: heartbeat?.pid ?? null,
       workerStartedAt: heartbeat?.started_at ?? null,
       activeChildProcesses: heartbeat?.active_jobs ?? 0,
+      queueMaxConcurrent,
+      runNowMaxConcurrent,
       activeJobs,
       queueDepth,
       scheduledJobs,
