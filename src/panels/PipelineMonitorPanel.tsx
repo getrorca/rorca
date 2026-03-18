@@ -1,6 +1,6 @@
 // @refresh reset
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Terminal, Clock, ChevronRight, List, XCircle, ArrowRight, AlertTriangle, X } from 'lucide-react';
+import { Terminal, Clock, ChevronRight, List, XCircle, ArrowRight, AlertTriangle, X, GitBranch, ArrowUpDown, Filter } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -124,6 +124,60 @@ function elapsedTime(startedAt: string, finishedAt: string | null): string {
   }
 }
 
+// ─── Sort / Filter types ─────────────────────────────────────────────────────
+
+type SortField = 'id' | 'status' | 'triggered_via';
+type SortDir = 'asc' | 'desc';
+type StatusFilter = 'all' | 'running' | 'queued' | 'done' | 'failed' | 'cancelled';
+type OriginFilter = 'all' | 'queue' | 'run_now';
+
+function sortRuns(runs: PipelineRun[], field: SortField, dir: SortDir): PipelineRun[] {
+  return [...runs].sort((a, b) => {
+    let cmp = 0;
+    if (field === 'id') {
+      cmp = a.id - b.id;
+    } else if (field === 'status') {
+      cmp = (a.status || '').localeCompare(b.status || '');
+    } else if (field === 'triggered_via') {
+      cmp = (a.triggered_via || 'run_now').localeCompare(b.triggered_via || 'run_now');
+    }
+    return dir === 'asc' ? cmp : -cmp;
+  });
+}
+
+// ─── Inline badges ───────────────────────────────────────────────────────────
+
+function TriggeredViaBadge({ value }: { value?: 'queue' | 'run_now' }) {
+  if (value === 'queue') {
+    return (
+      <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-medium rounded bg-amber-500/15 text-amber-400 border border-amber-500/25 shrink-0">
+        <Clock className="w-2.5 h-2.5" />
+        Queue
+      </span>
+    );
+  }
+  return (
+    <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-medium rounded bg-blue-500/15 text-blue-400 border border-blue-500/25 shrink-0">
+      Run Now
+    </span>
+  );
+}
+
+function WorktreeBadge({ branchName }: { branchName?: string | null }) {
+  if (!branchName) return null;
+  // Show shortened branch name (last segment after last /)
+  const short = branchName.includes('/') ? branchName.split('/').pop()! : branchName;
+  return (
+    <span
+      className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-medium rounded bg-purple-500/15 text-purple-400 border border-purple-500/25 shrink-0 max-w-[140px]"
+      title={branchName}
+    >
+      <GitBranch className="w-2.5 h-2.5 shrink-0" />
+      <span className="truncate">{short}</span>
+    </span>
+  );
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 interface PipelineMonitorPanelProps {
@@ -142,6 +196,10 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
   const [cancellingRunId, setCancellingRunId] = useState<number | null>(null);
   const [workerHealth, setWorkerHealth] = useState<WorkerHealthData | null>(null);
   const [bannerDismissedAt, setBannerDismissedAt] = useState<number | null>(null);
+  const [sortField, setSortField] = useState<SortField>('id');
+  const [sortDir, setSortDir] = useState<SortDir>('desc');
+  const [statusFilter, setStatusFilter] = useState<StatusFilter>('all');
+  const [originFilter, setOriginFilter] = useState<OriginFilter>('all');
 
   const { show: showGlobalToast } = useGlobalToast();
 
@@ -283,6 +341,23 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
   const completedRuns = runs.filter(r =>
     r.status !== 'running' && r.status !== 'paused' && r.status !== 'queued'
   );
+
+  // ─── Filtered + sorted completed runs ─────────────────────────
+  const filteredCompleted = completedRuns.filter(r => {
+    if (statusFilter !== 'all' && r.status !== statusFilter) return false;
+    if (originFilter !== 'all' && (r.triggered_via || 'run_now') !== originFilter) return false;
+    return true;
+  });
+  const sortedCompleted = sortRuns(filteredCompleted, sortField, sortDir);
+
+  const toggleSort = (field: SortField) => {
+    if (sortField === field) {
+      setSortDir(d => d === 'asc' ? 'desc' : 'asc');
+    } else {
+      setSortField(field);
+      setSortDir('desc');
+    }
+  };
 
   // ─── Banner ──────────────────────────────────────────────────────────────
   const banner = computeBanner(workerHealth);
@@ -470,10 +545,12 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
                 </div>
               )}
 
-              <div className="flex items-center gap-3 text-[10px] text-[var(--text-muted)]">
+              <div className="flex items-center gap-2 flex-wrap text-[10px] text-[var(--text-muted)]">
                 <span>Started {formatDistanceToNow(parseUtc(run.started_at), { addSuffix: true })}</span>
                 <span>&middot;</span>
                 <span>Elapsed: {elapsedTime(run.started_at, null)}</span>
+                <TriggeredViaBadge value={run.triggered_via} />
+                <WorktreeBadge branchName={run.branch_name} />
               </div>
             </button>
           );
@@ -500,6 +577,7 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
                     #{run.queue_position ?? '?'}
                   </span>
                   <span className="text-sm capitalize truncate flex-1">{specName(run.spec_path)}</span>
+                  <WorktreeBadge branchName={run.branch_name} />
                   <button
                     onClick={async (e) => {
                       e.stopPropagation();
@@ -553,18 +631,66 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
         {/* Recent Completed Runs */}
         {completedRuns.length > 0 && (
           <div>
-            <h3 className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)] mb-2 px-1">
-              Recent Runs
-            </h3>
+            <div className="flex items-center justify-between mb-2 px-1">
+              <h3 className="text-xs font-medium uppercase tracking-wide text-[var(--text-muted)]">
+                Recent Runs
+                {filteredCompleted.length !== completedRuns.length && (
+                  <span className="ml-1.5 text-[10px] font-normal normal-case">
+                    ({filteredCompleted.length} of {completedRuns.length})
+                  </span>
+                )}
+              </h3>
+              <div className="flex items-center gap-1.5">
+                {/* Status filter */}
+                <div className="relative">
+                  <select
+                    value={statusFilter}
+                    onChange={e => setStatusFilter(e.target.value as StatusFilter)}
+                    className="appearance-none pl-5 pr-2 py-0.5 text-[10px] rounded border border-[var(--border)] bg-[var(--surface)] text-[var(--text-muted)] cursor-pointer focus:outline-none focus:ring-1 focus:ring-accent/50"
+                    aria-label="Filter by status"
+                  >
+                    <option value="all">All statuses</option>
+                    <option value="done">Passed</option>
+                    <option value="failed">Failed</option>
+                    <option value="cancelled">Cancelled</option>
+                  </select>
+                  <Filter size={10} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] pointer-events-none" />
+                </div>
+                {/* Origin filter */}
+                <div className="relative">
+                  <select
+                    value={originFilter}
+                    onChange={e => setOriginFilter(e.target.value as OriginFilter)}
+                    className="appearance-none pl-5 pr-2 py-0.5 text-[10px] rounded border border-[var(--border)] bg-[var(--surface)] text-[var(--text-muted)] cursor-pointer focus:outline-none focus:ring-1 focus:ring-accent/50"
+                    aria-label="Filter by origin"
+                  >
+                    <option value="all">All origins</option>
+                    <option value="queue">Queue</option>
+                    <option value="run_now">Run Now</option>
+                  </select>
+                  <Filter size={10} className="absolute left-1.5 top-1/2 -translate-y-1/2 text-[var(--text-muted)] pointer-events-none" />
+                </div>
+                {/* Sort toggle */}
+                <button
+                  onClick={() => toggleSort('id')}
+                  className="inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] rounded border border-[var(--border)] bg-[var(--surface)] text-[var(--text-muted)] hover:bg-[var(--surface-hover)] transition-colors"
+                  title={`Sort by ${sortField} ${sortDir}`}
+                  aria-label="Toggle sort order"
+                >
+                  <ArrowUpDown size={10} />
+                  {sortDir === 'desc' ? 'Newest' : 'Oldest'}
+                </button>
+              </div>
+            </div>
             <div className="space-y-1">
-              {completedRuns.slice(0, 20).map((run) => (
+              {sortedCompleted.slice(0, 20).map((run) => (
                 <button
                   key={run.id}
                   onClick={() => handleRunClick(run.id)}
-                  className="w-full text-left flex items-center gap-3 rounded-lg border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--surface-hover)] transition-colors p-3"
+                  className="w-full text-left flex items-center gap-2 rounded-lg border border-[var(--border)] bg-[var(--surface)] hover:bg-[var(--surface-hover)] transition-colors p-3"
                 >
                   <span className={`w-2 h-2 rounded-full flex-shrink-0 ${STATUS_DOTS[run.status] || 'bg-zinc-500'}`} />
-                  <span className="text-sm capitalize truncate flex-1">{specName(run.spec_path)}</span>
+                  <span className="text-sm capitalize truncate flex-1 min-w-0">{specName(run.spec_path)}</span>
                   <span className={`px-1.5 py-0.5 text-[10px] font-medium rounded-full shrink-0 ${
                     run.status === 'done' ? 'bg-emerald-500/20 text-emerald-400'
                     : run.status === 'failed' || run.status === 'partial_failure' ? 'bg-red-500/20 text-red-400'
@@ -572,6 +698,8 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
                   }`}>
                     {STATUS_LABELS[run.status] || run.status}
                   </span>
+                  <TriggeredViaBadge value={run.triggered_via} />
+                  <WorktreeBadge branchName={run.branch_name} />
                   <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} />
                   <span className="text-[10px] text-[var(--text-muted)] shrink-0">
                     {elapsedTime(run.started_at, run.finished_at)}

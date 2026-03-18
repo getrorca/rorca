@@ -882,6 +882,7 @@ interface PipelineRunRow {
   merge_status: string | null;
   merge_commit_sha: string | null;
   triggered_via: 'queue' | 'run_now';
+  auto_worktree: boolean;
 }
 
 interface StoryResultRow {
