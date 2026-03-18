@@ -1,4 +1,4 @@
-import { useEffect, useRef, useState } from 'react';
+import { useEffect, useRef, useState, useCallback } from 'react';
 import AnsiToHtml from 'ansi-to-html';
 import {
   Terminal as TerminalIcon, Layers, CheckCircle2, XCircle,
@@ -59,6 +59,30 @@ const ansiConverter = new AnsiToHtml({
   newline: true,
 });
 
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const MAX_BUFFER_LINES = 5_000;
+const FLUSH_INTERVAL_MS = 80;
+const FALLBACK_TIMEOUT_MS = 3_000;
+const SCROLL_LOCK_THRESHOLD = 50;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Decode a base64-encoded SSE data field to a UTF-8 string. */
+function decodeBase64Chunk(data: string): string {
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+/** Trim a buffer string array to at most MAX_BUFFER_LINES lines (in-place). */
+function trimBuffer(buf: string[]): void {
+  if (buf.length > MAX_BUFFER_LINES) {
+    buf.splice(0, buf.length - MAX_BUFFER_LINES);
+  }
+}
+
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function MiniTerminalPane({ runId, storyId, storyTitle, status }: MiniTerminalPaneProps) {
@@ -72,6 +96,11 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
   const [streamDone, setStreamDone] = useState(false);
   const stepListRef = useRef<HTMLDivElement>(null);
 
+  // Buffer for accumulating raw text before batch flush
+  const pendingTextRef = useRef('');
+  const bufferLinesRef = useRef<string[]>([]);
+  const flushedHtmlLenRef = useRef(0);
+
   // Auto-scroll semantic list
   useEffect(() => {
     if (mode === 'semantic' && stepListRef.current) {
@@ -79,64 +108,128 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
     }
   }, [steps, mode]);
 
-  // SSE setup — streams output and renders to <pre> via ansi-to-html
+  // SSE setup — connects to /stream first, falls back to /log after 3s
   useEffect(() => {
     if (status === 'waiting') return;
 
+    // Reset state
     esRef.current?.close();
     if (preRef.current) preRef.current.innerHTML = '';
+    pendingTextRef.current = '';
+    bufferLinesRef.current = [];
+    flushedHtmlLenRef.current = 0;
+    setSteps([]);
+    setStreamDone(false);
 
     const converter = resolved === 'light'
       ? new AnsiToHtml({ fg: lightTheme.foreground, bg: lightTheme.background, escapeXML: true, newline: true })
       : ansiConverter;
 
-    // Connect to per-story log stream
-    const es = new EventSource(`${BASE_URL}/api/pipeline/runs/${runId}/stories/${storyId}/log`);
-    esRef.current = es;
+    let receivedData = false;
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+    let flushTimer: ReturnType<typeof setInterval> | null = null;
+    let cancelled = false;
 
-    es.addEventListener('chunk', (e: MessageEvent) => {
-      try {
-        const binary = atob(e.data);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        const text = new TextDecoder().decode(bytes);
-        if (preRef.current) {
-          preRef.current.innerHTML += converter.toHtml(text);
-          if (autoScrollRef.current) {
-            preRef.current.scrollTop = preRef.current.scrollHeight;
-          }
-        }
-      } catch { /* ignore malformed chunk */ }
-    });
+    // ── Batch flush: convert only new pending text every 80ms ──
+    const flush = () => {
+      const text = pendingTextRef.current;
+      if (!text || !preRef.current) return;
+      pendingTextRef.current = '';
 
-    es.addEventListener('semantic_step', (e: MessageEvent) => {
-      try {
-        const step: SemanticStep = JSON.parse(e.data);
-        setSteps(prev => [...prev, step]);
-      } catch { /* ignore */ }
-    });
+      // Split into lines for buffer cap tracking
+      const newLines = text.split('\n');
+      bufferLinesRef.current.push(...newLines);
+      trimBuffer(bufferLinesRef.current);
 
-    es.addEventListener('done', () => {
-      setStreamDone(true);
-      es.close();
-    });
+      // Check if we've exceeded the cap and need to re-render from buffer
+      // (only happens after a trim — lines were dropped from the front)
+      const totalBufferedText = bufferLinesRef.current.join('\n');
+      const expectedHtmlLen = flushedHtmlLenRef.current;
 
-    es.onerror = () => {
-      setStreamDone(true);
-      es.close();
+      // Normal path: append only new HTML
+      const html = converter.toHtml(text);
+      preRef.current.innerHTML += html;
+      flushedHtmlLenRef.current = preRef.current.innerHTML.length;
+
+      // If buffer was trimmed, rebuild from the full buffer to stay in sync
+      if (bufferLinesRef.current.length === MAX_BUFFER_LINES && expectedHtmlLen > 0) {
+        const fullHtml = converter.toHtml(totalBufferedText);
+        preRef.current.innerHTML = fullHtml;
+        flushedHtmlLenRef.current = fullHtml.length;
+      }
+
+      if (autoScrollRef.current) {
+        preRef.current.scrollTop = preRef.current.scrollHeight;
+      }
     };
 
-    return () => {
+    // ── Attach chunk/output + semantic_step + done handlers to an EventSource ──
+    const attachHandlers = (es: EventSource, chunkEvent: string) => {
+      es.addEventListener(chunkEvent, (e: MessageEvent) => {
+        try {
+          receivedData = true;
+          const text = decodeBase64Chunk(e.data);
+          pendingTextRef.current += text;
+        } catch { /* ignore malformed chunk */ }
+      });
+
+      es.addEventListener('semantic_step', (e: MessageEvent) => {
+        try {
+          const step: SemanticStep = JSON.parse(e.data);
+          setSteps(prev => [...prev, step]);
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener('done', () => {
+        // Final flush before marking done
+        flush();
+        setStreamDone(true);
+        es.close();
+      });
+
+      es.onerror = () => {
+        if (es.readyState === EventSource.CLOSED) {
+          flush();
+          setStreamDone(true);
+        }
+      };
+    };
+
+    // ── Start flush interval ──
+    flushTimer = setInterval(flush, FLUSH_INTERVAL_MS);
+
+    // ── Try /stream endpoint first (DB-backed filtered prose) ──
+    const streamUrl = `${BASE_URL}/api/pipeline/runs/${runId}/stories/${storyId}/stream`;
+    const es = new EventSource(streamUrl);
+    esRef.current = es;
+    attachHandlers(es, 'output');
+
+    // ── Fallback: if /stream returns no data within 3s, switch to /log ──
+    fallbackTimer = setTimeout(() => {
+      if (cancelled || receivedData) return;
+      // No data from /stream — close it and connect to /log
       es.close();
+      const logEs = new EventSource(`${BASE_URL}/api/pipeline/runs/${runId}/stories/${storyId}/log`);
+      esRef.current = logEs;
+      attachHandlers(logEs, 'chunk');
+    }, FALLBACK_TIMEOUT_MS);
+
+    return () => {
+      cancelled = true;
+      esRef.current?.close();
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+      if (flushTimer) clearInterval(flushTimer);
+      // Final flush on cleanup
+      flush();
     };
   }, [runId, storyId, resolved, status]);
 
-  // Track scroll position for auto-scroll
-  const handlePreScroll = () => {
+  // Track scroll position for auto-scroll (50px threshold)
+  const handlePreScroll = useCallback(() => {
     const el = preRef.current;
     if (!el) return;
-    autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < 40;
-  };
+    autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_LOCK_THRESHOLD;
+  }, []);
 
   const statusBanner = status === 'passed' || status === 'failed';
   const themeColors = resolved === 'light' ? lightTheme : darkTheme;
