@@ -2,7 +2,7 @@
   "specId": "rorca-mcp-recall-tool",
   "runId": 20260316000019,
   "startedAt": "2026-03-17T21:03:11.254Z",
-  "lastUpdatedAt": "2026-03-18T00:33:20.482Z",
+  "lastUpdatedAt": "2026-03-18T00:37:27.195Z",
   "completedStories": [
     {
       "storyId": "US-002",
@@ -75,6 +75,15 @@
       "finishedAt": "2026-03-18T00:33:20.482Z",
       "agentType": "claude",
       "elapsedMs": 400172
+    },
+    {
+      "storyId": "US-005",
+      "title": "Implement scroll-lock awareness and 20,000-line buffer cap",
+      "status": "passed",
+      "startedAt": "2026-03-18T00:33:50.194Z",
+      "finishedAt": "2026-03-18T00:37:27.195Z",
+      "agentType": "claude",
+      "elapsedMs": 217001
     }
   ],
   "failedStories": [],
