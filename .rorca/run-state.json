@@ -2,7 +2,7 @@
   "specId": "rorca-pipeline-queueing-and-worktrees",
   "runId": 20260316000031,
   "startedAt": "2026-03-18T19:15:18.101Z",
-  "lastUpdatedAt": "2026-03-18T20:15:25.295Z",
+  "lastUpdatedAt": "2026-03-18T20:26:27.711Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -39,6 +39,15 @@
       "finishedAt": "2026-03-18T20:15:25.294Z",
       "agentType": "claude",
       "elapsedMs": 421532
+    },
+    {
+      "storyId": "US-005",
+      "title": "Update advanceQueue to pass triggered_via='queue' and respect queue_max_concurrent",
+      "status": "passed",
+      "startedAt": "2026-03-18T20:15:46.677Z",
+      "finishedAt": "2026-03-18T20:26:27.710Z",
+      "agentType": "claude",
+      "elapsedMs": 641033
     }
   ],
   "failedStories": [],
