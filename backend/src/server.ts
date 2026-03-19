@@ -170,7 +170,7 @@ app.use(cors({
   origin: corsOrigin,
   credentials: allowCredentials,
   methods: ['GET', 'POST', 'PUT', 'PATCH', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Workspace-Id'],
+  allowedHeaders: ['Content-Type', 'Authorization', 'X-CSRF-Token', 'X-Workspace-Id', 'X-Rorca-Admin-Key'],
   maxAge: 86400,
 }));
 
@@ -391,6 +391,38 @@ process.on('uncaughtException', (err) => {
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
+  // BL-013: Log license status at startup
+  (() => {
+    const envLicenseKey = process.env.RORCA_LICENSE_KEY;
+    if (envLicenseKey) {
+      try {
+        const { verifyLicense: verify } = require('./lib/license-verifier');
+        const license = verify(envLicenseKey);
+        const expiresInfo = license.exp
+          ? `expires ${new Date(license.exp * 1000).toISOString().split('T')[0]}`
+          : 'perpetual';
+        logger.info(`License: self-hosted (RORCA_LICENSE_KEY) — plan=${license.plan}, ${expiresInfo}`);
+      } catch (err: any) {
+        logger.warn(`License: RORCA_LICENSE_KEY set but invalid — ${err.message || 'verification failed'}`);
+      }
+    } else {
+      // Check for trial via DB
+      const { queryOne: qo } = require('./db/index');
+      (qo(
+        `SELECT trial_ends_at, plan FROM subscriptions WHERE status = 'trialing' AND trial_ends_at > NOW() LIMIT 1`
+      ) as Promise<{ trial_ends_at: string; plan: string } | undefined>).then((trial) => {
+        if (trial) {
+          const days = Math.max(0, Math.ceil((new Date(trial.trial_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
+          logger.info(`License: trial (${days} days remaining)`);
+        } else {
+          logger.info('License: not configured');
+        }
+      }).catch(() => {
+        logger.info('License: not configured');
+      });
+    }
+  })();
+
   app.listen(PORT, () => {
     logger.info(`Rorca backend listening on port ${PORT}`);
     // OC-015: Clean up orphan runs (stale status='running' from crashed backend)

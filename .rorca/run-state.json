@@ -1,8 +1,8 @@
 {
   "specId": "rorca-billing-launch",
-  "runId": 20260316000044,
-  "startedAt": "2026-03-19T20:38:35.785Z",
-  "lastUpdatedAt": "2026-03-19T20:39:16.135Z",
+  "runId": 20260316000045,
+  "startedAt": "2026-03-19T20:45:48.038Z",
+  "lastUpdatedAt": "2026-03-19T21:05:12.717Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -12,11 +12,20 @@
       "finishedAt": "2026-03-19T20:39:16.135Z",
       "agentType": "claude",
       "elapsedMs": 33402
+    },
+    {
+      "storyId": "BL-013",
+      "title": "Self-hosted offline license activation — RORCA_LICENSE_KEY env var",
+      "status": "passed",
+      "startedAt": "2026-03-19T20:45:54.697Z",
+      "finishedAt": "2026-03-19T21:05:12.717Z",
+      "agentType": "claude",
+      "elapsedMs": 1158020
     }
   ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
-  "resumedFromStory": null
+  "resumedFromStory": "BL-012"
 }

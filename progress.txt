@@ -1,9 +1,10 @@
 # Run State Summary
 
 Spec: rorca-billing-launch
-Run ID: 20260316000044
-Started: 2026-03-19T20:38:35.785Z
-Last Updated: 2026-03-19T20:39:16.135Z
+Run ID: 20260316000045
+Started: 2026-03-19T20:45:48.038Z
+Last Updated: 2026-03-19T21:05:12.717Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - BL-012: Billing webhook idempotency — prevent duplicate billing state transitions — DONE (claude, 33s)
+- BL-013: Self-hosted offline license activation — RORCA_LICENSE_KEY env var — DONE (claude, 1158s)

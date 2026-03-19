@@ -245,7 +245,7 @@ describe('@mention notifications', () => {
     // Register a second user to be mentioned
     await request(app).post('/api/auth/register').send({
       email: 'mentioned@example.com',
-      password: 'securepass123',
+      password: 'SecurePass123',
       displayName: 'Mentioned User',
     });
     const row = await queryOne(`SELECT id FROM users WHERE email = 'mentioned@example.com'`) as { id: string };
@@ -286,7 +286,7 @@ describe('@mention notifications', () => {
     // Register a third user
     await request(app).post('/api/auth/register').send({
       email: 'third@example.com',
-      password: 'securepass123',
+      password: 'SecurePass123',
       displayName: 'Third User',
     });
     const thirdRow = await queryOne(`SELECT id FROM users WHERE email = 'third@example.com'`) as { id: string };
