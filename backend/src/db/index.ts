@@ -475,12 +475,18 @@ async function shutdown(): Promise<void> {
 // Exported for tests that need to close the pool to release connections
 export const closePool = shutdown;
 
-// Only register shutdown handlers in the Express server process.
-// execution-engine.ts subprocesses set RORCA_PROCESS_ROLE=engine and manage
-// their own pool lifecycle — registering here would close the pool when tsx watch
-// sends SIGTERM to the old server process group, killing active story subprocesses.
-if (process.env.RORCA_PROCESS_ROLE !== 'engine') {
-  process.on('SIGTERM', () => { shutdown().catch(() => {}); });
-  process.on('SIGINT', () => { shutdown().catch(() => {}); });
-}
+// Register shutdown handlers unconditionally, but check RORCA_PROCESS_ROLE at
+// runtime (not import time) — ES module hoisting means env vars set in worker.ts
+// aren't available when this module's top-level code evaluates.
+// Worker and engine processes manage their own pool lifecycle.
+process.on('SIGTERM', () => {
+  if (process.env.RORCA_PROCESS_ROLE !== 'engine' && process.env.RORCA_PROCESS_ROLE !== 'worker') {
+    shutdown().catch(() => {});
+  }
+});
+process.on('SIGINT', () => {
+  if (process.env.RORCA_PROCESS_ROLE !== 'engine' && process.env.RORCA_PROCESS_ROLE !== 'worker') {
+    shutdown().catch(() => {});
+  }
+});
 
