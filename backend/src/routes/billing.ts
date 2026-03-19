@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import Stripe from 'stripe';
-import { query, queryOne, execute } from '../db/index';
+import { query, queryOne, execute, transaction } from '../db/index';
 import type { AuthUser } from './auth';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError, UnprocessableError } from '../lib/errors';
@@ -613,99 +613,149 @@ webhookRouter.post('/webhook', async (req: Request, res: Response) => {
   }
 
   try {
-    switch (event.type) {
-      case 'customer.subscription.created':
-      case 'customer.subscription.updated': {
-        const subscription = event.data.object as Stripe.Subscription;
-        const customerId = subscription.customer as string;
-
-        // Look up plan from price ID
-        const priceId = subscription.items.data[0]?.price?.id;
-        let plan: PlanId = 'free';
-        for (const [key, config] of Object.entries(PLANS)) {
-          if (config.stripePriceId === priceId) {
-            plan = key as Exclude<PlanId, 'free'>;
-            break;
-          }
-        }
-
-        // Map Stripe status to our status
-        let status: string = 'active';
-        if (subscription.status === 'canceled' || subscription.status === 'unpaid') {
-          status = 'canceled';
-          plan = 'free';
-        } else if (subscription.status === 'past_due') {
-          status = 'past_due';
-        } else if (subscription.status === 'incomplete') {
-          status = 'incomplete';
-        }
-
-        // Extract period dates from subscription (cast for compatibility with different Stripe SDK versions)
-        const subAny = subscription as unknown as Record<string, unknown>;
-        const periodStart = typeof subAny.current_period_start === 'number'
-          ? new Date(subAny.current_period_start * 1000).toISOString()
-          : null;
-        const periodEnd = typeof subAny.current_period_end === 'number'
-          ? new Date(subAny.current_period_end * 1000).toISOString()
-          : null;
-
-        // Upsert subscription row
-        const existing = await queryOne<{ id: string; user_id: string }>(
-          `SELECT id, user_id FROM subscriptions WHERE stripe_customer_id = $1`,
-          [customerId]
-        );
-
-        if (existing) {
-          await execute(
-            `UPDATE subscriptions SET stripe_subscription_id = $1, plan = $2, status = $3,
-             current_period_start = $4, current_period_end = $5, updated_at = NOW()
-             WHERE id = $6`,
-            [
-              subscription.id,
-              plan,
-              status,
-              periodStart,
-              periodEnd,
-              existing.id,
-            ]
-          );
-
-          // Update user plan
-          await execute(
-            'UPDATE users SET plan = $1, updated_at = NOW() WHERE id = $2',
-            [plan, existing.user_id]
-          );
-        }
-        break;
-      }
-
-      case 'customer.subscription.deleted': {
-        const subscription = event.data.object as Stripe.Subscription;
-        const customerId = subscription.customer as string;
-
-        const existing = await queryOne<{ id: string; user_id: string }>(
-          `SELECT id, user_id FROM subscriptions WHERE stripe_customer_id = $1`,
-          [customerId]
-        );
-
-        if (existing) {
-          await execute(
-            `UPDATE subscriptions SET plan = 'free', status = 'canceled', updated_at = NOW() WHERE id = $1`,
-            [existing.id]
-          );
-          await execute(
-            'UPDATE users SET plan = $1, updated_at = NOW() WHERE id = $2',
-            ['free', existing.user_id]
-          );
-        }
-        break;
-      }
+    // BL-012: Idempotency check — skip already-processed events
+    const alreadyProcessed = await queryOne<{ id: string }>(
+      `SELECT id FROM stripe_webhook_events WHERE id = $1`,
+      [event.id]
+    );
+    if (alreadyProcessed) {
+      res.json({ received: true });
+      return;
     }
+
+    // Process event + record idempotency key in a single transaction
+    await transaction(async (client) => {
+      switch (event.type) {
+        case 'customer.subscription.created':
+        case 'customer.subscription.updated': {
+          const subscription = event.data.object as Stripe.Subscription;
+          const customerId = subscription.customer as string;
+
+          // Look up plan from price ID
+          const priceId = subscription.items.data[0]?.price?.id;
+          let plan: PlanId = 'free';
+          for (const [key, config] of Object.entries(PLANS)) {
+            if (config.stripePriceId === priceId) {
+              plan = key as Exclude<PlanId, 'free'>;
+              break;
+            }
+          }
+
+          // Map Stripe status to our status
+          let status: string = 'active';
+          if (subscription.status === 'canceled' || subscription.status === 'unpaid') {
+            status = 'canceled';
+            plan = 'free';
+          } else if (subscription.status === 'past_due') {
+            status = 'past_due';
+          } else if (subscription.status === 'incomplete') {
+            status = 'incomplete';
+          }
+
+          // Extract period dates from subscription (cast for compatibility with different Stripe SDK versions)
+          const subAny = subscription as unknown as Record<string, unknown>;
+          const periodStart = typeof subAny.current_period_start === 'number'
+            ? new Date(subAny.current_period_start * 1000).toISOString()
+            : null;
+          const periodEnd = typeof subAny.current_period_end === 'number'
+            ? new Date(subAny.current_period_end * 1000).toISOString()
+            : null;
+
+          // Upsert subscription row
+          const existingResult = await client.query(
+            `SELECT id, user_id FROM subscriptions WHERE stripe_customer_id = $1`,
+            [customerId]
+          );
+          const existing = existingResult.rows[0] as { id: string; user_id: string } | undefined;
+
+          if (existing) {
+            await client.query(
+              `UPDATE subscriptions SET stripe_subscription_id = $1, plan = $2, status = $3,
+               current_period_start = $4, current_period_end = $5, updated_at = NOW()
+               WHERE id = $6`,
+              [subscription.id, plan, status, periodStart, periodEnd, existing.id]
+            );
+
+            // Update user plan
+            await client.query(
+              'UPDATE users SET plan = $1, updated_at = NOW() WHERE id = $2',
+              [plan, existing.user_id]
+            );
+          }
+          break;
+        }
+
+        case 'customer.subscription.deleted': {
+          const subscription = event.data.object as Stripe.Subscription;
+          const customerId = subscription.customer as string;
+
+          const existingResult = await client.query(
+            `SELECT id, user_id FROM subscriptions WHERE stripe_customer_id = $1`,
+            [customerId]
+          );
+          const existing = existingResult.rows[0] as { id: string; user_id: string } | undefined;
+
+          if (existing) {
+            await client.query(
+              `UPDATE subscriptions SET plan = 'free', status = 'canceled', updated_at = NOW() WHERE id = $1`,
+              [existing.id]
+            );
+            await client.query(
+              'UPDATE users SET plan = $1, updated_at = NOW() WHERE id = $2',
+              ['free', existing.user_id]
+            );
+          }
+          break;
+        }
+      }
+
+      // Record the event ID for idempotency
+      await client.query(
+        `INSERT INTO stripe_webhook_events (id, event_type) VALUES ($1, $2) ON CONFLICT (id) DO NOTHING`,
+        [event.id, event.type]
+      );
+    });
 
     res.json({ received: true });
   } catch (err) {
     handleRouteError(res, err, '[Billing] Webhook processing');
   }
 });
+
+// ─── BL-012: Weekly cleanup of old webhook idempotency records ──────────────
+const WEBHOOK_CLEANUP_INTERVAL_MS = 7 * 24 * 60 * 60 * 1000; // 1 week
+const WEBHOOK_RETENTION_DAYS = 90;
+
+let cleanupTimer: ReturnType<typeof setInterval> | null = null;
+
+export function startWebhookCleanup(): void {
+  if (cleanupTimer) return;
+  cleanupTimer = setInterval(async () => {
+    try {
+      const result = await execute(
+        `DELETE FROM stripe_webhook_events WHERE processed_at < NOW() - INTERVAL '${WEBHOOK_RETENTION_DAYS} days'`
+      );
+      if (result.rowCount > 0) {
+        logger.info({ deleted: result.rowCount }, 'Cleaned up old Stripe webhook events');
+      }
+    } catch (err) {
+      logger.error({ err }, 'Failed to clean up Stripe webhook events');
+    }
+  }, WEBHOOK_CLEANUP_INTERVAL_MS);
+  // Don't block process exit
+  cleanupTimer.unref();
+}
+
+export function stopWebhookCleanup(): void {
+  if (cleanupTimer) {
+    clearInterval(cleanupTimer);
+    cleanupTimer = null;
+  }
+}
+
+// Start cleanup on module load (only when Stripe is configured)
+if (stripe) {
+  startWebhookCleanup();
+}
 
 export default router;

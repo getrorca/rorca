@@ -78,7 +78,8 @@
       "dependsOn": [
         "BL-003"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "BL-005",
@@ -140,9 +141,8 @@
       "dependsOn": [
         "BL-004"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story BL-007"
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "BL-008",
@@ -164,9 +164,8 @@
         "BL-004",
         "BL-005"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story BL-008"
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "BL-009",
@@ -187,9 +186,8 @@
         "BL-002",
         "BL-001"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story BL-009"
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "BL-010",
@@ -208,9 +206,8 @@
         "BL-007",
         "BL-008"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story BL-010"
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "BL-011",
@@ -229,9 +226,8 @@
         "BL-001",
         "BL-009"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story BL-011"
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "BL-012",
@@ -249,9 +245,8 @@
       "dependsOn": [
         "BL-007"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story BL-012"
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "BL-013",
@@ -272,9 +267,7 @@
         "BL-003",
         "BL-007"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story BL-013"
+      "passes": false
     },
     {
       "id": "BL-014",

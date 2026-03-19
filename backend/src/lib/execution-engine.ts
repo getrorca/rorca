@@ -741,7 +741,10 @@ function spawnClaude(
           if (event.type === 'assistant' && event.message?.content) {
             for (const block of event.message.content as { type: string; text?: string }[]) {
               if (block.type === 'text' && block.text) {
-                process.stdout.write(block.text);
+                // Ensure the text block ends with a newline so RunTerminal's line-buffer
+                // flushes it immediately — without a trailing \n the text stays in
+                // lineBufferRef indefinitely and never reaches the display.
+                process.stdout.write(block.text.endsWith('\n') ? block.text : block.text + '\n');
               }
             }
           }
@@ -779,7 +782,21 @@ function spawnClaude(
     child.stderr?.on('data', (chunk: Buffer) => {
       watchdog.reset();
       logStream.write(chunk);
-      process.stdout.write(chunk);
+      // Don't pipe raw stderr to terminal — Claude CLI with --verbose writes
+      // diagnostic JSON (model usage, cache stats, token counts) to stderr.
+      // Piping it raw causes mini-terminals to show JSON metrics instead of
+      // the agent's prose narrative. Stderr is still captured in stderrChunks
+      // for error reporting and written to the log file for debugging.
+      // Only forward genuine error lines (non-JSON) to terminal.
+      const text = chunk.toString('utf8');
+      for (const line of text.split('\n')) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try { JSON.parse(trimmed); } catch {
+          // Not JSON — genuine error/warning message, show in terminal
+          process.stdout.write(line + '\n');
+        }
+      }
       stderrChunks.push(chunk);
       stderrSize += chunk.length;
       while (stderrSize > MAX_STDERR && stderrChunks.length > 1) {
@@ -2905,6 +2922,15 @@ async function main(): Promise<void> {
   // process.send is only available when spawned with an IPC channel — the ?. guard
   // makes this a no-op when running standalone (e.g. npx tsx execution-engine.ts ...).
   process.send?.({ type: 'pid', pid: process.pid });
+
+  // ── IPC heartbeat — tells the worker "I'm still alive" every 60s ──────────
+  // The worker updates pipeline_runs.last_heartbeat on each beat.
+  // If the heartbeat stops and the PID is dead, reconciliation marks the run failed.
+  // No-op when running standalone (process.send is undefined without IPC channel).
+  const heartbeatInterval = process.send
+    ? setInterval(() => { process.send?.({ type: 'heartbeat', ts: Date.now() }); }, 60_000)
+    : null;
+  if (heartbeatInterval) heartbeatInterval.unref(); // don't prevent clean exit
 
   logger.info(`[engine] Agent: ${config.agentType}${config.agentModel ? ` (model: ${config.agentModel})` : ''}`);
   if (config.attachAddr) logger.info(`[engine] OpenCode attach: ${config.attachAddr}`);

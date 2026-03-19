@@ -1433,17 +1433,11 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       runId = runResult!.id;
     }
 
-    // 7. Build env overrides — strip Claude Code vars and inject workspace/vault keys.
-    //    These are serialised into the pg-boss payload so the worker has everything it needs.
+    // 7. Build env overrides — workspace-specific and vault key additions only.
+    //    The worker already inherits its own process.env when spawning the execution engine,
+    //    so we only need to pass the EXTRA vars here (vault keys, workspace env vars).
+    //    DO NOT dump all of process.env here — it bloats the pg-boss payload unnecessarily.
     const envOverrides: Record<string, string> = {};
-
-    // Strip Claude Code env vars that block nested invocation
-    for (const [k, v] of Object.entries(process.env)) {
-      if (v !== undefined && !CLAUDE_ENV_VARS_TO_REMOVE.includes(k)) {
-        envOverrides[k] = v;
-      }
-    }
-    envOverrides['RORCA_PROCESS_ROLE'] = 'engine';
 
     // Inject workspace-specific env vars (decrypted)
     const workspaceEnvVars = getWorkspaceEnvVars(workspaceId);
@@ -1581,7 +1575,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     await getBoss().send('pipeline:run', jobPayload, {
       retryLimit: 0,
-      expireInSeconds: 7200, // 2 hours — pipeline runs can take 30–60 min; never expire mid-run
+      expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
     });
 
     logger.info(`[Pipeline] Enqueued pipeline:run job for runId=${runId}`);
@@ -3052,7 +3046,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     // 13. Enqueue via pg-boss (let pg-boss generate a UUID job ID).
     await getBoss().send('pipeline:retry', jobPayload, {
       retryLimit: 0,
-      expireInSeconds: 7200, // 2 hours — retry runs can take as long as fresh runs
+      expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
     });
 
     logger.info(`[Pipeline] Enqueued pipeline:retry job for newRunId=${newRunId} (originalRunId=${originalRunId})`);
@@ -5392,7 +5386,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
 
     await getBoss().send('pipeline:run', jobPayload, {
       retryLimit: 0,
-      expireInSeconds: 7200, // 2 hours — DLQ-retried runs can take as long as fresh runs
+      expireInSeconds: 300, // Task-Monitor: job spawns engine and returns immediately
     });
 
     // Emit WAL event

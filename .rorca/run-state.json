@@ -1,17 +1,17 @@
 {
-  "specId": "rorca-pipeline-queueing-and-worktrees",
-  "runId": 20260316000034,
-  "startedAt": "2026-03-18T21:27:49.832Z",
-  "lastUpdatedAt": "2026-03-18T22:02:50.976Z",
+  "specId": "rorca-billing-launch",
+  "runId": 20260316000044,
+  "startedAt": "2026-03-19T20:38:35.785Z",
+  "lastUpdatedAt": "2026-03-19T20:39:16.135Z",
   "completedStories": [
     {
-      "storyId": "US-012",
-      "title": "Write integration tests for queue semantics and worktree isolation flows",
+      "storyId": "BL-012",
+      "title": "Billing webhook idempotency — prevent duplicate billing state transitions",
       "status": "passed",
-      "startedAt": "2026-03-18T21:50:00.280Z",
-      "finishedAt": "2026-03-18T22:02:50.976Z",
+      "startedAt": "2026-03-19T20:38:42.733Z",
+      "finishedAt": "2026-03-19T20:39:16.135Z",
       "agentType": "claude",
-      "elapsedMs": 770696
+      "elapsedMs": 33402
     }
   ],
   "failedStories": [],
