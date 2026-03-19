@@ -245,6 +245,103 @@ describe('POST /api/billing/activate-license', () => {
   });
 });
 
+// ─── POST /api/billing/create-portal-session ─────────────────────────────────
+
+describe('POST /api/billing/create-portal-session', () => {
+  test('returns 503 when Stripe is not configured', async () => {
+    const res = await request(app)
+      .post('/api/billing/create-portal-session')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(503);
+  });
+
+  describe('with Stripe configured', () => {
+    let stripeApp: Express;
+    let stripeAuthToken: string;
+    const mockPortalCreate = jest.fn();
+
+    beforeEach(async () => {
+      jest.resetModules();
+
+      jest.mock('../../lib/llm-client', () => ({
+        chatComplete: jest.fn(),
+        getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
+        isValidModel: jest.fn().mockReturnValue(true),
+        DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+        resolveVaultProvider: jest.fn().mockReturnValue(null),
+        getModelInfo: jest.fn().mockReturnValue(undefined),
+        SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
+      }));
+
+      process.env.STRIPE_SECRET_KEY = 'sk_test_fake_key';
+      process.env.RORCA_LICENSE_PUBLIC_KEY = rsaPublicKey;
+
+      mockPortalCreate.mockResolvedValue({ url: 'https://billing.stripe.com/session/test_portal_123' });
+
+      jest.mock('../../lib/stripe-client', () => ({
+        stripe: {
+          billingPortal: { sessions: { create: mockPortalCreate } },
+          customers: { create: jest.fn().mockResolvedValue({ id: 'cus_test_portal' }) },
+          checkout: { sessions: { create: jest.fn() } },
+          webhooks: { constructEvent: jest.fn() },
+        },
+      }));
+
+      const serverMod = require('../../server');
+      stripeApp = serverMod.default;
+      stripeAuthToken = await getAuthToken(stripeApp);
+    });
+
+    afterEach(async () => {
+      try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
+      delete process.env.STRIPE_SECRET_KEY;
+    });
+
+    test('returns portalUrl when stripe_customer_id exists', async () => {
+      // Pre-create a subscription row with a Stripe customer ID
+      const { execute: exec, queryOne: qo } = require('../../db/index');
+      const user = await qo('SELECT id FROM users WHERE email = $1', ['testauth@example.com']);
+      expect(user).toBeDefined();
+
+      await exec(
+        `INSERT INTO subscriptions (id, user_id, stripe_customer_id, plan, status)
+         VALUES ($1, $2, $3, 'pro', 'active')
+         ON CONFLICT (id) DO NOTHING`,
+        ['sub_portal_test', user.id, 'cus_test_portal']
+      );
+
+      const res = await request(stripeApp)
+        .post('/api/billing/create-portal-session')
+        .set('Authorization', `Bearer ${stripeAuthToken}`);
+
+      expect(res.status).toBe(200);
+      expect(res.body.portalUrl).toBe('https://billing.stripe.com/session/test_portal_123');
+      expect(mockPortalCreate).toHaveBeenCalledWith(
+        expect.objectContaining({
+          customer: 'cus_test_portal',
+          return_url: expect.stringContaining('/settings/billing'),
+        })
+      );
+    });
+
+    test('returns 404 when no stripe_customer_id exists', async () => {
+      // Ensure no subscription row exists for the test user
+      const { execute: exec, queryOne: qo } = require('../../db/index');
+      const user = await qo('SELECT id FROM users WHERE email = $1', ['testauth@example.com']);
+      if (user) {
+        await exec('DELETE FROM subscriptions WHERE user_id = $1', [user.id]);
+      }
+
+      const res = await request(stripeApp)
+        .post('/api/billing/create-portal-session')
+        .set('Authorization', `Bearer ${stripeAuthToken}`);
+
+      expect(res.status).toBe(404);
+    });
+  });
+});
+
 // ─── POST /api/billing/webhook ──────────────────────────────────────────────
 
 describe('POST /api/billing/webhook', () => {

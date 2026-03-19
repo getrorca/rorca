@@ -3,10 +3,11 @@
 Spec: rorca-billing-launch
 Run ID: 20260316000040
 Started: 2026-03-19T18:17:27.182Z
-Last Updated: 2026-03-19T19:25:06.224Z
+Last Updated: 2026-03-19T19:40:37.959Z
 
-## Completed Stories (4)
+## Completed Stories (5)
 - BL-004: License activation endpoint — POST /api/billing/activate-license — DONE (claude, 1176s)
 - BL-007: Stripe checkout flow — POST /api/billing/create-checkout-session — DONE (claude, 702s)
 - BL-008: License status in Settings > Billing tab — DONE (claude, 351s)
 - BL-009: Trial expiry notification and grace period — DONE (claude, 424s)
+- BL-010: Stripe Customer Portal session endpoint — DONE (claude, 607s)

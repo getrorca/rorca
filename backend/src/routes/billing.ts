@@ -446,6 +446,56 @@ router.post('/portal', async (req: Request, res: Response) => {
   }
 });
 
+/**
+ * @swagger
+ * /api/billing/create-portal-session:
+ *   post:
+ *     tags: [Billing]
+ *     summary: Create a Stripe Customer Portal session
+ *     operationId: createPortalSession
+ *     description: Creates a Stripe Customer Portal session for the authenticated user. The portal allows subscription management (upgrade, downgrade, cancel, update payment method). Returns a portal URL for redirect.
+ *     responses:
+ *       200:
+ *         description: Portal session URL
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 portalUrl: { type: string }
+ *       404:
+ *         description: No billing account or Stripe customer found
+ *       503:
+ *         description: Stripe not configured
+ *       500:
+ *         description: Failed to create portal session
+ */
+router.post('/create-portal-session', async (req: Request, res: Response) => {
+  if (!stripe) {
+    res.status(503).json({ error: 'Stripe is not configured' });
+    return;
+  }
+
+  const authReq = req as Request & { user: AuthUser };
+  const sub = await getOrCreateCustomer(authReq.user.id);
+
+  if (!sub?.stripe_customer_id) {
+    res.status(404).json({ error: 'No billing account found. Subscribe to a plan first.' });
+    return;
+  }
+
+  try {
+    const session = await stripe.billingPortal.sessions.create({
+      customer: sub.stripe_customer_id,
+      return_url: `${FRONTEND_URL}/settings/billing`,
+    });
+    res.json({ portalUrl: session.url });
+  } catch (err) {
+    logger.error({ err }, 'Stripe portal error');
+    res.status(500).json({ error: 'Failed to create billing portal session' });
+  }
+});
+
 // ─── GET /api/billing/quotas ─────────────────────────────────────────────────
 
 interface QuotaRow {

@@ -168,8 +168,9 @@ export function BillingSettings() {
     setPortalLoading(true);
     setError(null);
     try {
-      const res = await apiFetch<{ url?: string; error?: string }>('/api/billing/portal', { method: 'POST' });
-      if (res.url) window.open(res.url, '_blank');
+      const res = await apiFetch<{ portalUrl?: string; url?: string; error?: string }>('/api/billing/create-portal-session', { method: 'POST' });
+      const portalUrl = res.portalUrl || res.url;
+      if (portalUrl) window.location.href = portalUrl;
       else setError(res.error || 'Failed to open billing portal');
     } catch (err: any) {
       setError(err.message || 'Failed to open billing portal');
