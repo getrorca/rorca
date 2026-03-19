@@ -13,6 +13,9 @@
  */
 
 import 'dotenv/config';
+// Mark this process as 'worker' so db/index.ts doesn't register its own
+// SIGTERM handler — the worker manages pool teardown in its shutdown() function.
+process.env.RORCA_PROCESS_ROLE = 'worker';
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
@@ -31,7 +34,7 @@ import {
 
 import simpleGit from 'simple-git';
 import { performMerge } from './lib/merge-handler';
-import { initDb, query, queryOne, execute } from './db/index';
+import { initDb, query, queryOne, execute, closePool } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { logger } from './lib/logger';
@@ -40,6 +43,28 @@ import { advanceQueue } from './lib/run-queue';
 import { FlushBuffer } from './lib/flush-buffer';
 import { createOrUpdateAutoPr } from './lib/github-pr-creator';
 import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
+
+// ── tsx binary resolution ─────────────────────────────────────────────────────
+
+/**
+ * Resolve the tsx binary used to spawn execution-engine subprocesses.
+ * Primary: backend/node_modules/.bin/tsx (works after `npm install` in backend/).
+ * Fallback: search PATH via `which tsx` (works when tsx is installed globally or via npx).
+ * Throws if tsx cannot be found — a missing tsx binary means runs will always fail.
+ */
+function findTsxBin(): string {
+  const local = path.join(__dirname, '..', 'node_modules', '.bin', 'tsx');
+  if (fs.existsSync(local)) return local;
+  // Fallback: search PATH
+  try {
+    const found = execSync('which tsx 2>/dev/null', { encoding: 'utf8' }).trim();
+    if (found) return found;
+  } catch { /* ignore */ }
+  throw new Error(
+    `tsx binary not found at ${local} and not in PATH. ` +
+    `Run 'cd backend && npm install' to install devDependencies.`
+  );
+}
 
 // ── Post-merge smoke test ─────────────────────────────────────────────────────
 
@@ -219,11 +244,6 @@ const HEARTBEAT_INTERVAL_MS = 30_000; // 30 s
 // is mutated by job handlers. Cleaned up when the process exits.
 
 const activeProcesses = new Map<number, ChildProcess>();
-
-// ── US-002: Track triggered_via per active run for per-type concurrency ───
-// Maps runId → 'queue' | 'run_now' so the handler can count active jobs of
-// each type and enforce queue_max_concurrent vs run_now_max_concurrent.
-const activeTriggeredVia = new Map<number, 'queue' | 'run_now'>();
 
 // ── Cancelling runs set (runId) ───────────────────────────────────────────
 // Tracks which runs are being intentionally cancelled so the exit handler
@@ -652,29 +672,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, triggeredVia } = payload;
-
-    // US-002: Enforce per-type concurrency limits before spawning.
-    // Count currently active jobs of this trigger type and check against the limit.
-    const settings = await getConcurrencySettings();
-    const activeOfType = Array.from(activeTriggeredVia.values()).filter(v => v === triggeredVia).length;
-    const maxForType = triggeredVia === 'queue' ? settings.queueMaxConcurrent : settings.runNowMaxConcurrent;
-
-    if (activeOfType >= maxForType) {
-      // At capacity for this trigger type — re-enqueue with a short delay so
-      // pg-boss picks it up again after some active jobs finish.
-      // Cannot throw (retryLimit=0 would permanently fail the job).
-      logger.info(
-        { jobId, runId, triggeredVia, activeOfType, maxForType },
-        '[worker] pipeline:run — at capacity for trigger type, re-enqueueing with 5s delay',
-      );
-      await getBoss().send('pipeline:run', job.data as Record<string, unknown>, {
-        retryLimit: 0,
-        expireInSeconds: 7200,
-        startAfter: 5, // delay 5s before becoming eligible again
-      });
-      continue; // skip to next job in batch
-    }
+    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId } = payload;
 
     // Determine effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
@@ -689,6 +687,39 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       return;
     }
     const { workspace_id: workspaceId, parallelism } = runRow;
+
+    // 1b. Per-workspace concurrency lock (DB-based, survives restarts).
+    // Task-Monitor pattern: pg-boss jobs complete immediately after spawn, so pg-boss
+    // queue locks no longer enforce concurrency. We check pipeline_runs directly.
+    // Worktree runs are git-isolated and safe to run in parallel; non-worktree runs
+    // on the same workspace would cause git conflicts.
+    const concurrentRow = await queryOne<{ count: string }>(
+      `SELECT COUNT(*) AS count FROM pipeline_runs
+       WHERE workspace_id = $1 AND status = 'running' AND id != $2`,
+      [workspaceId, runId],
+    );
+    const activeForWorkspace = parseInt(concurrentRow?.count ?? '0', 10);
+    const settings = await getConcurrencySettings();
+    const maxConcurrent = settings.queueMaxConcurrent;
+
+    if (activeForWorkspace >= maxConcurrent && !worktreePath) {
+      // At capacity for this workspace — re-enqueue with delay.
+      // Reset status back to 'queued' so the UI shows it correctly.
+      logger.info(
+        { runId, workspaceId, activeForWorkspace, maxConcurrent },
+        '[worker] Per-workspace concurrency limit reached — re-enqueueing with 10s delay',
+      );
+      await execute(
+        `UPDATE pipeline_runs SET status = 'queued' WHERE id = $1 AND status != 'running'`,
+        [runId],
+      );
+      await getBoss().send('pipeline:run', job.data as Record<string, unknown>, {
+        retryLimit: 0,
+        expireInSeconds: 300,
+        startAfter: 10,
+      });
+      return;
+    }
 
     // 2. Mark run as running — set worker_id so orphan sweep knows this run belongs to us
     await execute(
@@ -728,7 +759,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
     // 3. Build engine args
     const executionEngineTs = path.join(__dirname, 'lib', 'execution-engine.ts');
-    const tsxBin = path.join(__dirname, '..', 'node_modules', '.bin', 'tsx');
+    const tsxBin = findTsxBin();
     const backendPort = process.env.PORT ?? '3030';
 
     const engineArgs = [
@@ -781,28 +812,30 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       await execute('UPDATE pipeline_runs SET pid = $1 WHERE id = $2', [child.pid, runId]);
     }
 
-    // Register in active processes map for cancellation + concurrency tracking
+    // Register in active processes map for cancellation
     activeProcesses.set(runId, child);
-    activeTriggeredVia.set(runId, triggeredVia);
 
     // Listen for IPC message from execution-engine reporting its own PID.
     // tsx compiles TypeScript and forks a Node.js child — the tsx wrapper PID
     // stored above dies within ~1-2s. The engine sends its actual PID so the
     // kill endpoint can SIGTERM the correct process.
     child.on('message', async (msg: unknown) => {
-      if (
-        typeof msg === 'object' &&
-        msg !== null &&
-        (msg as Record<string, unknown>).type === 'pid' &&
-        typeof (msg as Record<string, unknown>).pid === 'number'
-      ) {
-        const enginePid = (msg as Record<string, unknown>).pid as number;
+      if (typeof msg !== 'object' || msg === null) return;
+      const m = msg as Record<string, unknown>;
+
+      if (m.type === 'pid' && typeof m.pid === 'number') {
+        const enginePid = m.pid;
         logger.info({ runId, enginePid }, '[worker] Received inner engine PID via IPC — updating pipeline_runs.pid');
         try {
           await execute('UPDATE pipeline_runs SET pid = $1 WHERE id = $2', [enginePid, runId]);
         } catch (err) {
           logger.warn({ err, runId, enginePid }, '[worker] Failed to update pipeline_runs.pid with inner engine PID');
         }
+      } else if (m.type === 'heartbeat') {
+        // Engine is alive — touch last_heartbeat so reconciliation doesn't kill us.
+        try {
+          await execute('UPDATE pipeline_runs SET last_heartbeat = NOW() WHERE id = $1', [runId]);
+        } catch { /* non-fatal — next beat will retry */ }
       }
     });
 
@@ -825,170 +858,154 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     child.stdout?.on('data', (data: Buffer) => { void handleData(data); });
     child.stderr?.on('data', (data: Buffer) => { void handleData(data); });
 
-    // 7. Wait for close (not exit), flush remaining bytes, update run status.
+    // 7. Task-Monitor pattern: fire-and-forget close/error handlers.
     //
-    // Root cause fix (US-007): Node.js does NOT guarantee that all stdout/stderr
-    // data events have been emitted when the 'exit' event fires. The pipe buffer
-    // may still contain unread bytes (e.g. pino's sonic-boom flush, final log lines
-    // produced just before the child exits). Using 'exit' for flushPending() caused
-    // run_output_chunks to receive 0 rows for worktree runs where the engine emits
-    // a burst of output right before exit (merge logs, summary lines).
+    // The pg-boss job completes immediately after spawning the engine — no
+    // long-lived job lock. The engine sends IPC heartbeats every 60s; the
+    // worker writes them to pipeline_runs.last_heartbeat. reconcileState()
+    // (running every 60s) acts as the watchdog: if last_heartbeat > 2 min
+    // stale AND the PID is dead → mark the run failed.
     //
-    // The 'close' event fires after BOTH:
-    //   (a) the child process has exited, AND
-    //   (b) all stdio streams have been fully drained (all data events emitted).
-    // This guarantees flushPending() sees every byte the engine wrote to stdout/stderr.
-    await new Promise<void>((resolve) => {
-      // Capture exit code from 'exit' event; cleanup runs on 'close'.
-      let capturedCode: number | null = null;
-      child.on('exit', (code) => { capturedCode = code; });
+    // Root cause fix (US-007): 'close' fires after all stdio streams drain,
+    // guaranteeing flushPending() sees every byte the engine wrote.
+    let capturedCode: number | null = null;
+    child.on('exit', (code) => { capturedCode = code; });
 
-      child.on('close', async () => {
-        // All stdout/stderr data has been received — safe to flush the tail.
+    child.on('close', async () => {
+      try {
         await flushPending();
 
         const code = capturedCode;
         activeProcesses.delete(runId);
-        activeTriggeredVia.delete(runId);
+
 
         const wasCancelled = cancellingRuns.delete(runId);
         const status = wasCancelled ? 'cancelled' : (code === 0 ? 'done' : 'failed');
         logger.info({ runId, code, status, wasCancelled }, '[worker] execution-engine exited');
 
-        try {
-          await execute(
-            `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
-            [status, runId],
-          );
+        await execute(
+          `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
+          [status, runId],
+        );
 
-          if (wasCancelled) {
-            await emitWalEvent('run_cancelled', workspaceId, {
-              run_id: runId,
-              cancelledAt: new Date().toISOString(),
-              source: 'worker',
-            });
-          } else {
-            await emitWalEvent('run_finished', workspaceId, {
-              run_id: runId,
-              status,
-              exit_code: code,
-              source: 'worker',
-            });
+        if (wasCancelled) {
+          await emitWalEvent('run_cancelled', workspaceId, {
+            run_id: runId,
+            cancelledAt: new Date().toISOString(),
+            source: 'worker',
+          });
+        } else {
+          await emitWalEvent('run_finished', workspaceId, {
+            run_id: runId,
+            status,
+            exit_code: code,
+            source: 'worker',
+          });
 
-            // Auto-merge worktree into main after run completes (US-004 + US-005)
-            // Only attempt if the run succeeded (status='done'), a worktree was created,
-            // AND every story in the spec JSON has passes:true — partial runs must not merge.
-            let allSpecStoriesPassed = false;
-            if (status === 'done' && payload.autoMerge && worktreePath && payload.branchName) {
-              try {
-                const absSpecPath = path.join(workspacePath, specPath);
-                const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
-                const stories: Array<{ passes?: boolean; excluded?: boolean }> = specJson.userStories ?? [];
-                allSpecStoriesPassed = stories.length > 0 && stories.every(s => s.passes === true || s.excluded === true);
-                if (!allSpecStoriesPassed) {
-                  logger.info({ runId, specPath }, '[worker] Skipping auto-merge — spec not fully complete (not all stories passed)');
-                }
-              } catch (specErr: any) {
-                logger.warn({ runId, err: specErr?.message }, '[worker] Could not read spec JSON for merge check — skipping merge');
+          // Auto-merge worktree into main after run completes (US-004 + US-005)
+          let allSpecStoriesPassed = false;
+          if (status === 'done' && payload.autoMerge && worktreePath && payload.branchName) {
+            try {
+              const absSpecPath = path.join(workspacePath, specPath);
+              const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
+              const stories: Array<{ passes?: boolean; excluded?: boolean }> = specJson.userStories ?? [];
+              allSpecStoriesPassed = stories.length > 0 && stories.every(s => s.passes === true || s.excluded === true);
+              if (!allSpecStoriesPassed) {
+                logger.info({ runId, specPath }, '[worker] Skipping auto-merge — spec not fully complete (not all stories passed)');
               }
-            }
-            if (status === 'done' && payload.autoMerge && worktreePath && payload.branchName && allSpecStoriesPassed) {
-              try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-              const mergeLog = (msg: string) => logger.info({ runId }, msg);
-              try {
-                await autoMergeAfterRun(
-                  workspacePath,
-                  worktreePath,
-                  payload.branchName,
-                  workspaceId,
-                  runId,
-                  mergeLog,
-                );
-              } catch (mergeErr: any) {
-                logger.error({ err: mergeErr, runId }, '[worker] autoMergeAfterRun threw unexpectedly');
-              }
-            }
-
-            // US-034: Finalize draft PR on run completion. If a draft PR was created
-            // at run start, convert it to ready-for-review (success) or update with
-            // failure summary (failure). Falls back to legacy auto-PR if no draft exists.
-            if (payload.branchName) {
-              try {
-                const prRow = await queryOne<{ pr_number: number | null }>(
-                  'SELECT pr_number FROM pipeline_runs WHERE id = $1',
-                  [runId],
-                );
-
-                if (prRow?.pr_number) {
-                  // Draft PR exists — finalize it
-                  await finalizeDraftPr({
-                    runId,
-                    workspaceId,
-                    branchName: payload.branchName,
-                    workspacePath,
-                    status,
-                  });
-                } else if (status === 'done') {
-                  // No draft PR — fall back to legacy auto-PR creation (US-028)
-                  await createOrUpdateAutoPr({
-                    runId,
-                    workspaceId,
-                    branchName: payload.branchName,
-                    workspacePath,
-                  });
-                }
-              } catch (prErr: any) {
-                logger.error({ err: prErr, runId }, '[worker] Draft PR finalization/auto-PR threw unexpectedly');
-              }
-            }
-
-            // Workflow dispatch (US-026): trigger configured GitHub Actions workflow on run completion.
-            // Only fires when status='done'. Non-fatal.
-            if (status === 'done') {
-              await dispatchWorkflowIfConfigured(workspaceId, runId);
+            } catch (specErr: any) {
+              logger.warn({ runId, err: specErr?.message }, '[worker] Could not read spec JSON for merge check — skipping merge');
             }
           }
-        } catch (err) {
-          logger.error({ err, runId }, '[worker] Failed to update run status on exit');
+          if (status === 'done' && payload.autoMerge && worktreePath && payload.branchName && allSpecStoriesPassed) {
+            try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+            const mergeLog = (msg: string) => logger.info({ runId }, msg);
+            try {
+              await autoMergeAfterRun(
+                workspacePath,
+                worktreePath,
+                payload.branchName,
+                workspaceId,
+                runId,
+                mergeLog,
+              );
+            } catch (mergeErr: any) {
+              logger.error({ err: mergeErr, runId }, '[worker] autoMergeAfterRun threw unexpectedly');
+            }
+          }
+
+          // US-034: Finalize draft PR on run completion.
+          if (payload.branchName) {
+            try {
+              const prRow = await queryOne<{ pr_number: number | null }>(
+                'SELECT pr_number FROM pipeline_runs WHERE id = $1',
+                [runId],
+              );
+
+              if (prRow?.pr_number) {
+                await finalizeDraftPr({
+                  runId,
+                  workspaceId,
+                  branchName: payload.branchName,
+                  workspacePath,
+                  status,
+                });
+              } else if (status === 'done') {
+                await createOrUpdateAutoPr({
+                  runId,
+                  workspaceId,
+                  branchName: payload.branchName,
+                  workspacePath,
+                });
+              }
+            } catch (prErr: any) {
+              logger.error({ err: prErr, runId }, '[worker] Draft PR finalization/auto-PR threw unexpectedly');
+            }
+          }
+
+          // Workflow dispatch (US-026)
+          if (status === 'done') {
+            await dispatchWorkflowIfConfigured(workspaceId, runId);
+          }
         }
 
         // Advance run queue — promote next queued run for this workspace
         advanceQueue(String(workspaceId)).catch(err =>
           logger.error({ err, runId, workspaceId }, '[worker] advanceQueue failed after run completion'),
         );
+      } catch (err) {
+        logger.error({ err, runId }, '[worker] close handler failed');
+      }
+    });
 
-        resolve();
-      });
-
-      child.on('error', async (err) => {
+    child.on('error', async (err) => {
+      try {
         logger.error({ err, runId }, '[worker] execution-engine spawn error');
         await flushPending();
         activeProcesses.delete(runId);
-        activeTriggeredVia.delete(runId);
+
         cancellingRuns.delete(runId);
 
-        try {
-          await execute(
-            `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`,
-            [runId],
-          );
-          await emitWalEvent('run_finished', workspaceId, {
-            run_id: runId,
-            status: 'failed',
-            error: (err as Error).message,
-            source: 'worker',
-          });
-        } catch (dbErr) {
-          logger.error({ dbErr, runId }, '[worker] Failed to update run status after spawn error');
-        }
+        await execute(
+          `UPDATE pipeline_runs SET status = 'failed', finished_at = NOW() WHERE id = $1`,
+          [runId],
+        );
+        await emitWalEvent('run_finished', workspaceId, {
+          run_id: runId,
+          status: 'failed',
+          error: (err as Error).message,
+          source: 'worker',
+        });
 
         advanceQueue(String(workspaceId)).catch(qErr =>
           logger.error({ err: qErr, runId, workspaceId }, '[worker] advanceQueue failed after spawn error'),
         );
-
-        resolve();
-      });
+      } catch (dbErr) {
+        logger.error({ dbErr, runId }, '[worker] error handler failed');
+      }
     });
+
+    logger.info({ runId, pid: child.pid }, '[worker] Engine spawned — releasing pg-boss job');
   }));
 }
 
@@ -1037,7 +1054,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
     // 4. Build execution-engine args with the temp retry spec
     const executionEngineTs = path.join(__dirname, 'lib', 'execution-engine.ts');
-    const tsxBin = path.join(__dirname, '..', 'node_modules', '.bin', 'tsx');
+    const tsxBin = findTsxBin();
     const backendPort = process.env.PORT ?? '3030';
 
     // Verify the temp retry spec file still exists (route handler should have written it)
@@ -1132,7 +1149,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
 
         const code = capturedCode;
         activeProcesses.delete(runId);
-        activeTriggeredVia.delete(runId);
+
 
         const wasCancelled = cancellingRuns.delete(runId);
 
@@ -1196,7 +1213,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
         logger.error({ err, runId }, '[worker] retry execution-engine spawn error');
         await flushPending();
         activeProcesses.delete(runId);
-        activeTriggeredVia.delete(runId);
+
         cancellingRuns.delete(runId);
 
         try {
@@ -1659,16 +1676,21 @@ async function reconcileState(): Promise<void> {
   // ── Case A: pipeline_runs stuck in 'running' with no live pgboss job ──
   // NOTE: 'queued' runs are excluded — they intentionally have no pg-boss job.
   // Queued runs are promoted via advanceQueue() when the active run completes.
+  //
+  // Heartbeat-aware: if the engine sent a heartbeat within the last 2 minutes,
+  // the subprocess is still alive even if the pg-boss job expired. Don't kill it.
 
   type StuckRunRow = {
     id: number;
+    pid: number | null;
     workspace_id: number | string;
+    last_heartbeat: string | null;
   };
 
   let stuckRuns: StuckRunRow[];
   try {
     stuckRuns = await query<StuckRunRow>(
-      `SELECT pr.id, pr.workspace_id
+      `SELECT pr.id, pr.pid, pr.workspace_id, pr.last_heartbeat
        FROM pipeline_runs pr
        WHERE pr.status = 'running'
          AND NOT EXISTS (
@@ -1676,7 +1698,8 @@ async function reconcileState(): Promise<void> {
            WHERE j.name IN ('pipeline:run', 'pipeline:retry')
              AND j.state IN ('created', 'active', 'retry')
              AND (j.data->>'runId')::bigint = pr.id
-         )`,
+         )
+         AND (pr.last_heartbeat IS NULL OR pr.last_heartbeat < NOW() - INTERVAL '2 minutes')`,
     );
   } catch (err) {
     logger.warn({ err }, '[worker] reconcileState — Case A query failed, skipping');
@@ -1684,9 +1707,23 @@ async function reconcileState(): Promise<void> {
   }
 
   for (const run of stuckRuns) {
+    // Final safety: if the PID is still alive, the engine is running — skip.
+    if (run.pid) {
+      try {
+        process.kill(run.pid, 0); // signal 0 = liveness check, doesn't kill
+        logger.info(
+          { runId: run.id, pid: run.pid },
+          '[worker] reconcileState — Case A: pg-boss job gone but PID still alive, skipping',
+        );
+        continue;
+      } catch {
+        // PID not found — process is dead, proceed with reconciliation
+      }
+    }
+
     logger.warn(
-      { runId: run.id, currentStatus: 'running' },
-      '[worker] reconcileState — Case A: pipeline_run has no live pgboss job, marking failed',
+      { runId: run.id, currentStatus: 'running', lastHeartbeat: run.last_heartbeat },
+      '[worker] reconcileState — Case A: no live pgboss job, no recent heartbeat, PID dead — marking failed',
     );
 
     try {
@@ -1910,12 +1947,19 @@ async function shutdown(signal: string): Promise<void> {
   logger.info('[worker] shutdown — stopping pg-boss (timeout: 15s)');
   try {
     await getBoss().stop({ timeout: 15_000 });
-    logger.info('[worker] pg-boss stopped cleanly — exiting');
-    process.exit(0);
+    logger.info('[worker] pg-boss stopped cleanly');
   } catch (err) {
-    logger.error({ err }, '[worker] error during shutdown');
-    process.exit(1);
+    logger.error({ err }, '[worker] error stopping pg-boss');
   }
+
+  // 7. Close DB pool LAST — all DB work must be done before this point
+  try {
+    await closePool();
+    logger.info('[worker] DB pool closed — exiting');
+  } catch {
+    // best-effort
+  }
+  process.exit(0);
 }
 
 process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
