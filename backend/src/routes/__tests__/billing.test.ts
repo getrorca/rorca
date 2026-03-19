@@ -244,3 +244,115 @@ describe('POST /api/billing/activate-license', () => {
     expect(res2.body.plan).toBe('team');
   });
 });
+
+// ─── POST /api/billing/webhook ──────────────────────────────────────────────
+
+describe('POST /api/billing/webhook', () => {
+  let stripeApp: Express;
+  let stripeAuthToken: string;
+
+  beforeEach(async () => {
+    // Reload modules with Stripe configured
+    jest.resetModules();
+
+    jest.mock('../../lib/llm-client', () => ({
+      chatComplete: jest.fn(),
+      getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
+      isValidModel: jest.fn().mockReturnValue(true),
+      DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+      resolveVaultProvider: jest.fn().mockReturnValue(null),
+      getModelInfo: jest.fn().mockReturnValue(undefined),
+      SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
+    }));
+
+    process.env.STRIPE_SECRET_KEY = 'sk_test_fake_key';
+    process.env.STRIPE_WEBHOOK_SECRET = 'whsec_test_secret';
+    process.env.RORCA_LICENSE_PUBLIC_KEY = rsaPublicKey;
+
+    // Mock the stripe-client module to return a mock stripe instance
+    const mockConstructEvent = jest.fn();
+    jest.mock('../../lib/stripe-client', () => ({
+      stripe: {
+        webhooks: { constructEvent: mockConstructEvent },
+        customers: { create: jest.fn().mockResolvedValue({ id: 'cus_test_123' }) },
+        checkout: { sessions: { create: jest.fn().mockResolvedValue({ url: 'https://checkout.stripe.com/test' }) } },
+      },
+    }));
+
+    const serverMod = require('../../server');
+    stripeApp = serverMod.default;
+    stripeAuthToken = await getAuthToken(stripeApp);
+
+    // Pre-create a subscription row for the test user
+    const { execute: exec, queryOne: qo } = require('../../db/index');
+    const user = await qo('SELECT id FROM users WHERE email = $1', ['testauth@example.com']);
+    if (user) {
+      await exec(
+        `INSERT INTO subscriptions (id, user_id, stripe_customer_id, plan, status)
+         VALUES ($1, $2, $3, 'free', 'active')
+         ON CONFLICT (id) DO NOTHING`,
+        [`sub_test_wh`, user.id, 'cus_test_123']
+      );
+    }
+  });
+
+  afterEach(async () => {
+    try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
+    delete process.env.STRIPE_SECRET_KEY;
+    delete process.env.STRIPE_WEBHOOK_SECRET;
+  });
+
+  test('webhook upserts billing row on checkout.session.completed', async () => {
+    // Configure mock constructEvent to return a checkout.session.completed event
+    const { stripe: mockStripe } = require('../../lib/stripe-client');
+    const { queryOne: qo } = require('../../db/index');
+    const user = await qo('SELECT id FROM users WHERE email = $1', ['testauth@example.com']);
+
+    mockStripe.webhooks.constructEvent.mockReturnValue({
+      type: 'checkout.session.completed',
+      data: {
+        object: {
+          customer: 'cus_test_123',
+          subscription: 'sub_stripe_test_456',
+          metadata: { rorca_user_id: user.id, plan: 'pro' },
+        },
+      },
+    });
+
+    const payload = JSON.stringify({ type: 'checkout.session.completed' });
+    const res = await request(stripeApp)
+      .post('/api/billing/webhook')
+      .set('Content-Type', 'application/json')
+      .set('stripe-signature', 'valid_test_signature')
+      .send(payload);
+
+    expect(res.status).toBe(200);
+    expect(res.body.received).toBe(true);
+
+    // Verify subscription row was updated
+    const sub = await qo(
+      `SELECT plan, status, stripe_subscription_id FROM subscriptions WHERE stripe_customer_id = $1`,
+      ['cus_test_123']
+    );
+    expect(sub).toBeDefined();
+    expect(sub.plan).toBe('pro');
+    expect(sub.status).toBe('active');
+    expect(sub.stripe_subscription_id).toBe('sub_stripe_test_456');
+  });
+
+  test('invalid webhook signature returns 400', async () => {
+    const { stripe: mockStripe } = require('../../lib/stripe-client');
+    mockStripe.webhooks.constructEvent.mockImplementation(() => {
+      throw new Error('Invalid signature');
+    });
+
+    const payload = JSON.stringify({ type: 'checkout.session.completed' });
+    const res = await request(stripeApp)
+      .post('/api/billing/webhook')
+      .set('Content-Type', 'application/json')
+      .set('stripe-signature', 'bad_signature')
+      .send(payload);
+
+    expect(res.status).toBe(400);
+  });
+});

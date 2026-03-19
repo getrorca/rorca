@@ -3,7 +3,8 @@
 Spec: rorca-billing-launch
 Run ID: 20260316000040
 Started: 2026-03-19T18:17:27.182Z
-Last Updated: 2026-03-19T18:59:23.933Z
+Last Updated: 2026-03-19T19:11:26.994Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - BL-004: License activation endpoint — POST /api/billing/activate-license — DONE (claude, 1176s)
+- BL-007: Stripe checkout flow — POST /api/billing/create-checkout-session — DONE (claude, 702s)

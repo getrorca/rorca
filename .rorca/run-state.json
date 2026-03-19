@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000040,
   "startedAt": "2026-03-19T18:17:27.182Z",
-  "lastUpdatedAt": "2026-03-19T18:59:23.933Z",
+  "lastUpdatedAt": "2026-03-19T19:11:26.994Z",
   "completedStories": [
     {
       "storyId": "BL-004",
@@ -12,6 +12,15 @@
       "finishedAt": "2026-03-19T18:59:23.933Z",
       "agentType": "claude",
       "elapsedMs": 1175831
+    },
+    {
+      "storyId": "BL-007",
+      "title": "Stripe checkout flow — POST /api/billing/create-checkout-session",
+      "status": "passed",
+      "startedAt": "2026-03-19T18:59:45.351Z",
+      "finishedAt": "2026-03-19T19:11:26.993Z",
+      "agentType": "claude",
+      "elapsedMs": 701642
     }
   ],
   "failedStories": [],

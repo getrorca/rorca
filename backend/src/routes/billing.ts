@@ -5,16 +5,13 @@ import type { AuthUser } from './auth';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { verifyLicense } from '../lib/license';
+import { stripe } from '../lib/stripe-client';
 
 const router = Router();
 
 // ─── Stripe setup ────────────────────────────────────────────────────────────
-const STRIPE_SECRET_KEY = process.env.STRIPE_SECRET_KEY || '';
 const STRIPE_WEBHOOK_SECRET = process.env.STRIPE_WEBHOOK_SECRET || '';
 const FRONTEND_URL = process.env.FRONTEND_URL || 'http://localhost:5210';
-
-// Only initialize Stripe when the key is provided (allows graceful dev mode without Stripe)
-const stripe = STRIPE_SECRET_KEY ? new Stripe(STRIPE_SECRET_KEY) : null;
 
 // ─── Plan config ─────────────────────────────────────────────────────────────
 export type PlanId = 'free' | 'solo' | 'pro' | 'team';
@@ -314,6 +311,93 @@ router.post('/checkout', async (req: Request, res: Response) => {
 
 /**
  * @swagger
+ * /api/billing/create-checkout-session:
+ *   post:
+ *     tags: [Billing]
+ *     summary: Create a Stripe checkout session (alias)
+ *     operationId: createCheckoutSession
+ *     description: Alias for POST /api/billing/checkout. Creates a Stripe Checkout Session for the specified plan and returns the checkout URL.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [plan]
+ *             properties:
+ *               plan: { type: string, enum: [solo, pro, team] }
+ *     responses:
+ *       200:
+ *         description: Checkout session URL
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 checkoutUrl: { type: string }
+ *       400:
+ *         description: Invalid plan
+ *       503:
+ *         description: Stripe not configured
+ */
+router.post('/create-checkout-session', async (req: Request, res: Response) => {
+  if (!stripe) {
+    res.status(503).json({ error: 'Stripe is not configured. Set STRIPE_SECRET_KEY in backend/.env' });
+    return;
+  }
+
+  const authReq = req as Request & { user: AuthUser };
+  const { plan } = req.body as { plan?: string };
+
+  if (!plan || !(plan in PLANS)) {
+    throw new ValidationError(`Invalid plan. Choose one of: ${Object.keys(PLANS).join(', ')}`);
+  }
+
+  const planConfig = PLANS[plan as Exclude<PlanId, 'free'>];
+  if (!planConfig.stripePriceId) {
+    res.status(503).json({ error: `Stripe price ID not configured for plan: ${plan}. Set STRIPE_PRICE_${plan.toUpperCase()} in backend/.env` });
+    return;
+  }
+
+  try {
+    // Get or create Stripe customer
+    let sub = await getOrCreateCustomer(authReq.user.id);
+    let customerId: string;
+
+    if (sub?.stripe_customer_id) {
+      customerId = sub.stripe_customer_id;
+    } else {
+      const customer = await stripe.customers.create({
+        email: authReq.user.email,
+        metadata: { rorca_user_id: authReq.user.id },
+      });
+      customerId = customer.id;
+
+      const id = `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+      await execute(
+        `INSERT INTO subscriptions (id, user_id, stripe_customer_id, plan, status) VALUES ($1, $2, $3, 'free', 'active')`,
+        [id, authReq.user.id, customerId]
+      );
+    }
+
+    const session = await stripe.checkout.sessions.create({
+      customer: customerId,
+      mode: 'subscription',
+      line_items: [{ price: planConfig.stripePriceId, quantity: 1 }],
+      success_url: `${FRONTEND_URL}?billing=success&plan=${plan}`,
+      cancel_url: `${FRONTEND_URL}?billing=canceled`,
+      metadata: { rorca_user_id: authReq.user.id, plan },
+    });
+
+    res.json({ checkoutUrl: session.url });
+  } catch (err) {
+    logger.error({ err }, 'Stripe checkout error');
+    res.status(500).json({ error: 'Failed to create checkout session' });
+  }
+});
+
+/**
+ * @swagger
  * /api/billing/portal:
  *   post:
  *     tags: [Billing]
@@ -584,7 +668,7 @@ webhookRouter.post('/webhook', async (req: Request, res: Response) => {
   const rawBody = (req as any).rawBody as Buffer | undefined;
 
   if (!sig || !rawBody) {
-    throw new ValidationError('Missing signature or body');
+    res.status(400).json({ error: 'Missing signature or body' });
     return;
   }
 
@@ -593,12 +677,54 @@ webhookRouter.post('/webhook', async (req: Request, res: Response) => {
     event = stripe.webhooks.constructEvent(rawBody, sig, STRIPE_WEBHOOK_SECRET);
   } catch (err) {
     logger.error({ err }, 'Webhook signature verification failed');
-    throw new ValidationError('Invalid signature');
+    res.status(400).json({ error: 'Invalid signature' });
     return;
   }
 
   try {
     switch (event.type) {
+      case 'checkout.session.completed': {
+        const session = event.data.object as Stripe.Checkout.Session;
+        const customerId = session.customer as string;
+        const subscriptionId = session.subscription as string;
+        const planFromMeta = session.metadata?.plan as PlanId | undefined;
+        const plan: PlanId = planFromMeta && planFromMeta in PLANS ? planFromMeta : 'pro';
+
+        // Look up user from existing subscription row (created during checkout initiation)
+        const existing = await queryOne<{ id: string; user_id: string }>(
+          `SELECT id, user_id FROM subscriptions WHERE stripe_customer_id = $1`,
+          [customerId]
+        );
+
+        if (existing) {
+          await execute(
+            `UPDATE subscriptions SET stripe_subscription_id = $1, plan = $2, status = 'active', updated_at = NOW()
+             WHERE id = $3`,
+            [subscriptionId, plan, existing.id]
+          );
+          await execute(
+            'UPDATE users SET plan = $1, updated_at = NOW() WHERE id = $2',
+            [plan, existing.user_id]
+          );
+        } else {
+          // Edge case: no subscription row yet (e.g. Stripe customer created outside Rorca)
+          const userId = session.metadata?.rorca_user_id;
+          if (userId) {
+            const id = `sub_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+            await execute(
+              `INSERT INTO subscriptions (id, user_id, stripe_customer_id, stripe_subscription_id, plan, status)
+               VALUES ($1, $2, $3, $4, $5, 'active')`,
+              [id, userId, customerId, subscriptionId, plan]
+            );
+            await execute(
+              'UPDATE users SET plan = $1, updated_at = NOW() WHERE id = $2',
+              [plan, userId]
+            );
+          }
+        }
+        break;
+      }
+
       case 'customer.subscription.created':
       case 'customer.subscription.updated': {
         const subscription = event.data.object as Stripe.Subscription;
