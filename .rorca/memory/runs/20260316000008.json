@@ -1,0 +1,139 @@
+{
+  "specId": "rorca-billing-launch",
+  "runId": 20260316000008,
+  "startedAt": "2026-03-16T23:00:22.736Z",
+  "lastUpdatedAt": "2026-03-16T23:45:52.070Z",
+  "completedStories": [],
+  "failedStories": [],
+  "skippedStories": [
+    {
+      "storyId": "BL-007",
+      "title": "BL-007",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:49.901Z",
+      "finishedAt": "2026-03-16T23:45:49.901Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-004"
+    },
+    {
+      "storyId": "BL-008",
+      "title": "BL-008",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:49.935Z",
+      "finishedAt": "2026-03-16T23:45:49.935Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-004"
+    },
+    {
+      "storyId": "BL-009",
+      "title": "BL-009",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:49.947Z",
+      "finishedAt": "2026-03-16T23:45:49.947Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-002"
+    },
+    {
+      "storyId": "BL-010",
+      "title": "BL-010",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:49.954Z",
+      "finishedAt": "2026-03-16T23:45:49.954Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-007, BL-008"
+    },
+    {
+      "storyId": "BL-011",
+      "title": "BL-011",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:49.960Z",
+      "finishedAt": "2026-03-16T23:45:49.960Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-009"
+    },
+    {
+      "storyId": "BL-012",
+      "title": "BL-012",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:49.973Z",
+      "finishedAt": "2026-03-16T23:45:49.973Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-007"
+    },
+    {
+      "storyId": "BL-013",
+      "title": "BL-013",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:49.981Z",
+      "finishedAt": "2026-03-16T23:45:49.981Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-008, BL-007"
+    },
+    {
+      "storyId": "BL-009",
+      "title": "Trial expiry notification and grace period",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:51.995Z",
+      "finishedAt": "2026-03-16T23:45:51.995Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-002"
+    },
+    {
+      "storyId": "BL-007",
+      "title": "Stripe checkout flow — POST /api/billing/create-checkout-session",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:52.006Z",
+      "finishedAt": "2026-03-16T23:45:52.006Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-004"
+    },
+    {
+      "storyId": "BL-008",
+      "title": "License status in Settings > Billing tab",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:52.033Z",
+      "finishedAt": "2026-03-16T23:45:52.033Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-004"
+    },
+    {
+      "storyId": "BL-011",
+      "title": "Plan enforcement guard for active pipeline runs",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:52.043Z",
+      "finishedAt": "2026-03-16T23:45:52.043Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-009"
+    },
+    {
+      "storyId": "BL-012",
+      "title": "Billing webhook idempotency — prevent duplicate billing state transitions",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:52.054Z",
+      "finishedAt": "2026-03-16T23:45:52.054Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-007"
+    },
+    {
+      "storyId": "BL-010",
+      "title": "Stripe Customer Portal session endpoint",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:52.061Z",
+      "finishedAt": "2026-03-16T23:45:52.061Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-007, BL-008"
+    },
+    {
+      "storyId": "BL-013",
+      "title": "Self-hosted offline license activation — RORCA_LICENSE_KEY env var",
+      "status": "skipped",
+      "startedAt": "2026-03-16T23:45:52.070Z",
+      "finishedAt": "2026-03-16T23:45:52.070Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: BL-008, BL-007"
+    }
+  ],
+  "currentStory": null,
+  "decisions": [],
+  "resumedFromStory": null
+}

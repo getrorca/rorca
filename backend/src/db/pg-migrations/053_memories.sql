@@ -12,7 +12,6 @@ CREATE TABLE IF NOT EXISTS memories (
   confidence      TEXT NOT NULL DEFAULT 'medium'
                   CHECK (confidence IN ('high', 'medium', 'low')),
   related_files   JSONB NOT NULL DEFAULT '[]',
-  embedding       vector(1536),
   created_at      TIMESTAMPTZ NOT NULL DEFAULT NOW(),
   deleted_at      TIMESTAMPTZ
 );
@@ -29,7 +28,17 @@ CREATE INDEX IF NOT EXISTS idx_memories_run
 CREATE INDEX IF NOT EXISTS idx_memories_related_files
   ON memories USING GIN (related_files);
 
--- ivfflat index on embedding for vector similarity search
--- Using lists=10 for small-to-medium datasets; adjust upward for >100k rows
-CREATE INDEX IF NOT EXISTS idx_memories_embedding
-  ON memories USING ivfflat (embedding vector_cosine_ops) WITH (lists = 10);
+-- Add vector embedding column if pgvector is available (non-fatal if not)
+DO $$ BEGIN
+  ALTER TABLE memories ADD COLUMN IF NOT EXISTS embedding vector(1536);
+EXCEPTION WHEN undefined_object THEN
+  RAISE NOTICE 'pgvector not available — skipping embedding column';
+END $$;
+
+-- ivfflat index on embedding for vector similarity search (only if column exists)
+DO $$ BEGIN
+  IF EXISTS (SELECT 1 FROM information_schema.columns WHERE table_name = 'memories' AND column_name = 'embedding') THEN
+    CREATE INDEX IF NOT EXISTS idx_memories_embedding
+      ON memories USING ivfflat (embedding vector_cosine_ops) WITH (lists = 10);
+  END IF;
+END $$;

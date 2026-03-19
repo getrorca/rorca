@@ -4,6 +4,7 @@ import { query, queryOne, execute } from '../db/index';
 import type { AuthUser } from './auth';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
+import { verifyLicense } from '../lib/license';
 
 const router = Router();
 
@@ -53,6 +54,9 @@ interface SubscriptionRow {
   status: string;
   current_period_start: string | null;
   current_period_end: string | null;
+  license_key: string | null;
+  activated_at: string | null;
+  expires_at: string | null;
 }
 
 async function getUserPlan(userId: string): Promise<PlanId> {
@@ -115,6 +119,11 @@ router.get('/status', async (req: Request, res: Response) => {
   const sub = await getOrCreateCustomer(authReq.user.id);
   const seats = await getSeatsUsed(authReq.user.id);
 
+  // License info: show last 8 chars only for security
+  const licenseKey = sub?.license_key
+    ? `...${sub.license_key.slice(-8)}`
+    : null;
+
   res.json({
     plan,
     subscription: sub ? {
@@ -124,6 +133,9 @@ router.get('/status', async (req: Request, res: Response) => {
       currentPeriodEnd: sub.current_period_end,
       stripeSubscriptionId: sub.stripe_subscription_id,
     } : null,
+    licenseKey,
+    activatedAt: sub?.activated_at || null,
+    expiresAt: sub?.expires_at || null,
     seats,
     plans: {
       free: { name: 'Free', priceMonthly: 0, features: ['Spec generation only', '1 workspace', 'No pipeline execution'] },
@@ -439,6 +451,95 @@ router.get('/quotas', async (req: Request, res: Response) => {
   }));
 
   res.json({ plan, quotas });
+});
+
+// ─── POST /api/billing/activate-license ──────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/billing/activate-license:
+ *   post:
+ *     tags: [Billing]
+ *     summary: Activate a license key
+ *     operationId: activateLicense
+ *     description: Verifies an RS256-signed JWT license key and activates the corresponding plan. Used for both cloud-issued licenses and self-hosted offline activation. Idempotent — activating the same key twice returns success.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [licenseKey]
+ *             properties:
+ *               licenseKey: { type: string, description: "RS256-signed JWT license key" }
+ *     responses:
+ *       200:
+ *         description: License activated successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 activated: { type: boolean }
+ *                 plan: { type: string }
+ *                 expiresAt: { type: string, nullable: true }
+ *       422:
+ *         description: Invalid license key
+ */
+router.post('/activate-license', async (req: Request, res: Response) => {
+  const { licenseKey } = req.body as { licenseKey?: string };
+
+  if (!licenseKey || typeof licenseKey !== 'string') {
+    res.status(422).json({ error: 'Invalid license key' });
+    return;
+  }
+
+  const payload = verifyLicense(licenseKey);
+  if (!payload) {
+    res.status(422).json({ error: 'Invalid license key' });
+    return;
+  }
+
+  const authReq = req as Request & { user: AuthUser };
+  const userId = authReq.user.id;
+  const plan = payload.plan as PlanId;
+  const expiresAt = payload.exp
+    ? new Date(payload.exp * 1000).toISOString()
+    : null;
+
+  // Upsert: check if user already has a subscription row
+  const existing = await queryOne<{ id: string }>(
+    `SELECT id FROM subscriptions WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1`,
+    [userId]
+  );
+
+  if (existing) {
+    await execute(
+      `UPDATE subscriptions
+       SET plan = $1, status = 'active', license_key = $2, activated_at = NOW(), expires_at = $3, updated_at = NOW()
+       WHERE id = $4`,
+      [plan, licenseKey, expiresAt, existing.id]
+    );
+  } else {
+    const id = `sub_license_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
+    await execute(
+      `INSERT INTO subscriptions (id, user_id, stripe_customer_id, plan, status, license_key, activated_at, expires_at)
+       VALUES ($1, $2, '', $3, 'active', $4, NOW(), $5)`,
+      [id, userId, plan, licenseKey, expiresAt]
+    );
+  }
+
+  // Update user plan
+  await execute(
+    'UPDATE users SET plan = $1, updated_at = NOW() WHERE id = $2',
+    [plan, userId]
+  );
+
+  res.json({
+    activated: true,
+    plan,
+    expiresAt,
+  });
 });
 
 // ─── POST /api/billing/webhook (Stripe webhook — no auth) ───────────────────
