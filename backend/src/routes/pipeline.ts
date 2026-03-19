@@ -4355,6 +4355,7 @@ async function startTailing(logPath: string, agent: string, res: Response, hb: R
  *       400: { description: "Invalid runId" }
  */
 router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Response) => {
+  let hb: ReturnType<typeof setInterval> | undefined;
   try {
   const runId = Number(req.params.runId);
   const storyId = String(req.params.storyId);
@@ -4370,7 +4371,7 @@ router.get('/runs/:runId/stories/:storyId/stream', async (req: Request, res: Res
   });
   res.write(': connected\n\n');
 
-  const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
+  hb = setInterval(() => res.write(': hb\n\n'), 15_000);
   let closed = false;
   let pollInterval: ReturnType<typeof setInterval> | null = null;
 
@@ -4529,7 +4530,9 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
  *     tags: [Pipeline]
  *     summary: Stream WAL events (SSE)
  *     operationId: streamPipelineEvents
- *     description: Server-Sent Events stream of WAL events (story progress). Polls wal_events table every 3s.
+ *     description: >
+ *       Server-Sent Events stream of WAL events (story progress).
+ *       Events are pushed in real-time via PostgreSQL LISTEN/NOTIFY through the sse-hub.
  *     parameters:
  *       - in: query
  *         name: runId
@@ -4543,7 +4546,7 @@ const HEARTBEAT_INTERVAL_MS = 15_000;
  *             schema:
  *               type: string
  */
-router.get('/stream', async (req: Request, res: Response) => {
+router.get('/stream', async (_req: Request, res: Response) => {
   res.writeHead(200, {
     'Content-Type': 'text/event-stream',
     'Cache-Control': 'no-cache',
@@ -4553,7 +4556,9 @@ router.get('/stream', async (req: Request, res: Response) => {
   // Send initial keepalive
   res.write(': keepalive\n\n');
 
-  // Wire up real-time broadcast via sse-hub
+  // Wire up real-time broadcast via sse-hub.
+  // Events arrive from the dedicated LISTEN/NOTIFY client (wal-listener.ts)
+  // which calls broadcastAll() on every pg notification.
   const unsubscribe = attachSSE(res);
 
   // Heartbeat every 15s
@@ -4561,93 +4566,9 @@ router.get('/stream', async (req: Request, res: Response) => {
     res.write(': heartbeat\n\n');
   }, HEARTBEAT_INTERVAL_MS);
 
-  // Also poll WAL for events (catch events from external processes like Ralph)
-  const runId = req.query.runId as string;
-  const wsId = req.query.workspaceId as string | undefined;
-
-  // Resolve workspace_id from the run if not provided explicitly
-  let resolvedWsId = wsId ?? null;
-  if (!resolvedWsId && runId) {
-    const runRow = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [Number(runId)]) as { workspace_id: number } | undefined;
-    if (runRow) resolvedWsId = String(runRow.workspace_id);
-  }
-
-  // Start from the current max WAL id so new connections only receive live events.
-  // Historical events are served by GET /runs/:runId/wal-events (REST, instant).
-  // Starting from 0 caused minutes-long delays replaying thousands of old events at LIMIT 50/tick.
-  const maxWalRow = await queryOne<{ max_id: number }>('SELECT COALESCE(MAX(id), 0) AS max_id FROM wal_events');
-  let lastSeenId = maxWalRow?.max_id ?? 0;
-  const pollInterval = setInterval(async () => {
-    try {
-      let events;
-      if (runId && resolvedWsId) {
-        events = await query(`SELECT * FROM wal_events
-           WHERE id > $1
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND (payload->>'run_id')::bigint = $2
-             AND workspace_id = $3
-           ORDER BY id ASC
-           LIMIT 50`, [lastSeenId, runId, resolvedWsId]);
-      } else if (runId) {
-        events = await query(`SELECT * FROM wal_events
-           WHERE id > $1
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND (payload->>'run_id')::bigint = $2
-           ORDER BY id ASC
-           LIMIT 50`, [lastSeenId, runId]);
-      } else if (resolvedWsId) {
-        events = await query(`SELECT * FROM wal_events
-           WHERE id > $1
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-             AND workspace_id = $2
-           ORDER BY id ASC
-           LIMIT 50`, [lastSeenId, resolvedWsId]);
-      } else {
-        events = await query(`SELECT * FROM wal_events
-           WHERE id > $1
-             AND event_type IN ('story_started','story_passed','story_failed','story_retry','story_retried','story_skipped','story_token_update','run_started','run_finished','run_failed','run_paused','run_resumed','run_blocked','run_cancelled','spec_generated','spec_approved','spec_rejected','batch_started','batch_progress')
-           ORDER BY id ASC
-           LIMIT 50`, [lastSeenId]);
-      }
-
-      for (const event of events as any[]) {
-        res.write(`event: wal_event\ndata: ${JSON.stringify(event)}\n\n`);
-        lastSeenId = event.id;
-
-        // V2-025: Auto-record token usage from WAL event payloads into story_results
-        // V2-043: Also insert into token_usage analytics table
-        if (event.story_id && event.payload && (event.event_type === 'story_passed' || event.event_type === 'story_failed')) {
-          try {
-            const payload = JSON.parse(event.payload);
-            if (payload.input_tokens != null || payload.output_tokens != null) {
-              const runIdFromPayload = payload.run_id;
-              if (runIdFromPayload) {
-                const storyRow = await queryOne(`SELECT id FROM story_results WHERE run_id = $1 AND story_id = $2 ORDER BY id DESC LIMIT 1`, [runIdFromPayload, event.story_id]) as { id: number } | undefined;
-                if (storyRow) {
-                  await execute(`UPDATE story_results SET input_tokens = COALESCE($1, input_tokens), output_tokens = COALESCE($2, output_tokens) WHERE id = $3`, [payload.input_tokens ?? null, payload.output_tokens ?? null, storyRow.id]);
-                }
-                // Record into token_usage analytics table
-                recordTokenUsage(
-                  runIdFromPayload,
-                  event.story_id,
-                  payload.input_tokens || 0,
-                  payload.output_tokens || 0,
-                  payload.model,
-                );
-              }
-            }
-          } catch { /* payload parse error — ignore */ }
-        }
-      }
-    } catch {
-      // DB may be locked briefly, skip this tick
-    }
-  }, 1000);
-
-  req.on('close', () => {
+  _req.on('close', () => {
     unsubscribe();
     clearInterval(heartbeatInterval);
-    clearInterval(pollInterval);
   });
 });
 

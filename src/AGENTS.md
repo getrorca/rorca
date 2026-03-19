@@ -73,16 +73,16 @@ Returns WAL events from `/api/pipeline/stream`. Drives story progress in Pipelin
 - `onNavigate` prop: used to switch to Pipeline Monitor after "Run in Pipeline" success
 
 ## RunTerminal Component (`src/components/RunTerminal.tsx`)
-- Uses `@xterm/xterm` + `@xterm/addon-fit` (scoped packages, not old `xterm`)
+- Uses ansi-to-html to render ANSI escape sequences into styled `<pre>` tags — no xterm.js dependency
 - Connects to `/api/pipeline/runs/:runId/output` SSE
-- Chunks arrive base64-encoded: `atob(e.data)` → write to xterm
-- `ResizeObserver` keeps terminal fitted to container
+- Chunks arrive base64-encoded: `atob(e.data)` → rendered as styled log lines
+- Semantic log view parses `[Read]`, `[Write]`, `[Bash]`, `[Planning]` prefixes with icons
 - `key={runId}` on the component forces full remount when switching between runs
-- Terminal is read-only (`disableStdin: true`)
+- Scroll-lock awareness with 20,000-line buffer cap
+- Dark/light theme support via ThemeContext
 
 ## Tailwind / CSS Notes
 - CSS vars: `var(--bg)`, `var(--surface)`, `var(--panel)`, `var(--text)`, `var(--text-muted)`, `var(--border)`, `var(--accent)`, `var(--success)`, `var(--error)`, `var(--warning)`
-- xterm.js injects its own CSS — import `@xterm/xterm/css/xterm.css` in RunTerminal.tsx
 
 ## TypeScript
 - `npx tsc --noEmit` from repo root (not `src/`) — Vite uses project root tsconfig
