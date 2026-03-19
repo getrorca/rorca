@@ -1,6 +1,7 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
+import jwt from 'jsonwebtoken';
 import { createBackup, listBackups, pruneOldBackups } from '../lib/backup';
 import { backfillAll, isBackfillRunning, getQueueStats, getEmbeddingCounts, getProvider } from '../lib/embedding-pipeline';
 import { isGraphAvailable, graphStats, populateFromSpec, populateFromRun } from '../lib/knowledge-graph';
@@ -336,6 +337,122 @@ router.get('/graph-stats', async (_req: Request, res: Response) => {
     res.json(stats);
   } catch (error: any) {
     handleRouteError(res, error, '[graph-stats]');
+  }
+});
+
+// ─── BL-013: Generate offline RS256 license key for self-hosted distribution ──
+
+/**
+ * @swagger
+ * /api/admin/generate-license:
+ *   post:
+ *     tags: [Admin]
+ *     summary: Generate an offline RS256 license JWT for self-hosted distribution
+ *     operationId: generateLicense
+ *     description: |
+ *       Signs a license JWT with the RORCA_LICENSE_PRIVATE_KEY. Requires RORCA_ADMIN_KEY header for authentication.
+ *       Used by Rorca admins to generate trial or paid licenses for self-hosted users.
+ *     parameters:
+ *       - in: header
+ *         name: X-Rorca-Admin-Key
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Admin API key (must match RORCA_ADMIN_KEY env var)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [plan, email]
+ *             properties:
+ *               plan: { type: string, enum: [solo, pro, team], description: "License plan tier" }
+ *               email: { type: string, description: "Licensee email address" }
+ *               expiresInDays: { type: integer, description: "License validity in days (omit for perpetual)" }
+ *     responses:
+ *       200:
+ *         description: License JWT generated
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 licenseKey: { type: string, description: "RS256-signed JWT license key" }
+ *                 plan: { type: string }
+ *                 email: { type: string }
+ *                 expiresAt: { type: string, nullable: true }
+ *       400:
+ *         description: Missing or invalid parameters
+ *       401:
+ *         description: Missing or invalid RORCA_ADMIN_KEY
+ *       503:
+ *         description: RORCA_LICENSE_PRIVATE_KEY not configured
+ */
+router.post('/generate-license', async (req: Request, res: Response) => {
+  try {
+    // Validate admin key
+    const adminKey = process.env.RORCA_ADMIN_KEY;
+    if (!adminKey) {
+      res.status(401).json({ error: 'RORCA_ADMIN_KEY env var not configured' });
+      return;
+    }
+
+    const providedKey = req.headers['x-rorca-admin-key'] as string;
+    if (!providedKey || providedKey !== adminKey) {
+      res.status(401).json({ error: 'Invalid or missing X-Rorca-Admin-Key header' });
+      return;
+    }
+
+    // Validate private key availability
+    const privateKey = process.env.RORCA_LICENSE_PRIVATE_KEY;
+    if (!privateKey) {
+      res.status(503).json({ error: 'RORCA_LICENSE_PRIVATE_KEY env var not configured' });
+      return;
+    }
+
+    const { plan, email, expiresInDays } = req.body as {
+      plan?: string;
+      email?: string;
+      expiresInDays?: number;
+    };
+
+    if (!plan || !['solo', 'pro', 'team'].includes(plan)) {
+      res.status(400).json({ error: 'plan must be one of: solo, pro, team' });
+      return;
+    }
+    if (!email || typeof email !== 'string') {
+      res.status(400).json({ error: 'email is required' });
+      return;
+    }
+
+    const payload: Record<string, unknown> = {
+      sub: email,
+      plan,
+      iss: 'rorca',
+    };
+
+    const signOptions: jwt.SignOptions = { algorithm: 'RS256' };
+
+    if (expiresInDays && expiresInDays > 0) {
+      payload.exp = Math.floor(Date.now() / 1000) + expiresInDays * 86400;
+    }
+
+    const licenseKey = jwt.sign(payload, privateKey, signOptions);
+    const expiresAt = payload.exp
+      ? new Date((payload.exp as number) * 1000).toISOString()
+      : null;
+
+    logger.info({ plan, email, expiresInDays: expiresInDays || 'perpetual' }, '[Admin] License generated');
+
+    res.json({
+      licenseKey,
+      plan,
+      email,
+      expiresAt,
+    });
+  } catch (err) {
+    handleRouteError(res, err, '[Admin] Generate license');
   }
 });
 

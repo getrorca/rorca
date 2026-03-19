@@ -3,7 +3,7 @@ import request from 'supertest';
 
 const testUser = {
   email: 'testauth@example.com',
-  password: 'securepass123',
+  password: 'SecurePass123',
   displayName: 'Auth Test User',
 };
 
