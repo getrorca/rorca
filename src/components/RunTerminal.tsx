@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState, useCallback, useImperativeHandle, forwardRef } from 'react';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
+import { useEffect, useRef, useState, useCallback, useImperativeHandle, forwardRef, useMemo } from 'react';
+import AnsiToHtml from 'ansi-to-html';
 import {
   Copy, Check, Terminal as TerminalIcon, Layers,
   ChevronDown, ChevronRight,
@@ -9,7 +8,6 @@ import {
 } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { BASE_URL } from '../lib/apiFetch';
-import '@xterm/xterm/css/xterm.css';
 
 export interface RunTerminalHandle {
   scrollToStory: (storyId: string) => void;
@@ -77,50 +75,45 @@ function resolveStepVisual(step: SemanticStep, isOpenCode: boolean): StepVisual 
   return STEP_CONFIG[step.type];
 }
 
-// ─── xterm themes ─────────────────────────────────────────────────────────────
+// ─── ANSI color palettes per theme ───────────────────────────────────────────
+// Indices 0-7: standard colors, 8-15: bright variants
 
-const darkTheme = {
-  background: '#0d0d0d',
-  foreground: '#d4d4d4',
-  cursor: '#d4d4d4',
-  black: '#1e1e1e',
-  brightBlack: '#808080',
-  red: '#f44747',
-  brightRed: '#f44747',
-  green: '#4ec9b0',
-  brightGreen: '#4ec9b0',
-  yellow: '#dcdcaa',
-  brightYellow: '#dcdcaa',
-  blue: '#569cd6',
-  brightBlue: '#9cdcfe',
-  magenta: '#c586c0',
-  brightMagenta: '#c586c0',
-  cyan: '#9cdcfe',
-  brightCyan: '#9cdcfe',
-  white: '#d4d4d4',
-  brightWhite: '#e6e6e6',
+const ANSI_COLORS_DARK: Record<number, string> = {
+  0: '#1e1e1e',   // black
+  1: '#f87171',   // red
+  2: '#4ade80',   // green
+  3: '#facc15',   // yellow
+  4: '#60a5fa',   // blue
+  5: '#c084fc',   // magenta
+  6: '#22d3ee',   // cyan
+  7: '#d4d4d4',   // white
+  8: '#525252',   // bright black
+  9: '#fca5a5',   // bright red
+  10: '#86efac',  // bright green
+  11: '#fde68a',  // bright yellow
+  12: '#93c5fd',  // bright blue
+  13: '#d8b4fe',  // bright magenta
+  14: '#67e8f9',  // bright cyan
+  15: '#fafafa',  // bright white
 };
 
-const lightTheme = {
-  background: '#f5f5f5',
-  foreground: '#1e1e1e',
-  cursor: '#1e1e1e',
-  black: '#1e1e1e',
-  brightBlack: '#6e6e6e',
-  red: '#cd3131',
-  brightRed: '#cd3131',
-  green: '#00873a',
-  brightGreen: '#00873a',
-  yellow: '#795e26',
-  brightYellow: '#795e26',
-  blue: '#0451a5',
-  brightBlue: '#0451a5',
-  magenta: '#af00db',
-  brightMagenta: '#af00db',
-  cyan: '#0598bc',
-  brightCyan: '#0598bc',
-  white: '#d4d4d4',
-  brightWhite: '#1e1e1e',
+const ANSI_COLORS_LIGHT: Record<number, string> = {
+  0: '#1e1e1e',   // black
+  1: '#dc2626',   // red
+  2: '#16a34a',   // green
+  3: '#ca8a04',   // yellow
+  4: '#2563eb',   // blue
+  5: '#9333ea',   // magenta
+  6: '#0891b2',   // cyan
+  7: '#f5f5f5',   // white
+  8: '#737373',   // bright black
+  9: '#ef4444',   // bright red
+  10: '#22c55e',  // bright green
+  11: '#eab308',  // bright yellow
+  12: '#3b82f6',  // bright blue
+  13: '#a855f7',  // bright magenta
+  14: '#06b6d4',  // bright cyan
+  15: '#fafafa',  // bright white
 };
 
 // ─── stream-json → readable text formatter (for Raw terminal display) ────────
@@ -197,7 +190,7 @@ function formatStreamJsonForDisplay(line: string): string | null {
 
 /** Strip ANSI escape codes */
 function stripAnsi(s: string): string {
-   
+
   return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
 }
 
@@ -240,6 +233,23 @@ function parseVerboseLine(line: string): SemanticStep | null {
     }
   }
   return null;
+}
+
+// ─── Story ID detection ──────────────────────────────────────────────────────
+
+/** Match story IDs like US-001, CIE-014, SL-003 etc. in text */
+const STORY_ID_PATTERN = /\b([A-Z]{1,6}-\d{3,4})\b/g;
+
+/**
+ * Inject data-story-id anchor spans at story boundary mentions in HTML.
+ * Only injects an anchor for the FIRST occurrence of each story ID.
+ */
+function injectStoryAnchors(html: string, seenIds: Set<string>): string {
+  return html.replace(STORY_ID_PATTERN, (match, id: string) => {
+    if (seenIds.has(id)) return match;
+    seenIds.add(id);
+    return `<span data-story-id="${id}">${match}</span>`;
+  });
 }
 
 // ─── Helpers ──────────────────────────────────────────────────────────────────
@@ -430,28 +440,74 @@ function ClaudeStepRow({
   );
 }
 
-// ─── Main Component ───────────────────────────────────────────────────────────
+// ─── ANSI converter factory ──────────────────────────────────────────────────
+
+function createAnsiConverter(theme: 'light' | 'dark'): AnsiToHtml {
+  const isLight = theme === 'light';
+  return new AnsiToHtml({
+    fg: isLight ? '#1e1e1e' : '#d4d4d4',
+    bg: isLight ? '#f5f5f5' : '#0d0d1a',
+    escapeXML: true,
+    newline: true,
+    colors: isLight ? ANSI_COLORS_LIGHT : ANSI_COLORS_DARK,
+  });
+}
+
+// ─── Flush buffer interval ───────────────────────────────────────────────────
+
+const FLUSH_INTERVAL_MS = 80;
+const SCROLL_LOCK_THRESHOLD = 50;
+const MAX_LINES = 20_000;
 
 /**
- * Embeds an xterm.js terminal that streams live stdout/stderr from a pipeline run.
- * Includes a Raw/Semantic toggle. In Semantic mode, structured `semantic_step` SSE
- * events are rendered as a step list instead of the raw terminal.
- *
- * When agent_type=opencode, the semantic view uses a richer renderer with:
- * - Tool-specific icons (Globe for webfetch, FilePlus for write, etc.)
- * - Duration badges per event
- * - Collapsible stdout/stderr for bash events
- * - Error events highlighted in red
- *
- * When agent_type=claude (default), the existing xterm-parsing semantic view is unchanged.
+ * Trim the oldest lines from an accumulated HTML string so the total
+ * newline count stays at or below MAX_LINES.  Truncation always happens
+ * at a newline boundary so we never break a mid-tag ANSI-color span.
  */
+function trimOldestLines(html: string): string {
+  // Count total newlines
+  let count = 0;
+  for (let i = 0; i < html.length; i++) {
+    if (html.charCodeAt(i) === 10) count++;
+  }
+  if (count <= MAX_LINES) return html;
+
+  // Need to drop (count - MAX_LINES) oldest lines — find the byte offset
+  // just past the (count - MAX_LINES)-th newline from the start.
+  const toDrop = count - MAX_LINES;
+  let dropped = 0;
+  let offset = 0;
+  for (; offset < html.length; offset++) {
+    if (html.charCodeAt(offset) === 10) {
+      dropped++;
+      if (dropped === toDrop) {
+        offset++; // skip past the newline itself
+        break;
+      }
+    }
+  }
+  return html.slice(offset);
+}
+
+// ─── Main Component ───────────────────────────────────────────────────────────
+
 const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId, workspaceId }, ref) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const termRef = useRef<Terminal | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
+  const preRef = useRef<HTMLPreElement>(null);
   const esRef = useRef<EventSource | null>(null);
   const { resolved } = useTheme();
   const [copied, setCopied] = useState(false);
+  const autoScrollRef = useRef(true);
+
+  // Accumulated raw text buffer (pending flush)
+  const pendingTextRef = useRef('');
+  // Timer ID for the 80ms flush
+  const flushTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  // Accumulated HTML string rendered so far
+  const accumulatedHtmlRef = useRef('');
+  // Set of story IDs already anchored (to avoid duplicate anchors)
+  const seenStoryIdsRef = useRef(new Set<string>());
+  // SSE line buffer for incomplete lines across chunks
+  const lineBufferRef = useRef('');
 
   // Agent type detected from backend run_meta SSE event
   const [agentType, setAgentType] = useState<'claude' | 'opencode' | 'codex'>('claude');
@@ -473,43 +529,78 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     try { localStorage.setItem(lsKey(runId), m); } catch { /* noop */ }
   }, [runId]);
 
+  // Recreate ansi-to-html converter when theme changes
+  const ansiConverter = useMemo(() => createAnsiConverter(resolved), [resolved]);
+
+  // Flush pending text buffer → convert via ansi-to-html → append to accumulated HTML
+  const flushBuffer = useCallback(() => {
+    flushTimerRef.current = null;
+    const pending = pendingTextRef.current;
+    if (!pending) return;
+    pendingTextRef.current = '';
+
+    let newHtml = ansiConverter.toHtml(pending);
+
+    // Inject story ID anchors at first occurrence of each story ID
+    newHtml = injectStoryAnchors(newHtml, seenStoryIdsRef.current);
+
+    accumulatedHtmlRef.current += newHtml;
+    accumulatedHtmlRef.current = trimOldestLines(accumulatedHtmlRef.current);
+
+    const pre = preRef.current;
+    if (pre) {
+      pre.innerHTML = accumulatedHtmlRef.current;
+      if (autoScrollRef.current) {
+        pre.scrollTop = pre.scrollHeight;
+      }
+    }
+  }, [ansiConverter]);
+
+  // Schedule a flush if not already scheduled
+  const scheduleFlush = useCallback(() => {
+    if (flushTimerRef.current === null) {
+      flushTimerRef.current = setTimeout(flushBuffer, FLUSH_INTERVAL_MS);
+    }
+  }, [flushBuffer]);
+
   // Expose scrollToStory + writeMarker via ref
   useImperativeHandle(ref, () => ({
     scrollToStory(storyId: string) {
-      const term = termRef.current;
-      if (!term) return;
-      const buffer = term.buffer.active;
-      for (let i = 0; i < buffer.length; i++) {
-        const line = buffer.getLine(i);
-        if (!line) continue;
-        const text = line.translateToString(true);
-        if (text.includes(storyId)) {
-          term.scrollToLine(i);
-          return;
-        }
+      const pre = preRef.current;
+      if (!pre) return;
+      const anchor = pre.querySelector(`[data-story-id="${storyId}"]`);
+      if (anchor) {
+        anchor.scrollIntoView({ behavior: 'smooth', block: 'start' });
+        return;
       }
+      // Fallback: search text content for the story ID
+      const text = pre.textContent ?? '';
+      const idx = text.indexOf(storyId);
+      if (idx === -1) return;
+      const totalHeight = pre.scrollHeight;
+      const totalLen = text.length;
+      const ratio = idx / totalLen;
+      pre.scrollTop = ratio * totalHeight;
     },
     writeMarker(text: string) {
-      const term = termRef.current;
-      if (!term) return;
-      term.write(text);
+      const markerHtml = `<div style="padding:4px 8px;margin:4px 0;background:rgba(59,130,246,0.15);border-left:3px solid #3b82f6;color:#93c5fd;font-size:11px;font-family:monospace;">${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>`;
+      accumulatedHtmlRef.current += markerHtml;
+      accumulatedHtmlRef.current = trimOldestLines(accumulatedHtmlRef.current);
+      const pre = preRef.current;
+      if (pre) {
+        pre.innerHTML = accumulatedHtmlRef.current;
+        if (autoScrollRef.current) {
+          pre.scrollTop = pre.scrollHeight;
+        }
+      }
     },
   }), []);
 
   const handleCopy = useCallback(async () => {
-    const term = termRef.current;
-    if (!term) return;
-    const buffer = term.buffer.active;
-    const lines: string[] = [];
-    for (let i = 0; i < buffer.length; i++) {
-      const line = buffer.getLine(i);
-      if (line) lines.push(line.translateToString(true));
-    }
-    while (lines.length > 0 && lines[lines.length - 1].trim() === '') {
-      lines.pop();
-    }
-    const text = lines.join('\n');
-    if (!text) return;
+    const pre = preRef.current;
+    if (!pre) return;
+    const text = pre.textContent ?? '';
+    if (!text.trim()) return;
     try {
       await navigator.clipboard.writeText(text);
       setCopied(true);
@@ -517,34 +608,18 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     } catch { /* clipboard not available */ }
   }, []);
 
-  // xterm + SSE setup — always runs (xterm writes happen even when hidden)
+  // SSE setup — streams output chunks into pending buffer, flushes every 80ms
   useEffect(() => {
-    if (!containerRef.current) return;
-
-    termRef.current?.dispose();
     esRef.current?.close();
-
-    const xtermTheme = resolved === 'light' ? lightTheme : darkTheme;
-    const isMobile = window.innerWidth < 768;
-
-    const term = new Terminal({
-      theme: xtermTheme,
-      fontSize: isMobile ? 10 : 12,
-      fontFamily: '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Monaco, monospace',
-      lineHeight: 1.3,
-      scrollback: 50000,
-      convertEol: true,
-      cursorBlink: false,
-      disableStdin: true,
-    });
-
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(containerRef.current);
-    requestAnimationFrame(() => fitAddon.fit());
-
-    termRef.current = term;
-    fitRef.current = fitAddon;
+    pendingTextRef.current = '';
+    accumulatedHtmlRef.current = '';
+    seenStoryIdsRef.current = new Set();
+    lineBufferRef.current = '';
+    if (flushTimerRef.current !== null) {
+      clearTimeout(flushTimerRef.current);
+      flushTimerRef.current = null;
+    }
+    if (preRef.current) preRef.current.innerHTML = '';
 
     // Connect to live output stream — scoped to workspace
     const outputParams = new URLSearchParams();
@@ -552,7 +627,6 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     const outputUrl = `${BASE_URL}/api/pipeline/runs/${runId}/output${outputParams.toString() ? '?' + outputParams : ''}`;
     const es = new EventSource(outputUrl);
     esRef.current = es;
-    let lineBuffer = '';
 
     // Listen for run metadata (agent type detection)
     es.addEventListener('run_meta', (e: MessageEvent) => {
@@ -570,11 +644,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         const bytes = new Uint8Array(binary.length);
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
-        // Convert stream-json lines to readable text before writing to xterm
         const text = new TextDecoder().decode(bytes);
-        lineBuffer += text;
-        const parts = lineBuffer.split('\n');
-        lineBuffer = parts.pop() ?? '';
+
+        // Split into lines for semantic parsing and stream-json formatting
+        lineBufferRef.current += text;
+        const parts = lineBufferRef.current.split('\n');
+        lineBufferRef.current = parts.pop() ?? '';
 
         const displayLines: string[] = [];
         const newSteps: SemanticStep[] = [];
@@ -591,10 +666,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           }
         }
 
-        // Write formatted text to xterm (instead of raw JSON bytes)
+        // Append formatted text to pending buffer (NOT converted yet)
         if (displayLines.length > 0) {
-          const output = displayLines.join('\r\n') + '\r\n';
-          term.write(output);
+          pendingTextRef.current += displayLines.join('\n') + '\n';
+          scheduleFlush();
         }
 
         if (newSteps.length > 0) {
@@ -612,6 +687,35 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     });
 
     es.addEventListener('done', () => {
+      // Flush remaining buffer immediately on done — don't wait for 80ms timer
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
+      // Flush any remaining line buffer content
+      if (lineBufferRef.current) {
+        const formatted = formatStreamJsonForDisplay(lineBufferRef.current);
+        if (formatted !== null) {
+          pendingTextRef.current += formatted + '\n';
+        }
+        lineBufferRef.current = '';
+      }
+      // Convert and render remaining pending text
+      const pending = pendingTextRef.current;
+      if (pending) {
+        pendingTextRef.current = '';
+        let newHtml = ansiConverter.toHtml(pending);
+        newHtml = injectStoryAnchors(newHtml, seenStoryIdsRef.current);
+        accumulatedHtmlRef.current += newHtml;
+        accumulatedHtmlRef.current = trimOldestLines(accumulatedHtmlRef.current);
+        const pre = preRef.current;
+        if (pre) {
+          pre.innerHTML = accumulatedHtmlRef.current;
+          if (autoScrollRef.current) {
+            pre.scrollTop = pre.scrollHeight;
+          }
+        }
+      }
       setStreamDone(true);
       es.close();
     });
@@ -625,22 +729,21 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       }
     };
 
-    const ro = new ResizeObserver(() => fitAddon.fit());
-    ro.observe(containerRef.current);
-
     return () => {
       es.close();
-      term.dispose();
-      ro.disconnect();
+      if (flushTimerRef.current !== null) {
+        clearTimeout(flushTimerRef.current);
+        flushTimerRef.current = null;
+      }
     };
-  }, [runId, resolved]);
+  }, [runId, ansiConverter, workspaceId, scheduleFlush]);
 
-  // Re-fit xterm when switching back to raw mode (container was display:none)
-  useEffect(() => {
-    if (mode === 'raw') {
-      requestAnimationFrame(() => fitRef.current?.fit());
-    }
-  }, [mode]);
+  // Track scroll position for auto-scroll on raw <pre>
+  const handlePreScroll = useCallback(() => {
+    const el = preRef.current;
+    if (!el) return;
+    autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_LOCK_THRESHOLD;
+  }, []);
 
   // Auto-scroll semantic step list
   useEffect(() => {
@@ -719,15 +822,19 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
       {/* ─── Content area ────────────────────────────────────────────────── */}
       <div className="flex-1 min-h-0 relative">
-        {/* Raw terminal — always mounted, hidden via CSS when semantic */}
-        <div
-          ref={containerRef}
-          className="h-full w-full overflow-x-auto"
+        {/* Raw terminal — ansi-to-html rendered <pre> */}
+        <pre
+          ref={preRef}
+          onScroll={handlePreScroll}
+          className="h-full w-full overflow-y-auto font-mono text-xs leading-[1.3] whitespace-pre-wrap break-words"
           style={{
-            background: resolved === 'light' ? lightTheme.background : darkTheme.background,
-            padding: '8px 4px',
-            WebkitOverflowScrolling: 'touch',
+            background: 'var(--terminal-bg)',
+            color: 'var(--terminal-fg)',
+            padding: '8px 12px',
+            margin: 0,
             display: mode === 'raw' ? 'block' : 'none',
+            fontFamily: '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Monaco, monospace',
+            fontSize: window.innerWidth < 768 ? '10px' : '12px',
           }}
         />
 
