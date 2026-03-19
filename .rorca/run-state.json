@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000040,
   "startedAt": "2026-03-19T18:17:27.182Z",
-  "lastUpdatedAt": "2026-03-19T19:11:26.994Z",
+  "lastUpdatedAt": "2026-03-19T19:17:40.914Z",
   "completedStories": [
     {
       "storyId": "BL-004",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-19T19:11:26.993Z",
       "agentType": "claude",
       "elapsedMs": 701642
+    },
+    {
+      "storyId": "BL-008",
+      "title": "License status in Settings > Billing tab",
+      "status": "passed",
+      "startedAt": "2026-03-19T19:11:49.572Z",
+      "finishedAt": "2026-03-19T19:17:40.914Z",
+      "agentType": "claude",
+      "elapsedMs": 351342
     }
   ],
   "failedStories": [],

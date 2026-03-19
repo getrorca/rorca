@@ -59,7 +59,7 @@ const AccountSettingsTab = lazy(() =>
 );
 
 const BillingSection = lazy(() =>
-  import('./settings/AccountSettingsTab').then((m) => ({ default: m.BillingSection })),
+  import('./settings/BillingSettings').then((m) => ({ default: m.BillingSettings })),
 );
 
 const UnifiedActivitySection = lazy(() =>
