@@ -319,6 +319,24 @@ describe('POST /api/pipeline/trigger', () => {
     // May get 201 (trigger succeeds), 422 (validation), or 404 (workspace).
     expect([200, 201, 400, 404, 422]).toContain(res.status);
   });
+
+  test('BL-011: pipeline run is inserted with plan_checked_at and plan_at_trigger set', async () => {
+    createRunLoopStub();
+    seedSpec('approved', 'plan-audit');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specPath: 'forge/specs/approved/plan-audit.json', workspaceId: 'ws-pipe' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.runId).toBeDefined();
+
+    const run = await queryOne(`SELECT plan_checked_at, plan_at_trigger FROM pipeline_runs WHERE id = $1`, [res.body.runId]) as any;
+    expect(run).toBeDefined();
+    expect(run.plan_checked_at).toBeTruthy();
+    expect(run.plan_at_trigger).toBe('pro');
+  });
 });
 
 // ─── GET /api/pipeline/runs (list) ──────────────────────────────────────────
@@ -437,6 +455,21 @@ describe('GET /api/pipeline/runs/:runId', () => {
     const res = await request(app).get(`/api/pipeline/runs/${runId}`);
     // Auth is bypassed in local mode — returns 200 not 401
     expect(res.status).toBe(200);
+  });
+
+  test('BL-011: response includes planCheckedAt and planAtTrigger audit fields', async () => {
+    // Seed a run with plan audit columns populated
+    const result = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, plan_checked_at, plan_at_trigger)
+       VALUES ('forge/specs/approved/test.json', 'ws-pipe', 'done', NOW(), 'pro') RETURNING id`);
+    const runId = result!.id;
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.planCheckedAt).toBeTruthy();
+    expect(res.body.planAtTrigger).toBe('pro');
   });
 });
 

@@ -881,6 +881,8 @@ interface PipelineRunRow {
   auto_merge: boolean;
   merge_status: string | null;
   merge_commit_sha: string | null;
+  plan_checked_at: string | null;
+  plan_at_trigger: string | null;
 }
 
 interface StoryResultRow {
@@ -1036,11 +1038,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // ── Plan enforcement: Free tier cannot execute pipelines ─────
+    // BL-011: Capture plan at trigger time for audit (plan_checked_at, plan_at_trigger)
     const effectiveUser = await getEffectiveUser(req);
+    let triggerPlan = 'free';
     if (effectiveUser?.id) {
       const userRow = await queryOne('SELECT plan FROM users WHERE id = $1', [effectiveUser.id]) as { plan: string } | undefined;
-      const plan = userRow?.plan || 'free';
-      if (plan === 'free' && !dryRun) {
+      triggerPlan = userRow?.plan || 'free';
+      if (triggerPlan === 'free' && !dryRun) {
         throw new ForbiddenError('plan_required');
         return;
       }
@@ -1270,8 +1274,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const queueCount = (await queryOne(`SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`, [workspaceId]) as { count: number }).count;
         const position = queueCount + 1;
 
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position]);
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, plan_checked_at, plan_at_trigger)
+           VALUES ($1, $2, 'queued', $3, NOW(), $4, NOW(), $5) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, triggerPlan]);
         const queuedId = queueResult!.id;
 
         res.status(202).json({ queued: true, runId: queuedId, position });
@@ -1384,12 +1388,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     if (queuedRunId) {
       // Promote queued run to running — worker will actually execute it
+      // BL-011: plan_checked_at/plan_at_trigger already set when originally queued
       await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
          branch_name = $5, worktree_path = $6, auto_merge = $7 WHERE id = $8 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, queuedRunId]);
       runId = queuedRunId;
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, plan_checked_at, plan_at_trigger) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, NOW(), $11) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, triggerPlan]);
       runId = runResult!.id;
     }
 
@@ -2733,6 +2738,8 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       specModel,
       agentType: run.agent_type || run.agent || 'claude',
       agentModel: run.agent_model || null,
+      planCheckedAt: run.plan_checked_at || null,
+      planAtTrigger: run.plan_at_trigger || null,
       tokenSummary: {
         inputTokens: tokenRow.total_input,
         outputTokens: tokenRow.total_output,

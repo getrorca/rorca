@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000040,
   "startedAt": "2026-03-19T18:17:27.182Z",
-  "lastUpdatedAt": "2026-03-19T19:40:37.959Z",
+  "lastUpdatedAt": "2026-03-19T19:54:47.525Z",
   "completedStories": [
     {
       "storyId": "BL-004",
@@ -48,6 +48,15 @@
       "finishedAt": "2026-03-19T19:40:37.959Z",
       "agentType": "claude",
       "elapsedMs": 607424
+    },
+    {
+      "storyId": "BL-011",
+      "title": "Plan enforcement guard for active pipeline runs",
+      "status": "passed",
+      "startedAt": "2026-03-19T19:41:00.488Z",
+      "finishedAt": "2026-03-19T19:54:47.524Z",
+      "agentType": "claude",
+      "elapsedMs": 827036
     }
   ],
   "failedStories": [],
