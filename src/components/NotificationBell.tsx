@@ -10,6 +10,7 @@ function linkToPanelId(link: string | null): PanelId | null {
   if (link.startsWith('/specs/')) return 'specs';
   if (link.startsWith('/pipeline/')) return 'runs';
   if (link.includes('/budget')) return 'analytics';
+  if (link.startsWith('/settings/')) return 'settings';
   return null;
 }
 

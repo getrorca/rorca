@@ -1,8 +1,9 @@
 import PgBoss from 'pg-boss';
 import { CronExpressionParser } from 'cron-parser';
-import { query, execute } from '../db/index';
+import { query, queryOne, execute } from '../db/index';
 import { INTERNAL_SERVICE_TOKEN } from '../routes/auth';
 import { createBackup, pruneOldBackups } from './backup';
+import { createNotification } from '../routes/notifications';
 import { logger } from './logger';
 
 interface ScheduleRow {
@@ -203,6 +204,107 @@ export async function registerSchedulesWithBoss(
   }
 }
 
+// ─── Trial expiry notifications ──────────────────────────────────────────────
+
+interface TrialRow {
+  user_id: string;
+  trial_ends_at: string;
+}
+
+const TRIAL_NOTIFY_DAYS = [7, 3, 1, 0];
+
+/**
+ * checkTrialExpiry — runs daily, queries all trialing subscriptions and sends
+ * notifications at 7, 3, 1, 0 days remaining. Idempotent: deduplicates by
+ * checking if a notification with the same type already exists for that user
+ * on the same date.
+ */
+export async function checkTrialExpiry(): Promise<void> {
+  try {
+    const rows = await query<TrialRow>(
+      `SELECT user_id, trial_ends_at FROM subscriptions WHERE status = 'trialing' AND trial_ends_at IS NOT NULL`,
+      [],
+    );
+
+    const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+
+    for (const row of rows) {
+      const trialEnd = new Date(row.trial_ends_at);
+      const now = new Date();
+      const diffMs = trialEnd.getTime() - now.getTime();
+      const daysRemaining = Math.ceil(diffMs / (1000 * 60 * 60 * 24));
+
+      if (!TRIAL_NOTIFY_DAYS.includes(daysRemaining)) continue;
+
+      const notifType = daysRemaining > 0 ? 'trial_expiring' : 'trial_expired';
+
+      // Idempotency: check if notification for this type + user + date already exists
+      const existing = await queryOne<{ id: string }>(
+        `SELECT id FROM notifications
+         WHERE user_id = $1 AND type = $2 AND DATE(created_at) = $3::date`,
+        [row.user_id, notifType, today],
+      );
+      if (existing) continue;
+
+      if (daysRemaining > 0) {
+        await createNotification(
+          row.user_id,
+          notifType as any,
+          `Trial expires in ${daysRemaining} day${daysRemaining === 1 ? '' : 's'}`,
+          `Your free trial ends ${daysRemaining === 1 ? 'tomorrow' : `in ${daysRemaining} days`}. Upgrade to keep using pipeline execution and all features.`,
+          '/settings/billing',
+        );
+      } else {
+        await createNotification(
+          row.user_id,
+          notifType as any,
+          'Your trial has expired',
+          'Your free trial has ended. Upgrade now to continue using Rorca with full features.',
+          '/settings/billing',
+        );
+      }
+
+      logger.info(`[Scheduler] Trial notification sent: ${notifType} (${daysRemaining} days) for user ${row.user_id}`);
+    }
+  } catch (error) {
+    logger.error({ error }, '[Scheduler] checkTrialExpiry error');
+  }
+}
+
+let trialCheckIntervalHandle: ReturnType<typeof setInterval> | null = null;
+
+export function startTrialExpiryScheduler(): void {
+  if (trialCheckIntervalHandle) return;
+  logger.info('[Scheduler] Starting trial expiry check — running every 60s');
+  trialCheckIntervalHandle = setInterval(() => {
+    checkTrialExpiryOnceDaily().catch(err => logger.error({ err }, '[Scheduler] Trial expiry check error'));
+  }, 60_000);
+  // Run immediately on startup
+  checkTrialExpiryOnceDaily().catch(err => logger.error({ err }, '[Scheduler] Initial trial expiry check error'));
+}
+
+export function stopTrialExpiryScheduler(): void {
+  if (trialCheckIntervalHandle) {
+    clearInterval(trialCheckIntervalHandle);
+    trialCheckIntervalHandle = null;
+    logger.info('[Scheduler] Trial expiry scheduler stopped');
+  }
+}
+
+let lastTrialCheckDate: string | null = null;
+
+async function checkTrialExpiryOnceDaily(): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
+  if (lastTrialCheckDate === today) return;
+  lastTrialCheckDate = today;
+  try {
+    await checkTrialExpiry();
+  } catch {
+    // Reset so it retries next interval
+    lastTrialCheckDate = null;
+  }
+}
+
 // ─── Daily backup cron ──────────────────────────────────────────────────────
 
 let lastBackupDate: string | null = null;
@@ -252,8 +354,10 @@ export function stopDailyBackupScheduler(): void {
 
 export function startScheduler(): void {
   startDailyBackupScheduler();
+  startTrialExpiryScheduler();
 }
 
 export function stopScheduler(): void {
   stopDailyBackupScheduler();
+  stopTrialExpiryScheduler();
 }

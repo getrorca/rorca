@@ -14,6 +14,8 @@ const NOTIFICATION_TYPES = [
   'pipeline_completed',
   'budget_alert',
   'mention',
+  'trial_expiring',
+  'trial_expired',
 ] as const;
 
 type NotificationType = (typeof NOTIFICATION_TYPES)[number];
