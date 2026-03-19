@@ -3,10 +3,16 @@
  *
  * Checks the current user's plan against plan_quotas.
  * Returns 402 if the feature is disabled (quota_limit = 0) or usage exceeds quota.
+ *
+ * BL-013: Self-hosted instances can activate via RORCA_LICENSE_KEY env var.
+ * Env var check happens FIRST — if valid, the request is allowed without DB lookup.
+ * If invalid/expired, falls through to the normal DB-based check (does not hard-reject).
  */
 import { Request, Response, NextFunction } from 'express';
 import { queryOne, query } from '../db/index';
 import { getEffectiveUser } from './get-user';
+import { verifyLicense } from './license-verifier';
+import { logger } from './logger';
 import type { PlanId } from '../routes/billing';
 
 interface QuotaRow {
@@ -101,6 +107,21 @@ async function findRequiredPlan(feature: string): Promise<PlanId> {
 export function requirePlan(feature: string) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     try {
+      // BL-013: Check RORCA_LICENSE_KEY env var FIRST — env var wins over DB
+      const envLicenseKey = process.env.RORCA_LICENSE_KEY;
+      if (envLicenseKey) {
+        try {
+          const license = verifyLicense(envLicenseKey);
+          // Valid self-hosted license — allow the request
+          logger.debug({ plan: license.plan, feature }, '[requirePlan] Self-hosted license valid via RORCA_LICENSE_KEY');
+          next();
+          return;
+        } catch {
+          // Invalid/expired env var license — fall through to DB check (does not hard-reject)
+          logger.debug({ feature }, '[requirePlan] RORCA_LICENSE_KEY invalid/expired — falling through to DB check');
+        }
+      }
+
       const user = await getEffectiveUser(req);
       const userId = user?.id || 'local-admin';
 

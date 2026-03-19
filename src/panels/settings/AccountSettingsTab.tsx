@@ -30,6 +30,7 @@ interface BillingStatus {
   } | null;
   seats: { used: number; limit: number | null };
   plans: Record<string, { name: string; priceMonthly: number; features: string[] }>;
+  selfHostedLicense?: { set: boolean; valid: boolean; plan?: string; expiresAt?: string | null; error?: string };
   stripeConfigured: boolean;
 }
 
@@ -1028,6 +1029,65 @@ export function BillingSection() {
           )}
         </div>
       )}
+
+      {/* Self-Hosted License */}
+      <div className="border-t border-border pt-6">
+        <h3 className="text-sm font-semibold text-[var(--text)] mb-2">Self-Hosted License</h3>
+        <p className="text-xs text-muted mb-3">
+          Self-hosted instances can activate with an offline license key via the <code className="px-1 py-0.5 bg-bg rounded text-[10px] font-mono border border-border">RORCA_LICENSE_KEY</code> environment variable. No network call required.
+        </p>
+
+        {status.selfHostedLicense?.set ? (
+          <div className={`border rounded-lg p-4 ${
+            status.selfHostedLicense.valid
+              ? 'border-green-500/30 bg-green-500/5'
+              : 'border-red-500/30 bg-red-500/5'
+          }`}>
+            <div className="flex items-center gap-2 mb-2">
+              {status.selfHostedLicense.valid ? (
+                <>
+                  <Shield size={14} className="text-green-500" />
+                  <span className="text-sm font-medium text-green-500">Valid License</span>
+                  <span className="px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider rounded bg-green-500/15 text-green-500">
+                    {status.selfHostedLicense.plan}
+                  </span>
+                </>
+              ) : (
+                <>
+                  <XCircle size={14} className="text-red-500" />
+                  <span className="text-sm font-medium text-red-500">Invalid License</span>
+                </>
+              )}
+            </div>
+            {status.selfHostedLicense.valid && status.selfHostedLicense.expiresAt && (
+              <p className="text-xs text-muted">
+                Expires: {new Date(status.selfHostedLicense.expiresAt).toLocaleDateString('en-US', { month: 'long', day: 'numeric', year: 'numeric' })}
+              </p>
+            )}
+            {status.selfHostedLicense.valid && !status.selfHostedLicense.expiresAt && (
+              <p className="text-xs text-muted">Perpetual license (no expiry)</p>
+            )}
+            {!status.selfHostedLicense.valid && status.selfHostedLicense.error && (
+              <p className="text-xs text-red-400">{status.selfHostedLicense.error}</p>
+            )}
+          </div>
+        ) : (
+          <div className="border border-border rounded-lg p-4 bg-bg">
+            <p className="text-xs text-muted mb-2">
+              <code className="px-1 py-0.5 bg-bg rounded text-[10px] font-mono border border-border">RORCA_LICENSE_KEY</code> is not set.
+            </p>
+            <p className="text-xs text-muted">
+              To activate, add to your environment:
+            </p>
+            <pre className="mt-2 p-2 bg-[var(--bg-darker,#111)] rounded text-[10px] font-mono text-muted overflow-x-auto border border-border">
+              RORCA_LICENSE_KEY=eyJhbGciOiJSUzI1NiIs...
+            </pre>
+            <p className="text-xs text-muted mt-2">
+              Then restart the backend. The license is verified locally — no network call to rorca.app required.
+            </p>
+          </div>
+        )}
+      </div>
 
       {error && (
         <p className="text-xs text-red-500 flex items-center gap-1">

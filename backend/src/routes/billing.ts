@@ -5,7 +5,7 @@ import type { AuthUser } from './auth';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError, UnprocessableError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
-import { verifyLicense } from '../lib/license-verifier';
+import { verifyLicense, type LicensePayload } from '../lib/license-verifier';
 
 const router = Router();
 
@@ -134,6 +134,22 @@ router.get('/status', async (req: Request, res: Response) => {
     [authReq.user.id]
   );
 
+  // BL-013: Check RORCA_LICENSE_KEY env var status
+  let selfHostedLicense: { set: boolean; valid: boolean; plan?: string; expiresAt?: string | null; error?: string } = { set: false, valid: false };
+  const envLicenseKey = process.env.RORCA_LICENSE_KEY;
+  if (envLicenseKey) {
+    selfHostedLicense.set = true;
+    try {
+      const envLicense = verifyLicense(envLicenseKey);
+      selfHostedLicense.valid = true;
+      selfHostedLicense.plan = envLicense.plan;
+      selfHostedLicense.expiresAt = envLicense.exp ? new Date(envLicense.exp * 1000).toISOString() : null;
+    } catch (err: any) {
+      selfHostedLicense.valid = false;
+      selfHostedLicense.error = err.message || 'Invalid license';
+    }
+  }
+
   // BL-002: Compute trial fields
   const isTrialing = sub?.status === 'trialing' && sub.trial_ends_at != null && new Date(sub.trial_ends_at) > new Date();
   const trialEndsAt = sub?.trial_ends_at || null;
@@ -142,7 +158,7 @@ router.get('/status', async (req: Request, res: Response) => {
     : null;
 
   res.json({
-    plan,
+    plan: selfHostedLicense.valid ? selfHostedLicense.plan! : plan,
     subscription: sub ? {
       status: sub.status,
       plan: sub.plan,
@@ -165,6 +181,7 @@ router.get('/status', async (req: Request, res: Response) => {
       pro: { name: 'Pro', priceMonthly: 25, features: ['Everything in Solo', 'Unlimited workspaces', 'Git worktree isolation', 'Priority support', 'Up to 5 seats'] },
       team: { name: 'Team', priceMonthly: 59, features: ['Everything in Pro', 'Team collaboration', 'Shared direction stack', 'Admin controls', 'Unlimited seats'] },
     },
+    selfHostedLicense,
     stripeConfigured: !!stripe,
   });
 });
