@@ -1,6 +1,5 @@
-import { useEffect, useRef, useState } from 'react';
-import { Terminal } from '@xterm/xterm';
-import { FitAddon } from '@xterm/addon-fit';
+import { useEffect, useRef, useState, useCallback } from 'react';
+import AnsiToHtml from 'ansi-to-html';
 import {
   Terminal as TerminalIcon, Layers, CheckCircle2, XCircle,
   FileText, Pencil, Brain, GitCommitHorizontal, Search, Hash, AlertCircle,
@@ -8,7 +7,6 @@ import {
 } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { BASE_URL } from '../lib/apiFetch';
-import '@xterm/xterm/css/xterm.css';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -40,49 +38,68 @@ const STEP_CONFIG: Record<SemanticStep['type'], { icon: typeof FileText; color: 
   unknown: { icon: AlertCircle,         color: 'text-gray-400' },
 };
 
-// ─── xterm themes ────────────────────────────────────────────────────────────
+// ─── Theme colors ────────────────────────────────────────────────────────────
 
 const darkTheme = {
   background: '#0d0d0d',
   foreground: '#d4d4d4',
-  cursor: '#d4d4d4',
-  black: '#1e1e1e', brightBlack: '#808080',
-  red: '#f44747', brightRed: '#f44747',
-  green: '#4ec9b0', brightGreen: '#4ec9b0',
-  yellow: '#dcdcaa', brightYellow: '#dcdcaa',
-  blue: '#569cd6', brightBlue: '#9cdcfe',
-  magenta: '#c586c0', brightMagenta: '#c586c0',
-  cyan: '#9cdcfe', brightCyan: '#9cdcfe',
-  white: '#d4d4d4', brightWhite: '#e6e6e6',
 };
 
 const lightTheme = {
   background: '#f5f5f5',
   foreground: '#1e1e1e',
-  cursor: '#1e1e1e',
-  black: '#1e1e1e', brightBlack: '#6e6e6e',
-  red: '#cd3131', brightRed: '#cd3131',
-  green: '#00873a', brightGreen: '#00873a',
-  yellow: '#795e26', brightYellow: '#795e26',
-  blue: '#0451a5', brightBlue: '#0451a5',
-  magenta: '#af00db', brightMagenta: '#af00db',
-  cyan: '#0598bc', brightCyan: '#0598bc',
-  white: '#d4d4d4', brightWhite: '#1e1e1e',
 };
+
+// ─── ANSI converter singleton ────────────────────────────────────────────────
+
+const ansiConverter = new AnsiToHtml({
+  fg: '#d4d4d4',
+  bg: '#0d0d0d',
+  escapeXML: true,
+  newline: true,
+});
+
+// ─── Constants ───────────────────────────────────────────────────────────────
+
+const MAX_BUFFER_LINES = 5_000;
+const FLUSH_INTERVAL_MS = 80;
+const FALLBACK_TIMEOUT_MS = 3_000;
+const SCROLL_LOCK_THRESHOLD = 50;
+
+// ─── Helpers ─────────────────────────────────────────────────────────────────
+
+/** Decode a base64-encoded SSE data field to a UTF-8 string. */
+function decodeBase64Chunk(data: string): string {
+  const binary = atob(data);
+  const bytes = new Uint8Array(binary.length);
+  for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+  return new TextDecoder().decode(bytes);
+}
+
+/** Trim a buffer string array to at most MAX_BUFFER_LINES lines (in-place). */
+function trimBuffer(buf: string[]): void {
+  if (buf.length > MAX_BUFFER_LINES) {
+    buf.splice(0, buf.length - MAX_BUFFER_LINES);
+  }
+}
 
 // ─── Component ───────────────────────────────────────────────────────────────
 
 export default function MiniTerminalPane({ runId, storyId, storyTitle, status }: MiniTerminalPaneProps) {
-  const containerRef = useRef<HTMLDivElement>(null);
-  const termRef = useRef<Terminal | null>(null);
-  const fitRef = useRef<FitAddon | null>(null);
+  const preRef = useRef<HTMLPreElement>(null);
   const esRef = useRef<EventSource | null>(null);
+  const autoScrollRef = useRef(true);
   const { resolved } = useTheme();
 
   const [mode, setMode] = useState<'raw' | 'semantic'>('raw');
   const [steps, setSteps] = useState<SemanticStep[]>([]);
   const [streamDone, setStreamDone] = useState(false);
   const stepListRef = useRef<HTMLDivElement>(null);
+
+  // Buffer for accumulating raw text before batch flush
+  const pendingTextRef = useRef('');
+  const bufferLinesRef = useRef<string[]>([]);
+  const flushedHtmlLenRef = useRef(0);
 
   // Auto-scroll semantic list
   useEffect(() => {
@@ -91,91 +108,131 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
     }
   }, [steps, mode]);
 
-  // xterm + SSE setup
+  // SSE setup — connects to /stream first, falls back to /log after 3s
   useEffect(() => {
-    if (!containerRef.current || status === 'waiting') return;
+    if (status === 'waiting') return;
 
-    termRef.current?.dispose();
+    // Reset state
     esRef.current?.close();
+    if (preRef.current) preRef.current.innerHTML = '';
+    pendingTextRef.current = '';
+    bufferLinesRef.current = [];
+    flushedHtmlLenRef.current = 0;
+    setSteps([]);
+    setStreamDone(false);
 
-    const xtermTheme = resolved === 'light' ? lightTheme : darkTheme;
+    const converter = resolved === 'light'
+      ? new AnsiToHtml({ fg: lightTheme.foreground, bg: lightTheme.background, escapeXML: true, newline: true })
+      : ansiConverter;
 
-    const term = new Terminal({
-      theme: xtermTheme,
-      fontSize: 10,
-      fontFamily: '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Monaco, monospace',
-      lineHeight: 1.2,
-      scrollback: 10000,
-      convertEol: true,
-      cursorBlink: false,
-      disableStdin: true,
-    });
+    let receivedData = false;
+    let fallbackTimer: ReturnType<typeof setTimeout> | null = null;
+    let flushTimer: ReturnType<typeof setInterval> | null = null;
+    let cancelled = false;
 
-    const fitAddon = new FitAddon();
-    term.loadAddon(fitAddon);
-    term.open(containerRef.current);
-    requestAnimationFrame(() => fitAddon.fit());
+    // ── Batch flush: convert only new pending text every 80ms ──
+    const flush = () => {
+      const text = pendingTextRef.current;
+      if (!text || !preRef.current) return;
+      pendingTextRef.current = '';
 
-    termRef.current = term;
-    fitRef.current = fitAddon;
+      // Split into lines for buffer cap tracking
+      const newLines = text.split('\n');
+      bufferLinesRef.current.push(...newLines);
+      trimBuffer(bufferLinesRef.current);
 
-    // Connect to per-story DB-backed stream (prose output)
-    const es = new EventSource(`${BASE_URL}/api/pipeline/runs/${runId}/stories/${storyId}/stream`);
-    esRef.current = es;
+      // Check if we've exceeded the cap and need to re-render from buffer
+      // (only happens after a trim — lines were dropped from the front)
+      const totalBufferedText = bufferLinesRef.current.join('\n');
+      const expectedHtmlLen = flushedHtmlLenRef.current;
 
-    // /stream emits 'output' events (base64-encoded prose text)
-    es.addEventListener('output', (e: MessageEvent) => {
-      try {
-        const text = atob(e.data);
-        term.write(text + '\r\n');
-      } catch { /* ignore malformed chunk */ }
-    });
+      // Normal path: append only new HTML
+      const html = converter.toHtml(text);
+      preRef.current.innerHTML += html;
+      flushedHtmlLenRef.current = preRef.current.innerHTML.length;
 
-    // Also accept 'chunk' events (fallback to file-based tailing when DB has no rows yet)
-    es.addEventListener('chunk', (e: MessageEvent) => {
-      try {
-        const binary = atob(e.data);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
-        term.write(bytes);
-      } catch { /* ignore malformed chunk */ }
-    });
+      // If buffer was trimmed, rebuild from the full buffer to stay in sync
+      if (bufferLinesRef.current.length === MAX_BUFFER_LINES && expectedHtmlLen > 0) {
+        const fullHtml = converter.toHtml(totalBufferedText);
+        preRef.current.innerHTML = fullHtml;
+        flushedHtmlLenRef.current = fullHtml.length;
+      }
 
-    es.addEventListener('semantic_step', (e: MessageEvent) => {
-      try {
-        const step: SemanticStep = JSON.parse(e.data);
-        setSteps(prev => [...prev, step]);
-      } catch { /* ignore */ }
-    });
-
-    es.addEventListener('done', () => {
-      setStreamDone(true);
-      es.close();
-    });
-
-    es.onerror = () => {
-      setStreamDone(true);
-      es.close();
+      if (autoScrollRef.current) {
+        preRef.current.scrollTop = preRef.current.scrollHeight;
+      }
     };
 
-    const ro = new ResizeObserver(() => fitAddon.fit());
-    ro.observe(containerRef.current);
+    // ── Attach chunk/output + semantic_step + done handlers to an EventSource ──
+    const attachHandlers = (es: EventSource, chunkEvent: string) => {
+      es.addEventListener(chunkEvent, (e: MessageEvent) => {
+        try {
+          receivedData = true;
+          const text = decodeBase64Chunk(e.data);
+          pendingTextRef.current += text;
+        } catch { /* ignore malformed chunk */ }
+      });
+
+      es.addEventListener('semantic_step', (e: MessageEvent) => {
+        try {
+          const step: SemanticStep = JSON.parse(e.data);
+          setSteps(prev => [...prev, step]);
+        } catch { /* ignore */ }
+      });
+
+      es.addEventListener('done', () => {
+        // Final flush before marking done
+        flush();
+        setStreamDone(true);
+        es.close();
+      });
+
+      es.onerror = () => {
+        if (es.readyState === EventSource.CLOSED) {
+          flush();
+          setStreamDone(true);
+        }
+      };
+    };
+
+    // ── Start flush interval ──
+    flushTimer = setInterval(flush, FLUSH_INTERVAL_MS);
+
+    // ── Try /stream endpoint first (DB-backed filtered prose) ──
+    const streamUrl = `${BASE_URL}/api/pipeline/runs/${runId}/stories/${storyId}/stream`;
+    const es = new EventSource(streamUrl);
+    esRef.current = es;
+    attachHandlers(es, 'output');
+
+    // ── Fallback: if /stream returns no data within 3s, switch to /log ──
+    fallbackTimer = setTimeout(() => {
+      if (cancelled || receivedData) return;
+      // No data from /stream — close it and connect to /log
+      es.close();
+      const logEs = new EventSource(`${BASE_URL}/api/pipeline/runs/${runId}/stories/${storyId}/log`);
+      esRef.current = logEs;
+      attachHandlers(logEs, 'chunk');
+    }, FALLBACK_TIMEOUT_MS);
 
     return () => {
-      es.close();
-      term.dispose();
-      ro.disconnect();
+      cancelled = true;
+      esRef.current?.close();
+      if (fallbackTimer) clearTimeout(fallbackTimer);
+      if (flushTimer) clearInterval(flushTimer);
+      // Final flush on cleanup
+      flush();
     };
   }, [runId, storyId, resolved, status]);
 
-  // Re-fit xterm when switching back to raw mode
-  useEffect(() => {
-    if (mode === 'raw') {
-      requestAnimationFrame(() => fitRef.current?.fit());
-    }
-  }, [mode]);
+  // Track scroll position for auto-scroll (50px threshold)
+  const handlePreScroll = useCallback(() => {
+    const el = preRef.current;
+    if (!el) return;
+    autoScrollRef.current = el.scrollHeight - el.scrollTop - el.clientHeight < SCROLL_LOCK_THRESHOLD;
+  }, []);
 
   const statusBanner = status === 'passed' || status === 'failed';
+  const themeColors = resolved === 'light' ? lightTheme : darkTheme;
 
   return (
     <div className="flex flex-col border border-[var(--border)] rounded-lg overflow-hidden bg-[var(--bg)] h-full">
@@ -224,15 +281,19 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
           </div>
         )}
 
-        {/* Raw terminal */}
+        {/* Raw terminal — ansi-to-html rendered <pre> */}
         {status !== 'waiting' && (
-          <div
-            ref={containerRef}
-            className="h-full w-full"
+          <pre
+            ref={preRef}
+            onScroll={handlePreScroll}
+            className="h-full w-full overflow-auto font-mono text-[10px] leading-[1.2] whitespace-pre-wrap break-words"
             style={{
-              background: resolved === 'light' ? lightTheme.background : darkTheme.background,
-              padding: '4px 2px',
+              background: themeColors.background,
+              color: themeColors.foreground,
+              padding: '4px 8px',
+              margin: 0,
               display: mode === 'raw' ? 'block' : 'none',
+              fontFamily: '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Monaco, monospace',
             }}
           />
         )}
