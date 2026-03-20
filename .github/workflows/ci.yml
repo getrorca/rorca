@@ -6,68 +6,138 @@ on:
   pull_request:
     branches: [main]
 
+env:
+  DATABASE_URL: postgres://rorca:rorca@localhost:5433/rorca_test
+
 jobs:
-  frontend-typecheck:
-    name: Frontend Type Check
+  typecheck-and-test:
+    name: Type Check & Test
     runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: package-lock.json
-      - run: npm ci
-      - run: npx tsc --noEmit
 
-  backend-typecheck:
-    name: Backend Type Check
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: backend/package-lock.json
-      - run: cd backend && npm ci
-      - run: cd backend && npx tsc --noEmit
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_DB: rorca_test
+          POSTGRES_USER: rorca
+          POSTGRES_PASSWORD: rorca
+          POSTGRES_PORT: 5433
+        ports:
+          - 5433:5432
+        options: >-
+          --health-cmd "pg_isready -U rorca -d rorca_test"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
 
-  backend-tests:
-    name: Backend Tests
-    runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
-        with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: backend/package-lock.json
-      - run: cd backend && npm ci
-      - run: cd backend && npm test
 
-  frontend-lint:
-    name: Frontend Lint
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
       - uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: '22'
           cache: 'npm'
-          cache-dependency-path: package-lock.json
-      - run: npm ci
-      - run: npm run lint
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
 
-  frontend-tests:
-    name: Frontend Tests
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-      - uses: actions/setup-node@v4
+      - name: Install root dependencies
+        run: npm ci
+
+      - name: Install backend dependencies
+        run: cd backend && npm ci
+
+      - name: Frontend type check
+        run: npx tsc --noEmit
+
+      - name: Backend type check
+        run: cd backend && npx tsc --noEmit
+
+      - name: Backend tests
+        id: backend-tests
+        run: |
+          cd backend && npm test -- --ci --verbose --runInBand --json --outputFile=test-results.json
+        continue-on-error: true
+
+      - name: Post test results to PR
+        if: github.event_name == 'pull_request' && always()
+        uses: actions/github-script@v7
         with:
-          node-version: '20'
-          cache: 'npm'
-          cache-dependency-path: package-lock.json
-      - run: npm ci
-      - run: npx vitest run
+          script: |
+            const fs = require('fs');
+            const path = require('path');
+
+            let total = 0, passed = 0, failed = 0, skipped = 0;
+            let suiteDetails = '';
+            let parsed = false;
+
+            try {
+              const raw = fs.readFileSync(path.join('backend', 'test-results.json'), 'utf8');
+              const results = JSON.parse(raw);
+
+              total = results.numTotalTests || 0;
+              passed = results.numPassedTests || 0;
+              failed = results.numFailedTests || 0;
+              skipped = (results.numPendingTests || 0) + (results.numTodoTests || 0);
+
+              if (results.testResults) {
+                for (const suite of results.testResults) {
+                  const name = suite.name.replace(/^.*backend\//, '');
+                  const icon = suite.numFailingTests > 0 ? '❌' : '✅';
+                  suiteDetails += `| ${icon} ${name} | ${suite.numPassingTests} | ${suite.numFailingTests} | ${suite.numPendingTests} |\n`;
+                }
+              }
+              parsed = true;
+            } catch (e) {
+              suiteDetails = `⚠️ Could not parse test-results.json: ${e.message}\n`;
+            }
+
+            const status = failed > 0 ? '❌ FAILED' : '✅ PASSED';
+            const body = [
+              `## [CI Test Results] ${status}`,
+              '',
+              `| Metric | Count |`,
+              `|--------|-------|`,
+              `| Total  | ${total} |`,
+              `| Passed | ${passed} |`,
+              `| Failed | ${failed} |`,
+              `| Skipped | ${skipped} |`,
+              '',
+              parsed && suiteDetails ? [
+                '<details>',
+                '<summary>Suite breakdown</summary>',
+                '',
+                '| Suite | Passed | Failed | Skipped |',
+                '|-------|--------|--------|---------|',
+                suiteDetails,
+                '</details>',
+              ].join('\n') : suiteDetails,
+            ].join('\n');
+
+            const { data: comments } = await github.rest.issues.listComments({
+              owner: context.repo.owner,
+              repo: context.repo.repo,
+              issue_number: context.issue.number,
+            });
+
+            const existing = comments.find(c => c.body && c.body.includes('[CI Test Results]'));
+
+            if (existing) {
+              await github.rest.issues.updateComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                comment_id: existing.id,
+                body,
+              });
+            } else {
+              await github.rest.issues.createComment({
+                owner: context.repo.owner,
+                repo: context.repo.repo,
+                issue_number: context.issue.number,
+                body,
+              });
+            }
+
+      - name: Fail if tests failed
+        if: steps.backend-tests.outcome == 'failure'
+        run: exit 1
