@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-19T21:05:12.717Z",
+  "lastUpdatedAt": "2026-03-20T22:45:35.757Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-19T21:05:12.717Z",
       "agentType": "claude",
       "elapsedMs": 1158020
+    },
+    {
+      "storyId": "TC-003",
+      "title": "End-to-end smoke test script — full user journey verification",
+      "status": "passed",
+      "startedAt": "2026-03-20T22:45:15.774Z",
+      "finishedAt": "2026-03-20T22:45:35.757Z",
+      "agentType": "claude",
+      "elapsedMs": 19983
     }
   ],
   "failedStories": [],
