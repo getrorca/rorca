@@ -3,9 +3,9 @@
 Spec: rorca-billing-launch
 Run ID: 20260316000045
 Started: 2026-03-19T20:45:48.038Z
-Last Updated: 2026-03-20T22:46:16.622Z
+Last Updated: 2026-03-20T22:45:35.757Z
 
 ## Completed Stories (3)
 - BL-012: Billing webhook idempotency — prevent duplicate billing state transitions — DONE (claude, 33s)
 - BL-013: Self-hosted offline license activation — RORCA_LICENSE_KEY env var — DONE (claude, 1158s)
-- TC-002: GitHub Actions CI workflow — test run on every PR — DONE (claude, 61s)
+- TC-003: End-to-end smoke test script — full user journey verification — DONE (claude, 20s)
