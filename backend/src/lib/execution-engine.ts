@@ -709,7 +709,9 @@ function spawnClaude(
     });
 
     const idleMinutes = Math.round(LLM_IDLE_TIMEOUT_MS / 60_000);
+    let watchdogFired = false;
     const watchdog = createIdleWatchdog(child, LLM_IDLE_TIMEOUT_MS, () => {
+      watchdogFired = true;
       const msg = `[System] Watchdog triggered: No output received for ${idleMinutes} minutes. Killing process...\n`;
       logStream.write(msg);
       process.stdout.write(msg);
@@ -829,7 +831,7 @@ function spawnClaude(
       logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
       const elapsedMs = Date.now() - startTime;
-      if (code === null) {
+      if (code === null || watchdogFired) {
         resolve({ exitCode: 124, stderrTail, elapsedMs });
       } else {
         resolve({ exitCode: code, stderrTail, elapsedMs });
@@ -883,7 +885,9 @@ function spawnOpenCode(
     });
 
     const idleMinutes = Math.round(LLM_IDLE_TIMEOUT_MS / 60_000);
+    let watchdogFired = false;
     const watchdog = createIdleWatchdog(child, LLM_IDLE_TIMEOUT_MS, () => {
+      watchdogFired = true;
       const msg = `[System] Watchdog triggered: No output received for ${idleMinutes} minutes. Killing process...\n`;
       logStream.write(msg);
       process.stdout.write(msg);
@@ -941,7 +945,7 @@ function spawnOpenCode(
       logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
       const elapsedMs = Date.now() - startTime;
-      if (code === null) {
+      if (code === null || watchdogFired) {
         resolve({ exitCode: 124, stderrTail, elapsedMs });
       } else {
         resolve({ exitCode: code, stderrTail, elapsedMs });
@@ -980,7 +984,9 @@ function spawnCodex(
     });
 
     const idleMinutes = Math.round(LLM_IDLE_TIMEOUT_MS / 60_000);
+    let watchdogFired = false;
     const watchdog = createIdleWatchdog(child, LLM_IDLE_TIMEOUT_MS, () => {
+      watchdogFired = true;
       const msg = `[System] Watchdog triggered: No output received for ${idleMinutes} minutes. Killing process...\n`;
       logStream.write(msg);
       process.stdout.write(msg);
@@ -1038,7 +1044,7 @@ function spawnCodex(
       logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
       const elapsedMs = Date.now() - startTime;
-      if (code === null) {
+      if (code === null || watchdogFired) {
         resolve({ exitCode: 124, stderrTail, elapsedMs });
       } else {
         resolve({ exitCode: code, stderrTail, elapsedMs });
@@ -2986,10 +2992,10 @@ async function main(): Promise<void> {
   // On a fresh run, these stale flags would prevent those stories from executing.
   // Reset skipped/blocked for any non-passed story so every run starts clean.
   if (!config.specificStory) {
-    const freshSpec: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
-    const freshStories = getStories(freshSpec);
+    // Clear flags directly on `stories` (same reference as spec.userStories) so
+    // runParallel receives the cleaned array — not a stale copy with skipped:true.
     let staleFlags = 0;
-    for (const s of freshStories) {
+    for (const s of stories) {
       if (!isPassed(s) && (s.skipped || (s as any).blocked)) {
         delete s.skipped;
         delete (s as any).blocked;
@@ -2998,7 +3004,7 @@ async function main(): Promise<void> {
       }
     }
     if (staleFlags > 0) {
-      fs.writeFileSync(config.jsonPath, JSON.stringify(freshSpec, null, 2) + '\n');
+      fs.writeFileSync(config.jsonPath, JSON.stringify(spec, null, 2) + '\n');
       logger.info(`[engine] Cleared stale skipped/blocked flags from ${staleFlags} stor${staleFlags === 1 ? 'y' : 'ies'}`);
     }
   }
