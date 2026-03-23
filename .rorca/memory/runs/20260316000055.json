@@ -1,0 +1,31 @@
+{
+  "specId": "rorca-test-ci-v2",
+  "runId": 20260316000055,
+  "startedAt": "2026-03-23T19:47:22.906Z",
+  "lastUpdatedAt": "2026-03-23T20:06:16.069Z",
+  "completedStories": [],
+  "failedStories": [],
+  "skippedStories": [
+    {
+      "storyId": "TC-009",
+      "title": "TC-009",
+      "status": "skipped",
+      "startedAt": "2026-03-23T20:06:14.020Z",
+      "finishedAt": "2026-03-23T20:06:14.020Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-004, TC-005, TC-006, TC-007, TC-008"
+    },
+    {
+      "storyId": "TC-009",
+      "title": "Fix worker, lib, and MCP test failures — achieve 0 failures total",
+      "status": "skipped",
+      "startedAt": "2026-03-23T20:06:16.068Z",
+      "finishedAt": "2026-03-23T20:06:16.068Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-004, TC-005, TC-006, TC-007, TC-008"
+    }
+  ],
+  "currentStory": null,
+  "decisions": [],
+  "resumedFromStory": null
+}

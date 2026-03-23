@@ -1,0 +1,121 @@
+{
+  "specId": "rorca-test-ci-v2",
+  "runId": 20260316000052,
+  "startedAt": "2026-03-21T05:13:08.126Z",
+  "lastUpdatedAt": "2026-03-21T05:28:31.012Z",
+  "completedStories": [],
+  "failedStories": [],
+  "skippedStories": [
+    {
+      "storyId": "TC-004",
+      "title": "TC-004",
+      "status": "skipped",
+      "startedAt": "2026-03-21T05:28:28.816Z",
+      "finishedAt": "2026-03-21T05:28:28.816Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-005",
+      "title": "TC-005",
+      "status": "skipped",
+      "startedAt": "2026-03-21T05:28:28.870Z",
+      "finishedAt": "2026-03-21T05:28:28.870Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-006",
+      "title": "TC-006",
+      "status": "skipped",
+      "startedAt": "2026-03-21T05:28:28.886Z",
+      "finishedAt": "2026-03-21T05:28:28.886Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-007",
+      "title": "TC-007",
+      "status": "skipped",
+      "startedAt": "2026-03-21T05:28:28.897Z",
+      "finishedAt": "2026-03-21T05:28:28.897Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-008",
+      "title": "TC-008",
+      "status": "skipped",
+      "startedAt": "2026-03-21T05:28:28.901Z",
+      "finishedAt": "2026-03-21T05:28:28.901Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-009",
+      "title": "TC-009",
+      "status": "skipped",
+      "startedAt": "2026-03-21T05:28:28.905Z",
+      "finishedAt": "2026-03-21T05:28:28.905Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-004, TC-005, TC-006, TC-007, TC-008"
+    },
+    {
+      "storyId": "TC-004",
+      "title": "Fix billing test failures",
+      "status": "skipped",
+      "startedAt": "2026-03-21T05:28:30.920Z",
+      "finishedAt": "2026-03-21T05:28:30.920Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-005",
+      "title": "Fix pipeline test failures",
+      "status": "skipped",
+      "startedAt": "2026-03-21T05:28:30.959Z",
+      "finishedAt": "2026-03-21T05:28:30.959Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-006",
+      "title": "Fix auth and users test failures",
+      "status": "skipped",
+      "startedAt": "2026-03-21T05:28:30.967Z",
+      "finishedAt": "2026-03-21T05:28:30.967Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-007",
+      "title": "Fix specs and direction test failures",
+      "status": "skipped",
+      "startedAt": "2026-03-21T05:28:30.990Z",
+      "finishedAt": "2026-03-21T05:28:30.990Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-008",
+      "title": "Fix workspace, skills, and analytics test failures",
+      "status": "skipped",
+      "startedAt": "2026-03-21T05:28:31.007Z",
+      "finishedAt": "2026-03-21T05:28:31.007Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-009",
+      "title": "Fix worker, lib, and MCP test failures — achieve 0 failures total",
+      "status": "skipped",
+      "startedAt": "2026-03-21T05:28:31.012Z",
+      "finishedAt": "2026-03-21T05:28:31.012Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-004, TC-005, TC-006, TC-007, TC-008"
+    }
+  ],
+  "currentStory": null,
+  "decisions": [],
+  "resumedFromStory": null
+}

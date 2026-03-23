@@ -1,0 +1,149 @@
+{
+  "specId": "rorca-billing-launch",
+  "runId": 20260316000045,
+  "startedAt": "2026-03-19T20:45:48.038Z",
+  "lastUpdatedAt": "2026-03-20T23:24:00.987Z",
+  "completedStories": [
+    {
+      "storyId": "BL-012",
+      "title": "Billing webhook idempotency — prevent duplicate billing state transitions",
+      "status": "passed",
+      "startedAt": "2026-03-19T20:38:42.733Z",
+      "finishedAt": "2026-03-19T20:39:16.135Z",
+      "agentType": "claude",
+      "elapsedMs": 33402
+    },
+    {
+      "storyId": "BL-013",
+      "title": "Self-hosted offline license activation — RORCA_LICENSE_KEY env var",
+      "status": "passed",
+      "startedAt": "2026-03-19T20:45:54.697Z",
+      "finishedAt": "2026-03-19T21:05:12.717Z",
+      "agentType": "claude",
+      "elapsedMs": 1158020
+    },
+    {
+      "storyId": "TC-003",
+      "title": "End-to-end smoke test script — full user journey verification",
+      "status": "passed",
+      "startedAt": "2026-03-20T22:45:15.774Z",
+      "finishedAt": "2026-03-20T22:45:35.757Z",
+      "agentType": "claude",
+      "elapsedMs": 19983
+    }
+  ],
+  "failedStories": [],
+  "skippedStories": [
+    {
+      "storyId": "TC-004",
+      "title": "TC-004",
+      "status": "skipped",
+      "startedAt": "2026-03-20T23:23:58.840Z",
+      "finishedAt": "2026-03-20T23:23:58.840Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-005",
+      "title": "TC-005",
+      "status": "skipped",
+      "startedAt": "2026-03-20T23:23:58.847Z",
+      "finishedAt": "2026-03-20T23:23:58.847Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-006",
+      "title": "TC-006",
+      "status": "skipped",
+      "startedAt": "2026-03-20T23:23:58.865Z",
+      "finishedAt": "2026-03-20T23:23:58.865Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-007",
+      "title": "TC-007",
+      "status": "skipped",
+      "startedAt": "2026-03-20T23:23:58.877Z",
+      "finishedAt": "2026-03-20T23:23:58.877Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-008",
+      "title": "TC-008",
+      "status": "skipped",
+      "startedAt": "2026-03-20T23:23:58.883Z",
+      "finishedAt": "2026-03-20T23:23:58.883Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-009",
+      "title": "TC-009",
+      "status": "skipped",
+      "startedAt": "2026-03-20T23:23:58.891Z",
+      "finishedAt": "2026-03-20T23:23:58.891Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-004, TC-005, TC-006, TC-007, TC-008"
+    },
+    {
+      "storyId": "TC-004",
+      "title": "Fix billing test failures",
+      "status": "skipped",
+      "startedAt": "2026-03-20T23:24:00.898Z",
+      "finishedAt": "2026-03-20T23:24:00.898Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-005",
+      "title": "Fix pipeline test failures",
+      "status": "skipped",
+      "startedAt": "2026-03-20T23:24:00.917Z",
+      "finishedAt": "2026-03-20T23:24:00.917Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-006",
+      "title": "Fix auth and users test failures",
+      "status": "skipped",
+      "startedAt": "2026-03-20T23:24:00.951Z",
+      "finishedAt": "2026-03-20T23:24:00.951Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-007",
+      "title": "Fix specs and direction test failures",
+      "status": "skipped",
+      "startedAt": "2026-03-20T23:24:00.969Z",
+      "finishedAt": "2026-03-20T23:24:00.969Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-008",
+      "title": "Fix workspace, skills, and analytics test failures",
+      "status": "skipped",
+      "startedAt": "2026-03-20T23:24:00.977Z",
+      "finishedAt": "2026-03-20T23:24:00.977Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-001"
+    },
+    {
+      "storyId": "TC-009",
+      "title": "Fix worker, lib, and MCP test failures — achieve 0 failures total",
+      "status": "skipped",
+      "startedAt": "2026-03-20T23:24:00.986Z",
+      "finishedAt": "2026-03-20T23:24:00.986Z",
+      "agentType": "claude",
+      "failReason": "blocked_by: TC-004, TC-005, TC-006, TC-007, TC-008"
+    }
+  ],
+  "currentStory": null,
+  "decisions": [],
+  "resumedFromStory": "BL-012"
+}

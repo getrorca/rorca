@@ -1,0 +1,12 @@
+{
+  "specId": "rorca-test-ci-v2",
+  "runId": 20260316000057,
+  "startedAt": "2026-03-23T20:29:09.591Z",
+  "lastUpdatedAt": "2026-03-23T20:29:09.591Z",
+  "completedStories": [],
+  "failedStories": [],
+  "skippedStories": [],
+  "currentStory": null,
+  "decisions": [],
+  "resumedFromStory": null
+}
