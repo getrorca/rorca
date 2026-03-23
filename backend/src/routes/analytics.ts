@@ -1233,8 +1233,8 @@ async function buildUsageExport(from: string, to: string, workspaceId?: string, 
     SELECT COUNT(*) AS total FROM token_usage tu
     WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
   `;
-  const countResult = await queryOne<{ total: number }>(countSql, baseParams);
-  const total = countResult?.total ?? 0;
+  const countResult = await queryOne<{ total: string | number }>(countSql, baseParams);
+  const total = Number(countResult?.total ?? 0);
 
   const limitIdx = baseParams.length + 1;
   const offsetIdx = baseParams.length + 2;
@@ -1271,7 +1271,7 @@ async function buildCostsExport(from: string, to: string, workspaceId?: string, 
     WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
   `;
   const countResult = await queryOne<{ total: number }>(countSql, baseParams);
-  const total = countResult?.total ?? 0;
+  const total = Number(countResult?.total ?? 0);
 
   const limitIdx = baseParams.length + 1;
   const offsetIdx = baseParams.length + 2;
@@ -1325,7 +1325,7 @@ async function buildVelocityExport(from: string, to: string, workspaceId?: strin
     ${whereClause}
   `;
   const countResult = await queryOne<{ total: number }>(countSql, params);
-  const total = countResult?.total ?? 0;
+  const total = Number(countResult?.total ?? 0);
 
   const limitIdx = params.length + 1;
   const offsetIdx = params.length + 2;
@@ -1363,7 +1363,7 @@ async function buildCompletionExport(from: string, to: string, workspaceId?: str
     AND sr.status IN ('pass', 'fail', 'skip')
   `;
   const countResult = await queryOne<{ total: number }>(countSql, params);
-  const total = countResult?.total ?? 0;
+  const total = Number(countResult?.total ?? 0);
 
   const limitIdx = params.length + 1;
   const offsetIdx = params.length + 2;

@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-20T22:45:35.757Z",
+  "lastUpdatedAt": "2026-03-23T21:40:07.909Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -30,6 +30,15 @@
       "finishedAt": "2026-03-20T22:45:35.757Z",
       "agentType": "claude",
       "elapsedMs": 19983
+    },
+    {
+      "storyId": "TC-008",
+      "title": "Fix workspace, skills, and analytics test failures",
+      "status": "passed",
+      "startedAt": "2026-03-23T21:14:07.456Z",
+      "finishedAt": "2026-03-23T21:40:07.908Z",
+      "agentType": "claude",
+      "elapsedMs": 1560452
     }
   ],
   "failedStories": [],

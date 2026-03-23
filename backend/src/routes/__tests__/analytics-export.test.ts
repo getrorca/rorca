@@ -44,6 +44,11 @@ process.env.NODE_ENV = 'test';
   app = serverMod.default;
 authToken = await getAuthToken(app);
 
+  // Clean up any data from previous test iterations
+  await execute(`DELETE FROM token_usage WHERE workspace_id = $1`, [workspaceId]);
+  await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)`, [workspaceId]);
+  await execute(`DELETE FROM pipeline_runs WHERE workspace_id = $1`, [workspaceId]);
+
   // Seed test data
   await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [workspaceId, 'Export Test', '/tmp/export-test']);
 
