@@ -39,7 +39,7 @@ describe('GET /api/notifications', () => {
 
   it('returns notifications for the authenticated user', async () => {
     const user = await createUser();
-    createNotification(user.id, 'spec_approved', 'Spec approved', 'Your spec was approved', '/specs/test');
+    await createNotification(user.id, 'spec_approved', 'Spec approved', 'Your spec was approved', '/specs/test');
 
     const res = await request(app)
       .get('/api/notifications')
@@ -53,7 +53,7 @@ describe('GET /api/notifications', () => {
   it('does not return notifications for other users', async () => {
     const user1 = await createUser();
     const user2 = await createUser();
-    createNotification(user1.id, 'spec_approved', 'For user 1', 'body');
+    await createNotification(user1.id, 'spec_approved', 'For user 1', 'body');
 
     const res = await request(app)
       .get('/api/notifications')
@@ -66,8 +66,8 @@ describe('GET /api/notifications', () => {
 describe('GET /api/notifications/unread-count', () => {
   it('returns correct unread count', async () => {
     const user = await createUser();
-    createNotification(user.id, 'spec_approved', 'N1', 'b1');
-    createNotification(user.id, 'pipeline_completed', 'N2', 'b2');
+    await createNotification(user.id, 'spec_approved', 'N1', 'b1');
+    await createNotification(user.id, 'pipeline_completed', 'N2', 'b2');
 
     const res = await request(app)
       .get('/api/notifications/unread-count')
@@ -80,7 +80,7 @@ describe('GET /api/notifications/unread-count', () => {
 describe('POST /api/notifications/:id/read', () => {
   it('marks a notification as read', async () => {
     const user = await createUser();
-    const nId = createNotification(user.id, 'mention', 'Mentioned', 'You were mentioned');
+    const nId = await createNotification(user.id, 'mention', 'Mentioned', 'You were mentioned');
 
     const res = await request(app)
       .post(`/api/notifications/${nId}/read`)
@@ -97,9 +97,9 @@ describe('POST /api/notifications/:id/read', () => {
 describe('POST /api/notifications/read-all', () => {
   it('marks all notifications as read', async () => {
     const user = await createUser();
-    createNotification(user.id, 'spec_approved', 'N1', 'b1');
-    createNotification(user.id, 'spec_rejected', 'N2', 'b2');
-    createNotification(user.id, 'pipeline_completed', 'N3', 'b3');
+    await createNotification(user.id, 'spec_approved', 'N1', 'b1');
+    await createNotification(user.id, 'spec_rejected', 'N2', 'b2');
+    await createNotification(user.id, 'pipeline_completed', 'N3', 'b3');
 
     const res = await request(app)
       .post('/api/notifications/read-all')
@@ -117,7 +117,7 @@ describe('POST /api/notifications/read-all', () => {
 describe('DELETE /api/notifications/:id', () => {
   it('deletes a notification', async () => {
     const user = await createUser();
-    const nId = createNotification(user.id, 'mention', 'Mentioned', 'body');
+    const nId = await createNotification(user.id, 'mention', 'Mentioned', 'body');
 
     const res = await request(app)
       .delete(`/api/notifications/${nId}`)
@@ -173,7 +173,7 @@ describe('Notification preferences', () => {
       });
 
     // Try to create notification — should be skipped
-    const nId = createNotification(user.id, 'spec_approved', 'Should not appear', 'body');
+    const nId = await createNotification(user.id, 'spec_approved', 'Should not appear', 'body');
     expect(nId).toBe('');
 
     const countRes = await request(app)

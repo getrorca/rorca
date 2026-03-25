@@ -88,7 +88,7 @@ async function getOrCreateCustomer(userId: string): Promise<SubscriptionRow | nu
 async function getSeatsUsed(userId: string): Promise<{ used: number; limit: number | null }> {
   // Count team members where user is team owner
   const row = await queryOne<{ cnt: number }>(
-    `SELECT COUNT(DISTINCT tm.user_id) as cnt
+    `SELECT COUNT(DISTINCT tm.user_id)::int as cnt
      FROM teams t
      JOIN team_members tm ON tm.team_id = t.id
      WHERE t.owner_id = $1`,
@@ -409,19 +409,19 @@ interface QuotaRow {
 async function getFeatureUsage(userId: string, feature: string): Promise<number> {
   switch (feature) {
     case 'workspaces': {
-      const row = await queryOne<{ cnt: number }>('SELECT COUNT(*) as cnt FROM workspaces');
+      const row = await queryOne<{ cnt: number }>('SELECT COUNT(*)::int as cnt FROM workspaces');
       return row?.cnt ?? 0;
     }
     case 'specs_per_month': {
       const row = await queryOne<{ cnt: number }>(
-        `SELECT COUNT(*) as cnt FROM wal_events
+        `SELECT COUNT(*)::int as cnt FROM wal_events
          WHERE event_type = 'generate' AND ts >= NOW() - INTERVAL '30 days'`
       );
       return row?.cnt ?? 0;
     }
     case 'team_members': {
       const row = await queryOne<{ cnt: number }>(
-        `SELECT COUNT(DISTINCT tm.user_id) as cnt
+        `SELECT COUNT(DISTINCT tm.user_id)::int as cnt
          FROM teams t
          JOIN team_members tm ON tm.team_id = t.id
          WHERE t.owner_id = $1`,
@@ -522,7 +522,8 @@ router.get('/quotas', async (req: Request, res: Response) => {
  *       422:
  *         description: Invalid license key
  */
-router.post('/activate-license', async (req: Request, res: Response) => {
+router.post('/activate-license', async (req: Request, res: Response, next) => {
+  try {
   const authReq = req as Request & { user: AuthUser };
   const { licenseKey } = req.body as { licenseKey?: string };
 
@@ -572,6 +573,7 @@ router.post('/activate-license', async (req: Request, res: Response) => {
     plan,
     expiresAt,
   });
+  } catch (err) { next(err); }
 });
 
 // ─── POST /api/billing/webhook (Stripe webhook — no auth) ───────────────────

@@ -157,6 +157,7 @@ export default function GitHubSettingsPanel() {
   // OAuth disconnect (legacy per-section)
   const [disconnectingOAuth, setDisconnectingOAuth] = useState(false);
   const [showOAuthDisconnect, setShowOAuthDisconnect] = useState(false);
+  const [oauthDisconnectError, setOauthDisconnectError] = useState<string | null>(null);
 
   // Full disconnect (unified — DELETE /api/workspaces/:id/github)
   const [showFullDisconnect, setShowFullDisconnect] = useState(false);
@@ -341,12 +342,15 @@ export default function GitHubSettingsPanel() {
   async function handleDisconnectOAuth() {
     if (!workspaceId) return;
     setDisconnectingOAuth(true);
+    setOauthDisconnectError(null);
     try {
       await apiFetch(`/api/workspaces/${workspaceId}/github/disconnect-oauth`, { method: 'POST' });
       setAccount({ connected: false });
       setShowOAuthDisconnect(false);
-    } catch {
-      // silent
+      // Re-fetch to confirm server state
+      fetchAccount();
+    } catch (err: unknown) {
+      setOauthDisconnectError(err instanceof Error ? err.message : 'Failed to disconnect GitHub account');
     } finally {
       setDisconnectingOAuth(false);
     }
@@ -363,6 +367,9 @@ export default function GitHubSettingsPanel() {
       setAccount({ connected: false });
       setStatus({ connected: false });
       setShowFullDisconnect(false);
+      // Re-fetch to confirm server state
+      fetchAccount();
+      fetchStatus();
     } catch (err: unknown) {
       setFullDisconnectError(err instanceof Error ? err.message : 'Failed to disconnect');
     } finally {
@@ -501,7 +508,7 @@ export default function GitHubSettingsPanel() {
                   @{account.username}
                 </p>
                 <p className="text-xs text-muted">
-                  Connected {account.connectedAt ? new Date(account.connectedAt + 'Z').toLocaleDateString() : ''}
+                  Connected {account.connectedAt ? new Date(account.connectedAt).toLocaleDateString() : ''}
                 </p>
               </div>
               <div className="flex items-center gap-2">
@@ -531,7 +538,7 @@ export default function GitHubSettingsPanel() {
                       {disconnectingOAuth ? <Loader2 size={12} className="animate-spin" /> : 'Confirm'}
                     </button>
                     <button
-                      onClick={() => setShowOAuthDisconnect(false)}
+                      onClick={() => { setShowOAuthDisconnect(false); setOauthDisconnectError(null); }}
                       className="px-2.5 py-1.5 text-xs rounded border border-border hover:bg-bg transition-colors"
                     >
                       Cancel
@@ -540,6 +547,14 @@ export default function GitHubSettingsPanel() {
                 )}
               </div>
             </div>
+
+            {/* OAuth disconnect error */}
+            {oauthDisconnectError && (
+              <div className="flex items-center gap-1.5 text-xs text-red-400">
+                <AlertCircle size={12} />
+                {oauthDisconnectError}
+              </div>
+            )}
 
             {/* Test result */}
             {testResult && (
@@ -578,6 +593,7 @@ export default function GitHubSettingsPanel() {
             </p>
             <a
               href={`${BASE_URL}/api/auth/github`}
+              onClick={() => sessionStorage.setItem('github_oauth_return', '/settings/github')}
               className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded bg-surface-200 text-text hover:bg-border transition-colors"
             >
               <Github size={16} />
@@ -620,13 +636,13 @@ export default function GitHubSettingsPanel() {
                 <div>
                   <span className="text-muted">Connected</span>
                   <p className="text-[var(--text)]">
-                    {status.connectedAt ? new Date(status.connectedAt + 'Z').toLocaleDateString() : '-'}
+                    {status.connectedAt ? new Date(status.connectedAt).toLocaleDateString() : '-'}
                   </p>
                 </div>
                 <div>
                   <span className="text-muted">Last webhook</span>
                   <p className="text-[var(--text)]">
-                    {status.lastWebhookAt ? new Date(status.lastWebhookAt + 'Z').toLocaleString() : 'None yet'}
+                    {status.lastWebhookAt ? new Date(status.lastWebhookAt).toLocaleString() : 'None yet'}
                   </p>
                 </div>
               </div>

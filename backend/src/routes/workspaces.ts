@@ -42,10 +42,9 @@ interface WorkspaceContextRow {
   schema_snapshot: string | null;
   schema_snapshot_at: string | null;
   schema_table_count: number;
-  git_memory: string | null;
-  git_memory_updated_at: string | null;
   last_ingested_commit_hash: string | null;
   git_commit_count: number;
+  git_memory_hydrated_at: string | null;
 }
 
 function parseWorkspace(row: WorkspaceRow) {
@@ -301,7 +300,7 @@ router.get('/:id/context', async (req, res, next) => {
     res.json({
       schemaSnapshot: row?.schema_snapshot ?? null,
       schemaTableCount: row?.schema_table_count ?? null,
-      gitMemory: row?.git_memory ?? null,
+      gitMemory: null, // git_memory column dropped (migration 075) — knowledge now in memories table
       lastIngestedCommitHash: row?.last_ingested_commit_hash ?? null,
       gitCommitCount: row?.git_commit_count ?? null,
     });
@@ -442,27 +441,23 @@ router.post('/:id/hydrate', async (req, res, next) => {
           return;
         }
 
-        // Delta vs fresh: if lastHash was set, append; otherwise replace
-        if (lastHash && existingCtx?.git_memory) {
-          gitMemory = existingCtx.git_memory + '\n\n' + gitMemory;
-        }
+        // git_memory column was dropped (migration 075) — knowledge now lives in memories table.
+        // gitMemory variable is kept for the API response only.
       } else {
-        gitMemory = existingCtx?.git_memory ?? '';
+        gitMemory = '';
       }
 
       const latestHash = getLatestHash(summaries) ?? existingCtx?.last_ingested_commit_hash ?? null;
       const totalCommitCount = (existingCtx?.git_commit_count ?? 0) + newCommits;
-      const memoryUpdatedAt = newCommits > 0 ? new Date().toISOString() : (existingCtx?.git_memory_updated_at ?? null);
+      const memoryUpdatedAt = newCommits > 0 ? new Date().toISOString() : null;
 
       await execute(
-        `INSERT INTO workspace_context (workspace_id, git_memory, last_ingested_commit_hash, git_memory_updated_at, git_commit_count)
-         VALUES ($1, $2, $3, $4, $5)
+        `INSERT INTO workspace_context (workspace_id, last_ingested_commit_hash, git_commit_count)
+         VALUES ($1, $2, $3)
          ON CONFLICT(workspace_id) DO UPDATE SET
-           git_memory = EXCLUDED.git_memory,
            last_ingested_commit_hash = EXCLUDED.last_ingested_commit_hash,
-           git_memory_updated_at = EXCLUDED.git_memory_updated_at,
            git_commit_count = EXCLUDED.git_commit_count`,
-        [id, gitMemory || null, latestHash, memoryUpdatedAt, totalCommitCount]
+        [id, latestHash, totalCommitCount]
       );
 
       await execute(
@@ -950,7 +945,7 @@ router.get('/:id/stats', async (req, res, next) => {
       last_run_at: string | null;
     }>(`
       SELECT
-        COUNT(*) AS total_runs,
+        COUNT(*)::int AS total_runs,
         SUM(CASE WHEN status = 'running' THEN 1 ELSE 0 END) AS active_runs,
         SUM(CASE WHEN status = 'done' THEN 1 ELSE 0 END) AS completed_runs,
         SUM(CASE WHEN status = 'failed' THEN 1 ELSE 0 END) AS failed_runs,
@@ -965,9 +960,9 @@ router.get('/:id/stats', async (req, res, next) => {
       failed_stories: string;
     }>(`
       SELECT
-        COUNT(*) AS total_stories,
-        SUM(CASE WHEN sr.status = 'pass' THEN 1 ELSE 0 END) AS passed_stories,
-        SUM(CASE WHEN sr.status = 'fail' THEN 1 ELSE 0 END) AS failed_stories
+        COUNT(*)::int AS total_stories,
+        SUM(CASE WHEN sr.status = 'pass' THEN 1 ELSE 0 END)::int AS passed_stories,
+        SUM(CASE WHEN sr.status = 'fail' THEN 1 ELSE 0 END)::int AS failed_stories
       FROM story_results sr
       JOIN pipeline_runs pr ON sr.run_id = pr.id
       WHERE pr.workspace_id = $1
@@ -2340,8 +2335,8 @@ router.get('/:id/context-health', async (req, res, next) => {
         "SELECT content FROM direction_layers WHERE workspace_id = $1 AND layer = 3 LIMIT 1",
         [req.params.id]
       ),
-      queryOne<{ schema_snapshot: string | null; git_memory: string | null; git_commit_count: number }>(
-        'SELECT schema_snapshot, git_memory, git_commit_count FROM workspace_context WHERE workspace_id = $1',
+      queryOne<{ schema_snapshot: string | null; git_commit_count: number }>(
+        'SELECT schema_snapshot, git_commit_count FROM workspace_context WHERE workspace_id = $1',
         [req.params.id]
       ),
       queryOne<{ cnt: string }>(

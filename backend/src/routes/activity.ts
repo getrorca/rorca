@@ -261,7 +261,7 @@ router.get('/', async (req, res) => {
 
   const result = await paginateQuery<WalEventRow>({
     query: `SELECT * FROM wal_events ${whereClause}`,
-    countQuery: `SELECT COUNT(*) as total FROM wal_events ${whereClause}`,
+    countQuery: `SELECT COUNT(*)::int as total FROM wal_events ${whereClause}`,
     params,
     pagination,
     orderBy: 'id DESC',

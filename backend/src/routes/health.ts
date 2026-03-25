@@ -119,7 +119,7 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
     let activeRuns = 0;
     try {
       const row = await queryOne<{ cnt: string }>(
-        `SELECT COUNT(*) AS cnt FROM pipeline_runs WHERE status = 'running'`
+        `SELECT COUNT(*)::int AS cnt FROM pipeline_runs WHERE status = 'running'`
       );
       activeRuns = parseInt(row?.cnt ?? '0', 10);
     } catch {
@@ -316,7 +316,7 @@ async function checkMigrationsComponent(): Promise<ComponentMigrationsHealth> {
   try {
     // Count applied migrations from schema_migrations
     const appliedRow = await queryOne<{ cnt: string }>(
-      `SELECT COUNT(*) AS cnt FROM schema_migrations`
+      `SELECT COUNT(*)::int AS cnt FROM schema_migrations`
     );
     const applied = parseInt(appliedRow?.cnt ?? '0', 10);
 
@@ -512,7 +512,7 @@ router.get('/detailed', async (_req: Request, res: Response, next: NextFunction)
     let activeRuns = 0;
     try {
       const row = await queryOne<{ cnt: string }>(
-        `SELECT COUNT(*) AS cnt FROM pipeline_runs WHERE status = 'running'`
+        `SELECT COUNT(*)::int AS cnt FROM pipeline_runs WHERE status = 'running'`
       );
       activeRuns = parseInt(row?.cnt ?? '0', 10);
     } catch {

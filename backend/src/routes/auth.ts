@@ -39,11 +39,12 @@ const DUMMY_HASH = '$2b$12$XXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
 const VERIFICATION_TOKEN_EXPIRES_HOURS = 24;
 const VERIFICATION_RATE_LIMIT_PER_HOUR = 3;
 
-// GitHub OAuth config
-const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || '';
-const GITHUB_CLIENT_SECRET = process.env.GITHUB_CLIENT_SECRET || '';
-const GITHUB_CALLBACK_URL = process.env.GITHUB_CALLBACK_URL || 'http://localhost:3030/api/auth/github/callback';
+// GitHub OAuth config — read lazily from process.env so dotenv can be called
+// before server.ts route imports without relying on import-hoisting order.
 const GITHUB_SCOPES = 'user:email,public_repo';
+function githubClientId(): string { return process.env.GITHUB_CLIENT_ID || ''; }
+function githubClientSecret(): string { return process.env.GITHUB_CLIENT_SECRET || ''; }
+function githubCallbackUrl(): string { return process.env.GITHUB_CALLBACK_URL || 'http://localhost:3030/api/auth/github/callback'; }
 
 // In-memory CSRF state store (TTL: 10 minutes). Not persisted — ephemeral tokens only.
 const oauthStateCache = new Map<string, number>();
@@ -823,7 +824,7 @@ router.post('/resend-verification', async (req: Request, res: Response) => {
 
   // Rate limit: max 3 verification requests per email per hour
   const rateRow = await queryOne<{ count: string }>(
-    "SELECT COUNT(*) as count FROM email_verification_tokens WHERE user_id = $1 AND created_at > NOW() - INTERVAL '1 hour'",
+    "SELECT COUNT(*)::int as count FROM email_verification_tokens WHERE user_id = $1 AND created_at > NOW() - INTERVAL '1 hour'",
     [user.id]
   );
   const recentCount = parseInt(rateRow?.count || '0', 10);
@@ -905,7 +906,7 @@ router.post('/forgot-password', async (req: Request, res: Response) => {
 
   // Rate limit: max 3 reset requests per email per hour
   const rateRow = await queryOne<{ count: string }>(
-    "SELECT COUNT(*) as count FROM password_reset_tokens WHERE user_id = $1 AND created_at > NOW() - INTERVAL '1 hour'",
+    "SELECT COUNT(*)::int as count FROM password_reset_tokens WHERE user_id = $1 AND created_at > NOW() - INTERVAL '1 hour'",
     [user.id]
   );
   const recentCount = parseInt(rateRow?.count || '0', 10);
@@ -1185,7 +1186,10 @@ async function githubApiFetch<T>(url: string, token: string): Promise<T> {
  *       500: { description: "GitHub OAuth not configured" }
  */
 router.get('/github', (_req: Request, res: Response) => {
-  if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
+  const clientId = githubClientId();
+  const clientSecret = githubClientSecret();
+  const callbackUrl = githubCallbackUrl();
+  if (!clientId || !clientSecret) {
     res.status(503).json({ error: 'GitHub OAuth not configured' });
     return;
   }
@@ -1194,8 +1198,8 @@ router.get('/github', (_req: Request, res: Response) => {
   storeOAuthState(state);
 
   const params = new URLSearchParams({
-    client_id: GITHUB_CLIENT_ID,
-    redirect_uri: GITHUB_CALLBACK_URL,
+    client_id: clientId,
+    redirect_uri: callbackUrl,
     scope: GITHUB_SCOPES,
     state,
   });
@@ -1237,7 +1241,10 @@ router.get('/github/callback', async (req: Request, res: Response) => {
     return;
   }
 
-  if (!GITHUB_CLIENT_ID || !GITHUB_CLIENT_SECRET) {
+  const cbClientId = githubClientId();
+  const cbClientSecret = githubClientSecret();
+  const cbCallbackUrl = githubCallbackUrl();
+  if (!cbClientId || !cbClientSecret) {
     res.status(503).json({ error: 'GitHub OAuth not configured' });
     return;
   }
@@ -1257,10 +1264,10 @@ router.get('/github/callback', async (req: Request, res: Response) => {
         Accept: 'application/json',
       },
       body: JSON.stringify({
-        client_id: GITHUB_CLIENT_ID,
-        client_secret: GITHUB_CLIENT_SECRET,
+        client_id: cbClientId,
+        client_secret: cbClientSecret,
         code,
-        redirect_uri: GITHUB_CALLBACK_URL,
+        redirect_uri: cbCallbackUrl,
       }),
     });
 

@@ -771,7 +771,7 @@ function SpecDetailContent({
                     </div>
                   )}
                   <div className={hasActiveRun ? 'flex gap-2' : ''}>
-                    <button onClick={() => setShowTriggerPopover(true)} disabled={runState === 'triggering'}
+                    <button onClick={() => isFreePlan ? handleRun(isolateInBranch) : setShowTriggerPopover(true)} disabled={runState === 'triggering'}
                       className={`flex items-center justify-center gap-1.5 py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity ${hasActiveRun ? 'flex-1' : 'w-full'}`}>
                       {runState === 'triggering' ? <><Loader2 size={14} className="animate-spin" /> Starting...</> : <><Play size={14} /> {hasActiveRun ? 'Run Now' : 'Run in Pipeline'}{deferredCount > 0 && <span className="ml-1 px-1.5 py-0.5 text-[10px] font-semibold rounded-full bg-[var(--kbd-bg)]">{deferredCount} deferred</span>}</>}
                     </button>

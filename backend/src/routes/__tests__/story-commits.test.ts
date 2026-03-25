@@ -45,7 +45,7 @@ function makePushPayload(commits: Array<{ id: string; message: string; author?: 
 }
 
 function createSpecFile(stories: Array<{ id: string; title: string }>) {
-  const approvedDir = path.join(tmpDir, 'scripts', 'ralph', 'specs', 'approved');
+  const approvedDir = path.join(tmpDir, 'forge', 'specs', 'approved');
   fs.mkdirSync(approvedDir, { recursive: true });
 
   const spec = {
@@ -74,9 +74,11 @@ process.env.NODE_ENV = 'test';
   app = serverMod.default;
 authToken = await getAuthToken(app);
 
+  await execute(`DELETE FROM story_commits`);
   await execute(`DELETE FROM wal_events`);
+  await execute(`DELETE FROM workspace_github_webhooks WHERE workspace_id = $1`, [WORKSPACE_ID]);
 
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, 'Commit Test', tmpDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO UPDATE SET path = $3`, [WORKSPACE_ID, 'Commit Test', tmpDir]);
 
   const authMod = require('../auth');
   const encryptedSecret = authMod.encryptToken(WEBHOOK_SECRET);

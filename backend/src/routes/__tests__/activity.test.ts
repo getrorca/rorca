@@ -34,16 +34,23 @@ beforeEach(async () => {
   }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-activity-test-'));
-  const _dbPath = path.join(tmpDir, 'test.db');
-process.env.NODE_ENV = 'test';
+  process.env.NODE_ENV = 'test';
+  process.env.AUTH_REQUIRED = 'true';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-authToken = await getAuthToken(app);
+  authToken = await getAuthToken(app);
+
+  // Clear WAL events from user registration/login so tests start with a clean slate
+  await execute('DELETE FROM wal_events');
 });
 
-afterEach(() => {
-fs.rmSync(tmpDir, { recursive: true, force: true });
+afterEach(async () => {
+  // Close the fresh pool created by jest.resetModules() + require('../../server') to prevent connection exhaustion
+  try { const { closePool } = require('../../db/index'); await closePool(); } catch {}
+  fs.rmSync(tmpDir, { recursive: true, force: true });
+  delete process.env.NODE_ENV;
+  delete process.env.AUTH_REQUIRED;
 });
 
 async function seedEvents() {
@@ -67,9 +74,9 @@ describe('GET /api/activity', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.items).toBeInstanceOf(Array);
-    // 7 seeded events + 1 user_registered from auth helper
-    expect(res.body.items.length).toBe(8);
-    expect(res.body.total).toBe(8);
+    // 7 seeded events (WAL events from auth are cleared in beforeEach)
+    expect(res.body.items.length).toBe(7);
+    expect(res.body.total).toBe(7);
     expect(res.body.hasMore).toBe(false);
 
     // Items should be in reverse chronological order

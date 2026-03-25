@@ -1329,217 +1329,68 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
-> Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
+## 2026-03-17 [Bug Fix] handlePipelineRetry also had the 4KB buffer bug — now fixed
+> Rule: The immediate-flush fix (write every data event directly instead of buffering to 4KB) was only applied to `handlePipelineRun` initially. `handlePipelineRetry` (around line 1079) still had the old accumulating buffer. Both handlers now call `writeBufferAsChunks(runId, data, sequenceRef)` directly in `handleData` with no pending buffer accumulation.
 
-## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
-> Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
+## 2026-03-17 [Architecture] Wave parallel mini-terminal silence fixed by rorca-mini-terminal-db-output spec
+> Rule: Wave parallel runs show no per-story output in mini-terminals because `run_output_chunks` has no `story_id` column — all stories write to the same table keyed by `run_id` only. The approved spec `rorca-mini-terminal-db-output` (7 stories) fixes this by: (1) adding a separate `story_output_chunks` table, (2) a `StoryLogFollower` WAL subscriber that fans out per-story, (3) a new SSE endpoint `GET /api/pipeline/runs/:runId/stories/:storyId/stream`, (4) US-007 validates wave parallel mini-terminals show prose. Sequential runs already stream fine after the immediate-flush worker fix.
 
-## 2026-03-13 [Gotcha] 150+ unmerged feat/ branches accumulate — audit regularly
-> Rule: Worktree spec runs create feat/ branches that never auto-merge. After several months of development, 150+ branches can accumulate. Most are stale (superseded by later runs of the same spec). When auditing: (1) check remote feat/ branches with commits not in main using `git branch -r | grep feat/ | while read b; do count=$(git log --oneline main.."$b" 2>/dev/null | wc -l | tr -d ' '); if [ "$count" -gt "0" ]; then echo "$count | $b"; fi; done`, (2) skip old pg-boss/scaffolding branches — their work is superseded by WR spec, (3) merge the most recent run of each spec (highest timestamp suffix = most complete), (4) skip convention-agents branches (old stubs, superseded by future spec).
+## 2026-03-17 [Decision] Remove hardcoded rorca.md injection from execution-engine.ts
+> Rule: rorca.md must NOT be hardcoded-injected in buildPrompt(). It was previously always injected via readWorkspaceFile(.claude/skills/rorca.md) regardless of suggestedSkills. Removed in this session. Now rorca goes through normal loadMatchedSkills() like every other skill — only injected if in a story's suggestedSkills array, and tracked in active_skills for the Skills tab.
 
-## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
-> Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
+## 2026-03-17 [Architecture] rorca-terminal-sse-overhaul spec — 10 stories, run AFTER rorca-mini-terminal-db-output
+> Rule: Spec rorca-terminal-sse-overhaul replaces xterm.js with ansi-to-html + pre tag (RunTerminal + MiniTerminalPane) and WAL polling with Postgres LISTEN/NOTIFY. Must run AFTER rorca-mini-terminal-db-output because US-009 connects MiniTerminalPane to /stream endpoint (created by mini-terminal spec). Migration timestamp: 20260317100000 (avoids collision with mini-terminal's 20260317000001). RunTerminal must preserve RunTerminalHandle type with scrollToStory() and writeMarker() via useImperativeHandle — RunViewPanel depends on these. WAL polling side effects (recordTokenUsage, story_results token updates) must be migrated into LISTEN/NOTIFY handler in US-003.
 
-## 2026-03-13 [Gotcha] Old execution-engine processes from test runs survive indefinitely
-> Rule: Execution-engine subprocesses from old load test runs (WR-019, PG-020) and integration tests in temp paths can survive machine restarts and run for days, consuming CPU/memory. Check with: `ps aux | grep execution-engine | grep -v grep`. Kill PIDs associated with temp paths (/var/folders, /tmp) or old worktree paths. WR-007 graceful shutdown only helps for clean worker exits — kill -9 or machine crash still orphans children. Safe to kill any execution-engine with a temp path or a worktree path that no longer exists.
+## 2026-03-17 [Decision] GTM worktree branches US-018/031/036 — do NOT merge, let billing-launch redo
+> Rule: Three unmerged GTM story worktrees (feat/rorca-go-to-market-v1-US-018, US-031, US-036) contain unique code not in main (github-token-validator.ts, github-review-requests.test.ts, license.ts). However they diverged from main at c9709e75 — well before 63 subsequent merges. Merging would clobber current main (~18k line deletions). These are failed story worktrees from the GTM run. The billing-launch spec will re-implement this work cleanly against current main. Delete worktrees, do not merge.
 
-## 2026-03-13 [Decision] MCP-native generation: API as context+persistence layer, LLM work in caller's session
-> Rule: Rorca's API should split LLM-heavy operations (spec generation, enrichment) into two phases: (1) context-fetch — API returns the synthesized direction stack, memory, schema, skills as a raw bundle with no LLM call; (2) save — API persists the result the caller's LLM already generated. The LLM reasoning happens IN the caller's MCP session (Claude Code, OpenCode CLI, Codex CLI), not in a server-spawned subprocess. This means: rorca_get_generation_context returns the context bundle, the calling LLM generates the spec JSON in-session using cached/warm context, then rorca_save_spec persists it. The existing server-side generation path (spawning claude --print) is kept as a fallback for browser UI users who have no MCP session. This is the correct long-term architecture for rorca_forge_and_run too — it should orchestrate tool calls that the caller's session handles, not block on a subprocess.
+## 2026-03-17 [Gotcha] git worktree merged check — use merge-base --is-ancestor SHA main, NOT git branch --merged
+> Rule: To check if a worktree is merged into main, use: git merge-base --is-ancestor &lt;SHA&gt; main. Do NOT use git branch --merged main with shell pattern matching — it has zsh escaping bugs and gave wrong results (reported all 63 as merged when 7 were not). The merge-base approach checks the actual commit SHA from git worktree list against main's ancestry chain.
 
-## 2026-03-13 [Architecture] All three CLI coding assistants support MCP — Rorca tools work from any of them
-> Rule: Claude Code, OpenCode CLI, and Codex CLI all support MCP servers. A user working in any of these three can call Rorca MCP tools (rorca_generate_spec, rorca_trigger_run, etc.) from their active session. The only path that does NOT support MCP is the browser UI. This means the MCP-native generation architecture benefits all CLI users regardless of which assistant they use: Claude Code (Claude model), OpenCode CLI (any provider — GPT-4o, Gemini, etc.), Codex CLI (ChatGPT model). Architecture principle: Rorca API = context + persistence. LLM reasoning = caller's session. Browser UI = server-side subprocess fallback only.
+## 2026-03-17 [Architecture] rorca-mcp-recall-tool spec complete — all 13 stories on main
+> Rule: rorca-mcp-recall-tool (13 stories) fully merged to main as of 2026-03-17. Run #20260316000019 (32 min, 1 pass / 12 skip / 0 fail). Auto-merge completed (merge_commit_sha: 75d44d9). The 12 skips were already-implemented stories from prior runs 17+18. US-013 (rorca_dump MCP tool + GET /api/recall/dump) was the only story that ran. All code on main, no stale worktrees.
 
-## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
-> Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
+## 2026-03-17 [Architecture] rorca-mini-terminal-db-output spec — run BEFORE rorca-terminal-sse-overhaul
+> Rule: rorca-mini-terminal-db-output (7 stories after US-006 deletion) creates story_output_chunks table, story-log-follower WAL subscriber (filters stream-json → prose, writes to DB), and GET /api/pipeline/runs/:runId/stories/:storyId/stream SSE endpoint. This fixes raw stream-json in wave parallel mini-terminals. Must run BEFORE rorca-terminal-sse-overhaul because US-009 of overhaul spec connects MiniTerminalPane to /stream. US-006 (MiniTerminalPane → /stream xterm update) was deleted from this spec to avoid conflict with overhaul's US-009 rewrite.
 
-## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
-> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
+## 2026-03-18 [Gotcha] Worktree auto-merge fails silently when concurrent specs touch overlapping files
+> Rule: When two specs run concurrently in separate worktrees and edit the same files, the auto-merge of the second worktree fails with real merge conflicts. The run is left stuck as 'running' and implementation files remain stranded in the feature branch. Recovery requires: (1) manual git merge with conflict resolution, (2) restoring dropped files via `git show <sha>:path > file`, (3) manually marking the run as failed in the DB.
 
-## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
-> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
+## 2026-03-18 [Architecture] Memory consolidation: DB is source of truth, MEMORY.md is optional projection
+> Rule: DB memories table is the single source of truth. MEMORY.md is a generated read-only projection rebuilt pre/post run — never written by agents directly. rorca_recall and rorca_get_memories (with fetchAll:true) both read from DB. rorca_dump is deprecated. MEMORY.md is only worth keeping if the workspace is used outside Rorca (Cursor, Copilot, raw Claude Code) — it is redundant in a Rorca-only workflow.
 
-## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
-> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
+## 2026-03-18 [Architecture] Simultaneous spec runs require autoWorktree
+> Rule: Running multiple specs simultaneously (sequential OR wave-parallel) requires autoWorktree: true on each run. Without a worktree, the conflict detection in pipeline.ts blocks any new run if another is already running in the same workspace. With autoWorktree, up to run_now_max_concurrent (default 3) runs can coexist, each in an isolated git worktree branch.
 
-## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
-> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
+## 2026-03-18 [Bug Fix] StoryLogFollower never fires from live WAL subscription — JSONB payload parsed as object not string
+> Rule: StoryLogFollower.onStoryStarted and onStoryFinished called JSON.parse(event.payload) but wal_events.payload is JSONB — pg returns it as a JS object, not a string. JSON.parse on an object calls .toString() → "[object Object]" → SyntaxError → catch returns silently. Fix: check typeof event.payload === 'string' before parsing, otherwise use the object directly. recover() was unaffected because it casts payload::text in SQL.
 
-## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
-> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
+## 2026-03-18 [Gotcha] continue inside Promise.allSettled map() is a compile error — use return
+> Rule: handlePipelineRun uses Promise.allSettled(jobs.map(async (job) => { ... })). Using continue inside an async arrow function in .map() is invalid — esbuild throws "Cannot use continue here". Use return instead to skip to the next job in the batch.
 
-## 2026-03-15 [Bug Fix] Worker never promoted queued runs — advanceQueue() missing from worker.ts
-> Rule: advanceQueue() must be called after EVERY run completion path in worker.ts (main exit, spawn error, retry exit, retry spawn error, stale job recovery, orphan sweep, state reconciliation). Without it, queued runs sit forever until state_reconciliation kills them.
+## 2026-03-18 [Gotcha] auto_merge is false on retry runs — set it manually if needed
+> Rule: Retry runs created via /api/pipeline/runs/:id/retry always set auto_merge = false. If the original run had auto_merge = true but failed before merging, the retry will NOT auto-merge on completion. Workaround: manually UPDATE pipeline_runs SET auto_merge = true WHERE id = &lt;retryRunId&gt; while the retry is in-flight.
 
-## 2026-03-15 [Bug Fix] reconcileState() killed legitimate queued runs — 'queued' removed from Case A query
-> Rule: reconcileState() Case A must only check status='running' (not 'queued'). Queued runs intentionally have no pg-boss job — they are managed by advanceQueue() which promotes them when the active run completes. Including 'queued' in the NOT EXISTS check causes reconciliation to mark every queued run as failed after 60 seconds.
+## 2026-03-19 [Bug Fix] tsx ENOENT when worker spawns execution engine
+> Rule: Worker spawns execution-engine via `path.join(__dirname, '..', 'node_modules', '.bin', 'tsx')` — fails with ENOENT when tsx not in backend/node_modules. Root cause: root postinstall runs `cd backend && npm install --production --ignore-scripts` which skips devDependencies (tsx is a devDep). Fix: added `findTsxBin()` helper in worker.ts — tries local path first, falls back to `which tsx`. Also run `cd backend && npm install` to install all deps. Symptom: run fails in <100ms with "spawn ... tsx ENOENT".
 
-## 2026-03-15 [Bug Fix] pipeline.ts merge conflicts resolved — queue-observability pickup latency kept
-> Rule: The /api/pipeline/worker/health endpoint uses individual CountRow/AgeRow/QueueRow/LatencyRow queries (not a single QueueStatsRow IIFE). The pickup latency metrics (avg/p50/p95/max over 24h rolling window for pipeline:run + pipeline:retry) are part of the queue-observability spec and must be preserved in any future merge.
+## 2026-03-19 [Bug Fix] Silent terminal — execution-engine block.text missing trailing newline
+> Rule: execution-engine.ts wrote `process.stdout.write(block.text)` without a trailing `\n`. RunTerminal.tsx uses a line-buffer pattern: `parts.pop()` keeps any "incomplete last line" (one without `\n`) in `lineBufferRef` indefinitely — it never reaches `displayLines` and is never rendered. Fix: `process.stdout.write(block.text.endsWith('\n') ? block.text : block.text + '\n')` at the point where claude stream-json assistant blocks are emitted to stdout (execution-engine.ts ~line 744). Non-JSON fallback already had `+ '\n'` and worked correctly.
 
-## 2026-03-15 [Architecture] Run queue lifecycle: queued runs have NO pg-boss job until promoted
-> Rule: When a run is queued (queue:true in trigger body while another run is active), pipeline.ts creates a pipeline_runs row with status='queued' and queue_position but does NOT call boss.send(). The pg-boss job is only created later when advanceQueue() fires POST /api/pipeline/trigger with queuedRunId, which promotes the existing row and sends the boss job. Any code that checks for 'stuck' runs must account for this: queued runs without pg-boss jobs are normal, not orphaned.
+## 2026-03-19 [Gotcha] run_output_chunks schema: column is "chunk" not "data", DB port is 5433
+> Rule: run_output_chunks table columns: `(id, run_id, chunk BYTEA, sequence INT, created_at)`. Column is `chunk`, NOT `data`. Also: DATABASE_URL uses port 5433 not default 5432 — `postgres://rorca:rorca@localhost:5433/rorca`. pg-boss table uses `created_on` not `createdon`. Always read backend/.env before writing raw SQL queries.
 
-## 2026-03-16 [Bug Fix] payload::text LIKE queries cause pool exhaustion under wave parallelism
-> Rule: Never use `payload::text LIKE '%"run_id":N%'` on wal_events. Always use `(payload->>'run_id')::int = $N` — JSONB accessor is 10x faster and doesn't cause full table scans. Critical under wave parallelism (18+ concurrent SSE connections each polling WAL).
+## 2026-03-19 [Decision] Task-Monitor pattern: pg-boss jobs complete immediately, reconcileState is the watchdog
+> Rule: pg-boss jobs must NOT stay active for the lifetime of an execution engine subprocess. The job spawns the engine and returns immediately (fire-and-forget). Engine liveness is monitored via IPC heartbeats (every 60s) written to pipeline_runs.last_heartbeat. reconcileState() runs every 60s as the watchdog: if last_heartbeat > 2 min stale AND PID is dead → mark run failed. expireInSeconds should be 300s (not hours).
 
-## 2026-03-16 [Bug Fix] specs.ts u.name column does not exist — users table uses display_name
-> Rule: The `users` table column is `display_name`, not `name`. Any JOIN query referencing `u.name` will crash with 'column u.name does not exist'. The go-to-market spec run introduced this bug in the spec_attachments query at specs.ts:9970.
+## 2026-03-19 [Decision] DB-based per-workspace concurrency lock replaces in-memory activeTriggeredVia
+> Rule: Concurrency uses SELECT COUNT(*) FROM pipeline_runs WHERE workspace_id=$1 AND status='running' before spawning. The old in-memory activeTriggeredVia map was removed. Worktree runs bypass the lock. DB is the single source of truth, supports horizontal scaling.
 
-## 2026-03-16 [Gotcha] unhandledRejection in server.ts kills entire process including API
-> Rule: The worker's unhandledRejection handler triggers graceful shutdown of the entire Node process. When server.ts and worker code share a process (via `npm run dev` / concurrently), ANY unhandled promise rejection — even a transient DB connection timeout — kills the API server too. DB queries in setInterval callbacks MUST be wrapped in try-catch.
+## 2026-03-19 [Gotcha] Never have workers kill each other — fix process management instead
+> Rule: Worker singleton guard must NEVER SIGTERM/SIGKILL other worker PIDs. In distributed environments, workers would assassinate each other. The zombie child problem is a process management issue — use --kill-others on concurrently or proper supervisor signal propagation.
 
 Follow this workflow for implementation:
 ## Agent Role: Database
-
----
-name: rorca
-description: Implement and validate changes to the Rorca codebase with subagent-assisted context management.
----
-
-## 0. KingMode — Behavioral Discipline Layer
-
-<KING_MODE>
-You are operating in KingMode. This is a behavioral discipline layer. You are the apex predator of this codebase.
-
-HARD RULES:
-- **Zero Friction**: No warm-up prose, "Sure!", or "I can help with that". Direct execution only.
-- **Apex efficiency**: If a task can be done with one complex `sed` command or a multi-file `grep`, do it. Don't crawl files sequentially if unnecessary.
-- **No Permission Theater**: Do not ask "Should I...?" for standard engineering decisions (naming, placement, refactoring). Just do it and document in the summary.
-- **Concurrency**: Use parallel tool calls for research and verification whenever possible.
-- **Orca Pulse**: Be assertive, precise, and hunt for bugs with zero mercy.
-
-ULTRATHINK TRIGGER:
-When you see ULTRATHINK, spend ONE silent planning pass (≤10s) before tool calls. No prose. Then execute.
-
-SCOPE DISCIPLINE:
-- Change ONLY what is requested. 
-- "While I'm here" refactors are prohibited unless they fix a direct blocker.
-
-OUTPUT FORMAT:
-- Code blocks > Prose.
-- Terminal commands must be absolute and copy-paste ready.
-- End immediately after the last tool/code block. No "hope this helps!"
-</KING_MODE>
-
-## 1. Context Gathering
-
-**Check progress.txt FIRST** (if it exists):
-- `## Current Phase` / `## Story [ID]` → Resume from where you left off
-- `## Specs Loaded` → Skip re-reading already-loaded docs
-- `## Gotchas Discovered` → Pre-load before touching those files
-
-**For codebase research (use subagent):**
-```
-Task(subagent_type="Explore", prompt="
-  Directories: [list dirs you'll modify, e.g. src/panels, backend/src/routes]
-  Task: [description]
-  Return: AGENTS.md gotchas + existing patterns (max 20 lines)
-")
-```
-
-**For project docs:** Load CLAUDE.md for architecture (it's comprehensive). Load specific AGENTS.md in each directory you'll touch.
-
-## 2. Before Writing Code
-- Redundancy check: Is this already implemented? (spec versions, templates, model selection all done — see progress.txt)
-- Missing details: Ask user rather than guessing
-- Non-trivial task (>3 files or new patterns): Use `EnterPlanMode`
-
-## 3. Implementation
-
-### Backend changes
-- PostgreSQL 16 via `pg` Pool — all DB calls are **async** (always `await`)
-- `query<T>(sql, params)` → `T[]`, `queryOne<T>(sql, params)` → `T | undefined`, `execute(sql, params)` → `{ rowCount }`
-- Use `$1, $2, ...` numbered placeholders (NOT `?`)
-- FK constraints always on, connection pooling (max 20, 30s idle timeout)
-- Emit `wal_events` for every state change — this drives the SSE pipeline and audit log
-- **New tables**: numbered SQL migration files in `backend/src/db/pg-migrations/`, tracked via `schema_migrations` table. Use `IF NOT EXISTS` guards freely.
-- `chatComplete()` returns `ChatResult { text: string; usage: TokenUsage }` — always use `.text`
-
-### Frontend changes
-- `apiFetch<T>(path, init?)` in `src/lib/apiFetch.ts` — use this for all API calls
-- `useWorkspace()` provides `workspaceId`, `workspaces`, `selectedWorkspace`
-- Panel components live in `src/panels/`, shared components in `src/components/`
-- xterm.js: `@xterm/xterm` + `@xterm/addon-fit` (NOT the old `xterm` package)
-
-### Critical path gotchas
-- **Spec path**: `ralph/specs/approved/${spec.id}.json` (NOT `specs/approved/${spec.specName}.json`)
-- **spec.id** = filename slug; **spec.specName** = human title (display only)
-- **chatComplete** returns `ChatResult` — use `.text` accessor everywhere
-- **Pipeline trigger** strips 4 Claude env vars before spawning `execution-engine.ts`
-- **execution-engine.ts** (`backend/src/lib/execution-engine.ts`) is the universal TypeScript execution engine — handles claude, opencode, and codex agent paths. Replaces run-loop.sh/run-loop.ts entirely.
-- **Backend port 3030** — restart required after any changes (`lsof -ti:3030 | xargs kill -9`)
-
-## 4. Validation (REQUIRED)
-
-Run in parallel where possible:
-```bash
-# From rorca root
-bash -c "cd /Users/dimitriteravanessian/rorca && npx tsc --noEmit 2>&1; echo FRONTEND:\$?" &
-bash -c "cd /Users/dimitriteravanessian/rorca/backend && npx tsc --noEmit 2>&1; echo BACKEND:\$?" &
-wait
-
-# Backend tests
-cd /Users/dimitriteravanessian/rorca/backend && npm test
-
-# Build check
-cd /Users/dimitriteravanessian/rorca && npm run build
-```
-
-All must pass before marking story done. Fix failures before moving on.
-
-## 4b. Browser Testing (if UI changed)
-
-Use **Playwright MCP** for automated browser testing — never ask user to manually test.
-```
-mcp__playwright__browser_navigate url=http://localhost:5210
-mcp__playwright__browser_snapshot
-mcp__playwright__browser_click ref=<uid>
-```
-Test: happy path + one edge case. Keep it under 60 seconds.
-
-## 5. QA Checklist
-- [ ] Happy path works end-to-end?
-- [ ] Error/edge case handled gracefully?
-- [ ] New WAL event emitted for state changes?
-- [ ] TypeScript strict — no `any` without justification?
-- [ ] Backend test added for new endpoints?
-
-## 6. Progress Tracking (`progress.txt`)
-
-**Update after every story completion** — critical for surviving context compaction across multi-hour runs.
-
-```
-## Story [ID]: [Title] — DONE
-Files touched: [list with brief note on what changed]
-What was built: [2-3 bullet summary of what exists now]
-Key decisions: [non-obvious choices, gotchas discovered]
-
-## Story [ID]: [Title] — IN PROGRESS
-Remaining: [specific remaining tasks, not vague]
-Blockers: [anything blocking]
-
-## Story [ID]: [Title] — NOT STARTED
-Expects: [prerequisites from prior stories]
-```
-
-**Rules:**
-- Re-read progress.txt FIRST after any `/compact` — it's your resume checkpoint
-- Never overwrite previous entries — append below existing content
-- Discovered gotchas → add to relevant `AGENTS.md` AND note in progress.txt under `## Gotchas Discovered`
-- `## Specs Loaded` section — list PRDs/SDDs you've already read so you skip re-reading
-
-## 7. Wrap-up
-- [ ] `npx tsc --noEmit` passes (frontend + backend)
-- [ ] `npm run build` succeeds
-- [ ] Backend tests pass
-- [ ] New gotchas documented in relevant `AGENTS.md`
-- [ ] `progress.txt` updated with completed story summary
-- [ ] WAL events emitted for new state changes
-- [ ] README.md updated if user-facing behavior changed
-
-## Context Alert
-At ~75% context: output `Context: ~X% | /compact?`
 
 ---
 Your task (TCH-001):
