@@ -1,3 +1,8 @@
+// Load environment variables before any other imports so module-level constants
+// (e.g. GITHUB_CLIENT_ID in auth.ts) pick up the correct values.
+import dotenv from 'dotenv';
+dotenv.config();
+
 // Patch Express 4 to catch async route handler rejections — must be first import
 import './lib/async-handler';
 
@@ -5,7 +10,6 @@ import express from 'express';
 import helmet from 'helmet';
 import cors from 'cors';
 import path from 'path';
-import dotenv from 'dotenv';
 import workspacesRouter from './routes/workspaces';
 import directionRouter from './routes/direction';
 import specsRouter from './routes/specs';
@@ -92,8 +96,6 @@ import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 import { initBoss } from './lib/pg-boss';
-
-dotenv.config();
 
 // OC-002: Fail-fast if RORCA_AGENT=opencode but binary is missing
 if (agentType === 'opencode') {

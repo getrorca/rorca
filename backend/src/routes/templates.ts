@@ -37,7 +37,7 @@ async function getUserTeamIds(userId: string): Promise<string[]> {
 
 async function getTemplateRating(templateId: string): Promise<{ avgRating: number; ratingCount: number }> {
   const row = await queryOne<{ avg_rating: number | null; rating_count: number }>(
-    `SELECT AVG(rating) as avg_rating, COUNT(*) as rating_count
+    `SELECT AVG(rating) as avg_rating, COUNT(*)::int as rating_count
      FROM template_ratings WHERE template_id = $1`,
     [templateId]
   );

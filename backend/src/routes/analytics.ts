@@ -102,7 +102,7 @@ router.get('/usage', async (req: Request, res: Response) => {
         SUM(tu.input_tokens) AS total_input_tokens,
         SUM(tu.output_tokens) AS total_output_tokens,
         SUM(tu.cost_usd) AS total_cost_usd,
-        COUNT(*) AS count
+        COUNT(*)::int AS count
       FROM token_usage tu
     `;
     if (needsJoin) {
@@ -149,7 +149,7 @@ router.get('/usage', async (req: Request, res: Response) => {
         COALESCE(SUM(tu.input_tokens), 0) AS total_input_tokens,
         COALESCE(SUM(tu.output_tokens), 0) AS total_output_tokens,
         COALESCE(SUM(tu.cost_usd), 0) AS total_cost_usd,
-        COUNT(*) AS total_records
+        COUNT(*)::int AS total_records
       FROM token_usage tu
       WHERE tu.recorded_at >= $${totParamIdx++} AND tu.recorded_at <= $${totParamIdx++}
     `;
@@ -168,7 +168,7 @@ router.get('/usage', async (req: Request, res: Response) => {
 
     // Active runs check (for auto-refresh hint)
     const activeRuns = await queryOne<{ count: number }>(
-      `SELECT COUNT(*) AS count FROM pipeline_runs WHERE status = 'running'`
+      `SELECT COUNT(*)::int AS count FROM pipeline_runs WHERE status = 'running'`
     );
 
     res.json({
@@ -300,7 +300,7 @@ router.get('/costs', async (req: Request, res: Response) => {
             ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
           END) AS output_cost_usd,
           SUM(tu.cost_usd) AS total_cost_usd,
-          COUNT(*) AS story_count
+          COUNT(*)::int AS story_count
         FROM token_usage tu
         LEFT JOIN model_pricing mp ON tu.model = mp.model_id
         WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2
@@ -338,7 +338,7 @@ router.get('/costs', async (req: Request, res: Response) => {
           ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
         END) AS output_cost_usd,
         SUM(tu.cost_usd) AS total_cost_usd,
-        COUNT(*) AS story_count
+        COUNT(*)::int AS story_count
       FROM token_usage tu
       LEFT JOIN model_pricing mp ON tu.model = mp.model_id
       ${needsRunJoin ? 'JOIN pipeline_runs pr ON tu.run_id = pr.id' : ''}
@@ -369,7 +369,7 @@ router.get('/costs', async (req: Request, res: Response) => {
           ELSE (tu.output_tokens * 1.0 / 1000) * COALESCE(mp.output_cost_per_1k, 0)
         END), 0) AS total_output_cost_usd,
         COALESCE(SUM(tu.cost_usd), 0) AS total_cost_usd,
-        COUNT(*) AS total_stories
+        COUNT(*)::int AS total_stories
       FROM token_usage tu
       LEFT JOIN model_pricing mp ON tu.model = mp.model_id
       WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2
@@ -705,9 +705,9 @@ router.get('/models', async (req: Request, res: Response) => {
     const sql = `
       SELECT
         tu.model,
-        COUNT(*) AS total_stories,
-        SUM(CASE WHEN sr.status = 'pass' THEN 1 ELSE 0 END) AS passed_stories,
-        SUM(CASE WHEN sr.status = 'fail' THEN 1 ELSE 0 END) AS failed_stories,
+        COUNT(*)::int AS total_stories,
+        SUM(CASE WHEN sr.status = 'pass' THEN 1 ELSE 0 END)::int AS passed_stories,
+        SUM(CASE WHEN sr.status = 'fail' THEN 1 ELSE 0 END)::int AS failed_stories,
         AVG(tu.cost_usd) AS avg_cost_usd,
         SUM(tu.cost_usd) AS total_cost_usd,
         AVG(sr.elapsed_seconds) AS avg_elapsed_seconds,
@@ -854,7 +854,7 @@ router.get('/velocity', async (req: Request, res: Response) => {
         SUM(CASE WHEN sr.status = 'pass' THEN 1 ELSE 0 END) AS passed,
         SUM(CASE WHEN sr.status = 'fail' THEN 1 ELSE 0 END) AS failed,
         SUM(CASE WHEN sr.status = 'skip' THEN 1 ELSE 0 END) AS skipped,
-        COUNT(*) AS total
+        COUNT(*)::int AS total
       FROM story_results sr
       JOIN pipeline_runs pr ON sr.run_id = pr.id
       ${whereClause}
@@ -1230,7 +1230,7 @@ async function buildUsageExport(from: string, to: string, workspaceId?: string, 
 
   // Count total rows
   const countSql = `
-    SELECT COUNT(*) AS total FROM token_usage tu
+    SELECT COUNT(*)::int AS total FROM token_usage tu
     WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
   `;
   const countResult = await queryOne<{ total: number }>(countSql, baseParams);
@@ -1265,7 +1265,7 @@ async function buildCostsExport(from: string, to: string, workspaceId?: string, 
   if (workspaceId) baseParams.push(workspaceId);
 
   const countSql = `
-    SELECT COUNT(*) AS total FROM token_usage tu
+    SELECT COUNT(*)::int AS total FROM token_usage tu
     LEFT JOIN model_pricing mp ON tu.model = mp.model_id
     JOIN pipeline_runs pr ON tu.run_id = pr.id
     WHERE tu.recorded_at >= $1 AND tu.recorded_at <= $2 ${wsFilter}
@@ -1319,7 +1319,7 @@ async function buildVelocityExport(from: string, to: string, workspaceId?: strin
   const whereClause = 'WHERE ' + conditions.join(' AND ');
 
   const countSql = `
-    SELECT COUNT(*) AS total
+    SELECT COUNT(*)::int AS total
     FROM story_results sr
     JOIN pipeline_runs pr ON sr.run_id = pr.id
     ${whereClause}
@@ -1356,7 +1356,7 @@ async function buildCompletionExport(from: string, to: string, workspaceId?: str
   const params: (string | number)[] = workspaceId ? [from, to, workspaceId] : [from, to];
 
   const countSql = `
-    SELECT COUNT(*) AS total
+    SELECT COUNT(*)::int AS total
     FROM story_results sr
     JOIN pipeline_runs pr ON sr.run_id = pr.id
     WHERE sr.finished_at >= $1 AND sr.finished_at <= $2 ${wsFilter}
@@ -1614,7 +1614,7 @@ router.get('/roi', async (req: Request, res: Response) => {
     // Then only count stories whose latest status is 'pass'.
     // Also exclude retry runs' copied passes by grouping across all runs.
     const passedResult = await queryOne<{ total_stories_passed: number }>(`
-      SELECT COUNT(*) AS total_stories_passed
+      SELECT COUNT(*)::int AS total_stories_passed
       FROM (
         SELECT DISTINCT ON (pr.id, sr.story_id) sr.story_id, sr.status
         FROM story_results sr
@@ -2467,14 +2467,14 @@ router.get('/skills/effectiveness', async (req: Request, res: Response) => {
 
     // Total runs in window
     const totalRunsRow = await queryOne<{ cnt: number }>(
-      `SELECT COUNT(DISTINCT id) AS cnt FROM pipeline_runs WHERE workspace_id = $1 AND started_at >= $2`,
+      `SELECT COUNT(DISTINCT id)::int AS cnt FROM pipeline_runs WHERE workspace_id = $1 AND started_at >= $2`,
       [workspaceId, since]
     );
     const totalRuns = totalRunsRow?.cnt ?? 0;
 
     // Total stories in window
     const totalStoriesRow = await queryOne<{ cnt: number }>(
-      `SELECT COUNT(*) AS cnt FROM story_results sr
+      `SELECT COUNT(*)::int AS cnt FROM story_results sr
        JOIN pipeline_runs pr ON sr.run_id = pr.id
        WHERE pr.workspace_id = $1 AND sr.started_at >= $2`,
       [workspaceId, since]

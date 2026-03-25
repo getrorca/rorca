@@ -62,9 +62,11 @@ export default function GitHubCallbackPage() {
 
     // Store tokens and validate session
     setTokens(accessToken, refreshToken);
+    const returnTo = sessionStorage.getItem('github_oauth_return') || '/';
+    sessionStorage.removeItem('github_oauth_return');
     apiFetch<{ user: AuthUser }>('/api/auth/me')
       .then(() => {
-        navigate('/', { replace: true });
+        navigate(returnTo, { replace: true });
       })
       .catch(() => {
         clearTokens();

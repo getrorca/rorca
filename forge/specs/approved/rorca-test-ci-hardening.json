@@ -20,7 +20,9 @@
         "Test run output shows 0 failures, ≤2 skipped"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": false,
+      "skipped": true,
+      "notes": "Skipped after max retries — fix manually and re-run with --story TCH-001"
     },
     {
       "id": "TCH-002",
@@ -37,7 +39,9 @@
         "No test file creates its own database connection — all use the shared `query()` helper from `backend/src/db/index.ts`",
         "Total test run time does not increase by more than 20% compared to TCH-001 baseline"
       ],
-      "dependsOn": ["TCH-001"],
+      "dependsOn": [
+        "TCH-001"
+      ],
       "passes": false
     },
     {
@@ -55,7 +59,9 @@
         "Workflow passes if all tests pass — green check on PR",
         "`.github/workflows/ci.yml` uses environment variables `DATABASE_URL=postgres://rorca:rorca@localhost:5432/rorca_test`"
       ],
-      "dependsOn": ["TCH-001"],
+      "dependsOn": [
+        "TCH-001"
+      ],
       "passes": false
     },
     {
@@ -75,7 +81,9 @@
         "Script cleans up: deletes test workspace, removes `/tmp/rorca-smoke-test` directory on success (not on failure, to allow inspection)",
         "README section added to root `README.md` under '## Smoke Test' explaining how to run the script before release"
       ],
-      "dependsOn": ["TCH-001"],
+      "dependsOn": [
+        "TCH-001"
+      ],
       "passes": false
     }
   ]

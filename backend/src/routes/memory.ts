@@ -1365,8 +1365,8 @@ router.get('/items', async (req: Request, res: Response) => {
   // Get counts
   const countRows = await dbQuery<{ total: string; pinned: string }>(
     `SELECT
-       COUNT(*) AS total,
-       COUNT(*) FILTER (WHERE pinned = true) AS pinned
+       COUNT(*)::int AS total,
+       COUNT(*) FILTER (WHERE pinned = true)::int AS pinned
      FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL`,
     [workspaceId as string],
   );

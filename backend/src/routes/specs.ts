@@ -31,65 +31,13 @@ import { route as routeContext } from '../lib/context-router';
 import { loadRorcaConfig } from '../lib/rorca-config';
 import { getWorkspaceEnvVars } from './env-vars';
 import { score as scoreStory, resolveModelId, type ScorerStory } from '../lib/complexity-scorer';
-import { gitMapStep, gitReduceStep, getLatestHash } from '../lib/git-hydrator';
+// git-hydrator imports removed — git_memory column dropped in migration 075
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import { handleRouteError } from '../lib/async-handler';
 
-/** Fire-and-forget git memory hydration for a workspace.
- *  Called from POST /api/specs/generate when workspace git memory is stale.
- *  Updates workspace_context.git_memory, last_ingested_commit_hash, git_memory_hydrated_at.
- *  Errors are swallowed — spec generation must not be blocked by background hydration.
- */
-async function hydrateGitMemory(workspaceId: string): Promise<void> {
-  try {
-    const workspace = await queryOne<{ path: string; label: string }>('SELECT path, label FROM workspaces WHERE id = $1', [workspaceId]);
-    if (!workspace) return;
-
-    const existingCtx = await queryOne<{
-      git_memory: string | null;
-      last_ingested_commit_hash: string | null;
-      git_commit_count: number;
-      git_memory_updated_at: string | null;
-    }>('SELECT git_memory, last_ingested_commit_hash, git_commit_count, git_memory_updated_at FROM workspace_context WHERE workspace_id = $1', [workspaceId]);
-
-    const lastHash = existingCtx?.last_ingested_commit_hash ?? undefined;
-
-    const summaries = await gitMapStep({ workspacePath: workspace.path, fromHash: lastHash });
-    const newCommits = summaries.reduce((acc, s) => acc + s.commitCount, 0);
-
-    let gitMemory: string;
-    if (newCommits > 0) {
-      const reduced = await gitReduceStep({ summaries, workspaceLabel: workspace.label });
-      gitMemory = lastHash && existingCtx?.git_memory
-        ? existingCtx.git_memory + '\n\n' + reduced
-        : reduced;
-    } else {
-      gitMemory = existingCtx?.git_memory ?? '';
-    }
-
-    const latestHash = getLatestHash(summaries) ?? existingCtx?.last_ingested_commit_hash ?? null;
-    const totalCommitCount = (existingCtx?.git_commit_count ?? 0) + newCommits;
-    const now = new Date().toISOString();
-    const memoryUpdatedAt = newCommits > 0 ? now : (existingCtx?.git_memory_updated_at ?? null);
-
-    await execute(
-      `INSERT INTO workspace_context (workspace_id, git_memory, last_ingested_commit_hash, git_memory_updated_at, git_commit_count, git_memory_hydrated_at)
-       VALUES ($1, $2, $3, $4, $5, $6)
-       ON CONFLICT(workspace_id) DO UPDATE SET
-         git_memory = EXCLUDED.git_memory,
-         last_ingested_commit_hash = EXCLUDED.last_ingested_commit_hash,
-         git_memory_updated_at = COALESCE(EXCLUDED.git_memory_updated_at, workspace_context.git_memory_updated_at),
-         git_commit_count = EXCLUDED.git_commit_count,
-         git_memory_hydrated_at = EXCLUDED.git_memory_hydrated_at`,
-      [workspaceId, gitMemory || null, latestHash, memoryUpdatedAt, totalCommitCount, now]
-    );
-
-    logger.info({ workspaceId, newCommits }, '[Specs] Background git hydration completed');
-  } catch (err) {
-    logger.warn({ err, workspaceId }, '[Specs] Background git hydration failed (ignored)');
-  }
-}
+/* hydrateGitMemory removed — git_memory column dropped in migration 075.
+   Git-derived knowledge is now served via the memories table + memory-router.ts. */
 
 const BRIEF_STOP_WORDS = new Set([
   'a', 'an', 'the', 'and', 'or', 'but', 'in', 'on', 'at', 'to', 'for',
@@ -1007,13 +955,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { content_yaml: string } | undefined;
 
     // 5b. Fetch auto-hydrated schema context from workspace_context
-    const ctx = await queryOne(
-      `SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`,
+    const ctx = await queryOne<{ schema_snapshot: string | null }>(
+      `SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`,
       [workspaceId]
-    ) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+    );
 
     const schemaSnapshot = ctx?.schema_snapshot || undefined;
-    const gitMemory = ctx?.git_memory || undefined;
 
     // 6. Synthesize direction stack
     const synthResult = synthesizeWithMeta({
@@ -1083,7 +1030,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       ? (catalogs.memoryMd.match(/^## \d{4}-\d{2}-\d{2}/gm) || []).length
       : 0;
     const dbMemoryRow = await queryOne<{ cnt: string }>(
-      'SELECT COUNT(*) as cnt FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL',
+      'SELECT COUNT(*)::int as cnt FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL',
       [workspace.id]
     );
     const dbMemoryCount = dbMemoryRow ? parseInt(dbMemoryRow.cnt, 10) : 0;
@@ -2254,6 +2201,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       (contextSummary ?? {}) as Record<string, unknown>,
     ).catch(() => { /* non-blocking — errors logged internally */ });
   } catch (error: any) {
+    // Let AppErrors (NotFoundError, ValidationError, etc.) propagate to the global error handler
+    // so they return their correct HTTP status codes instead of always returning 500.
+    if (error && typeof error.statusCode === 'number' && error.statusCode < 500) {
+      throw error;
+    }
+
     logger.error('[Specs] Generate error:', error);
     const category = categorizeSpecError(error);
     let suggestion = ERROR_SUGGESTIONS[category];
@@ -2328,7 +2281,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
   const l2Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [item.domain ?? '']) as { content_yaml: string } | undefined;
   const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [item.workspaceId]) as { content_yaml: string } | undefined;
-  const ctx = await queryOne(`SELECT schema_snapshot, git_memory FROM workspace_context WHERE workspace_id = $1`, [item.workspaceId]) as { schema_snapshot: string | null; git_memory: string | null } | undefined;
+  const ctx = await queryOne<{ schema_snapshot: string | null }>(`SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`, [item.workspaceId]);
 
   const synthesized = synthesize({
     l1: l1Row?.content_yaml,
@@ -3212,8 +3165,8 @@ router.get('/kanban', async (req: Request, res: Response) => {
     const storyFailed = new Map<string, number>();
     const storyCountRows = await query<{ spec_path: string; pass_count: string; fail_count: string }>(
       `SELECT latest.spec_path,
-              COUNT(*) FILTER (WHERE sr.status = 'pass') AS pass_count,
-              COUNT(*) FILTER (WHERE sr.status = 'fail') AS fail_count
+              COUNT(*) FILTER (WHERE sr.status = 'pass')::int AS pass_count,
+              COUNT(*) FILTER (WHERE sr.status = 'fail')::int AS fail_count
        FROM (
          SELECT DISTINCT ON (spec_path) id, spec_path
          FROM pipeline_runs
@@ -3558,7 +3511,7 @@ router.post('/kanban/columns', async (req: Request, res: Response) => {
   const { workspaceId, name, color } = req.body;
   if (!workspaceId || !name) { throw new ValidationError('Missing workspaceId or name'); return; }
 
-  const count = (await queryOne(`SELECT COUNT(*) as cnt FROM kanban_columns WHERE workspace_id = $1`, [workspaceId]) as { cnt: number }).cnt;
+  const count = (await queryOne(`SELECT COUNT(*)::int as cnt FROM kanban_columns WHERE workspace_id = $1`, [workspaceId]) as { cnt: number }).cnt;
   if (count >= MAX_CUSTOM_COLUMNS) { throw new UnprocessableError(`Maximum ${MAX_CUSTOM_COLUMNS} custom columns reached`); return; }
 
   const maxPos = (await queryOne(`SELECT COALESCE(MAX(position), -1) as maxPos FROM kanban_columns WHERE workspace_id = $1`, [workspaceId]) as { maxPos: number }).maxPos;
@@ -3714,7 +3667,7 @@ router.delete('/kanban/columns/:id', async (req: Request, res: Response) => {
   if (!col) { throw new NotFoundError('Column not found'); return; }
 
   // Count assigned specs before deleting
-  const assignedCount = (await queryOne(`SELECT COUNT(*) as cnt FROM kanban_spec_assignments WHERE column_id = $1`, [colId]) as { cnt: number }).cnt;
+  const assignedCount = (await queryOne(`SELECT COUNT(*)::int as cnt FROM kanban_spec_assignments WHERE column_id = $1`, [colId]) as { cnt: number }).cnt;
 
   // Remove assignments (specs go back to In Progress)
   await execute(`DELETE FROM kanban_spec_assignments WHERE column_id = $1`, [colId]);
@@ -3878,7 +3831,7 @@ async function getRunTelemetry(specSlug: string, workspaceId: string): Promise<R
     );
   }
 
-  const outcomes = await query(`SELECT status, COUNT(*) as cnt FROM story_results WHERE run_id = $1 GROUP BY status`, [run.id]) as { status: string; cnt: number }[];
+  const outcomes = await query(`SELECT status, COUNT(*)::int as cnt FROM story_results WHERE run_id = $1 GROUP BY status`, [run.id]) as { status: string; cnt: number }[];
 
   const storyOutcomes = { pass: 0, fail: 0, skip: 0, timeout: 0, excluded: 0 };
   for (const row of outcomes) {
@@ -5605,11 +5558,11 @@ router.get('/tags/autocomplete', async (req: Request, res: Response) => {
 
     let rows: { tag_name: string; count: number }[];
     if (q) {
-      rows = await query(`SELECT tag_name, COUNT(*) as count FROM spec_tags
+      rows = await query(`SELECT tag_name, COUNT(*)::int as count FROM spec_tags
          WHERE workspace_id = $1 AND tag_name LIKE $2 || '%'
          GROUP BY tag_name ORDER BY count DESC, tag_name ASC LIMIT 20`, [workspaceId, q.trim().toLowerCase()]) as { tag_name: string; count: number }[];
     } else {
-      rows = await query(`SELECT tag_name, COUNT(*) as count FROM spec_tags
+      rows = await query(`SELECT tag_name, COUNT(*)::int as count FROM spec_tags
          WHERE workspace_id = $1
          GROUP BY tag_name ORDER BY count DESC, tag_name ASC LIMIT 20`, [workspaceId]) as { tag_name: string; count: number }[];
     }
@@ -8861,7 +8814,7 @@ router.get('/:specId/comments/counts', async (req: Request, res: Response) => {
     const { specId } = req.params;
 
     const rows = await query(`
-      SELECT story_id, COUNT(*) as count
+      SELECT story_id, COUNT(*)::int as count
       FROM story_comments
       WHERE spec_id = $1 AND resolved_at IS NULL
       GROUP BY story_id

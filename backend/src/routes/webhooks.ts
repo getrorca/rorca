@@ -343,7 +343,7 @@ router.get('/dlq', async (req: Request, res: Response) => {
 
   const result = await paginateQuery<DlqRow>({
     query: `SELECT * FROM webhook_dlq WHERE ${where}`,
-    countQuery: `SELECT COUNT(*) AS total FROM webhook_dlq WHERE ${where}`,
+    countQuery: `SELECT COUNT(*)::int AS total FROM webhook_dlq WHERE ${where}`,
     params,
     pagination,
     orderBy: 'created_at DESC',
