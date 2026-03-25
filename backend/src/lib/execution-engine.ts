@@ -59,6 +59,7 @@ import { loadAgentsMd, matchRole, buildRolePromptSection, detectViolations, getL
 import { getGraphContext, formatGraphContext } from './graph-context';
 import { logger } from './logger';
 import { autoSynthesizeMemory } from './auto-memory';
+import { writeMemoryMd } from './memory-projection';
 import {
   initRunState,
   markStoryStarted as rsMarkStoryStarted,
@@ -2326,6 +2327,15 @@ async function executeStory(
       ...(injectedContextFiles.length > 0 ? { context_files: injectedContextFiles } : {}),
       ...(activeSkillNames.length > 0 ? { active_skills: activeSkillNames } : {}),
     }, story.id);
+  }
+
+  // US-003: Project DB memories to MEMORY.md before agent subprocess
+  if (workspaceId) {
+    try {
+      await writeMemoryMd(workspaceId, effectiveCwd);
+    } catch (err: any) {
+      console.warn(`[memory-projection] Failed to write MEMORY.md for ${story.id}: ${err.message}`);
+    }
   }
 
   // CIE-007: Mark story started in run-state.json
