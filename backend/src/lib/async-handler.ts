@@ -21,22 +21,32 @@ const Layer = require('express/lib/router/layer');
 
 // Idempotency guard — prevent double-patching when jest.resetModules() re-requires this file
 if (!(Layer.prototype as any).__asyncPatched) {
-  const originalHandle = Layer.prototype.handle_request;
-
+  // Replace handle_request entirely instead of wrapping it.
+  // The original does `try { fn(req, res, next) } catch (err) { next(err) }`
+  // but discards the return value, so async function rejections are never caught.
+  // We replicate the original logic but add `.catch(next)` on the returned Promise.
   Layer.prototype.handle_request = function handleRequest(
     req: Request,
     res: Response,
     next: NextFunction,
   ) {
-    // Call the original handler
-    const result = originalHandle.call(this, req, res, next);
+    const fn = this.handle;
 
-    // If the handler returned a Promise (async function), catch rejections
-    if (result && typeof result.catch === 'function') {
-      result.catch(next);
+    if (fn.length > 3) {
+      // Not a standard request handler (error handler has 4 params)
+      return next();
     }
 
-    return result;
+    try {
+      const result = fn(req, res, next);
+
+      // If the handler returned a Promise (async function), catch rejections
+      if (result && typeof result.catch === 'function') {
+        result.catch(next);
+      }
+    } catch (err) {
+      next(err);
+    }
   };
 
   (Layer.prototype as any).__asyncPatched = true;
