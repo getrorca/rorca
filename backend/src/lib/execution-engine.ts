@@ -526,6 +526,17 @@ function buildPrompt(
     ].join('\n')
     : '';
 
+  // US-005: OpenCode/Codex agents have no MCP — instruct them to write proposed memories to a JSON file
+  const nonClaudeMemoryInstruction = (agentType === 'opencode' || agentType === 'codex')
+    ? [
+      '## Memory Instructions',
+      'When you discover something worth remembering, append a JSON object to the file .rorca/proposed_memories.json in the workspace root.',
+      'The file is a JSON array. If the file does not exist, create it with [].',
+      'Each object must have: { "category": "Architecture|Convention|Bug Fix|Decision|Pattern|Gotcha", "title": "short summary", "rule": "the actionable lesson", "context": "why it matters", "source": "<storyId>" }.',
+      'Do NOT edit MEMORY.md directly — it is read-only and generated automatically.',
+    ].join('\n')
+    : '';
+
   // CA-009: Resolve persona prompt text if story has a persona field
   let personaSection = '';
   if (story.persona && personaRegistry) {
@@ -572,6 +583,7 @@ function buildPrompt(
       '- Write placeholder/todo tests — all tests must have real assertions',
       personaSection,
       claudeMemoryInstruction,
+      nonClaudeMemoryInstruction,
       '', '---', '',
       `Your task (${story.id}): ${story.title}`,
       '', story.description, acSection,
@@ -590,6 +602,7 @@ function buildPrompt(
     graphBlock,
     personaSection,
     claudeMemoryInstruction,
+    nonClaudeMemoryInstruction,
     '', '---', '',
     `Your task (${story.id}):`,
     story.description, acSection,
@@ -2641,6 +2654,48 @@ async function executeStory(
           }
         } catch (err: any) {
           logger.warn(`  [review] Adversarial review failed: ${err.message} — proceeding with pass`);
+        }
+      }
+
+      // US-005: Ingest proposed memories from opencode/codex agents (file-based fallback for non-MCP agents)
+      if (workspaceId) {
+        try {
+          const proposedPath = path.join(effectiveCwd, '.rorca', 'proposed_memories.json');
+          if (fs.existsSync(proposedPath)) {
+            let entries: unknown[];
+            try {
+              const raw = fs.readFileSync(proposedPath, 'utf-8');
+              const parsed = JSON.parse(raw);
+              entries = Array.isArray(parsed) ? parsed : [];
+            } catch {
+              logger.warn(`  [memory] Invalid JSON in proposed_memories.json — deleting file`);
+              entries = [];
+            }
+            for (const entry of entries) {
+              if (entry && typeof entry === 'object') {
+                const e = entry as Record<string, unknown>;
+                try {
+                  await fetch(`http://localhost:${config.port}/api/memory`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      workspaceId,
+                      category: e.category ?? 'Pattern',
+                      title: e.title ?? 'Untitled',
+                      rule: e.rule ?? '',
+                      context: e.context ?? '',
+                      source: e.source ?? story.id,
+                    }),
+                  });
+                } catch (postErr: any) {
+                  logger.warn(`  [memory] Failed to POST proposed memory: ${postErr.message}`);
+                }
+              }
+            }
+            try { fs.unlinkSync(proposedPath); } catch { /* best-effort cleanup */ }
+          }
+        } catch (err: any) {
+          logger.warn(`  [memory] proposed_memories.json processing failed: ${err.message}`);
         }
       }
 
