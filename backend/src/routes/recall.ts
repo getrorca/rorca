@@ -17,7 +17,6 @@ import * as fsPromises from 'fs/promises';
 import * as yaml from 'js-yaml';
 import { query as dbQuery, queryOne } from '../db/index';
 import { synthesizeDirectionStack } from '../lib/direction-stack';
-import { readMemory, query as queryMemory } from '../lib/memory-ledger';
 import { retrieveContext } from '../lib/memory-router';
 import { echolocate } from '../lib/workspace-echolocation';
 import { parseFrontmatter, inferCategory } from '../lib/skill-registry';
@@ -76,6 +75,18 @@ interface PipelineRunRow {
 interface StoryResultCountRow {
   status: string;
   cnt: string;
+}
+
+interface MemoryRow {
+  id: number;
+  category: string;
+  content: string;
+  source_story_id: string | null;
+  source_run_id: number | null;
+  confidence: string;
+  source: string | null;
+  pinned: boolean;
+  created_at: string;
 }
 
 // ─── Skills helpers ─────────────────────────────────────────────────────────
@@ -151,26 +162,87 @@ async function fetchDirectionStack(
 }
 
 async function fetchMemories(
-  workspacePath: string,
   workspaceId: string,
   category?: string,
   storyText?: string,
 ): Promise<{ memories: MemoryEntry[]; retrievalTier: RetrievalTier }> {
-  let retrievalTier: RetrievalTier = 'none';
+  if (!storyText) {
+    // No story text — return most recent 20 memories from DB
+    const catFilter = category
+      ? ' AND category = $2'
+      : '';
+    const params: (string | undefined)[] = [workspaceId];
+    if (category) params.push(category);
 
-  if (storyText) {
-    const ctx = await retrieveContext(workspaceId, storyText, { includeGraph: true });
-    retrievalTier = ctx.meta.tier === 'cache' ? 'cag'
-      : ctx.meta.tier === 'search' || ctx.meta.tier === 'hybrid' ? 'rag'
-      : 'none';
-    if (ctx.meta.graphHits > 0) retrievalTier = 'graph';
+    const rows = await dbQuery<MemoryRow>(
+      `SELECT id, category, content, source_story_id, source_run_id, confidence, source, pinned, created_at
+       FROM memories
+       WHERE workspace_id = $1 AND deleted_at IS NULL${catFilter}
+       ORDER BY created_at DESC
+       LIMIT 20`,
+      params,
+    );
+
+    return {
+      memories: rows.map(memoryRowToEntry),
+      retrievalTier: 'none',
+    };
   }
 
-  const all = category
-    ? queryMemory(workspacePath, category as Parameters<typeof queryMemory>[1])
-    : readMemory(workspacePath);
+  // Story text provided — use retrieveContext to get scored, ranked memories
+  const ctx = await retrieveContext(workspaceId, storyText, { includeGraph: true });
 
-  return { memories: all, retrievalTier };
+  let retrievalTier: RetrievalTier = ctx.meta.tier === 'cache' ? 'cag'
+    : ctx.meta.tier === 'search' || ctx.meta.tier === 'hybrid' ? 'rag'
+    : 'none';
+  if (ctx.meta.graphHits > 0) retrievalTier = 'graph';
+
+  // Fetch all non-deleted memories from DB (optionally filtered by category)
+  const catFilter = category
+    ? ' AND category = $2'
+    : '';
+  const params: (string | undefined)[] = [workspaceId];
+  if (category) params.push(category);
+
+  const dbRows = await dbQuery<MemoryRow>(
+    `SELECT id, category, content, source_story_id, source_run_id, confidence, source, pinned, created_at
+     FROM memories
+     WHERE workspace_id = $1 AND deleted_at IS NULL${catFilter}
+     ORDER BY created_at DESC`,
+    params,
+  );
+
+  // Build a map from content text -> DB row for matching against retrieval results
+  const contentToRow = new Map<string, MemoryRow>();
+  for (const row of dbRows) {
+    contentToRow.set(row.content, row);
+  }
+
+  // Match scored memory texts from retrieveContext against DB rows
+  const matched: Array<{ entry: MemoryEntry; score: number }> = [];
+  for (const mem of ctx.memory) {
+    const row = contentToRow.get(mem.text);
+    if (row) {
+      matched.push({ entry: memoryRowToEntry(row), score: mem.score });
+    }
+  }
+
+  // Sort by score descending, take top 10
+  matched.sort((a, b) => b.score - a.score);
+  const topMemories = matched.slice(0, 10).map(m => m.entry);
+
+  return { memories: topMemories, retrievalTier };
+}
+
+function memoryRowToEntry(r: MemoryRow): MemoryEntry {
+  return {
+    date: new Date(r.created_at).toISOString().slice(0, 10),
+    category: r.category as MemoryEntry['category'],
+    title: r.content.slice(0, 100),
+    rule: r.content,
+    context: '',
+    source: r.source || r.source_story_id || '',
+  };
 }
 
 function fetchHealth(workspacePath: string): EcholocationReport | null {
@@ -448,7 +520,7 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     // 1. Direction stack synthesis
     timed('directionStack', () => fetchDirectionStack(workspaceId, storyText)),
     // 2. Memories (may trigger 3-tier retrieval if storyText provided)
-    timed('memories', () => fetchMemories(workspace.path, workspaceId, category, storyText)),
+    timed('memories', () => fetchMemories(workspaceId, category, storyText)),
     // 3. Health / echolocation
     timed('health', () => includeHealth ? fetchHealth(workspace.path) : null),
     // 4. Recent completed runs
@@ -505,18 +577,6 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
 
 // ─── Dump-specific fetchers (no limits, no truncation) ──────────────────────
 
-interface MemoryRow {
-  id: number;
-  category: string;
-  content: string;
-  source_story_id: string | null;
-  source_run_id: number | null;
-  confidence: string;
-  source: string | null;
-  pinned: boolean;
-  created_at: string;
-}
-
 async function fetchAllMemories(workspaceId: string): Promise<MemoryEntry[]> {
   const rows = await dbQuery<MemoryRow>(
     `SELECT id, category, content, source_story_id, source_run_id, confidence, source, pinned, created_at
@@ -525,14 +585,7 @@ async function fetchAllMemories(workspaceId: string): Promise<MemoryEntry[]> {
      ORDER BY created_at DESC`,
     [workspaceId],
   );
-  return rows.map((r) => ({
-    date: new Date(r.created_at).toISOString().slice(0, 10),
-    category: r.category as MemoryEntry['category'],
-    title: r.content.slice(0, 100),
-    rule: r.content,
-    context: '',
-    source: r.source || r.source_story_id || '',
-  }));
+  return rows.map(memoryRowToEntry);
 }
 
 interface DirectionLayerRow {

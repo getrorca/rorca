@@ -1,9 +1,14 @@
 # Run State Summary
 
-Spec: rorca-test-ci-hardening
-Run ID: 20260316000049
-Started: 2026-03-20T07:41:57.656Z
-Last Updated: 2026-03-20T07:55:11.806Z
+Spec: rorca-billing-launch
+Run ID: 20260316000045
+Started: 2026-03-19T20:45:48.038Z
+Last Updated: 2026-03-25T19:31:32.880Z
 
-## Failed Stories (1)
-- TCH-001: Fix backend test suite — achieve 95%+ pass rate across all Jest tests — FAILED (timeout)
+## Completed Stories (6)
+- BL-012: Billing webhook idempotency — prevent duplicate billing state transitions — DONE (claude, 33s)
+- BL-013: Self-hosted offline license activation — RORCA_LICENSE_KEY env var — DONE (claude, 1158s)
+- US-004: Update buildPrompt() to instruct claude agent to use rorca_save_memory MCP tool — DONE (claude, 159s)
+- US-005: proposed_memories.json handler for opencode/codex agents — DONE (claude, 279s)
+- US-006: Post-story MEMORY.md rebuild after markStoryPassed() — DONE (claude, 264s)
+- US-007: Integration test: end-to-end memory consolidation flow — DONE (claude, 1982s)
