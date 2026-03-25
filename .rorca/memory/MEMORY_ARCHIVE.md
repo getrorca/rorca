@@ -303,3 +303,51 @@
 > Rule: GET /api/pipeline/stream started lastSeenId=0 every connection, replaying ALL historical WAL events at LIMIT 50/tick. With 5000+ events this caused 5+ minute delay before live events appeared. Fix: initialize lastSeenId to MAX(id) FROM wal_events on connection open. Historical events served instantly by new REST endpoint GET /runs/:runId/wal-events. Combined: usePipelineSSE seeds history from REST (immediate), SSE stream delivers only new events (within 3s).
 > Context: pipeline.ts line ~4332. The fix is a one-liner before the setInterval: `const maxWalRow = await queryOne('SELECT COALESCE(MAX(id), 0) AS max_id FROM wal_events'); let lastSeenId = maxWalRow?.max_id ?? 0;`. The REST endpoint uses `WHERE (payload->>'run_id')::bigint = $1 ORDER BY id ASC`. usePipelineSSE.ts seeds on runId change and deduplicates by event id.
 > Source: debugging session 2026-03-17
+## 2026-03-17 [Bug Fix] Merge failure leaves passes:true — idempotency gap causes next run to skip story with no code
+> Rule: When a sub-worktree merge fails, markStoryPassed() had already written passes:true to the spec JSON. The failure path added the story to failedIds and emitted story_failed WAL event, but never reverted passes:true. Next run sees passes:true, skips the story, but the code is not in the parent branch. Fix: call markStoryMergeFailed() in both merge failure paths (single-story wave at line ~3154, multi-story wave failures at line ~3219). markStoryMergeFailed() sets passes:false, clears skipped, adds a note.
+> Context: This was the exact bug that caused run #10 to exit in 760ms — US-001 merge conflicted in run #9, passes:true remained, run #10 pre-skipped US-001 and all downstream blocked stories immediately finished. markStoryMergeFailed() is try/catch wrapped so it never crashes the engine.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Bug Fix] Worker premature auto-merge — status=done without all stories passing triggered merge
+> Rule: worker.ts was merging the parent worktree into main when status==='done' regardless of whether all spec stories passed. A run can be 'done' with 0 stories executed (immediate exit). Fix: before calling autoMergeAfterRun, read the spec JSON and verify every story has passes===true or excluded===true. Only merge if allSpecStoriesPassed is true.
+> Context: In worker.ts around the autoMergeAfterRun call: read absSpecPath, parse JSON, check specJson.userStories.every(s => s.passes === true || s.excluded === true). Log warning and skip merge if not all passed. This ensures worktrees persist across multiple run IDs until the spec is fully complete.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Gotcha] tsx module cache causes routes to return 404 after file edits — fresh restart required
+> Rule: After adding a new route to pipeline.ts, the route returned 404 despite being in the source and other routes in the same file working. tsx watch auto-restarts do not always invalidate the compiled module cache. `touch` on the file does not fix it. A full kill+restart (lsof -ti:3030 | xargs kill -9, then npm run dev) forces tsx to recompile from scratch and register all routes. Never diagnose a 404 for a route that exists in source without first doing a full restart.
+> Context: Observed with GET /runs/:runId/wal-events route in pipeline.ts. Routes before and after it (skills, commits) returned 200. After kill+restart the route returned 200 immediately. The server must have been loaded from a stale tsx compilation cache.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Gotcha] Never kill backend while a run is active — execution engine WAL writes will fail
+> Rule: The execution engine (child of worker, not of server) sends WAL events via fetch to http://localhost:3030/api/wal. If the server is killed mid-run, those WAL writes fail silently and events are lost. The run continues but story progress disappears from the UI. The run stays stuck as status=running in the DB with no finished_at. Always confirm no active runs (GET /api/pipeline/worker/health activeJobs=[]) before killing the backend.
+> Context: Killed backend during run #20260316000012 while US-003, US-004, US-005, US-006, US-007, US-008 were running in wave parallel. Run was interrupted. The worker process (separate PID) survived but the engine's WAL event writes started failing.
+> Source: incident 2026-03-17
+## 2026-03-17 [Gotcha] Worker process must be manually restarted after worker.ts changes
+> Rule: Plain `tsx` (not `tsx watch`) is used for the worker — it does NOT hot-reload on file changes. Any change to `backend/src/worker.ts` requires killing the worker process and restarting it. The backend (Express) auto-restarts via tsx watch, but the worker is completely separate. Always verify worker PID start time vs file modification time before assuming a fix is live.
+> Context: Root cause of run #20260316000017 not streaming output after the immediate-flush fix was applied: the fix was written to worker.ts at 13:38 but the worker had been running since March 16 15:59 and never picked it up. Kill with `kill <pid>` then `npm run worker` in backend/. Check: `ps aux | grep worker` for PID, `ls -la backend/src/worker.ts` for mod time.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Bug Fix] handlePipelineRetry also had the 4KB buffer bug — now fixed
+> Rule: The immediate-flush fix (write every data event directly instead of buffering to 4KB) was only applied to `handlePipelineRun` initially. `handlePipelineRetry` (around line 1079) still had the old accumulating buffer. Both handlers now call `writeBufferAsChunks(runId, data, sequenceRef)` directly in `handleData` with no pending buffer accumulation.
+> Context: Retry runs (POST /api/pipeline/runs/:id/retry) use handlePipelineRetry, not handlePipelineRun. Had the same 4KB buffer delay. Fixed 2026-03-17 in the same session where the worker was restarted.
+> Source: debugging session 2026-03-17
+
+## 2026-03-17 [Decision] Remove hardcoded rorca.md injection from execution-engine.ts
+> Rule: rorca.md must NOT be hardcoded-injected in buildPrompt(). It was previously always injected via readWorkspaceFile(.claude/skills/rorca.md) regardless of suggestedSkills. Removed in this session. Now rorca goes through normal loadMatchedSkills() like every other skill — only injected if in a story's suggestedSkills array, and tracked in active_skills for the Skills tab.
+> Context: The Skills tab showed no skills because rorca was injected outside the activeSkillNames tracking path. The skip guard (lines 430-431) that prevented rorca from going through loadMatchedSkills was also removed. Files changed: backend/src/lib/execution-engine.ts
+> Source: session-2026-03-17
+
+## 2026-03-17 [Decision] GTM worktree branches US-018/031/036 — do NOT merge, let billing-launch redo
+> Rule: Three unmerged GTM story worktrees (feat/rorca-go-to-market-v1-US-018, US-031, US-036) contain unique code not in main (github-token-validator.ts, github-review-requests.test.ts, license.ts). However they diverged from main at c9709e75 — well before 63 subsequent merges. Merging would clobber current main (~18k line deletions). These are failed story worktrees from the GTM run. The billing-launch spec will re-implement this work cleanly against current main. Delete worktrees, do not merge.
+> Context: Verified via git merge-base --is-ancestor check. 60 of 63 worktrees were confirmed merged. 7 were not. GTM branches were the 3 failed stories split into billing-launch spec.
+> Source: session-2026-03-17
+
+## 2026-03-17 [Gotcha] git worktree merged check — use merge-base --is-ancestor SHA main, NOT git branch --merged
+> Rule: To check if a worktree is merged into main, use: git merge-base --is-ancestor &lt;SHA&gt; main. Do NOT use git branch --merged main with shell pattern matching — it has zsh escaping bugs and gave wrong results (reported all 63 as merged when 7 were not). The merge-base approach checks the actual commit SHA from git worktree list against main's ancestry chain.
+> Context: First check used a bash loop with grep pattern on branch names — zsh reported bad pattern errors but still printed merged=YES for all entries. Python script with subprocess was used to correctly identify 7 unmerged worktrees.
+> Source: session-2026-03-17
+
+## 2026-03-18 [Gotcha] Worktree auto-merge fails silently when concurrent specs touch overlapping files
+> Rule: When two specs run concurrently in separate worktrees and edit the same files, the auto-merge of the second worktree fails with real merge conflicts. The run is left stuck as 'running' and implementation files remain stranded in the feature branch. Recovery requires: (1) manual git merge with conflict resolution, (2) restoring dropped files via `git show <sha>:path > file`, (3) manually marking the run as failed in the DB.
+> Context: Happened with rorca-mcp-recall-tool and rorca-mini-terminal-db-output running concurrently — both touched recall.ts, server.ts, and mcp/server.ts. Merge conflict markers were committed into the codebase (<<<<<<< Updated upstream), causing TypeScript compilation failures. The run record (e.g. #20260316000021) stayed stuck as status='running'. Post-merge, the restored files still had conflict markers that had to be manually resolved for each file.
+> Source: debugging session 2026-03-17
