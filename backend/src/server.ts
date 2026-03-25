@@ -212,10 +212,21 @@ app.use('/api/review', rateLimiter, publicReviewRouter);
 registerWebhookHandlers();
 
 // CA-021: MCP Streamable HTTP transport — auto-generated from OpenAPI spec
+// MCP clients (Claude Code, IDE extensions) connect over HTTP without browser
+// origin headers. Scoped CORS on /mcp only — no credentials, session-id header
+// allowed, localhost-only binding keeps it off the network.
+const mcpCors = cors({
+  origin: true,
+  credentials: false,
+  methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
+  allowedHeaders: ['Content-Type', 'Accept', 'Mcp-Session-Id'],
+  exposedHeaders: ['Mcp-Session-Id'],
+  maxAge: 86400,
+});
 const mcpHandlers = createMcpRequestHandler(swaggerSpec as any);
-app.post('/mcp', mcpHandlers.handlePost);
-app.get('/mcp', mcpHandlers.handleGet);
-app.delete('/mcp', mcpHandlers.handleDelete);
+app.post('/mcp', mcpCors, mcpHandlers.handlePost);
+app.get('/mcp', mcpCors, mcpHandlers.handleGet);
+app.delete('/mcp', mcpCors, mcpHandlers.handleDelete);
 
 // MC-004: MCP Tools enumeration endpoint (public — used by VS Code extension, no auth required)
 app.use('/api/mcp/tools', mcpToolsRouter);
