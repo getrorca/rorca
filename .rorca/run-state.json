@@ -1,12 +1,40 @@
 {
-  "specId": "rorca-memory-consolidation",
-  "runId": 20260316000066,
-  "startedAt": "2026-03-25T18:43:32.457Z",
-  "lastUpdatedAt": "2026-03-25T18:43:32.457Z",
-  "completedStories": [],
+  "specId": "rorca-billing-launch",
+  "runId": 20260316000045,
+  "startedAt": "2026-03-19T20:45:48.038Z",
+  "lastUpdatedAt": "2026-03-25T18:47:32.754Z",
+  "completedStories": [
+    {
+      "storyId": "BL-012",
+      "title": "Billing webhook idempotency — prevent duplicate billing state transitions",
+      "status": "passed",
+      "startedAt": "2026-03-19T20:38:42.733Z",
+      "finishedAt": "2026-03-19T20:39:16.135Z",
+      "agentType": "claude",
+      "elapsedMs": 33402
+    },
+    {
+      "storyId": "BL-013",
+      "title": "Self-hosted offline license activation — RORCA_LICENSE_KEY env var",
+      "status": "passed",
+      "startedAt": "2026-03-19T20:45:54.697Z",
+      "finishedAt": "2026-03-19T21:05:12.717Z",
+      "agentType": "claude",
+      "elapsedMs": 1158020
+    },
+    {
+      "storyId": "US-001",
+      "title": "Fix semantic leak in GET /api/recall — use retrieveContext() results to filter and rank memories",
+      "status": "passed",
+      "startedAt": "2026-03-25T18:43:42.846Z",
+      "finishedAt": "2026-03-25T18:47:32.754Z",
+      "agentType": "claude",
+      "elapsedMs": 229908
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
-  "resumedFromStory": null
+  "resumedFromStory": "BL-012"
 }
