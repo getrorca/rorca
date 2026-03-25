@@ -516,6 +516,16 @@ function buildPrompt(
     ? 'AGENTS.md in the workspace root contains the Rorca direction stack with project standards and context. Follow its guidance for all implementation decisions.\n'
     : '';
 
+  // Claude agents use rorca_save_memory MCP tool — instruct them to save discoveries to DB, not MEMORY.md
+  const claudeMemoryInstruction = (!agentType || agentType === 'claude')
+    ? [
+      '## Memory Instructions',
+      'When you discover something worth remembering (a bug fix, architectural decision, convention, or pattern), use the rorca_save_memory MCP tool to save it.',
+      'Do NOT edit MEMORY.md directly — it is a read-only generated file that will be overwritten before the next story.',
+      'Call rorca_save_memory with: category (Architecture|Convention|Bug Fix|Decision|Pattern|Gotcha), title (short summary), rule (the actionable lesson), context (why it matters), source (story ID).',
+    ].join('\n')
+    : '';
+
   // CA-009: Resolve persona prompt text if story has a persona field
   let personaSection = '';
   if (story.persona && personaRegistry) {
@@ -561,6 +571,7 @@ function buildPrompt(
       '- Skip running the tests — every test must actually execute and pass',
       '- Write placeholder/todo tests — all tests must have real assertions',
       personaSection,
+      claudeMemoryInstruction,
       '', '---', '',
       `Your task (${story.id}): ${story.title}`,
       '', story.description, acSection,
@@ -578,6 +589,7 @@ function buildPrompt(
     matchedSkills,
     graphBlock,
     personaSection,
+    claudeMemoryInstruction,
     '', '---', '',
     `Your task (${story.id}):`,
     story.description, acSection,
