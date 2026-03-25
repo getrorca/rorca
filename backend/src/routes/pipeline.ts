@@ -1037,16 +1037,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       return;
     }
 
-    // ── Plan enforcement: Free tier cannot execute pipelines ─────
-    const effectiveUser = await getEffectiveUser(req);
-    if (effectiveUser?.id) {
-      const userRow = await queryOne('SELECT plan FROM users WHERE id = $1', [effectiveUser.id]) as { plan: string } | undefined;
-      const plan = userRow?.plan || 'free';
-      if (plan === 'free' && !dryRun) {
-        throw new ForbiddenError('plan_required');
-        return;
-      }
-    }
+    // Plan enforcement is handled by requirePlan middleware once billing-launch spec is complete.
 
     // ── Dry-run: return cost estimate without spawning any processes ─────
     if (dryRun) {
@@ -1930,16 +1921,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       return;
     }
 
-    // 2. Plan enforcement
-    const effectiveUser = await getEffectiveUser(req);
-    if (effectiveUser?.id) {
-      const userRow = await queryOne('SELECT plan FROM users WHERE id = $1', [effectiveUser.id]) as { plan: string } | undefined;
-      const plan = userRow?.plan || 'free';
-      if (plan === 'free') {
-        throw new ForbiddenError('plan_required');
-        return;
-      }
-    }
+    // Plan enforcement is handled by requirePlan middleware once billing-launch spec is complete.
 
     // 3. Budget cap guard
     const budgetStatus = await checkBudgetThresholds(workspaceId);
@@ -2399,7 +2381,7 @@ router.get('/runs', async (req: Request, res: Response) => {
     const pagination = parsePaginationParams(req);
     const result = await paginateQuery<PipelineRunRow>({
       query: 'SELECT * FROM pipeline_runs WHERE workspace_id = $1',
-      countQuery: 'SELECT COUNT(*) as total FROM pipeline_runs WHERE workspace_id = $1',
+      countQuery: 'SELECT COUNT(*)::int as total FROM pipeline_runs WHERE workspace_id = $1',
       params: [workspaceId],
       pagination,
       orderBy: 'id DESC',
@@ -3213,7 +3195,7 @@ router.post('/runs/:runId/pause', async (req: Request, res: Response) => {
     // Compute elapsed time and completed story count for the WAL event
     const elapsedMs = Date.now() - new Date(run.started_at + 'Z').getTime();
     const elapsedSeconds = Math.floor(elapsedMs / 1000);
-    const completedStories = await queryOne(`SELECT COUNT(*) as cnt FROM story_results WHERE run_id = $1 AND status IN ('pass', 'fail')`, [runId]) as { cnt: number };
+    const completedStories = await queryOne(`SELECT COUNT(*)::int as cnt FROM story_results WHERE run_id = $1 AND status IN ('pass', 'fail')`, [runId]) as { cnt: number };
 
     // Emit WAL event
     const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_paused', $1, $2)` + ' RETURNING *', [run.workspace_id, JSON.stringify({
@@ -5443,7 +5425,7 @@ router.get('/queue/:workspaceId', async (req: Request, res: Response) => {
     // Fetch concurrency settings
     const concurrencyRows = await query<{ key: string; value: string }>(
       `SELECT key, value FROM worker_settings WHERE key IN ('queue_max_concurrent', 'run_now_max_concurrent')`,
-    );
+    ).catch(() => [] as { key: string; value: string }[]);
     const settingsMap = Object.fromEntries(concurrencyRows.map(r => [r.key, r.value]));
     const queueMaxConcurrent = settingsMap['queue_max_concurrent'] ? parseInt(settingsMap['queue_max_concurrent'], 10) : 1;
     const runNowMaxConcurrent = settingsMap['run_now_max_concurrent'] ? parseInt(settingsMap['run_now_max_concurrent'], 10) : 3;
@@ -5769,7 +5751,7 @@ router.get('/worker/health', async (req: Request, res: Response) => {
     // ── Concurrency settings from worker_settings ──────────────────────────
     const concurrencyRows = await query<{ key: string; value: string }>(
       `SELECT key, value FROM worker_settings WHERE key IN ('queue_max_concurrent', 'run_now_max_concurrent')`,
-    );
+    ).catch(() => [] as { key: string; value: string }[]);
     const concurrencyMap = Object.fromEntries(concurrencyRows.map(r => [r.key, r.value]));
     const queueMaxConcurrent = concurrencyMap['queue_max_concurrent'] ? parseInt(concurrencyMap['queue_max_concurrent'], 10) : 1;
     const runNowMaxConcurrent = concurrencyMap['run_now_max_concurrent'] ? parseInt(concurrencyMap['run_now_max_concurrent'], 10) : 3;

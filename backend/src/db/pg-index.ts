@@ -65,9 +65,17 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
   const ownPool = !pool;
   if (!pool) pool = createPool();
 
-  const client = await pool.connect();
+  let client = await pool.connect();
 
   try {
+    // Pin search_path to public for the migration session to prevent dual-schema issues.
+    // db/index.ts sets search_path=rorca,public via Pool options. If the 'rorca' schema
+    // exists (created by AGE's create_graph('rorca') in migration 050), unqualified table
+    // names resolve to rorca.* instead of public.*. This causes schema_migrations to be
+    // created in the wrong schema, and migrations see 0 applied → re-run all, hitting
+    // non-idempotent migrations like 057.
+    await client.query('SET search_path TO public');
+
     // Ensure schema_migrations tracking table exists.
     // version is BIGINT to support 14-digit timestamp prefixes (e.g. 20260313120000).
     // Existing DBs are upgraded from INTEGER → BIGINT via migration 079.
@@ -161,15 +169,23 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
         appliedCount++;
         console.log(`[pg-migrate] Applied: ${file}`);
       } catch (err) {
-        await client.query('ROLLBACK');
+        // Try to rollback — may fail if connection was killed (e.g. LOAD 'age' crash)
+        try { await client.query('ROLLBACK'); } catch { /* connection may be dead */ }
 
         // PG-019: Extension migrations are non-fatal on managed services.
         // Some managed Postgres providers pre-install extensions (CREATE EXTENSION
         // fails with "already loaded") or don't support them at all (AGE on
         // Supabase/Neon). Mark as applied so we don't retry, and continue.
+        // LOAD 'age' can kill the backend process entirely, terminating the connection.
         if (isExtensionMigration(file)) {
           console.warn(`[pg-migrate] Extension migration failed (non-fatal): ${file}`);
           console.warn(`[pg-migrate] Reason: ${(err as Error).message || err}`);
+
+          // The connection may be dead (LOAD 'age' crash). Get a fresh one.
+          try { client.release(); } catch { /* already released or dead */ }
+          client = await pool.connect();
+          await client.query('SET search_path TO public');
+
           // Record as applied to prevent retries
           try {
             await client.query(
@@ -191,6 +207,10 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
 
     console.log(`[pg-migrate] Done. Applied: ${appliedCount}, Skipped: ${skippedCount}, Total: ${files.length}`);
   } finally {
+    // Restore search_path before releasing connection back to pool.
+    // We set search_path=public above; without restoring, subsequent queries
+    // on this pooled connection miss the rorca schema (same bug as AGE pool poisoning).
+    try { await client.query('SET search_path TO rorca, public'); } catch { /* best-effort */ }
     client.release();
     if (ownPool) await pool.end();
   }

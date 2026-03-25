@@ -58,6 +58,11 @@ beforeEach(async () => {
   const serverMod = require('../../server');
   app = serverMod.default;
   authToken = await getAuthToken(app);
+
+  // Reset billing state to prevent cross-test leakage
+  const { execute } = require('../../db/index');
+  await execute(`UPDATE users SET plan = 'free' WHERE email = 'testauth@example.com'`);
+  await execute(`DELETE FROM subscriptions WHERE user_id IN (SELECT id FROM users WHERE email = 'testauth@example.com')`);
 });
 
 afterEach(async () => {

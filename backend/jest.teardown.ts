@@ -7,8 +7,22 @@
 
 import { Pool } from 'pg';
 
-const TEST_DB_URL = process.env.DATABASE_URL_TEST
-  || 'postgres://rorca:rorca@localhost:5432/rorca_test';
+function deriveTestDbUrl(): string {
+  if (process.env.DATABASE_URL_TEST) return process.env.DATABASE_URL_TEST;
+  const prodUrl = process.env.DATABASE_URL || 'postgres://rorca:rorca@localhost:5433/rorca';
+  try {
+    const parsed = new URL(prodUrl);
+    const dbName = parsed.pathname.slice(1);
+    if (!dbName.endsWith('_test')) {
+      parsed.pathname = `/${dbName}_test`;
+    }
+    return parsed.toString();
+  } catch {
+    return 'postgres://rorca:rorca@localhost:5433/rorca_test';
+  }
+}
+
+const TEST_DB_URL = deriveTestDbUrl();
 
 function parseDbUrl(url: string): { dbName: string; maintenanceUrl: string } {
   const parsed = new URL(url);

@@ -854,10 +854,20 @@ describe('encryptToken / decryptToken', () => {
 
 describe('GET /api/auth/github', () => {
   test('returns 503 when GITHUB_CLIENT_ID is not configured', async () => {
-    // By default in tests, GITHUB_CLIENT_ID is not set
-    const res = await request(app).get('/api/auth/github');
-    expect(res.status).toBe(503);
-    expect(res.body.error).toContain('GitHub OAuth not configured');
+    // GITHUB_CLIENT_ID is loaded from .env at startup — temporarily clear it
+    const savedClientId = process.env.GITHUB_CLIENT_ID;
+    const savedClientSecret = process.env.GITHUB_CLIENT_SECRET;
+    delete process.env.GITHUB_CLIENT_ID;
+    delete process.env.GITHUB_CLIENT_SECRET;
+    try {
+      const res = await request(app).get('/api/auth/github');
+      expect(res.status).toBe(503);
+      expect(res.body.error).toContain('GitHub OAuth not configured');
+    } finally {
+      // Restore env vars
+      if (savedClientId) process.env.GITHUB_CLIENT_ID = savedClientId;
+      if (savedClientSecret) process.env.GITHUB_CLIENT_SECRET = savedClientSecret;
+    }
   });
 
   test('redirects to GitHub OAuth URL when configured', async () => {

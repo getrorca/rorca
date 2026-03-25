@@ -3,12 +3,29 @@
  *
  * Runs before each test file (setupFiles). Sets DATABASE_URL so the
  * db/index.ts pool connects to the test database.
+ *
+ * IMPORTANT: We derive the test DB URL from DATABASE_URL by appending _test
+ * to the database name. This ensures tests always hit a separate database
+ * on the same server, regardless of which port or credentials are configured.
  */
 
-process.env.DATABASE_URL = process.env.DATABASE_URL_TEST
-  || process.env.DATABASE_URL
-  || 'postgres://rorca:rorca@localhost:5432/rorca_test';
+const baseUrl = process.env.DATABASE_URL_TEST
+  || (() => {
+    // Derive test DB from production DATABASE_URL by appending _test
+    const prodUrl = process.env.DATABASE_URL || 'postgres://rorca:rorca@localhost:5433/rorca';
+    try {
+      const parsed = new URL(prodUrl);
+      const dbName = parsed.pathname.slice(1); // strip leading /
+      if (!dbName.endsWith('_test')) {
+        parsed.pathname = `/${dbName}_test`;
+      }
+      return parsed.toString();
+    } catch {
+      return 'postgres://rorca:rorca@localhost:5433/rorca_test';
+    }
+  })();
 
+process.env.DATABASE_URL = baseUrl;
 process.env.NODE_ENV = 'test';
 
 // Limit pool size in tests: each jest.resetModules() + require('../../server') creates a new
