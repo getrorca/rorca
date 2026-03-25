@@ -3,10 +3,10 @@
 Spec: rorca-billing-launch
 Run ID: 20260316000045
 Started: 2026-03-19T20:45:48.038Z
-Last Updated: 2026-03-25T18:53:17.806Z
+Last Updated: 2026-03-25T18:52:45.828Z
 
 ## Completed Stories (4)
 - BL-012: Billing webhook idempotency — prevent duplicate billing state transitions — DONE (claude, 33s)
 - BL-013: Self-hosted offline license activation — RORCA_LICENSE_KEY env var — DONE (claude, 1158s)
 - US-004: Update buildPrompt() to instruct claude agent to use rorca_save_memory MCP tool — DONE (claude, 159s)
-- US-003: Pre-run MEMORY.md generation in execution-engine before each story — DONE (claude, 311s)
+- US-005: proposed_memories.json handler for opencode/codex agents — DONE (claude, 279s)
