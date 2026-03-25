@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-25T18:53:17.806Z",
+  "lastUpdatedAt": "2026-03-25T18:52:45.828Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -32,13 +32,13 @@
       "elapsedMs": 159088
     },
     {
-      "storyId": "US-003",
-      "title": "Pre-run MEMORY.md generation in execution-engine before each story",
+      "storyId": "US-005",
+      "title": "proposed_memories.json handler for opencode/codex agents",
       "status": "passed",
-      "startedAt": "2026-03-25T18:48:07.273Z",
-      "finishedAt": "2026-03-25T18:53:17.806Z",
+      "startedAt": "2026-03-25T18:48:07.137Z",
+      "finishedAt": "2026-03-25T18:52:45.828Z",
       "agentType": "claude",
-      "elapsedMs": 310533
+      "elapsedMs": 278691
     }
   ],
   "failedStories": [],
