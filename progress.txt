@@ -3,8 +3,9 @@
 Spec: rorca-billing-launch
 Run ID: 20260316000045
 Started: 2026-03-19T20:45:48.038Z
-Last Updated: 2026-03-19T21:05:12.717Z
+Last Updated: 2026-03-25T18:44:07.640Z
 
-## Completed Stories (2)
+## Completed Stories (3)
 - BL-012: Billing webhook idempotency — prevent duplicate billing state transitions — DONE (claude, 33s)
 - BL-013: Self-hosted offline license activation — RORCA_LICENSE_KEY env var — DONE (claude, 1158s)
+- US-002: Add generateMemoryMd() utility that projects DB memories into MEMORY.md format — DONE (claude, 26s)

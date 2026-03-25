@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-19T21:05:12.717Z",
+  "lastUpdatedAt": "2026-03-25T18:44:07.640Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -21,6 +21,15 @@
       "finishedAt": "2026-03-19T21:05:12.717Z",
       "agentType": "claude",
       "elapsedMs": 1158020
+    },
+    {
+      "storyId": "US-002",
+      "title": "Add generateMemoryMd() utility that projects DB memories into MEMORY.md format",
+      "status": "passed",
+      "startedAt": "2026-03-25T18:43:42.063Z",
+      "finishedAt": "2026-03-25T18:44:07.640Z",
+      "agentType": "claude",
+      "elapsedMs": 25577
     }
   ],
   "failedStories": [],
