@@ -165,7 +165,10 @@ function buildZodInputShape(
         items: param.schema?.items,
       };
 
-      shape[param.name] = openApiTypeToZod(propSchema, param.required === true);
+      // workspaceId is auto-injected by executeApiCall when missing — mark optional
+      // in MCP schema so the SDK doesn't reject calls without it.
+      const isRequired = param.name === 'workspaceId' ? false : param.required === true;
+      shape[param.name] = openApiTypeToZod(propSchema, isRequired);
     }
   }
 
@@ -210,11 +213,38 @@ function extractPathParams(template: string): string[] {
   return (template.match(/\{(\w+)\}/g) || []).map(s => s.slice(1, -1));
 }
 
+// Cache the default workspace ID so we don't query on every tool call
+let cachedDefaultWorkspaceId: string | null = null;
+let cacheExpiry = 0;
+
+async function getDefaultWorkspaceId(): Promise<string | null> {
+  if (cachedDefaultWorkspaceId && Date.now() < cacheExpiry) return cachedDefaultWorkspaceId;
+  try {
+    const res = await fetch(`${RORCA_API}/api/workspaces?limit=1`);
+    if (!res.ok) return null;
+    const data = await res.json() as { items?: Array<{ id: string }> };
+    cachedDefaultWorkspaceId = data.items?.[0]?.id ?? null;
+    cacheExpiry = Date.now() + 60_000; // 1 min cache
+    return cachedDefaultWorkspaceId;
+  } catch { return null; }
+}
+
 async function executeApiCall(
   method: string,
   pathTemplate: string,
   params: Record<string, unknown>,
+  operation?: OpenAPIOperation,
 ): Promise<{ status: number; body: unknown }> {
+  // Auto-inject workspaceId when required but not provided — makes MCP tools
+  // "just work" without forcing users to know/specify the workspace ID.
+  const requiredParams = (operation?.parameters || []).filter(p => p.required);
+  for (const rp of requiredParams) {
+    if (rp.name === 'workspaceId' && !params.workspaceId) {
+      const defaultId = await getDefaultWorkspaceId();
+      if (defaultId) params.workspaceId = defaultId;
+    }
+  }
+
   let resolvedPath = pathTemplate;
   const queryParams: Record<string, string> = {};
   const bodyParams: Record<string, unknown> = {};
@@ -286,9 +316,12 @@ export function createMcpHttpServer(spec: OpenAPISpec): McpServer {
       const capturedMethod = httpMethod;
       const capturedPath = pathStr;
 
+      // Capture operation for default-param injection
+      const capturedOperation = operation;
+
       const handler = async (params: Record<string, unknown>) => {
         try {
-          const { status, body } = await executeApiCall(capturedMethod, capturedPath, params);
+          const { status, body } = await executeApiCall(capturedMethod, capturedPath, params, capturedOperation);
 
           if (status >= 400) {
             const errorText = typeof body === 'string' ? body : JSON.stringify(body, null, 2);

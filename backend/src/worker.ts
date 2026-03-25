@@ -1969,6 +1969,13 @@ process.on('uncaughtException', (err) => {
   void shutdown('uncaughtException');
 });
 process.on('unhandledRejection', (reason) => {
+  // AppError subclasses (ValidationError, NotFoundError, etc.) are expected
+  // business-logic errors from Express routes — NOT fatal.  Log and move on.
+  const isAppError = reason instanceof Error && 'statusCode' in reason && (reason as any).statusCode < 500;
+  if (isAppError) {
+    logger.warn({ reason }, '[worker] unhandledRejection (non-fatal AppError) — process kept alive');
+    return;
+  }
   logger.error({ reason }, '[worker] unhandledRejection — triggering shutdown');
   void shutdown('unhandledRejection');
 });
