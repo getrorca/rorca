@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-25T18:52:45.828Z",
+  "lastUpdatedAt": "2026-03-25T18:58:10.923Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -39,6 +39,15 @@
       "finishedAt": "2026-03-25T18:52:45.828Z",
       "agentType": "claude",
       "elapsedMs": 278691
+    },
+    {
+      "storyId": "US-006",
+      "title": "Post-story MEMORY.md rebuild after markStoryPassed()",
+      "status": "passed",
+      "startedAt": "2026-03-25T18:53:47.225Z",
+      "finishedAt": "2026-03-25T18:58:10.923Z",
+      "agentType": "claude",
+      "elapsedMs": 263698
     }
   ],
   "failedStories": [],
