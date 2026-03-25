@@ -49,7 +49,7 @@ describe('GET /api/health', () => {
 
     expect(res.status).toBe(200);
     // Health returns 'ok' when all components are up, 'degraded' when worker is not running (common in tests)
-    expect(['ok', 'degraded']).toContain(res.body.status);
+    expect(['healthy', 'degraded']).toContain(res.body.status);
     expect(res.body).toHaveProperty('version');
     expect(res.body).toHaveProperty('uptime');
     expect(typeof res.body.uptime).toBe('number');
@@ -88,7 +88,7 @@ describe('GET /api/health/detailed', () => {
     const res = await request(app).get('/api/health/detailed');
 
     expect(res.status).toBe(200);
-    expect(['ok', 'degraded']).toContain(res.body.status);
+    expect(['healthy', 'degraded']).toContain(res.body.status);
     expect(res.body).toHaveProperty('version');
     expect(res.body).toHaveProperty('uptime');
     expect(res.body).toHaveProperty('db_connected', true);

@@ -1329,36 +1329,6 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-17 [Bug Fix] Single-story wave merge fails on .rorca/run-state.json conflict — outer+inner worktree both write it
-> Rule: When a run uses an outer worktree (auto-merge) + inner wave worktrees, `mergeStoryWorktree` pre-commits dirty files in the outer worktree (including `.rorca/run-state.json`), creating a divergence from the inner story worktree which also wrote `run-state.json`. Git cannot auto-merge JSON, so `git merge --no-ff` fails. US-001 (or any single-story wave) is added to `failedIds`, cascade-blocking all downstream stories. Fixed by auto-resolving conflicts on runtime-only files (`--ours`) before falling through to hard failure.
-
-## 2026-03-17 [Gotcha] execSync merge errors: log err.stderr not err.message — "Command failed" is useless
-> Rule: When `execSync` throws on a failed git command, `err.message` only contains "Command failed: git merge ..." — the actual git error (conflict details, stderr output) is in `err.stderr` as a Buffer. Always log `err.stderr?.toString().trim()` first, fall back to `err.message`. Cast as `Error & { stderr?: Buffer }` for TypeScript.
-
-## 2026-03-17 [Pattern] Diagnose run failures: query run_output_chunks + grep msg field from JSON logs
-> Rule: To see the full execution log for any run (including errors scrolled off in the terminal), query: `psql postgres://rorca:rorca@localhost:5433/rorca -t -c "SELECT encode(chunk,'escape') FROM run_output_chunks WHERE run_id = <id> ORDER BY sequence" | grep -o '"msg":"[^"]*"' | sed 's/"msg":"//;s/"$//'`. The column is `chunk` (bytea), not `data`. Port is 5433, database is `rorca`.
-
-## 2026-03-17 [Bug Fix] SSE live stream 5-minute delay — root cause and fix
-> Rule: GET /api/pipeline/stream started lastSeenId=0 every connection, replaying ALL historical WAL events at LIMIT 50/tick. With 5000+ events this caused 5+ minute delay before live events appeared. Fix: initialize lastSeenId to MAX(id) FROM wal_events on connection open. Historical events served instantly by new REST endpoint GET /runs/:runId/wal-events. Combined: usePipelineSSE seeds history from REST (immediate), SSE stream delivers only new events (within 3s).
-
-## 2026-03-17 [Bug Fix] Merge failure leaves passes:true — idempotency gap causes next run to skip story with no code
-> Rule: When a sub-worktree merge fails, markStoryPassed() had already written passes:true to the spec JSON. The failure path added the story to failedIds and emitted story_failed WAL event, but never reverted passes:true. Next run sees passes:true, skips the story, but the code is not in the parent branch. Fix: call markStoryMergeFailed() in both merge failure paths (single-story wave at line ~3154, multi-story wave failures at line ~3219). markStoryMergeFailed() sets passes:false, clears skipped, adds a note.
-
-## 2026-03-17 [Bug Fix] Worker premature auto-merge — status=done without all stories passing triggered merge
-> Rule: worker.ts was merging the parent worktree into main when status==='done' regardless of whether all spec stories passed. A run can be 'done' with 0 stories executed (immediate exit). Fix: before calling autoMergeAfterRun, read the spec JSON and verify every story has passes===true or excluded===true. Only merge if allSpecStoriesPassed is true.
-
-## 2026-03-17 [Gotcha] tsx module cache causes routes to return 404 after file edits — fresh restart required
-> Rule: After adding a new route to pipeline.ts, the route returned 404 despite being in the source and other routes in the same file working. tsx watch auto-restarts do not always invalidate the compiled module cache. `touch` on the file does not fix it. A full kill+restart (lsof -ti:3030 | xargs kill -9, then npm run dev) forces tsx to recompile from scratch and register all routes. Never diagnose a 404 for a route that exists in source without first doing a full restart.
-
-## 2026-03-17 [Architecture] WAL event streaming architecture — two-track design for instant history + live events
-> Rule: Two endpoints work together: (1) REST GET /api/pipeline/runs/:runId/wal-events returns all past WAL events for a run instantly via direct DB query. (2) SSE GET /api/pipeline/stream delivers live events only (starts at MAX WAL id). usePipelineSSE.ts: on runId change, immediately seeds from REST then deduplicates live SSE events by id. useWalSSE singleton: single EventSource shared across all components (avoids Chrome 6-connection limit). Never use SSE alone for historical data — always pair with REST seed.
-
-## 2026-03-17 [Gotcha] Never kill backend while a run is active — execution engine WAL writes will fail
-> Rule: The execution engine (child of worker, not of server) sends WAL events via fetch to http://localhost:3030/api/wal. If the server is killed mid-run, those WAL writes fail silently and events are lost. The run continues but story progress disappears from the UI. The run stays stuck as status=running in the DB with no finished_at. Always confirm no active runs (GET /api/pipeline/worker/health activeJobs=[]) before killing the backend.
-
-## 2026-03-17 [Gotcha] Worker process must be manually restarted after worker.ts changes
-> Rule: Plain `tsx` (not `tsx watch`) is used for the worker — it does NOT hot-reload on file changes. Any change to `backend/src/worker.ts` requires killing the worker process and restarting it. The backend (Express) auto-restarts via tsx watch, but the worker is completely separate. Always verify worker PID start time vs file modification time before assuming a fix is live.
-
 ## 2026-03-17 [Bug Fix] handlePipelineRetry also had the 4KB buffer bug — now fixed
 > Rule: The immediate-flush fix (write every data event directly instead of buffering to 4KB) was only applied to `handlePipelineRun` initially. `handlePipelineRetry` (around line 1079) still had the old accumulating buffer. Both handlers now call `writeBufferAsChunks(runId, data, sequenceRef)` directly in `handleData` with no pending buffer accumulation.
 
@@ -1389,111 +1359,66 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 ## 2026-03-18 [Architecture] Memory consolidation: DB is source of truth, MEMORY.md is optional projection
 > Rule: DB memories table is the single source of truth. MEMORY.md is a generated read-only projection rebuilt pre/post run — never written by agents directly. rorca_recall and rorca_get_memories (with fetchAll:true) both read from DB. rorca_dump is deprecated. MEMORY.md is only worth keeping if the workspace is used outside Rorca (Cursor, Copilot, raw Claude Code) — it is redundant in a Rorca-only workflow.
 
+## 2026-03-18 [Architecture] Simultaneous spec runs require autoWorktree
+> Rule: Running multiple specs simultaneously (sequential OR wave-parallel) requires autoWorktree: true on each run. Without a worktree, the conflict detection in pipeline.ts blocks any new run if another is already running in the same workspace. With autoWorktree, up to run_now_max_concurrent (default 3) runs can coexist, each in an isolated git worktree branch.
+
+## 2026-03-18 [Bug Fix] StoryLogFollower never fires from live WAL subscription — JSONB payload parsed as object not string
+> Rule: StoryLogFollower.onStoryStarted and onStoryFinished called JSON.parse(event.payload) but wal_events.payload is JSONB — pg returns it as a JS object, not a string. JSON.parse on an object calls .toString() → "[object Object]" → SyntaxError → catch returns silently. Fix: check typeof event.payload === 'string' before parsing, otherwise use the object directly. recover() was unaffected because it casts payload::text in SQL.
+
+## 2026-03-18 [Gotcha] continue inside Promise.allSettled map() is a compile error — use return
+> Rule: handlePipelineRun uses Promise.allSettled(jobs.map(async (job) => { ... })). Using continue inside an async arrow function in .map() is invalid — esbuild throws "Cannot use continue here". Use return instead to skip to the next job in the batch.
+
+## 2026-03-18 [Gotcha] auto_merge is false on retry runs — set it manually if needed
+> Rule: Retry runs created via /api/pipeline/runs/:id/retry always set auto_merge = false. If the original run had auto_merge = true but failed before merging, the retry will NOT auto-merge on completion. Workaround: manually UPDATE pipeline_runs SET auto_merge = true WHERE id = &lt;retryRunId&gt; while the retry is in-flight.
+
+## 2026-03-19 [Bug Fix] tsx ENOENT when worker spawns execution engine
+> Rule: Worker spawns execution-engine via `path.join(__dirname, '..', 'node_modules', '.bin', 'tsx')` — fails with ENOENT when tsx not in backend/node_modules. Root cause: root postinstall runs `cd backend && npm install --production --ignore-scripts` which skips devDependencies (tsx is a devDep). Fix: added `findTsxBin()` helper in worker.ts — tries local path first, falls back to `which tsx`. Also run `cd backend && npm install` to install all deps. Symptom: run fails in <100ms with "spawn ... tsx ENOENT".
+
+## 2026-03-19 [Bug Fix] Silent terminal — execution-engine block.text missing trailing newline
+> Rule: execution-engine.ts wrote `process.stdout.write(block.text)` without a trailing `\n`. RunTerminal.tsx uses a line-buffer pattern: `parts.pop()` keeps any "incomplete last line" (one without `\n`) in `lineBufferRef` indefinitely — it never reaches `displayLines` and is never rendered. Fix: `process.stdout.write(block.text.endsWith('\n') ? block.text : block.text + '\n')` at the point where claude stream-json assistant blocks are emitted to stdout (execution-engine.ts ~line 744). Non-JSON fallback already had `+ '\n'` and worked correctly.
+
+## 2026-03-19 [Gotcha] run_output_chunks schema: column is "chunk" not "data", DB port is 5433
+> Rule: run_output_chunks table columns: `(id, run_id, chunk BYTEA, sequence INT, created_at)`. Column is `chunk`, NOT `data`. Also: DATABASE_URL uses port 5433 not default 5432 — `postgres://rorca:rorca@localhost:5433/rorca`. pg-boss table uses `created_on` not `createdon`. Always read backend/.env before writing raw SQL queries.
+
+## 2026-03-19 [Decision] Task-Monitor pattern: pg-boss jobs complete immediately, reconcileState is the watchdog
+> Rule: pg-boss jobs must NOT stay active for the lifetime of an execution engine subprocess. The job spawns the engine and returns immediately (fire-and-forget). Engine liveness is monitored via IPC heartbeats (every 60s) written to pipeline_runs.last_heartbeat. reconcileState() runs every 60s as the watchdog: if last_heartbeat > 2 min stale AND PID is dead → mark run failed. expireInSeconds should be 300s (not hours).
+
+## 2026-03-19 [Decision] DB-based per-workspace concurrency lock replaces in-memory activeTriggeredVia
+> Rule: Concurrency uses SELECT COUNT(*) FROM pipeline_runs WHERE workspace_id=$1 AND status='running' before spawning. The old in-memory activeTriggeredVia map was removed. Worktree runs bypass the lock. DB is the single source of truth, supports horizontal scaling.
+
+## 2026-03-19 [Gotcha] Never have workers kill each other — fix process management instead
+> Rule: Worker singleton guard must NEVER SIGTERM/SIGKILL other worker PIDs. In distributed environments, workers would assassinate each other. The zombie child problem is a process management issue — use --kill-others on concurrently or proper supervisor signal propagation.
+
 Follow this workflow for implementation:
-
-## Skill: logging-fundamentals (relevance: 7)
----
-name: logging-fundamentals
-description: Implement proper logging practices including log levels, structured logging, context propagation, and logging best practices for applications and systems
-license: MIT
-compatibility: opencode
-metadata:
-  audience: developers, SREs, DevOps engineers
-  category: observability
----
-
-# Logging Fundamentals
-
-Establish proper logging practices including log levels, structured logging, context propagation, and comprehensive logging strategies for applications, services, and infrastructure.
-
-## When to use me
-
-Use this skill when:
-- Setting up logging for new applications or services
-- Reviewing existing logging implementations
-- Establishing logging standards for teams or projects
-- Debugging issues with incomplete or poor logging
-- Implementing structured logging for better observability
-- Configuring log levels and verbosity for different environments
-- Ensuring logs contain sufficient context for troubleshooting
-
-## What I do
-
-### 1. Log Level Management
-- **Define appropriate log levels** (DEBUG, INFO, WARN, ERROR, FATAL)
-- **Configure level filtering** per environment (development, staging, production)
-- **Implement dynamic level adjustment** without application restarts
-- **Establish level usage guidelines** for different types of information
-
-### 2. Structured Logging Implementation
-- **Design log schema** with consistent field naming and types
-- **Implement structured formats** (JSON, key-value pairs, structured text)
-- **Include mandatory context fields** (timestamp, service, trace_id, user_id, etc.)
-- **Handle nested structures and arrays** appropriately in logs
-
-### 3. Context Propagation
-- **Implement correlation IDs** for request tracing across services
-- **Propagate context through async operations** (queues, background jobs)
-- **Maintain user/session context** throughout request lifecycle
-- **Include business context** (order_id, transaction_id, etc.) in logs
-
-### 4. Log Content Best Practices
-- **Include sufficient context** for debugging without external systems
-- **Balance detail with noise** - log enough but not too much
-- **Use consistent message formats** across the codebase
-- **Log before and after significant operations**
-- **Include error details** (stack traces, error codes, recovery suggestions)
-- **Avoid logging secrets, passwords, or sensitive data**
-
-## Logging Principles
-
-### The 5 Ws of Logging
-1. **WHO** - Which user/service/process generated the log?
-2. **WHAT** - What action/event is being logged?
-3. **WHEN** - Precise timestamp with timezone information
-4. **WHERE** - Which component/function/file generated the log?
-5. **WHY** - What is the significance/severity of the logged event?
-
-### Structured Logging Fields
-```json
-{
-  "timestamp": "2026-02-26T18:00:00Z",
-  "level": "INFO",
-  "service": "spec-generator",
-  "component": "chatComplete",
-  "trace_id": "gen-abc123",
-  "message": "LLM call completed",
-  "duration_ms": 5123,
-  "context": {
-    "model": "claude-sonnet-4-5-20250929",
-    "input_tokens": 12000,
-    "output_tokens": 4500
-  }
-}
-```
-
-### Log Level Guidelines
-- **DEBUG**: Detailed information for debugging, typically disabled in production
-- **INFO**: Routine information about normal operation
-- **WARN**: Warning conditions that might require attention but don't indicate failure
-- **ERROR**: Error conditions that indicate failure of a specific operation
-- **FATAL**: Critical errors that cause application termination
-
-## Notes
-
-- **Structured logging is essential** for modern log analysis and observability
-- **Context is more important than message content** - ensure logs can be correlated
-- **Log levels should reflect operational importance**, not developer convenience
-- **Consider log volume** - too many logs can overwhelm systems and teams
-- **Balance human readability with machine parsability** in log formats
+## Agent Role: Backend Routes
 
 ---
 Your task (US-001):
-Create a shared helper function `createIdleWatchdog` in `backend/src/lib/execution-engine.ts` that encapsulates all idle timeout logic. The function accepts a child process, timeout duration in ms (from `LLM_IDLE_TIMEOUT_MS` env var with default 300000), and a log callback for emitting visible error messages. It returns `{ reset(), clear() }` — `reset()` clears and restarts the idle timer, `clear()` tears down the timer permanently. This is the foundation all three spawn functions will use.
+**IMPORTANT: The mcp/server.ts changes (tool renames, fetchAll param, rorca_dump removal, IDEMPOTENT_TOOLS updates) have ALREADY been completed manually. Do NOT modify backend/src/mcp/server.ts — those changes are done and committed. This story covers ONLY the recall.ts semantic leak fix.**
+
+In `backend/src/routes/recall.ts`, the `fetchMemories()` function currently calls `retrieveContext(workspaceId, storyText, { includeGraph: true })` but throws the results away — it only uses the call to set a `retrievalTier` metadata badge. This is a performance leak: paying full RAG + graph latency with zero benefit to the response.
+
+**Fix**: When `storyText` is provided (maps to `currentTask` param from `rorca_recall_workspace`):
+1. Call `retrieveContext(workspaceId, storyText, { includeGraph: true })` as before
+2. Use `ctx.memory` (array of `MemoryEntryResult { text: string; score: number; source: 'cache' | 'search' }`) to filter and rank memories
+3. Match scored memory texts against `memories` DB table rows by content/rule field to return full structured `MemoryEntry` objects
+4. Return top 10 most relevant memories (sorted by score descending), not all memories
+5. Set `retrievalTier` from the actual retrieval tier used (same as today)
+
+When `storyText` is NOT provided:
+1. Query DB `SELECT * FROM memories WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 20`
+2. Map rows to `MemoryEntry` format
+3. Set `retrievalTier = 'none'`
+
+**Remove** all calls to `readMemory(workspacePath)` and `queryMemory()` (file-based reads from memory-ledger.ts) — the DB is now the single source of truth for the recall endpoint.
+
+Also verify `npx tsc --noEmit` passes in backend/ after the change.
 
 Acceptance Criteria:
-- Function `createIdleWatchdog(child, timeoutMs, onFire)` exists and is callable from within execution-engine.ts
-- `LLM_IDLE_TIMEOUT_MS` env var is read with `parseInt(process.env.LLM_IDLE_TIMEOUT_MS ?? '', 10)` and falls back to 300000 if missing or NaN — no hardcoded values anywhere else
-- `reset()` calls `clearTimeout` on the previous timer and starts a new `setTimeout` for `timeoutMs` ms
-- `clear()` calls `clearTimeout` unconditionally and sets the internal timer reference to undefined so it cannot fire after clear
-- `onFire` callback is invoked by the watchdog before SIGTERM — allows caller to inject log lines before the process is killed
+- GET /api/recall: when storyText is provided, retrieveContext() results are used to filter and rank memories — top 10 most relevant are returned instead of all memories
+- GET /api/recall: when storyText is NOT provided, returns most recent 20 memories from the DB memories table (NOT from MEMORY.md file)
+- retrievalTier in meta reflects the actual tier used by retrieveContext() — cag/rag/graph/none
+- fetchMemories() no longer calls readMemory() or queryMemory() from memory-ledger.ts — all reads come from DB
+- Memory entries in the response are full structured MemoryEntry objects (date, category, title, rule, context, source) matched from DB rows
+- backend/src/mcp/server.ts is NOT modified by this story — those changes are already done
+- npx tsc --noEmit passes in backend/ with no new errors

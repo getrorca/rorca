@@ -10,7 +10,7 @@ import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-vali
 import { getVaultKey } from './vault';
 import { logger } from '../lib/logger';
 import { invalidateDirection } from '../lib/context-cache';
-import { UnprocessableError, ValidationError } from '../lib/errors';
+import { ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
@@ -231,11 +231,19 @@ router.put('/', validateBody(DirectionUpsertSchema), async (req: Request, res: R
     if (!skipValidation) {
       const validation = validateDirectionYaml(layer, contentYaml);
       if (validation.yamlError) {
-        throw new UnprocessableError('Invalid YAML syntax');
+        res.status(422).json({
+          error: 'Invalid YAML syntax',
+          code: 'UNPROCESSABLE',
+          yamlError: validation.yamlError,
+        });
         return;
       }
       if (!validation.valid) {
-        throw new UnprocessableError('Direction content failed schema validation');
+        res.status(422).json({
+          error: 'Direction content failed schema validation',
+          code: 'UNPROCESSABLE',
+          validationErrors: validation.errors,
+        });
         return;
       }
     }

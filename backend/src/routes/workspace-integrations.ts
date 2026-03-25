@@ -102,36 +102,27 @@ router.get('/', async (req: Request, res: Response) => {
     };
 
     try {
+      // Check OAuth connection first (github_connections table)
+      const oauthRow = await queryOne<GitHubConnectionRow>(
+        `SELECT gc.github_username, u.avatar_url, gc.created_at
+         FROM github_connections gc
+         JOIN users u ON gc.user_id = u.id
+         ORDER BY gc.created_at DESC LIMIT 1`,
+        [],
+      );
+
+      // Also check workspace webhook connection
       const webhookRow = await queryOne<GithubWebhookRow>(
         'SELECT workspace_id, repo_owner, repo_name, webhook_id, last_webhook_at, created_at FROM workspace_github_webhooks WHERE workspace_id = $1',
         [workspaceId],
       );
 
-      if (webhookRow) {
-        // Has workspace connection — fetch OAuth account info for username/avatar
-        const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
-        let username: string | null = null;
-        let avatarUrl: string | null = null;
-        let connectedAt: string = webhookRow.created_at;
-
-        if (userRow) {
-          const connRow = await queryOne<GitHubConnectionRow>(
-            `SELECT gc.github_username, u.avatar_url, gc.created_at
-             FROM github_connections gc
-             JOIN users u ON gc.user_id = u.id
-             WHERE gc.user_id = $1`,
-            [userRow.id],
-          );
-          if (connRow) {
-            username = connRow.github_username;
-            avatarUrl =
-              connRow.avatar_url ||
-              (connRow.github_username
-                ? `https://github.com/${connRow.github_username}.png`
-                : null);
-            connectedAt = connRow.created_at;
-          }
-        }
+      if (oauthRow || webhookRow) {
+        const username = oauthRow?.github_username ?? null;
+        const avatarUrl =
+          oauthRow?.avatar_url ||
+          (username ? `https://github.com/${username}.png` : null);
+        const connectedAt = oauthRow?.created_at ?? webhookRow?.created_at ?? null;
 
         githubStatus = {
           provider: 'github',
@@ -139,7 +130,7 @@ router.get('/', async (req: Request, res: Response) => {
           connectedAt,
           username,
           avatarUrl,
-          orgName: webhookRow.repo_owner,
+          orgName: webhookRow?.repo_owner ?? null,
         };
       }
     } catch (ghErr) {

@@ -11,6 +11,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
+import { getAuthToken } from './helpers/auth-helper';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -44,6 +45,9 @@ beforeEach(async () => {
 
   const serverMod = require('../../server');
   app = serverMod.default;
+
+  // Ensure a test user exists (trial provisioning requires a user row)
+  await getAuthToken(app);
 
   // Clean billing state using the fresh pool (same instance as server's)
   const { execute } = require('../../db/index');

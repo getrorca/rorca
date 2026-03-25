@@ -348,7 +348,7 @@ router.post('/:id/invites', requireRole('admin'), async (req: Request, res: Resp
 
     // Check pending invite limit (free tier: max 3)
     const pendingCount = await queryOne<{ cnt: number }>(
-      'SELECT COUNT(*) AS cnt FROM team_invites WHERE team_id = $1 AND accepted_at IS NULL AND expires_at > NOW()',
+      'SELECT COUNT(*)::int AS cnt FROM team_invites WHERE team_id = $1 AND accepted_at IS NULL AND expires_at > NOW()',
       [teamId]
     );
     if (pendingCount && Number(pendingCount.cnt) >= MAX_PENDING_INVITES_FREE) {

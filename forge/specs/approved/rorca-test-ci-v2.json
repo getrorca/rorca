@@ -73,9 +73,7 @@
       "dependsOn": [
         "TC-001"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story TC-004"
+      "passes": false
     },
     {
       "id": "TC-005",
@@ -92,9 +90,7 @@
       "dependsOn": [
         "TC-001"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story TC-005"
+      "passes": false
     },
     {
       "id": "TC-006",
@@ -111,9 +107,7 @@
       "dependsOn": [
         "TC-001"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story TC-006"
+      "passes": false
     },
     {
       "id": "TC-007",
@@ -130,9 +124,7 @@
       "dependsOn": [
         "TC-001"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story TC-007"
+      "passes": false
     },
     {
       "id": "TC-008",
@@ -150,8 +142,8 @@
         "TC-001"
       ],
       "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story TC-008"
+      "notes": "Merge conflict — code passed but failed to merge into parent branch. Re-run to retry.",
+      "skipped": false
     },
     {
       "id": "TC-009",
@@ -172,9 +164,7 @@
         "TC-007",
         "TC-008"
       ],
-      "passes": false,
-      "skipped": true,
-      "notes": "Skipped after max retries — fix manually and re-run with --story TC-009"
+      "passes": false
     }
   ]
 }

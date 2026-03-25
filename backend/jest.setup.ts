@@ -4,14 +4,28 @@
  * Connects to the Postgres test database, creates it if it doesn't exist,
  * runs all pg-migrations, and enables required extensions (vector, age).
  *
- * DATABASE_URL_TEST or postgres://rorca:rorca@localhost:5432/rorca_test
+ * Derives the test DB URL from DATABASE_URL by appending _test to the db name.
  */
 
 import { Pool } from 'pg';
 import { runPgMigrations } from './src/db/pg-index';
 
-const TEST_DB_URL = process.env.DATABASE_URL_TEST
-  || 'postgres://rorca:rorca@localhost:5432/rorca_test';
+function deriveTestDbUrl(): string {
+  if (process.env.DATABASE_URL_TEST) return process.env.DATABASE_URL_TEST;
+  const prodUrl = process.env.DATABASE_URL || 'postgres://rorca:rorca@localhost:5433/rorca';
+  try {
+    const parsed = new URL(prodUrl);
+    const dbName = parsed.pathname.slice(1);
+    if (!dbName.endsWith('_test')) {
+      parsed.pathname = `/${dbName}_test`;
+    }
+    return parsed.toString();
+  } catch {
+    return 'postgres://rorca:rorca@localhost:5433/rorca_test';
+  }
+}
+
+const TEST_DB_URL = deriveTestDbUrl();
 
 /**
  * Parse connection string to extract database name and build a "maintenance" URL
@@ -27,24 +41,40 @@ function parseDbUrl(url: string): { dbName: string; maintenanceUrl: string } {
 export default async function globalSetup(): Promise<void> {
   const { dbName, maintenanceUrl } = parseDbUrl(TEST_DB_URL);
 
-  // 1. Connect to 'postgres' DB and create test DB if needed
+  // 1. Connect to 'postgres' DB and recreate test DB fresh every time.
+  //    This prevents stale schema state (e.g., dual public/rorca schema tables)
+  //    from causing migration failures (ON CONFLICT resolves wrong table).
   const adminPool = new Pool({ connectionString: maintenanceUrl });
   try {
-    const { rows } = await adminPool.query(
-      'SELECT 1 FROM pg_database WHERE datname = $1',
-      [dbName],
-    );
-    if (rows.length === 0) {
-      // CREATE DATABASE cannot run inside a transaction
-      await adminPool.query(`CREATE DATABASE "${dbName}"`);
-      console.log(`[jest-setup] Created test database: ${dbName}`);
+    // Terminate existing connections to the test DB and retry drop+create
+    // pg_terminate_backend is async — terminated backends may linger briefly,
+    // causing DROP DATABASE to see stale state or CREATE DATABASE to race.
+    const maxRetries = 3;
+    for (let attempt = 1; attempt <= maxRetries; attempt++) {
+      try {
+        await adminPool.query(
+          `SELECT pg_terminate_backend(pid) FROM pg_stat_activity WHERE datname = $1 AND pid <> pg_backend_pid()`,
+          [dbName],
+        );
+        // Give terminated backends time to fully disconnect
+        await new Promise(resolve => setTimeout(resolve, 200));
+        await adminPool.query(`DROP DATABASE IF EXISTS "${dbName}"`);
+        await adminPool.query(`CREATE DATABASE "${dbName}" OWNER rorca`);
+        console.log(`[jest-setup] Recreated test database: ${dbName}`);
+        break;
+      } catch (err: any) {
+        if (attempt === maxRetries) throw err;
+        console.warn(`[jest-setup] Attempt ${attempt} failed (${err.message}), retrying in 500ms...`);
+        await new Promise(resolve => setTimeout(resolve, 500));
+      }
     }
   } finally {
     await adminPool.end();
   }
 
   // 2. Connect to the test DB and enable extensions + run migrations
-  const testPool = new Pool({ connectionString: TEST_DB_URL });
+  //    Pool size 1 prevents AGE LOAD 'age' from poisoning idle connections
+  const testPool = new Pool({ connectionString: TEST_DB_URL, max: 1 });
   try {
     // Enable extensions — these are safe to run multiple times
     try {
@@ -53,11 +83,9 @@ export default async function globalSetup(): Promise<void> {
     try {
       await testPool.query('CREATE EXTENSION IF NOT EXISTS vector');
     } catch { /* pgvector may not be installed, non-fatal */ }
-    try {
-      await testPool.query('CREATE EXTENSION IF NOT EXISTS age');
-      await testPool.query("LOAD 'age'");
-      await testPool.query('SET search_path = ag_catalog, "$user", public');
-    } catch { /* AGE may not be installed, non-fatal */ }
+    // Skip AGE extension in test setup — it causes flaky connection crashes
+    // (LOAD 'age' can segfault the pg backend). Migration 050 (knowledge_graph)
+    // will be handled as a non-fatal extension migration by pg-index.ts.
 
     // 3. Run all pg-migrations
     await runPgMigrations(testPool);

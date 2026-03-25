@@ -634,7 +634,7 @@ router.get('/search', async (req: Request, res: Response) => {
   // Empty query -> return popular specs
   if (!searchQuery) {
     const countRow = await queryOne<{ total: number }>(
-      'SELECT COUNT(*) as total FROM spec_publications WHERE deleted_at IS NULL'
+      'SELECT COUNT(*)::int as total FROM spec_publications WHERE deleted_at IS NULL'
     );
     const rows = await query<PublicationRow>(
       `SELECT id, spec_id, title, description, tags, download_count, source, created_at
@@ -656,7 +656,7 @@ router.get('/search', async (req: Request, res: Response) => {
   const tsQuery = searchQuery.split(/\s+/).filter(Boolean).join(' & ');
 
   const countRow = await queryOne<{ total: number }>(
-    `SELECT COUNT(*) as total FROM spec_fts
+    `SELECT COUNT(*)::int as total FROM spec_fts
      INNER JOIN spec_publications ON spec_publications.id = spec_fts.publication_id
      WHERE to_tsvector('english', spec_fts.title || ' ' || spec_fts.description || ' ' || spec_fts.tags) @@ to_tsquery('english', $1)
        AND spec_publications.deleted_at IS NULL`,

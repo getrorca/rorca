@@ -412,16 +412,12 @@ router.post('/disconnect', async (req: Request, res: Response) => {
 router.get('/account', async (req: Request, res: Response) => {
   try {
     // Get first user's GitHub connection (auth is bypassed — single-user local tool)
-    const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
-    const userId = userRow?.id;
-    if (!userId) {
-      res.json({ connected: false });
-      return;
-    }
-
+    // Single-user mode: find the first github_connection (any user) rather than
+    // relying on LIMIT 1 from users, which returns admin@rorca.local (created first)
+    // instead of the GitHub-authenticated user.
     const conn = await queryOne<GitHubConnectionRow & { avatar_url: string | null }>(
-      'SELECT gc.*, u.avatar_url FROM github_connections gc JOIN users u ON gc.user_id = u.id WHERE gc.user_id = $1',
-      [userId]
+      'SELECT gc.*, u.avatar_url FROM github_connections gc JOIN users u ON gc.user_id = u.id ORDER BY gc.created_at DESC LIMIT 1',
+      []
     );
 
     if (!conn) {
@@ -466,16 +462,10 @@ router.get('/account', async (req: Request, res: Response) => {
  */
 router.post('/test-connection', async (req: Request, res: Response) => {
   try {
-    const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
-    const userId = userRow?.id;
-    if (!userId) {
-      res.json({ valid: false, error: 'No user configured' });
-      return;
-    }
-
+    // Single-user mode: query github_connections directly.
     const conn = await queryOne<Pick<GitHubConnectionRow, 'encrypted_token' | 'github_username'>>(
-      'SELECT encrypted_token, github_username FROM github_connections WHERE user_id = $1',
-      [userId]
+      'SELECT encrypted_token, github_username FROM github_connections ORDER BY created_at DESC LIMIT 1',
+      []
     );
 
     if (!conn) {
@@ -534,32 +524,33 @@ router.post('/test-connection', async (req: Request, res: Response) => {
  */
 router.post('/disconnect-oauth', async (req: Request, res: Response) => {
   try {
-    const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
-    const userId = userRow?.id;
-    if (!userId) {
-      throw new NotFoundError('No user configured');
-    }
-
-    const conn = await queryOne<Pick<GitHubConnectionRow, 'id' | 'encrypted_token'>>(
-      'SELECT id, encrypted_token FROM github_connections WHERE user_id = $1',
-      [userId]
+    // Single-user mode: query github_connections directly (not via LIMIT 1 on users,
+    // which returns admin@rorca.local instead of the GitHub-authenticated user).
+    const conn = await queryOne<Pick<GitHubConnectionRow, 'id' | 'encrypted_token' | 'user_id'>>(
+      'SELECT id, encrypted_token, user_id FROM github_connections ORDER BY created_at DESC LIMIT 1',
+      []
     );
 
     if (!conn) {
       throw new NotFoundError('No GitHub connection found');
     }
 
-    // Attempt to revoke the token via GitHub API (best-effort)
+    const userId = conn.user_id;
+
+    // Revoke the full OAuth GRANT (not just the token) so GitHub re-shows
+    // the consent screen on the next OAuth flow instead of auto-approving.
     const clientId = process.env.GITHUB_CLIENT_ID;
     const clientSecret = process.env.GITHUB_CLIENT_SECRET;
     if (clientId && clientSecret) {
+      const basicAuth = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`;
+      const token = decryptToken(conn.encrypted_token);
+      // 1. Revoke the grant (app authorization) — forces re-consent
       try {
-        const token = decryptToken(conn.encrypted_token);
         await githubRateLimiter.execute(() =>
-          fetch(`https://api.github.com/applications/${clientId}/token`, {
+          fetch(`https://api.github.com/applications/${clientId}/grant`, {
             method: 'DELETE',
             headers: {
-              Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+              Authorization: basicAuth,
               Accept: 'application/vnd.github+json',
               'Content-Type': 'application/json',
             },
@@ -567,7 +558,23 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
           }),
         );
       } catch (revokeErr) {
-        logger.warn({ err: revokeErr }, '[GitHub] Token revocation failed (proceeding with local disconnect)');
+        // Grant revocation failed — fall back to token-only revocation
+        logger.warn({ err: revokeErr }, '[GitHub] Grant revocation failed, falling back to token revocation');
+        try {
+          await githubRateLimiter.execute(() =>
+            fetch(`https://api.github.com/applications/${clientId}/token`, {
+              method: 'DELETE',
+              headers: {
+                Authorization: basicAuth,
+                Accept: 'application/vnd.github+json',
+                'Content-Type': 'application/json',
+              },
+              body: JSON.stringify({ access_token: token }),
+            }),
+          );
+        } catch (tokenRevokeErr) {
+          logger.warn({ err: tokenRevokeErr }, '[GitHub] Token revocation also failed (proceeding with local disconnect)');
+        }
       }
     }
 
@@ -636,16 +643,14 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
 router.delete('/', async (req: Request, res: Response) => {
   const workspaceId = req.params.id;
   try {
-    // Check if any GitHub connection exists (OAuth or webhook)
-    const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
-    const userId = userRow?.id ?? null;
-
-    const oauthConn = userId
-      ? await queryOne<Pick<GitHubConnectionRow, 'id' | 'encrypted_token'>>(
-          'SELECT id, encrypted_token FROM github_connections WHERE user_id = $1',
-          [userId],
-        )
-      : null;
+    // Check if any GitHub connection exists (OAuth or webhook).
+    // Single-user mode: query github_connections directly (LIMIT 1 on users returns
+    // admin@rorca.local, not the GitHub-authenticated user).
+    const oauthConn = await queryOne<Pick<GitHubConnectionRow, 'id' | 'encrypted_token' | 'user_id'>>(
+      'SELECT id, encrypted_token, user_id FROM github_connections ORDER BY created_at DESC LIMIT 1',
+      [],
+    );
+    const userId = oauthConn?.user_id ?? null;
 
     const webhookConn = await queryOne<GithubWebhookRow>(
       'SELECT * FROM workspace_github_webhooks WHERE workspace_id = $1',
@@ -661,18 +666,19 @@ router.delete('/', async (req: Request, res: Response) => {
       throw new NotFoundError('No GitHub connection found for this workspace');
     }
 
-    // 1a. Revoke OAuth token via GitHub API (best-effort, before local cleanup)
+    // 1a. Revoke full OAuth GRANT via GitHub API (forces re-consent on next connect)
     if (oauthConn) {
       const clientId = process.env.GITHUB_CLIENT_ID;
       const clientSecret = process.env.GITHUB_CLIENT_SECRET;
       if (clientId && clientSecret) {
+        const basicAuth = `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`;
+        const token = decryptToken(oauthConn.encrypted_token);
         try {
-          const token = decryptToken(oauthConn.encrypted_token);
           const revokeRes = await githubRateLimiter.execute(() =>
-            fetch(`https://api.github.com/applications/${clientId}/token`, {
+            fetch(`https://api.github.com/applications/${clientId}/grant`, {
               method: 'DELETE',
               headers: {
-                Authorization: `Basic ${Buffer.from(`${clientId}:${clientSecret}`).toString('base64')}`,
+                Authorization: basicAuth,
                 Accept: 'application/vnd.github+json',
                 'Content-Type': 'application/json',
               },
@@ -680,13 +686,24 @@ router.delete('/', async (req: Request, res: Response) => {
             }),
           );
           if (!revokeRes.ok && revokeRes.status !== 404 && revokeRes.status !== 422) {
-            logger.warn({ status: revokeRes.status }, '[GitHub] Token revocation returned non-success (proceeding with local cleanup)');
+            logger.warn({ status: revokeRes.status }, '[GitHub] Grant revocation returned non-success, falling back to token revocation');
+            await githubRateLimiter.execute(() =>
+              fetch(`https://api.github.com/applications/${clientId}/token`, {
+                method: 'DELETE',
+                headers: {
+                  Authorization: basicAuth,
+                  Accept: 'application/vnd.github+json',
+                  'Content-Type': 'application/json',
+                },
+                body: JSON.stringify({ access_token: token }),
+              }),
+            );
           }
         } catch (revokeErr) {
-          logger.warn({ err: revokeErr }, '[GitHub] Token revocation failed (proceeding with local cleanup)');
+          logger.warn({ err: revokeErr }, '[GitHub] Grant revocation failed (proceeding with local cleanup)');
         }
       } else {
-        logger.warn('[GitHub] GITHUB_CLIENT_ID/SECRET not configured — skipping token revocation');
+        logger.warn('[GitHub] GITHUB_CLIENT_ID/SECRET not configured — skipping grant revocation');
       }
     }
 
@@ -1089,11 +1106,11 @@ router.get('/rate-limit', (_req: Request, res: Response) => {
 // ─── Helper: get OAuth token for the current user ─────────────────────────────
 
 async function getOAuthToken(): Promise<string | null> {
-  const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
-  if (!userRow) return null;
+  // Single-user mode: query github_connections directly rather than via LIMIT 1 on users,
+  // which returns admin@rorca.local instead of the GitHub-authenticated user.
   const conn = await queryOne<{ encrypted_token: string }>(
-    'SELECT encrypted_token FROM github_connections WHERE user_id = $1',
-    [userRow.id]
+    'SELECT encrypted_token FROM github_connections ORDER BY created_at DESC LIMIT 1',
+    []
   );
   if (!conn) return null;
   return decryptToken(conn.encrypted_token);

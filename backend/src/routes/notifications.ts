@@ -94,7 +94,7 @@ router.get('/', async (req, res) => {
 
   const result = await paginateQuery<NotificationRow>({
     query: `SELECT * FROM notifications ${whereClause}`,
-    countQuery: `SELECT COUNT(*) as total FROM notifications ${whereClause}`,
+    countQuery: `SELECT COUNT(*)::int as total FROM notifications ${whereClause}`,
     params: [user.id],
     pagination,
     orderBy: 'created_at DESC',
@@ -103,7 +103,7 @@ router.get('/', async (req, res) => {
   });
 
   const unreadRow = await queryOne<{ count: number }>(
-    'SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND read_at IS NULL',
+    'SELECT COUNT(*)::int as count FROM notifications WHERE user_id = $1 AND read_at IS NULL',
     [user.id],
   );
 
@@ -147,7 +147,7 @@ router.get('/unread-count', async (req, res) => {
   // Auth bypassed in local mode — return 0 when no user session
   if (!user?.id) { res.json({ count: 0 }); return; }
   const row = await queryOne<{ count: number }>(
-    'SELECT COUNT(*) as count FROM notifications WHERE user_id = $1 AND read_at IS NULL',
+    'SELECT COUNT(*)::int as count FROM notifications WHERE user_id = $1 AND read_at IS NULL',
     [user.id],
   );
   res.json({ count: row?.count ?? 0 });

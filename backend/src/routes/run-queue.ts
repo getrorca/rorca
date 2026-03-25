@@ -100,7 +100,7 @@ router.get('/status', async (req: Request, res: Response) => {
 
     if (workspaceId) {
       const countRow = await queryOne<{ count: number }>(
-        `SELECT COUNT(*) as count FROM run_queue WHERE workspace_id = $1 AND status = 'pending'`,
+        `SELECT COUNT(*)::int as count FROM run_queue WHERE workspace_id = $1 AND status = 'pending'`,
         [Number(workspaceId)]
       );
       queueLength = countRow?.count ?? 0;
@@ -111,7 +111,7 @@ router.get('/status', async (req: Request, res: Response) => {
       )) || null;
     } else {
       const countRow = await queryOne<{ count: number }>(
-        `SELECT COUNT(*) as count FROM run_queue WHERE status = 'pending'`
+        `SELECT COUNT(*)::int as count FROM run_queue WHERE status = 'pending'`
       );
       queueLength = countRow?.count ?? 0;
 

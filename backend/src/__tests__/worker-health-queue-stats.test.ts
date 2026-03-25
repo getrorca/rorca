@@ -54,8 +54,9 @@ describe('GET /api/pipeline/worker/health with queueStats', () => {
   let app: express.Application;
 
   beforeEach(() => {
-    mockQuery.mockReset();
-    mockQueryOne.mockReset();
+    mockQuery.mockReset().mockResolvedValue([]);
+    mockQueryOne.mockReset().mockResolvedValue(undefined);
+    mockExecute.mockReset().mockResolvedValue({ rowCount: 0 });
     jest.clearAllMocks();
   });
 
@@ -110,7 +111,7 @@ describe('GET /api/pipeline/worker/health with queueStats', () => {
       .mockResolvedValueOnce({ cnt: '1' }) // failedInLast24h
       .mockResolvedValueOnce({ cnt: '5' }) // failedInLast7d
       .mockResolvedValueOnce({ cnt: '100' }) // archiveSize
-      .mockResolvedValueOnce({ age: '120' }); // oldestPendingAgeSeconds
+      .mockResolvedValueOnce({ age_seconds: 120 }); // oldestPendingAgeSeconds
 
     // Mock per-queue breakdown
     mockQuery.mockResolvedValueOnce([
@@ -118,6 +119,9 @@ describe('GET /api/pipeline/worker/health with queueStats', () => {
       { name: 'pipeline:retry', pending: '1', active: '0', failed: '0' },
       { name: 'pipeline:cancel', pending: '0', active: '0', failed: '0' },
     ]);
+
+    // Mock latency row (10th item in Promise.all)
+    mockQueryOne.mockResolvedValueOnce(null);
 
     const res = await request(app).get('/api/pipeline/worker/health');
 
@@ -128,22 +132,21 @@ describe('GET /api/pipeline/worker/health with queueStats', () => {
 
     const { queueStats, queueHealth } = res.body;
 
-    // Verify all queueStats fields are present
-    expect(queueStats).toEqual({
-      pending: 3,
-      active: 1,
-      failed: 0,
-      completed24h: 50,
-      failedInLast24h: 1,
-      failedInLast7d: 5,
-      archiveSize: 100,
-      oldestPendingAgeSeconds: 120,
-      queues: [
-        { name: 'pipeline:run', pending: 2, active: 1, failed: 0 },
-        { name: 'pipeline:retry', pending: 1, active: 0, failed: 0 },
-        { name: 'pipeline:cancel', pending: 0, active: 0, failed: 0 },
-      ],
-    });
+    // Verify key queueStats fields are present
+    expect(queueStats.pending).toBe(3);
+    expect(queueStats.active).toBe(1);
+    expect(queueStats.failed).toBe(0);
+    expect(queueStats.completed24h).toBe(50);
+    expect(queueStats.failedInLast24h).toBe(1);
+    expect(queueStats.failedInLast7d).toBe(5);
+    expect(queueStats.archiveSize).toBe(100);
+    expect(queueStats.oldestPendingAgeSeconds).toBe(120);
+    expect(queueStats.queues).toEqual([
+      { name: 'pipeline:run', pending: 2, active: 1, failed: 0 },
+      { name: 'pipeline:retry', pending: 1, active: 0, failed: 0 },
+      { name: 'pipeline:cancel', pending: 0, active: 0, failed: 0 },
+    ]);
+    expect(queueStats).toHaveProperty('pickupLatency');
 
     // Should be degraded because failedInLast24h > 0
     expect(queueHealth).toBe('degraded');
@@ -170,12 +173,15 @@ describe('GET /api/pipeline/worker/health with queueStats', () => {
       .mockResolvedValueOnce({ cnt: '0' }) // failedInLast24h
       .mockResolvedValueOnce({ cnt: '0' }) // failedInLast7d
       .mockResolvedValueOnce({ cnt: '0' }) // archiveSize
-      .mockResolvedValueOnce({ age: null }); // oldestPendingAgeSeconds (null)
+      .mockResolvedValueOnce({ age_seconds: null }); // oldestPendingAgeSeconds (null)
 
     mockQuery
       .mockResolvedValueOnce([]) // active jobs
       .mockResolvedValueOnce([]) // scheduled jobs
       .mockResolvedValueOnce([]); // per-queue breakdown
+
+    // Mock latency row (10th item in Promise.all)
+    mockQueryOne.mockResolvedValueOnce(null);
 
     const res = await request(app).get('/api/pipeline/worker/health');
 
@@ -208,12 +214,15 @@ describe('GET /api/pipeline/worker/health with queueStats', () => {
       .mockResolvedValueOnce({ cnt: '2' }) // failedInLast24h (triggers degraded)
       .mockResolvedValueOnce({ cnt: '5' }) // failedInLast7d
       .mockResolvedValueOnce({ cnt: '50' }) // archiveSize
-      .mockResolvedValueOnce({ age: '60' }); // oldestPendingAgeSeconds
+      .mockResolvedValueOnce({ age_seconds: 60 }); // oldestPendingAgeSeconds
 
     mockQuery
       .mockResolvedValueOnce([]) // active jobs
       .mockResolvedValueOnce([]) // scheduled jobs
       .mockResolvedValueOnce([{ name: 'pipeline:run', pending: '1', active: '0', failed: '0' }]); // per-queue
+
+    // Mock latency row
+    mockQueryOne.mockResolvedValueOnce(null);
 
     const res = await request(app).get('/api/pipeline/worker/health');
 
@@ -242,12 +251,15 @@ describe('GET /api/pipeline/worker/health with queueStats', () => {
       .mockResolvedValueOnce({ cnt: '0' }) // failedInLast24h
       .mockResolvedValueOnce({ cnt: '5' }) // failedInLast7d
       .mockResolvedValueOnce({ cnt: '100' }) // archiveSize
-      .mockResolvedValueOnce({ age: null }); // oldestPendingAgeSeconds
+      .mockResolvedValueOnce({ age_seconds: null }); // oldestPendingAgeSeconds
 
     mockQuery
       .mockResolvedValueOnce([]) // active jobs
       .mockResolvedValueOnce([]) // scheduled jobs
       .mockResolvedValueOnce([]); // per-queue
+
+    // Mock latency row
+    mockQueryOne.mockResolvedValueOnce(null);
 
     const res = await request(app).get('/api/pipeline/worker/health');
 
@@ -276,12 +288,15 @@ describe('GET /api/pipeline/worker/health with queueStats', () => {
       .mockResolvedValueOnce({ cnt: '10' }) // failedInLast24h (> 5 triggers critical)
       .mockResolvedValueOnce({ cnt: '15' }) // failedInLast7d
       .mockResolvedValueOnce({ cnt: '200' }) // archiveSize
-      .mockResolvedValueOnce({ age: null }); // oldestPendingAgeSeconds
+      .mockResolvedValueOnce({ age_seconds: null }); // oldestPendingAgeSeconds
 
     mockQuery
       .mockResolvedValueOnce([]) // active jobs
       .mockResolvedValueOnce([]) // scheduled jobs
       .mockResolvedValueOnce([]); // per-queue
+
+    // Mock latency row
+    mockQueryOne.mockResolvedValueOnce(null);
 
     const res = await request(app).get('/api/pipeline/worker/health');
 
@@ -310,12 +325,15 @@ describe('GET /api/pipeline/worker/health with queueStats', () => {
       .mockResolvedValueOnce({ cnt: '0' }) // failedInLast24h
       .mockResolvedValueOnce({ cnt: '2' }) // failedInLast7d
       .mockResolvedValueOnce({ cnt: '100' }) // archiveSize
-      .mockResolvedValueOnce({ age: '450' }); // oldestPendingAgeSeconds (> 300)
+      .mockResolvedValueOnce({ age_seconds: 450 }); // oldestPendingAgeSeconds (> 300)
 
     mockQuery
       .mockResolvedValueOnce([]) // active jobs
       .mockResolvedValueOnce([]) // scheduled jobs
       .mockResolvedValueOnce([{ name: 'pipeline:run', pending: '5', active: '0', failed: '0' }]); // per-queue
+
+    // Mock latency row
+    mockQueryOne.mockResolvedValueOnce(null);
 
     const res = await request(app).get('/api/pipeline/worker/health');
 
@@ -345,7 +363,7 @@ describe('GET /api/pipeline/worker/health with queueStats', () => {
       .mockResolvedValueOnce({ cnt: '0' }) // failedInLast24h
       .mockResolvedValueOnce({ cnt: '2' }) // failedInLast7d
       .mockResolvedValueOnce({ cnt: '100' }) // archiveSize
-      .mockResolvedValueOnce({ age: '30' }); // oldestPendingAgeSeconds
+      .mockResolvedValueOnce({ age_seconds: 30 }); // oldestPendingAgeSeconds
 
     mockQuery
       .mockResolvedValueOnce([
@@ -357,6 +375,9 @@ describe('GET /api/pipeline/worker/health with queueStats', () => {
       ]) // active jobs
       .mockResolvedValueOnce([{ name: 'test-schedule', cron: '0 0 * * *', timezone: 'UTC' }]) // scheduled jobs
       .mockResolvedValueOnce([]); // per-queue
+
+    // Mock latency row
+    mockQueryOne.mockResolvedValueOnce(null);
 
     const res = await request(app).get('/api/pipeline/worker/health');
 
