@@ -19,13 +19,10 @@ interface MemoryRow {
 }
 
 /**
- * Project all active memories from DB to <workspacePath>/MEMORY.md.
- * The file is a read-only generated projection — agents must NOT edit it directly.
+ * Generate the MEMORY.md content string from all active memories in the DB.
+ * Returns the full markdown string without writing to disk.
  */
-export async function writeMemoryMd(
-  workspaceId: string,
-  workspacePath: string,
-): Promise<void> {
+export async function generateMemoryMd(workspaceId: string): Promise<string> {
   const rows = await query<MemoryRow>(
     `SELECT category, content, source_story_id, confidence, created_at
        FROM memories
@@ -41,14 +38,25 @@ export async function writeMemoryMd(
   ];
 
   const entries = rows.map((r) => {
-    const date = r.created_at.slice(0, 10);
+    const raw = r.created_at;
+    const date = (typeof raw === 'string' ? raw : (raw as unknown as Date).toISOString()).slice(0, 10);
     const source = r.source_story_id ? `\n> Source: ${r.source_story_id}` : '';
     return `## ${date} [${r.category}] ${r.content.split('\n')[0]}
 > Rule: ${r.content}${source}`;
   });
 
-  const content = header.join('\n') + entries.join('\n\n') + '\n';
+  return header.join('\n') + entries.join('\n\n') + '\n';
+}
 
+/**
+ * Project all active memories from DB to <workspacePath>/MEMORY.md.
+ * The file is a read-only generated projection — agents must NOT edit it directly.
+ */
+export async function writeMemoryMd(
+  workspaceId: string,
+  workspacePath: string,
+): Promise<void> {
+  const content = await generateMemoryMd(workspaceId);
   const memoryPath = path.join(workspacePath, 'MEMORY.md');
   fs.writeFileSync(memoryPath, content, 'utf-8');
 }

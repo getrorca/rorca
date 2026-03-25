@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-25T18:58:10.923Z",
+  "lastUpdatedAt": "2026-03-25T19:31:32.880Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -48,6 +48,15 @@
       "finishedAt": "2026-03-25T18:58:10.923Z",
       "agentType": "claude",
       "elapsedMs": 263698
+    },
+    {
+      "storyId": "US-007",
+      "title": "Integration test: end-to-end memory consolidation flow",
+      "status": "passed",
+      "startedAt": "2026-03-25T18:58:30.466Z",
+      "finishedAt": "2026-03-25T19:31:32.880Z",
+      "agentType": "claude",
+      "elapsedMs": 1982414
     }
   ],
   "failedStories": [],
