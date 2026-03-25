@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-25T18:44:07.640Z",
+  "lastUpdatedAt": "2026-03-25T18:46:20.825Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -23,13 +23,13 @@
       "elapsedMs": 1158020
     },
     {
-      "storyId": "US-002",
-      "title": "Add generateMemoryMd() utility that projects DB memories into MEMORY.md format",
+      "storyId": "US-004",
+      "title": "Update buildPrompt() to instruct claude agent to use rorca_save_memory MCP tool",
       "status": "passed",
-      "startedAt": "2026-03-25T18:43:42.063Z",
-      "finishedAt": "2026-03-25T18:44:07.640Z",
+      "startedAt": "2026-03-25T18:43:41.737Z",
+      "finishedAt": "2026-03-25T18:46:20.825Z",
       "agentType": "claude",
-      "elapsedMs": 25577
+      "elapsedMs": 159088
     }
   ],
   "failedStories": [],
