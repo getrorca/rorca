@@ -59,6 +59,7 @@ import { loadAgentsMd, matchRole, buildRolePromptSection, detectViolations, getL
 import { getGraphContext, formatGraphContext } from './graph-context';
 import { logger } from './logger';
 import { autoSynthesizeMemory } from './auto-memory';
+import { writeMemoryMd } from './memory-projection';
 import {
   initRunState,
   markStoryStarted as rsMarkStoryStarted,
@@ -516,6 +517,27 @@ function buildPrompt(
     ? 'AGENTS.md in the workspace root contains the Rorca direction stack with project standards and context. Follow its guidance for all implementation decisions.\n'
     : '';
 
+  // Claude agents use rorca_save_memory MCP tool — instruct them to save discoveries to DB, not MEMORY.md
+  const claudeMemoryInstruction = (!agentType || agentType === 'claude')
+    ? [
+      '## Memory Instructions',
+      'When you discover something worth remembering (a bug fix, architectural decision, convention, or pattern), use the rorca_save_memory MCP tool to save it.',
+      'Do NOT edit MEMORY.md directly — it is a read-only generated file that will be overwritten before the next story.',
+      'Call rorca_save_memory with: category (Architecture|Convention|Bug Fix|Decision|Pattern|Gotcha), title (short summary), rule (the actionable lesson), context (why it matters), source (story ID).',
+    ].join('\n')
+    : '';
+
+  // US-005: OpenCode/Codex agents have no MCP — instruct them to write proposed memories to a JSON file
+  const nonClaudeMemoryInstruction = (agentType === 'opencode' || agentType === 'codex')
+    ? [
+      '## Memory Instructions',
+      'When you discover something worth remembering, append a JSON object to the file .rorca/proposed_memories.json in the workspace root.',
+      'The file is a JSON array. If the file does not exist, create it with [].',
+      'Each object must have: { "category": "Architecture|Convention|Bug Fix|Decision|Pattern|Gotcha", "title": "short summary", "rule": "the actionable lesson", "context": "why it matters", "source": "<storyId>" }.',
+      'Do NOT edit MEMORY.md directly — it is read-only and generated automatically.',
+    ].join('\n')
+    : '';
+
   // CA-009: Resolve persona prompt text if story has a persona field
   let personaSection = '';
   if (story.persona && personaRegistry) {
@@ -561,6 +583,8 @@ function buildPrompt(
       '- Skip running the tests — every test must actually execute and pass',
       '- Write placeholder/todo tests — all tests must have real assertions',
       personaSection,
+      claudeMemoryInstruction,
+      nonClaudeMemoryInstruction,
       '', '---', '',
       `Your task (${story.id}): ${story.title}`,
       '', story.description, acSection,
@@ -578,6 +602,8 @@ function buildPrompt(
     matchedSkills,
     graphBlock,
     personaSection,
+    claudeMemoryInstruction,
+    nonClaudeMemoryInstruction,
     '', '---', '',
     `Your task (${story.id}):`,
     story.description, acSection,
@@ -2316,6 +2342,15 @@ async function executeStory(
     }, story.id);
   }
 
+  // US-003: Project DB memories to MEMORY.md before agent subprocess
+  if (workspaceId) {
+    try {
+      await writeMemoryMd(workspaceId, effectiveCwd);
+    } catch (err: any) {
+      console.warn(`[memory-projection] Failed to write MEMORY.md for ${story.id}: ${err.message}`);
+    }
+  }
+
   // CIE-007: Mark story started in run-state.json
   rsMarkStoryStarted(effectiveCwd, story.id);
 
@@ -2563,6 +2598,60 @@ async function executeStory(
         elapsedMs: result.elapsedMs,
       });
       writeProgressTxt(effectiveCwd);
+
+      // US-005: Ingest proposed memories from opencode/codex agents (file-based fallback for non-MCP agents)
+      // Moved before writeMemoryMd so newly proposed memories appear in the rebuilt MEMORY.md
+      if (workspaceId) {
+        try {
+          const proposedPath = path.join(effectiveCwd, '.rorca', 'proposed_memories.json');
+          if (fs.existsSync(proposedPath)) {
+            let entries: unknown[];
+            try {
+              const raw = fs.readFileSync(proposedPath, 'utf-8');
+              const parsed = JSON.parse(raw);
+              entries = Array.isArray(parsed) ? parsed : [];
+            } catch {
+              logger.warn(`  [memory] Invalid JSON in proposed_memories.json — deleting file`);
+              entries = [];
+            }
+            for (const entry of entries) {
+              if (entry && typeof entry === 'object') {
+                const e = entry as Record<string, unknown>;
+                try {
+                  await fetch(`http://localhost:${config.port}/api/memory`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({
+                      workspaceId,
+                      category: e.category ?? 'Pattern',
+                      title: e.title ?? 'Untitled',
+                      rule: e.rule ?? '',
+                      context: e.context ?? '',
+                      source: e.source ?? story.id,
+                    }),
+                  });
+                } catch (postErr: any) {
+                  logger.warn(`  [memory] Failed to POST proposed memory: ${postErr.message}`);
+                }
+              }
+            }
+            try { fs.unlinkSync(proposedPath); } catch { /* best-effort cleanup */ }
+          }
+        } catch (err: any) {
+          logger.warn(`  [memory] proposed_memories.json processing failed: ${err.message}`);
+        }
+      }
+
+      // US-006: Rebuild MEMORY.md from DB so it includes any memories saved during this story
+      // (via MCP tool for claude, or proposed_memories.json for opencode/codex above).
+      // Called before gitCommitStory so the updated MEMORY.md is included in the story's commit.
+      if (workspaceId) {
+        try {
+          await writeMemoryMd(workspaceId, effectiveCwd);
+        } catch (err: any) {
+          logger.warn(`  [memory] writeMemoryMd failed: ${err.message} — continuing`);
+        }
+      }
 
       logger.info(`Committing ${story.id}...`);
       gitCommitStory(effectiveCwd, story.id, story.title, mode);
