@@ -2302,6 +2302,7 @@ async function executeStory(
 
   // SW-004: Fetch graph context (related memories, conventions, file history)
   let graphSection = '';
+  let graphHits: number | undefined;
   if (workspaceId && config.includeGraph) {
     try {
       const predictedPaths = extractPredictedPaths(story);
@@ -2309,8 +2310,9 @@ async function executeStory(
       if (!isNaN(wsIdNum) && predictedPaths.length > 0) {
         const graphCtx = await getGraphContext(story.id, predictedPaths, wsIdNum);
         graphSection = formatGraphContext(graphCtx);
+        graphHits = graphCtx.graphHits;
         if (graphSection) {
-          logger.info(`  [graph] Injected graph context for ${story.id}: ${graphCtx.relatedMemories.length} memories, ${graphCtx.relatedConventions.length} conventions, ${graphCtx.fileHistory.length} file histories`);
+          logger.info(`  [graph] Injected graph context for ${story.id}: ${graphCtx.relatedMemories.length} memories, ${graphCtx.relatedConventions.length} conventions, ${graphCtx.fileHistory.length} file histories (${graphHits} graph hits)`);
         }
       }
     } catch (err: any) {
@@ -2341,6 +2343,7 @@ async function executeStory(
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
       ...(injectedContextFiles.length > 0 ? { context_files: injectedContextFiles } : {}),
       ...(activeSkillNames.length > 0 ? { active_skills: activeSkillNames } : {}),
+      ...(graphHits != null ? { graph_hits: graphHits } : {}),
     }, story.id);
   }
 
@@ -2461,6 +2464,7 @@ async function executeStory(
             run_id: config.runId, story_id: story.id,
             reason: 'rate_limit_exhausted', attempts: rateLimitAttempts,
             log_file: storyLogFile,
+            ...(graphHits != null ? { graph_hits: graphHits } : {}),
           }, story.id);
           await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
@@ -2565,6 +2569,7 @@ async function executeStory(
             run_id: config.runId, story_id: story.id, reason: gate.reason,
             ...(gate.reason === 'typecheck' ? { stderr: gate.output } : { summary: gate.output }),
             log_file: storyLogFile,
+            ...(graphHits != null ? { graph_hits: graphHits } : {}),
           }, story.id);
           await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
         }
@@ -2729,6 +2734,7 @@ async function executeStory(
           agent_type: effectiveAgent,
           input_tokens: tokenPayload.inputTokens,
           output_tokens: tokenPayload.outputTokens,
+          ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'pass', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
@@ -2761,6 +2767,7 @@ async function executeStory(
           log_file: storyLogFile,
           input_tokens: tokenPayload.inputTokens,
           output_tokens: tokenPayload.outputTokens,
+          ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
@@ -2797,6 +2804,7 @@ async function executeStory(
           reason: classified.category, error_message: classified.message,
           agent_type: effectiveAgent, exit_code: result.exitCode,
           log_file: storyLogFile,
+          ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
@@ -2884,6 +2892,7 @@ async function executeStory(
             error_category: classified.category, error_message: classified.message,
             agent_type: effectiveAgent,
             log_file: storyLogFile,
+            ...(graphHits != null ? { graph_hits: graphHits } : {}),
           }, story.id);
           await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
@@ -2928,6 +2937,7 @@ async function executeStory(
           error_category: classified.category, error_message: classified.message,
           agent_type: effectiveAgent,
           log_file: storyLogFile,
+          ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
