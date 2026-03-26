@@ -24,7 +24,7 @@ import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
 import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
-import { querySkillEffectiveness, querySkillPathAffinity, isGraphAvailable, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
+import { querySkillEffectiveness, querySkillPathAffinity, isGraphAvailable, graphStats, querySpecKnowledgeGraph, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
@@ -7036,6 +7036,76 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
     res.json({ nodes, edges, parallelGroups } as GraphResponse);
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Graph');
+  }
+});
+
+// ─── US-008: GET /:specId/knowledge-graph — AGE knowledge graph data ─────────
+
+/**
+ * @swagger
+ * /api/specs/{specId}/knowledge-graph:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Get knowledge graph data for a spec
+ *     operationId: getSpecKnowledgeGraph
+ *     description: Returns memories, conventions, and related stories from the Apache AGE knowledge graph linked to this spec's stories. Returns empty arrays when AGE is unavailable.
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     responses:
+ *       200:
+ *         description: Knowledge graph data
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 available:
+ *                   type: boolean
+ *                 memories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       category: { type: string }
+ *                       relationship: { type: string }
+ *                       storyId: { type: string }
+ *                 conventions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       name: { type: string }
+ *                       source: { type: string }
+ *                       relationship: { type: string }
+ *                       filePath: { type: string }
+ *                 relatedStories:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       id: { type: string }
+ *                       specId: { type: string }
+ *                       title: { type: string }
+ *                       relationship: { type: string }
+ */
+router.get('/:specId/knowledge-graph', async (req: Request, res: Response) => {
+  try {
+    const { specId } = req.params;
+
+    const stats = await graphStats();
+    if (!stats.available) {
+      res.json({ available: false, memories: [], conventions: [], relatedStories: [] });
+      return;
+    }
+
+    const result = await querySpecKnowledgeGraph(specId);
+    res.json({ available: true, ...result });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Specs] Knowledge Graph');
   }
 });
 
