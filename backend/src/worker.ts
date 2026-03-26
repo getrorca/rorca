@@ -672,7 +672,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, includeGraph } = payload;
 
     // Determine effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
@@ -787,6 +787,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
     if (worktreePath) {
       engineArgs.push('--workspace-path', workspacePath);
+    }
+    if (includeGraph) {
+      engineArgs.push('--include-graph');
     }
 
     // 4. Spawn execution-engine.ts with pipe stdio so we can capture chunks
@@ -1024,7 +1027,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     }
 
     const payload: PipelineRetryJobPayloadType = parsed.data;
-    const { runId, originalRunId, workspacePath, retrySpecPath, agent, model, worktreePath, sequenceOffset, envOverrides } = payload;
+    const { runId, originalRunId, workspacePath, retrySpecPath, agent, model, worktreePath, sequenceOffset, envOverrides, includeGraph } = payload;
 
     // Effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
@@ -1079,6 +1082,9 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     ];
     if (model) {
       engineArgs.push('--model', model);
+    }
+    if (includeGraph) {
+      engineArgs.push('--include-graph');
     }
 
     // 5. Spawn execution-engine with pipe stdio for chunk capture
