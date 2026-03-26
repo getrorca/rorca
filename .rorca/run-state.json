@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-26T05:59:17.370Z",
+  "lastUpdatedAt": "2026-03-26T06:01:07.676Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -68,13 +68,13 @@
       "elapsedMs": 301654
     },
     {
-      "storyId": "US-003",
-      "title": "Add includeGraph toggle to TriggerPopover.tsx",
+      "storyId": "US-006",
+      "title": "Add POST /api/graph/populate endpoint with progress tracking",
       "status": "passed",
-      "startedAt": "2026-03-26T05:55:27.947Z",
-      "finishedAt": "2026-03-26T05:59:17.370Z",
+      "startedAt": "2026-03-26T05:55:27.927Z",
+      "finishedAt": "2026-03-26T06:01:07.676Z",
       "agentType": "claude",
-      "elapsedMs": 229423
+      "elapsedMs": 339749
     }
   ],
   "failedStories": [],
