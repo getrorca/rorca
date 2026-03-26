@@ -3014,6 +3014,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       worktreePath: z.string().nullable(),
       sequenceOffset: z.number().int().min(0),
       envOverrides: z.record(z.string(), z.string()),
+      includeGraph: z.boolean().optional().default(false),
     });
 
     const jobPayload = PipelineRetryJobPayloadSchema.parse({
@@ -3028,6 +3029,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       worktreePath: originalRun.worktree_path ?? null,
       sequenceOffset,
       envOverrides,
+      includeGraph: originalRun.include_graph ?? false,
     });
 
     // 13. Enqueue via pg-boss (let pg-boss generate a UUID job ID).
