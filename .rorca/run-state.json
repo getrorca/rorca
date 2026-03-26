@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-26T06:00:49.785Z",
+  "lastUpdatedAt": "2026-03-26T06:09:01.625Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -75,6 +75,15 @@
       "finishedAt": "2026-03-26T06:00:49.784Z",
       "agentType": "claude",
       "elapsedMs": 321912
+    },
+    {
+      "storyId": "US-007",
+      "title": "Show graph context badge on story rows in Run View",
+      "status": "passed",
+      "startedAt": "2026-03-26T06:02:08.280Z",
+      "finishedAt": "2026-03-26T06:09:01.625Z",
+      "agentType": "claude",
+      "elapsedMs": 413345
     }
   ],
   "failedStories": [],
