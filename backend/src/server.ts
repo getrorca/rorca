@@ -88,6 +88,7 @@ import { logger } from './lib/logger';
 import pinoHttp from 'pino-http';
 import { startGraphPopulator } from './lib/graph-populator';
 import workspaceDriftRouter from './routes/workspace-drift';
+import graphRouter from './routes/graph';
 import { startDriftSubscriber } from './lib/drift-subscriber';
 import { startMarkerInjector } from './lib/marker-injector';
 import { StoryLogFollower } from './lib/story-log-follower';
@@ -322,6 +323,7 @@ app.use('/api/personas', personasRouter);
 app.use('/api/marketplace', marketplaceRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/recall', recallRouter);
+app.use('/api/graph', graphRouter);
 
 // V2-108: Serve frontend static files when running via `rorca start`
 if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
