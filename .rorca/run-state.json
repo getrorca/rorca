@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-26T06:00:49.785Z",
+  "lastUpdatedAt": "2026-03-26T06:05:04.040Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -75,6 +75,15 @@
       "finishedAt": "2026-03-26T06:00:49.784Z",
       "agentType": "claude",
       "elapsedMs": 321912
+    },
+    {
+      "storyId": "US-004",
+      "title": "Persist includeGraph preference in workspace settings",
+      "status": "passed",
+      "startedAt": "2026-03-26T06:02:08.381Z",
+      "finishedAt": "2026-03-26T06:05:04.040Z",
+      "agentType": "claude",
+      "elapsedMs": 175659
     }
   ],
   "failedStories": [],
