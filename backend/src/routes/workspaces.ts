@@ -781,6 +781,7 @@ router.patch('/:id', async (req, res, next) => {
  *                     storyTimeoutMin: { type: integer }
  *                     maxRetries: { type: integer }
  *                     defaultParallelism: { type: integer }
+ *                     includeGraph: { type: boolean }
  *       404: { description: "Workspace not found" }
  */
 router.get('/:id/pipeline-config', async (req, res, next) => {
@@ -800,6 +801,7 @@ router.get('/:id/pipeline-config', async (req, res, next) => {
         storyTimeoutMin: config.storyTimeoutMin ?? 45,
         maxRetries: config.maxRetries ?? 0,
         defaultParallelism: row.default_parallelism ?? 1,
+        includeGraph: config.includeGraph ?? false,
       },
     });
   } catch (err) {
@@ -834,6 +836,7 @@ router.get('/:id/pipeline-config', async (req, res, next) => {
  *               storyTimeoutMin: { type: integer }
  *               maxRetries: { type: integer }
  *               defaultParallelism: { type: integer, minimum: 1, maximum: 10 }
+ *               includeGraph: { type: boolean }
  *     responses:
  *       200:
  *         description: Configuration updated
@@ -847,13 +850,20 @@ router.get('/:id/pipeline-config', async (req, res, next) => {
  */
 router.put('/:id/pipeline-config', async (req, res, next) => {
   try {
-    const row = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [req.params.id]);
+    const row = await queryOne<{ id: string; pipeline_config: string }>('SELECT id, pipeline_config FROM workspaces WHERE id = $1', [req.params.id]);
     if (!row) {
       throw new NotFoundError('Workspace not found');
       return;
     }
-    const { autoWorktree, storyTimeoutMin, maxRetries, defaultParallelism } = req.body;
-    const config = JSON.stringify({ autoWorktree, storyTimeoutMin, maxRetries });
+    const existing = JSON.parse(row.pipeline_config || '{}');
+    const { autoWorktree, storyTimeoutMin, maxRetries, defaultParallelism, includeGraph } = req.body;
+    const merged = {
+      autoWorktree: autoWorktree !== undefined ? autoWorktree : existing.autoWorktree,
+      storyTimeoutMin: storyTimeoutMin !== undefined ? storyTimeoutMin : existing.storyTimeoutMin,
+      maxRetries: maxRetries !== undefined ? maxRetries : existing.maxRetries,
+      includeGraph: includeGraph !== undefined ? includeGraph : existing.includeGraph,
+    };
+    const config = JSON.stringify(merged);
     if (defaultParallelism !== undefined) {
       const p = Math.max(1, Math.min(10, Math.floor(Number(defaultParallelism) || 1)));
       await execute('UPDATE workspaces SET pipeline_config = $1, default_parallelism = $2 WHERE id = $3', [config, p, req.params.id]);
