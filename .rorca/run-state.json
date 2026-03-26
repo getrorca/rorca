@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-26T06:06:44.218Z",
+  "lastUpdatedAt": "2026-03-26T06:33:52.695Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -84,6 +84,15 @@
       "finishedAt": "2026-03-26T06:06:44.218Z",
       "agentType": "claude",
       "elapsedMs": 274756
+    },
+    {
+      "storyId": "US-010",
+      "title": "Graceful degradation and integration tests for knowledge graph UI",
+      "status": "passed",
+      "startedAt": "2026-03-26T06:09:22.485Z",
+      "finishedAt": "2026-03-26T06:33:52.695Z",
+      "agentType": "claude",
+      "elapsedMs": 1470210
     }
   ],
   "failedStories": [],
