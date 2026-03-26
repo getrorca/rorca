@@ -23,7 +23,7 @@ import { StoryCard } from './StoryCard';
 import type { Story } from './StoryCard';
 import { InlineStoryEditor } from './InlineStoryEditor';
 import { StoryComments } from './StoryComments';
-import DependencyGraph from './DependencyGraph';
+import { GraphTabWithSubTabs } from './GraphTabWithSubTabs';
 import MermaidDiagram from './MermaidDiagram';
 import { SpecVersionHistory } from './SpecVersionHistory';
 import { TagChips } from './TagChips';
@@ -712,7 +712,7 @@ function SpecDetailContent({
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} />}
             {activeTab === 'skills' && <SpecSkillsTab stories={stories} workspaceId={workspaceId ?? ''} />}
-            {activeTab === 'graph' && workspaceId && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
+            {activeTab === 'graph' && workspaceId && <GraphTabWithSubTabs specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
             {activeTab === 'json' && <JsonTab spec={detail} specId={specId} />}
             {activeTab === 'attachments' && <AttachmentsTab specId={specId} />}

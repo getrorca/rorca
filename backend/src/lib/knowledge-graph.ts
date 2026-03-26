@@ -920,6 +920,117 @@ export async function querySkillPathAffinity(limit: number = 50): Promise<SkillP
   }
 }
 
+// ── Spec Knowledge Graph Query ──────────────────────────────────────────────
+
+export interface KnowledgeGraphMemory {
+  id: string;
+  category: string;
+  relationship: string;
+  storyId: string;
+}
+
+export interface KnowledgeGraphConvention {
+  name: string;
+  source: string;
+  relationship: string;
+  filePath: string;
+}
+
+export interface KnowledgeGraphRelatedStory {
+  id: string;
+  specId: string;
+  title: string;
+  relationship: string;
+}
+
+export interface SpecKnowledgeGraphResult {
+  memories: KnowledgeGraphMemory[];
+  conventions: KnowledgeGraphConvention[];
+  relatedStories: KnowledgeGraphRelatedStory[];
+}
+
+/**
+ * Query the knowledge graph for data related to a spec's stories.
+ * Returns memories linked via LEARNED_FROM, conventions linked via APPLIES_TO/TOUCHES,
+ * and related stories from other specs connected via DEPENDS_ON or TOUCHES.
+ * PG-019: Returns empty arrays if AGE is unavailable.
+ */
+export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowledgeGraphResult> {
+  const empty: SpecKnowledgeGraphResult = { memories: [], conventions: [], relatedStories: [] };
+  if (!(await isGraphAvailable())) return empty;
+
+  const safeSpecId = escCypher(specId);
+
+  try {
+    // 1. Memory nodes linked to this spec's stories via LEARNED_FROM
+    const memoryRows = await cypherQuery<{ mid: unknown; cat: unknown; sid: unknown }>(
+      `MATCH (m:Memory)-[:LEARNED_FROM]->(s:Story)-[:BELONGS_TO]->(sp:Spec {id: '${safeSpecId}'})
+       RETURN m.id, m.category, s.id`,
+      [
+        { name: 'mid', type: 'agtype' },
+        { name: 'cat', type: 'agtype' },
+        { name: 'sid', type: 'agtype' },
+      ],
+    );
+
+    const memories: KnowledgeGraphMemory[] = memoryRows.map(row => ({
+      id: String(parseAgtype(row.mid) ?? ''),
+      category: String(parseAgtype(row.cat) ?? ''),
+      relationship: 'LEARNED_FROM',
+      storyId: String(parseAgtype(row.sid) ?? ''),
+    }));
+
+    // 2. Convention nodes that APPLIES_TO files touched by this spec's stories
+    const conventionRows = await cypherQuery<{ cname: unknown; csrc: unknown; fpath: unknown }>(
+      `MATCH (c:Convention)-[:APPLIES_TO]->(f:File)<-[:TOUCHES]-(s:Story)-[:BELONGS_TO]->(sp:Spec {id: '${safeSpecId}'})
+       RETURN DISTINCT c.name, c.source, f.path`,
+      [
+        { name: 'cname', type: 'agtype' },
+        { name: 'csrc', type: 'agtype' },
+        { name: 'fpath', type: 'agtype' },
+      ],
+    );
+
+    const conventions: KnowledgeGraphConvention[] = conventionRows.map(row => ({
+      name: String(parseAgtype(row.cname) ?? ''),
+      source: String(parseAgtype(row.csrc) ?? ''),
+      relationship: 'APPLIES_TO',
+      filePath: String(parseAgtype(row.fpath) ?? ''),
+    }));
+
+    // 3. Related stories from OTHER specs connected via DEPENDS_ON or TOUCHES
+    const relatedRows = await cypherQuery<{ rid: unknown; rspec: unknown; rtitle: unknown; rel: unknown }>(
+      `MATCH (s:Story)-[:BELONGS_TO]->(sp:Spec {id: '${safeSpecId}'})
+       MATCH (s)-[:TOUCHES]->(f:File)<-[:TOUCHES]-(r:Story)-[:BELONGS_TO]->(rsp:Spec)
+       WHERE rsp.id <> '${safeSpecId}'
+       RETURN DISTINCT r.id, rsp.id, r.title, 'TOUCHES'`,
+      [
+        { name: 'rid', type: 'agtype' },
+        { name: 'rspec', type: 'agtype' },
+        { name: 'rtitle', type: 'agtype' },
+        { name: 'rel', type: 'agtype' },
+      ],
+    );
+
+    const relatedStories: KnowledgeGraphRelatedStory[] = relatedRows.map(row => ({
+      id: String(parseAgtype(row.rid) ?? ''),
+      specId: String(parseAgtype(row.rspec) ?? ''),
+      title: String(parseAgtype(row.rtitle) ?? ''),
+      relationship: String(parseAgtype(row.rel) ?? 'TOUCHES'),
+    }));
+
+    logger.debug(
+      { specId, memories: memories.length, conventions: conventions.length, relatedStories: relatedStories.length },
+      '[knowledge-graph] querySpecKnowledgeGraph complete',
+    );
+
+    return { memories, conventions, relatedStories };
+  } catch (err) {
+    logger.warn({ err, specId }, '[knowledge-graph] querySpecKnowledgeGraph failed');
+    return empty;
+  }
+}
+
 export async function graphStats(): Promise<GraphStats> {
   if (!(await isGraphAvailable())) {
     return { available: false, vertexCount: 0, edgeCount: 0, labels: [] };
