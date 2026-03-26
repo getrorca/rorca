@@ -82,6 +82,10 @@ const DeveloperToolsSection = lazy(() =>
   import('./settings/DeveloperToolsSection'),
 );
 
+const KnowledgeGraphSection = lazy(() =>
+  import('./settings/KnowledgeGraphSection').then((m) => ({ default: m.KnowledgeGraphSection })),
+);
+
 const IntegrationPlaceholder = lazy(() =>
   import('./settings/IntegrationPlaceholder'),
 );
@@ -142,6 +146,8 @@ export default function SettingsPanel() {
           {/* System group */}
           {activeTab === 'system' && (
             <>
+              <KnowledgeGraphSection />
+              <hr className="border-border my-6" />
               <DeadLetterQueueSection />
               <hr className="border-border my-6" />
               <UnifiedActivitySection />
