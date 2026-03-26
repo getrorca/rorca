@@ -168,6 +168,16 @@ export default function TriggerPopover({
   const [includeGraph, setIncludeGraph] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
+  // Fetch persisted pipeline-config on mount (includeGraph preference)
+  useEffect(() => {
+    if (!workspaceId) return;
+    apiFetch<{ config: { includeGraph?: boolean } }>(`/api/workspaces/${workspaceId}/pipeline-config`)
+      .then((data) => {
+        setIncludeGraph(data.config.includeGraph ?? false);
+      })
+      .catch(() => {});
+  }, [workspaceId]);
+
   // Fetch workspace health badge on mount
   useEffect(() => {
     if (!workspaceId) return;
@@ -687,7 +697,17 @@ export default function TriggerPopover({
         <input
           type="checkbox"
           checked={includeGraph}
-          onChange={(e) => setIncludeGraph(e.target.checked)}
+          onChange={(e) => {
+            const val = e.target.checked;
+            setIncludeGraph(val);
+            if (workspaceId) {
+              apiFetch(`/api/workspaces/${workspaceId}/pipeline-config`, {
+                method: 'PUT',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ includeGraph: val }),
+              }).catch(() => {});
+            }
+          }}
           className="rounded border-border accent-[var(--accent)]"
         />
         <span className="text-xs text-[var(--text)] flex items-center gap-1">
