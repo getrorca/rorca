@@ -31,6 +31,7 @@ export const PipelineRunJobPayload = z.object({
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
   startFromStoryId: z.string().optional(),
   triggeredVia: z.enum(['queue', 'run_now']).default('run_now'),
+  includeGraph: z.boolean().optional().default(false),
 }).strict();
 
 export type PipelineRunJobPayloadType = z.infer<typeof PipelineRunJobPayload>;
@@ -53,6 +54,7 @@ export const PipelineRetryJobPayload = z.object({
   worktreePath: z.string().nullable(),
   sequenceOffset: z.number().int().min(0),
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
+  includeGraph: z.boolean().optional().default(false),
 }).strict();
 
 export type PipelineRetryJobPayloadType = z.infer<typeof PipelineRetryJobPayload>;
