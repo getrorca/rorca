@@ -7094,7 +7094,7 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
  */
 router.get('/:specId/knowledge-graph', async (req: Request, res: Response) => {
   try {
-    const { specId } = req.params;
+    const specId = req.params.specId as string;
 
     const stats = await graphStats();
     if (!stats.available) {
