@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-26T06:05:04.040Z",
+  "lastUpdatedAt": "2026-03-26T06:09:01.625Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -77,13 +77,13 @@
       "elapsedMs": 321912
     },
     {
-      "storyId": "US-004",
-      "title": "Persist includeGraph preference in workspace settings",
+      "storyId": "US-007",
+      "title": "Show graph context badge on story rows in Run View",
       "status": "passed",
-      "startedAt": "2026-03-26T06:02:08.381Z",
-      "finishedAt": "2026-03-26T06:05:04.040Z",
+      "startedAt": "2026-03-26T06:02:08.280Z",
+      "finishedAt": "2026-03-26T06:09:01.625Z",
       "agentType": "claude",
-      "elapsedMs": 175659
+      "elapsedMs": 413345
     }
   ],
   "failedStories": [],
