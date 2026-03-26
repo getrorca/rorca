@@ -3,9 +3,9 @@
 Spec: rorca-billing-launch
 Run ID: 20260316000045
 Started: 2026-03-19T20:45:48.038Z
-Last Updated: 2026-03-26T06:06:44.218Z
+Last Updated: 2026-03-26T06:33:52.695Z
 
-## Completed Stories (9)
+## Completed Stories (10)
 - BL-012: Billing webhook idempotency — prevent duplicate billing state transitions — DONE (claude, 33s)
 - BL-013: Self-hosted offline license activation — RORCA_LICENSE_KEY env var — DONE (claude, 1158s)
 - US-004: Update buildPrompt() to instruct claude agent to use rorca_save_memory MCP tool — DONE (claude, 159s)
@@ -15,3 +15,4 @@ Last Updated: 2026-03-26T06:06:44.218Z
 - US-005: Add GET /api/graph/stats endpoint and knowledge graph health indicator — DONE (claude, 302s)
 - US-008: Add Knowledge Graph sub-tab to SpecDetailSlideOver Graph tab — DONE (claude, 322s)
 - US-009: Emit graph_hits count in WAL events from execution-engine — DONE (claude, 275s)
+- US-010: Graceful degradation and integration tests for knowledge graph UI — DONE (claude, 1470s)
