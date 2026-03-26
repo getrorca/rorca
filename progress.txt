@@ -3,7 +3,7 @@
 Spec: rorca-billing-launch
 Run ID: 20260316000045
 Started: 2026-03-19T20:45:48.038Z
-Last Updated: 2026-03-26T05:59:17.370Z
+Last Updated: 2026-03-26T06:01:07.676Z
 
 ## Completed Stories (8)
 - BL-012: Billing webhook idempotency — prevent duplicate billing state transitions — DONE (claude, 33s)
@@ -13,4 +13,4 @@ Last Updated: 2026-03-26T05:59:17.370Z
 - US-006: Post-story MEMORY.md rebuild after markStoryPassed() — DONE (claude, 264s)
 - US-007: Integration test: end-to-end memory consolidation flow — DONE (claude, 1982s)
 - US-005: Add GET /api/graph/stats endpoint and knowledge graph health indicator — DONE (claude, 302s)
-- US-003: Add includeGraph toggle to TriggerPopover.tsx — DONE (claude, 229s)
+- US-006: Add POST /api/graph/populate endpoint with progress tracking — DONE (claude, 340s)
