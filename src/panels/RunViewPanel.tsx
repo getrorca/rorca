@@ -44,6 +44,7 @@ interface PipelineRun {
   pr_number?: number | null;
   pr_creating?: boolean;
   pr_creation_error?: string | null;
+  include_graph?: boolean;
 }
 
 interface StoryResultSeed {
@@ -1434,6 +1435,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                     walEvents={walEvents}
                     onStoryClick={useMultiPane ? undefined : (storyId) => terminalRef.current?.scrollToStory(storyId)}
                     parallelism={run.parallelism}
+                    includeGraph={run.include_graph}
                   />
                 </div>
                 <RunMetadataPanel
@@ -1459,6 +1461,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
               setTimeout(() => terminalRef.current?.scrollToStory(storyId), 100);
             }}
             parallelism={run.parallelism}
+            includeGraph={run.include_graph}
           />
         );
       case 'graph':

@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText, Github } from 'lucide-react';
+import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText, Github, Share2 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { fetchStoryOutput, retryRun } from '../api/pipeline';
 import type { WalEvent } from '../hooks/usePipelineSSE';
@@ -31,6 +31,7 @@ interface RunStoryListProps {
   onStoryClick?: (storyId: string) => void;
   onRetryStory?: (storyId: string, newRunId: number) => void;
   parallelism?: number;
+  includeGraph?: boolean;
 }
 
 type DerivedStatus = 'pending' | 'running' | 'pass' | 'fail' | 'blocked' | 'excluded' | 'skip' | 'retry' | 'rate_limited';
@@ -134,6 +135,7 @@ interface MergedStory {
   blockedBy: string[] | null; // upstream story IDs that caused this story to be blocked
   githubStatusPending: boolean; // US-027: true when commit status is being posted to GitHub
   prSyncPending: boolean; // US-034: true transiently when PR body is being updated
+  graphHits: number | null; // US-007: graph node hit count from WAL event payload
 }
 
 // ─── Live elapsed timer ──────────────────────────────────────────────────────
@@ -171,13 +173,14 @@ const MAX_RETRIES = 3;
 
 // ─── Story row component ─────────────────────────────────────────────────────
 
-function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocused }: {
+function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocused, includeGraph }: {
   story: MergedStory;
   onStoryClick?: (storyId: string) => void;
   indented?: boolean;
   runId?: number;
   onRetryStory?: (storyId: string) => void;
   isFocused?: boolean;
+  includeGraph?: boolean;
 }) {
   const cfg = STATUS_CONFIG[story.status] || STATUS_CONFIG.pending;
   const Icon = cfg.icon;
@@ -277,6 +280,16 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
         }`}>
           {story.title}
         </span>
+        {/* US-007: Graph context badge — shown when run has includeGraph=true */}
+        {includeGraph && (
+          <span
+            className="inline-flex items-center gap-1 text-[10px] text-indigo-400 bg-indigo-500/10 px-1.5 py-0.5 rounded shrink-0"
+            title="Knowledge graph context was injected for this story"
+          >
+            <Share2 size={10} />
+            Graph{story.graphHits != null ? `: ${story.graphHits} hits` : ''}
+          </span>
+        )}
         {/* Blocked by badge — grey with upstream story ID */}
         {isBlocked && story.blockedBy && story.blockedBy.length > 0 && (
           <span className="text-[10px] text-gray-400 bg-gray-500/10 px-1.5 py-0.5 rounded shrink-0 font-mono">
@@ -475,7 +488,7 @@ type VirtualItem =
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
-export default function RunStoryList({ runId, walEvents, onStoryClick, onRetryStory, parallelism }: RunStoryListProps) {
+export default function RunStoryList({ runId, walEvents, onStoryClick, onRetryStory, parallelism, includeGraph }: RunStoryListProps) {
   const [storyResults, setStoryResults] = useState<StoryResult[]>([]);
   const [specStories, setSpecStories] = useState<SpecStory[]>([]);
   const [loading, setLoading] = useState(true);
@@ -631,6 +644,26 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
     return set;
   }, [walEvents]);
 
+  // US-007: Extract graph_hits per story from WAL event payloads
+  const graphHitsMap = useMemo(() => {
+    if (!includeGraph) return new Map<string, number>();
+    const map = new Map<string, number>();
+    for (const evt of walEvents) {
+      if (!evt.story_id) continue;
+      if (evt.event_type === 'story_started' || evt.event_type === 'story_passed' || evt.event_type === 'story_failed') {
+        if (evt.payload) {
+          try {
+            const payload = typeof evt.payload === 'string' ? JSON.parse(evt.payload) : evt.payload;
+            if (typeof payload.graph_hits === 'number') {
+              map.set(evt.story_id, payload.graph_hits);
+            }
+          } catch { /* ignore */ }
+        }
+      }
+    }
+    return map;
+  }, [walEvents, includeGraph]);
+
   // Merge spec stories with results to derive status
   const mergedStories = useMemo(() => {
     const source: SpecStory[] = specStories.length > 0
@@ -702,9 +735,10 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
         blockedBy,
         githubStatusPending: status === 'running' || status === 'retry',
         prSyncPending: prSyncActive && (status === 'pass' || status === 'fail'),
+        graphHits: graphHitsMap.get(spec.id) ?? null,
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents, prSyncActive]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents, prSyncActive, graphHitsMap]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {
@@ -996,6 +1030,7 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
                     runId={runId}
                     indented={item.indented}
                     isFocused={isFocused}
+                    includeGraph={includeGraph}
                   />
                 ) : item.type === 'wave-header' ? (
                   <WaveHeader
