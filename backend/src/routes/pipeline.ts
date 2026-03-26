@@ -884,6 +884,7 @@ interface PipelineRunRow {
   merge_commit_sha: string | null;
   triggered_via: 'queue' | 'run_now';
   auto_worktree: boolean;
+  include_graph: boolean;
 }
 
 interface StoryResultRow {
@@ -990,6 +991,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               autoMerge: { type: boolean, default: false, description: "Auto-merge worktree branch to main on successful run" }
  *               dryRun: { type: boolean, default: false }
  *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
+ *               includeGraph: { type: boolean, default: false, description: "Include knowledge graph context in the pipeline run" }
  *     responses:
  *       200:
  *         description: Pipeline started or conflict detected
@@ -1023,11 +1025,12 @@ const PipelineTriggerSchema = z.object({
   storyId: z.string().optional(),
   queuedRunId: z.number().optional(),
   queue: z.boolean().optional(),
+  includeGraph: z.boolean().optional(),
 });
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId, includeGraph } = req.body;
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1417,10 +1420,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       // Promote queued run to running — worker will actually execute it
       await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
-         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9 WHERE id = $10 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, queuedRunId]);
+         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10 WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, queuedRunId]);
       runId = queuedRunId;
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false]);
       runId = runResult!.id;
     }
 
@@ -1562,6 +1565,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       envOverrides,
       ...(startFromStoryId ? { startFromStoryId } : {}),
       triggeredVia,
+      includeGraph: includeGraph ?? false,
     };
 
     await getBoss().send('pipeline:run', jobPayload, {
@@ -2750,6 +2754,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       // US-004: Expose worktree fields at top level for easy frontend access
       worktreePath: run.worktree_path || null,
       branchName: run.branch_name || null,
+      includeGraph: run.include_graph ?? false,
       tokenSummary: {
         inputTokens: tokenRow.total_input,
         outputTokens: tokenRow.total_output,
