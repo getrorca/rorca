@@ -46,6 +46,7 @@ export interface GraphContext {
   relatedConventions: RelatedConvention[];
   fileHistory: FileHistory[];
   impactRadius: number;
+  graphHits: number;
 }
 
 // ─── Cache Key ──────────────────────────────────────────────────────────────
@@ -138,6 +139,7 @@ export async function getGraphContext(
     relatedConventions: [],
     fileHistory: [],
     impactRadius: 0,
+    graphHits: 0,
   };
 
   // Guard: check if graph is available
@@ -215,6 +217,7 @@ export async function getGraphContext(
   result.fileHistory = [...mergedHistory.values()];
 
   result.impactRadius = uniqueNodes.size;
+  result.graphHits = result.relatedMemories.length + result.relatedConventions.length + result.fileHistory.length;
 
   const latencyMs = Date.now() - start;
   logger.info(
@@ -224,6 +227,7 @@ export async function getGraphContext(
       memories: result.relatedMemories.length,
       conventions: result.relatedConventions.length,
       files: result.fileHistory.length,
+      graphHits: result.graphHits,
       impactRadius: result.impactRadius,
       latencyMs,
     },
