@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-26T05:54:46.985Z",
+  "lastUpdatedAt": "2026-03-26T06:01:41.934Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -66,6 +66,15 @@
       "finishedAt": "2026-03-26T05:54:46.985Z",
       "agentType": "claude",
       "elapsedMs": 301654
+    },
+    {
+      "storyId": "US-002",
+      "title": "Wire includeGraph through worker.ts to execution-engine.ts",
+      "status": "passed",
+      "startedAt": "2026-03-26T05:55:27.778Z",
+      "finishedAt": "2026-03-26T06:01:41.934Z",
+      "agentType": "claude",
+      "elapsedMs": 374156
     }
   ],
   "failedStories": [],

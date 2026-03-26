@@ -131,6 +131,8 @@ interface EngineConfig {
   workspacePath: string | null;
   /** When set, skip (without re-emitting WAL events) all stories that appear before this story ID. Pre-seeded by trigger. */
   startFromStoryId?: string;
+  /** When true, fetch knowledge graph context (related memories, conventions, file history) for each story. */
+  includeGraph: boolean;
 }
 
 // ─── Escalation Tracking ─────────────────────────────────────────────────────
@@ -2300,7 +2302,7 @@ async function executeStory(
 
   // SW-004: Fetch graph context (related memories, conventions, file history)
   let graphSection = '';
-  if (workspaceId) {
+  if (workspaceId && config.includeGraph) {
     try {
       const predictedPaths = extractPredictedPaths(story);
       const wsIdNum = parseInt(workspaceId, 10);
@@ -3551,6 +3553,7 @@ function parseArgs(): EngineConfig {
   let branchName: string | null = null;
   let workspacePath: string | null = null;
   let startFromStoryId: string | undefined;
+  let includeGraph = false;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -3596,6 +3599,9 @@ function parseArgs(): EngineConfig {
       case '--start-from':
         startFromStoryId = args[++i];
         break;
+      case '--include-graph':
+        includeGraph = true;
+        break;
       default:
         logger.error(`Unknown arg: ${args[i]}`);
         process.exit(1);
@@ -3603,7 +3609,7 @@ function parseArgs(): EngineConfig {
   }
 
   if (!jsonPath || !cwd || !runId) {
-    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>]');
+    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph]');
     process.exit(1);
   }
 
@@ -3612,7 +3618,7 @@ function parseArgs(): EngineConfig {
   const agentType: AgentType = (cliAgent as AgentType) ?? envConfig.agentType;
   const agentModel: string | null = cliModel ?? envConfig.agentModel;
 
-  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, worktreePath, branchName, workspacePath, startFromStoryId };
+  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph };
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────
