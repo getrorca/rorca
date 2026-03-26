@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef } from 'react';
-import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert } from 'lucide-react';
+import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert, Info } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { preflightCheck, type CapabilityWarning } from '../api/pipeline';
 import type { PanelId } from './Sidebar';
@@ -127,9 +127,9 @@ interface TriggerPopoverProps {
   /** Whether a trigger is currently in progress */
   loading?: boolean;
   /** Called when user clicks Run Now */
-  onTrigger: (autoWorktree: boolean, options?: { forceSequential?: boolean; autoMerge?: boolean }) => void;
+  onTrigger: (autoWorktree: boolean, options?: { forceSequential?: boolean; autoMerge?: boolean; includeGraph?: boolean }) => void;
   /** Called when user clicks Add to Queue */
-  onAddToQueue?: (autoWorktree: boolean, options?: { forceSequential?: boolean; autoMerge?: boolean }) => void;
+  onAddToQueue?: (autoWorktree: boolean, options?: { forceSequential?: boolean; autoMerge?: boolean; includeGraph?: boolean }) => void;
   /** Whether Add to Queue action is loading */
   queueLoading?: boolean;
   /** Called when popover is dismissed */
@@ -165,6 +165,7 @@ export default function TriggerPopover({
   const [driftData, setDriftData] = useState<DriftReportData | null>(null);
   const [driftCheckEnabled, setDriftCheckEnabled] = useState(false);
   const [forceSequential, setForceSequential] = useState(false);
+  const [includeGraph, setIncludeGraph] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
 
   // Fetch workspace health badge on mount
@@ -681,13 +682,32 @@ export default function TriggerPopover({
         </div>
       )}
 
+      {/* Knowledge Graph toggle */}
+      <label className="flex items-center gap-2 cursor-pointer">
+        <input
+          type="checkbox"
+          checked={includeGraph}
+          onChange={(e) => setIncludeGraph(e.target.checked)}
+          className="rounded border-border accent-[var(--accent)]"
+        />
+        <span className="text-xs text-[var(--text)] flex items-center gap-1">
+          Knowledge Graph
+          <span className="relative group">
+            <Info size={12} className="text-muted cursor-help" />
+            <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-1.5 rounded bg-[var(--bg-elevated)] border border-border text-[10px] text-muted leading-snug w-56 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity z-50 shadow-lg">
+              Enrich story context by traversing the knowledge graph — Story→TOUCHES→File←TOUCHES→Story→LEARNED_FROM→Memory chains surface prior file history and conventions.
+            </span>
+          </span>
+        </span>
+      </label>
+
       {/* Action buttons */}
       <div className="space-y-2">
         {/* Run Now — primary */}
         <button
           onClick={() => {
             const effectiveWorktree = autoWorktree || (isWaveParallel && !forceSequential);
-            onTrigger(effectiveWorktree, { forceSequential: forceSequential || undefined, autoMerge: effectiveWorktree ? autoMerge : undefined });
+            onTrigger(effectiveWorktree, { forceSequential: forceSequential || undefined, autoMerge: effectiveWorktree ? autoMerge : undefined, includeGraph: includeGraph || undefined });
           }}
           disabled={triggerDisabled}
           className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
@@ -704,7 +724,7 @@ export default function TriggerPopover({
           <button
             onClick={() => {
               const effectiveWorktree = autoWorktree || (isWaveParallel && !forceSequential);
-              onAddToQueue(effectiveWorktree, { forceSequential: forceSequential || undefined, autoMerge: effectiveWorktree ? autoMerge : undefined });
+              onAddToQueue(effectiveWorktree, { forceSequential: forceSequential || undefined, autoMerge: effectiveWorktree ? autoMerge : undefined, includeGraph: includeGraph || undefined });
             }}
             disabled={triggerDisabled}
             title="Will run after the active spec completes"

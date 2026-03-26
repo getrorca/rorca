@@ -492,7 +492,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; includeGraph?: boolean }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -505,6 +505,7 @@ function SpecDetailContent({
           ...(options?.forceSequential ? { forceSequential: true } : {}),
           ...(options?.queue ? { queue: true } : {}),
           ...(autoWorktree && options?.autoMerge !== undefined ? { autoMerge: options.autoMerge } : {}),
+          ...(options?.includeGraph ? { includeGraph: true } : {}),
         }) },
       );
       if (res.conflict) setRunState('conflict');
