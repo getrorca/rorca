@@ -12,6 +12,9 @@ progress.txt
 .rorca/run-state.json
 .rorca/memory/health-log.json
 
+# Postgres backup files (auto-generated, not for git)
+backend/backups/
+
 # Bun binary build artifacts
 bin/.generated/
 build/
