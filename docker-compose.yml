@@ -28,6 +28,21 @@ services:
       DATABASE_URL: postgres://rorca:rorca@db:5432/rorca
       RORCA_SERVE_STATIC: "1"
       NODE_ENV: production
+      # Execution engine — set in .env
+      RORCA_AGENT: ${RORCA_AGENT:-claude}
+      RORCA_MODEL: ${RORCA_MODEL:-}
+      # API keys — set in .env
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      # Spec generation provider
+      SPEC_PROVIDER: ${SPEC_PROVIDER:-claude}
+      # Optional overrides
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+    env_file:
+      - path: .env
+        required: false
     depends_on:
       db:
         condition: service_healthy
