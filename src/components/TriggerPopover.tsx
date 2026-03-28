@@ -1,4 +1,5 @@
-import { useState, useEffect, useRef } from 'react';
+import { useState, useEffect, useLayoutEffect, useRef } from 'react';
+import { createPortal } from 'react-dom';
 import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert, Info } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { preflightCheck, type CapabilityWarning } from '../api/pipeline';
@@ -167,6 +168,23 @@ export default function TriggerPopover({
   const [forceSequential, setForceSequential] = useState(false);
   const [includeGraph, setIncludeGraph] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
+  const anchorRef = useRef<HTMLDivElement>(null);
+  const [portalStyle, setPortalStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
+
+  // Position the portal above the anchor element, within the viewport
+  useLayoutEffect(() => {
+    if (!anchorRef.current) return;
+    const rect = anchorRef.current.getBoundingClientRect();
+    const maxH = Math.min(rect.top - 12, window.innerHeight * 0.85);
+    setPortalStyle({
+      position: 'fixed',
+      left: rect.left,
+      right: window.innerWidth - rect.right,
+      bottom: window.innerHeight - rect.top + 8,
+      maxHeight: `${maxH}px`,
+      visibility: 'visible',
+    });
+  }, []);
 
   // Fetch persisted pipeline-config on mount (includeGraph preference)
   useEffect(() => {
@@ -286,18 +304,17 @@ export default function TriggerPopover({
 
   const isWaveParallel = orchestration?.mode === 'wave-parallel';
 
-  // Build orchestration badge text
-  const orchBadgeText = orchestration
-    ? isWaveParallel
-      ? `Wave parallel \u00b7 ${orchestration.waveCount} waves \u00b7 max ${orchestration.maxWaveSize} parallel`
-      : `Sequential \u00b7 ${orchestration.totalStories} stories`
-    : null;
 
   return (
-    <div
-      ref={ref}
-      className="absolute bottom-full left-0 right-0 mb-2 rounded-lg border border-border bg-panel shadow-lg z-50 p-3 space-y-3"
-    >
+    <>
+      {/* Zero-height anchor in the normal flow — used to measure position */}
+      <div ref={anchorRef} className="absolute bottom-full left-0 right-0" />
+      {createPortal(
+        <div
+          ref={ref}
+          style={portalStyle}
+          className="overflow-y-auto rounded-lg border border-border bg-panel shadow-lg z-[500] p-3 space-y-3"
+        >
       {/* CIE-012: Health badge — warns if score < 50% */}
       {healthBadge && (
         <div className="flex items-center gap-2">
@@ -426,51 +443,6 @@ export default function TriggerPopover({
         </div>
       )}
 
-      {/* Orchestration mode — toggleable between wave-parallel and sequential */}
-      <div>
-        <label className="block text-xs text-muted mb-1.5">Execution</label>
-        {orchestration ? (
-          <div>
-            {isWaveParallel ? (
-              <div className="flex items-center gap-2">
-                <Layers size={13} className={forceSequential ? 'text-muted shrink-0' : 'text-accent shrink-0'} />
-                <button
-                  onClick={() => setForceSequential(!forceSequential)}
-                  className={`text-xs font-medium hover:underline cursor-pointer ${forceSequential ? 'text-[var(--text)]' : 'text-accent'}`}
-                  title={forceSequential ? 'Click to enable wave parallel' : 'Click to force sequential'}
-                >
-                  {forceSequential
-                    ? `Sequential · ${orchestration.totalStories} stories`
-                    : orchBadgeText}
-                </button>
-                <span className="text-[9px] text-muted ml-auto">(click to toggle)</span>
-              </div>
-            ) : (
-              <div className="flex items-center gap-2">
-                <Layers size={13} className="text-muted shrink-0" />
-                <span className="text-xs font-medium text-[var(--text)]">{orchBadgeText}</span>
-              </div>
-            )}
-            {/* Show wave breakdown when wave-parallel and not forced sequential */}
-            {isWaveParallel && !forceSequential && orchestration && (
-              <div className="mt-1.5 space-y-0.5">
-                {orchestration.waves.map((w) => (
-                  <div key={w.index} className="flex items-center gap-1 text-[10px] text-muted">
-                    <span className="font-medium tabular-nums w-12 shrink-0">Wave {w.index}</span>
-                    <ArrowRight size={8} className="shrink-0" />
-                    <span className="truncate">{w.storyIds.join(', ')}</span>
-                  </div>
-                ))}
-              </div>
-            )}
-          </div>
-        ) : (
-          <div className="flex items-center gap-2">
-            <Layers size={13} className="text-muted shrink-0 animate-pulse" />
-            <span className="text-xs text-muted">Analyzing dependencies...</span>
-          </div>
-        )}
-      </div>
 
       {/* CIE-016: Context Preview — expandable section */}
       <div>
@@ -651,78 +623,178 @@ export default function TriggerPopover({
         )}
       </div>
 
-      {/* Use worktrees checkbox */}
-      <label className="flex items-center gap-2 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={autoWorktree || (isWaveParallel && !forceSequential)}
-          onChange={(e) => {
-            if (isWaveParallel && !forceSequential) return;
-            setAutoWorktree(e.target.checked);
-            if (e.target.checked) setAutoMerge(true);
-            else setAutoMerge(false);
-          }}
-          disabled={isWaveParallel && !forceSequential}
-          className="rounded border-border accent-[var(--accent)]"
-        />
-        <span className="text-xs text-[var(--text)] flex items-center gap-1">
-          <GitBranch size={12} className="text-muted" />
-          Use worktrees
-        </span>
-        {isWaveParallel && !forceSequential && (
-          <span className="text-[10px] text-muted">(required for parallel)</span>
-        )}
-      </label>
+      {/* ─── Run Options ─────────────────────────────────────────────── */}
+      <div className="rounded-lg border border-border bg-[var(--bg)] p-3 space-y-2.5">
+        <span className="block text-[10px] font-semibold uppercase tracking-wider text-muted mb-1">Run Options</span>
 
-      {/* Auto-merge checkbox — only visible when autoWorktree is on */}
-      {(autoWorktree || (isWaveParallel && !forceSequential)) && (
-        <div className="ml-5 space-y-1">
-          <label className="flex items-center gap-2 cursor-pointer">
+        {/* Wave Parallel toggle */}
+        <label className={`flex items-center gap-3 py-1 ${isWaveParallel ? 'cursor-pointer' : 'cursor-default'}`}>
+          <div className="relative flex items-center justify-center shrink-0">
             <input
               type="checkbox"
-              checked={autoMerge}
-              onChange={(e) => setAutoMerge(e.target.checked)}
-              className="rounded border-border accent-[var(--accent)]"
+              checked={isWaveParallel && !forceSequential}
+              onChange={(e) => { if (isWaveParallel) setForceSequential(!e.target.checked); }}
+              disabled={!isWaveParallel}
+              className="peer sr-only"
             />
-            <span className="text-xs text-[var(--text)]">Merge to main after run completes</span>
-          </label>
-          <p className="text-[10px] text-muted leading-tight">
-            Automatically merges the worktree branch into main when all stories pass.
-          </p>
-        </div>
-      )}
+            <div className={`w-8 h-[18px] rounded-full transition-colors ${isWaveParallel ? 'bg-[var(--border)] peer-checked:bg-accent' : 'bg-[var(--border)] opacity-40'}`} />
+            <div className="absolute left-0.5 top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-[14px]" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <Layers size={12} className={`shrink-0 ${isWaveParallel && !forceSequential ? 'text-accent' : 'text-muted'}`} />
+              <span className="text-xs font-medium text-[var(--text)]">Wave Parallel</span>
+              <span className="relative group/tip">
+                <Info size={11} className="text-muted/60 cursor-help" />
+                <span className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-2 rounded-md bg-[var(--bg-elevated)] border border-border text-[10px] text-muted leading-snug w-64 opacity-0 pointer-events-none group-hover/tip:opacity-100 group-hover/tip:pointer-events-auto transition-opacity z-[200] shadow-xl">
+                  Groups stories into dependency waves and runs each wave simultaneously in parallel worktrees. Typically 3× faster than sequential for specs with independent stories.
+                </span>
+              </span>
+              {!isWaveParallel && orchestration && (
+                <span className="text-[9px] text-muted/60 italic">no independent stories</span>
+              )}
+              {!orchestration && (
+                <span className="text-[9px] text-muted animate-pulse">analyzing…</span>
+              )}
+            </div>
+            {isWaveParallel && !forceSequential && orchestration && (
+              <div className="mt-1 space-y-0.5">
+                {orchestration.waves.map((w) => (
+                  <div key={w.index} className="flex items-center gap-1 text-[10px] text-muted">
+                    <span className="font-medium tabular-nums w-12 shrink-0">Wave {w.index}</span>
+                    <ArrowRight size={8} className="shrink-0" />
+                    <span className="truncate">{w.storyIds.join(', ')}</span>
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        </label>
 
-      {/* Knowledge Graph toggle */}
-      <label className="flex items-center gap-2 cursor-pointer">
-        <input
-          type="checkbox"
-          checked={includeGraph}
-          onChange={(e) => {
-            const val = e.target.checked;
-            setIncludeGraph(val);
-            if (workspaceId) {
-              apiFetch(`/api/workspaces/${workspaceId}/pipeline-config`, {
-                method: 'PUT',
-                headers: { 'Content-Type': 'application/json' },
-                body: JSON.stringify({ includeGraph: val }),
-              }).catch(() => {});
-            }
-          }}
-          className="rounded border-border accent-[var(--accent)]"
-        />
-        <span className="text-xs text-[var(--text)] flex items-center gap-1">
-          Knowledge Graph
-          <span className="relative group">
-            <Info size={12} className="text-muted cursor-help" />
-            <span className="absolute bottom-full left-1/2 -translate-x-1/2 mb-1 px-2 py-1.5 rounded bg-[var(--bg-elevated)] border border-border text-[10px] text-muted leading-snug w-56 opacity-0 pointer-events-none group-hover:opacity-100 group-hover:pointer-events-auto transition-opacity z-50 shadow-lg">
-              Enrich story context by traversing the knowledge graph — Story→TOUCHES→File←TOUCHES→Story→LEARNED_FROM→Memory chains surface prior file history and conventions.
-            </span>
-          </span>
-        </span>
-      </label>
+        {/* Sequential toggle */}
+        <label className={`flex items-center gap-3 py-1 ${isWaveParallel ? 'cursor-pointer' : 'cursor-default'}`}>
+          <div className="relative flex items-center justify-center shrink-0">
+            <input
+              type="checkbox"
+              checked={!isWaveParallel || forceSequential}
+              onChange={(e) => { if (isWaveParallel) setForceSequential(e.target.checked); }}
+              disabled={!isWaveParallel}
+              className="peer sr-only"
+            />
+            <div className={`w-8 h-[18px] rounded-full transition-colors ${isWaveParallel ? 'bg-[var(--border)] peer-checked:bg-violet-500' : 'bg-violet-500 opacity-60'}`} />
+            <div className="absolute left-0.5 top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-[14px]" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs font-medium text-[var(--text)]">Sequential</span>
+              <span className="relative group/tip">
+                <Info size={11} className="text-muted/60 cursor-help" />
+                <span className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-2 rounded-md bg-[var(--bg-elevated)] border border-border text-[10px] text-muted leading-snug w-64 opacity-0 pointer-events-none group-hover/tip:opacity-100 group-hover/tip:pointer-events-auto transition-opacity z-[200] shadow-xl">
+                  Runs stories one at a time in dependency order. Simpler execution with no worktree overhead — useful when stories have tight sequential dependencies.
+                </span>
+              </span>
+            </div>
+            {orchestration && (
+              <p className="text-[10px] text-muted leading-tight mt-0.5">
+                {orchestration.totalStories} {orchestration.totalStories === 1 ? 'story' : 'stories'} · one at a time
+              </p>
+            )}
+          </div>
+        </label>
+
+        {/* Divider */}
+        <div className="border-t border-border/50" />
+
+        {/* Worktrees */}
+        <label className="flex items-center gap-3 cursor-pointer group py-1">
+          <div className="relative flex items-center justify-center">
+            <input
+              type="checkbox"
+              checked={autoWorktree || (isWaveParallel && !forceSequential)}
+              onChange={(e) => {
+                if (isWaveParallel && !forceSequential) return;
+                setAutoWorktree(e.target.checked);
+                if (e.target.checked) setAutoMerge(true);
+                else setAutoMerge(false);
+              }}
+              disabled={isWaveParallel && !forceSequential}
+              className="peer sr-only"
+            />
+            <div className="w-8 h-[18px] rounded-full bg-[var(--border)] peer-checked:bg-accent transition-colors" />
+            <div className="absolute left-0.5 top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-[14px]" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <GitBranch size={12} className="text-muted shrink-0" />
+              <span className="text-xs font-medium text-[var(--text)]">Isolate in worktree</span>
+              {isWaveParallel && !forceSequential && (
+                <span className="text-[9px] px-1.5 py-0.5 rounded-full bg-accent/15 text-accent font-medium">required</span>
+              )}
+            </div>
+          </div>
+        </label>
+
+        {/* Auto-merge — nested under worktrees */}
+        {(autoWorktree || (isWaveParallel && !forceSequential)) && (
+          <label className="flex items-center gap-3 cursor-pointer ml-11 py-1">
+            <div className="relative flex items-center justify-center">
+              <input
+                type="checkbox"
+                checked={autoMerge}
+                onChange={(e) => setAutoMerge(e.target.checked)}
+                className="peer sr-only"
+              />
+              <div className="w-8 h-[18px] rounded-full bg-[var(--border)] peer-checked:bg-emerald-500 transition-colors" />
+              <div className="absolute left-0.5 top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-[14px]" />
+            </div>
+            <span className="text-xs text-[var(--text)]">Auto-merge to main when all stories pass</span>
+          </label>
+        )}
+
+        {/* Divider */}
+        <div className="border-t border-border/50" />
+
+        {/* Knowledge Graph */}
+        <label className="flex items-center gap-3 cursor-pointer group py-1">
+          <div className="relative flex items-center justify-center">
+            <input
+              type="checkbox"
+              checked={includeGraph}
+              onChange={(e) => {
+                const val = e.target.checked;
+                setIncludeGraph(val);
+                if (workspaceId) {
+                  apiFetch(`/api/workspaces/${workspaceId}/pipeline-config`, {
+                    method: 'PUT',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ includeGraph: val }),
+                  }).catch(() => {});
+                }
+              }}
+              className="peer sr-only"
+            />
+            <div className="w-8 h-[18px] rounded-full bg-[var(--border)] peer-checked:bg-violet-500 transition-colors" />
+            <div className="absolute left-0.5 top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-[14px]" />
+          </div>
+          <div className="flex-1 min-w-0">
+            <div className="flex items-center gap-1.5">
+              <span className="text-xs font-medium text-[var(--text)]">Knowledge Graph</span>
+              <span className="relative group/tip">
+                <Info size={11} className="text-muted/60 cursor-help" />
+                <span className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-2 rounded-md bg-[var(--bg-elevated)] border border-border text-[10px] text-muted leading-snug w-60 opacity-0 pointer-events-none group-hover/tip:opacity-100 group-hover/tip:pointer-events-auto transition-opacity z-[200] shadow-xl">
+                  Traverses file-to-story and memory edges to surface prior context for each story.
+                </span>
+              </span>
+            </div>
+            <p className="text-[10px] text-muted leading-tight mt-0.5">
+              Enrich stories with graph-linked memories and file history
+            </p>
+          </div>
+        </label>
+      </div>
 
       {/* Action buttons */}
-      <div className="space-y-2">
+      <div className="space-y-2 pt-1">
         {/* Run Now — primary */}
         <button
           onClick={() => {
@@ -730,12 +802,12 @@ export default function TriggerPopover({
             onTrigger(effectiveWorktree, { forceSequential: forceSequential || undefined, autoMerge: effectiveWorktree ? autoMerge : undefined, includeGraph: includeGraph || undefined });
           }}
           disabled={triggerDisabled}
-          className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-accent text-white hover:opacity-90 disabled:opacity-60 transition-opacity"
+          className="flex items-center justify-center gap-2 w-full py-2.5 rounded-lg text-sm font-semibold bg-accent text-white hover:brightness-110 disabled:opacity-50 transition-all shadow-sm shadow-accent/20"
         >
           {loading ? (
-            <><Loader2 size={14} className="animate-spin" /> Starting run...</>
+            <><Loader2 size={15} className="animate-spin" /> Starting run...</>
           ) : (
-            <><Play size={14} /> Run Now</>
+            <><Play size={15} /> Run Now</>
           )}
         </button>
 
@@ -748,16 +820,19 @@ export default function TriggerPopover({
             }}
             disabled={triggerDisabled}
             title="Will run after the active spec completes"
-            className="flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium border border-border text-[var(--text)] hover:bg-bg disabled:opacity-60 transition-colors"
+            className="flex items-center justify-center gap-2 w-full py-2.5 rounded-lg text-sm font-medium border border-border text-[var(--text)] hover:bg-[var(--bg)] disabled:opacity-50 transition-all"
           >
             {queueLoading ? (
-              <><Loader2 size={14} className="animate-spin" /> Adding to queue...</>
+              <><Loader2 size={15} className="animate-spin" /> Adding to queue...</>
             ) : (
-              <><ListPlus size={14} /> Add to Queue</>
+              <><ListPlus size={15} /> Add to Queue</>
             )}
           </button>
         )}
       </div>
-    </div>
+        </div>,
+        document.body,
+      )}
+    </>
   );
 }

@@ -339,5 +339,6 @@
       "totalTokens": 3216,
       "scopesMatched": []
     }
-  }
+  },
+  "autoWorktree": true
 }

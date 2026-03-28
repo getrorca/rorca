@@ -148,6 +148,14 @@ export const RecallQuerySchema = z.object({
     .default('true')
     .transform((v) => v === 'true'),
   storyText: z.string().optional(),
+  /** Preferred alias for storyText — anchors semantic retrieval to a feature brief. Takes precedence over storyText if both provided. */
+  query: z.string().optional(),
+  /** When true, strips full memory content from the response and returns only {date, category, title, source} per entry — ~2K tokens vs ~50K+ for a full dump. Use for spec generation context loading. */
+  titlesOnly: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true'),
 });
 
 export type RecallQueryParams = z.infer<typeof RecallQuerySchema>;
