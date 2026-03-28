@@ -167,7 +167,7 @@ async function fetchMemories(
   storyText?: string,
 ): Promise<{ memories: MemoryEntry[]; retrievalTier: RetrievalTier }> {
   if (!storyText) {
-    // No story text — return most recent 20 memories from DB
+    // No story text — return most recent 100 memories from DB (was 20, too few for full recall)
     const catFilter = category
       ? ' AND category = $2'
       : '';
@@ -178,8 +178,8 @@ async function fetchMemories(
       `SELECT id, category, content, source_story_id, source_run_id, confidence, source, pinned, created_at
        FROM memories
        WHERE workspace_id = $1 AND deleted_at IS NULL${catFilter}
-       ORDER BY created_at DESC
-       LIMIT 20`,
+       ORDER BY pinned DESC, created_at DESC
+       LIMIT 100`,
       params,
     );
 
@@ -227,9 +227,9 @@ async function fetchMemories(
     }
   }
 
-  // Sort by score descending, take top 10
+  // Sort by score descending, take top 30 semantically relevant (was 10, too few)
   matched.sort((a, b) => b.score - a.score);
-  const topMemories = matched.slice(0, 10).map(m => m.entry);
+  const topMemories = matched.slice(0, 30).map(m => m.entry);
 
   return { memories: topMemories, retrievalTier };
 }
@@ -453,7 +453,18 @@ async function fetchActiveRuns(
  *         name: storyText
  *         schema:
  *           type: string
- *         description: Optional story text for semantic memory retrieval
+ *         description: Optional story text for semantic memory retrieval (legacy — prefer query)
+ *       - in: query
+ *         name: query
+ *         schema:
+ *           type: string
+ *         description: Feature brief or task description — anchors CAG/RAG/graph retrieval to what you are building. Takes precedence over storyText.
+ *       - in: query
+ *         name: titlesOnly
+ *         schema:
+ *           type: string
+ *           default: 'false'
+ *         description: When true, strips full rule content from memories and returns titles only (~2K tokens vs ~50K for full dump).
  *     responses:
  *       200:
  *         description: Full recall payload
@@ -473,7 +484,9 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
       parsed.error.issues.map(i => i.message).join('; '),
     );
   }
-  const { workspaceId, category, includeRuns, includeHealth, storyText } = parsed.data;
+  const { workspaceId, category, includeRuns, includeHealth, titlesOnly } = parsed.data;
+  // `query` is the preferred alias for brief-anchored retrieval; falls back to legacy `storyText`
+  const storyText = parsed.data.query ?? parsed.data.storyText;
 
   // Verify workspace exists (required before parallel fetchers)
   const workspace = await queryOne<WorkspaceRow>(
@@ -545,9 +558,14 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
   }
 
   // ── Assemble response ────────────────────────────────────────────────────
+  const rawMemories = memoryResult?.memories ?? [];
+  const memories = titlesOnly
+    ? rawMemories.map(m => ({ ...m, rule: '', context: '' }))
+    : rawMemories;
+
   const response: RecallResponse = {
     directionStack: directionResult?.directionStack ?? '',
-    memories: memoryResult?.memories ?? [],
+    memories,
     health: healthResult ?? null,
     recentRuns: (recentRunsResult as RunSummary[] | null) ?? [],
     skills: (skillsResult as SkillPreview[] | null) ?? [],
@@ -561,6 +579,19 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
       generatedAt: new Date().toISOString(),
     },
   };
+
+  // Hard cap: MCP HTTP transport rejects responses > ~100K chars.
+  // Trim memories from the bottom (lowest priority) until serialized size fits.
+  const MAX_RESPONSE_CHARS = 80_000;
+  let serialized = JSON.stringify(response);
+  while (serialized.length > MAX_RESPONSE_CHARS && response.memories.length > 0) {
+    response.memories = response.memories.slice(0, Math.max(1, Math.floor(response.memories.length * 0.8)));
+    serialized = JSON.stringify(response);
+  }
+  if (serialized.length > MAX_RESPONSE_CHARS) {
+    // Still too large — strip rule content from all memories (equivalent to titlesOnly)
+    response.memories = response.memories.map(m => ({ ...m, rule: '', context: '' }));
+  }
 
   // Compute token estimate over the full serialized response
   response.meta.totalTokens = Math.ceil(JSON.stringify(response).length / 4);

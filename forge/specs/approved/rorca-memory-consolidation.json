@@ -35,7 +35,8 @@
         "architect",
         "spec-verifier"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-002",
@@ -102,7 +103,8 @@
         "sre",
         "red-team"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-004",
@@ -129,7 +131,8 @@
         "assumption-buster",
         "spec-verifier"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-005",
@@ -170,7 +173,8 @@
         "assumption-buster",
         "qa"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-006",
@@ -205,7 +209,8 @@
         "sre",
         "qa"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-007",
@@ -247,7 +252,8 @@
         "assumption-buster",
         "red-team"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ],
   "mermaidDiagram": "graph TD\n  US-001[\"US-001: Switch rorca_recall to DB query\"]\n  US-002[\"US-002: generateMemoryMd() utility\"]\n  US-003[\"US-003: Pre-run MEMORY.md generation\"]\n  US-004[\"US-004: buildPrompt() claude instruction\"]\n  US-005[\"US-005: proposed_memories.json handler\"]\n  US-006[\"US-006: Post-story MEMORY.md rebuild\"]\n  US-007[\"US-007: Integration test\"]\n  US-002 --> US-003\n  US-004 --> US-005\n  US-002 --> US-006\n  US-005 --> US-006\n  US-002 --> US-007\n  US-005 --> US-007\n  US-006 --> US-007",
