@@ -115,76 +115,6 @@
 > Context: Implemented by rorca-pipeline-queueing-and-worktrees spec (run 20260316000033/34, merged 2026-03-18). Non-worktree runs still hard-block at pipeline.ts line 1316. Wave-parallel within a single spec also requires a worktree for the sub-story isolation.
 > Source: debugging session
 
-## 2026-03-18 [Bug Fix] StoryLogFollower never fires from live WAL subscription — JSONB payload parsed as object not string
-> Rule: StoryLogFollower.onStoryStarted and onStoryFinished called JSON.parse(event.payload) but wal_events.payload is JSONB — pg returns it as a JS object, not a string. JSON.parse on an object calls .toString() → "[object Object]" → SyntaxError → catch returns silently. Fix: check typeof event.payload === 'string' before parsing, otherwise use the object directly. recover() was unaffected because it casts payload::text in SQL.
-> Context: Root cause of mini-terminals never showing prose output from live subscription. recover() worked on restart but live subscription path always silently dropped story_started events. Fixed in backend/src/lib/story-log-follower.ts onStoryStarted + onStoryFinished. Discovered 2026-03-18 by confirming 0 chunks despite valid log file content and correct DB schema.
-> Source: debugging session
-
-## 2026-03-18 [Gotcha] continue inside Promise.allSettled map() is a compile error — use return
-> Rule: handlePipelineRun uses Promise.allSettled(jobs.map(async (job) => { ... })). Using continue inside an async arrow function in .map() is invalid — esbuild throws "Cannot use continue here". Use return instead to skip to the next job in the batch.
-> Context: Introduced by US-003 of rorca-pipeline-queueing-and-worktrees merge. Caught at backend startup (esbuild transform error). Fixed by replacing continue with return at worker.ts line 676.
-> Source: debugging session
-
-## 2026-03-18 [Gotcha] auto_merge is false on retry runs — set it manually if needed
-> Rule: Retry runs created via /api/pipeline/runs/:id/retry always set auto_merge = false. If the original run had auto_merge = true but failed before merging, the retry will NOT auto-merge on completion. Workaround: manually UPDATE pipeline_runs SET auto_merge = true WHERE id = &lt;retryRunId&gt; while the retry is in-flight.
-> Context: Discovered 2026-03-18 when retrying US-012 of rorca-pipeline-queueing-and-worktrees. The worktree branch was not merged after the retry completed. Had to manually set auto_merge and then do the git merge ourselves.
-> Source: debugging session
-
-## 2026-03-19 [Bug Fix] tsx ENOENT when worker spawns execution engine
-> Rule: Worker spawns execution-engine via `path.join(__dirname, '..', 'node_modules', '.bin', 'tsx')` — fails with ENOENT when tsx not in backend/node_modules. Root cause: root postinstall runs `cd backend && npm install --production --ignore-scripts` which skips devDependencies (tsx is a devDep). Fix: added `findTsxBin()` helper in worker.ts — tries local path first, falls back to `which tsx`. Also run `cd backend && npm install` to install all deps. Symptom: run fails in <100ms with "spawn ... tsx ENOENT".
-> Context: Discovered 2026-03-19 when debugging instant run failure. The old worker had survived since before the --production flag took effect; restarting the worker exposed the bug. Files: backend/src/worker.ts (findTsxBin function added at top, used in two spawn locations).
-> Source: debugging session 2026-03-19
-
-## 2026-03-19 [Bug Fix] Silent terminal — execution-engine block.text missing trailing newline
-> Rule: execution-engine.ts wrote `process.stdout.write(block.text)` without a trailing `\n`. RunTerminal.tsx uses a line-buffer pattern: `parts.pop()` keeps any "incomplete last line" (one without `\n`) in `lineBufferRef` indefinitely — it never reaches `displayLines` and is never rendered. Fix: `process.stdout.write(block.text.endsWith('\n') ? block.text : block.text + '\n')` at the point where claude stream-json assistant blocks are emitted to stdout (execution-engine.ts ~line 744). Non-JSON fallback already had `+ '\n'` and worked correctly.
-> Context: Discovered 2026-03-19 — terminal showed no output for 1.5+ minutes even though 14 chunks were confirmed in run_output_chunks DB. Chunks arrived via SSE but text sat in lineBufferRef forever because no \n was written. Files: backend/src/lib/execution-engine.ts (stream-json assistant block output path).
-> Source: debugging session 2026-03-19
-
-## 2026-03-19 [Gotcha] run_output_chunks schema: column is "chunk" not "data", DB port is 5433
-> Rule: run_output_chunks table columns: `(id, run_id, chunk BYTEA, sequence INT, created_at)`. Column is `chunk`, NOT `data`. Also: DATABASE_URL uses port 5433 not default 5432 — `postgres://rorca:rorca@localhost:5433/rorca`. pg-boss table uses `created_on` not `createdon`. Always read backend/.env before writing raw SQL queries.
-> Context: Hit multiple wrong-column-name errors during 2026-03-19 debugging session when querying run_output_chunks directly.
-> Source: debugging session 2026-03-19
-
-## 2026-03-19 [Decision] Task-Monitor pattern: pg-boss jobs complete immediately, reconcileState is the watchdog
-> Rule: pg-boss jobs must NOT stay active for the lifetime of an execution engine subprocess. The job spawns the engine and returns immediately (fire-and-forget). Engine liveness is monitored via IPC heartbeats (every 60s) written to pipeline_runs.last_heartbeat. reconcileState() runs every 60s as the watchdog: if last_heartbeat > 2 min stale AND PID is dead → mark run failed. expireInSeconds should be 300s (not hours).
-> Context: Root cause: pg-boss expireInSeconds=7200 caused reconcileState to kill runs after exactly 2 hours even when the engine was still alive. Files: worker.ts, execution-engine.ts, migration 20260319200000.
-> Source: debugging session
-
-## 2026-03-19 [Decision] DB-based per-workspace concurrency lock replaces in-memory activeTriggeredVia
-> Rule: Concurrency uses SELECT COUNT(*) FROM pipeline_runs WHERE workspace_id=$1 AND status='running' before spawning. The old in-memory activeTriggeredVia map was removed. Worktree runs bypass the lock. DB is the single source of truth, supports horizontal scaling.
-> Context: Task-Monitor pattern freed pg-boss jobs immediately so the queue no longer acted as a concurrency lock. Files: worker.ts handlePipelineRun.
-> Source: debugging session
-
-## 2026-03-19 [Gotcha] Never have workers kill each other — fix process management instead
-> Rule: Worker singleton guard must NEVER SIGTERM/SIGKILL other worker PIDs. In distributed environments, workers would assassinate each other. The zombie child problem is a process management issue — use --kill-others on concurrently or proper supervisor signal propagation.
-> Context: concurrently failed to propagate SIGTERM to children, leaving zombie worker. Fix: package.json --kill-others --kill-others-on-fail. Files: package.json, worker.ts singleton guard.
-> Source: debugging session
-
-## 2026-03-20 [Bug Fix] GitHub OAuth 503 — tsx/esbuild module-level env var capture
-> Rule: Module-level constants like `const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || ''` capture empty strings because tsx/esbuild hoists all require() calls before dotenv.config() runs. Fix: use lazy getter functions that call process.env at request time: `function githubClientId() { return process.env.GITHUB_CLIENT_ID || ''; }`
-> Context: backend/src/routes/auth.ts — applies to ANY module-level env var constant in the backend that is needed at request time (not just startup). The dotenv.config() position in server.ts does NOT help due to esbuild hoisting.
-> Source: session-2026-03-20
-
-## 2026-03-20 [Bug Fix] Migration runner poisoning pool search_path (pg-index.ts)
-> Rule: pg-index.ts runPgMigrations() sets `SET search_path TO public` but never restores it before releasing the pool connection. This poisons the reused connection — subsequent code (e.g. seedWorkerSettings) runs with search_path=public and cannot see rorca.* tables. Fix: in the `finally` block, run `SET search_path TO rorca, public` before client.release(). Same class of bug as AGE pool poisoning.
-> Context: backend/src/db/pg-index.ts finally block (line ~201). Fixed 2026-03-20 by adding `try { await client.query('SET search_path TO rorca, public'); } catch {}` before client.release().
-> Source: session-2026-03-20
-
-## 2026-03-20 [Bug Fix] Two schema_migrations tables — public vs rorca schema split
-> Rule: There are TWO schema_migrations tables: `public.schema_migrations` (used by migration runner after search_path fix) and `rorca.schema_migrations` (used before the fix). Migrations applied before the fix are only in `rorca.schema_migrations`. On fresh server starts, the runner tries to re-run them and fails on non-idempotent ones (e.g. 057). Fix applied 2026-03-20: upgraded public.schema_migrations.version to BIGINT and copied all missing rows from rorca.schema_migrations. Also: public.schema_migrations was INTEGER not BIGINT — had to ALTER COLUMN before copying timestamp versions (20260316+).
-> Context: Symptoms: "[pg-migrate] FAILED: 057_spec_search_auto_index.sql" on every server start, server crashes. Root cause: public.schema_migrations missing versions 57+. One-time repair SQL: ALTER TABLE public.schema_migrations ALTER COLUMN version TYPE BIGINT; INSERT INTO public.schema_migrations SELECT r.version, r.applied_at, r.filename FROM rorca.schema_migrations r WHERE NOT EXISTS (SELECT 1 FROM public.schema_migrations p WHERE p.version = r.version);
-> Source: session-2026-03-20
-
-## 2026-03-20 [Bug Fix] GitHub account endpoint always returning connected:false (LIMIT 1 on users)
-> Rule: workspace-github.ts GET /account used `SELECT id FROM users LIMIT 1` to find the "current user", which always returns admin@rorca.local (created first by migration seed). The GitHub-authenticated user (dteravan@gmail.com) is a different row and has the github_connections entry. Fix: query github_connections directly without going through users first: `SELECT gc.*, u.avatar_url FROM github_connections gc JOIN users u ON gc.user_id = u.id ORDER BY gc.created_at DESC LIMIT 1`
-> Context: backend/src/routes/workspace-github.ts GET /account handler (~line 412). admin@rorca.local is always first in users table because it's seeded by initDb(). The GitHub OAuth user is created second.
-> Source: session-2026-03-20
-
-## 2026-03-20 [Pattern] sessionStorage return URL for OAuth flows
-> Rule: Before triggering any full-page OAuth redirect, store the return destination in sessionStorage: `sessionStorage.setItem('github_oauth_return', '/settings/github')`. In the callback page, read it: `const returnTo = sessionStorage.getItem('github_oauth_return') || '/'; sessionStorage.removeItem('github_oauth_return'); navigate(returnTo, { replace: true })`. Without this, OAuth callbacks always land on '/' which React Router maps to /specs.
-> Context: src/panels/GitHubSettingsPanel.tsx (Connect button onClick) + src/pages/GitHubCallbackPage.tsx (token storage + navigation). Also: in-memory oauthStateCache in auth.ts is ephemeral — server restarts during OAuth flow cause invalid_state errors (known limitation, not fixed).
-> Source: session-2026-03-20
-
 ## 2026-03-23 [Architecture] CLAUDE.md is never written by the pipeline — only read
 > Rule: The pipeline (execution-engine.ts, pipeline.ts) never writes to CLAUDE.md. It is only written by: manual edits, POST /api/workspaces/:id/scan-direction (brownfield extraction), POST /api/workspaces/:id/apply-conventions (if missing), and monorepo discover/apply (appends section). Do not expect pipeline runs to update CLAUDE.md.
 > Context: Common misconception when reasoning about how Rorca maintains project context. CLAUDE.md is the static developer handbook — declarative, rarely changes. The DB memories table is the dynamic episodic store that gets written during runs.
@@ -200,40 +130,15 @@
 > Context: Emerged from discussion about whether Rorca should be a DB-only project. The trojan horse value for Cursor/Copilot is real but passive — those tools require explicit @file references, unlike claude --print which auto-injects CLAUDE.md. The DB-only path already works for all three execution engines via buildPrompt() injection.
 > Source: session-2026-03-23
 
-## 2026-03-23 [Gotcha] Singleton guard blocks worker restart — stale heartbeat survives process kill
-> Rule: When a worker process is killed mid-run (e.g. by SIGKILL), its heartbeat row in worker_heartbeat persists for up to 90 seconds. The singleton guard in the new worker sees the heartbeat and exits with code 0. This cascades via concurrently --kill-others to kill the frontend and server too. Fix: pkill -9 -f "src/worker" to kill ALL worker processes (not just by port), then wait and restart.
-> Context: Hit this multiple times during restart cycles in this session. The stale heartbeat window is 90s. Simply killing port 3030 does not kill the worker (it uses no port). Must kill by process name pattern.
-> Source: session-2026-03-23
-
-## 2026-03-23 [Gotcha] concurrently --kill-others kills everything when worker exits with code 0
-> Rule: npm run dev uses concurrently with both --kill-others and --kill-others-on-fail. --kill-others kills ALL processes when ANY process exits, regardless of exit code. So when the worker exits cleanly (code 0) after graceful shutdown, it cascades to kill the frontend and server. This is why restarting the full stack after a worker crash requires killing all three separately.
-> Context: Caused confusion because the worker exiting with code 0 (graceful shutdown after an active run was killed) still brought down the entire dev stack. --kill-others-on-fail alone would only trigger on non-zero exits.
-> Source: session-2026-03-23
-
 ## 2026-03-23 [Convention] Three distinct knowledge layers: CLAUDE.md (IS), MEMORY.md (Learned), AGENTS.md (Rules), DB memories (Indexed)
 > Rule: CLAUDE.md = declarative handbook of how the system IS built (stack, API routes, gotchas, architecture). MEMORY.md = episodic ledger of what was learned during runs (timestamped, categorized, actionable rules). AGENTS.md = governance of who owns what files and behavioral rules per zone. DB memories table = same content as MEMORY.md but structured, vector-searchable, scored, with embeddings and dedup. Each serves a different injection point and audience.
 > Context: These are often conflated. The key distinction: CLAUDE.md answers "what IS this codebase?", MEMORY.md answers "what did we learn?", AGENTS.md answers "whose rules apply here?", DB memories answers "what's most relevant to this specific story right now?"
-> Source: session-2026-03-23
-
-## 2026-03-24 [Gotcha] worker-supervisor.ts stale processes send SIGTERM to new workers — kills the whole dev stack
-> Rule: Stale `worker-supervisor.ts` node processes (started by previous npm run dev sessions) survive after the session ends and send SIGTERM to any new worker that starts, causing cascading --kill-others shutdown of the entire dev stack. Fix: before restarting, run `pkill -9 -f "worker-supervisor" && pkill -9 -f "rorca/backend"` to kill ALL rorca backend processes, not just by port. Port kills alone (lsof -ti:3030) miss the worker and supervisor since they don't bind to a port.
-> Context: Hit repeatedly during restart cycles in this session. The worker would start successfully, process one cron tick, then immediately receive SIGTERM from a stale supervisor. The singleton guard (90s heartbeat) and the worker-supervisor both contribute to restart failures when not fully cleaning up.
 > Source: session-2026-03-23
 
 ## 2026-03-24 [Convention] Full clean restart procedure for dev stack
 > Rule: To fully restart the dev stack after crashes or stale process buildup: (1) `pkill -9 -f "rorca/backend"` — kills all tsx server/worker/supervisor processes, (2) `pkill -9 -f "worker-supervisor"` — kills supervisor, (3) `lsof -ti:3030 -ti:5210 | xargs kill -9` — clears ports, (4) wait 3s for heartbeat table to go stale (or wait 90s for full expiry), (5) `npm run dev`. Do NOT rely on port-only kills — the worker and supervisor have no bound port.
 > Context: Developed from multiple failed restart attempts in this session. The key insight is that the worker process and worker-supervisor process do not bind to any port, so lsof-based port kills cannot reach them.
 > Source: session-2026-03-23
-
-## 2026-03-24 [Bug Fix] Run Pipeline button silent — TriggerPopover gated by !isFreePlan
-> Rule: The "Run in Pipeline" button in SpecDetailSlideOver calls setShowTriggerPopover(true), but the TriggerPopover only renders when !isFreePlan. If user.plan is 'free' or unset, the button does nothing visibly. Fixed: button now calls handleRun(isolateInBranch) directly when isFreePlan, bypassing the popover.
-> Context: SpecDetailSlideOver.tsx line 774. Introduced by rorca-pipeline-queueing-and-worktrees spec. Broke when billing-launch spec had not yet run (admin user defaults to free plan). The popover is for advanced options (forceSequential, queue, autoMerge) — free plan users should just run with defaults.
-> Source: debugging session 2026-03-23
-
-## 2026-03-24 [Bug Fix] Premature plan_required check in pipeline.ts blocking all trigger calls
-> Rule: pipeline.ts had inline plan enforcement blocks at the trigger and retry routes that threw ForbiddenError('plan_required') for free-plan users. Since local-admin defaults to plan='free' and billing-launch spec hasn't run, this blocked all pipeline runs. Removed both blocks — plan enforcement belongs in requirePlan middleware, not inline in route handlers.
-> Context: Lines ~1040-1049 and ~1933-1942 in pipeline.ts. Added by rorca-pipeline-queueing-and-worktrees spec. Did not manifest immediately because worker had old code cached in memory. Broke after worker restart loaded the new code. Fix: removed both blocks, left comment "Plan enforcement is handled by requirePlan middleware once billing-launch spec is complete."
-> Source: debugging session 2026-03-23
 
 ## 2026-03-24 [Gotcha] local-admin user defaults to plan='free' — must be set to 'pro' manually
 > Rule: The default admin user (id='local-admin', email='admin@rorca.local') has plan='free' in the DB. Any plan gate will block it. Until billing-launch spec runs and sets up proper subscription records, manually set: UPDATE users SET plan='pro' WHERE id='local-admin';
@@ -249,3 +154,58 @@
 > Rule: Skill hetzner-coolify-infra.md installed at .rorca/skills/ and .claude/skills/. Covers: Hetzner hcloud CLI, VM sizing (CX31 default), private network 10.0.0.0/16, floating IP for stable DNS, Coolify install, Postgres via Coolify, Rorca Docker deployment, worker as separate service, forge/ volume mount, AGE extension caveat. Pre-prod cost ~€19/mo.
 > Context: User wants to deploy Rorca to Hetzner + Coolify for pre-prod testing. Skill created 2026-03-24.
 > Source: manual
+
+## 2026-03-25 [Bug Fix] Express 4 async error handler was broken — routes hung on thrown errors
+> Rule: The Layer.prototype.handle_request patch in async-handler.ts wrapped the original function, but Express 4's original does `try { fn(req, res, next) } catch` WITHOUT returning the Promise. So `result` was always undefined and `.catch(next)` never fired. Any async route that threw (ValidationError, NotFoundError) would hang forever. Fix: replace handle_request entirely, call `this.handle` directly, catch the returned Promise. Affected all routers (memory, agents, etc.) — not just one route.
+> Context: Discovered when MCP slash commands timed out on /rorca:get_memories. Root cause: GET /api/memory without workspaceId threw ValidationError but response never sent. Commit 6c8d3c5.
+> Source: debugging session 2026-03-25
+
+## 2026-03-25 [Architecture] MCP tools auto-inject workspaceId when not provided
+> Rule: In mcp-http.ts, workspaceId is marked optional in Zod schema (so MCP SDK doesn't reject) and executeApiCall() auto-injects the default workspace ID (fetched from GET /api/workspaces?limit=1, cached 1 min). This makes all MCP tools work without users needing to know or specify the workspace ID. The cachedDefaultWorkspaceId + cacheExpiry pattern avoids a DB query on every tool call.
+> Context: Users calling MCP slash commands like /rorca:get_memories didn't know to pass workspaceId. Zod validation rejected before handler ran. Now tools "just work" for single-workspace setups. Commit 6c8d3c5.
+> Source: debugging session 2026-03-25
+
+## 2026-03-25 [Architecture] MCP /mcp endpoint has scoped CORS separate from /api/* CORS
+> Rule: server.ts has two CORS layers: (1) Global at line ~171 — origin: 'localhost:5210', credentials: true, for browser /api/* routes. (2) MCP-specific mcpCors at line ~218 — origin: true (reflect any), credentials: false, allows Mcp-Session-Id header, scoped to POST/GET/DELETE /mcp only. MCP clients (Claude Code, IDE extensions) connect without browser origin headers so they need the permissive config.
+> Context: MCP endpoint previously used the restrictive /api/* CORS which worked but didn't expose Mcp-Session-Id header properly. Commit 6c8d3c5.
+> Source: debugging session 2026-03-25
+
+## 2026-03-25 [Bug Fix] Worker crashes on non-fatal AppError unhandledRejections
+> Rule: worker.ts process.on('unhandledRejection') triggered full shutdown on ANY rejection, including ValidationError/NotFoundError from Express routes (statusCode < 500). These are expected business-logic errors, not fatal. Fix: check if reason is an AppError with statusCode < 500 — if so, log warning and return without shutdown. Only truly unexpected rejections trigger shutdown.
+> Context: When the async handler fix started properly propagating errors, some leaked as unhandledRejections and crashed the worker. Commit 6c8d3c5.
+> Source: debugging session 2026-03-25
+
+## 2026-03-25 [Pattern] MCP HTTP server health: 397 tools, <20ms, fully functional
+> Rule: MCP HTTP transport at http://localhost:3030/mcp is healthy. 397 auto-generated tools from OpenAPI spec. Initialize handshake returns session ID via Mcp-Session-Id header. tools/list and tools/call both return in <20ms. Registered in Claude Code as `rorca: http://localhost:3030/mcp (HTTP)`. To diagnose MCP issues: test with curl (Accept: application/json, text/event-stream header required), check backend logs, test specific tool via tools/call.
+> Context: Verified 2026-03-25. If slash commands time out, the issue is likely a specific route hanging (check async error handling) or a heavy LLM-calling tool, not the MCP transport itself.
+> Source: debugging session 2026-03-25
+
+## 2026-03-25 [Pattern] rorca-memory-consolidation spec completed — 7/7 stories passed, auto-merged
+> Rule: Run 20260316000066: all 7 stories passed (US-001 through US-007), auto-merged to main as commit dff68e5. Branch feat/rorca-memory-consolidation. 48min runtime, parallelism 3, Claude CLI engine. Stories: US-001 recall semantic leak fix, US-002 generateMemoryMd(), US-003 pre-run MEMORY.md generation, US-004 buildPrompt MCP instruction, US-005 proposed_memories.json handler, US-006 post-story MEMORY.md rebuild, US-007 integration test.
+> Context: Memory consolidation makes DB memories the source of truth and projects them to MEMORY.md before each story run. Agents write memories via MCP tool (claude) or proposed_memories.json file (opencode/codex).
+> Source: run-20260316000066
+
+## 2026-03-25 [Bug Fix] MCP rorca_recall_memories returned 53 instead of 176 — was reading from file, not DB
+> Rule: The MCP tool `rorca_recall_memories` was hitting `GET /api/memory` (file-based MEMORY.md, 53 entries) instead of `GET /api/memory/items` (PostgreSQL `memories` table, 176 entries). The file-based ledger falls behind because synthesis runs and some write paths only write to the DB. Fix: switched MCP tool to use `/api/memory/items` endpoint which matches what the UI MemoryPanel uses.
+> Context: User saw 176 in Rorca UI but MCP tool returned only 53. Root cause: dual memory stores (file + DB) out of sync. File at `.rorca/memory/MEMORY.md` had 53 `##` entries. DB `memories` table had 176 non-deleted rows. The `fetchAll: true` param was correctly passed as `limit=9999` but the file-based endpoint's `recent()` function returned all 53 entries (slice(-9999) = everything in the file). Fix applied in `backend/src/mcp/server.ts`.
+> Source: session-2026-03-25
+
+## 2026-03-25 [Architecture] rorca_recall_memories now supports 3 retrieval modes: full dump, recent 100, semantic
+> Rule: The MCP `rorca_recall_memories` tool now supports three modes: (1) Full dump (`fetchAll: true`) — returns ALL memories from DB with no limit, (2) Recent (default) — returns last 100 memories ordered by pinned-first then newest (was 20), (3) Semantic (`currentTask` provided) — hits `/api/recall` which triggers the full CAG → RAG → Knowledge Graph cascade and returns top 30 semantically ranked results (was 10). The `currentTask` param is new — it maps to `storyText` on the recall endpoint.
+> Context: Previously the tool only had modes 1 and 2, both reading from the stale file-based ledger. Mode 3 (semantic) existed in `rorca_recall_workspace` via `currentTask` param but was not exposed on `rorca_recall_memories`. Now both tools share the same retrieval infrastructure. Files changed: `backend/src/mcp/server.ts` (MCP tool rewrite), `backend/src/routes/recall.ts` (fetchMemories limits: LIMIT 20→100, slice 10→30).
+> Source: session-2026-03-25
+
+## 2026-03-25 [Gotcha] Dual memory stores (file MEMORY.md vs DB memories table) drift out of sync
+> Rule: Rorca maintains two parallel memory stores: (1) file-based `.rorca/memory/MEMORY.md` read by `memory-ledger.ts`, and (2) PostgreSQL `memories` table. Manual writes and `POST /api/memory` write to both, but synthesis runs and some automated paths only write to the DB. This causes the file to fall behind. The UI MemoryPanel reads from DB (`/api/memory/items`), showing the true count. Any tool reading from the file will see fewer memories. Always prefer DB-backed endpoints for memory retrieval.
+> Context: Discovered when UI showed 176 memories but MCP tool returned 53. The file had exactly 53 `## ` header entries. DB had 176 non-deleted rows. The memory consolidation spec (US-002/US-003) added `generateMemoryMd()` to project DB into MEMORY.md format, but this only runs pre-pipeline — not on every write.
+> Source: session-2026-03-25
+
+## 2026-03-25 [Gotcha] MCP stdio processes must be killed after server.ts code changes — they run old code
+> Rule: When editing `backend/src/mcp/server.ts`, restarting the backend API server (port 3030) is NOT sufficient if Claude Code spawned MCP stdio processes. Those processes (`tsx server.ts` via node) load the old source and keep running until killed. After code changes: `ps aux | grep 'mcp/server.ts' | grep -v grep` to find them, then `kill -9` the PIDs. Claude Code will auto-restart them with the new code.
+> Context: After restarting backend on :3030, MCP tool calls still returned stale 53-count results. Found 4 MCP stdio processes (2 pairs of tsx wrapper + node child) from before the edit. Killing them allowed Claude Code to respawn with the new code, returning the correct 176 count.
+> Source: session-2026-03-25
+
+## 2026-03-25 [Architecture] Memory retrieval cascade: CAG → RAG → Knowledge Graph (memory-router.ts)
+> Rule: Semantic memory retrieval uses a 3-tier cascade in `backend/src/lib/memory-router.ts`: (1) CAG — cache-first via `context-cache.ts`, pinned memories always included, (2) RAG — hybrid full-text search via `search.ts` using `tsv @@ plainto_tsquery`, triggered when cache coverage < 50% of key phrases, (3) Graph — Apache AGE knowledge graph via `knowledge-graph.ts` + `graph-context.ts`, traverses file touches and story dependencies. Token budgets: 60% memory, 25% skills, 15% graph (with underflow redistribution). Key phrase extraction uses stopword filtering on words > 4 chars.
+> Context: The cascade is fully implemented and wired into `/api/recall` endpoint. The `rorca_recall_memories` tool now exposes it via the `currentTask` parameter. Previously this was only available through `rorca_recall_workspace`'s `currentTask` param. PG-022 added pinned memories (always included regardless of budget).
+> Source: session-2026-03-25
