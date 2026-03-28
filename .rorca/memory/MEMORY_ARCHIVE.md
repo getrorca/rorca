@@ -351,3 +351,96 @@
 > Rule: When two specs run concurrently in separate worktrees and edit the same files, the auto-merge of the second worktree fails with real merge conflicts. The run is left stuck as 'running' and implementation files remain stranded in the feature branch. Recovery requires: (1) manual git merge with conflict resolution, (2) restoring dropped files via `git show <sha>:path > file`, (3) manually marking the run as failed in the DB.
 > Context: Happened with rorca-mcp-recall-tool and rorca-mini-terminal-db-output running concurrently — both touched recall.ts, server.ts, and mcp/server.ts. Merge conflict markers were committed into the codebase (<<<<<<< Updated upstream), causing TypeScript compilation failures. The run record (e.g. #20260316000021) stayed stuck as status='running'. Post-merge, the restored files still had conflict markers that had to be manually resolved for each file.
 > Source: debugging session 2026-03-17
+## 2026-03-18 [Bug Fix] StoryLogFollower never fires from live WAL subscription — JSONB payload parsed as object not string
+> Rule: StoryLogFollower.onStoryStarted and onStoryFinished called JSON.parse(event.payload) but wal_events.payload is JSONB — pg returns it as a JS object, not a string. JSON.parse on an object calls .toString() → "[object Object]" → SyntaxError → catch returns silently. Fix: check typeof event.payload === 'string' before parsing, otherwise use the object directly. recover() was unaffected because it casts payload::text in SQL.
+> Context: Root cause of mini-terminals never showing prose output from live subscription. recover() worked on restart but live subscription path always silently dropped story_started events. Fixed in backend/src/lib/story-log-follower.ts onStoryStarted + onStoryFinished. Discovered 2026-03-18 by confirming 0 chunks despite valid log file content and correct DB schema.
+> Source: debugging session
+
+## 2026-03-18 [Gotcha] continue inside Promise.allSettled map() is a compile error — use return
+> Rule: handlePipelineRun uses Promise.allSettled(jobs.map(async (job) => { ... })). Using continue inside an async arrow function in .map() is invalid — esbuild throws "Cannot use continue here". Use return instead to skip to the next job in the batch.
+> Context: Introduced by US-003 of rorca-pipeline-queueing-and-worktrees merge. Caught at backend startup (esbuild transform error). Fixed by replacing continue with return at worker.ts line 676.
+> Source: debugging session
+
+## 2026-03-18 [Gotcha] auto_merge is false on retry runs — set it manually if needed
+> Rule: Retry runs created via /api/pipeline/runs/:id/retry always set auto_merge = false. If the original run had auto_merge = true but failed before merging, the retry will NOT auto-merge on completion. Workaround: manually UPDATE pipeline_runs SET auto_merge = true WHERE id = &lt;retryRunId&gt; while the retry is in-flight.
+> Context: Discovered 2026-03-18 when retrying US-012 of rorca-pipeline-queueing-and-worktrees. The worktree branch was not merged after the retry completed. Had to manually set auto_merge and then do the git merge ourselves.
+> Source: debugging session
+
+## 2026-03-19 [Bug Fix] tsx ENOENT when worker spawns execution engine
+> Rule: Worker spawns execution-engine via `path.join(__dirname, '..', 'node_modules', '.bin', 'tsx')` — fails with ENOENT when tsx not in backend/node_modules. Root cause: root postinstall runs `cd backend && npm install --production --ignore-scripts` which skips devDependencies (tsx is a devDep). Fix: added `findTsxBin()` helper in worker.ts — tries local path first, falls back to `which tsx`. Also run `cd backend && npm install` to install all deps. Symptom: run fails in <100ms with "spawn ... tsx ENOENT".
+> Context: Discovered 2026-03-19 when debugging instant run failure. The old worker had survived since before the --production flag took effect; restarting the worker exposed the bug. Files: backend/src/worker.ts (findTsxBin function added at top, used in two spawn locations).
+> Source: debugging session 2026-03-19
+
+## 2026-03-19 [Bug Fix] Silent terminal — execution-engine block.text missing trailing newline
+> Rule: execution-engine.ts wrote `process.stdout.write(block.text)` without a trailing `\n`. RunTerminal.tsx uses a line-buffer pattern: `parts.pop()` keeps any "incomplete last line" (one without `\n`) in `lineBufferRef` indefinitely — it never reaches `displayLines` and is never rendered. Fix: `process.stdout.write(block.text.endsWith('\n') ? block.text : block.text + '\n')` at the point where claude stream-json assistant blocks are emitted to stdout (execution-engine.ts ~line 744). Non-JSON fallback already had `+ '\n'` and worked correctly.
+> Context: Discovered 2026-03-19 — terminal showed no output for 1.5+ minutes even though 14 chunks were confirmed in run_output_chunks DB. Chunks arrived via SSE but text sat in lineBufferRef forever because no \n was written. Files: backend/src/lib/execution-engine.ts (stream-json assistant block output path).
+> Source: debugging session 2026-03-19
+
+## 2026-03-19 [Gotcha] run_output_chunks schema: column is "chunk" not "data", DB port is 5433
+> Rule: run_output_chunks table columns: `(id, run_id, chunk BYTEA, sequence INT, created_at)`. Column is `chunk`, NOT `data`. Also: DATABASE_URL uses port 5433 not default 5432 — `postgres://rorca:rorca@localhost:5433/rorca`. pg-boss table uses `created_on` not `createdon`. Always read backend/.env before writing raw SQL queries.
+> Context: Hit multiple wrong-column-name errors during 2026-03-19 debugging session when querying run_output_chunks directly.
+> Source: debugging session 2026-03-19
+
+## 2026-03-19 [Decision] Task-Monitor pattern: pg-boss jobs complete immediately, reconcileState is the watchdog
+> Rule: pg-boss jobs must NOT stay active for the lifetime of an execution engine subprocess. The job spawns the engine and returns immediately (fire-and-forget). Engine liveness is monitored via IPC heartbeats (every 60s) written to pipeline_runs.last_heartbeat. reconcileState() runs every 60s as the watchdog: if last_heartbeat > 2 min stale AND PID is dead → mark run failed. expireInSeconds should be 300s (not hours).
+> Context: Root cause: pg-boss expireInSeconds=7200 caused reconcileState to kill runs after exactly 2 hours even when the engine was still alive. Files: worker.ts, execution-engine.ts, migration 20260319200000.
+> Source: debugging session
+## 2026-03-19 [Decision] DB-based per-workspace concurrency lock replaces in-memory activeTriggeredVia
+> Rule: Concurrency uses SELECT COUNT(*) FROM pipeline_runs WHERE workspace_id=$1 AND status='running' before spawning. The old in-memory activeTriggeredVia map was removed. Worktree runs bypass the lock. DB is the single source of truth, supports horizontal scaling.
+> Context: Task-Monitor pattern freed pg-boss jobs immediately so the queue no longer acted as a concurrency lock. Files: worker.ts handlePipelineRun.
+> Source: debugging session
+
+## 2026-03-19 [Gotcha] Never have workers kill each other — fix process management instead
+> Rule: Worker singleton guard must NEVER SIGTERM/SIGKILL other worker PIDs. In distributed environments, workers would assassinate each other. The zombie child problem is a process management issue — use --kill-others on concurrently or proper supervisor signal propagation.
+> Context: concurrently failed to propagate SIGTERM to children, leaving zombie worker. Fix: package.json --kill-others --kill-others-on-fail. Files: package.json, worker.ts singleton guard.
+> Source: debugging session
+
+## 2026-03-20 [Bug Fix] GitHub OAuth 503 — tsx/esbuild module-level env var capture
+> Rule: Module-level constants like `const GITHUB_CLIENT_ID = process.env.GITHUB_CLIENT_ID || ''` capture empty strings because tsx/esbuild hoists all require() calls before dotenv.config() runs. Fix: use lazy getter functions that call process.env at request time: `function githubClientId() { return process.env.GITHUB_CLIENT_ID || ''; }`
+> Context: backend/src/routes/auth.ts — applies to ANY module-level env var constant in the backend that is needed at request time (not just startup). The dotenv.config() position in server.ts does NOT help due to esbuild hoisting.
+> Source: session-2026-03-20
+
+## 2026-03-20 [Bug Fix] Migration runner poisoning pool search_path (pg-index.ts)
+> Rule: pg-index.ts runPgMigrations() sets `SET search_path TO public` but never restores it before releasing the pool connection. This poisons the reused connection — subsequent code (e.g. seedWorkerSettings) runs with search_path=public and cannot see rorca.* tables. Fix: in the `finally` block, run `SET search_path TO rorca, public` before client.release(). Same class of bug as AGE pool poisoning.
+> Context: backend/src/db/pg-index.ts finally block (line ~201). Fixed 2026-03-20 by adding `try { await client.query('SET search_path TO rorca, public'); } catch {}` before client.release().
+> Source: session-2026-03-20
+
+## 2026-03-20 [Bug Fix] Two schema_migrations tables — public vs rorca schema split
+> Rule: There are TWO schema_migrations tables: `public.schema_migrations` (used by migration runner after search_path fix) and `rorca.schema_migrations` (used before the fix). Migrations applied before the fix are only in `rorca.schema_migrations`. On fresh server starts, the runner tries to re-run them and fails on non-idempotent ones (e.g. 057). Fix applied 2026-03-20: upgraded public.schema_migrations.version to BIGINT and copied all missing rows from rorca.schema_migrations. Also: public.schema_migrations was INTEGER not BIGINT — had to ALTER COLUMN before copying timestamp versions (20260316+).
+> Context: Symptoms: "[pg-migrate] FAILED: 057_spec_search_auto_index.sql" on every server start, server crashes. Root cause: public.schema_migrations missing versions 57+. One-time repair SQL: ALTER TABLE public.schema_migrations ALTER COLUMN version TYPE BIGINT; INSERT INTO public.schema_migrations SELECT r.version, r.applied_at, r.filename FROM rorca.schema_migrations r WHERE NOT EXISTS (SELECT 1 FROM public.schema_migrations p WHERE p.version = r.version);
+> Source: session-2026-03-20
+
+## 2026-03-20 [Bug Fix] GitHub account endpoint always returning connected:false (LIMIT 1 on users)
+> Rule: workspace-github.ts GET /account used `SELECT id FROM users LIMIT 1` to find the "current user", which always returns admin@rorca.local (created first by migration seed). The GitHub-authenticated user (dteravan@gmail.com) is a different row and has the github_connections entry. Fix: query github_connections directly without going through users first: `SELECT gc.*, u.avatar_url FROM github_connections gc JOIN users u ON gc.user_id = u.id ORDER BY gc.created_at DESC LIMIT 1`
+> Context: backend/src/routes/workspace-github.ts GET /account handler (~line 412). admin@rorca.local is always first in users table because it's seeded by initDb(). The GitHub OAuth user is created second.
+> Source: session-2026-03-20
+
+## 2026-03-20 [Pattern] sessionStorage return URL for OAuth flows
+> Rule: Before triggering any full-page OAuth redirect, store the return destination in sessionStorage: `sessionStorage.setItem('github_oauth_return', '/settings/github')`. In the callback page, read it: `const returnTo = sessionStorage.getItem('github_oauth_return') || '/'; sessionStorage.removeItem('github_oauth_return'); navigate(returnTo, { replace: true })`. Without this, OAuth callbacks always land on '/' which React Router maps to /specs.
+> Context: src/panels/GitHubSettingsPanel.tsx (Connect button onClick) + src/pages/GitHubCallbackPage.tsx (token storage + navigation). Also: in-memory oauthStateCache in auth.ts is ephemeral — server restarts during OAuth flow cause invalid_state errors (known limitation, not fixed).
+> Source: session-2026-03-20
+
+## 2026-03-23 [Gotcha] Singleton guard blocks worker restart — stale heartbeat survives process kill
+> Rule: When a worker process is killed mid-run (e.g. by SIGKILL), its heartbeat row in worker_heartbeat persists for up to 90 seconds. The singleton guard in the new worker sees the heartbeat and exits with code 0. This cascades via concurrently --kill-others to kill the frontend and server too. Fix: pkill -9 -f "src/worker" to kill ALL worker processes (not just by port), then wait and restart.
+> Context: Hit this multiple times during restart cycles in this session. The stale heartbeat window is 90s. Simply killing port 3030 does not kill the worker (it uses no port). Must kill by process name pattern.
+> Source: session-2026-03-23
+
+## 2026-03-23 [Gotcha] concurrently --kill-others kills everything when worker exits with code 0
+> Rule: npm run dev uses concurrently with both --kill-others and --kill-others-on-fail. --kill-others kills ALL processes when ANY process exits, regardless of exit code. So when the worker exits cleanly (code 0) after graceful shutdown, it cascades to kill the frontend and server. This is why restarting the full stack after a worker crash requires killing all three separately.
+> Context: Caused confusion because the worker exiting with code 0 (graceful shutdown after an active run was killed) still brought down the entire dev stack. --kill-others-on-fail alone would only trigger on non-zero exits.
+> Source: session-2026-03-23
+
+## 2026-03-24 [Gotcha] worker-supervisor.ts stale processes send SIGTERM to new workers — kills the whole dev stack
+> Rule: Stale `worker-supervisor.ts` node processes (started by previous npm run dev sessions) survive after the session ends and send SIGTERM to any new worker that starts, causing cascading --kill-others shutdown of the entire dev stack. Fix: before restarting, run `pkill -9 -f "worker-supervisor" && pkill -9 -f "rorca/backend"` to kill ALL rorca backend processes, not just by port. Port kills alone (lsof -ti:3030) miss the worker and supervisor since they don't bind to a port.
+> Context: Hit repeatedly during restart cycles in this session. The worker would start successfully, process one cron tick, then immediately receive SIGTERM from a stale supervisor. The singleton guard (90s heartbeat) and the worker-supervisor both contribute to restart failures when not fully cleaning up.
+> Source: session-2026-03-23
+
+## 2026-03-24 [Bug Fix] Run Pipeline button silent — TriggerPopover gated by !isFreePlan
+> Rule: The "Run in Pipeline" button in SpecDetailSlideOver calls setShowTriggerPopover(true), but the TriggerPopover only renders when !isFreePlan. If user.plan is 'free' or unset, the button does nothing visibly. Fixed: button now calls handleRun(isolateInBranch) directly when isFreePlan, bypassing the popover.
+> Context: SpecDetailSlideOver.tsx line 774. Introduced by rorca-pipeline-queueing-and-worktrees spec. Broke when billing-launch spec had not yet run (admin user defaults to free plan). The popover is for advanced options (forceSequential, queue, autoMerge) — free plan users should just run with defaults.
+> Source: debugging session 2026-03-23
+
+## 2026-03-24 [Bug Fix] Premature plan_required check in pipeline.ts blocking all trigger calls
+> Rule: pipeline.ts had inline plan enforcement blocks at the trigger and retry routes that threw ForbiddenError('plan_required') for free-plan users. Since local-admin defaults to plan='free' and billing-launch spec hasn't run, this blocked all pipeline runs. Removed both blocks — plan enforcement belongs in requirePlan middleware, not inline in route handlers.
+> Context: Lines ~1040-1049 and ~1933-1942 in pipeline.ts. Added by rorca-pipeline-queueing-and-worktrees spec. Did not manifest immediately because worker had old code cached in memory. Broke after worker restart loaded the new code. Fix: removed both blocks, left comment "Plan enforcement is handled by requirePlan middleware once billing-launch spec is complete."
+> Source: debugging session 2026-03-23

@@ -1101,39 +1101,115 @@ server.registerTool(
 server.registerTool(
   'rorca_recall_memories',
   {
-    description: 'Retrieve memories from the Rorca memory ledger for a workspace. Returns recent memories or filters by category. Deterministic DB query tool — no fuzzy/semantic search. Use this to check what conventions, decisions, and patterns have been recorded for a project before making changes.',
+    description: `Retrieve memories from the Rorca memory database for a workspace. Three retrieval modes:
+
+1. **Full dump** (fetchAll: true): Returns ALL memories from the database — use for brain dumps or audits.
+2. **Recent** (default): Returns the last N memories (default 100), ordered by pinned-first then newest.
+3. **Semantic** (currentTask provided): Triggers the full CAG → RAG → Knowledge Graph cascade to find the most relevant memories for a task. Returns top 30 semantically ranked results.
+
+Memories are stored in PostgreSQL with full-text search vectors and optional embeddings for semantic retrieval.`,
     inputSchema: {
       workspaceId: z.string().describe('Rorca workspace ID'),
-      category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).optional().describe('Filter by category. If omitted, returns recent memories across all categories.'),
-      limit: z.number().min(1).max(100).optional().default(20).describe('Maximum entries to return (default 20). Ignored when fetchAll is true.'),
-      fetchAll: z.boolean().optional().default(false).describe('When true, returns ALL memories with no pagination limit. Overrides the limit parameter.'),
+      category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).optional().describe('Filter by category. If omitted, returns memories across all categories.'),
+      limit: z.number().min(1).max(500).optional().default(100).describe('Maximum entries to return (default 100). Ignored when fetchAll is true.'),
+      fetchAll: z.boolean().optional().default(false).describe('When true, returns ALL memories with no pagination limit. Overrides limit.'),
+      currentTask: z.string().optional().describe('Description of the current task — when provided, triggers semantic retrieval (CAG → RAG → Knowledge Graph) and returns the most relevant memories ranked by score.'),
+      titlesOnly: z.boolean().optional().default(false).describe('Return memory titles only (strips full rule content) — ~2K tokens vs ~50K+ for full dump. Useful for getting a quick index before deciding which memories to load in full.'),
     },
   },
-  async ({ workspaceId, category, limit, fetchAll }) => {
-    const cacheKey = `recall_memories:${workspaceId}:${category ?? 'all'}:${fetchAll ? 'all' : limit}`;
+  async ({ workspaceId, category, limit, fetchAll, currentTask, titlesOnly }) => {
+    const mode = fetchAll ? 'full' : currentTask ? 'semantic' : 'recent';
+    const cacheKey = `recall_memories:${workspaceId}:${category ?? 'all'}:${mode}:${fetchAll ? 'all' : limit}`;
     return wrapToolCall('rorca_recall_memories', async () => {
-      const params = new URLSearchParams({ workspaceId });
-      if (category) params.set('category', category);
-      if (fetchAll) {
-        params.set('limit', '9999');
-      } else if (limit) {
-        params.set('limit', String(limit ?? 20));
+
+      // ── Mode 3: Semantic retrieval via /api/recall (CAG → RAG → Graph) ──
+      if (currentTask) {
+        const params = new URLSearchParams({ workspaceId, storyText: currentTask });
+        if (category) params.set('category', category);
+        if (titlesOnly) params.set('titlesOnly', 'true');
+
+        const res = await fetchWithRetry('rorca_recall_memories', () =>
+          timedFetch(`${RORCA_API}/api/recall?${params.toString()}`)
+        );
+        if (!res.ok) return httpError('rorca_recall_memories', res);
+
+        const data = await res.json() as {
+          memories: Array<{ date: string; category: string; title: string; rule: string; context: string; source: string }>;
+          meta: { retrievalTier: string; cagHits: number; ragHits: number; graphHits: number; totalTokens: number; latencyMs: number };
+        };
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: JSON.stringify({
+              ok: true,
+              workspaceId,
+              mode: 'semantic',
+              retrievalTier: data.meta?.retrievalTier ?? 'unknown',
+              cagHits: data.meta?.cagHits ?? 0,
+              ragHits: data.meta?.ragHits ?? 0,
+              graphHits: data.meta?.graphHits ?? 0,
+              items: data.memories,
+              total: data.memories.length,
+            }, null, 2),
+          }]
+        };
       }
 
+      // ── Mode 1 & 2: Full dump or Recent — use /api/memory/items (DB-backed) ──
+      const params = new URLSearchParams({ workspaceId });
+      if (category) params.set('category', category);
+
       const res = await fetchWithRetry('rorca_recall_memories', () =>
-        timedFetch(`${RORCA_API}/api/memory?${params.toString()}`)
+        timedFetch(`${RORCA_API}/api/memory/items?${params.toString()}`)
       );
       if (!res.ok) return httpError('rorca_recall_memories', res);
 
       const data = await res.json() as {
-        items: Array<{ date: string; category: string; title: string; rule: string; context?: string }>;
+        items: Array<{
+          id: number;
+          category: string;
+          content: string;
+          sourceStoryId: string | null;
+          sourceRunId: number | null;
+          confidence: string;
+          pinned: boolean;
+          sourceType: string;
+          createdAt: string;
+        }>;
         total: number;
       };
+
+      // Map DB items to the ledger format consumers expect
+      const mapped = data.items.map(item => {
+        const lines = item.content.split('\n');
+        const title = (lines[0] || '').replace(/^#+\s*/, '').slice(0, 100);
+        return {
+          date: new Date(item.createdAt).toISOString().slice(0, 10),
+          category: item.category,
+          title,
+          rule: titlesOnly ? '' : item.content,
+          context: '',
+          source: item.sourceStoryId || '',
+          lineNumber: item.id,
+          sourceType: item.sourceType,
+        };
+      });
+
+      // Apply limit (fetchAll = no limit, otherwise use limit param)
+      const limited = fetchAll ? mapped : mapped.slice(0, limit ?? 100);
 
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ ok: true, workspaceId, category: category ?? null, fetchAll: fetchAll ?? false, items: data.items, total: data.total }, null, 2),
+          text: JSON.stringify({
+            ok: true,
+            workspaceId,
+            mode: fetchAll ? 'full' : 'recent',
+            category: category ?? null,
+            items: limited,
+            total: data.total,
+          }, null, 2),
         }]
       };
     }, cacheKey);
@@ -3211,22 +3287,24 @@ server.registerPrompt(
 server.registerTool(
   'rorca_recall_workspace',
   {
-    description: 'Workspace bootstrapper — inject full workspace context into any AI session with a single call. Returns the direction stack, semantically relevant memories (top 10 when currentTask is provided), workspace health, recent runs, installed skills, workspace context (schema + git), active runs, and metadata in one payload. Use this at the start of any session to bootstrap context.',
+    description: 'Workspace bootstrapper — inject full workspace context into any AI session with a single call. Returns the direction stack, memories (last 100 recent, or top 30 semantically ranked when query is provided), workspace health, recent runs, installed skills, workspace context (schema + git), active runs, and metadata in one payload. Use this at the start of any session to bootstrap context. For spec generation, pass query=<feature brief> to anchor semantic retrieval (CAG → RAG → Knowledge Graph) to what you are about to build.',
     inputSchema: {
       workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces or settings)'),
       category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).optional().describe('Filter memories to a specific category'),
       includeRuns: z.boolean().optional().default(true).describe('Include recent pipeline runs in response (default: true)'),
       includeHealth: z.boolean().optional().default(true).describe('Include workspace health report (default: true)'),
-      currentTask: z.string().optional().describe('Description of the current task or story — when provided, memories are semantically ranked and filtered to top 10 most relevant'),
+      query: z.string().optional().describe('Feature brief or task description — anchors semantic retrieval (CAG → RAG → Knowledge Graph) to fetch the most relevant memories, file-touch history, and convention links for what you are about to build. Pass the raw brief text here.'),
+      titlesOnly: z.boolean().optional().default(false).describe('Return memory titles only (strips full rule content) — ~2K tokens vs ~50K+ for full dump. Use when you want a quick index to decide which memories to load in full.'),
     },
   },
-  async ({ workspaceId, category, includeRuns, includeHealth, currentTask }) => {
+  async ({ workspaceId, category, includeRuns, includeHealth, query, titlesOnly }) => {
     return wrapToolCall('rorca_recall_workspace', async () => {
       const params = new URLSearchParams({ workspaceId });
       if (category) params.set('category', category);
       if (includeRuns !== undefined) params.set('includeRuns', String(includeRuns));
       if (includeHealth !== undefined) params.set('includeHealth', String(includeHealth));
-      if (currentTask) params.set('storyText', currentTask);
+      if (query) params.set('query', query);
+      if (titlesOnly) params.set('titlesOnly', 'true');
 
       const res = await fetchWithRetry('rorca_recall_workspace', () =>
         timedFetch(`${RORCA_API}/api/recall?${params.toString()}`)

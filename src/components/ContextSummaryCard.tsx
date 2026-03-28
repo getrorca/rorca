@@ -195,30 +195,32 @@ export default function ContextSummaryCard({ summary, isGenerating, skillDetails
                 ? <span className="text-success">{cagHits} hit{cagHits !== 1 ? 's' : ''}</span>
                 : <span>0 hits</span>}
             </span>
-            <span
-              className={`inline-flex items-center gap-1 ${vectorHits && vectorHits > 0 ? 'text-text' : 'text-zinc-400'}`}
-              title="Retrieval-augmented generation: hybrid vector+keyword search for unfamiliar concepts"
-            >
-              <Search className="w-3 h-3" />
-              Vector (RAG){' '}
-              {vectorHits != null && vectorHits > 0
-                ? <span className="text-success">{vectorHits} hit{vectorHits !== 1 ? 's' : ''}</span>
-                : retrievalTier === 'cache'
-                  ? <span>— skipped (cache sufficient)</span>
-                  : <span>⬚ No embeddings</span>}
-            </span>
-            <span
-              className={`inline-flex items-center gap-1 ${graphHits && graphHits > 0 ? 'text-text' : 'text-zinc-400'}`}
-              title="Knowledge graph context via Apache AGE"
-            >
-              <Share2 className="w-3 h-3" />
-              Graph{' '}
-              {graphHits != null && graphHits > 0
-                ? <span className="text-success">{graphHits} node{graphHits !== 1 ? 's' : ''}</span>
-                : retrievalTier === 'cache'
-                  ? <span>— skipped (cache sufficient)</span>
-                  : <span>⬚ No graph data</span>}
-            </span>
+            {/* Only show Vector (RAG) when it has hits or was explicitly skipped */}
+            {(vectorHits != null && vectorHits > 0) || retrievalTier === 'cache' ? (
+              <span
+                className={`inline-flex items-center gap-1 ${vectorHits && vectorHits > 0 ? 'text-text' : 'text-zinc-400'}`}
+                title="Retrieval-augmented generation: hybrid vector+keyword search for unfamiliar concepts"
+              >
+                <Search className="w-3 h-3" />
+                Vector (RAG){' '}
+                {vectorHits != null && vectorHits > 0
+                  ? <span className="text-success">{vectorHits} hit{vectorHits !== 1 ? 's' : ''}</span>
+                  : <span>— skipped (cache sufficient)</span>}
+              </span>
+            ) : null}
+            {/* Only show Graph when it has hits or was explicitly skipped */}
+            {(graphHits != null && graphHits > 0) || retrievalTier === 'cache' ? (
+              <span
+                className={`inline-flex items-center gap-1 ${graphHits && graphHits > 0 ? 'text-text' : 'text-zinc-400'}`}
+                title="Knowledge graph context via Apache AGE"
+              >
+                <Share2 className="w-3 h-3" />
+                Graph{' '}
+                {graphHits != null && graphHits > 0
+                  ? <span className="text-success">{graphHits} node{graphHits !== 1 ? 's' : ''}</span>
+                  : <span>— skipped (cache sufficient)</span>}
+              </span>
+            ) : null}
             {retrievalTier && (
               <span className="px-1.5 py-0 rounded bg-muted/15 text-[10px] font-medium text-muted" title="cache = in-memory (~0ms), search = vector+keyword (50-200ms), hybrid = both">
                 {retrievalTier}

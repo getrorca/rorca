@@ -34,7 +34,8 @@
         "database",
         "spec-verifier"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-002",
@@ -68,7 +69,8 @@
         "architect",
         "security"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-003",
@@ -102,7 +104,8 @@
         "ux-designer",
         "best-practices"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-004",
@@ -136,7 +139,8 @@
         "backend",
         "best-practices"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-005",
@@ -173,7 +177,8 @@
         "frontend",
         "spec-verifier"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-006",
@@ -212,7 +217,8 @@
         "architect",
         "sre"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-007",
@@ -247,7 +253,8 @@
         "ux-designer",
         "best-practices"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-008",
@@ -292,7 +299,8 @@
         "frontend",
         "security"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-009",
@@ -326,7 +334,8 @@
         "architect",
         "sre"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "US-010",
@@ -372,7 +381,8 @@
         "frontend",
         "spec-verifier"
       ],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ],
   "mermaidDiagram": "graph TD\n  US-001[\"US-001: Add includeGraph column + trigger route\"]\n  US-002[\"US-002: Wire includeGraph through worker to engine\"]\n  US-003[\"US-003: Add includeGraph toggle to TriggerPopover\"]\n  US-004[\"US-004: Persist includeGraph workspace preference\"]\n  US-005[\"US-005: GET /api/graph/stats + health indicator\"]\n  US-006[\"US-006: POST /api/graph/populate + progress\"]\n  US-007[\"US-007: Graph context badge in Run View\"]\n  US-008[\"US-008: Knowledge Graph sub-tab in SpecDetail\"]\n  US-009[\"US-009: Emit graph_hits in WAL events\"]\n  US-010[\"US-010: Graceful degradation + integration tests\"]\n  US-001 --> US-002\n  US-001 --> US-003\n  US-003 --> US-004\n  US-005 --> US-006\n  US-005 --> US-008\n  US-001 --> US-007\n  US-003 --> US-007\n  US-002 --> US-009\n  US-001 --> US-010\n  US-002 --> US-010\n  US-003 --> US-010\n  US-005 --> US-010\n  US-006 --> US-010\n  US-008 --> US-010\n  US-009 --> US-010",
