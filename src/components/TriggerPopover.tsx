@@ -658,12 +658,16 @@ export default function TriggerPopover({
               )}
             </div>
             {isWaveParallel && !forceSequential && orchestration && (
-              <div className="mt-1 space-y-0.5">
+              <div className="mt-1 space-y-1">
                 {orchestration.waves.map((w) => (
-                  <div key={w.index} className="flex items-center gap-1 text-[10px] text-muted">
-                    <span className="font-medium tabular-nums w-12 shrink-0">Wave {w.index}</span>
-                    <ArrowRight size={8} className="shrink-0" />
-                    <span className="truncate">{w.storyIds.join(', ')}</span>
+                  <div key={w.index} className="text-[10px] text-muted">
+                    <span className="font-medium tabular-nums">Wave {w.index}</span>
+                    <span className="mx-1 text-muted/50">→</span>
+                    <span className="flex flex-wrap gap-x-1 gap-y-0.5 mt-0.5">
+                      {w.storyIds.map((id) => (
+                        <span key={id} className="px-1 py-0.5 rounded bg-accent/10 text-accent font-mono text-[9px]">{id}</span>
+                      ))}
+                    </span>
                   </div>
                 ))}
               </div>

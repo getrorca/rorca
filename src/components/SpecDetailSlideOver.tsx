@@ -296,9 +296,9 @@ export default function SpecDetailSlideOver({
     return () => document.removeEventListener('keydown', handleKeyDown);
   }, [isOpen, onClose]);
 
-  // Backdrop click
+  // Backdrop click — only close when clicking the backdrop itself, not portals rendered outside the panel
   const handleBackdropClick = (e: React.MouseEvent) => {
-    if (panelRef.current && !panelRef.current.contains(e.target as Node)) {
+    if (e.target === e.currentTarget || (e.target as HTMLElement).classList.contains('backdrop-blur-sm')) {
       onClose();
     }
   };
