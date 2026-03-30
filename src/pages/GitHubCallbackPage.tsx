@@ -33,6 +33,7 @@ export default function GitHubCallbackPage() {
         token_exchange_failed: 'Failed to complete GitHub sign-in. Please try again.',
         no_verified_email: 'Your GitHub account has no verified email address.',
         github_error: 'An unexpected error occurred. Please try again.',
+        github_not_configured: 'GitHub sign-in is not configured on this server.',
       };
       setError(messages[qError] ?? 'GitHub sign-in failed. Please try again.');
       // Clean up URL
