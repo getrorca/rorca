@@ -1190,7 +1190,10 @@ router.get('/github', (_req: Request, res: Response) => {
   const clientSecret = githubClientSecret();
   const callbackUrl = githubCallbackUrl();
   if (!clientId || !clientSecret) {
-    res.status(503).json({ error: 'GitHub OAuth not configured' });
+    const frontendBase = process.env.RORCA_SERVE_STATIC === '1'
+      ? `http://localhost:${process.env.PORT || 3030}`
+      : (process.env.CORS_ORIGIN || 'http://localhost:5210').split(',')[0].trim();
+    res.redirect(`${frontendBase}/auth/github/callback?error=github_not_configured`);
     return;
   }
 
