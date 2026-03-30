@@ -237,6 +237,17 @@ app.delete('/mcp', mcpCors, mcpHandlers.handleDelete);
 // MC-004: MCP Tools enumeration endpoint (public — used by VS Code extension, no auth required)
 app.use('/api/mcp/tools', mcpToolsRouter);
 
+// Serve static frontend files before auth so assets/favicon load for unauthenticated users
+if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
+  const staticDir = process.env.RORCA_STATIC_DIR;
+  app.use(express.static(staticDir));
+  // SPA fallback: serve index.html for non-API routes
+  app.get('*', (req, res, next) => {
+    if (req.path.startsWith('/api/')) return next();
+    res.sendFile(path.join(staticDir, 'index.html'));
+  });
+}
+
 // ─── Auth middleware (all routes below require authentication) ───
 // PR-009: Conditional auth — AUTH_REQUIRED=true enforces JWT on all protected routes.
 // Default (false/absent) = local single-user mode: inject local admin so req.user is
@@ -329,17 +340,6 @@ app.use('/api/marketplace', marketplaceRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/recall', recallRouter);
 app.use('/api/graph', graphRouter);
-
-// V2-108: Serve frontend static files when running via `rorca start`
-if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
-  const staticDir = process.env.RORCA_STATIC_DIR;
-  app.use(express.static(staticDir));
-  // SPA fallback: serve index.html for non-API routes
-  app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api/')) return next();
-    res.sendFile(path.join(staticDir, 'index.html'));
-  });
-}
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);
