@@ -7,7 +7,7 @@ RUN apk add --no-cache python3 make g++
 
 # Root deps (frontend)
 COPY package.json package-lock.json ./
-RUN npm ci --legacy-peer-deps
+RUN npm install --legacy-peer-deps
 
 # Backend deps
 COPY backend/package.json backend/package-lock.json ./backend/
