@@ -14,5 +14,5 @@
     "types": ["node", "jest"]
   },
   "include": ["src"],
-  "exclude": ["src/db/bun-sqlite-shim.ts"]
+  "exclude": ["src/db/bun-sqlite-shim.ts", "src/**/__tests__/**", "src/**/*.test.ts"]
 }
