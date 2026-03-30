@@ -31,6 +31,8 @@ import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
 // — Lazy-loaded pages (not part of initial bundle) —
 const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
 const GitHubCallbackPage = lazy(() => import('./pages/GitHubCallbackPage'));
+const LoginPage = lazy(() => import('./components/LoginPage'));
+const RegisterPage = lazy(() => import('./components/RegisterPage'));
 const ForgotPasswordPage = lazy(() => import('./components/ForgotPasswordPage'));
 const ResetPasswordPage = lazy(() => import('./components/ResetPasswordPage'));
 const OnboardingWizard = lazy(() => import('./components/OnboardingWizard'));
@@ -114,8 +116,34 @@ function AuthGate() {
     );
   }
 
-  // Auth gate bypassed — Rorca is a local single-user tool
-  void isAuthenticated; void authPage; void setAuthPage;
+  // Show login page when user is not authenticated
+  if (!isAuthenticated) {
+    if (authPage === 'forgot-password') {
+      return (
+        <Suspense fallback={<BoardSkeleton />}>
+          <ForgotPasswordPage onSwitchToLogin={() => setAuthPage('login')} />
+        </Suspense>
+      );
+    }
+    if (authPage === 'register') {
+      return (
+        <Suspense fallback={<BoardSkeleton />}>
+          <RegisterPage
+            onSwitchToLogin={() => setAuthPage('login')}
+          />
+        </Suspense>
+      );
+    }
+    // Default: login page
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <LoginPage
+          onSwitchToRegister={() => setAuthPage('register')}
+          onSwitchToForgotPassword={() => setAuthPage('forgot-password')}
+        />
+      </Suspense>
+    );
+  }
 
   return (
     <NotificationProvider>
