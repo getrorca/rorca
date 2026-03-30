@@ -241,9 +241,9 @@ app.use('/api/mcp/tools', mcpToolsRouter);
 if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
   const staticDir = process.env.RORCA_STATIC_DIR;
   app.use(express.static(staticDir));
-  // SPA fallback: serve index.html for non-API routes
+  // SPA fallback: serve index.html for non-API, non-MCP routes
   app.get('*', (req, res, next) => {
-    if (req.path.startsWith('/api/')) return next();
+    if (req.path.startsWith('/api/') || req.path.startsWith('/mcp')) return next();
     res.sendFile(path.join(staticDir, 'index.html'));
   });
 }
