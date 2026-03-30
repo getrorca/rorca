@@ -233,6 +233,12 @@ const RegisterSchema = z.object({
 });
 
 router.post('/register', validateBody(RegisterSchema), async (req: Request, res: Response) => {
+  // Registration disabled — single-user deployment. Remove REGISTRATION_DISABLED to re-enable.
+  if (process.env.REGISTRATION_DISABLED !== 'false') {
+    res.status(403).json({ error: 'Registration is disabled on this server.' });
+    return;
+  }
+
   const { email, password, displayName } = req.body;
 
   const trimmedEmail = email.trim().toLowerCase();
