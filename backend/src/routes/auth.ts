@@ -1190,10 +1190,8 @@ router.get('/github', (_req: Request, res: Response) => {
   const clientSecret = githubClientSecret();
   const callbackUrl = githubCallbackUrl();
   if (!clientId || !clientSecret) {
-    const frontendBase = process.env.RORCA_SERVE_STATIC === '1'
-      ? `http://localhost:${process.env.PORT || 3030}`
-      : (process.env.CORS_ORIGIN || 'http://localhost:5210').split(',')[0].trim();
-    res.redirect(`${frontendBase}/auth/github/callback?error=github_not_configured`);
+    // Use relative redirect so it works on any host (local, VPS, custom domain)
+    res.redirect('/auth/github/callback?error=github_not_configured');
     return;
   }
 
