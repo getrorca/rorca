@@ -125,10 +125,11 @@ app.use(helmet({
   contentSecurityPolicy: {
     directives: {
       defaultSrc: ["'self'"],
-      scriptSrc: ["'self'"],
-      styleSrc: ["'self'", "'unsafe-inline'"], // required for Tailwind inline styles
+      scriptSrc: ["'self'", "'unsafe-inline'"],  // unsafe-inline needed for dynamic script chunks
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
       imgSrc: ["'self'", 'data:', 'https:'],
-      connectSrc: ["'self'", 'ws:', 'wss:'],   // allow SSE and WebSocket connections
+      connectSrc: ["'self'", 'ws:', 'wss:', 'http:', 'https:'],  // allow API calls regardless of origin
       upgradeInsecureRequests: httpsEnabled ? [] : null,
     },
   },
