@@ -1,7 +1,8 @@
 import { useState, useEffect, useCallback } from 'react';
 import { WifiOff } from 'lucide-react';
+import { BASE_URL } from '../lib/apiFetch';
 
-const HEALTH_URL = 'http://localhost:3030/api/health';
+const HEALTH_URL = `${BASE_URL}/api/health`;
 const POLL_INTERVAL = 5_000; // 5s
 
 /**
