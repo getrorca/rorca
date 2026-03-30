@@ -118,6 +118,9 @@ app.use((_req, res, next) => {
 app.use(pinoHttp({ logger }));
 
 // PR-006: HTTP security headers via helmet
+// HTTPS_ENABLED=1 must be set when serving over TLS — enables HSTS and CSP upgrade-insecure-requests.
+// Without it, those headers force the browser to HTTPS and break plain-HTTP deployments.
+const httpsEnabled = process.env.HTTPS_ENABLED === '1';
 app.use(helmet({
   contentSecurityPolicy: {
     directives: {
@@ -126,11 +129,12 @@ app.use(helmet({
       styleSrc: ["'self'", "'unsafe-inline'"], // required for Tailwind inline styles
       imgSrc: ["'self'", 'data:', 'https:'],
       connectSrc: ["'self'", 'ws:', 'wss:'],   // allow SSE and WebSocket connections
+      upgradeInsecureRequests: httpsEnabled ? [] : null,
     },
   },
   frameguard: { action: 'deny' },               // X-Frame-Options: DENY
   noSniff: true,                                 // X-Content-Type-Options: nosniff
-  hsts: { maxAge: 31536000 },                   // Strict-Transport-Security
+  hsts: httpsEnabled ? { maxAge: 31536000 } : false,
   xssFilter: false,                              // X-XSS-Protection: 0 (CSP is the real protection)
   referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
   permittedCrossDomainPolicies: false,
