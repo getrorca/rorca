@@ -27,6 +27,7 @@ RUN cd backend && npm prune --omit=dev
 
 # ── Stage 2: Runtime ────────────────────────────────────────────────────
 FROM node:20-alpine
+RUN apk add --no-cache postgresql16-client
 WORKDIR /app
 
 # Copy pruned production node_modules (includes native addons built in stage 1)

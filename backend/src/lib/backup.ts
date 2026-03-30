@@ -51,8 +51,7 @@ export async function createBackup(): Promise<{ filename: string; path: string; 
     args.push(process.env.DATABASE_URL);
   }
 
-  const pgDumpBin = process.env.PG_DUMP_BIN ||
-    '/usr/local/opt/postgresql@16/bin/pg_dump';  // Homebrew pg16 on macOS
+  const pgDumpBin = process.env.PG_DUMP_BIN || 'pg_dump';
   await execFileAsync(pgDumpBin, args, {
     env: buildPgDumpEnv(),
     timeout: 120_000,
