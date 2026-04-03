@@ -3,9 +3,9 @@
 Spec: rorca-billing-launch
 Run ID: 20260316000045
 Started: 2026-03-19T20:45:48.038Z
-Last Updated: 2026-04-03T18:40:16.382Z
+Last Updated: 2026-04-03T18:53:45.103Z
 
-## Completed Stories (11)
+## Completed Stories (12)
 - BL-012: Billing webhook idempotency — prevent duplicate billing state transitions — DONE (claude, 33s)
 - BL-013: Self-hosted offline license activation — RORCA_LICENSE_KEY env var — DONE (claude, 1158s)
 - US-004: Update buildPrompt() to instruct claude agent to use rorca_save_memory MCP tool — DONE (claude, 159s)
@@ -17,3 +17,4 @@ Last Updated: 2026-04-03T18:40:16.382Z
 - US-009: Emit graph_hits count in WAL events from execution-engine — DONE (claude, 275s)
 - US-010: Graceful degradation and integration tests for knowledge graph UI — DONE (claude, 1470s)
 - MP-004: Build EngineSelector segmented control component — DONE (claude, claude-sonnet-4-6, 152s)
+- MP-003: Add --thinking, --thinking-budget, --effort CLI flags to execution-engine.ts — DONE (claude, claude-sonnet-4-6, 447s)
