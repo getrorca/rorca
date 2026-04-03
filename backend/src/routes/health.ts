@@ -1,5 +1,6 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { CronExpressionParser } from 'cron-parser';
+import { execSync } from 'child_process';
 import { query, queryOne, dbHealthCheck } from '../db/index';
 import { listBackups } from '../lib/backup';
 import { agentType } from '../lib/config';
@@ -14,6 +15,60 @@ import * as path from 'path';
 const router = Router();
 
 const startTime = Date.now();
+
+// ── Engine detection cache (30s TTL) ─────────────────────────────────────────
+
+interface EnginesStatus {
+  claude: { installed: boolean };
+  opencode: { installed: boolean; version?: string };
+  codex: { installed: boolean; version?: string };
+}
+
+let enginesCache: EnginesStatus | null = null;
+let enginesCacheAt = 0;
+const ENGINES_CACHE_TTL_MS = 30_000;
+
+function detectClaudeBinary(): boolean {
+  // Check CLAUDE_BIN env var first, then PATH
+  const claudeBin = process.env.CLAUDE_BIN?.trim();
+  if (claudeBin) {
+    return fs.existsSync(claudeBin);
+  }
+  try {
+    execSync('which claude', { encoding: 'utf-8', timeout: 5000 });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function detectEngines(): EnginesStatus {
+  const now = Date.now();
+  if (enginesCache && now - enginesCacheAt < ENGINES_CACHE_TTL_MS) {
+    return enginesCache;
+  }
+
+  const claudeInstalled = agentType === 'claude' || detectClaudeBinary();
+
+  const opencode = detectOpenCode();
+  const codex = detectCodex();
+
+  const result: EnginesStatus = {
+    claude: { installed: claudeInstalled },
+    opencode: {
+      installed: opencode.opencodeInstalled,
+      ...(opencode.opencodeVersion ? { version: opencode.opencodeVersion } : {}),
+    },
+    codex: {
+      installed: codex.codexInstalled,
+      ...(codex.codexVersion ? { version: codex.codexVersion } : {}),
+    },
+  };
+
+  enginesCache = result;
+  enginesCacheAt = now;
+  return result;
+}
 
 // Cache package.json version at module load — avoids fs.readFileSync on every request
 let VERSION = '0.0.1';
@@ -57,6 +112,24 @@ const NO_CACHE_HEADERS = {
  *                 opencodeVersion: { type: string }
  *                 codexInstalled: { type: boolean }
  *                 codexVersion: { type: string }
+ *                 engines:
+ *                   type: object
+ *                   description: "Availability status for each execution engine (cached 30s)"
+ *                   properties:
+ *                     claude:
+ *                       type: object
+ *                       properties:
+ *                         installed: { type: boolean }
+ *                     opencode:
+ *                       type: object
+ *                       properties:
+ *                         installed: { type: boolean }
+ *                         version: { type: string }
+ *                     codex:
+ *                       type: object
+ *                       properties:
+ *                         installed: { type: boolean }
+ *                         version: { type: string }
  *                 components:
  *                   type: object
  *                   properties:
@@ -131,6 +204,9 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
     // OC-024: Include codex status when agentType=codex
     const codex = agentType === 'codex' ? detectCodex() : undefined;
 
+    // MP-009: Detect all engines (cached 30s) for EngineSelector availability dots
+    const engines = detectEngines();
+
     // Reconstruct dbHealthCheck fields from our component check
     const rawDbHealth = (dbHealth as ComponentDatabaseHealth);
 
@@ -163,6 +239,8 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
         codexInstalled: codex.codexInstalled,
         codexVersion: codex.codexVersion,
       } : {}),
+      // MP-009: Engine availability for EngineSelector (all three engines, cached 30s)
+      engines,
       embeddings: getQueueStats(),
       cache: cacheStats(),
       activeJobs: activeJobsResult.status === 'fulfilled' ? activeJobsResult.value : [],

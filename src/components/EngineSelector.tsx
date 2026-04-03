@@ -1,3 +1,6 @@
+import { useEffect, useState } from 'react';
+import { apiFetch } from '../lib/apiFetch';
+
 export type EngineValue = 'claude' | 'opencode' | 'codex';
 
 export interface EngineStatus {
@@ -18,22 +21,55 @@ interface Pill {
   available: boolean;
 }
 
+interface HealthEngines {
+  claude: { installed: boolean };
+  opencode: { installed: boolean; version?: string };
+  codex: { installed: boolean; version?: string };
+}
+
+interface HealthResponse {
+  engines?: HealthEngines;
+}
+
 export function EngineSelector({ value, onChange, engineStatus }: EngineSelectorProps) {
+  const [fetchedStatus, setFetchedStatus] = useState<EngineStatus | null>(null);
+
+  useEffect(() => {
+    // Only fetch if no engineStatus prop is provided
+    if (engineStatus !== undefined) return;
+
+    apiFetch<HealthResponse>('/api/health', { silent: true })
+      .then((data) => {
+        if (data.engines) {
+          setFetchedStatus({
+            claudeAvailable: data.engines.claude.installed,
+            opencodeAvailable: data.engines.opencode.installed,
+            codexAvailable: data.engines.codex.installed,
+          });
+        }
+      })
+      .catch(() => {
+        // Health check failed — leave availability dots muted
+      });
+  }, [engineStatus]);
+
+  const resolved = engineStatus ?? fetchedStatus ?? {};
+
   const pills: Pill[] = [
     {
       value: 'claude',
       label: 'Claude (Sub)',
-      available: engineStatus?.claudeAvailable ?? false,
+      available: resolved.claudeAvailable ?? false,
     },
     {
       value: 'opencode',
       label: 'OpenCode (API)',
-      available: engineStatus?.opencodeAvailable ?? false,
+      available: resolved.opencodeAvailable ?? false,
     },
     {
       value: 'codex',
       label: 'Codex (Sub)',
-      available: engineStatus?.codexAvailable ?? false,
+      available: resolved.codexAvailable ?? false,
     },
   ];
 
