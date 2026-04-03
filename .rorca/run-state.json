@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-04-03T18:50:54.299Z",
+  "lastUpdatedAt": "2026-04-03T18:58:32.938Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -113,6 +113,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 275196
+    },
+    {
+      "storyId": "MP-007",
+      "title": "Integrate SpecModelControlBar into SpecDetailSlideOver Stories tab",
+      "status": "passed",
+      "startedAt": "2026-04-03T18:54:08.277Z",
+      "finishedAt": "2026-04-03T18:58:32.938Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 264661
     }
   ],
   "failedStories": [],
