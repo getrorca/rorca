@@ -4,6 +4,7 @@ import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRi
 import { apiFetch } from '../lib/apiFetch';
 import { preflightCheck, type CapabilityWarning } from '../api/pipeline';
 import type { PanelId } from './Sidebar';
+import ThinkingControls, { type EffortLevel } from './ThinkingControls';
 
 interface HealthBadge {
   score: number;
@@ -124,13 +125,22 @@ function TokenBar({ global, scoped, tagged, budget }: { global: number; scoped: 
   );
 }
 
+export interface TriggerOptions {
+  forceSequential?: boolean;
+  autoMerge?: boolean;
+  includeGraph?: boolean;
+  effortLevel?: EffortLevel;
+  thinkingEnabled?: boolean;
+  thinkingBudget?: number;
+}
+
 interface TriggerPopoverProps {
   /** Whether a trigger is currently in progress */
   loading?: boolean;
   /** Called when user clicks Run Now */
-  onTrigger: (autoWorktree: boolean, options?: { forceSequential?: boolean; autoMerge?: boolean; includeGraph?: boolean }) => void;
+  onTrigger: (autoWorktree: boolean, options?: TriggerOptions) => void;
   /** Called when user clicks Add to Queue */
-  onAddToQueue?: (autoWorktree: boolean, options?: { forceSequential?: boolean; autoMerge?: boolean; includeGraph?: boolean }) => void;
+  onAddToQueue?: (autoWorktree: boolean, options?: TriggerOptions) => void;
   /** Whether Add to Queue action is loading */
   queueLoading?: boolean;
   /** Called when popover is dismissed */
@@ -141,6 +151,12 @@ interface TriggerPopoverProps {
   specPath?: string;
   /** Workspace ID for capability preflight check + orchestration preview */
   workspaceId?: string;
+  /** Pre-populate effort level from spec JSON */
+  initialEffortLevel?: EffortLevel;
+  /** Pre-populate thinking enabled from spec JSON */
+  initialThinkingEnabled?: boolean;
+  /** Pre-populate thinking budget from spec JSON */
+  initialThinkingBudget?: number;
 }
 
 export default function TriggerPopover({
@@ -152,6 +168,9 @@ export default function TriggerPopover({
   onNavigate,
   specPath,
   workspaceId,
+  initialEffortLevel,
+  initialThinkingEnabled,
+  initialThinkingBudget,
 }: TriggerPopoverProps) {
   const [autoWorktree, setAutoWorktree] = useState(false);
   const [autoMerge, setAutoMerge] = useState(true);
@@ -167,6 +186,9 @@ export default function TriggerPopover({
   const [driftCheckEnabled, setDriftCheckEnabled] = useState(false);
   const [forceSequential, setForceSequential] = useState(false);
   const [includeGraph, setIncludeGraph] = useState(false);
+  const [effortLevel, setEffortLevel] = useState<EffortLevel>(initialEffortLevel ?? 'medium');
+  const [thinkingEnabled, setThinkingEnabled] = useState(initialThinkingEnabled ?? false);
+  const [thinkingBudget, setThinkingBudget] = useState(initialThinkingBudget ?? 5000);
   const ref = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
   const [portalStyle, setPortalStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
@@ -794,6 +816,21 @@ export default function TriggerPopover({
             </p>
           </div>
         </label>
+
+        {/* Divider */}
+        <div className="border-t border-border/50" />
+
+        {/* Thinking controls — Claude Opus/Sonnet only */}
+        <ThinkingControls
+          engine={agentConfig?.agentType ?? null}
+          model={agentConfig?.agentModel ?? null}
+          effortLevel={effortLevel}
+          onEffortChange={setEffortLevel}
+          thinkingEnabled={thinkingEnabled}
+          onThinkingEnabledChange={setThinkingEnabled}
+          thinkingBudget={thinkingBudget}
+          onThinkingBudgetChange={setThinkingBudget}
+        />
       </div>
 
       {/* Action buttons */}
@@ -802,7 +839,17 @@ export default function TriggerPopover({
         <button
           onClick={() => {
             const effectiveWorktree = autoWorktree || (isWaveParallel && !forceSequential);
-            onTrigger(effectiveWorktree, { forceSequential: forceSequential || undefined, autoMerge: effectiveWorktree ? autoMerge : undefined, includeGraph: includeGraph || undefined });
+            const isClaude = agentConfig?.agentType === 'claude';
+            const m = agentConfig?.agentModel?.toLowerCase() ?? '';
+            const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
+            onTrigger(effectiveWorktree, {
+              forceSequential: forceSequential || undefined,
+              autoMerge: effectiveWorktree ? autoMerge : undefined,
+              includeGraph: includeGraph || undefined,
+              effortLevel: thinkingApplies ? effortLevel : undefined,
+              thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
+              thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
+            });
           }}
           disabled={triggerDisabled}
           className="flex items-center justify-center gap-2 w-full py-2.5 rounded-lg text-sm font-semibold bg-accent text-white hover:brightness-110 disabled:opacity-50 transition-all shadow-sm shadow-accent/20"
@@ -819,7 +866,17 @@ export default function TriggerPopover({
           <button
             onClick={() => {
               const effectiveWorktree = autoWorktree || (isWaveParallel && !forceSequential);
-              onAddToQueue(effectiveWorktree, { forceSequential: forceSequential || undefined, autoMerge: effectiveWorktree ? autoMerge : undefined, includeGraph: includeGraph || undefined });
+              const isClaude = agentConfig?.agentType === 'claude';
+              const m = agentConfig?.agentModel?.toLowerCase() ?? '';
+              const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
+              onAddToQueue(effectiveWorktree, {
+                forceSequential: forceSequential || undefined,
+                autoMerge: effectiveWorktree ? autoMerge : undefined,
+                includeGraph: includeGraph || undefined,
+                effortLevel: thinkingApplies ? effortLevel : undefined,
+                thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
+                thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
+              });
             }}
             disabled={triggerDisabled}
             title="Will run after the active spec completes"
