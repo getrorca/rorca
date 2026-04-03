@@ -738,7 +738,7 @@ function SpecPreviewDrawer({
     }
   };
 
-  const handleRun = async (autoWorktree: boolean) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; autoMerge?: boolean; includeGraph?: boolean; modelOverride?: string }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -753,6 +753,10 @@ function SpecPreviewDrawer({
             specPath: `forge/specs/approved/${summary.id}.json`,
             workspaceId,
             autoWorktree,
+            ...(options?.forceSequential ? { forceSequential: true } : {}),
+            ...(options?.autoMerge !== undefined ? { autoMerge: options.autoMerge } : {}),
+            ...(options?.includeGraph ? { includeGraph: true } : {}),
+            ...(options?.modelOverride ? { modelOverride: options.modelOverride } : {}),
           }),
         }
       );
@@ -981,6 +985,7 @@ function SpecPreviewDrawer({
                         onClose={() => setShowTriggerPopover(false)}
                         specPath={`forge/specs/approved/${summary.id}.json`}
                         workspaceId={workspaceId ?? undefined}
+                        specId={summary.id}
                       />
                     )}
                     <button

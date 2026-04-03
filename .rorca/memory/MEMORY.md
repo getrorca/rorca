@@ -140,25 +140,10 @@
 > Context: Developed from multiple failed restart attempts in this session. The key insight is that the worker process and worker-supervisor process do not bind to any port, so lsof-based port kills cannot reach them.
 > Source: session-2026-03-23
 
-## 2026-03-24 [Gotcha] local-admin user defaults to plan='free' — must be set to 'pro' manually
-> Rule: The default admin user (id='local-admin', email='admin@rorca.local') has plan='free' in the DB. Any plan gate will block it. Until billing-launch spec runs and sets up proper subscription records, manually set: UPDATE users SET plan='pro' WHERE id='local-admin';
-> Context: Discovered 2026-03-23 when pipeline trigger started returning 403 plan_required. getEffectiveUser() falls back to first user in DB (local-admin) when auth is bypassed globally. That user's plan='free' tripped the inline plan check added by rorca-pipeline-queueing-and-worktrees.
-> Source: debugging session 2026-03-23
-
-## 2026-03-24 [Bug Fix] Wave-parallel stale skipped flags — stories array and freshSpec were separate refs
-> Rule: In execution-engine.ts, stale flag clearing read a freshSpec from disk and cleared flags on freshSpec.userStories, but the stories array passed to runParallel() was loaded earlier and not updated. Since getStories() returns spec.userStories by reference, clearing must be done directly on the stories array (same object). Fixed by deleting skipped/blocked flags on stories[] directly and writing spec (not freshSpec) back to disk.
-> Context: Commit 11db1bc. Manifested as wave-parallel runs completing in 0.5s with "No executable stories" — all stories had stale skipped:true from a prior failed run. The freshSpec read was a different object entirely so clearing it had no effect on the stories array used for execution.
-> Source: debugging session 2026-03-23
-
 ## 2026-03-25 [Architecture] hetzner-coolify-infra skill installed
 > Rule: Skill hetzner-coolify-infra.md installed at .rorca/skills/ and .claude/skills/. Covers: Hetzner hcloud CLI, VM sizing (CX31 default), private network 10.0.0.0/16, floating IP for stable DNS, Coolify install, Postgres via Coolify, Rorca Docker deployment, worker as separate service, forge/ volume mount, AGE extension caveat. Pre-prod cost ~€19/mo.
 > Context: User wants to deploy Rorca to Hetzner + Coolify for pre-prod testing. Skill created 2026-03-24.
 > Source: manual
-
-## 2026-03-25 [Bug Fix] Express 4 async error handler was broken — routes hung on thrown errors
-> Rule: The Layer.prototype.handle_request patch in async-handler.ts wrapped the original function, but Express 4's original does `try { fn(req, res, next) } catch` WITHOUT returning the Promise. So `result` was always undefined and `.catch(next)` never fired. Any async route that threw (ValidationError, NotFoundError) would hang forever. Fix: replace handle_request entirely, call `this.handle` directly, catch the returned Promise. Affected all routers (memory, agents, etc.) — not just one route.
-> Context: Discovered when MCP slash commands timed out on /rorca:get_memories. Root cause: GET /api/memory without workspaceId threw ValidationError but response never sent. Commit 6c8d3c5.
-> Source: debugging session 2026-03-25
 
 ## 2026-03-25 [Architecture] MCP tools auto-inject workspaceId when not provided
 > Rule: In mcp-http.ts, workspaceId is marked optional in Zod schema (so MCP SDK doesn't reject) and executeApiCall() auto-injects the default workspace ID (fetched from GET /api/workspaces?limit=1, cached 1 min). This makes all MCP tools work without users needing to know or specify the workspace ID. The cachedDefaultWorkspaceId + cacheExpiry pattern avoids a DB query on every tool call.
@@ -170,42 +155,62 @@
 > Context: MCP endpoint previously used the restrictive /api/* CORS which worked but didn't expose Mcp-Session-Id header properly. Commit 6c8d3c5.
 > Source: debugging session 2026-03-25
 
-## 2026-03-25 [Bug Fix] Worker crashes on non-fatal AppError unhandledRejections
-> Rule: worker.ts process.on('unhandledRejection') triggered full shutdown on ANY rejection, including ValidationError/NotFoundError from Express routes (statusCode < 500). These are expected business-logic errors, not fatal. Fix: check if reason is an AppError with statusCode < 500 — if so, log warning and return without shutdown. Only truly unexpected rejections trigger shutdown.
-> Context: When the async handler fix started properly propagating errors, some leaked as unhandledRejections and crashed the worker. Commit 6c8d3c5.
-> Source: debugging session 2026-03-25
-
-## 2026-03-25 [Pattern] MCP HTTP server health: 397 tools, <20ms, fully functional
-> Rule: MCP HTTP transport at http://localhost:3030/mcp is healthy. 397 auto-generated tools from OpenAPI spec. Initialize handshake returns session ID via Mcp-Session-Id header. tools/list and tools/call both return in <20ms. Registered in Claude Code as `rorca: http://localhost:3030/mcp (HTTP)`. To diagnose MCP issues: test with curl (Accept: application/json, text/event-stream header required), check backend logs, test specific tool via tools/call.
-> Context: Verified 2026-03-25. If slash commands time out, the issue is likely a specific route hanging (check async error handling) or a heavy LLM-calling tool, not the MCP transport itself.
-> Source: debugging session 2026-03-25
-
-## 2026-03-25 [Pattern] rorca-memory-consolidation spec completed — 7/7 stories passed, auto-merged
-> Rule: Run 20260316000066: all 7 stories passed (US-001 through US-007), auto-merged to main as commit dff68e5. Branch feat/rorca-memory-consolidation. 48min runtime, parallelism 3, Claude CLI engine. Stories: US-001 recall semantic leak fix, US-002 generateMemoryMd(), US-003 pre-run MEMORY.md generation, US-004 buildPrompt MCP instruction, US-005 proposed_memories.json handler, US-006 post-story MEMORY.md rebuild, US-007 integration test.
-> Context: Memory consolidation makes DB memories the source of truth and projects them to MEMORY.md before each story run. Agents write memories via MCP tool (claude) or proposed_memories.json file (opencode/codex).
-> Source: run-20260316000066
-
-## 2026-03-25 [Bug Fix] MCP rorca_recall_memories returned 53 instead of 176 — was reading from file, not DB
-> Rule: The MCP tool `rorca_recall_memories` was hitting `GET /api/memory` (file-based MEMORY.md, 53 entries) instead of `GET /api/memory/items` (PostgreSQL `memories` table, 176 entries). The file-based ledger falls behind because synthesis runs and some write paths only write to the DB. Fix: switched MCP tool to use `/api/memory/items` endpoint which matches what the UI MemoryPanel uses.
-> Context: User saw 176 in Rorca UI but MCP tool returned only 53. Root cause: dual memory stores (file + DB) out of sync. File at `.rorca/memory/MEMORY.md` had 53 `##` entries. DB `memories` table had 176 non-deleted rows. The `fetchAll: true` param was correctly passed as `limit=9999` but the file-based endpoint's `recent()` function returned all 53 entries (slice(-9999) = everything in the file). Fix applied in `backend/src/mcp/server.ts`.
-> Source: session-2026-03-25
-
 ## 2026-03-25 [Architecture] rorca_recall_memories now supports 3 retrieval modes: full dump, recent 100, semantic
 > Rule: The MCP `rorca_recall_memories` tool now supports three modes: (1) Full dump (`fetchAll: true`) — returns ALL memories from DB with no limit, (2) Recent (default) — returns last 100 memories ordered by pinned-first then newest (was 20), (3) Semantic (`currentTask` provided) — hits `/api/recall` which triggers the full CAG → RAG → Knowledge Graph cascade and returns top 30 semantically ranked results (was 10). The `currentTask` param is new — it maps to `storyText` on the recall endpoint.
 > Context: Previously the tool only had modes 1 and 2, both reading from the stale file-based ledger. Mode 3 (semantic) existed in `rorca_recall_workspace` via `currentTask` param but was not exposed on `rorca_recall_memories`. Now both tools share the same retrieval infrastructure. Files changed: `backend/src/mcp/server.ts` (MCP tool rewrite), `backend/src/routes/recall.ts` (fetchMemories limits: LIMIT 20→100, slice 10→30).
-> Source: session-2026-03-25
-
-## 2026-03-25 [Gotcha] Dual memory stores (file MEMORY.md vs DB memories table) drift out of sync
-> Rule: Rorca maintains two parallel memory stores: (1) file-based `.rorca/memory/MEMORY.md` read by `memory-ledger.ts`, and (2) PostgreSQL `memories` table. Manual writes and `POST /api/memory` write to both, but synthesis runs and some automated paths only write to the DB. This causes the file to fall behind. The UI MemoryPanel reads from DB (`/api/memory/items`), showing the true count. Any tool reading from the file will see fewer memories. Always prefer DB-backed endpoints for memory retrieval.
-> Context: Discovered when UI showed 176 memories but MCP tool returned 53. The file had exactly 53 `## ` header entries. DB had 176 non-deleted rows. The memory consolidation spec (US-002/US-003) added `generateMemoryMd()` to project DB into MEMORY.md format, but this only runs pre-pipeline — not on every write.
-> Source: session-2026-03-25
-
-## 2026-03-25 [Gotcha] MCP stdio processes must be killed after server.ts code changes — they run old code
-> Rule: When editing `backend/src/mcp/server.ts`, restarting the backend API server (port 3030) is NOT sufficient if Claude Code spawned MCP stdio processes. Those processes (`tsx server.ts` via node) load the old source and keep running until killed. After code changes: `ps aux | grep 'mcp/server.ts' | grep -v grep` to find them, then `kill -9` the PIDs. Claude Code will auto-restart them with the new code.
-> Context: After restarting backend on :3030, MCP tool calls still returned stale 53-count results. Found 4 MCP stdio processes (2 pairs of tsx wrapper + node child) from before the edit. Killing them allowed Claude Code to respawn with the new code, returning the correct 176 count.
 > Source: session-2026-03-25
 
 ## 2026-03-25 [Architecture] Memory retrieval cascade: CAG → RAG → Knowledge Graph (memory-router.ts)
 > Rule: Semantic memory retrieval uses a 3-tier cascade in `backend/src/lib/memory-router.ts`: (1) CAG — cache-first via `context-cache.ts`, pinned memories always included, (2) RAG — hybrid full-text search via `search.ts` using `tsv @@ plainto_tsquery`, triggered when cache coverage < 50% of key phrases, (3) Graph — Apache AGE knowledge graph via `knowledge-graph.ts` + `graph-context.ts`, traverses file touches and story dependencies. Token budgets: 60% memory, 25% skills, 15% graph (with underflow redistribution). Key phrase extraction uses stopword filtering on words > 4 chars.
 > Context: The cascade is fully implemented and wired into `/api/recall` endpoint. The `rorca_recall_memories` tool now exposes it via the `currentTask` parameter. Previously this was only available through `rorca_recall_workspace`'s `currentTask` param. PG-022 added pinned memories (always included regardless of budget).
 > Source: session-2026-03-25
+
+## 2026-03-30 [Architecture] Docker Compose production setup on VPS
+> Rule: Three services in /home/ubuntu/rorca/docker-compose.yml: (1) db — postgres:pgvector image, port 5433:5432, volume rorca_pgdata; (2) rorca — API+frontend on port 3030:3030, CMD node cli.js start --no-open; (3) worker — same image, CMD node backend/dist/worker.js. All env vars in /home/ubuntu/rorca/.env. Worker was NOT in the original compose file and had to be added manually.
+> Context: Repo cloned to /home/ubuntu/rorca. Rorca workspace DB path updated to /home/ubuntu/rorca. Coolify manages the stack but docker compose commands run directly as sudo docker compose.
+> Source:  
+
+## 2026-03-30 [Bug Fix] Cross-schema restore breaks migrations — attachment_storage_type enum
+> Rule: When restoring a pg_dump taken from the rorca schema into a fresh DB, the ENUM types land in the rorca schema but migrations run in public schema. Migration 061 IF NOT EXISTS check finds the ENUM in rorca schema, skips CREATE TYPE, then CREATE TABLE fails because search_path=public. Fix: run `CREATE TYPE public.attachment_storage_type AS ENUM ('database', 's3');` directly on the DB before first container start after a restore.
+> Context: Also: migration 057 ON CONFLICT failed because public.spec_search_index was missing the uq_spec_search_slug_workspace unique constraint. Fix: ALTER TABLE public.spec_search_index ADD CONSTRAINT uq_spec_search_slug_workspace UNIQUE (spec_slug, workspace_id);
+> Source:  
+
+## 2026-03-30 [Gotcha] HTTPS_ENABLED=1 required to enable HSTS and CSP upgrade-insecure-requests
+> Rule: Helmet sends HSTS and CSP upgrade-insecure-requests conditionally based on HTTPS_ENABLED=1 env var. Without it on a plain HTTP deployment, the browser caches HSTS and forces HTTPS on all subsequent requests causing ERR_SSL_PROTOCOL_ERROR. Never set HTTPS_ENABLED=1 unless TLS is actually terminated (nginx/Coolify proxy in front).
+> Context: Fixed in backend/src/server.ts: `const httpsEnabled = process.env.HTTPS_ENABLED === '1'` gates both hsts and upgradeInsecureRequests directives.
+> Source:  
+
+## 2026-03-30 [Bug Fix] Static files must be served before authRequired middleware
+> Rule: express.static and the SPA catch-all (app.get('*')) must be mounted BEFORE the authRequired middleware block in server.ts. If mounted after, all static assets (JS chunks, CSS, favicon.ico) return 401 Unauthorized to unauthenticated users, breaking the login page entirely. Order: public routes → MCP tools → static files → auth middleware → protected API routes.
+> Context: Fixed in server.ts around line 240. The duplicate static block that was at line ~334 was removed.
+> Source:  
+
+## 2026-03-30 [Bug Fix] AuthGate must check isAuthenticated to show login page
+> Rule: The AuthGate component in App.tsx originally had `void isAuthenticated` — deliberately bypassed for local single-user mode. When AUTH_REQUIRED=true on the backend, the frontend still rendered the onboarding wizard and made API calls that all 401'd. Fixed by adding `if (!isAuthenticated)` check that renders LoginPage/RegisterPage/ForgotPasswordPage. LoginPage and RegisterPage added as module-level lazy imports (not inline inside the function body).
+> Context: Commit 216b363. The GitHubCallbackPage and PublicReviewPage checks remain before the isAuthenticated check so they work without auth.
+> Source:  
+
+## 2026-03-30 [Bug Fix] GitHub OAuth unconfigured — redirect not JSON
+> Rule: When GITHUB_CLIENT_ID/SECRET are not set, GET /api/auth/github must redirect to /auth/github/callback?error=github_not_configured (relative URL) rather than returning JSON. Browser navigates directly to this URL so JSON renders raw. Use a relative redirect so it works on any host without hardcoding localhost. The frontend GitHubCallbackPage handles the error param and shows a friendly message.
+> Context: Commit f4a5583 + 3b86f56. Also added github_not_configured to the error messages map in GitHubCallbackPage.tsx. SPA catch-all also updated to exclude /mcp paths.
+> Source:  
+
+## 2026-03-30 [Decision] Single-user deployment — registration disabled, GitHub OAuth hidden
+> Rule: VPS deployment is single-user only. POST /api/auth/register returns 403 unless REGISTRATION_DISABLED=false is explicitly set in env. LoginPage no longer shows "Create one" or "Sign in with GitHub" buttons — email/password only. Workspaces have no user_id scoping (all users see all workspaces) so blocking new signups is the only isolation mechanism until proper multi-user workspace scoping is built.
+> Context: Commit 83a4c12. Default creds: dteravan@gmail.com / rorca123 and admin@rorca.local / rorca123 — both should be changed. Change via Settings > Account or via bcryptjs hash update in DB.
+> Source:  
+
+## 2026-03-30 [Gotcha] NetworkBanner hardcoded localhost:3030 caused private network CORS errors
+> Rule: NetworkBanner.tsx had `const HEALTH_URL = 'http://localhost:3030/api/health'` hardcoded. On the VPS, the browser blocked this as a private network access CORS violation (cross-origin from 141.94.33.224:3030 to localhost:3030). Fixed by importing BASE_URL from lib/apiFetch and using `${BASE_URL}/api/health`. BASE_URL is empty string in production builds (relative URL) so health checks go to the same origin.
+> Context: Any hardcoded localhost URLs in frontend code will break on VPS/cloud deployments. Always use BASE_URL from apiFetch or relative paths.
+> Source:  
+
+## 2026-03-30 [Gotcha] Pending migration blocks pipeline trigger — include_graph column
+> Rule: If pipeline trigger hangs indefinitely (curl times out, UI stuck on "Starting..."), check for pending migrations first via GET /api/health — look for `"migrations":{"status":"degraded","pending":N}`. A missing column on pipeline_runs causes the INSERT to fail silently and the backend connection to hang. Fix: apply the migration manually then restart the backend. Root cause: migrations only run on backend startup, so new migrations added while backend is running are never applied until restart.
+> Context: Specifically hit with 20260325100000_add_include_graph_to_pipeline_runs.sql — added include_graph BOOLEAN column. Applied manually via ALTER TABLE + INSERT INTO schema_migrations. Also: stale worker (running since Tuesday) was the first suspect but restarting it wasn't enough — the pending migration was the real blocker.
+> Source:  
+
+## 2026-04-03 [Bug Fix] Wave parallel broken by two separate issues: ArchivePanel options drop + waveParallelism config
+> Rule: Wave parallel execution requires two things to be correct simultaneously: (1) ArchivePanel.handleRun must forward all TriggerPopover options (forceSequential, autoMerge, includeGraph) to the pipeline trigger API — since ULT-007, the options parameter was silently dropped, so forceSequential was never sent and backend defaulted to sequential; (2) the target workspace's .rorca/config.json must have waveParallelism: true in the execution block — workspace had it hardcoded to false, blocking wave parallel regardless of UI toggle. Both must be correct or parallelism stays at 1.
+> Context: Diagnosed by checking all finops-generator-engine runs via MCP and confirming parallelism: 1 on every run. ArchivePanel fix: handleRun now accepts options?: { forceSequential?, autoMerge?, includeGraph? } and spreads them into the fetch body. Config fix: .rorca/config.json waveParallelism changed from false to true.
+> Source:  
