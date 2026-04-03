@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-26T06:33:52.695Z",
+  "lastUpdatedAt": "2026-04-03T19:48:18.958Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -93,6 +93,46 @@
       "finishedAt": "2026-03-26T06:33:52.695Z",
       "agentType": "claude",
       "elapsedMs": 1470210
+    },
+    {
+      "storyId": "MP-004",
+      "title": "Build EngineSelector segmented control component",
+      "status": "passed",
+      "startedAt": "2026-04-03T18:37:44.126Z",
+      "finishedAt": "2026-04-03T18:40:16.382Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 152256
+    },
+    {
+      "storyId": "MP-009",
+      "title": "Add engine health status to GET /api/health and expose to frontend",
+      "status": "passed",
+      "startedAt": "2026-04-03T18:46:19.102Z",
+      "finishedAt": "2026-04-03T18:50:54.298Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 275196
+    },
+    {
+      "storyId": "MP-007",
+      "title": "Integrate SpecModelControlBar into SpecDetailSlideOver Stories tab",
+      "status": "passed",
+      "startedAt": "2026-04-03T18:54:08.277Z",
+      "finishedAt": "2026-04-03T18:58:32.938Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 264661
+    },
+    {
+      "storyId": "MP-008",
+      "title": "Wire spec-level model into TriggerPopover run action and update story ModelBadge reactivity",
+      "status": "passed",
+      "startedAt": "2026-04-03T19:39:26.863Z",
+      "finishedAt": "2026-04-03T19:48:18.957Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 532094
     }
   ],
   "failedStories": [],
