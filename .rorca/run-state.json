@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-04-03T18:41:33.859Z",
+  "lastUpdatedAt": "2026-04-03T18:45:43.012Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -95,14 +95,14 @@
       "elapsedMs": 1470210
     },
     {
-      "storyId": "MP-001",
-      "title": "Extend spec JSON schema and PUT /api/specs/:specId to persist engine + thinking fields",
+      "storyId": "MP-002",
+      "title": "Extend PipelineTriggerSchema and pg-boss job payload with thinking controls",
       "status": "passed",
-      "startedAt": "2026-04-03T18:37:38.529Z",
-      "finishedAt": "2026-04-03T18:41:33.859Z",
+      "startedAt": "2026-04-03T18:37:37.593Z",
+      "finishedAt": "2026-04-03T18:45:43.011Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 235330
+      "elapsedMs": 485418
     }
   ],
   "failedStories": [],
