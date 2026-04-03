@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-04-03T18:45:43.012Z",
+  "lastUpdatedAt": "2026-04-03T18:40:16.382Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -95,14 +95,14 @@
       "elapsedMs": 1470210
     },
     {
-      "storyId": "MP-002",
-      "title": "Extend PipelineTriggerSchema and pg-boss job payload with thinking controls",
+      "storyId": "MP-004",
+      "title": "Build EngineSelector segmented control component",
       "status": "passed",
-      "startedAt": "2026-04-03T18:37:37.593Z",
-      "finishedAt": "2026-04-03T18:45:43.011Z",
+      "startedAt": "2026-04-03T18:37:44.126Z",
+      "finishedAt": "2026-04-03T18:40:16.382Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 485418
+      "elapsedMs": 152256
     }
   ],
   "failedStories": [],
