@@ -13,6 +13,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { AuthError, NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
 
+/**
+ * Context window overrides for OpenRouter models where the API reports the wrong value
+ * (e.g., cheapest provider has a lower cap than the model's native context window).
+ */
+const OPENROUTER_CONTEXT_OVERRIDES: Record<string, number> = {
+  'z-ai/glm-5': 200000, // Ambient reports 80K, actual native context is 200K
+};
+
 const router = Router();
 
 // ─── In-memory mutable config (hot-reloaded via PUT /agent) ──────────────────
@@ -425,7 +433,7 @@ router.get('/openrouter-models', async (_req: Request, res: Response) => {
         id: m.id,
         name: m.name,
         provider: getOpenRouterProviderFamily(m.id),
-        contextWindow: m.context_length,
+        contextWindow: OPENROUTER_CONTEXT_OVERRIDES[m.id] ?? m.context_length,
         free: parseFloat(m.pricing?.prompt ?? '1') === 0 && parseFloat(m.pricing?.completion ?? '1') === 0,
         pricingPrompt: parseFloat(m.pricing?.prompt ?? '0'),
         pricingCompletion: parseFloat(m.pricing?.completion ?? '0'),
@@ -576,7 +584,7 @@ router.put('/agent', async (req: Request, res: Response) => {
     if (newType === 'opencode') {
       const status = detectOpenCode();
       if (!status.opencodeInstalled) {
-        throw new ValidationError('OpenCode binary not found. Install it first: npm i -g opencode');
+        throw new ValidationError('OpenCode binary not found. Install it first: npm i -g opencode-ai');
         return;
       }
     }

@@ -1114,7 +1114,7 @@ function ExecutionEngineSection() {
           ) : (
             <>
               <AlertTriangle size={14} />
-              OpenCode not found. Install: <code className="bg-panel px-1 rounded">npm i -g opencode</code>
+              OpenCode not found. Install: <code className="bg-panel px-1 rounded">npm i -g opencode-ai</code>
             </>
           )}
         </div>

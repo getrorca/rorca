@@ -13,7 +13,7 @@ import { generateDiagramBundle } from '../lib/diagram-generator';
 import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, getModelInfo, ALL_MODELS } from '../lib/llm-client';
 import { writeSpec } from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
-import { getVaultKey } from './vault';
+import { getVaultKey, getOpenRouterPrefs } from './vault';
 import type { AuthUser } from './auth';
 import { getEffectiveUser } from '../lib/get-user';
 import { getPlanLimits, type PlanTier } from '../lib/plan-limits';
@@ -802,6 +802,8 @@ const GenerateSpecSchema = z.object({
   multiPass: z.boolean().optional(),
   storyPrefix: z.string().optional(),
   async: z.boolean().optional(), // Force async chunked generation
+  thinkingEnabled: z.boolean().optional(), // Enable extended thinking (Anthropic models)
+  thinkingBudget: z.number().int().positive().max(65536).optional(), // Token budget for thinking
 }).refine(data => !!(data.brief || data.specBrief), {
   message: 'brief (or specBrief) is required',
   path: ['brief'],
@@ -903,6 +905,8 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     const storyCount: number = rawCount === 0 ? 0 : Math.min(500, Math.max(1, rawCount || 8));
     const requestedModel: string | undefined = req.body.model;
     const multiPass: boolean = req.body.multiPass === true;
+    const thinkingEnabled: boolean = req.body.thinkingEnabled === true;
+    const thinkingBudget: number | undefined = req.body.thinkingBudget;
 
     const effectiveTitle = title || brief;
 
@@ -1246,9 +1250,15 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
       const user = await getEffectiveUser(req);
       const vaultCreds = user ? await resolveVaultCreds(user.id, resolvedModel) : {};
+      const orPrefs = await getOpenRouterPrefs(resolvedModel);
       const chatOpts: import('../lib/llm-client').ChatOptions = {
         model: resolvedModel,
         ...vaultCreds,
+        ...(thinkingEnabled ? {
+          thinking: { type: 'enabled' as const, budgetTokens: thinkingBudget || 8192 },
+          maxTokens: (thinkingBudget || 8192) + 16384,
+        } : {}),
+        ...(orPrefs ? { openRouterProvider: orPrefs } : {}),
       };
 
       // Compute spec file path
@@ -1333,6 +1343,19 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
       const vaultCreds = await resolveVaultCreds(user.id, resolvedModel);
 
+      // Build shared chatOpts with thinking + OpenRouter provider prefs
+      const orPrefsMultiPass = await getOpenRouterPrefs(resolvedModel);
+      const specChatOpts: import('../lib/llm-client').ChatOptions = {
+        model: resolvedModel,
+        apiKey: vaultCreds.apiKey,
+        baseUrl: vaultCreds.baseUrl,
+        ...(thinkingEnabled ? {
+          thinking: { type: 'enabled' as const, budgetTokens: thinkingBudget || 8192 },
+          maxTokens: (thinkingBudget || 8192) + 16384,
+        } : {}),
+        ...(orPrefsMultiPass ? { openRouterProvider: orPrefsMultiPass } : {}),
+      };
+
       // ── Pass 1: PM Agent — coarse high-level stories ──
       await emitPassEvent(slug, 1, 'started', workspaceId);
 
@@ -1381,7 +1404,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
       const llmResult1 = await chatComplete(
         [{ role: 'user', content: pass1Prompt }],
-        { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+        specChatOpts,
       );
       pass1Usage = llmResult1.usage;
       usedProvider = getActiveProvider();
@@ -1490,7 +1513,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
       const llmResult2 = await chatComplete(
         [{ role: 'user', content: pass2Prompt }],
-        { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+        specChatOpts,
       );
       const pass2Usage = llmResult2.usage;
 
@@ -1595,7 +1618,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
         const llmResult3 = await chatComplete(
           [{ role: 'user', content: pass3Prompt }],
-          { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+          specChatOpts,
         );
         pass3Usage = llmResult3.usage;
 
@@ -1726,7 +1749,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
         const llmResult4 = await chatComplete(
           [{ role: 'user', content: pass4Prompt }],
-          { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+          specChatOpts,
         );
         pass4Usage = llmResult4.usage;
 
@@ -1818,7 +1841,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
           const llmResult5a = await chatComplete(
             [{ role: 'user', content: pass5aPrompt }],
-            { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+            specChatOpts,
           );
           pass5Usage.inputTokens += llmResult5a.usage.inputTokens;
           pass5Usage.outputTokens += llmResult5a.usage.outputTokens;
@@ -1887,7 +1910,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
           const llmResult5b = await chatComplete(
             [{ role: 'user', content: pass5bPrompt }],
-            { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+            specChatOpts,
           );
           pass5Usage.inputTokens += llmResult5b.usage.inputTokens;
           pass5Usage.outputTokens += llmResult5b.usage.outputTokens;
@@ -1996,7 +2019,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 
         const llmResult6 = await chatComplete(
           [{ role: 'user', content: pass6Prompt }],
-          { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+          specChatOpts,
         );
         pass6Usage = llmResult6.usage;
 
@@ -2071,9 +2094,14 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         const user = await getEffectiveUser(req);
         if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
         const vaultCreds = await resolveVaultCreds(user.id, resolvedModel);
+        const orPrefsFallback = await getOpenRouterPrefs(resolvedModel);
         const llmResult = await chatComplete(
           [{ role: 'user', content: fullPrompt }],
-          { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+          {
+            model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl,
+            ...(thinkingEnabled ? { thinking: { type: 'enabled' as const, budgetTokens: thinkingBudget || 8192 }, maxTokens: (thinkingBudget || 8192) + 16384 } : {}),
+            ...(orPrefsFallback ? { openRouterProvider: orPrefsFallback } : {}),
+          },
         );
         const rawResponse = llmResult.text;
         tokenUsage = llmResult.usage;
@@ -2108,9 +2136,14 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       const user = await getEffectiveUser(req);
       if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
       const vaultCreds = await resolveVaultCreds(user.id, resolvedModel);
+      const orPrefsSdk = await getOpenRouterPrefs(resolvedModel);
       const llmResult = await chatComplete(
         [{ role: 'user', content: fullPrompt }],
-        { model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl },
+        {
+          model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl,
+          ...(thinkingEnabled ? { thinking: { type: 'enabled' as const, budgetTokens: thinkingBudget || 8192 }, maxTokens: (thinkingBudget || 8192) + 16384 } : {}),
+          ...(orPrefsSdk ? { openRouterProvider: orPrefsSdk } : {}),
+        },
       );
       const rawResponse = llmResult.text;
       tokenUsage = llmResult.usage;

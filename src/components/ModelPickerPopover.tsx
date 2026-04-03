@@ -204,7 +204,8 @@ export default function ModelPickerPopover({
       const qs = workspaceId ? `?workspaceId=${encodeURIComponent(workspaceId)}` : '';
       apiFetch<{ models: ModelOption[]; defaultModel: string }>(`/api/direction/models${qs}`)
         .then(data => {
-          setModels(data.models);
+          // OpenCode uses API keys — hide Anthropic models (those require Claude subscription)
+          setModels(data.models.filter(m => m.provider !== 'Anthropic'));
         })
         .catch(() => {
           setModels([]);
@@ -218,7 +219,8 @@ export default function ModelPickerPopover({
     if (!open) {
       setPopoverPos(null);
       setQuery('');
-      setCollapsed(new Set(['OpenRouter']));
+      // For OpenCode, OpenRouter is the primary model source — start expanded
+      setCollapsed(engine === 'opencode' ? new Set() : new Set(['OpenRouter']));
       return;
     }
 
