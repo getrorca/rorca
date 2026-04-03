@@ -32,6 +32,8 @@ import { ImagePreviewModal } from './ImagePreviewModal';
 import type { PanelId } from './Sidebar';
 import ContextSummaryCard from './ContextSummaryCard';
 import type { ContextSummary } from '../panels/SpecForgeOutput';
+import { SpecModelControlBar } from './SpecModelControlBar';
+import type { SpecModelFields } from './SpecModelControlBar';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -61,6 +63,10 @@ interface SpecDetailData {
   diagrams?: Record<string, { mermaid?: string; ascii?: string }>;
   mermaidDiagram?: string;
   model?: string;
+  agentOverride?: 'claude' | 'opencode' | 'codex' | null;
+  thinkingEnabled?: boolean;
+  thinkingBudget?: number;
+  effortLevel?: 'low' | 'medium' | 'high';
   readinessPercent?: number;
   [key: string]: unknown;
 }
@@ -492,7 +498,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; includeGraph?: boolean }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high'; thinkingEnabled?: boolean; thinkingBudget?: number }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -506,6 +512,9 @@ function SpecDetailContent({
           ...(options?.queue ? { queue: true } : {}),
           ...(autoWorktree && options?.autoMerge !== undefined ? { autoMerge: options.autoMerge } : {}),
           ...(options?.includeGraph ? { includeGraph: true } : {}),
+          ...(options?.effortLevel ? { effortLevel: options.effortLevel } : {}),
+          ...(options?.thinkingEnabled !== undefined ? { thinkingEnabled: options.thinkingEnabled } : {}),
+          ...(options?.thinkingBudget !== undefined ? { thinkingBudget: options.thinkingBudget } : {}),
         }) },
       );
       if (res.conflict) setRunState('conflict');
@@ -708,7 +717,15 @@ function SpecDetailContent({
             {activeTab === 'stories' && (
               <StoriesTabContent stories={stories} specId={specId} workspaceId={workspaceId ?? ''}
                 onToggleExclude={summary?.status === 'approved' ? handleToggleExclude : undefined}
-                onStoryUpdated={(updated) => setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))} />
+                onStoryUpdated={(updated) => setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))}
+                specModelFields={{
+                  agentOverride: detail?.agentOverride,
+                  model: detail?.model,
+                  thinkingEnabled: detail?.thinkingEnabled,
+                  thinkingBudget: detail?.thinkingBudget,
+                  effortLevel: detail?.effortLevel,
+                }}
+                onSpecModelUpdated={(fields) => setDetail(prev => prev ? { ...prev, ...fields, model: fields.model ?? undefined } : prev)} />
             )}
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} />}
@@ -763,7 +780,10 @@ function SpecDetailContent({
                 <>
                   {showTriggerPopover && (
                     <TriggerPopover loading={runState === 'triggering'} onTrigger={handleRun} onClose={() => setShowTriggerPopover(false)}
-                      specPath={`forge/specs/approved/${summary!.id}.json`} workspaceId={workspaceId ?? undefined} />
+                      specPath={`forge/specs/approved/${summary!.id}.json`} workspaceId={workspaceId ?? undefined}
+                      initialEffortLevel={detail?.effortLevel}
+                      initialThinkingEnabled={detail?.thinkingEnabled}
+                      initialThinkingBudget={detail?.thinkingBudget} />
                   )}
                   {hasActiveRun && runState !== 'triggering' && (
                     <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 mb-2 flex items-center gap-2">
@@ -878,11 +898,13 @@ function SpecDetailContent({
 
 /* ─── Stories Tab Content ──────────────────────────────────────────── */
 
-/** Compact chip showing a story's assigned model (or 'auto' if none). */
-function ModelBadge({ story, specId, workspaceId, onModelChanged }: {
+/** Compact chip showing a story's assigned model (or the spec-level model if none, or 'auto' if neither). */
+function ModelBadge({ story, specId, workspaceId, specModel, onModelChanged }: {
   story: Story;
   specId: string;
   workspaceId: string;
+  /** Spec-level model to display as fallback when story has no individual override */
+  specModel?: string | null;
   onModelChanged: (updated: Story) => void;
 }) {
   const [open, setOpen] = useState(false);
@@ -924,22 +946,33 @@ function ModelBadge({ story, specId, workspaceId, onModelChanged }: {
     }
   };
 
-  const label = story.model ?? 'auto';
-  const isAuto = !story.model;
+  // Story-level override takes precedence; fall back to spec-level model, then 'auto'
+  const hasStoryOverride = !!story.model;
+  const displayLabel = story.model ?? specModel ?? 'auto';
+  const isAuto = !story.model && !specModel;
+  const isSpecLevel = !story.model && !!specModel;
 
   return (
     <div ref={containerRef} className="relative inline-block">
       <button
         onClick={(e) => { e.stopPropagation(); setOpen(o => !o); }}
         className={`inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-mono border transition-colors ${
-          isAuto
-            ? 'bg-muted/10 text-muted border-border'
-            : 'bg-accent/10 text-accent border-accent/30'
+          hasStoryOverride
+            ? 'bg-accent/10 text-accent border-accent/30'
+            : isSpecLevel
+              ? 'bg-blue-500/10 text-blue-400 border-blue-500/30'
+              : 'bg-muted/10 text-muted border-border'
         }`}
-        title={isAuto ? 'Auto-assigned model — click to override' : `Model: ${story.model}`}
+        title={
+          hasStoryOverride
+            ? `Story override: ${story.model}`
+            : isSpecLevel
+              ? `Spec-level model: ${specModel} — click to override for this story`
+              : 'Auto-assigned model — click to override'
+        }
       >
         <Cpu size={9} />
-        {label}
+        {displayLabel}
       </button>
 
       {open && (
@@ -952,12 +985,12 @@ function ModelBadge({ story, specId, workspaceId, onModelChanged }: {
             onChange={e => patchModel(e.target.value || null)}
             disabled={saving}
           >
-            <option value="">auto (let pipeline decide)</option>
+            <option value="">{specModel ? `spec default (${specModel})` : 'auto (let pipeline decide)'}</option>
             {models.map(m => <option key={m} value={m}>{m}</option>)}
           </select>
           <button
             onClick={() => patchModel(null)}
-            disabled={saving || isAuto}
+            disabled={saving || !hasStoryOverride}
             className="w-full text-xs px-2 py-1 rounded border border-border text-muted hover:text-text disabled:opacity-40 transition-colors"
           >
             {saving ? <Loader2 size={10} className="animate-spin mx-auto" /> : 'Clear override'}
@@ -968,12 +1001,20 @@ function ModelBadge({ story, specId, workspaceId, onModelChanged }: {
   );
 }
 
-function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onStoryUpdated }: {
+function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onStoryUpdated, specModelFields, onSpecModelUpdated }: {
   stories: Story[];
   specId: string;
   workspaceId: string;
   onToggleExclude?: (storyId: string) => void;
   onStoryUpdated?: (story: Story) => void;
+  specModelFields?: {
+    agentOverride?: 'claude' | 'opencode' | 'codex' | null;
+    model?: string | null;
+    thinkingEnabled?: boolean;
+    thinkingBudget?: number;
+    effortLevel?: 'low' | 'medium' | 'high';
+  };
+  onSpecModelUpdated?: (fields: SpecModelFields) => void;
 }) {
   const toast = useGlobalToast();
   const [editingStoryId, setEditingStoryId] = useState<string | null>(null);
@@ -1012,13 +1053,38 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
   };
 
   if (stories.length === 0) {
-    return <div className="flex items-center justify-center h-full text-muted text-sm">No stories found in this spec</div>;
+    return (
+      <>
+        <SpecModelControlBar
+          specId={specId}
+          workspaceId={workspaceId}
+          initialEngine={specModelFields?.agentOverride ?? undefined}
+          initialModel={specModelFields?.model ?? undefined}
+          initialThinkingEnabled={specModelFields?.thinkingEnabled}
+          initialThinkingBudget={specModelFields?.thinkingBudget}
+          initialEffortLevel={specModelFields?.effortLevel}
+          onSpecUpdated={onSpecModelUpdated}
+        />
+        <div className="flex items-center justify-center h-full text-muted text-sm">No stories found in this spec</div>
+      </>
+    );
   }
 
   const deferredCount = stories.filter(s => s.excluded && !s.passes).length;
   const allStoryIds = new Set(stories.map(s => s.id));
 
   return (
+    <>
+      <SpecModelControlBar
+        specId={specId}
+        workspaceId={workspaceId}
+        initialEngine={specModelFields?.agentOverride ?? undefined}
+        initialModel={specModelFields?.model ?? undefined}
+        initialThinkingEnabled={specModelFields?.thinkingEnabled}
+        initialThinkingBudget={specModelFields?.thinkingBudget}
+        initialEffortLevel={specModelFields?.effortLevel}
+        onSpecUpdated={onSpecModelUpdated}
+      />
     <div className="p-4 space-y-2">
       <div className="flex items-center justify-between">
         <span className="text-xs text-muted">
@@ -1054,6 +1120,7 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
                     story={story}
                     specId={specId}
                     workspaceId={workspaceId}
+                    specModel={specModelFields?.model ?? undefined}
                     onModelChanged={(updated) => onStoryUpdated?.(updated)}
                   />
                 } />
@@ -1066,6 +1133,7 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
         ),
       )}
     </div>
+    </>
   );
 }
 
