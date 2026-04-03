@@ -10865,12 +10865,24 @@ router.delete('/:specId/attachments/:attachmentId', async (req: Request, res: Re
   res.status(204).send();
 });
 
+const UpdateSpecSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  model: z.string().optional(),
+  title: z.string().optional(),
+  _notes: z.string().optional(),
+  autoWorktree: z.boolean().optional(),
+  agentOverride: z.enum(['claude', 'opencode', 'codex']).optional(),
+  thinkingEnabled: z.boolean().optional(),
+  thinkingBudget: z.number().optional(),
+  effortLevel: z.enum(['low', 'medium', 'high']).optional(),
+});
+
 /**
  * @swagger
  * /api/specs/{specId}:
  *   put:
  *     summary: Update spec-level metadata
- *     description: Updates top-level metadata fields (model, title, _notes) without touching userStories.
+ *     description: Updates top-level metadata fields (model, title, _notes, agentOverride, thinkingEnabled, thinkingBudget, effortLevel) without touching userStories.
  *     tags: [Specs]
  *     parameters:
  *       - in: path
@@ -10898,6 +10910,20 @@ router.delete('/:specId/attachments/:attachmentId', async (req: Request, res: Re
  *               _notes:
  *                 type: string
  *                 description: Internal notes for the spec
+ *               agentOverride:
+ *                 type: string
+ *                 enum: [claude, opencode, codex]
+ *                 description: Override the execution agent for this spec
+ *               thinkingEnabled:
+ *                 type: boolean
+ *                 description: Enable extended thinking for this spec
+ *               thinkingBudget:
+ *                 type: number
+ *                 description: Token budget for extended thinking
+ *               effortLevel:
+ *                 type: string
+ *                 enum: [low, medium, high]
+ *                 description: Effort level hint for execution
  *             required:
  *               - workspaceId
  *     responses:
@@ -10918,15 +10944,29 @@ router.delete('/:specId/attachments/:attachmentId', async (req: Request, res: Re
  *                   type: string
  *                 storyCount:
  *                   type: number
+ *                 agentOverride:
+ *                   type: string
+ *                 thinkingEnabled:
+ *                   type: boolean
+ *                 thinkingBudget:
+ *                   type: number
+ *                 effortLevel:
+ *                   type: string
  *       400:
- *         description: Missing required parameter
+ *         description: Missing required parameter or invalid field value
  *       404:
  *         description: Workspace or spec not found
  */
 router.put('/:specId', async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
-    const { workspaceId, model, title, _notes, autoWorktree } = req.body;
+
+    const parseResult = UpdateSpecSchema.safeParse(req.body);
+    if (!parseResult.success) {
+      throw new ValidationError(parseResult.error.errors.map(e => e.message).join(', '));
+    }
+
+    const { workspaceId, model, title, _notes, autoWorktree, agentOverride, thinkingEnabled, thinkingBudget, effortLevel } = parseResult.data;
 
     if (!workspaceId) {
       throw new ValidationError('Missing required body param: workspaceId');
@@ -10960,6 +11000,10 @@ router.put('/:specId', async (req: Request, res: Response) => {
     if (title !== undefined) content.title = title;
     if (_notes !== undefined) content._notes = _notes;
     if (autoWorktree !== undefined) content.autoWorktree = !!autoWorktree;
+    if (agentOverride !== undefined) content.agentOverride = agentOverride;
+    if (thinkingEnabled !== undefined) content.thinkingEnabled = thinkingEnabled;
+    if (thinkingBudget !== undefined) content.thinkingBudget = thinkingBudget;
+    if (effortLevel !== undefined) content.effortLevel = effortLevel;
 
     const specStatus = fs.existsSync(approvedFile) ? 'approved' : 'pending';
     fs.writeFileSync(specFile, JSON.stringify(content, null, 2), 'utf8');
@@ -10972,6 +11016,10 @@ router.put('/:specId', async (req: Request, res: Response) => {
       model: content.model,
       _notes: content._notes,
       autoWorktree: content.autoWorktree,
+      agentOverride: content.agentOverride,
+      thinkingEnabled: content.thinkingEnabled,
+      thinkingBudget: content.thinkingBudget,
+      effortLevel: content.effortLevel,
       storyCount: userStories.length,
     });
   } catch (error: any) {
