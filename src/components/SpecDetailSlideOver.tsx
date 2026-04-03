@@ -32,6 +32,8 @@ import { ImagePreviewModal } from './ImagePreviewModal';
 import type { PanelId } from './Sidebar';
 import ContextSummaryCard from './ContextSummaryCard';
 import type { ContextSummary } from '../panels/SpecForgeOutput';
+import { SpecModelControlBar } from './SpecModelControlBar';
+import type { SpecModelFields } from './SpecModelControlBar';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -61,6 +63,10 @@ interface SpecDetailData {
   diagrams?: Record<string, { mermaid?: string; ascii?: string }>;
   mermaidDiagram?: string;
   model?: string;
+  agentOverride?: 'claude' | 'opencode' | 'codex' | null;
+  thinkingEnabled?: boolean;
+  thinkingBudget?: number;
+  effortLevel?: 'low' | 'medium' | 'high';
   readinessPercent?: number;
   [key: string]: unknown;
 }
@@ -711,7 +717,15 @@ function SpecDetailContent({
             {activeTab === 'stories' && (
               <StoriesTabContent stories={stories} specId={specId} workspaceId={workspaceId ?? ''}
                 onToggleExclude={summary?.status === 'approved' ? handleToggleExclude : undefined}
-                onStoryUpdated={(updated) => setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))} />
+                onStoryUpdated={(updated) => setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))}
+                specModelFields={{
+                  agentOverride: detail?.agentOverride,
+                  model: detail?.model,
+                  thinkingEnabled: detail?.thinkingEnabled,
+                  thinkingBudget: detail?.thinkingBudget,
+                  effortLevel: detail?.effortLevel,
+                }}
+                onSpecModelUpdated={(fields) => setDetail(prev => prev ? { ...prev, ...fields } : prev)} />
             )}
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} />}
@@ -971,12 +985,20 @@ function ModelBadge({ story, specId, workspaceId, onModelChanged }: {
   );
 }
 
-function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onStoryUpdated }: {
+function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onStoryUpdated, specModelFields, onSpecModelUpdated }: {
   stories: Story[];
   specId: string;
   workspaceId: string;
   onToggleExclude?: (storyId: string) => void;
   onStoryUpdated?: (story: Story) => void;
+  specModelFields?: {
+    agentOverride?: 'claude' | 'opencode' | 'codex' | null;
+    model?: string | null;
+    thinkingEnabled?: boolean;
+    thinkingBudget?: number;
+    effortLevel?: 'low' | 'medium' | 'high';
+  };
+  onSpecModelUpdated?: (fields: SpecModelFields) => void;
 }) {
   const toast = useGlobalToast();
   const [editingStoryId, setEditingStoryId] = useState<string | null>(null);
@@ -1015,13 +1037,38 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
   };
 
   if (stories.length === 0) {
-    return <div className="flex items-center justify-center h-full text-muted text-sm">No stories found in this spec</div>;
+    return (
+      <>
+        <SpecModelControlBar
+          specId={specId}
+          workspaceId={workspaceId}
+          initialEngine={specModelFields?.agentOverride ?? undefined}
+          initialModel={specModelFields?.model ?? undefined}
+          initialThinkingEnabled={specModelFields?.thinkingEnabled}
+          initialThinkingBudget={specModelFields?.thinkingBudget}
+          initialEffortLevel={specModelFields?.effortLevel}
+          onSpecUpdated={onSpecModelUpdated}
+        />
+        <div className="flex items-center justify-center h-full text-muted text-sm">No stories found in this spec</div>
+      </>
+    );
   }
 
   const deferredCount = stories.filter(s => s.excluded && !s.passes).length;
   const allStoryIds = new Set(stories.map(s => s.id));
 
   return (
+    <>
+      <SpecModelControlBar
+        specId={specId}
+        workspaceId={workspaceId}
+        initialEngine={specModelFields?.agentOverride ?? undefined}
+        initialModel={specModelFields?.model ?? undefined}
+        initialThinkingEnabled={specModelFields?.thinkingEnabled}
+        initialThinkingBudget={specModelFields?.thinkingBudget}
+        initialEffortLevel={specModelFields?.effortLevel}
+        onSpecUpdated={onSpecModelUpdated}
+      />
     <div className="p-4 space-y-2">
       <div className="flex items-center justify-between">
         <span className="text-xs text-muted">
@@ -1069,6 +1116,7 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
         ),
       )}
     </div>
+    </>
   );
 }
 
