@@ -2,7 +2,7 @@
  * SpecModelControlBar — horizontal bar composing EngineSelector + ModelPickerPopover + ThinkingControls.
  *
  * Reads initial state from spec JSON fields (agentOverride, model, thinkingEnabled,
- * thinkingBudget, effortLevel). Any change persists via PUT /api/specs/:specId.
+ * effortLevel). Any change persists via PUT /api/specs/:specId.
  *
  * Layout: engine pills (left) | model picker (center) | thinking controls (right)
  * Height: ~48px collapsed, expands when thinking toggle is on.
@@ -27,7 +27,7 @@ export interface SpecModelControlBarProps {
   initialModel?: string | null;
   /** Initial thinking enabled flag from spec JSON */
   initialThinkingEnabled?: boolean;
-  /** Initial thinking budget (tokens) from spec JSON */
+  /** Initial thinking budget (tokens) from spec JSON — kept for backward compat but unused in UI */
   initialThinkingBudget?: number;
   /** Initial effort level from spec JSON */
   initialEffortLevel?: EffortLevel;
@@ -48,7 +48,6 @@ export interface SpecModelFields {
 const DEFAULT_ENGINE: EngineValue = 'claude';
 const DEFAULT_MODEL = 'claude-sonnet-4-6';
 const DEFAULT_EFFORT: EffortLevel = 'medium';
-const DEFAULT_BUDGET = 5000;
 
 /* ─── Component ──────────────────────────────────────────────────────────── */
 
@@ -58,14 +57,12 @@ export function SpecModelControlBar({
   initialEngine,
   initialModel,
   initialThinkingEnabled = false,
-  initialThinkingBudget = DEFAULT_BUDGET,
   initialEffortLevel = DEFAULT_EFFORT,
   onSpecUpdated,
 }: SpecModelControlBarProps) {
   const [engine, setEngine] = useState<EngineValue>(initialEngine ?? DEFAULT_ENGINE);
   const [model, setModel] = useState<string>(initialModel ?? DEFAULT_MODEL);
   const [thinkingEnabled, setThinkingEnabled] = useState(initialThinkingEnabled);
-  const [thinkingBudget, setThinkingBudget] = useState(initialThinkingBudget);
   const [effortLevel, setEffortLevel] = useState<EffortLevel>(initialEffortLevel);
   const [saving, setSaving] = useState(false);
 
@@ -106,11 +103,6 @@ export function SpecModelControlBar({
     persist({ thinkingEnabled: next });
   }, [persist]);
 
-  const handleThinkingBudgetChange = useCallback((next: number) => {
-    setThinkingBudget(next);
-    persist({ thinkingBudget: next });
-  }, [persist]);
-
   return (
     <div className="flex flex-col gap-0 border-b border-border/60 bg-[var(--surface-100,var(--bg))] shrink-0">
       {/* Main row: engine | model | saving indicator */}
@@ -146,8 +138,6 @@ export function SpecModelControlBar({
             onEffortChange={handleEffortChange}
             thinkingEnabled={thinkingEnabled}
             onThinkingEnabledChange={handleThinkingEnabledChange}
-            thinkingBudget={thinkingBudget}
-            onThinkingBudgetChange={handleThinkingBudgetChange}
           />
         </div>
       )}

@@ -2123,6 +2123,22 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Advanced options
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
+  // Extended thinking (persisted in localStorage)
+  const [thinkingEnabled, setThinkingEnabled] = useState(() => {
+    try { return localStorage.getItem('rorca:forge:thinkingEnabled') === 'true'; } catch { return false; }
+  });
+  const THINKING_BUDGET_PRESETS = [
+    { label: 'Low', value: 4096 },
+    { label: 'Medium', value: 8192 },
+    { label: 'High', value: 16384 },
+    { label: 'Max', value: 32768 },
+  ] as const;
+  const [thinkingBudget, setThinkingBudget] = useState(() => {
+    try { const v = localStorage.getItem('rorca:forge:thinkingBudget'); return v ? parseInt(v, 10) : 8192; } catch { return 8192; }
+  });
+  useEffect(() => { try { localStorage.setItem('rorca:forge:thinkingEnabled', String(thinkingEnabled)); } catch {} }, [thinkingEnabled]);
+  useEffect(() => { try { localStorage.setItem('rorca:forge:thinkingBudget', String(thinkingBudget)); } catch {} }, [thinkingBudget]);
+
   // Auto-match & auto-suggest toggles (persisted in localStorage)
   const [autoMatchSkills, setAutoMatchSkills] = useState(() => {
     try { const v = localStorage.getItem('rorca:forge:autoMatchSkills'); return v !== 'false'; } catch { return true; }
@@ -2372,7 +2388,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     try {
       const result = await apiFetch<GeneratedSpec>('/api/specs/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
-        body: JSON.stringify({ workspaceId, domain: workspace?.domain || undefined, specName: specName || undefined, storyCount, specBrief, model: selectedModel || undefined }),
+        body: JSON.stringify({ workspaceId, domain: workspace?.domain || undefined, specName: specName || undefined, storyCount, specBrief, model: selectedModel || undefined, ...(thinkingEnabled ? { thinkingEnabled, thinkingBudget } : {}) }),
       });
       setApiDone(true);
       // Map backend response fields: backend returns { slug, title } but GeneratedSpec expects { slug, specName }
@@ -2982,6 +2998,35 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                       className="w-16 px-2 py-2 text-sm bg-panel border border-border rounded text-text outline-none focus:border-accent transition-colors text-center" autoFocus />
                   )}
                 </div>
+              </div>
+
+              {/* Extended Thinking */}
+              <div className="border-t border-border mt-4 pt-4 space-y-3">
+                <span className="text-xs font-semibold uppercase tracking-wider text-muted">Reasoning</span>
+
+                <label className="flex items-center gap-2 cursor-pointer group">
+                  <button type="button" role="switch" aria-checked={thinkingEnabled} onClick={() => setThinkingEnabled(v => !v)}
+                    className={`relative w-8 h-[18px] rounded-full transition-colors ${thinkingEnabled ? 'bg-accent' : 'bg-border group-hover:bg-muted/40'}`}>
+                    <span className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-switch-knob transition-transform ${thinkingEnabled ? 'translate-x-[14px]' : ''}`} />
+                  </button>
+                  <span className="text-xs font-medium text-text">Extended thinking</span>
+                  <span className="text-[10px] text-muted">(Anthropic models)</span>
+                </label>
+
+                {thinkingEnabled && (
+                  <div className="ml-10 space-y-2">
+                    <label className="block text-xs font-medium text-muted mb-1">Thinking Budget</label>
+                    <div className="flex gap-1.5">
+                      {THINKING_BUDGET_PRESETS.map(({ label, value }) => (
+                        <button key={value} type="button" onClick={() => setThinkingBudget(value)}
+                          className={`px-2.5 py-1 text-xs rounded transition-colors ${thinkingBudget === value ? 'bg-accent text-white' : 'bg-panel border border-border text-text hover:border-accent/50'}`}>
+                          {label}
+                        </button>
+                      ))}
+                    </div>
+                    <p className="text-[10px] text-muted">{thinkingBudget.toLocaleString()} tokens — higher = deeper reasoning, more cost</p>
+                  </div>
+                )}
               </div>
 
               {/* Skills & Models */}

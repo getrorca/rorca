@@ -564,4 +564,106 @@ export async function getVaultKey(userId: string, provider: string): Promise<Vau
   }
 }
 
+// ─── OpenRouter Provider Preferences ─────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/vault/openrouter-provider-prefs:
+ *   get:
+ *     tags: [Vault]
+ *     summary: List all OpenRouter provider routing preferences
+ *     operationId: getOpenRouterProviderPrefs
+ *     responses:
+ *       200:
+ *         description: Array of per-model provider routing preferences
+ */
+router.get('/openrouter-provider-prefs', async (_req: Request, res: Response) => {
+  try {
+    const rows = await query<{
+      id: string; model_id: string; pref_order: string[] | null;
+      ignore_list: string[] | null; allow_fallbacks: boolean;
+    }>('SELECT * FROM openrouter_provider_prefs ORDER BY model_id');
+    res.json(rows.map(r => ({
+      id: r.id,
+      modelId: r.model_id,
+      order: r.pref_order ?? [],
+      ignore: r.ignore_list ?? [],
+      allowFallbacks: r.allow_fallbacks,
+    })));
+  } catch (err) { handleRouteError(res, err); }
+});
+
+/**
+ * @swagger
+ * /api/vault/openrouter-provider-prefs:
+ *   put:
+ *     tags: [Vault]
+ *     summary: Upsert OpenRouter provider routing preferences for a model
+ *     operationId: putOpenRouterProviderPrefs
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [modelId]
+ *             properties:
+ *               modelId:
+ *                 type: string
+ *               order:
+ *                 type: array
+ *                 items: { type: string }
+ *               ignore:
+ *                 type: array
+ *                 items: { type: string }
+ *               allowFallbacks:
+ *                 type: boolean
+ */
+router.put('/openrouter-provider-prefs', async (req: Request, res: Response) => {
+  try {
+    const { modelId, order, ignore, allowFallbacks } = req.body;
+    if (!modelId || typeof modelId !== 'string') throw new ValidationError('modelId is required');
+
+    const row = await queryOne<{ id: string }>(
+      `INSERT INTO openrouter_provider_prefs (model_id, pref_order, ignore_list, allow_fallbacks)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT (model_id)
+       DO UPDATE SET pref_order = $2, ignore_list = $3, allow_fallbacks = $4, updated_at = NOW()
+       RETURNING id`,
+      [modelId, order ?? [], ignore ?? [], allowFallbacks ?? true],
+    );
+    res.json({ ok: true, id: row?.id, modelId });
+  } catch (err) { handleRouteError(res, err); }
+});
+
+/**
+ * @swagger
+ * /api/vault/openrouter-provider-prefs/{modelId}:
+ *   delete:
+ *     tags: [Vault]
+ *     summary: Delete OpenRouter provider routing preferences for a model
+ *     operationId: deleteOpenRouterProviderPrefs
+ */
+router.delete('/openrouter-provider-prefs/:modelId', async (req: Request, res: Response) => {
+  try {
+    const { modelId } = req.params;
+    await execute('DELETE FROM openrouter_provider_prefs WHERE model_id = $1', [modelId]);
+    res.json({ ok: true });
+  } catch (err) { handleRouteError(res, err); }
+});
+
+/** Look up DB-stored provider prefs for a model, returns null if none saved. */
+export async function getOpenRouterPrefs(modelId: string): Promise<{ order?: string[]; ignore?: string[]; allow_fallbacks?: boolean } | null> {
+  const row = await queryOne<{ pref_order: string[] | null; ignore_list: string[] | null; allow_fallbacks: boolean }>(
+    'SELECT pref_order, ignore_list, allow_fallbacks FROM openrouter_provider_prefs WHERE model_id = $1',
+    [modelId],
+  );
+  if (!row) return null;
+  return {
+    order: row.pref_order ?? undefined,
+    ignore: row.ignore_list ?? undefined,
+    allow_fallbacks: row.allow_fallbacks,
+  };
+}
+
 export default router;
