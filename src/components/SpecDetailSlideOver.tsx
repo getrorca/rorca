@@ -492,7 +492,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; includeGraph?: boolean }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high'; thinkingEnabled?: boolean; thinkingBudget?: number }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -506,6 +506,9 @@ function SpecDetailContent({
           ...(options?.queue ? { queue: true } : {}),
           ...(autoWorktree && options?.autoMerge !== undefined ? { autoMerge: options.autoMerge } : {}),
           ...(options?.includeGraph ? { includeGraph: true } : {}),
+          ...(options?.effortLevel ? { effortLevel: options.effortLevel } : {}),
+          ...(options?.thinkingEnabled !== undefined ? { thinkingEnabled: options.thinkingEnabled } : {}),
+          ...(options?.thinkingBudget !== undefined ? { thinkingBudget: options.thinkingBudget } : {}),
         }) },
       );
       if (res.conflict) setRunState('conflict');

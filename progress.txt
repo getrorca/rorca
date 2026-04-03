@@ -3,7 +3,7 @@
 Spec: rorca-billing-launch
 Run ID: 20260316000045
 Started: 2026-03-19T20:45:48.038Z
-Last Updated: 2026-04-03T18:52:18.820Z
+Last Updated: 2026-04-03T18:52:02.772Z
 
 ## Completed Stories (12)
 - BL-012: Billing webhook idempotency — prevent duplicate billing state transitions — DONE (claude, 33s)
@@ -17,4 +17,4 @@ Last Updated: 2026-04-03T18:52:18.820Z
 - US-009: Emit graph_hits count in WAL events from execution-engine — DONE (claude, 275s)
 - US-010: Graceful degradation and integration tests for knowledge graph UI — DONE (claude, 1470s)
 - MP-004: Build EngineSelector segmented control component — DONE (claude, claude-sonnet-4-6, 152s)
-- MP-005: Build ModelPickerPopover component with virtualized list and search — DONE (claude, claude-sonnet-4-6, 360s)
+- MP-006: Build ThinkingControls component with effort segmented control, toggle, and budget slider — DONE (claude, claude-sonnet-4-6, 344s)
