@@ -19,11 +19,25 @@ export interface ChatResult {
   usage: TokenUsage;
 }
 
+/** OpenRouter provider routing preferences. */
+export interface OpenRouterProviderPrefs {
+  order?: string[];
+  ignore?: string[];
+  allow_fallbacks?: boolean;
+  require_parameters?: boolean;
+}
+
 export interface ChatOptions {
   model?: string;
   apiKey?: string;
   provider?: ProviderType;
   baseUrl?: string;
+  /** Enable extended thinking for Anthropic models. */
+  thinking?: { type: 'enabled'; budgetTokens: number };
+  /** Override default max_tokens (16384). When thinking is enabled, increase this. */
+  maxTokens?: number;
+  /** OpenRouter provider routing preferences (order, ignore, allow_fallbacks). */
+  openRouterProvider?: OpenRouterProviderPrefs;
 }
 
 // ─── Model Registry ──────────────────────────────────────────────────────────
@@ -419,13 +433,33 @@ function chatCompleteCLI(messages: ChatMessage[], model?: string): Promise<ChatR
 
 // ─── Anthropic SDK ───────────────────────────────────────────────────────────
 
-async function chatCompleteAnthropic(messages: ChatMessage[], model: string, apiKey: string): Promise<ChatResult> {
+async function chatCompleteAnthropic(
+  messages: ChatMessage[],
+  model: string,
+  apiKey: string,
+  opts?: Pick<ChatOptions, 'thinking' | 'maxTokens'>,
+): Promise<ChatResult> {
   const client = new Anthropic({ apiKey });
-  const response = await client.messages.create({
+  const maxTokens = opts?.maxTokens ?? 16384;
+
+  const createParams: Record<string, unknown> = {
     model,
-    max_tokens: 16384,
+    max_tokens: maxTokens,
     messages: messages.map(m => ({ role: m.role, content: m.content })),
-  });
+  };
+
+  if (opts?.thinking) {
+    createParams.thinking = {
+      type: 'enabled',
+      budget_tokens: opts.thinking.budgetTokens,
+    };
+    // When thinking is enabled, max_tokens must be > budget_tokens
+    if (maxTokens <= opts.thinking.budgetTokens) {
+      createParams.max_tokens = opts.thinking.budgetTokens + 16384;
+    }
+  }
+
+  const response = await client.messages.create(createParams as Parameters<typeof client.messages.create>[0]);
 
   const text = response.content
     .filter((b): b is Anthropic.TextBlock => b.type === 'text')
@@ -448,6 +482,7 @@ async function chatCompleteOpenAICompat(
   model: string,
   apiKey: string,
   baseUrl?: string,
+  opts?: Pick<ChatOptions, 'maxTokens'>,
 ): Promise<ChatResult> {
   const client = new OpenAI({
     apiKey,
@@ -457,7 +492,7 @@ async function chatCompleteOpenAICompat(
   const response = await client.chat.completions.create({
     model,
     messages: messages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-    max_tokens: 16384,
+    max_tokens: opts?.maxTokens ?? 16384,
   });
 
   const text = response.choices[0]?.message?.content ?? '';
@@ -474,7 +509,28 @@ async function chatCompleteOpenAICompat(
 
 // ─── OpenRouter ──────────────────────────────────────────────────────────────
 
-async function chatCompleteOpenRouter(messages: ChatMessage[], model: string, apiKey: string): Promise<ChatResult> {
+/** Built-in OpenRouter provider routing defaults for models with known provider issues. */
+const GLM5_PREFS: OpenRouterProviderPrefs = { order: ['DeepInfra', 'SiliconFlow', 'AtlasCloud'], ignore: ['Ambient'], allow_fallbacks: true };
+const OPENROUTER_PROVIDER_DEFAULTS: Record<string, OpenRouterProviderPrefs> = {
+  // GLM-5 base: Ambient caps at 80K; prefer full-context providers for full 200K
+  'z-ai/glm-5': GLM5_PREFS,
+};
+
+/**
+ * Context window overrides for models where OpenRouter reports the wrong value
+ * (usually because the cheapest provider has a lower cap than the model supports).
+ * Only override models that are KNOWN to report wrong values — turbo variants are fine.
+ */
+const CONTEXT_WINDOW_OVERRIDES: Record<string, number> = {
+  'z-ai/glm-5': 200000,
+};
+
+async function chatCompleteOpenRouter(
+  messages: ChatMessage[],
+  model: string,
+  apiKey: string,
+  opts?: Pick<ChatOptions, 'maxTokens' | 'openRouterProvider'>,
+): Promise<ChatResult> {
   const client = new OpenAI({
     apiKey,
     baseURL: OPENROUTER_BASE_URL,
@@ -484,11 +540,27 @@ async function chatCompleteOpenRouter(messages: ChatMessage[], model: string, ap
     },
   });
 
-  const response = await client.chat.completions.create({
+  // Merge: explicit opts > DB-stored prefs (passed via opts) > built-in defaults > nothing
+  const builtInPrefs = OPENROUTER_PROVIDER_DEFAULTS[model];
+  const providerPrefs = opts?.openRouterProvider ?? builtInPrefs;
+
+  const createParams: Record<string, unknown> = {
     model,
     messages: messages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
-    max_tokens: 16384,
-  });
+    max_tokens: opts?.maxTokens ?? 16384,
+  };
+
+  if (providerPrefs) {
+    createParams.provider = providerPrefs;
+  }
+
+  // Enable reasoning/thinking for models that support it.
+  // GLM-5: thinking mode with highest effort by default.
+  if (/glm-?5/i.test(model) && !model.includes('turbo') && !model.includes('flash')) {
+    createParams.reasoning = { effort: 'high' };
+  }
+
+  const response = await client.chat.completions.create(createParams as Parameters<typeof client.chat.completions.create>[0]);
 
   const text = response.choices[0]?.message?.content ?? '';
   const usage = response.usage;
@@ -538,7 +610,7 @@ export async function fetchOpenRouterModels(apiKey: string): Promise<ModelInfo[]
       providerType: 'openrouter' as ProviderType,
       costPer1kInput: inputCost,
       costPer1kOutput: outputCost,
-      contextWindow: (m as any).context_length ?? 128000,
+      contextWindow: CONTEXT_WINDOW_OVERRIDES[m.id] ?? (m as any).context_length ?? 128000,
       speedTier: 'medium' as SpeedTier,
       costTier: (avgCost === 0 ? 'free' : avgCost < 0.002 ? 'low' : avgCost < 0.01 ? 'medium' : avgCost < 0.05 ? 'high' : 'premium') as CostTier,
     };
@@ -573,19 +645,19 @@ export function chatComplete(messages: ChatMessage[], modelOrOpts?: string | Cha
       if (!opts.apiKey) {
         throw new Error('Anthropic provider requires an API key (set via BYOB vault or ANTHROPIC_API_KEY)');
       }
-      return chatCompleteAnthropic(messages, model, opts.apiKey);
+      return chatCompleteAnthropic(messages, model, opts.apiKey, opts);
 
     case 'openai-compat':
       if (!opts.apiKey) {
         throw new Error('OpenAI-compatible provider requires an API key');
       }
-      return chatCompleteOpenAICompat(messages, model, opts.apiKey, opts.baseUrl);
+      return chatCompleteOpenAICompat(messages, model, opts.apiKey, opts.baseUrl, opts);
 
     case 'openrouter':
       if (!opts.apiKey) {
         throw new Error('OpenRouter provider requires an API key');
       }
-      return chatCompleteOpenRouter(messages, model, opts.apiKey);
+      return chatCompleteOpenRouter(messages, model, opts.apiKey, opts);
 
     default:
       throw new Error(`Unknown provider: ${provider}`);

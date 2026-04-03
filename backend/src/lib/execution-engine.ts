@@ -138,7 +138,7 @@ interface EngineConfig {
   /** Token budget for extended thinking (requires thinkingEnabled). */
   thinkingBudget?: number;
   /** Effort level hint for models that support it (e.g. 'low'|'medium'|'high'). */
-  effortLevel?: 'low' | 'medium' | 'high';
+  effortLevel?: 'low' | 'medium' | 'high' | 'max';
 }
 
 // ─── Escalation Tracking ─────────────────────────────────────────────────────
@@ -704,7 +704,7 @@ function runAgent(
   onTokenUpdate?: TokenUpdateCallback,
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
-  effortLevel?: 'low' | 'medium' | 'high',
+  effortLevel?: 'low' | 'medium' | 'high' | 'max',
 ): Promise<AgentResult> {
   switch (agentType) {
     case 'claude':
@@ -728,7 +728,7 @@ function spawnClaude(
   onTokenUpdate?: TokenUpdateCallback,
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
-  effortLevel?: 'low' | 'medium' | 'high',
+  effortLevel?: 'low' | 'medium' | 'high' | 'max',
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildCleanEnv();
@@ -1134,7 +1134,7 @@ function classifyOpenCodeError(result: AgentResult): ClassifiedError {
   if (lower.includes('enoent') || lower.includes('not found') || lower.includes('no such file')) {
     return {
       category: 'not_installed',
-      message: 'OpenCode binary not found. Install with: npm i -g opencode',
+      message: 'OpenCode binary not found. Install with: npm i -g opencode-ai',
       retryable: false,
     };
   }
@@ -3586,7 +3586,7 @@ function parseArgs(): EngineConfig {
   let includeGraph = false;
   let thinkingEnabled: boolean | undefined;
   let thinkingBudget: number | undefined;
-  let effortLevel: 'low' | 'medium' | 'high' | undefined;
+  let effortLevel: 'low' | 'medium' | 'high' | 'max' | undefined;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -3645,10 +3645,10 @@ function parseArgs(): EngineConfig {
         thinkingBudget = parseInt(args[++i], 10);
         break;
       case '--effort':
-        effortLevel = args[++i] as 'low' | 'medium' | 'high';
+        effortLevel = args[++i] as 'low' | 'medium' | 'high' | 'max';
         break;
       case '--effort-level':
-        effortLevel = args[++i] as 'low' | 'medium' | 'high';
+        effortLevel = args[++i] as 'low' | 'medium' | 'high' | 'max';
         break;
       default:
         logger.error(`Unknown arg: ${args[i]}`);

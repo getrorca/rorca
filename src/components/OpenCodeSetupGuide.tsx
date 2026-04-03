@@ -139,7 +139,7 @@ export default function OpenCodeSetupGuide({ onClose }: { onClose: () => void })
                   <Terminal size={12} className="text-accent shrink-0 mt-0.5" />
                   <div>
                     <span className="text-[var(--text)]">Install OpenCode</span>
-                    <code className="block text-[10px] text-muted mt-0.5 bg-bg px-1.5 py-0.5 rounded">npm i -g opencode</code>
+                    <code className="block text-[10px] text-muted mt-0.5 bg-bg px-1.5 py-0.5 rounded">npm i -g opencode-ai</code>
                   </div>
                 </div>
                 <div className="flex items-start gap-2 text-xs">

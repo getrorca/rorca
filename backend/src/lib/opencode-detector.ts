@@ -83,7 +83,7 @@ export function requireOpenCode(): OpenCodeStatus {
 
   if (!status.opencodeInstalled) {
     logger.error(
-      '\x1b[31m[FATAL] OpenCode not installed. Run: npm i -g opencode\x1b[0m'
+      '\x1b[31m[FATAL] OpenCode not installed. Run: npm i -g opencode-ai\x1b[0m'
     );
     logger.error(
       'Set RORCA_AGENT=claude to use Claude subscription instead, ' +
@@ -96,7 +96,7 @@ export function requireOpenCode(): OpenCodeStatus {
     logger.error(
       `\x1b[31m[FATAL] OpenCode version ${status.opencodeVersion} is below minimum required ${MIN_OPENCODE_VERSION}.\x1b[0m`
     );
-    logger.error('Run: npm i -g opencode@latest');
+    logger.error('Run: npm i -g opencode-ai@latest');
     process.exit(1);
   }
 
