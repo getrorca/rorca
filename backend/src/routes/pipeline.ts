@@ -1026,11 +1026,14 @@ const PipelineTriggerSchema = z.object({
   queuedRunId: z.number().optional(),
   queue: z.boolean().optional(),
   includeGraph: z.boolean().optional(),
+  thinkingEnabled: z.boolean().optional(),
+  thinkingBudget: z.number().int().positive().optional(),
+  effortLevel: z.enum(['low', 'medium', 'high']).optional(),
 });
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId, includeGraph } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, thinkingEnabled, thinkingBudget, effortLevel } = req.body;
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1080,8 +1083,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // 3. Resolve agent type and verify execution engine is available.
-    //    Priority: execution-engine.ts (universal) → bash run-loop.sh (legacy fallback)
-    const resolvedAgentType: AgentType = agentConfig.agentType;
+    //    Priority: request agentOverride > RORCA_AGENT env var > default (claude)
+    //    execution-engine.ts (universal) → bash run-loop.sh (legacy fallback)
+    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? agentConfig.agentType;
     // Model priority: RORCA_MODEL env var > workspace L3 preferred_model > null (agent default)
     const l3WorkspaceModel = workspaceId
       ? (await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined)?.preferred_model ?? null
@@ -1566,6 +1570,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       ...(startFromStoryId ? { startFromStoryId } : {}),
       triggeredVia,
       includeGraph: includeGraph ?? false,
+      ...(agentOverride ? { agentOverride } : {}),
+      ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
+      ...(thinkingBudget !== undefined ? { thinkingBudget } : {}),
+      ...(effortLevel ? { effortLevel } : {}),
     };
 
     await getBoss().send('pipeline:run', jobPayload, {
