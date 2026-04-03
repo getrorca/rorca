@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-03-26T06:33:52.695Z",
+  "lastUpdatedAt": "2026-04-03T18:41:33.859Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -93,6 +93,16 @@
       "finishedAt": "2026-03-26T06:33:52.695Z",
       "agentType": "claude",
       "elapsedMs": 1470210
+    },
+    {
+      "storyId": "MP-001",
+      "title": "Extend spec JSON schema and PUT /api/specs/:specId to persist engine + thinking fields",
+      "status": "passed",
+      "startedAt": "2026-04-03T18:37:38.529Z",
+      "finishedAt": "2026-04-03T18:41:33.859Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 235330
     }
   ],
   "failedStories": [],
