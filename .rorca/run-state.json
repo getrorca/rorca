@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-04-03T18:52:02.772Z",
+  "lastUpdatedAt": "2026-04-03T18:50:54.299Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -105,14 +105,14 @@
       "elapsedMs": 152256
     },
     {
-      "storyId": "MP-006",
-      "title": "Build ThinkingControls component with effort segmented control, toggle, and budget slider",
+      "storyId": "MP-009",
+      "title": "Add engine health status to GET /api/health and expose to frontend",
       "status": "passed",
-      "startedAt": "2026-04-03T18:46:18.749Z",
-      "finishedAt": "2026-04-03T18:52:02.772Z",
+      "startedAt": "2026-04-03T18:46:19.102Z",
+      "finishedAt": "2026-04-03T18:50:54.298Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 344023
+      "elapsedMs": 275196
     }
   ],
   "failedStories": [],
