@@ -151,6 +151,12 @@ interface TriggerPopoverProps {
   specPath?: string;
   /** Workspace ID for capability preflight check + orchestration preview */
   workspaceId?: string;
+  /** Pre-populate effort level from spec JSON */
+  initialEffortLevel?: EffortLevel;
+  /** Pre-populate thinking enabled from spec JSON */
+  initialThinkingEnabled?: boolean;
+  /** Pre-populate thinking budget from spec JSON */
+  initialThinkingBudget?: number;
 }
 
 export default function TriggerPopover({
@@ -162,6 +168,9 @@ export default function TriggerPopover({
   onNavigate,
   specPath,
   workspaceId,
+  initialEffortLevel,
+  initialThinkingEnabled,
+  initialThinkingBudget,
 }: TriggerPopoverProps) {
   const [autoWorktree, setAutoWorktree] = useState(false);
   const [autoMerge, setAutoMerge] = useState(true);
@@ -177,9 +186,9 @@ export default function TriggerPopover({
   const [driftCheckEnabled, setDriftCheckEnabled] = useState(false);
   const [forceSequential, setForceSequential] = useState(false);
   const [includeGraph, setIncludeGraph] = useState(false);
-  const [effortLevel, setEffortLevel] = useState<EffortLevel>('medium');
-  const [thinkingEnabled, setThinkingEnabled] = useState(false);
-  const [thinkingBudget, setThinkingBudget] = useState(5000);
+  const [effortLevel, setEffortLevel] = useState<EffortLevel>(initialEffortLevel ?? 'medium');
+  const [thinkingEnabled, setThinkingEnabled] = useState(initialThinkingEnabled ?? false);
+  const [thinkingBudget, setThinkingBudget] = useState(initialThinkingBudget ?? 5000);
   const ref = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
   const [portalStyle, setPortalStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
