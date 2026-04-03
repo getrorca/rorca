@@ -86,14 +86,20 @@ async function handleTokenTracking(event: WalEvent): Promise<void> {
       );
     }
 
-    // Record into token_usage analytics table
-    await recordTokenUsage(
-      runId,
-      event.story_id,
-      payload.input_tokens || 0,
-      payload.output_tokens || 0,
-      payload.model,
+    // Record into token_usage analytics table — skip if already recorded by story-result endpoint
+    const existing = await queryOne(
+      'SELECT id FROM token_usage WHERE run_id = $1 AND story_id = $2 LIMIT 1',
+      [runId, event.story_id],
     );
+    if (!existing) {
+      await recordTokenUsage(
+        runId,
+        event.story_id,
+        payload.input_tokens || 0,
+        payload.output_tokens || 0,
+        payload.model,
+      );
+    }
   } catch {
     // payload parse error — ignore
   }

@@ -66,7 +66,7 @@ interface SpecDetailData {
   agentOverride?: 'claude' | 'opencode' | 'codex' | null;
   thinkingEnabled?: boolean;
   thinkingBudget?: number;
-  effortLevel?: 'low' | 'medium' | 'high';
+  effortLevel?: 'low' | 'medium' | 'high' | 'max';
   readinessPercent?: number;
   [key: string]: unknown;
 }
@@ -498,7 +498,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high'; thinkingEnabled?: boolean; thinkingBudget?: number }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max'; thinkingEnabled?: boolean; thinkingBudget?: number }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -1012,7 +1012,7 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
     model?: string | null;
     thinkingEnabled?: boolean;
     thinkingBudget?: number;
-    effortLevel?: 'low' | 'medium' | 'high';
+    effortLevel?: 'low' | 'medium' | 'high' | 'max';
   };
   onSpecModelUpdated?: (fields: SpecModelFields) => void;
 }) {

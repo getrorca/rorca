@@ -444,3 +444,97 @@
 > Rule: pipeline.ts had inline plan enforcement blocks at the trigger and retry routes that threw ForbiddenError('plan_required') for free-plan users. Since local-admin defaults to plan='free' and billing-launch spec hasn't run, this blocked all pipeline runs. Removed both blocks — plan enforcement belongs in requirePlan middleware, not inline in route handlers.
 > Context: Lines ~1040-1049 and ~1933-1942 in pipeline.ts. Added by rorca-pipeline-queueing-and-worktrees spec. Did not manifest immediately because worker had old code cached in memory. Broke after worker restart loaded the new code. Fix: removed both blocks, left comment "Plan enforcement is handled by requirePlan middleware once billing-launch spec is complete."
 > Source: debugging session 2026-03-23
+## 2026-03-24 [Gotcha] local-admin user defaults to plan='free' — must be set to 'pro' manually
+> Rule: The default admin user (id='local-admin', email='admin@rorca.local') has plan='free' in the DB. Any plan gate will block it. Until billing-launch spec runs and sets up proper subscription records, manually set: UPDATE users SET plan='pro' WHERE id='local-admin';
+> Context: Discovered 2026-03-23 when pipeline trigger started returning 403 plan_required. getEffectiveUser() falls back to first user in DB (local-admin) when auth is bypassed globally. That user's plan='free' tripped the inline plan check added by rorca-pipeline-queueing-and-worktrees.
+> Source: debugging session 2026-03-23
+
+## 2026-03-24 [Bug Fix] Wave-parallel stale skipped flags — stories array and freshSpec were separate refs
+> Rule: In execution-engine.ts, stale flag clearing read a freshSpec from disk and cleared flags on freshSpec.userStories, but the stories array passed to runParallel() was loaded earlier and not updated. Since getStories() returns spec.userStories by reference, clearing must be done directly on the stories array (same object). Fixed by deleting skipped/blocked flags on stories[] directly and writing spec (not freshSpec) back to disk.
+> Context: Commit 11db1bc. Manifested as wave-parallel runs completing in 0.5s with "No executable stories" — all stories had stale skipped:true from a prior failed run. The freshSpec read was a different object entirely so clearing it had no effect on the stories array used for execution.
+> Source: debugging session 2026-03-23
+
+## 2026-03-25 [Bug Fix] Express 4 async error handler was broken — routes hung on thrown errors
+> Rule: The Layer.prototype.handle_request patch in async-handler.ts wrapped the original function, but Express 4's original does `try { fn(req, res, next) } catch` WITHOUT returning the Promise. So `result` was always undefined and `.catch(next)` never fired. Any async route that threw (ValidationError, NotFoundError) would hang forever. Fix: replace handle_request entirely, call `this.handle` directly, catch the returned Promise. Affected all routers (memory, agents, etc.) — not just one route.
+> Context: Discovered when MCP slash commands timed out on /rorca:get_memories. Root cause: GET /api/memory without workspaceId threw ValidationError but response never sent. Commit 6c8d3c5.
+> Source: debugging session 2026-03-25
+
+## 2026-03-25 [Bug Fix] Worker crashes on non-fatal AppError unhandledRejections
+> Rule: worker.ts process.on('unhandledRejection') triggered full shutdown on ANY rejection, including ValidationError/NotFoundError from Express routes (statusCode < 500). These are expected business-logic errors, not fatal. Fix: check if reason is an AppError with statusCode < 500 — if so, log warning and return without shutdown. Only truly unexpected rejections trigger shutdown.
+> Context: When the async handler fix started properly propagating errors, some leaked as unhandledRejections and crashed the worker. Commit 6c8d3c5.
+> Source: debugging session 2026-03-25
+
+## 2026-03-25 [Pattern] MCP HTTP server health: 397 tools, <20ms, fully functional
+> Rule: MCP HTTP transport at http://localhost:3030/mcp is healthy. 397 auto-generated tools from OpenAPI spec. Initialize handshake returns session ID via Mcp-Session-Id header. tools/list and tools/call both return in <20ms. Registered in Claude Code as `rorca: http://localhost:3030/mcp (HTTP)`. To diagnose MCP issues: test with curl (Accept: application/json, text/event-stream header required), check backend logs, test specific tool via tools/call.
+> Context: Verified 2026-03-25. If slash commands time out, the issue is likely a specific route hanging (check async error handling) or a heavy LLM-calling tool, not the MCP transport itself.
+> Source: debugging session 2026-03-25
+
+## 2026-03-25 [Pattern] rorca-memory-consolidation spec completed — 7/7 stories passed, auto-merged
+> Rule: Run 20260316000066: all 7 stories passed (US-001 through US-007), auto-merged to main as commit dff68e5. Branch feat/rorca-memory-consolidation. 48min runtime, parallelism 3, Claude CLI engine. Stories: US-001 recall semantic leak fix, US-002 generateMemoryMd(), US-003 pre-run MEMORY.md generation, US-004 buildPrompt MCP instruction, US-005 proposed_memories.json handler, US-006 post-story MEMORY.md rebuild, US-007 integration test.
+> Context: Memory consolidation makes DB memories the source of truth and projects them to MEMORY.md before each story run. Agents write memories via MCP tool (claude) or proposed_memories.json file (opencode/codex).
+> Source: run-20260316000066
+
+## 2026-03-25 [Bug Fix] MCP rorca_recall_memories returned 53 instead of 176 — was reading from file, not DB
+> Rule: The MCP tool `rorca_recall_memories` was hitting `GET /api/memory` (file-based MEMORY.md, 53 entries) instead of `GET /api/memory/items` (PostgreSQL `memories` table, 176 entries). The file-based ledger falls behind because synthesis runs and some write paths only write to the DB. Fix: switched MCP tool to use `/api/memory/items` endpoint which matches what the UI MemoryPanel uses.
+> Context: User saw 176 in Rorca UI but MCP tool returned only 53. Root cause: dual memory stores (file + DB) out of sync. File at `.rorca/memory/MEMORY.md` had 53 `##` entries. DB `memories` table had 176 non-deleted rows. The `fetchAll: true` param was correctly passed as `limit=9999` but the file-based endpoint's `recent()` function returned all 53 entries (slice(-9999) = everything in the file). Fix applied in `backend/src/mcp/server.ts`.
+> Source: session-2026-03-25
+
+## 2026-03-25 [Gotcha] Dual memory stores (file MEMORY.md vs DB memories table) drift out of sync
+> Rule: Rorca maintains two parallel memory stores: (1) file-based `.rorca/memory/MEMORY.md` read by `memory-ledger.ts`, and (2) PostgreSQL `memories` table. Manual writes and `POST /api/memory` write to both, but synthesis runs and some automated paths only write to the DB. This causes the file to fall behind. The UI MemoryPanel reads from DB (`/api/memory/items`), showing the true count. Any tool reading from the file will see fewer memories. Always prefer DB-backed endpoints for memory retrieval.
+> Context: Discovered when UI showed 176 memories but MCP tool returned 53. The file had exactly 53 `## ` header entries. DB had 176 non-deleted rows. The memory consolidation spec (US-002/US-003) added `generateMemoryMd()` to project DB into MEMORY.md format, but this only runs pre-pipeline — not on every write.
+> Source: session-2026-03-25
+
+## 2026-03-25 [Gotcha] MCP stdio processes must be killed after server.ts code changes — they run old code
+> Rule: When editing `backend/src/mcp/server.ts`, restarting the backend API server (port 3030) is NOT sufficient if Claude Code spawned MCP stdio processes. Those processes (`tsx server.ts` via node) load the old source and keep running until killed. After code changes: `ps aux | grep 'mcp/server.ts' | grep -v grep` to find them, then `kill -9` the PIDs. Claude Code will auto-restart them with the new code.
+> Context: After restarting backend on :3030, MCP tool calls still returned stale 53-count results. Found 4 MCP stdio processes (2 pairs of tsx wrapper + node child) from before the edit. Killing them allowed Claude Code to respawn with the new code, returning the correct 176 count.
+> Source: session-2026-03-25
+
+## 2026-03-30 [Decision] OVH VPS-3 production deployment (2026-03-30)
+> Rule: Rorca is deployed on OVH VPS-3: IP 141.94.33.224, hostname vps-59964a0f.vps.ovh.net, SSH user ubuntu, key ~/.ssh/rorca-testing. Spec: 8 vCPU, 24GB RAM, 200GB NVMe, Ubuntu 24.04, ~$12.75/mo. Stack: Coolify 4.0.0-beta.470 (port 8000) → Docker Compose at /home/ubuntu/rorca/docker-compose.yml → PostgreSQL 16 + pgvector + AGE + Rorca API (port 3030) + Worker.
+> Context: Ordered manually via OVH UI (EU catalog). OVH world/legacy account td459-ovh cannot use the eu/ca/us API token pages — must order through the browser UI. VPS-3 only available on EU/CA catalogs, not US.
+> Source:  
+
+## 2026-03-30 [Gotcha] OVH world/legacy account cannot use EU/CA/US API token pages
+> Rule: OVH account td459-ovh is on ovh.com/world (legacy). The API token pages at eu.api.ovh.com, ca.api.ovh.com, and us.ovhcloud.com use a different auth system and reject the correct password. Must order VPS manually via OVH UI. The automated order-vps.sh script only works with EU/CA/US accounts, not world/legacy.
+> Context: VPS-3 ($12.75/mo, 8vCPU/24GB/200GB NVMe) exists on EU and CA catalogs but NOT on the US catalog (US tops at 32GB with different naming). Use eu.api.ovh.com with subsidiary IE for EU orders.
+> Source:  
+
+## 2026-03-30 [Bug Fix] Cross-schema restore: ENUM types missing in public schema block migrations
+> Rule: When restoring a pg_dump from the rorca schema into a fresh instance, migration 061 (spec_attachments) fails with "type attachment_storage_type does not exist". The migration's IF NOT EXISTS check finds the ENUM in the rorca schema (from the dump) and skips CREATE TYPE, but then CREATE TABLE runs with search_path=public and the type isn't there. Fix before first container start: CREATE TYPE public.attachment_storage_type AS ENUM ('database', 's3');
+> Context: Same issue can affect any ENUM created by migrations if the dump already contains it in the rorca schema. The migration runner sets search_path=public for migration sessions but restores to rorca,public after. The IF NOT EXISTS pg_type check is schema-unaware.
+> Source:  
+
+## 2026-03-30 [Bug Fix] Cross-schema restore: missing unique constraint on spec_search_index blocks migration 057
+> Rule: After restoring a dump from the rorca schema, migration 057 fails on ON CONFLICT because public.spec_search_index is missing the uq_spec_search_slug_workspace unique constraint (it only exists in rorca schema from the dump). Fix: ALTER TABLE public.spec_search_index ADD CONSTRAINT uq_spec_search_slug_workspace UNIQUE (spec_slug, workspace_id);
+> Context: The migration runner creates tables in public schema but the restored dump put the constraint in rorca schema. The migration assumes the constraint exists because the table exists (from a prior migration), but the constraint was never created in public.
+> Source:  
+
+## 2026-03-30 [Bug Fix] pg_dump path hardcoded to macOS Homebrew — breaks Docker Alpine runtime
+> Rule: backup.ts had pg_dump binary path hardcoded to /usr/local/opt/postgresql@16/bin/pg_dump (macOS Homebrew). This fails silently in Docker Alpine. Fixed two ways: (1) changed fallback to just 'pg_dump' (uses PATH); (2) added postgresql16-client to the Alpine runtime stage in Dockerfile so pg_dump is available. Set PG_DUMP_BIN env var to override.
+> Context: The daily backup scheduler was silently failing on the VPS with ENOENT on every startup. Fix committed in 2283c80.
+> Source:  
+
+## 2026-03-30 [Bug Fix] HSTS + CSP upgrade-insecure-requests break plain-HTTP deployments
+> Rule: Helmet was sending Strict-Transport-Security (max-age=31536000) and upgrade-insecure-requests in CSP unconditionally. On plain HTTP deployments (no TLS), the browser honors HSTS and upgrades all requests to HTTPS → ERR_SSL_PROTOCOL_ERROR for all assets. Fixed by gating both on HTTPS_ENABLED=1 env var in server.ts. Set HTTPS_ENABLED=1 when serving behind SSL/TLS to re-enable both headers.
+> Context: Fix committed in f942e90. The browser also caches HSTS for max-age seconds after first visit — users who visited before the fix may need to clear HSTS cache in chrome://net-internals/#hsts.
+> Source:  
+
+## 2026-03-30 [Bug Fix] @rollup/rollup-darwin-arm64 in package.json breaks linux/x64 Docker builds
+> Rule: Having @rollup/rollup-darwin-arm64 as a direct dependency in package.json causes EBADPLATFORM errors in Docker linux/x64 builds. It's a Mac M-series specific binary that npm refuses to install on linux/x64. Fix: remove it from package.json dependencies entirely and regenerate package-lock.json. It gets pulled in automatically when needed on Mac.
+> Context: Never add platform-specific optional packages (@rollup/rollup-darwin-*, @rollup/rollup-linux-*, etc.) as direct dependencies. They are optionalDependencies managed by rollup itself.
+> Source:  
+
+## 2026-03-30 [Bug Fix] TypeScript test files included in Docker tsc build cause type errors
+> Rule: backend/tsconfig.json was not excluding test files, so tsc during Docker build compiled __tests__ and *.test.ts files which had type errors (e.g. semantic-log-parser.test.ts). Fixed by adding to tsconfig exclude: ["src/db/bun-sqlite-shim.ts", "src/**/__tests__/**", "src/**/*.test.ts"]
+> Context: Test files are compiled by Jest separately with its own tsconfig. The production tsc build should never include them.
+> Source:  
+
+## 2026-03-30 [Gotcha] Cross-schema restore procedure for rorca schema → fresh PostgreSQL
+> Rule: When restoring a dump where data is in the rorca schema into a fresh instance that runs migrations in the public schema: (1) restore with --data-only --disable-triggers after truncating all public tables; (2) before first app start, manually create ENUMs in public schema that migrations would create (attachment_storage_type); (3) manually add unique constraints to public tables that the dump has in rorca schema (uq_spec_search_slug_workspace on spec_search_index); (4) update workspace paths in DB to match new server paths.
+> Context: The migration runner uses search_path=public for migration sessions. IF NOT EXISTS checks are schema-unaware and find objects in rorca schema, skipping creation, then fail when referencing the type/constraint in public schema. The app pool uses search_path=rorca,public so data access works fine after migrations pass.
+> Source:  
+
+## 2026-03-30 [Decision] OVH VPS deployment — Docker Compose setup
+> Rule: Rorca is deployed on OVH VPS-3 (141.94.33.224) via Docker Compose. Two services: rorca (app) and db (postgres). Worker service added manually to docker-compose.yml on VPS. Both rorca and worker containers mount /home/ubuntu/rorca:/home/ubuntu/rorca so workspace paths resolve correctly.
+> Context: VPS hostname: vps-59964a0f-vps-ovh-net. Coolify 4.0.0-beta.470 used for orchestration. ubuntu user needed `sudo usermod -aG docker ubuntu && newgrp docker` to run docker commands without sudo.
+> Source:  

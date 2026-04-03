@@ -1,6 +1,6 @@
 // @refresh reset
 import { useState, useEffect, useCallback, useRef } from 'react';
-import { Terminal, Clock, ChevronRight, List, XCircle, ArrowRight, AlertTriangle, X, GitBranch, ArrowUpDown, Filter } from 'lucide-react';
+import { Terminal, Clock, ChevronRight, List, XCircle, ArrowRight, AlertTriangle, X, GitBranch, ArrowUpDown, Filter, Layers, ArrowDownUp } from 'lucide-react';
 import { useNavigate } from 'react-router-dom';
 import { formatDistanceToNow } from 'date-fns';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -551,6 +551,17 @@ export default function PipelineMonitorPanel({ onNavigateToRun }: PipelineMonito
                 <span>Elapsed: {elapsedTime(run.started_at, null)}</span>
                 <TriggeredViaBadge value={run.triggered_via} />
                 <WorktreeBadge branchName={run.branch_name} />
+                {run.parallelism != null && run.parallelism > 1 ? (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-medium rounded bg-purple-500/15 text-purple-400 border border-purple-500/25 shrink-0">
+                    <Layers className="w-2.5 h-2.5" />
+                    Wave ×{run.parallelism}
+                  </span>
+                ) : (
+                  <span className="inline-flex items-center gap-1 px-1.5 py-0.5 text-[9px] font-medium rounded bg-zinc-500/15 text-zinc-400 border border-zinc-500/25 shrink-0">
+                    <ArrowDownUp className="w-2.5 h-2.5" />
+                    Sequential
+                  </span>
+                )}
               </div>
             </button>
           );

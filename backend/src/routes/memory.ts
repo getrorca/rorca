@@ -1254,7 +1254,13 @@ router.post('/deduplicate', async (req: Request, res: Response) => {
  * /api/memory/items:
  *   get:
  *     tags: [Memory]
- *     summary: List memories from the database with filters
+ *     summary: Paginated memory list — use for browsing, filtering, or "show me the last N memories"
+ *     description: >
+ *       USE THIS for paginated listing ("show last 50 memories", "list all Architecture memories", "memories from run #42").
+ *       Returns memories sorted by pinned-first then newest, with category/confidence/run filters.
+ *       This is keyword search only (PostgreSQL tsquery) — NOT semantic. For semantic search
+ *       ("find memories related to deployment"), use getRecall with a query parameter instead.
+ *       For cross-source search (specs + stories + memories together), use hybridSearch.
  *     operationId: listMemoryItems
  *     parameters:
  *       - name: workspaceId
@@ -1277,6 +1283,14 @@ router.post('/deduplicate', async (req: Request, res: Response) => {
  *       - name: pinnedOnly
  *         in: query
  *         schema: { type: boolean }
+ *       - name: limit
+ *         in: query
+ *         description: Max items to return (default 20, max 500). Keep low to avoid large responses — use page param to paginate.
+ *         schema: { type: integer, default: 20 }
+ *       - name: page
+ *         in: query
+ *         description: Page number (1-based, default 1)
+ *         schema: { type: integer, default: 1 }
  *     responses:
  *       200:
  *         description: Memory items list with counts
@@ -1305,11 +1319,17 @@ router.post('/deduplicate', async (req: Request, res: Response) => {
  *                 pinned: { type: integer }
  *                 recentRunIds: { type: array, items: { type: integer } }
  *                 categories: { type: array, items: { type: string } }
+ *                 page: { type: integer }
+ *                 pageSize: { type: integer }
  *       400: { description: "Missing workspaceId" }
  */
 router.get('/items', async (req: Request, res: Response) => {
   const { workspaceId, category, confidence, sourceRunId, search, pinnedOnly } = req.query;
   if (!workspaceId) throw new ValidationError('workspaceId required');
+
+  const pageSize = Math.min(Math.max(parseInt(req.query.limit as string, 10) || 20, 1), 500);
+  const page = Math.max(parseInt(req.query.page as string, 10) || 1, 1);
+  const offset = (page - 1) * pageSize;
 
   let sql = `SELECT id, workspace_id, category, content, source_story_id, source_run_id,
              confidence, related_files, pinned, source_type, created_at
@@ -1345,8 +1365,10 @@ router.get('/items', async (req: Request, res: Response) => {
     sql += ' AND pinned = true';
   }
 
-  // Pinned first, then by created_at DESC
-  sql += ' ORDER BY pinned DESC, created_at DESC';
+  // Pinned first, then by created_at DESC, with pagination
+  sql += ` ORDER BY pinned DESC, created_at DESC LIMIT $${paramIdx} OFFSET $${paramIdx + 1}`;
+  params.push(pageSize, offset);
+  paramIdx += 2;
 
   const rows = await dbQuery<{
     id: number;
@@ -1399,6 +1421,8 @@ router.get('/items', async (req: Request, res: Response) => {
     pinned: parseInt(countRows[0]?.pinned ?? '0', 10),
     recentRunIds: runRows.map(r => r.source_run_id),
     categories: MEMORY_CATEGORIES,
+    page,
+    pageSize,
   });
 });
 

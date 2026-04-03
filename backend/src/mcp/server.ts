@@ -1101,13 +1101,14 @@ server.registerTool(
 server.registerTool(
   'rorca_recall_memories',
   {
-    description: `Retrieve memories from the Rorca memory database for a workspace. Three retrieval modes:
+    description: `Semantic memory retrieval — USE THIS when asking "what do we know about X?" or "find memories related to Y".
 
-1. **Full dump** (fetchAll: true): Returns ALL memories from the database — use for brain dumps or audits.
-2. **Recent** (default): Returns the last N memories (default 100), ordered by pinned-first then newest.
-3. **Semantic** (currentTask provided): Triggers the full CAG → RAG → Knowledge Graph cascade to find the most relevant memories for a task. Returns top 30 semantically ranked results.
+Three modes:
+1. **Semantic** (currentTask provided): USE THIS FOR SEARCH. Triggers CAG → RAG → Knowledge Graph cascade. Returns top 30 memories ranked by semantic relevance to your task description. Example: currentTask="deploying to Hetzner" finds deployment, infrastructure, and hosting memories even if they don't contain the exact word "Hetzner".
+2. **Recent** (default): Returns last N memories (default 100), pinned-first then newest. Use for browsing or "show me recent memories".
+3. **Full dump** (fetchAll: true): Returns ALL memories — use only for audits or exports.
 
-Memories are stored in PostgreSQL with full-text search vectors and optional embeddings for semantic retrieval.`,
+DO NOT use for paginated listing with filters — use rorca_memory_items instead.`,
     inputSchema: {
       workspaceId: z.string().describe('Rorca workspace ID'),
       category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).optional().describe('Filter by category. If omitted, returns memories across all categories.'),
@@ -3287,7 +3288,15 @@ server.registerPrompt(
 server.registerTool(
   'rorca_recall_workspace',
   {
-    description: 'Workspace bootstrapper — inject full workspace context into any AI session with a single call. Returns the direction stack, memories (last 100 recent, or top 30 semantically ranked when query is provided), workspace health, recent runs, installed skills, workspace context (schema + git), active runs, and metadata in one payload. Use this at the start of any session to bootstrap context. For spec generation, pass query=<feature brief> to anchor semantic retrieval (CAG → RAG → Knowledge Graph) to what you are about to build.',
+    description: `Semantic workspace context recall — USE THIS when asking "what does Rorca know about X?" or bootstrapping a session with full workspace context.
+
+With query parameter: triggers 3-tier semantic retrieval (CAG cache → RAG embeddings → Knowledge Graph) to find memories, conventions, and decisions most relevant to your question. Example: query="authentication middleware" returns auth-related memories ranked by semantic similarity, not just keyword match.
+
+Without query: returns full brain dump — direction stack, all recent memories, health, runs, skills, workspace context. Use at session start to bootstrap context.
+
+Returns direction stack + memories + health + recent runs + skills + workspace context + active runs in one payload.
+DO NOT use for paginated memory listing — use rorca_memory_items.
+DO NOT use for cross-source search (specs + stories + memories) — use rorca_search.`,
     inputSchema: {
       workspaceId: z.string().describe('Rorca workspace ID (from rorca_list_workspaces or settings)'),
       category: z.enum(['Architecture', 'Convention', 'Bug Fix', 'Decision', 'Pattern', 'Gotcha']).optional().describe('Filter memories to a specific category'),
