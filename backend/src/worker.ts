@@ -672,7 +672,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, includeGraph } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel } = payload;
 
     // Determine effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
@@ -790,6 +790,17 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
     if (includeGraph) {
       engineArgs.push('--include-graph');
+    }
+    // agentOverride is already incorporated into the `agent` field via pipeline.ts resolution;
+    // the --agent flag above uses payload.agent which already reflects the override.
+    if (thinkingEnabled !== undefined) {
+      engineArgs.push('--thinking-enabled', String(thinkingEnabled));
+    }
+    if (thinkingBudget !== undefined) {
+      engineArgs.push('--thinking-budget', String(thinkingBudget));
+    }
+    if (effortLevel) {
+      engineArgs.push('--effort-level', effortLevel);
     }
 
     // 4. Spawn execution-engine.ts with pipe stdio so we can capture chunks
