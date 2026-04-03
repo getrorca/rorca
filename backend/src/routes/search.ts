@@ -18,12 +18,14 @@ const router = Router();
  * /api/search:
  *   get:
  *     tags: [Search]
- *     summary: Unified hybrid search
+ *     summary: Cross-source semantic + keyword search — use when searching across specs, stories, AND memories together
  *     operationId: hybridSearch
  *     description: >
- *       Combines keyword (tsvector full-text) and semantic (pgvector cosine similarity)
- *       search using Reciprocal Rank Fusion. Falls back to keyword-only if no embeddings
- *       are available.
+ *       USE THIS for broad search across all content types ("find anything about Stripe integration",
+ *       "search for authentication across specs and memories"). Combines keyword (tsvector) and semantic
+ *       (pgvector cosine similarity) via Reciprocal Rank Fusion. Filter by source type (spec, story, memory, archive).
+ *       Falls back to keyword-only if no embeddings exist. For memory-only semantic search, prefer getRecall with query.
+ *       For paginated memory browsing, use listMemoryItems.
  *     parameters:
  *       - in: query
  *         name: q

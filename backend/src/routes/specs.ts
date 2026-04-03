@@ -20,6 +20,7 @@ import { getPlanLimits, type PlanTier } from '../lib/plan-limits';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
 import { agentType as configuredAgentType } from '../lib/config';
 import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
+import { runChunkedGeneration, CHUNK_THRESHOLD } from '../lib/spec-gen-chunked';
 import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
 import { hybridSearch } from '../lib/search';
@@ -800,6 +801,7 @@ const GenerateSpecSchema = z.object({
   model: z.string().optional(),
   multiPass: z.boolean().optional(),
   storyPrefix: z.string().optional(),
+  async: z.boolean().optional(), // Force async chunked generation
 }).refine(data => !!(data.brief || data.specBrief), {
   message: 'brief (or specBrief) is required',
   path: ['brief'],
@@ -1235,6 +1237,81 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       '- In the mermaidDiagram: each story is a node labeled with its ID, edges go from dependency to dependent (A --> B means A must be done before B)',
       '- Stories with no dependencies are root nodes (no incoming edges). Use \\n for newlines in the mermaid string',
     ].join('\n');
+
+    // 7b. Async chunked generation — large specs (storyCount > CHUNK_THRESHOLD)
+    const forceAsync = req.body.async === true;
+    const autoAsync = storyCount > CHUNK_THRESHOLD && !multiPass;
+    if (forceAsync || autoAsync) {
+      logger.info({ slug, storyCount, forceAsync, autoAsync }, '[Specs] Routing to async chunked generation');
+
+      const user = await getEffectiveUser(req);
+      const vaultCreds = user ? await resolveVaultCreds(user.id, resolvedModel) : {};
+      const chatOpts: import('../lib/llm-client').ChatOptions = {
+        model: resolvedModel,
+        ...vaultCreds,
+      };
+
+      // Compute spec file path
+      const pendingDir = path.join(workspace.path as string, 'forge/specs/pending');
+      const specFilePath = path.join(pendingDir, `${slug}.json`);
+
+      // Insert job row in Postgres
+      const jobRow = await queryOne<{ id: string }>(
+        `INSERT INTO spec_generation_jobs (workspace_id, status, brief, title, slug, story_count, model, provider)
+         VALUES ($1, 'pending', $2, $3, $4, $5, $6, $7) RETURNING id`,
+        [workspaceId, brief, effectiveTitle, slug, storyCount, resolvedModel, getActiveProvider()],
+      );
+      if (!jobRow) {
+        res.status(500).json({ error: 'Failed to create generation job' });
+        return;
+      }
+
+      // Fire background generation (non-blocking)
+      setImmediate(() => {
+        runChunkedGeneration({
+          jobId: jobRow.id,
+          workspaceId: String(workspaceId),
+          brief,
+          title: effectiveTitle,
+          slug,
+          storyCount,
+          storyPrefix: storyPrefix,
+          model: resolvedModel,
+          chatOpts,
+          directionContext: synthesized,
+          catalogSections: catalogSections.join('\n'),
+          attachmentSection: attachmentSection || '',
+          specFilePath,
+        }).catch(err => {
+          logger.error({ jobId: jobRow.id, err }, '[Specs] Background chunked generation failed');
+        });
+      });
+
+      // Emit WAL event for generation started
+      try {
+        broadcastAll({
+          id: 0,
+          ts: new Date().toISOString(),
+          event_type: 'generate',
+          workspace_id: String(workspaceId),
+          spec_id: slug,
+          story_id: null,
+          actor: 'system',
+          payload: JSON.stringify({ status: 'chunked_started', storyCount, jobId: jobRow.id }),
+        });
+      } catch { /* non-fatal */ }
+
+      res.json({
+        async: true,
+        jobId: jobRow.id,
+        slug,
+        storyCount,
+        status: 'generating',
+        message: `Large spec (${storyCount} stories) — generating in ${Math.ceil(storyCount / 25)} parallel chunks. Poll GET /api/specs/generate/job/${jobRow.id} for progress.`,
+        contextSummary: precomputedContextSummary,
+      });
+      return;
+    }
 
     // 8. Route by agent type: OpenCode path vs SDK (llm-client) path
     let parsed: { stories: unknown[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
@@ -2234,6 +2311,108 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       suggestion,
       ...(precomputedContextSummary ? { contextSummary: precomputedContextSummary } : {}),
     });
+  }
+});
+
+// ─── GET /generate/job/:jobId — Poll async chunked generation status ──────────
+
+/**
+ * @swagger
+ * /api/specs/generate/job/{jobId}:
+ *   get:
+ *     tags: [Specs]
+ *     summary: Poll async spec generation job status
+ *     operationId: getSpecGenerationJobStatus
+ *     description: >
+ *       Returns the status of an async chunked spec generation job.
+ *       Poll this endpoint every 2-5 seconds after receiving a jobId from POST /api/specs/generate.
+ *     parameters:
+ *       - in: path
+ *         name: jobId
+ *         required: true
+ *         schema: { type: string, format: uuid }
+ *         description: Job ID returned from POST /api/specs/generate
+ *     responses:
+ *       200:
+ *         description: Job status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 jobId: { type: string }
+ *                 status: { type: string, enum: [pending, processing, done, failed] }
+ *                 chunks_done: { type: integer }
+ *                 chunks_total: { type: integer }
+ *                 slug: { type: string }
+ *                 spec_path: { type: string }
+ *                 error: { type: string }
+ *       404:
+ *         description: Job not found
+ */
+router.get('/generate/job/:jobId', async (req: Request, res: Response) => {
+  try {
+    const { jobId } = req.params;
+    const job = await queryOne<{
+      id: string;
+      status: string;
+      slug: string | null;
+      story_count: number;
+      chunks_total: number | null;
+      chunks_done: number;
+      spec_path: string | null;
+      error: string | null;
+      model: string | null;
+      provider: string | null;
+      created_at: string;
+      updated_at: string;
+    }>('SELECT id, status, slug, story_count, chunks_total, chunks_done, spec_path, error, model, provider, created_at, updated_at FROM spec_generation_jobs WHERE id = $1', [jobId]);
+
+    if (!job) {
+      res.status(404).json({ error: 'Job not found' });
+      return;
+    }
+
+    const response: Record<string, unknown> = {
+      jobId: job.id,
+      status: job.status,
+      slug: job.slug,
+      storyCount: job.story_count,
+      chunksTotal: job.chunks_total,
+      chunksDone: job.chunks_done,
+      model: job.model,
+      provider: job.provider,
+      createdAt: job.created_at,
+      updatedAt: job.updated_at,
+    };
+
+    if (job.status === 'done' && job.spec_path) {
+      response.specPath = job.spec_path;
+      // Read the generated spec for convenience
+      try {
+        const specContent = JSON.parse(fs.readFileSync(job.spec_path, 'utf8'));
+        response.spec = {
+          id: specContent.id ?? job.slug,
+          title: specContent.title,
+          storyCount: specContent.userStories?.length ?? 0,
+          model: specContent.model,
+          generatedAt: specContent.generatedAt,
+        };
+      } catch { /* spec file read failure — non-fatal */ }
+    }
+
+    if (job.status === 'failed') {
+      response.error = job.error;
+    }
+
+    // Progress percentage for UI
+    if (job.chunks_total && job.chunks_total > 0) {
+      response.progress = Math.round((job.chunks_done / job.chunks_total) * 100);
+    }
+
+    res.json(response);
+  } catch (error: any) {
+    res.status(500).json({ error: error.message });
   }
 });
 
@@ -5587,6 +5766,11 @@ router.get('/tags/autocomplete', async (req: Request, res: Response) => {
  *         required: true
  *         schema: { type: string }
  *         description: Spec slug (filename without .json)
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema: { type: string }
+ *         description: Workspace ID (use rorca_get_workspaces to find it)
  *     responses:
  *       200:
  *         description: Full spec JSON with metadata

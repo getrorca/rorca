@@ -1033,7 +1033,7 @@ const PipelineTriggerSchema = z.object({
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, thinkingEnabled, thinkingBudget, effortLevel } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, thinkingEnabled, thinkingBudget, effortLevel } = req.body;
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1085,12 +1085,26 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     // 3. Resolve agent type and verify execution engine is available.
     //    Priority: request agentOverride > RORCA_AGENT env var > default (claude)
     //    execution-engine.ts (universal) → bash run-loop.sh (legacy fallback)
-    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? agentConfig.agentType;
-    // Model priority: RORCA_MODEL env var > workspace L3 preferred_model > null (agent default)
+    // Model priority: RORCA_MODEL env var > spec-level model > workspace L3 preferred_model > null (agent default)
     const l3WorkspaceModel = workspaceId
       ? (await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined)?.preferred_model ?? null
       : null;
-    const resolvedAgentModel: string | null = agentConfig.agentModel ?? l3WorkspaceModel;
+    const specModelPath = path.join(workspace.path, specPath);
+    const specModelJson = fs.existsSync(specModelPath) ? JSON.parse(fs.readFileSync(specModelPath, 'utf8')) : {};
+    const specLevelModel: string | null = specModelJson.model ?? null;
+    // Read spec-level agent override saved by SpecModelControlBar (PUT /api/specs/:id)
+    const specLevelAgent: AgentType | null = specModelJson.agentOverride ?? null;
+    const resolvedAgentModel: string | null = modelOverride ?? agentConfig.agentModel ?? specLevelModel ?? l3WorkspaceModel;
+
+    // Auto-detect agent from model string: if model has a provider prefix (e.g. openrouter/z-ai/glm-5,
+    // openai/gpt-4o) it cannot run on Claude CLI — switch to opencode automatically.
+    const OPENCODE_PROVIDER_PREFIXES = ['openrouter/', 'openai/', 'google/', 'anthropic/', 'ollama/', 'github/', 'bedrock/', 'vertex/'];
+    const modelNeedsOpenCode = resolvedAgentModel != null && OPENCODE_PROVIDER_PREFIXES.some(p => resolvedAgentModel.startsWith(p));
+    // Also catch bare provider/model strings like "z-ai/glm-5" that contain "/" but aren't claude- models
+    const modelIsNonClaude = resolvedAgentModel != null && resolvedAgentModel.includes('/') && !resolvedAgentModel.startsWith('claude-');
+    const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !specLevelAgent && agentConfig.agentType === 'claude';
+    // Priority: request agentOverride > spec-level agentOverride > auto-detect from model > RORCA_AGENT env
+    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : agentConfig.agentType);
 
     // OC-025: Block pipeline trigger if Claude is selected but not authenticated
     if (resolvedAgentType === 'claude') {

@@ -333,7 +333,7 @@ export default function MemoryPanel() {
 
   const fetchItems = useCallback(async () => {
     if (!workspaceId) return;
-    const params = new URLSearchParams({ workspaceId });
+    const params = new URLSearchParams({ workspaceId, limit: '500' });
     if (filterCategory) params.set('category', filterCategory);
     if (filterConfidence) params.set('confidence', filterConfidence);
     if (filterRunId) params.set('sourceRunId', filterRunId);

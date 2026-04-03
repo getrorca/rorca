@@ -268,16 +268,29 @@ async function executeApiCall(
     url += `?${new URLSearchParams(qsEntries).toString()}`;
   }
 
+  // Long-running endpoints (spec generation, hydration, embedding) need extended timeouts
+  const SLOW_PATHS = ['/api/specs/generate', '/api/specs/generate-batch', '/api/workspaces/', '/api/admin/embed-all'];
+  const isSlowPath = SLOW_PATHS.some(p => resolvedPath.startsWith(p));
+  const timeoutMs = isSlowPath ? 5 * 60 * 1000 : 30_000; // 5 min for slow, 30s default
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
   const fetchOptions: RequestInit = {
     method,
     headers: { 'Content-Type': 'application/json' },
+    signal: controller.signal,
   };
 
   if (method !== 'GET' && method !== 'DELETE' && Object.keys(bodyParams).length > 0) {
     fetchOptions.body = JSON.stringify(bodyParams);
   }
 
-  const res = await fetch(url, fetchOptions);
+  let res: Response;
+  try {
+    res = await fetch(url, fetchOptions);
+  } finally {
+    clearTimeout(timeoutId);
+  }
   const contentType = res.headers.get('content-type') || '';
   const body = contentType.includes('application/json')
     ? await res.json()
@@ -336,7 +349,10 @@ export function createMcpHttpServer(spec: OpenAPISpec): McpServer {
             content: [{ type: 'text' as const, text: resultText }],
           };
         } catch (err: unknown) {
-          const message = err instanceof Error ? err.message : String(err);
+          const isAbort = err instanceof Error && err.name === 'AbortError';
+          const message = isAbort
+            ? `Tool timed out. This is a long-running operation — the backend is still processing. Check results via the relevant list/get tool after a moment.`
+            : err instanceof Error ? err.message : String(err);
           return {
             content: [{ type: 'text' as const, text: `MCP tool error: ${message}` }],
             isError: true,
