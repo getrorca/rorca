@@ -116,6 +116,40 @@ const ANSI_COLORS_LIGHT: Record<number, string> = {
   15: '#fafafa',  // bright white
 };
 
+// ─── Markdown → HTML converter (for terminal display) ────────────────────────
+
+/**
+ * Convert basic markdown to HTML for terminal display.
+ * Must be called on RAW text BEFORE ansi-to-html, because ansi-to-html
+ * replaces \n with <br> tags, breaking ^/$ multiline anchors.
+ * We HTML-escape the text ourselves first, then apply markdown patterns.
+ */
+function markdownToHtml(text: string): string {
+  // HTML-escape first so our injected tags aren't re-escaped downstream.
+  // We set escapeXML:false on the ansi converter when using this path,
+  // OR we call this before the ansi converter on plain text segments.
+  const escaped = text
+    .replace(/&/g, '&amp;')
+    .replace(/</g, '&lt;')
+    .replace(/>/g, '&gt;');
+
+  return escaped
+    // Headings: ### text (at line start)
+    .replace(/^#{1,3}\s+(.+)$/gm, '<span style="color:#93c5fd;font-weight:bold">$1</span>')
+    // Bold **text**
+    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
+    // Bold __text__
+    .replace(/__(.+?)__/g, '<b>$1</b>')
+    // Italic *text* (single asterisk, not double)
+    .replace(/\*([^*\n]+?)\*/g, '<i>$1</i>')
+    // Inline code `code`
+    .replace(/`([^`\n]+)`/g, '<code style="background:rgba(255,255,255,0.08);padding:0 3px;border-radius:3px;color:#fbbf24">$1</code>')
+    // Horizontal rule ---
+    .replace(/^[-]{3,}\s*$/gm, '<span style="color:#4b5563">────────────────────────────────</span>')
+    // Bullet list items: "- item" or "– item" at line start
+    .replace(/^[-–]\s+(.+)$/gm, '  <span style="color:#6b7280">•</span> $1');
+}
+
 // ─── stream-json → readable text formatter (for Raw terminal display) ────────
 
 /**
@@ -139,9 +173,14 @@ function formatStreamJsonForDisplay(line: string): string | null {
       const parts: string[] = [];
       for (const block of ev.message.content) {
         if (block.type === 'text' && block.text) {
-          // Show assistant thinking/text (truncated)
+          // Convert markdown → HTML, prefix so flushBuffer skips XML escaping
           const text = block.text.trim();
-          if (text) parts.push(text.length > 500 ? text.slice(0, 500) + '...' : text);
+          if (text) {
+            const truncated = text.length > 500 ? text.slice(0, 500) + '...' : text;
+            // markdownToHtml already HTML-escapes the text, so prefix each output line
+            const converted = markdownToHtml(truncated);
+            parts.push(...converted.split('\n').map(l => HTML_LINE_PREFIX + l));
+          }
         } else if (block.type === 'tool_use') {
           const name: string = block.name ?? '';
           const input = block.input ?? {};
@@ -442,16 +481,19 @@ function ClaudeStepRow({
 
 // ─── ANSI converter factory ──────────────────────────────────────────────────
 
-function createAnsiConverter(theme: 'light' | 'dark'): AnsiToHtml {
+function createAnsiConverter(theme: 'light' | 'dark', escapeXml = true): AnsiToHtml {
   const isLight = theme === 'light';
   return new AnsiToHtml({
     fg: isLight ? '#1e1e1e' : '#d4d4d4',
     bg: isLight ? '#f5f5f5' : '#0d0d1a',
-    escapeXML: true,
+    escapeXML: escapeXml,
     newline: true,
     colors: isLight ? ANSI_COLORS_LIGHT : ANSI_COLORS_DARK,
   });
 }
+
+// Lines with this prefix are pre-converted HTML — skip XML escaping in the ANSI converter.
+const HTML_LINE_PREFIX = '\x01';
 
 // ─── Flush buffer interval ───────────────────────────────────────────────────
 
@@ -529,17 +571,29 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     try { localStorage.setItem(lsKey(runId), m); } catch { /* noop */ }
   }, [runId]);
 
-  // Recreate ansi-to-html converter when theme changes
-  const ansiConverter = useMemo(() => createAnsiConverter(resolved), [resolved]);
+  // Recreate ansi-to-html converters when theme changes.
+  // ansiConverter: escapeXML=true for raw terminal lines (ANSI codes, plain text).
+  // ansiConverterNoEscape: escapeXML=false for lines already HTML-converted by markdownToHtml.
+  const ansiConverter = useMemo(() => createAnsiConverter(resolved, true), [resolved]);
+  const ansiConverterNoEscape = useMemo(() => createAnsiConverter(resolved, false), [resolved]);
 
-  // Flush pending text buffer → convert via ansi-to-html → append to accumulated HTML
+  // Flush pending text buffer → convert via ansi-to-html → append to accumulated HTML.
+  // Lines prefixed with HTML_LINE_PREFIX are pre-HTML (markdown already converted) — use no-escape converter.
   const flushBuffer = useCallback(() => {
     flushTimerRef.current = null;
     const pending = pendingTextRef.current;
     if (!pending) return;
     pendingTextRef.current = '';
 
-    let newHtml = ansiConverter.toHtml(pending);
+    // Process line by line: pre-HTML lines go through no-escape converter, raw lines escape normally.
+    const lines = pending.split('\n');
+    const htmlLines = lines.map(line => {
+      if (line.startsWith(HTML_LINE_PREFIX)) {
+        return ansiConverterNoEscape.toHtml(line.slice(HTML_LINE_PREFIX.length));
+      }
+      return ansiConverter.toHtml(line);
+    });
+    let newHtml = htmlLines.join('\n');
 
     // Inject story ID anchors at first occurrence of each story ID
     newHtml = injectStoryAnchors(newHtml, seenStoryIdsRef.current);
@@ -554,7 +608,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         pre.scrollTop = pre.scrollHeight;
       }
     }
-  }, [ansiConverter]);
+  }, [ansiConverter, ansiConverterNoEscape]);
 
   // Schedule a flush if not already scheduled
   const scheduleFlush = useCallback(() => {
@@ -704,8 +758,14 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       const pending = pendingTextRef.current;
       if (pending) {
         pendingTextRef.current = '';
-        let newHtml = ansiConverter.toHtml(pending);
-        newHtml = injectStoryAnchors(newHtml, seenStoryIdsRef.current);
+        const lines = pending.split('\n');
+        const htmlLines = lines.map(line => {
+          if (line.startsWith(HTML_LINE_PREFIX)) {
+            return ansiConverterNoEscape.toHtml(line.slice(HTML_LINE_PREFIX.length));
+          }
+          return ansiConverter.toHtml(line);
+        });
+        let newHtml = injectStoryAnchors(htmlLines.join('\n'), seenStoryIdsRef.current);
         accumulatedHtmlRef.current += newHtml;
         accumulatedHtmlRef.current = trimOldestLines(accumulatedHtmlRef.current);
         const pre = preRef.current;
@@ -736,7 +796,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         flushTimerRef.current = null;
       }
     };
-  }, [runId, ansiConverter, workspaceId, scheduleFlush]);
+  }, [runId, ansiConverter, ansiConverterNoEscape, workspaceId, scheduleFlush]);
 
   // Track scroll position for auto-scroll on raw <pre>
   const handlePreScroll = useCallback(() => {

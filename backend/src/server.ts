@@ -225,7 +225,7 @@ const mcpCors = cors({
   origin: true,
   credentials: false,
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
-  allowedHeaders: ['Content-Type', 'Accept', 'Mcp-Session-Id'],
+  allowedHeaders: ['Content-Type', 'Accept', 'Mcp-Session-Id', 'Authorization'],
   exposedHeaders: ['Mcp-Session-Id'],
   maxAge: 86400,
 });
@@ -233,6 +233,62 @@ const mcpHandlers = createMcpRequestHandler(swaggerSpec as any);
 app.post('/mcp', mcpCors, mcpHandlers.handlePost);
 app.get('/mcp', mcpCors, mcpHandlers.handleGet);
 app.delete('/mcp', mcpCors, mcpHandlers.handleDelete);
+
+// ── Trivial local OAuth 2.0 server for MCP HTTP transport ───────────────────
+// Claude desktop app (newer versions) requires OAuth for HTTP MCP servers.
+// Since Rorca is a local single-user tool, we implement a no-op OAuth flow
+// that auto-approves any client — no real security, just satisfies the protocol.
+const MCP_OAUTH_BASE = process.env.RORCA_PUBLIC_URL || 'http://localhost:3030';
+app.get('/.well-known/oauth-authorization-server', (_req, res) => {
+  res.json({
+    issuer: MCP_OAUTH_BASE,
+    authorization_endpoint: `${MCP_OAUTH_BASE}/oauth/authorize`,
+    token_endpoint: `${MCP_OAUTH_BASE}/oauth/token`,
+    registration_endpoint: `${MCP_OAUTH_BASE}/oauth/register`,
+    response_types_supported: ['code'],
+    grant_types_supported: ['authorization_code'],
+    code_challenge_methods_supported: ['S256'],
+  });
+});
+app.get('/.well-known/oauth-protected-resource', (_req, res) => {
+  res.json({
+    resource: MCP_OAUTH_BASE,
+    authorization_servers: [MCP_OAUTH_BASE],
+  });
+});
+// Dynamic client registration — accept any client, return a dummy client_id
+const handleOAuthRegister = (req: import('express').Request, res: import('express').Response) => {
+  const body = req.body || {};
+  res.status(201).json({
+    client_id: 'rorca-local',
+    client_secret: 'rorca-local-secret',
+    client_id_issued_at: Math.floor(Date.now() / 1000),
+    redirect_uris: body.redirect_uris || [],
+    grant_types: body.grant_types || ['authorization_code'],
+    response_types: body.response_types || ['code'],
+    token_endpoint_auth_method: body.token_endpoint_auth_method || 'client_secret_basic',
+  });
+};
+app.post('/oauth/register', express.json(), handleOAuthRegister);
+app.post('/register', express.json(), handleOAuthRegister);
+// Authorization endpoint — auto-approve, redirect immediately with code
+app.get('/oauth/authorize', (req, res) => {
+  const { redirect_uri, state } = req.query as Record<string, string>;
+  const code = 'rorca-auth-code-' + Date.now();
+  const url = new URL(redirect_uri);
+  url.searchParams.set('code', code);
+  if (state) url.searchParams.set('state', state);
+  res.redirect(url.toString());
+});
+// Token endpoint — exchange any code for a permanent local token
+app.post('/oauth/token', express.urlencoded({ extended: false }), express.json(), (_req, res) => {
+  res.json({
+    access_token: 'rorca-local-access-token',
+    token_type: 'bearer',
+    expires_in: 86400 * 365, // 1 year
+    scope: 'mcp',
+  });
+});
 
 // MC-004: MCP Tools enumeration endpoint (public — used by VS Code extension, no auth required)
 app.use('/api/mcp/tools', mcpToolsRouter);

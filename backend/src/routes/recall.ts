@@ -418,11 +418,14 @@ async function fetchActiveRuns(
  * /api/recall:
  *   get:
  *     operationId: getRecall
- *     summary: Full workspace context recall ("brain dump")
+ *     summary: Semantic workspace context recall — use when asking "what do we know about X?" or bootstrapping a session
  *     description: >
- *       Composes the entire Rorca workspace brain into a single JSON payload —
- *       direction stack, memories, health, recent runs, skills, workspace context,
- *       metadata, and active runs. All 8 data sources are fetched concurrently.
+ *       USE THIS for semantic memory search ("find memories about deployment", "what conventions exist for auth").
+ *       Pass the `query` parameter to trigger 3-tier semantic retrieval (CAG cache → RAG embeddings → Knowledge Graph)
+ *       which ranks memories by relevance, not just recency. Without `query`, returns a full brain dump.
+ *       Returns direction stack, memories, health, recent runs, skills, workspace context, metadata, and active runs.
+ *       DO NOT use this for paginated memory listing — use listMemoryItems instead.
+ *       DO NOT use this for cross-source search (specs + stories + memories) — use hybridSearch instead.
  *     tags: [Recall]
  *     parameters:
  *       - in: query
@@ -581,16 +584,38 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
   };
 
   // Hard cap: MCP HTTP transport rejects responses > ~100K chars.
-  // Trim memories from the bottom (lowest priority) until serialized size fits.
-  const MAX_RESPONSE_CHARS = 80_000;
+  // Progressively trim sections until serialized size fits.
+  const MAX_RESPONSE_CHARS = 40_000;
   let serialized = JSON.stringify(response);
-  while (serialized.length > MAX_RESPONSE_CHARS && response.memories.length > 0) {
+
+  // 1. Trim memories from the bottom (lowest priority)
+  while (serialized.length > MAX_RESPONSE_CHARS && response.memories.length > 1) {
     response.memories = response.memories.slice(0, Math.max(1, Math.floor(response.memories.length * 0.8)));
     serialized = JSON.stringify(response);
   }
+
+  // 2. Strip memory rule/context content
   if (serialized.length > MAX_RESPONSE_CHARS) {
-    // Still too large — strip rule content from all memories (equivalent to titlesOnly)
     response.memories = response.memories.map(m => ({ ...m, rule: '', context: '' }));
+    serialized = JSON.stringify(response);
+  }
+
+  // 3. Trim skills to previews only (drop full content)
+  if (serialized.length > MAX_RESPONSE_CHARS && response.skills.length > 0) {
+    response.skills = response.skills.slice(0, 10).map((s: SkillPreview) => ({ ...s, content: undefined } as SkillPreview));
+    serialized = JSON.stringify(response);
+  }
+
+  // 4. Truncate direction stack
+  if (serialized.length > MAX_RESPONSE_CHARS && response.directionStack.length > 10_000) {
+    response.directionStack = response.directionStack.slice(0, 10_000) + '\n\n[truncated]';
+    serialized = JSON.stringify(response);
+  }
+
+  // 5. Drop workspace context snapshots
+  if (serialized.length > MAX_RESPONSE_CHARS) {
+    response.workspaceContext = { schemaSnapshot: null, gitMemory: null };
+    serialized = JSON.stringify(response);
   }
 
   // Compute token estimate over the full serialized response

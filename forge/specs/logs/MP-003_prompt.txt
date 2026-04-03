@@ -10,7 +10,7 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 
 ```bash
 # Start everything (recommended)
-npm run dev                # Frontend :5210 + Backend :3030 concurrently
+npm run dev                # Frontend :5210 + Backend :3030 + pg-boss Worker concurrently
 
 # Frontend (root)
 npm run dev                # Vite dev server (:5210)
@@ -19,7 +19,8 @@ npm run lint               # ESLint
 npx tsc --noEmit           # Frontend type check
 
 # Backend (backend/)
-cd backend && npm run dev  # Express server (:3030) — NO hot-reload, requires restart
+cd backend && npm run dev  # Express server (:3030) — auto-restarts on file save (tsx watch)
+cd backend && npm run worker  # pg-boss worker (required — picks up queued pipeline runs)
 cd backend && npm run mcp  # Run MCP server standalone (for debugging)
 cd backend && npm test     # Jest test suite
 cd backend && npx tsc --noEmit   # Backend type check
@@ -45,11 +46,14 @@ npm run self-register
 
 ```
 Browser (React :5210)  ←→  Express API (:3030)  ←→  PostgreSQL 16
-                                    ↓
-                            Execution Engine (per-story subprocess)
-                            ├── claude --print      (Claude subscription)
-                            ├── opencode run        (75+ providers via API key)
-                            └── codex               (ChatGPT subscription)
+                                                           ↑
+                                                   Worker Process
+                                                   (npm run worker)
+                                                           ↓
+                                                   execution-engine subprocesses
+                                                   ├── claude --print
+                                                   ├── opencode run
+                                                   └── codex
 
 Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 ```
@@ -141,8 +145,37 @@ Spec files live in the **project workspace** (not Rorca):
 ```
 ⚠️ Key field is `userStories` (NOT `stories`). `id` is always the slug (filename without `.json`), NOT the human-readable title.
 
+### Job Queue Architecture (pg-boss)
+
+Pipeline runs are no longer spawned synchronously by `pipeline.ts`. The flow is:
+
+1. `POST /api/pipeline/trigger` inserts a `pipeline:run` job into pg-boss and returns `{ runId, queued: true, queuePosition }` in ~200ms
+2. The **Worker process** (`backend/src/worker.ts`, `npm run worker`) polls pg-boss and picks up the job ~500ms later (default polling interval, configurable via `pollingIntervalSeconds`)
+3. Worker spawns `execution-engine.ts` as a child process with `RORCA_PROCESS_ROLE=engine`
+
+**Job types**:
+| Queue | Purpose |
+|-------|---------|
+| `pipeline:run` | Trigger a new pipeline run (specPath, workspaceId, runId, options) |
+| `pipeline:retry` | Retry failed stories in a completed run (runId, storyIds) |
+| `pipeline:cancel` | Cancel an active run by sending SIGTERM to the child process |
+| `pipeline:cron` | Meta-cron tick — checks `pipeline_schedules` for due runs |
+| `pipeline:cron:<id>` | Per-schedule cron job — fires a specific scheduled run |
+
+**Worker process** (`backend/src/worker.ts`):
+- Standalone process — completely independent of Express API
+- Connects to the same `DATABASE_URL` as the API
+- Writes heartbeat to `worker_heartbeat` table every 30s (`worker_id`, `pid`, `hostname`, `last_seen`)
+- Graceful shutdown on `SIGTERM` — drains in-flight jobs up to 30s before exiting
+- `RORCA_PROCESS_ROLE=engine` is set in the child process env to prevent nested worker spawning
+
+**Terminal output streaming** (`run_output_chunks`):
+- Worker writes stdout/stderr to `run_output_chunks` table in 4KB chunks with monotonically increasing sequence numbers
+- DB-backed streaming survives backend restarts and enables late-join SSE replay
+- `GET /api/pipeline/runs/:runId/output` SSE endpoint replays all chunks since sequence 0, then streams live
+
 ### The Ralph Loop (`backend/src/lib/execution-engine.ts`)
-The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by `pipeline.ts` via `npx tsx`. The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — `pipeline.ts` uses it only if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all three agent types. **Always edit `execution-engine.ts` for all execution behavior.**
+The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by the **Worker process** (not directly by `pipeline.ts`). The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — only used if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all three agent types. **Always edit `execution-engine.ts` for all execution behavior.**
 
 **Flags**: `--json <path>` (spec file), `--cwd <path>` (workspace root), `--run-id <number>` (required for WAL events), `--story <ID>` (single story), `--dry-run` (preview only), `--port <number>` (default 3030), `--agent <claude|opencode|codex>`, `--model <model>`
 
@@ -185,11 +218,12 @@ rorca/
 │       ├── routes/           # Express route handlers (32 route files)
 │       ├── lib/              # Core services (sse-hub, direction-stack, llm-client,
 │       │                     # errors, scheduler, agent-hook-runner, etc.)
+│       ├── worker.ts         # pg-boss worker process (pipeline job consumer)
 │       ├── mcp/              # MCP stdio server (5 tools)
 │       └── db/
 │           ├── index.ts      # PostgreSQL Pool + async query helpers
 │           ├── pg-index.ts   # Migration runner (schema_migrations tracking)
-│           └── pg-migrations/ # PostgreSQL migration files (001–049)
+│           └── pg-migrations/ # PostgreSQL migration files (001–062)
 ├── forge/
 │   ├── run-loop.sh           # Ralph Loop execution engine
 │   ├── self-register.ts      # Self-hosting bootstrap
@@ -225,7 +259,7 @@ rorca/
 
 ## Database Tables
 
-49 migrations (`backend/src/db/pg-migrations/001-049`). Key tables:
+62 migrations (`backend/src/db/pg-migrations/001-062`). Key tables:
 
 | Table | Purpose |
 |-------|---------|
@@ -258,6 +292,8 @@ rorca/
 | `user_settings` | Per-user preferences |
 | `billing` | Stripe subscription tracking |
 | `provider_defaults` | Default model configs per provider |
+| `run_output_chunks` | DB-backed terminal output streaming — `(run_id, sequence, data)`, monotonically increasing, survives restarts, enables late-join SSE replay |
+| `worker_heartbeat` | Worker liveness — `(worker_id, pid, hostname, started_at, last_seen)`, updated every 30s; stale if `last_seen` > 90s ago |
 
 **WAL event types**: `generate`, `spec_approved`, `spec_rejected`, `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `worktree_created`, `worktree_merged`, `run_blocked` (HITL pause), `context_file_changed` (CIE file watcher), `story_escalated` (CIE model escalation), `skill_installed` (skill added), `skill_removed` (skill deleted), `skill_matched` (LLM skill-to-spec matching)
 
@@ -316,6 +352,7 @@ Key routes (see `backend/src/server.ts` for full mount list):
 | `POST /api/skills/install` | Install skill from raw markdown content |
 | `POST /api/skills/install-from-sh` | Install from skills.sh registry → GitHub fetch → dual-save |
 | `GET /api/skills/preview` | Preview uninstalled skill from skills.sh WITHOUT installing |
+| `GET /api/skills/top` | Top skills from skills.sh ranked by install count (24h leaderboard) |
 | `GET /api/skills/suggestions` | Echolocation-inferred skill suggestions for current workspace |
 | `GET /api/skills/:name/content` | Full markdown of installed skill (SkillRegistry → DB fallback) |
 | `DELETE /api/skills/:name` | Remove installed skill |
@@ -374,12 +411,13 @@ When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the buil
 
 ## Critical Gotchas
 
-### Top 5
+### Top 6
 1. **`chatComplete` returns `ChatResult { text, usage }`** — always use `.text` accessor. Never treat result as a string.
 2. **pg is async — always `await` DB calls**. `await queryOne<T>(sql, params)` returns T|undefined, `await query<T>(sql, params)` returns T[], `await execute(sql, params)` returns `{ rowCount }`. Use `$1, $2, ...` numbered placeholders (not `?`).
 3. **spec `id` ≠ spec `specName`** — `id` is the filename slug (`rorca-feature-enhancements`), `specName` is the human title. Use `spec.id` to construct file paths.
 4. **run-loop.sh is a bash fallback only** — lives at `workspace.path/forge/run-loop.sh`. Only used if `execution-engine.ts` is missing. Claude-only, no multi-agent support. Do not rely on it.
-5. **Backend requires restart** — `tsx` has no hot-reload. Always `lsof -ti:3030 | xargs kill -9 && npm run dev` after any backend changes.
+5. **Backend auto-restarts** — `tsx watch` detects file changes and restarts automatically. Manual restart only needed if the process itself crashes: `lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev`.
+6. **Worker must be running** — pipeline triggers insert a pg-boss job and return immediately; runs only execute if the worker process is live. Check `GET /api/pipeline/worker/health` before triggering runs. Start with `cd backend && npm run worker` or `npm run dev` (starts both). Stale if `worker_heartbeat.last_seen` > 90s.
 
 ### Auth Middleware — Intentionally Bypassed
 `app.use(authRequired)` in `backend/src/server.ts` line ~78 is **commented out**. This is intentional — Rorca is a local single-user tool and the login wall blocks workspaces API causing onboarding to show incorrectly. Do NOT re-enable globally. Auth routes (`/api/auth/*`) still work for the registered user (`admin@rorca.local` / `rorca123`). If authRequired reappears as a global middleware, comment it out again.
@@ -434,8 +472,37 @@ The `wal_events` table uses `ts` as the timestamp column — NOT `created_at`. Q
 
 `SUPPORTED_MODELS` list is authoritative — validate before passing to `chatComplete`.
 
-### PostgreSQL Migration Pattern
-Migrations are SQL files in `backend/src/db/pg-migrations/` (49 files, 001–049). They run in numeric order on first startup via `pg-index.ts`, tracked in `schema_migrations` table. Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively — no workarounds needed. New migrations: create `NNN_description.sql` in `pg-migrations/`.
+### Apache AGE — Pool Connection Hygiene (CRITICAL)
+Apache AGE requires `LOAD 'age'` + `SET search_path = ag_catalog, "$user", public` per session before Cypher queries. This **poisons** the pool connection — subsequent queries on that connection hit `ag_catalog.workspaces` (empty) instead of `rorca.workspaces` (real data), causing intermittent "Workspace not found" 404s.
+
+**Rule**: Any code that calls `setupAgeSession()` MUST restore the search_path before releasing:
+```typescript
+const client = await pool.connect();
+try {
+  await setupAgeSession(client);  // sets search_path to ag_catalog
+  await client.query(cypherSQL);
+} finally {
+  await client.query('SET search_path = rorca, public');  // MUST restore
+  client.release();
+}
+```
+
+Three schemas have a `workspaces` table: `rorca.workspaces` (app data), `ag_catalog.workspaces` (AGE system, empty), `public.workspaces` (legacy, empty). The pool has an `on('connect')` safety net in `db/index.ts`, but it does NOT replace proper cleanup in graph code.
+
+### PostgreSQL Migration Pattern — Timestamp Format (CRITICAL)
+Migrations are SQL files in `backend/src/db/pg-migrations/`. They run in numeric prefix order on first startup via `pg-index.ts`, tracked in `schema_migrations` table (BIGINT version column). Each migration runs inside a transaction. PostgreSQL supports `IF NOT EXISTS` for `CREATE TABLE`, `ADD COLUMN`, and indexes natively.
+
+**New migrations MUST use timestamp format**: `YYYYMMDDHHMMSS_description.sql`
+```bash
+# Example: creating a migration on 2026-03-14 at 15:00:00
+20260314150000_add_user_preferences.sql
+```
+
+**Why**: Sequential numbers (001, 002, ...) collide when parallel branches create migrations simultaneously — common with Rorca's worktree-per-spec architecture. Timestamps are structurally unique (two developers/agents can't commit at the exact same second).
+
+**Hybrid coexistence**: Existing sequential migrations (001–079) stay as-is. New timestamp migrations sort after them automatically (numeric sort: `79 < 20260314150000`). The runner supports both formats indefinitely — no renaming needed.
+
+**Duplicate prefix detection**: `pg-index.ts` calls `checkDuplicatePrefixes()` at startup and fails loudly if two files share the same numeric prefix. This catches collisions before any SQL runs.
 
 ### Skills Install Chain (install-from-sh)
 `POST /api/skills/install-from-sh` does NOT shell out to `npx skills add`. It fetches directly:
@@ -471,10 +538,53 @@ Express API routes → @swagger JSDoc annotations → OpenAPI spec (/api/docs/op
                                                 → Served over HTTP on same :3030 port
 ```
 
-**Current state**: 5 hand-written stdio MCP tools in `backend/src/mcp/server.ts`:
-`rorca_get_context` | `rorca_generate_spec` | `rorca_list_specs` | `rorca_approve_spec` | `rorca_pipeline_status`
+**Current state**: 24 hand-written stdio MCP tools in `backend/src/mcp/server.ts`.
 
-Setup (stdio, legacy): `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
+Setup (stdio): `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
+
+**Specs & Pipeline**
+| Tool | Purpose |
+|------|---------|
+| `rorca_get_context` | Get synthesized Direction Stack (L1–L5) for a workspace |
+| `rorca_generate_spec` | Generate a spec JSON from a brief |
+| `rorca_list_specs` | List all specs grouped by status (pending/approved/running) |
+| `rorca_approve_spec` | Approve a pending spec and move it to the queue |
+| `rorca_pipeline_status` | Status of active/most recent pipeline run |
+| `rorca_trigger_run` | Start a pipeline run for an approved spec (supports dry-run + worktree) |
+| `rorca_run_status` | Detailed per-story status for a specific run |
+| `rorca_list_runs` | List recent pipeline runs |
+| `rorca_retry_story` | Retry failed stories in a completed run |
+
+**Story Editing**
+| Tool | Purpose |
+|------|---------|
+| `rorca_edit_story` | Update a story's title/description/acceptance criteria |
+| `rorca_add_stories` | Generate and append new LLM-generated stories to a spec |
+| `rorca_delete_story` | Remove a story (reindexes remaining, snapshots before delete) |
+| `rorca_search_stories` | Full-text search across all stories in all specs |
+
+**Direction Stack**
+| Tool | Purpose |
+|------|---------|
+| `rorca_get_direction` | Get all direction layers (L1–L3) with raw content |
+| `rorca_update_direction` | Update a specific direction layer (L1/L2/L3) |
+| `rorca_synthesize_direction` | Preview the merged direction string exactly as sent to the LLM |
+
+**Workspaces**
+| Tool | Purpose |
+|------|---------|
+| `rorca_list_workspaces` | List all registered workspaces |
+| `rorca_create_workspace` | Register a new workspace by filesystem path |
+| `rorca_workspace_stats` | Spec/run counts, pass rate, last activity |
+| `rorca_team_members` | Get team members for a workspace |
+| `rorca_usage_stats` | Token usage + cost summary over a date range |
+
+**Memory**
+| Tool | Purpose |
+|------|---------|
+| `rorca_save_memory` | Save a memory entry (Architecture/Convention/Bug Fix/Decision/Pattern/Gotcha) |
+| `rorca_log_decision` | Shortcut for saving architectural decisions with structured reasoning |
+| `rorca_get_memories` | Retrieve memories, optionally filtered by category |
 
 **Target state**: MCP Streamable HTTP transport at `http://localhost:3030/mcp`, auto-generated from OpenAPI spec. All API routes become MCP tools automatically. Stdio server kept as offline fallback.
 
@@ -514,6 +624,9 @@ CODEX_BIN=/path/to/codex        # Auto-detected if in PATH
 SPEC_PROVIDER=claude          # Options: claude (default), anthropic, openrouter
 ANTHROPIC_API_KEY=sk-ant-...  # Required if SPEC_PROVIDER=anthropic
 OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
+
+# Process role (set automatically by worker — do not set manually)
+RORCA_PROCESS_ROLE=engine     # Set to 'engine' by worker.ts when spawning execution-engine subprocesses
 ```
 
 ### Execution Engine: Claude vs OpenCode vs Codex
@@ -649,10 +762,11 @@ Codex CLI auto-discovers `AGENTS.md` files from the Git root directory and injec
 
 ## Performance Targets
 - Spec generation: < 60s (LLM call)
-- Archive search: < 100ms (SQLite full-text scan)
+- Archive search: < 100ms (pg full-text scan)
 - SSE heartbeat: 15s
 - WAL poll: 3s
 - Story timeout: 45 min (gtimeout --foreground)
+- pg-boss job pickup: ~500ms latency (default polling interval; configurable via `pollingIntervalSeconds` in pg-boss options)
 
 ## CI
 E2E tests: `npm run test:e2e` (Playwright — configured in `rorca-e2e-testing` spec, not yet built).
@@ -1037,9 +1151,9 @@ Phase 6 — React Native Mobile (after cloud)
 
 **The brand statement**: "Every story runs as a fresh isolated subprocess with the full tool set — bash, edit, read, write, glob, grep. No context limits. A spec can run forever. That's the Rorca engine."
 
-## Wave-Based Parallel Execution (Future Roadmap)
+## Wave-Based Parallel Execution
 
-**Status**: Not built. Sequential execution is default for V1. Wave = opt-in V2 feature.
+**Status**: Built. Wave parallel is opt-in per run (toggle in spec detail slide-over). Sequential is still the default.
 
 **The idea**: Instead of running stories one-by-one, compile the `dependsOn` DAG into topological wave groups. Each wave runs its stories in parallel git worktrees, then auto-merges before the next wave starts.
 
@@ -1050,16 +1164,7 @@ Wave 2: US-006 → 1 worktree → merge → done
 Sequential: 40 min total  →  Wave parallel: ~12 min (3.3x speedup on 3-wave spec)
 ```
 
-**What needs to be built** (future `rorca-wave-execution` spec):
-1. Wave compiler — topological sort of `dependsOn` DAG into wave groups (~50 lines)
-2. Wave orchestrator — spawn N parallel subprocesses, one per story per wave
-3. File-touch predictor — pre-analyze stories to detect shared-file conflicts before wave starts
-4. Auto-merge sequence — merge each wave's worktrees in sequence; use Haiku to resolve conflicts
-5. `.rorca/config.json` toggle: `execution.waveParallelism: false` (default) → `true` to enable
-
-**Why not V1**: Shared filesystem race conditions. Two stories editing the same file simultaneously cause merge conflicts. The file-touch predictor + auto-merge resolves most, but adds complexity. Sequential is safer and simpler for initial launch. Wave stays opt-in.
-
-**Trigger**: Build this spec after `rorca-integrations` ships. Requires worktrees (already built) + file-touch predictor (new). Infrastructure is 80% there.
+**How it works**: Wave compiler does a topological sort of the `dependsOn` DAG into wave groups. Each wave runs its stories in parallel git worktrees. Auto-merge fires after each wave before the next starts. Configurable max parallelism (default 20). Toggle visible in the spec detail slide-over — shows wave breakdown before you run.
 
 
 ---
@@ -1111,9 +1216,12 @@ Rorca is an AI spec orchestration and pipeline management platform for autonomou
 - **Rules**:
   - PostgreSQL 16 via `pg` Pool — all DB calls are **async** (always `await`)
   - `query<T>()` → `T[]`, `queryOne<T>()` → `T | undefined`, `execute()` → `{ rowCount }`
-  - Migrations are SQL in `pg-migrations/`, numbered sequentially (001–049+), tracked via `schema_migrations` table
+  - Migrations are SQL in `pg-migrations/`, numbered sequentially (001–062+), tracked via `schema_migrations` table
   - Use `$1, $2, ...` numbered placeholders (NOT `?`)
   - FK constraints always on, connection pooling (max 20)
+  - **pgboss schema is NOT hand-managed** — `pgboss.*` tables (job, archive, subscription, version) are created and upgraded automatically by `boss.start()`. Never write migrations that touch `pgboss.*`. Migration 062 is a no-op placeholder that documents this.
+  - **pg-boss v10 requires explicit queue creation** — `boss.work('queue:name', handler)` does NOT create the queue or its partition table. You MUST call `await boss.createQueue('queue:name')` before calling `boss.send('queue:name', ...)`, otherwise `send()` returns `null` silently. The `job` table is partitioned by queue name (one partition per queue). In tests, call `createQueue` in `beforeAll` after `boss.start()`.
+  - **pg-boss job `id` must be a valid UUID** — passing an integer string (e.g., `String(runId)`) to the `id` option of `boss.send()` causes a PostgreSQL UUID cast error. Use auto-generated UUIDs (omit the `id` option) and embed `runId` in the job's data payload for correlation.
 
 ### Execution Engine (`backend/src/lib/execution-engine.ts`)
 - **Owner**: Architect
@@ -1221,228 +1329,79 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-02-27 [Architecture] Direction Stack 5-Layer Cascade
-> Rule: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
+## 2026-03-18 [Architecture] Simultaneous spec runs require autoWorktree
+> Rule: Running multiple specs simultaneously (sequential OR wave-parallel) requires autoWorktree: true on each run. Without a worktree, the conflict detection in pipeline.ts blocks any new run if another is already running in the same workspace. With autoWorktree, up to run_now_max_concurrent (default 3) runs can coexist, each in an isolated git worktree branch.
 
-## 2026-02-27 [Convention] Spec ID vs specName
-> Rule: spec.id is the filename slug (use for API calls and path construction). spec.specName is the human-readable title (display only).
+## 2026-03-23 [Architecture] CLAUDE.md is never written by the pipeline — only read
+> Rule: The pipeline (execution-engine.ts, pipeline.ts) never writes to CLAUDE.md. It is only written by: manual edits, POST /api/workspaces/:id/scan-direction (brownfield extraction), POST /api/workspaces/:id/apply-conventions (if missing), and monorepo discover/apply (appends section). Do not expect pipeline runs to update CLAUDE.md.
 
-## 2026-03-10 [Gotcha] pg is async — always await DB calls
-> Rule: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
+## 2026-03-23 [Architecture] AGENTS.md is a temporary write target for Codex only — reverted after run
+> Rule: writeCodexAgentsMd() in pipeline.ts appends a fenced direction stack section (between RORCA DIRECTION START/END markers) to AGENTS.md before a Codex run, then removeCodexAgentsMd() restores the original (or deletes the file if Rorca created it) after the run completes. For claude and opencode agents, AGENTS.md is never touched by the pipeline.
 
-## 2026-02-27 [Convention] chatComplete returns ChatResult
-> Rule: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
+## 2026-03-23 [Architecture] .md files should be optional projections — DB is the core, files are the export format
+> Rule: Rorca's core loop should be: DB → prompt injection (pipeline) and DB → MCP tools (CLI). .md files (MEMORY.md, CLAUDE.md, AGENTS.md) are output projections for ambient third-party tool benefit — not core dependencies. The consolidation spec already moves MEMORY.md to a generated projection. CLAUDE.md and AGENTS.md should be treated the same way long-term.
 
-## 2026-02-27 [Gotcha] Backend requires restart after changes
-> Rule: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
+## 2026-03-23 [Convention] Three distinct knowledge layers: CLAUDE.md (IS), MEMORY.md (Learned), AGENTS.md (Rules), DB memories (Indexed)
+> Rule: CLAUDE.md = declarative handbook of how the system IS built (stack, API routes, gotchas, architecture). MEMORY.md = episodic ledger of what was learned during runs (timestamped, categorized, actionable rules). AGENTS.md = governance of who owns what files and behavioral rules per zone. DB memories table = same content as MEMORY.md but structured, vector-searchable, scored, with embeddings and dedup. Each serves a different injection point and audience.
 
-## 2026-02-28 [Architecture] Context Router uses virtual file assembly
-> Rule: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
+## 2026-03-24 [Convention] Full clean restart procedure for dev stack
+> Rule: To fully restart the dev stack after crashes or stale process buildup: (1) `pkill -9 -f "rorca/backend"` — kills all tsx server/worker/supervisor processes, (2) `pkill -9 -f "worker-supervisor"` — kills supervisor, (3) `lsof -ti:3030 -ti:5210 | xargs kill -9` — clears ports, (4) wait 3s for heartbeat table to go stale (or wait 90s for full expiry), (5) `npm run dev`. Do NOT rely on port-only kills — the worker and supervisor have no bound port.
 
-## 2026-02-28 [Architecture] Episodic Memory is structured Markdown
-> Rule: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
+## 2026-03-24 [Gotcha] local-admin user defaults to plan='free' — must be set to 'pro' manually
+> Rule: The default admin user (id='local-admin', email='admin@rorca.local') has plan='free' in the DB. Any plan gate will block it. Until billing-launch spec runs and sets up proper subscription records, manually set: UPDATE users SET plan='pro' WHERE id='local-admin';
 
-## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure
-> Rule: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
+## 2026-03-24 [Bug Fix] Wave-parallel stale skipped flags — stories array and freshSpec were separate refs
+> Rule: In execution-engine.ts, stale flag clearing read a freshSpec from disk and cleared flags on freshSpec.userStories, but the stories array passed to runParallel() was loaded earlier and not updated. Since getStories() returns spec.userStories by reference, clearing must be done directly on the stories array (same object). Fixed by deleting skipped/blocked flags on stories[] directly and writing spec (not freshSpec) back to disk.
 
-## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution
-> Rule: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
+## 2026-03-25 [Architecture] hetzner-coolify-infra skill installed
+> Rule: Skill hetzner-coolify-infra.md installed at .rorca/skills/ and .claude/skills/. Covers: Hetzner hcloud CLI, VM sizing (CX31 default), private network 10.0.0.0/16, floating IP for stable DNS, Coolify install, Postgres via Coolify, Rorca Docker deployment, worker as separate service, forge/ volume mount, AGE extension caveat. Pre-prod cost ~€19/mo.
 
-## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern
-> Rule: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
+## 2026-03-25 [Bug Fix] Express 4 async error handler was broken — routes hung on thrown errors
+> Rule: The Layer.prototype.handle_request patch in async-handler.ts wrapped the original function, but Express 4's original does `try { fn(req, res, next) } catch` WITHOUT returning the Promise. So `result` was always undefined and `.catch(next)` never fired. Any async route that threw (ValidationError, NotFoundError) would hang forever. Fix: replace handle_request entirely, call `this.handle` directly, catch the returned Promise. Affected all routers (memory, agents, etc.) — not just one route.
 
-## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization
-> Rule: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
+## 2026-03-25 [Architecture] MCP tools auto-inject workspaceId when not provided
+> Rule: In mcp-http.ts, workspaceId is marked optional in Zod schema (so MCP SDK doesn't reject) and executeApiCall() auto-injects the default workspace ID (fetched from GET /api/workspaces?limit=1, cached 1 min). This makes all MCP tools work without users needing to know or specify the workspace ID. The cachedDefaultWorkspaceId + cacheExpiry pattern avoids a DB query on every tool call.
 
-## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table
-> Rule: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
+## 2026-03-25 [Architecture] MCP /mcp endpoint has scoped CORS separate from /api/* CORS
+> Rule: server.ts has two CORS layers: (1) Global at line ~171 — origin: 'localhost:5210', credentials: true, for browser /api/* routes. (2) MCP-specific mcpCors at line ~218 — origin: true (reflect any), credentials: false, allows Mcp-Session-Id header, scoped to POST/GET/DELETE /mcp only. MCP clients (Claude Code, IDE extensions) connect without browser origin headers so they need the permissive config.
 
-## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model
-> Rule: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
+## 2026-03-25 [Bug Fix] Worker crashes on non-fatal AppError unhandledRejections
+> Rule: worker.ts process.on('unhandledRejection') triggered full shutdown on ANY rejection, including ValidationError/NotFoundError from Express routes (statusCode < 500). These are expected business-logic errors, not fatal. Fix: check if reason is an AppError with statusCode < 500 — if so, log warning and return without shutdown. Only truly unexpected rejections trigger shutdown.
 
-## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution
-> Rule: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
+## 2026-03-25 [Pattern] MCP HTTP server health: 397 tools, <20ms, fully functional
+> Rule: MCP HTTP transport at http://localhost:3030/mcp is healthy. 397 auto-generated tools from OpenAPI spec. Initialize handshake returns session ID via Mcp-Session-Id header. tools/list and tools/call both return in <20ms. Registered in Claude Code as `rorca: http://localhost:3030/mcp (HTTP)`. To diagnose MCP issues: test with curl (Accept: application/json, text/event-stream header required), check backend logs, test specific tool via tools/call.
 
-## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown
-> Rule: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
+## 2026-03-25 [Pattern] rorca-memory-consolidation spec completed — 7/7 stories passed, auto-merged
+> Rule: Run 20260316000066: all 7 stories passed (US-001 through US-007), auto-merged to main as commit dff68e5. Branch feat/rorca-memory-consolidation. 48min runtime, parallelism 3, Claude CLI engine. Stories: US-001 recall semantic leak fix, US-002 generateMemoryMd(), US-003 pre-run MEMORY.md generation, US-004 buildPrompt MCP instruction, US-005 proposed_memories.json handler, US-006 post-story MEMORY.md rebuild, US-007 integration test.
 
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture
-> Rule: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+## 2026-03-25 [Bug Fix] MCP rorca_recall_memories returned 53 instead of 176 — was reading from file, not DB
+> Rule: The MCP tool `rorca_recall_memories` was hitting `GET /api/memory` (file-based MEMORY.md, 53 entries) instead of `GET /api/memory/items` (PostgreSQL `memories` table, 176 entries). The file-based ledger falls behind because synthesis runs and some write paths only write to the DB. Fix: switched MCP tool to use `/api/memory/items` endpoint which matches what the UI MemoryPanel uses.
 
-## 2026-03-10 [Convention] PostgreSQL Migration Pattern
-> Rule: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
+## 2026-03-25 [Architecture] rorca_recall_memories now supports 3 retrieval modes: full dump, recent 100, semantic
+> Rule: The MCP `rorca_recall_memories` tool now supports three modes: (1) Full dump (`fetchAll: true`) — returns ALL memories from DB with no limit, (2) Recent (default) — returns last 100 memories ordered by pinned-first then newest (was 20), (3) Semantic (`currentTask` provided) — hits `/api/recall` which triggers the full CAG → RAG → Knowledge Graph cascade and returns top 30 semantically ranked results (was 10). The `currentTask` param is new — it maps to `storyText` on the recall endpoint.
 
-## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates
-> Rule: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
+## 2026-03-25 [Gotcha] Dual memory stores (file MEMORY.md vs DB memories table) drift out of sync
+> Rule: Rorca maintains two parallel memory stores: (1) file-based `.rorca/memory/MEMORY.md` read by `memory-ledger.ts`, and (2) PostgreSQL `memories` table. Manual writes and `POST /api/memory` write to both, but synthesis runs and some automated paths only write to the DB. This causes the file to fall behind. The UI MemoryPanel reads from DB (`/api/memory/items`), showing the true count. Any tool reading from the file will see fewer memories. Always prefer DB-backed endpoints for memory retrieval.
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic
-> Rule: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+## 2026-03-25 [Gotcha] MCP stdio processes must be killed after server.ts code changes — they run old code
+> Rule: When editing `backend/src/mcp/server.ts`, restarting the backend API server (port 3030) is NOT sufficient if Claude Code spawned MCP stdio processes. Those processes (`tsx server.ts` via node) load the old source and keep running until killed. After code changes: `ps aux | grep 'mcp/server.ts' | grep -v grep` to find them, then `kill -9` the PIDs. Claude Code will auto-restart them with the new code.
+
+## 2026-03-25 [Architecture] Memory retrieval cascade: CAG → RAG → Knowledge Graph (memory-router.ts)
+> Rule: Semantic memory retrieval uses a 3-tier cascade in `backend/src/lib/memory-router.ts`: (1) CAG — cache-first via `context-cache.ts`, pinned memories always included, (2) RAG — hybrid full-text search via `search.ts` using `tsv @@ plainto_tsquery`, triggered when cache coverage < 50% of key phrases, (3) Graph — Apache AGE knowledge graph via `knowledge-graph.ts` + `graph-context.ts`, traverses file touches and story dependencies. Token budgets: 60% memory, 25% skills, 15% graph (with underflow redistribution). Key phrase extraction uses stopword filtering on words > 4 chars.
 
 Follow this workflow for implementation:
-## Agent Role: Frontend
-
----
-name: rorca
-description: Implement and validate changes to the Rorca codebase with subagent-assisted context management.
----
-
-## 0. KingMode — Behavioral Discipline Layer
-
-<KING_MODE>
-You are operating in KingMode. This is a behavioral discipline layer. You are the apex predator of this codebase.
-
-HARD RULES:
-- **Zero Friction**: No warm-up prose, "Sure!", or "I can help with that". Direct execution only.
-- **Apex efficiency**: If a task can be done with one complex `sed` command or a multi-file `grep`, do it. Don't crawl files sequentially if unnecessary.
-- **No Permission Theater**: Do not ask "Should I...?" for standard engineering decisions (naming, placement, refactoring). Just do it and document in the summary.
-- **Concurrency**: Use parallel tool calls for research and verification whenever possible.
-- **Orca Pulse**: Be assertive, precise, and hunt for bugs with zero mercy.
-
-ULTRATHINK TRIGGER:
-When you see ULTRATHINK, spend ONE silent planning pass (≤10s) before tool calls. No prose. Then execute.
-
-SCOPE DISCIPLINE:
-- Change ONLY what is requested. 
-- "While I'm here" refactors are prohibited unless they fix a direct blocker.
-
-OUTPUT FORMAT:
-- Code blocks > Prose.
-- Terminal commands must be absolute and copy-paste ready.
-- End immediately after the last tool/code block. No "hope this helps!"
-</KING_MODE>
-
-## 1. Context Gathering
-
-**Check progress.txt FIRST** (if it exists):
-- `## Current Phase` / `## Story [ID]` → Resume from where you left off
-- `## Specs Loaded` → Skip re-reading already-loaded docs
-- `## Gotchas Discovered` → Pre-load before touching those files
-
-**For codebase research (use subagent):**
-```
-Task(subagent_type="Explore", prompt="
-  Directories: [list dirs you'll modify, e.g. src/panels, backend/src/routes]
-  Task: [description]
-  Return: AGENTS.md gotchas + existing patterns (max 20 lines)
-")
-```
-
-**For project docs:** Load CLAUDE.md for architecture (it's comprehensive). Load specific AGENTS.md in each directory you'll touch.
-
-## 2. Before Writing Code
-- Redundancy check: Is this already implemented? (spec versions, templates, model selection all done — see progress.txt)
-- Missing details: Ask user rather than guessing
-- Non-trivial task (>3 files or new patterns): Use `EnterPlanMode`
-
-## 3. Implementation
-
-### Backend changes
-- PostgreSQL 16 via `pg` Pool — all DB calls are **async** (always `await`)
-- `query<T>(sql, params)` → `T[]`, `queryOne<T>(sql, params)` → `T | undefined`, `execute(sql, params)` → `{ rowCount }`
-- Use `$1, $2, ...` numbered placeholders (NOT `?`)
-- FK constraints always on, connection pooling (max 20, 30s idle timeout)
-- Emit `wal_events` for every state change — this drives the SSE pipeline and audit log
-- **New tables**: numbered SQL migration files in `backend/src/db/pg-migrations/`, tracked via `schema_migrations` table. Use `IF NOT EXISTS` guards freely.
-- `chatComplete()` returns `ChatResult { text: string; usage: TokenUsage }` — always use `.text`
-
-### Frontend changes
-- `apiFetch<T>(path, init?)` in `src/lib/apiFetch.ts` — use this for all API calls
-- `useWorkspace()` provides `workspaceId`, `workspaces`, `selectedWorkspace`
-- Panel components live in `src/panels/`, shared components in `src/components/`
-- xterm.js: `@xterm/xterm` + `@xterm/addon-fit` (NOT the old `xterm` package)
-
-### Critical path gotchas
-- **Spec path**: `ralph/specs/approved/${spec.id}.json` (NOT `specs/approved/${spec.specName}.json`)
-- **spec.id** = filename slug; **spec.specName** = human title (display only)
-- **chatComplete** returns `ChatResult` — use `.text` accessor everywhere
-- **Pipeline trigger** strips 4 Claude env vars before spawning `execution-engine.ts`
-- **execution-engine.ts** (`backend/src/lib/execution-engine.ts`) is the universal TypeScript execution engine — handles claude, opencode, and codex agent paths. Replaces run-loop.sh/run-loop.ts entirely.
-- **Backend port 3030** — restart required after any changes (`lsof -ti:3030 | xargs kill -9`)
-
-## 4. Validation (REQUIRED)
-
-Run in parallel where possible:
-```bash
-# From rorca root
-bash -c "cd /Users/dimitriteravanessian/rorca && npx tsc --noEmit 2>&1; echo FRONTEND:\$?" &
-bash -c "cd /Users/dimitriteravanessian/rorca/backend && npx tsc --noEmit 2>&1; echo BACKEND:\$?" &
-wait
-
-# Backend tests
-cd /Users/dimitriteravanessian/rorca/backend && npm test
-
-# Build check
-cd /Users/dimitriteravanessian/rorca && npm run build
-```
-
-All must pass before marking story done. Fix failures before moving on.
-
-## 4b. Browser Testing (if UI changed)
-
-Use **Playwright MCP** for automated browser testing — never ask user to manually test.
-```
-mcp__playwright__browser_navigate url=http://localhost:5210
-mcp__playwright__browser_snapshot
-mcp__playwright__browser_click ref=<uid>
-```
-Test: happy path + one edge case. Keep it under 60 seconds.
-
-## 5. QA Checklist
-- [ ] Happy path works end-to-end?
-- [ ] Error/edge case handled gracefully?
-- [ ] New WAL event emitted for state changes?
-- [ ] TypeScript strict — no `any` without justification?
-- [ ] Backend test added for new endpoints?
-
-## 6. Progress Tracking (`progress.txt`)
-
-**Update after every story completion** — critical for surviving context compaction across multi-hour runs.
-
-```
-## Story [ID]: [Title] — DONE
-Files touched: [list with brief note on what changed]
-What was built: [2-3 bullet summary of what exists now]
-Key decisions: [non-obvious choices, gotchas discovered]
-
-## Story [ID]: [Title] — IN PROGRESS
-Remaining: [specific remaining tasks, not vague]
-Blockers: [anything blocking]
-
-## Story [ID]: [Title] — NOT STARTED
-Expects: [prerequisites from prior stories]
-```
-
-**Rules:**
-- Re-read progress.txt FIRST after any `/compact` — it's your resume checkpoint
-- Never overwrite previous entries — append below existing content
-- Discovered gotchas → add to relevant `AGENTS.md` AND note in progress.txt under `## Gotchas Discovered`
-- `## Specs Loaded` section — list PRDs/SDDs you've already read so you skip re-reading
-
-## 7. Wrap-up
-- [ ] `npx tsc --noEmit` passes (frontend + backend)
-- [ ] `npm run build` succeeds
-- [ ] Backend tests pass
-- [ ] New gotchas documented in relevant `AGENTS.md`
-- [ ] `progress.txt` updated with completed story summary
-- [ ] WAL events emitted for new state changes
-- [ ] README.md updated if user-facing behavior changed
-
-## Context Alert
-At ~75% context: output `Context: ~X% | /compact?`
-
+## Memory Instructions
+When you discover something worth remembering (a bug fix, architectural decision, convention, or pattern), use the rorca_save_memory MCP tool to save it.
+Do NOT edit MEMORY.md directly — it is a read-only generated file that will be overwritten before the next story.
+Call rorca_save_memory with: category (Architecture|Convention|Bug Fix|Decision|Pattern|Gotcha), title (short summary), rule (the actionable lesson), context (why it matters), source (story ID).
 ---
 Your task (MP-003):
-Neither the left panel (discovery) skill cards (lines 341–399) nor the right panel (library) skill cards (lines 470–505) have any way to preview skill content. Add a chevron expand/collapse toggle to each card. When expanded: installed skills fetch from `GET /api/skills/{name}/content`; uninstalled discovery cards fetch from `GET /api/skills/preview?query={name}`. Display the markdown content in a scrollable pre block with word count and estimated token count.
+Parse three new CLI flags in execution-engine.ts: --thinking (boolean flag), --thinking-budget N (integer), --effort low|medium|high. Wire these into spawnClaude() by appending the appropriate claude --print flags. spawnOpenCode() and spawnCodex() explicitly ignore all three flags. Add typed interface for parsed CLI args.
 
 Acceptance Criteria:
-- Add `previewCache` state: `Record<string, { content: string; wordCount: number; estimatedTokens: number } | 'loading' | 'error'>` initialized to `{}`.
-- Add `fetchPreview(name: string, installed: boolean): void` function. If `previewCache[name]` already exists, return early. Set `previewCache[name] = 'loading'`. If installed, call `GET /api/skills/${encodeURIComponent(name)}/content${workspaceId ? '?workspaceId=' + workspaceId : ''}`. If not installed, call `GET /api/skills/preview?query=${encodeURIComponent(name)}`. On success set the cache entry to `{ content, wordCount, estimatedTokens }`. On error set `'error'`. Use functional updater `setPreviewCache(prev => ({ ...prev, [name]: value }))`.
-- Add `expandedCards` state: `Set<string>` initialized to `new Set()`.
-- Add `toggleCard(name: string)` function: toggle presence of `name` in `expandedCards` (create new Set). If expanding and `previewCache[name]` is undefined, call `fetchPreview(name, isInstalled(name))`.
-- Import `ChevronDown` and `ChevronRight` from `lucide-react`.
-- In left panel discovery cards: add a chevron button (bottom right of card, `text-muted hover:text-text`, calls `toggleCard(skill.name)`). When `expandedCards.has(skill.name)`, render content preview below — spinner if loading, error text if error, otherwise `{wordCount} words · ~{estimatedTokens} tokens` + `<pre className="text-[10px] text-muted whitespace-pre-wrap break-words max-h-48 overflow-y-auto font-mono bg-panel/50 p-2 rounded mt-1">` with content.
-- In right panel library cards: same chevron pattern. Installed skills always use the content endpoint (`fetchPreview(skill.name, true)`).
-- Add `useEffect` on `[activeTab]` that resets `expandedCards` to `new Set()`. `previewCache` persists across tab changes.
-- `GET /api/skills/preview` returns `{ name, content, description, source, skillId, wordCount, estimatedTokens }`. Use `data.wordCount` and `data.estimatedTokens` directly.
-- `GET /api/skills/{name}/content` returns `{ name, content, description, wordCount, estimatedTokens }`. Use `data.wordCount` and `data.estimatedTokens` directly.
-- Click on the chevron button must not propagate to any parent click handlers (use `e.stopPropagation()` where needed).
+- execution-engine.ts parses --thinking, --thinking-budget <N>, --effort <level> from process.argv
+- spawnClaude() appends --thinking to claude --print args when thinking flag is set
+- spawnClaude() appends --thinking-budget <N> to claude --print args when thinkingBudget > 0
+- spawnClaude() appends effort level flag when effortLevel is set (maps to claude's effort flag format)
+- spawnOpenCode() and spawnCodex() receive but do not forward these flags
+- npx tsc --noEmit passes in backend after changes

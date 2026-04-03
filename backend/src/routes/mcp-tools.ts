@@ -282,7 +282,7 @@ const MCP_TOOLS: McpToolDef[] = [
   {
     name: 'rorca_get_memories',
     category: 'Memory',
-    description: 'Retrieve memories from the workspace ledger, optionally filtered by category.',
+    description: 'Paginated memory list with filters — use for browsing ("show last 50 memories") or filtering by category/confidence/run. Keyword search only. For semantic search ("find memories about X"), use rorca_recall_memories with currentTask or rorca_recall_workspace with query instead.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
       category: { type: 'string', description: 'Filter by category (optional)' },
