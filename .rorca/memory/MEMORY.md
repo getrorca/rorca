@@ -214,3 +214,23 @@
 > Rule: Wave parallel execution requires two things to be correct simultaneously: (1) ArchivePanel.handleRun must forward all TriggerPopover options (forceSequential, autoMerge, includeGraph) to the pipeline trigger API — since ULT-007, the options parameter was silently dropped, so forceSequential was never sent and backend defaulted to sequential; (2) the target workspace's .rorca/config.json must have waveParallelism: true in the execution block — Cashflow-App had it hardcoded to false, blocking wave parallel regardless of UI toggle. Both must be correct or parallelism stays at 1.
 > Context: Diagnosed by checking all finops-generator-engine runs via MCP and confirming parallelism: 1 on every run. ArchivePanel fix: handleRun now accepts options?: { forceSequential?, autoMerge?, includeGraph? } and spreads them into the fetch body. Config fix: .rorca/config.json waveParallelism changed from false to true.
 > Source:  
+
+## 2026-04-03 [Gotcha] Model picker must filter by engine type
+> Rule: When engine is OpenCode (API), the model picker must NOT show Anthropic subscription models (Opus, Sonnet, Haiku). Filter by `m.provider !== 'Anthropic'` on the `/api/direction/models` response. Only OpenRouter models should appear. OpenRouter section should also start expanded (not collapsed) when OpenCode is selected.
+> Context:  
+> Source: MP-005
+
+## 2026-04-03 [Gotcha] Effort level 'max' is Opus-only
+> Rule: Claude CLI supports 4 effort levels: low, medium, high, max. However 'max' is only available for Opus models. When Sonnet is selected, the ThinkingControls component must hide the Max button (only show Low/Medium/High). If effort was set to 'max' and user switches to Sonnet, clamp down to 'high'.
+> Context:  
+> Source: MP-006
+
+## 2026-04-03 [Gotcha] No --thinking-budget CLI flag — budget slider removed
+> Rule: Claude Code CLI has `--thinking` (on/off toggle) and `--effort` (low/medium/high/max) but NO `--thinking-budget` flag. The thinking budget slider was removed from ThinkingControls. The `thinkingBudget` field is kept in the data model for backward compat but the UI no longer renders a slider for it. Extended thinking is just an on/off toggle.
+> Context:  
+> Source: MP-006
+
+## 2026-04-03 [Bug Fix] Model picker merge left conflict markers in 3 files
+> Rule: The feat/rorca-spec-model-picker merge with stash/restore left `<<<<<<< Updated upstream` conflict markers in SpecDetailSlideOver.tsx, TriggerPopover.tsx, and WorktreesPanel.tsx. Blindly taking one side of conflict resolution caused missing variable definitions (hasStoryOverride, isSpecLevel, specModelFields). Fix was to restore from the last working commit (aef070f) rather than manual conflict patching.
+> Context: 
+> Source: MP-008
