@@ -702,13 +702,18 @@ function runAgent(
   agentModel: string | null,
   attachAddr: string | null,
   onTokenUpdate?: TokenUpdateCallback,
+  thinkingEnabled?: boolean,
+  thinkingBudget?: number,
+  effortLevel?: 'low' | 'medium' | 'high',
 ): Promise<AgentResult> {
   switch (agentType) {
     case 'claude':
-      return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate);
+      return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel);
     case 'opencode':
+      // thinking/effort flags are not forwarded to OpenCode
       return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr);
     case 'codex':
+      // thinking/effort flags are not forwarded to Codex
       return spawnCodex(prompt, cwd, timeoutMs, logFile);
   }
 }
@@ -721,6 +726,9 @@ function spawnClaude(
   logFile: string,
   agentModel: string | null = null,
   onTokenUpdate?: TokenUpdateCallback,
+  thinkingEnabled?: boolean,
+  thinkingBudget?: number,
+  effortLevel?: 'low' | 'medium' | 'high',
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildCleanEnv();
@@ -732,6 +740,9 @@ function spawnClaude(
       '--verbose',
       '--output-format', 'stream-json',
       ...(agentModel ? ['--model', agentModel] : []),
+      ...(thinkingEnabled ? ['--thinking'] : []),
+      ...(thinkingBudget && thinkingBudget > 0 ? ['--thinking-budget', String(thinkingBudget)] : []),
+      ...(effortLevel ? ['--effort', effortLevel] : []),
       prompt,
     ];
 
@@ -2401,6 +2412,9 @@ async function executeStory(
       currentModel,
       effectiveAttach,
       tokenUpdateCallback,
+      config.thinkingEnabled,
+      config.thinkingBudget,
+      config.effortLevel,
     );
 
     // Extract token usage from log file after agent exits
@@ -3621,11 +3635,17 @@ function parseArgs(): EngineConfig {
       case '--include-graph':
         includeGraph = true;
         break;
+      case '--thinking':
+        thinkingEnabled = true;
+        break;
       case '--thinking-enabled':
         thinkingEnabled = args[++i] === 'true';
         break;
       case '--thinking-budget':
         thinkingBudget = parseInt(args[++i], 10);
+        break;
+      case '--effort':
+        effortLevel = args[++i] as 'low' | 'medium' | 'high';
         break;
       case '--effort-level':
         effortLevel = args[++i] as 'low' | 'medium' | 'high';
@@ -3637,7 +3657,7 @@ function parseArgs(): EngineConfig {
   }
 
   if (!jsonPath || !cwd || !runId) {
-    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort-level <low|medium|high>]');
+    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>]');
     process.exit(1);
   }
 
