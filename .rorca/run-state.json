@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-04-03T18:40:16.382Z",
+  "lastUpdatedAt": "2026-04-03T18:52:02.772Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -103,6 +103,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 152256
+    },
+    {
+      "storyId": "MP-006",
+      "title": "Build ThinkingControls component with effort segmented control, toggle, and budget slider",
+      "status": "passed",
+      "startedAt": "2026-04-03T18:46:18.749Z",
+      "finishedAt": "2026-04-03T18:52:02.772Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 344023
     }
   ],
   "failedStories": [],
