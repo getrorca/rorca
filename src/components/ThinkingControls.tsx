@@ -1,6 +1,6 @@
 import { Brain } from 'lucide-react';
 
-export type EffortLevel = 'low' | 'medium' | 'high';
+export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
 export interface ThinkingControlsProps {
   /** Current agent engine type */
@@ -13,22 +13,17 @@ export interface ThinkingControlsProps {
   /** Whether extended thinking is enabled */
   thinkingEnabled: boolean;
   onThinkingEnabledChange: (enabled: boolean) => void;
-  /** Thinking budget in tokens (only relevant when thinkingEnabled=true) */
-  thinkingBudget: number;
-  onThinkingBudgetChange: (budget: number) => void;
 }
 
 const EFFORT_LEVELS: { value: EffortLevel; label: string }[] = [
   { value: 'low', label: 'Low' },
   { value: 'medium', label: 'Medium' },
   { value: 'high', label: 'High' },
+  { value: 'max', label: 'Max' },
 ];
 
-const BUDGET_STEPS = [1000, 5000, 10000, 25000, 50000];
-
-function formatBudgetLabel(tokens: number): string {
-  if (tokens >= 1000) return `${tokens / 1000}K tokens`;
-  return `${tokens} tokens`;
+function isOpus(model: string | null): boolean {
+  return !!model && model.toLowerCase().includes('opus');
 }
 
 /** Returns true when ThinkingControls should be fully interactive */
@@ -46,14 +41,18 @@ export default function ThinkingControls({
   onEffortChange,
   thinkingEnabled,
   onThinkingEnabledChange,
-  thinkingBudget,
-  onThinkingBudgetChange,
 }: ThinkingControlsProps) {
   const active = isClaudeOpusOrSonnet(engine, model);
   const disabledClass = !active ? 'opacity-50 pointer-events-none' : '';
+  const opusSelected = isOpus(model);
 
-  const currentBudgetIndex = BUDGET_STEPS.indexOf(thinkingBudget);
-  const sliderIndex = currentBudgetIndex >= 0 ? currentBudgetIndex : 1; // default to 5K
+  // Max effort is Opus-only — Sonnet caps at high
+  const visibleLevels = opusSelected
+    ? EFFORT_LEVELS
+    : EFFORT_LEVELS.filter(l => l.value !== 'max');
+
+  // If Sonnet is selected but effort was set to max, clamp down to high
+  const effectiveEffort = (!opusSelected && effortLevel === 'max') ? 'high' : effortLevel;
 
   return (
     <div className={`space-y-3 ${disabledClass}`}>
@@ -73,13 +72,13 @@ export default function ThinkingControls({
       <div>
         <span className="block text-[10px] text-muted mb-1.5">Effort</span>
         <div className="flex gap-1">
-          {EFFORT_LEVELS.map(({ value, label }) => (
+          {visibleLevels.map(({ value, label }) => (
             <button
               key={value}
               type="button"
               onClick={() => active && onEffortChange(value)}
               className={`flex-1 py-1 rounded text-[11px] font-medium transition-colors border ${
-                effortLevel === value
+                effectiveEffort === value
                   ? 'bg-accent text-white border-accent'
                   : 'bg-[var(--bg)] text-muted border-border hover:border-accent/40 hover:text-[var(--text)]'
               }`}
@@ -104,37 +103,6 @@ export default function ThinkingControls({
         </div>
         <span className="text-xs font-medium text-[var(--text)]">Extended thinking</span>
       </label>
-
-      {/* Thinking budget slider — only shown when thinkingEnabled */}
-      {thinkingEnabled && (
-        <div className="ml-11">
-          <div className="flex items-center justify-between mb-1">
-            <span className="text-[10px] text-muted">Budget</span>
-            <span className="text-[10px] font-mono text-[var(--text)] tabular-nums">
-              {formatBudgetLabel(BUDGET_STEPS[sliderIndex])}
-            </span>
-          </div>
-          <input
-            type="range"
-            min={0}
-            max={BUDGET_STEPS.length - 1}
-            step={1}
-            value={sliderIndex}
-            onChange={(e) => {
-              const idx = parseInt(e.target.value, 10);
-              onThinkingBudgetChange(BUDGET_STEPS[idx]);
-            }}
-            className="w-full h-1.5 rounded-full appearance-none cursor-pointer accent-accent bg-border"
-          />
-          <div className="flex justify-between mt-1">
-            {BUDGET_STEPS.map((step) => (
-              <span key={step} className="text-[9px] text-muted/60 tabular-nums">
-                {step >= 1000 ? `${step / 1000}K` : step}
-              </span>
-            ))}
-          </div>
-        </div>
-      )}
     </div>
   );
 }

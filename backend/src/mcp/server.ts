@@ -253,10 +253,12 @@ server.registerTool(
       title: z.string().describe('Short title for the spec (used as filename slug)'),
       storyCount: z.number().min(1).max(500).optional().default(8).describe('Target number of user stories (default 8)'),
       includeDiagrams: z.boolean().optional().default(true).describe('Whether to include Mermaid and ASCII diagrams in output'),
-      model: z.enum(['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001']).optional().describe('LLM model to use for generation. If omitted, uses workspace default or claude-sonnet-4-6.'),
+      model: z.string().optional().describe('LLM model to use for generation (any model ID). If omitted, uses workspace default or claude-sonnet-4-6.'),
+      thinkingEnabled: z.boolean().optional().default(false).describe('Enable extended thinking for deeper reasoning during spec generation (Anthropic models). Increases cost but improves spec quality for complex briefs.'),
+      thinkingBudget: z.number().min(1024).max(65536).optional().default(8192).describe('Token budget for extended thinking (only used when thinkingEnabled=true). Higher = deeper reasoning. Default 8192.'),
     },
   },
-  async ({ workspaceId, specBrief, title, storyCount, includeDiagrams, model }) => {
+  async ({ workspaceId, specBrief, title, storyCount, includeDiagrams, model, thinkingEnabled, thinkingBudget }) => {
     return wrapToolCall('rorca_generate_spec', async () => {
       const resolvedStoryCount = storyCount ?? 8;
       const resolvedIncludeDiagrams = includeDiagrams ?? true;
@@ -268,6 +270,7 @@ server.registerTool(
           storyCount: resolvedStoryCount,
           includeDiagrams: resolvedIncludeDiagrams,
           ...(model ? { model } : {}),
+          ...(thinkingEnabled ? { thinkingEnabled, thinkingBudget: thinkingBudget ?? 8192 } : {}),
         }),
       }, 600_000); // 10 min — Opus with 20+ stories can take 90s+
       if (!res.ok) return httpError('rorca_generate_spec', res);
