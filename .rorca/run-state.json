@@ -1,12 +1,113 @@
 {
-  "specId": "rorca-spec-model-picker",
-  "runId": 20260316000085,
-  "startedAt": "2026-04-03T18:37:15.162Z",
-  "lastUpdatedAt": "2026-04-03T18:37:15.162Z",
-  "completedStories": [],
+  "specId": "rorca-billing-launch",
+  "runId": 20260316000045,
+  "startedAt": "2026-03-19T20:45:48.038Z",
+  "lastUpdatedAt": "2026-04-03T18:41:33.859Z",
+  "completedStories": [
+    {
+      "storyId": "BL-012",
+      "title": "Billing webhook idempotency — prevent duplicate billing state transitions",
+      "status": "passed",
+      "startedAt": "2026-03-19T20:38:42.733Z",
+      "finishedAt": "2026-03-19T20:39:16.135Z",
+      "agentType": "claude",
+      "elapsedMs": 33402
+    },
+    {
+      "storyId": "BL-013",
+      "title": "Self-hosted offline license activation — RORCA_LICENSE_KEY env var",
+      "status": "passed",
+      "startedAt": "2026-03-19T20:45:54.697Z",
+      "finishedAt": "2026-03-19T21:05:12.717Z",
+      "agentType": "claude",
+      "elapsedMs": 1158020
+    },
+    {
+      "storyId": "US-004",
+      "title": "Update buildPrompt() to instruct claude agent to use rorca_save_memory MCP tool",
+      "status": "passed",
+      "startedAt": "2026-03-25T18:43:41.737Z",
+      "finishedAt": "2026-03-25T18:46:20.825Z",
+      "agentType": "claude",
+      "elapsedMs": 159088
+    },
+    {
+      "storyId": "US-005",
+      "title": "proposed_memories.json handler for opencode/codex agents",
+      "status": "passed",
+      "startedAt": "2026-03-25T18:48:07.137Z",
+      "finishedAt": "2026-03-25T18:52:45.828Z",
+      "agentType": "claude",
+      "elapsedMs": 278691
+    },
+    {
+      "storyId": "US-006",
+      "title": "Post-story MEMORY.md rebuild after markStoryPassed()",
+      "status": "passed",
+      "startedAt": "2026-03-25T18:53:47.225Z",
+      "finishedAt": "2026-03-25T18:58:10.923Z",
+      "agentType": "claude",
+      "elapsedMs": 263698
+    },
+    {
+      "storyId": "US-007",
+      "title": "Integration test: end-to-end memory consolidation flow",
+      "status": "passed",
+      "startedAt": "2026-03-25T18:58:30.466Z",
+      "finishedAt": "2026-03-25T19:31:32.880Z",
+      "agentType": "claude",
+      "elapsedMs": 1982414
+    },
+    {
+      "storyId": "US-005",
+      "title": "Add GET /api/graph/stats endpoint and knowledge graph health indicator",
+      "status": "passed",
+      "startedAt": "2026-03-26T05:49:45.331Z",
+      "finishedAt": "2026-03-26T05:54:46.985Z",
+      "agentType": "claude",
+      "elapsedMs": 301654
+    },
+    {
+      "storyId": "US-008",
+      "title": "Add Knowledge Graph sub-tab to SpecDetailSlideOver Graph tab",
+      "status": "passed",
+      "startedAt": "2026-03-26T05:55:27.872Z",
+      "finishedAt": "2026-03-26T06:00:49.784Z",
+      "agentType": "claude",
+      "elapsedMs": 321912
+    },
+    {
+      "storyId": "US-009",
+      "title": "Emit graph_hits count in WAL events from execution-engine",
+      "status": "passed",
+      "startedAt": "2026-03-26T06:02:09.462Z",
+      "finishedAt": "2026-03-26T06:06:44.218Z",
+      "agentType": "claude",
+      "elapsedMs": 274756
+    },
+    {
+      "storyId": "US-010",
+      "title": "Graceful degradation and integration tests for knowledge graph UI",
+      "status": "passed",
+      "startedAt": "2026-03-26T06:09:22.485Z",
+      "finishedAt": "2026-03-26T06:33:52.695Z",
+      "agentType": "claude",
+      "elapsedMs": 1470210
+    },
+    {
+      "storyId": "MP-001",
+      "title": "Extend spec JSON schema and PUT /api/specs/:specId to persist engine + thinking fields",
+      "status": "passed",
+      "startedAt": "2026-04-03T18:37:38.529Z",
+      "finishedAt": "2026-04-03T18:41:33.859Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 235330
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
-  "resumedFromStory": null
+  "resumedFromStory": "BL-012"
 }
