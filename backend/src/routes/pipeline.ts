@@ -3750,7 +3750,7 @@ interface ModelPricingRow {
   output_cost_per_1k: number;
 }
 
-async function recordTokenUsage(runId: number, storyId: string, inputTokens: number, outputTokens: number, model?: string) {
+async function recordTokenUsage(runId: number, storyId: string, inputTokens: number, outputTokens: number, model?: string, reasoningTokens?: number) {
   const run = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: string } | undefined;
   if (!run) return;
 
@@ -3761,8 +3761,8 @@ async function recordTokenUsage(runId: number, storyId: string, inputTokens: num
     ? (inputTokens / 1000) * pricing.input_cost_per_1k + (outputTokens / 1000) * pricing.output_cost_per_1k
     : 0;
 
-  await execute(`INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`, [runId, storyId, run.workspace_id, modelName, inputTokens, outputTokens, Math.round(costUsd * 1_000_000) / 1_000_000]);
+  await execute(`INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, reasoning_tokens, cost_usd)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [runId, storyId, run.workspace_id, modelName, inputTokens, outputTokens, reasoningTokens ?? 0, Math.round(costUsd * 1_000_000) / 1_000_000]);
 }
 
 // ─── POST /api/pipeline/story-result — Record story outcome from run-loop.ts ──
@@ -3805,12 +3805,12 @@ router.post('/story-result', async (req: Request, res: Response) => {
   try {
     const {
       runId, storyId, status, worktreePath, worktreeBranch,
-      inputTokens, outputTokens, modelUsed, costUsd,
+      inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
       logPath, blockedBy, activeSkills,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string;
-      inputTokens?: number; outputTokens?: number; modelUsed?: string; costUsd?: number;
+      inputTokens?: number; outputTokens?: number; reasoningTokens?: number; modelUsed?: string; costUsd?: number;
       logPath?: string; blockedBy?: string[]; activeSkills?: string[];
     };
 
@@ -3835,7 +3835,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
 
     // Also record into token_usage analytics table if tokens are present
     if ((inputTokens && inputTokens > 0) || (outputTokens && outputTokens > 0)) {
-      recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, modelUsed);
+      recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, modelUsed, reasoningTokens ?? 0);
     }
 
     res.status(201).json({ ok: true });
@@ -3884,7 +3884,7 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
   try {
     const runId = parseInt(String(req.params.runId), 10);
     const storyId = String(req.params.storyId);
-    const { inputTokens, outputTokens, model } = req.body as { inputTokens?: number; outputTokens?: number; model?: string };
+    const { inputTokens, outputTokens, reasoningTokens, model } = req.body as { inputTokens?: number; outputTokens?: number; reasoningTokens?: number; model?: string };
 
     if (isNaN(runId)) {
       throw new ValidationError('Invalid runId');
@@ -3907,7 +3907,7 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
     await execute(`UPDATE story_results SET input_tokens = COALESCE($1, input_tokens), output_tokens = COALESCE($2, output_tokens) WHERE id = $3`, [inputTokens ?? null, outputTokens ?? null, row.id]);
 
     // Also record into token_usage analytics table
-    recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, model);
+    recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, model, reasoningTokens ?? 0);
 
     res.json({ ok: true });
   } catch (error: any) {

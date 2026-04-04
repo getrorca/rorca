@@ -2,7 +2,7 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T07:04:41.111Z",
+  "lastUpdatedAt": "2026-04-04T07:05:06.411Z",
   "completedStories": [
     {
       "storyId": "RE-004",
@@ -15,14 +15,14 @@
       "elapsedMs": 699266
     },
     {
-      "storyId": "RE-010",
-      "title": "Reasoning defaults table in Settings > Model & Providers",
+      "storyId": "RE-012",
+      "title": "FinOps dashboard: reasoning tokens breakdown",
       "status": "passed",
-      "startedAt": "2026-04-04T06:54:37.196Z",
-      "finishedAt": "2026-04-04T07:04:41.111Z",
+      "startedAt": "2026-04-04T06:54:37.206Z",
+      "finishedAt": "2026-04-04T07:05:06.411Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 603915
+      "elapsedMs": 629205
     }
   ],
   "failedStories": [],
