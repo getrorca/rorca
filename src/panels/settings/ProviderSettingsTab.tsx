@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal } from 'lucide-react';
+import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal, GitBranch } from 'lucide-react';
 import { ProBadge } from '../../components/UpgradePrompt';
 import { useAuth } from '../../contexts/AuthContext';
 import ModelSearchSelect, { type ModelOption } from '../../components/ModelSearchSelect';
@@ -313,6 +313,7 @@ const PROVIDER_TABS = [
   { id: 'model-browser', label: 'Model Browser' },
   { id: 'embeddings', label: 'Embeddings' },
   { id: 'routing', label: 'Routing' },
+  { id: 'workflow-router', label: 'Workflow Router' },
   { id: 'providers', label: 'Providers' },
   { id: 'display', label: 'Display' },
 ] as const;
@@ -329,6 +330,7 @@ export function ProviderSettingsTab() {
     'model-browser': null,
     'embeddings': null,
     'routing': null,
+    'workflow-router': null,
     'providers': null,
     'display': null,
   });
@@ -345,7 +347,7 @@ export function ProviderSettingsTab() {
     const visibilityMap: Record<string, number> = {};
 
     // Observe the 5 distinct DOM sections (embeddings shares execution's ref)
-    const observedTabs: ProviderTabId[] = ['execution', 'model-browser', 'routing', 'providers', 'display'];
+    const observedTabs: ProviderTabId[] = ['execution', 'model-browser', 'routing', 'workflow-router', 'providers', 'display'];
     observedTabs.forEach((id) => {
       const el = sectionRefs.current[id];
       if (!el) return;
@@ -432,6 +434,11 @@ export function ProviderSettingsTab() {
         {/* (5) Model Browser */}
         <div ref={el => { sectionRefs.current['model-browser'] = el; }}>
           <ModelBrowserContainer />
+        </div>
+
+        {/* (5b) Workflow Router */}
+        <div ref={el => { sectionRefs.current['workflow-router'] = el; }}>
+          <WorkflowRouterSection />
         </div>
 
         {/* (6) Providers + API Keys */}
@@ -2889,6 +2896,115 @@ function ModelBrowserSection({
           ))}
         </div>
       )}
+    </div>
+  );
+}
+
+// ─── Workflow Router Types ─────────────────────────────────────────────────
+
+interface WorkflowConfig {
+  workflowId: string;
+  runtime: string;
+  provider: string;
+  model: string | null;
+  hasApiKey: boolean;
+  updatedAt: string;
+}
+
+const WORKFLOW_LABELS: Record<string, { name: string; description: string }> = {
+  spec_generation: { name: 'Spec Generation', description: 'LLM calls to generate specs from briefs' },
+  pipeline_execution: { name: 'Pipeline Execution', description: 'Agent subprocess per story (claude / opencode / codex)' },
+  memory_consolidation: { name: 'Memory Consolidation', description: 'Post-run memory synthesis and recall' },
+};
+
+const WORKFLOW_ORDER = ['spec_generation', 'pipeline_execution', 'memory_consolidation'];
+
+// ─── Workflow Router Section ──────────────────────────────────────────────
+
+function WorkflowRouterSection() {
+  const [configs, setConfigs] = useState<WorkflowConfig[]>([]);
+  const [loading, setLoading] = useState(true);
+
+  useEffect(() => {
+    apiFetch<WorkflowConfig[]>('/api/workflow-router')
+      .then(data => setConfigs(data))
+      .catch(() => { /* silently fail — table shows empty */ })
+      .finally(() => setLoading(false));
+  }, []);
+
+  // Sort by canonical order
+  const sorted = useMemo(() => {
+    const map = new Map(configs.map(c => [c.workflowId, c]));
+    return WORKFLOW_ORDER.map(id => map.get(id)).filter(Boolean) as WorkflowConfig[];
+  }, [configs]);
+
+  return (
+    <div className="rounded-xl border border-border bg-panel p-5">
+      <div className="flex items-center gap-2 mb-4">
+        <GitBranch size={15} className="text-accent flex-shrink-0" />
+        <span className="text-sm font-semibold text-[var(--text)]">Workflow Router</span>
+      </div>
+      <p className="text-xs text-muted mb-4">
+        Per-workflow runtime, provider, and model configuration. Each workflow can target a different engine.
+      </p>
+
+      <div className="overflow-x-auto">
+        <table className="w-full text-sm">
+          <thead>
+            <tr className="border-b border-border text-left">
+              <th className="pb-2 pr-4 text-xs font-medium text-muted">Workflow</th>
+              <th className="pb-2 pr-4 text-xs font-medium text-muted">Runtime</th>
+              <th className="pb-2 pr-4 text-xs font-medium text-muted">Provider</th>
+              <th className="pb-2 text-xs font-medium text-muted">Model</th>
+            </tr>
+          </thead>
+          <tbody>
+            {loading ? (
+              <>
+                {[0, 1, 2].map(i => (
+                  <tr key={i} className="border-b border-border/50">
+                    <td className="py-3 pr-4"><div className="h-4 w-32 rounded bg-surface-100 animate-pulse" /></td>
+                    <td className="py-3 pr-4"><div className="h-4 w-20 rounded bg-surface-100 animate-pulse" /></td>
+                    <td className="py-3 pr-4"><div className="h-4 w-24 rounded bg-surface-100 animate-pulse" /></td>
+                    <td className="py-3"><div className="h-4 w-36 rounded bg-surface-100 animate-pulse" /></td>
+                  </tr>
+                ))}
+              </>
+            ) : sorted.length === 0 ? (
+              <tr>
+                <td colSpan={4} className="py-6 text-center text-muted text-xs">
+                  No workflow configurations found
+                </td>
+              </tr>
+            ) : (
+              sorted.map(cfg => {
+                const label = WORKFLOW_LABELS[cfg.workflowId];
+                return (
+                  <tr key={cfg.workflowId} className="border-b border-border/50 last:border-0">
+                    <td className="py-3 pr-4">
+                      <div className="text-[var(--text)] font-medium">{label?.name ?? cfg.workflowId}</div>
+                      <div className="text-xs text-muted mt-0.5">{label?.description ?? ''}</div>
+                    </td>
+                    <td className="py-3 pr-4">
+                      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-surface-100 text-[var(--text)]">
+                        {cfg.runtime}
+                      </span>
+                    </td>
+                    <td className="py-3 pr-4">
+                      <span className="text-[var(--text)]">{cfg.provider}</span>
+                    </td>
+                    <td className="py-3">
+                      <span className="text-[var(--text)] font-mono text-xs">
+                        {cfg.model ?? <span className="text-muted italic">default</span>}
+                      </span>
+                    </td>
+                  </tr>
+                );
+              })
+            )}
+          </tbody>
+        </table>
+      </div>
     </div>
   );
 }
