@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal, GitBranch } from 'lucide-react';
+import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal, GitBranch, X } from 'lucide-react';
 import { ProBadge } from '../../components/UpgradePrompt';
 import { useAuth } from '../../contexts/AuthContext';
 import ModelSearchSelect, { type ModelOption } from '../../components/ModelSearchSelect';
@@ -2941,23 +2941,245 @@ const API_PROVIDER_OPTIONS: { value: string; label: string }[] = [
   { value: 'openai-compat', label: 'OpenAI-Compatible' },
 ];
 
+/** Maps workflow_configs.provider to ModelOption.providerType for filtering */
+function providerToModelFilter(provider: string): (m: ModelOption) => boolean {
+  if (provider === 'claude-cli') return m => m.providerType === 'anthropic';
+  return m => m.providerType === provider;
+}
+
+/** Compact searchable model select for workflow router table cells */
+function WorkflowModelSelect({ models, value, provider, onChange, disabled }: {
+  models: ModelOption[];
+  value: string | null;
+  provider: string;
+  onChange: (modelId: string | null) => void;
+  disabled?: boolean;
+}) {
+  const [open, setOpen] = useState(false);
+  const [query, setQuery] = useState('');
+  const [highlightIdx, setHighlightIdx] = useState(0);
+  const containerRef = useRef<HTMLDivElement>(null);
+  const triggerRef = useRef<HTMLButtonElement>(null);
+  const inputRef = useRef<HTMLInputElement>(null);
+  const dropdownRef = useRef<HTMLDivElement>(null);
+  const listRef = useRef<HTMLDivElement>(null);
+  const [dropdownPos, setDropdownPos] = useState<{ top: number; left: number; width: number } | null>(null);
+
+  const filtered = useMemo(() => {
+    const providerModels = models.filter(providerToModelFilter(provider));
+    const q = query.toLowerCase().trim();
+    if (!q) return providerModels;
+    return providerModels.filter(m =>
+      m.label.toLowerCase().includes(q) ||
+      m.id.toLowerCase().includes(q)
+    );
+  }, [models, provider, query]);
+
+  const selected = value ? models.find(m => m.id === value) : null;
+
+  useEffect(() => { setHighlightIdx(0); }, [query]);
+
+  // Position dropdown
+  useEffect(() => {
+    if (open && triggerRef.current) {
+      const rect = triggerRef.current.getBoundingClientRect();
+      const spaceBelow = window.innerHeight - rect.bottom;
+      const dropdownHeight = 280;
+      const openUp = spaceBelow < dropdownHeight && rect.top > spaceBelow;
+      setDropdownPos({
+        top: openUp ? rect.top - dropdownHeight : rect.bottom + 4,
+        left: rect.left,
+        width: Math.max(rect.width, 260),
+      });
+      setTimeout(() => inputRef.current?.focus(), 0);
+    } else {
+      setQuery('');
+      setDropdownPos(null);
+    }
+  }, [open]);
+
+  // Close on outside click
+  useEffect(() => {
+    if (!open) return;
+    const handle = (e: MouseEvent) => {
+      const t = e.target as Node;
+      if (
+        containerRef.current && !containerRef.current.contains(t) &&
+        dropdownRef.current && !dropdownRef.current.contains(t)
+      ) setOpen(false);
+    };
+    document.addEventListener('mousedown', handle);
+    return () => document.removeEventListener('mousedown', handle);
+  }, [open]);
+
+  // Scroll highlighted into view
+  useEffect(() => {
+    if (!open || !listRef.current) return;
+    const items = listRef.current.querySelectorAll('[data-wm-item]');
+    items[highlightIdx]?.scrollIntoView({ block: 'nearest' });
+  }, [highlightIdx, open]);
+
+  const handleKeyDown = useCallback((e: React.KeyboardEvent) => {
+    if (!open) {
+      if (e.key === 'Enter' || e.key === ' ' || e.key === 'ArrowDown') {
+        e.preventDefault();
+        setOpen(true);
+      }
+      return;
+    }
+    // +1 for the Clear option at index 0
+    const totalItems = filtered.length + 1;
+    switch (e.key) {
+      case 'ArrowDown':
+        e.preventDefault();
+        setHighlightIdx(i => Math.min(i + 1, totalItems - 1));
+        break;
+      case 'ArrowUp':
+        e.preventDefault();
+        setHighlightIdx(i => Math.max(i - 1, 0));
+        break;
+      case 'Enter':
+        e.preventDefault();
+        if (highlightIdx === 0) { onChange(null); setOpen(false); }
+        else if (filtered[highlightIdx - 1]) { onChange(filtered[highlightIdx - 1].id); setOpen(false); }
+        break;
+      case 'Escape':
+        e.preventDefault();
+        setOpen(false);
+        break;
+    }
+  }, [open, filtered, highlightIdx, onChange]);
+
+  return (
+    <div ref={containerRef} className="relative" onKeyDown={handleKeyDown}>
+      <button
+        ref={triggerRef}
+        type="button"
+        onClick={() => !disabled && setOpen(!open)}
+        disabled={disabled}
+        className={`inline-flex items-center gap-1.5 px-2 py-1 text-xs bg-panel border border-border rounded outline-none hover:border-accent/50 focus:border-accent transition-colors text-left max-w-[220px] ${disabled ? 'opacity-50 cursor-not-allowed' : 'cursor-pointer'}`}
+        aria-expanded={open}
+        aria-haspopup="listbox"
+        aria-label="Select model"
+      >
+        {selected ? (
+          <span className="truncate font-mono text-[var(--text)]">{selected.label}</span>
+        ) : (
+          <span className="text-muted italic">Provider Default</span>
+        )}
+        <ChevronDown size={10} className={`text-muted/60 shrink-0 transition-transform duration-150 ${open ? 'rotate-180' : ''}`} />
+      </button>
+
+      {open && dropdownPos && (
+        <div
+          ref={dropdownRef}
+          className="fixed bg-[var(--panel)] border border-[var(--border)] rounded-lg z-[9999] overflow-hidden"
+          style={{ top: dropdownPos.top, left: dropdownPos.left, width: dropdownPos.width, boxShadow: '0 4px 24px rgba(0,0,0,0.18), 0 1px 4px rgba(0,0,0,0.12)' }}
+        >
+          {/* Search input */}
+          <div className="flex items-center gap-2 px-3 py-2 border-b border-[var(--border)]">
+            <Search size={12} className="text-muted/50 shrink-0" />
+            <input
+              ref={inputRef}
+              type="text"
+              value={query}
+              onChange={e => setQuery(e.target.value)}
+              placeholder="Search models..."
+              className="flex-1 bg-transparent text-xs text-text placeholder:text-muted/40 outline-none"
+              aria-label="Search models"
+            />
+            {query && (
+              <button onClick={() => setQuery('')} className="text-[10px] text-muted/50 hover:text-muted transition-colors">Clear</button>
+            )}
+          </div>
+
+          {/* Model list */}
+          <div ref={listRef} className="max-h-56 overflow-y-auto" role="listbox">
+            {/* Clear / Provider Default option */}
+            <button
+              data-wm-item
+              type="button"
+              role="option"
+              aria-selected={value === null}
+              onClick={() => { onChange(null); setOpen(false); }}
+              onMouseEnter={() => setHighlightIdx(0)}
+              className={`w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center gap-2 ${
+                highlightIdx === 0
+                  ? 'bg-accent/8 text-[var(--text)]'
+                  : 'text-[var(--text)]/80 hover:bg-[var(--surface-100)]'
+              }`}
+            >
+              <span className="w-3 shrink-0">
+                {value === null && <Check size={10} className="text-accent" />}
+              </span>
+              <X size={10} className="text-muted/50 shrink-0" />
+              <span className="italic text-muted">Provider Default</span>
+            </button>
+
+            {filtered.length === 0 ? (
+              <div className="px-3 py-4 text-center text-[10px] text-muted">
+                No models match "{query}"
+              </div>
+            ) : (
+              filtered.map((m, i) => {
+                const idx = i + 1; // offset by 1 for Clear option
+                const isSelected = m.id === value;
+                const isHighlighted = idx === highlightIdx;
+                return (
+                  <button
+                    key={m.id}
+                    data-wm-item
+                    type="button"
+                    role="option"
+                    aria-selected={isSelected}
+                    onClick={() => { onChange(m.id); setOpen(false); }}
+                    onMouseEnter={() => setHighlightIdx(idx)}
+                    className={`w-full text-left px-3 py-1.5 text-xs transition-colors flex items-center gap-2 ${
+                      isHighlighted
+                        ? 'bg-accent/8 text-[var(--text)]'
+                        : 'text-[var(--text)]/80 hover:bg-[var(--surface-100)]'
+                    }`}
+                  >
+                    <span className="w-3 shrink-0">
+                      {isSelected && <Check size={10} className="text-accent" />}
+                    </span>
+                    <span className={`truncate flex-1 ${isSelected ? 'font-medium' : ''}`}>{m.label}</span>
+                    {m.costPer1kInput != null && (
+                      <span className="text-[10px] font-mono text-muted/50 shrink-0">
+                        {m.costPer1kInput === 0 ? 'Free' : `$${m.costPer1kInput < 0.001 ? m.costPer1kInput.toFixed(4) : m.costPer1kInput.toFixed(3)}/1K`}
+                      </span>
+                    )}
+                  </button>
+                );
+              })
+            )}
+          </div>
+        </div>
+      )}
+    </div>
+  );
+}
+
 function WorkflowRouterSection() {
   const toast = useGlobalToast();
   const [configs, setConfigs] = useState<WorkflowConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [cliStatus, setCliStatus] = useState<CliInstallStatus>({ opencodeInstalled: false, codexInstalled: false });
   const [vaultKeys, setVaultKeys] = useState<ApiKeyEntry[]>([]);
+  const [allModels, setAllModels] = useState<ModelOption[]>([]);
 
   useEffect(() => {
     Promise.all([
       apiFetch<WorkflowConfig[]>('/api/workflow-router'),
       apiFetch<CliInstallStatus>('/api/config'),
       apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
+      apiFetch<{ models: ModelOption[] }>('/api/direction/models'),
     ])
-      .then(([cfgs, status, keyData]) => {
+      .then(([cfgs, status, keyData, modelData]) => {
         setConfigs(cfgs);
         setCliStatus({ opencodeInstalled: status.opencodeInstalled, codexInstalled: status.codexInstalled });
         setVaultKeys(keyData.keys);
+        setAllModels(modelData.models);
       })
       .catch(() => { /* silently fail — table shows empty */ })
       .finally(() => setLoading(false));
@@ -3005,13 +3227,23 @@ function WorkflowRouterSection() {
     const prev = configs.find(c => c.workflowId === workflowId);
     if (!prev || prev.provider === newProvider) return;
 
-    // Optimistic update
-    setConfigs(cs => cs.map(c => c.workflowId === workflowId ? { ...c, provider: newProvider } : c));
+    // Check if current model is compatible with the new provider
+    const newProviderModels = allModels.filter(providerToModelFilter(newProvider));
+    const modelStillValid = prev.model && newProviderModels.some(m => m.id === prev.model);
+    const resetModel = prev.model && !modelStillValid;
+
+    // Optimistic update — also reset model if incompatible
+    setConfigs(cs => cs.map(c => c.workflowId === workflowId
+      ? { ...c, provider: newProvider, model: resetModel ? null : c.model }
+      : c));
 
     try {
+      const body: Record<string, string | null> = { provider: newProvider };
+      if (resetModel) body.model = null;
+
       const updated = await apiFetch<{ workflowId: string; runtime: string; provider: string; model: string | null; updatedAt: string }>(
         `/api/workflow-router/${workflowId}`,
-        { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: newProvider }) },
+        { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body) },
       );
       setConfigs(cs => cs.map(c => c.workflowId === workflowId
         ? { ...c, provider: updated.provider, model: updated.model, updatedAt: updated.updatedAt }
@@ -3019,6 +3251,27 @@ function WorkflowRouterSection() {
     } catch {
       setConfigs(cs => cs.map(c => c.workflowId === workflowId ? prev : c));
       toast.show('Failed to update provider', 'error');
+    }
+  }, [configs, allModels, toast]);
+
+  const handleModelChange = useCallback(async (workflowId: string, newModel: string | null) => {
+    const prev = configs.find(c => c.workflowId === workflowId);
+    if (!prev || prev.model === newModel) return;
+
+    // Optimistic update
+    setConfigs(cs => cs.map(c => c.workflowId === workflowId ? { ...c, model: newModel } : c));
+
+    try {
+      const updated = await apiFetch<{ workflowId: string; runtime: string; provider: string; model: string | null; updatedAt: string }>(
+        `/api/workflow-router/${workflowId}`,
+        { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ model: newModel }) },
+      );
+      setConfigs(cs => cs.map(c => c.workflowId === workflowId
+        ? { ...c, model: updated.model, updatedAt: updated.updatedAt }
+        : c));
+    } catch {
+      setConfigs(cs => cs.map(c => c.workflowId === workflowId ? prev : c));
+      toast.show('Failed to update model', 'error');
     }
   }, [configs, toast]);
 
@@ -3147,9 +3400,12 @@ function WorkflowRouterSection() {
                       })()}
                     </td>
                     <td className="py-3">
-                      <span className="text-[var(--text)] font-mono text-xs">
-                        {cfg.model ?? <span className="text-muted italic">default</span>}
-                      </span>
+                      <WorkflowModelSelect
+                        models={allModels}
+                        value={cfg.model}
+                        provider={cfg.provider}
+                        onChange={modelId => handleModelChange(cfg.workflowId, modelId)}
+                      />
                     </td>
                   </tr>
                 );

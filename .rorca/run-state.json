@@ -2,7 +2,7 @@
   "specId": "rorca-workflow-router",
   "runId": 20260316000091,
   "startedAt": "2026-04-04T06:06:05.615Z",
-  "lastUpdatedAt": "2026-04-04T06:57:02.608Z",
+  "lastUpdatedAt": "2026-04-04T07:02:27.040Z",
   "completedStories": [
     {
       "storyId": "WR-001",
@@ -123,6 +123,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 212000
+    },
+    {
+      "storyId": "WR-013",
+      "title": "WorkflowRouterSection model picker — ModelSearchSelect filtered by provider",
+      "status": "passed",
+      "startedAt": "2026-04-04T06:57:24.974Z",
+      "finishedAt": "2026-04-04T07:02:27.040Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 302066
     }
   ],
   "failedStories": [],
