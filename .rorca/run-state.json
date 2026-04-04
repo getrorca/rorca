@@ -2,7 +2,7 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T07:11:12.357Z",
+  "lastUpdatedAt": "2026-04-04T07:29:21.759Z",
   "completedStories": [
     {
       "storyId": "RE-004",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 215986
+    },
+    {
+      "storyId": "RE-009",
+      "title": "Reasoning badge and controls in SpecModelControlBar.tsx",
+      "status": "passed",
+      "startedAt": "2026-04-04T07:23:10.714Z",
+      "finishedAt": "2026-04-04T07:29:21.759Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 371045
     }
   ],
   "failedStories": [],
