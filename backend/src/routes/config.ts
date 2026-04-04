@@ -705,6 +705,24 @@ router.put('/agent', async (req: Request, res: Response) => {
       updated_at = excluded.updated_at
   `, [currentAgentType, currentAgentModel]);
 
+  // Dual-write to workflow_configs so the new workflow router stays in sync
+  try {
+    const provider = providerForRuntime(currentAgentType, currentAgentModel);
+    await execute(
+      `INSERT INTO workflow_configs (workflow_id, runtime, provider, model, updated_at)
+       VALUES ('pipeline_execution', $1, $2, $3, NOW())
+       ON CONFLICT (workflow_id) DO UPDATE SET
+         runtime = EXCLUDED.runtime,
+         model = EXCLUDED.model,
+         provider = EXCLUDED.provider,
+         updated_at = NOW()`,
+      [currentAgentType, provider, currentAgentModel],
+    );
+  } catch (err) {
+    // workflow_configs table may not exist yet on older DBs — log but don't fail
+    console.warn('[config] workflow_configs dual-write failed:', (err as Error).message);
+  }
+
   res.json({
     agentType: currentAgentType,
     agentModel: currentAgentModel,
