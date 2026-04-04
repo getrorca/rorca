@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T08:48:12.707Z",
+  "lastUpdatedAt": "2026-04-04T09:11:22.225Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -73,6 +73,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 221702
+    },
+    {
+      "storyId": "QRW-008",
+      "title": "Unit tests — reasoning-detector.ts covers all 4 detection paths",
+      "status": "passed",
+      "startedAt": "2026-04-04T09:03:39.526Z",
+      "finishedAt": "2026-04-04T09:11:22.225Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 462699
     }
   ],
   "failedStories": [],
