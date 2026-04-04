@@ -89,6 +89,7 @@ import pinoHttp from 'pino-http';
 import { startGraphPopulator } from './lib/graph-populator';
 import workspaceDriftRouter from './routes/workspace-drift';
 import graphRouter from './routes/graph';
+import workflowRouterRouter from './routes/workflow-router';
 import { startDriftSubscriber } from './lib/drift-subscriber';
 import { startMarkerInjector } from './lib/marker-injector';
 import { StoryLogFollower } from './lib/story-log-follower';
@@ -396,6 +397,7 @@ app.use('/api/marketplace', marketplaceRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/recall', recallRouter);
 app.use('/api/graph', graphRouter);
+app.use('/api/workflow-router', workflowRouterRouter);
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);
