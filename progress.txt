@@ -3,9 +3,9 @@
 Spec: rorca-workflow-router
 Run ID: 20260316000091
 Started: 2026-04-04T06:06:05.615Z
-Last Updated: 2026-04-04T07:23:22.744Z
+Last Updated: 2026-04-04T07:27:32.995Z
 
-## Completed Stories (16)
+## Completed Stories (17)
 - WR-001: DB migration — create workflow_configs table with constraints and seed rows — DONE (claude, claude-opus-4-6, 32s)
 - WR-002: New lib workflow-config-resolver.ts — resolveWorkflowConfig with full fallback chain — DONE (claude, claude-opus-4-6, 797s)
 - WR-003: New route workflow-router.ts — GET/PUT/resolved endpoints — DONE (claude, claude-opus-4-6, 216s)
@@ -22,3 +22,4 @@ Last Updated: 2026-04-04T07:23:22.744Z
 - WR-014: ProviderSettingsTab tab navigation update — new tabs replacing old structure — DONE (claude, claude-opus-4-6, 145s)
 - WR-015: SpecsPanel default model from workflow config — fetch resolved spec_generation config — DONE (claude, claude-opus-4-6, 195s)
 - WR-016: Integration test — workflow config survives restart and resolveWorkflowConfig returns correct runtime — DONE (claude, claude-opus-4-6, 840s)
+- WR-017: Backward compat test — env vars still work as fallback when DB has default seed rows — DONE (claude, claude-opus-4-6, 226s)
