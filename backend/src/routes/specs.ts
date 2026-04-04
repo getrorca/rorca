@@ -36,6 +36,7 @@ import { score as scoreStory, resolveModelId, type ScorerStory } from '../lib/co
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import { handleRouteError } from '../lib/async-handler';
+import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 
 /* hydrateGitMemory removed — git_memory column dropped in migration 075.
    Git-derived knowledge is now served via the memories table + memory-router.ts. */
@@ -939,16 +940,28 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       return;
     }
 
-    // 2b. Resolve model: request param > workspace L3 preferred_model > default
+    // 2b. Resolve workflow config for spec generation (WR-008).
+    //     resolveWorkflowConfig('spec_generation') consults:
+    //       DB workflow_configs → env vars (SPEC_PROVIDER) → hardcoded defaults
+    //     Provides model, apiKey, baseUrl, provider — used throughout the generate flow.
+    const specGenUser = await getEffectiveUser(req);
+    const wfConfig = await resolveWorkflowConfig('spec_generation', specGenUser?.id);
+
+    // Model resolution chain: request body > workspace L3 > wfConfig.model > DEFAULT_MODEL
     resolvedModel = DEFAULT_MODEL;
-    if (requestedModel) {
-      resolvedModel = requestedModel;
-    } else {
-      // Check workspace L3 for preferred_model
+    if (wfConfig.model) {
+      resolvedModel = wfConfig.model;
+    }
+    // Check workspace L3 for preferred_model (overrides wfConfig.model)
+    {
       const l3Pref = await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined;
       if (l3Pref?.preferred_model) {
         resolvedModel = l3Pref.preferred_model;
       }
+    }
+    // Request body model takes highest priority
+    if (requestedModel) {
+      resolvedModel = requestedModel;
     }
 
     // 3. Fetch L1: global brain (no workspace, no domain)
@@ -1248,12 +1261,11 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     if (forceAsync || autoAsync) {
       logger.info({ slug, storyCount, forceAsync, autoAsync }, '[Specs] Routing to async chunked generation');
 
-      const user = await getEffectiveUser(req);
-      const vaultCreds = user ? await resolveVaultCreds(user.id, resolvedModel) : {};
       const orPrefs = await getOpenRouterPrefs(resolvedModel);
       const chatOpts: import('../lib/llm-client').ChatOptions = {
         model: resolvedModel,
-        ...vaultCreds,
+        apiKey: wfConfig.apiKey ?? undefined,
+        baseUrl: wfConfig.baseUrl ?? undefined,
         ...(thinkingEnabled ? {
           thinking: { type: 'enabled' as const, budgetTokens: thinkingBudget || 8192 },
           maxTokens: (thinkingBudget || 8192) + 16384,
@@ -1339,16 +1351,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         return;
       }
 
-      const user = await getEffectiveUser(req);
-      if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-      const vaultCreds = await resolveVaultCreds(user.id, resolvedModel);
-
       // Build shared chatOpts with thinking + OpenRouter provider prefs
       const orPrefsMultiPass = await getOpenRouterPrefs(resolvedModel);
       const specChatOpts: import('../lib/llm-client').ChatOptions = {
         model: resolvedModel,
-        apiKey: vaultCreds.apiKey,
-        baseUrl: vaultCreds.baseUrl,
+        apiKey: wfConfig.apiKey ?? undefined,
+        baseUrl: wfConfig.baseUrl ?? undefined,
         ...(thinkingEnabled ? {
           thinking: { type: 'enabled' as const, budgetTokens: thinkingBudget || 8192 },
           maxTokens: (thinkingBudget || 8192) + 16384,
@@ -2091,14 +2099,11 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         // Fallback to SDK path on OpenCode failure
         logger.warn(`[Specs] OpenCode spec gen failed (${ocResult.error}), falling back to SDK path`);
 
-        const user = await getEffectiveUser(req);
-        if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-        const vaultCreds = await resolveVaultCreds(user.id, resolvedModel);
         const orPrefsFallback = await getOpenRouterPrefs(resolvedModel);
         const llmResult = await chatComplete(
           [{ role: 'user', content: fullPrompt }],
           {
-            model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl,
+            model: resolvedModel, apiKey: wfConfig.apiKey ?? undefined, baseUrl: wfConfig.baseUrl ?? undefined,
             ...(thinkingEnabled ? { thinking: { type: 'enabled' as const, budgetTokens: thinkingBudget || 8192 }, maxTokens: (thinkingBudget || 8192) + 16384 } : {}),
             ...(orPrefsFallback ? { openRouterProvider: orPrefsFallback } : {}),
           },
@@ -2133,14 +2138,11 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       }
     } else {
       // ── SDK path: direct LLM call via chatComplete ──
-      const user = await getEffectiveUser(req);
-      if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-      const vaultCreds = await resolveVaultCreds(user.id, resolvedModel);
       const orPrefsSdk = await getOpenRouterPrefs(resolvedModel);
       const llmResult = await chatComplete(
         [{ role: 'user', content: fullPrompt }],
         {
-          model: resolvedModel, apiKey: vaultCreds.apiKey, baseUrl: vaultCreds.baseUrl,
+          model: resolvedModel, apiKey: wfConfig.apiKey ?? undefined, baseUrl: wfConfig.baseUrl ?? undefined,
           ...(thinkingEnabled ? { thinking: { type: 'enabled' as const, budgetTokens: thinkingBudget || 8192 }, maxTokens: (thinkingBudget || 8192) + 16384 } : {}),
           ...(orPrefsSdk ? { openRouterProvider: orPrefsSdk } : {}),
         },
