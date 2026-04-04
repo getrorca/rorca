@@ -3,7 +3,8 @@
 Spec: qa-reasoning-engine-workflow-router
 Run ID: 20260316000097
 Started: 2026-04-04T08:10:02.760Z
-Last Updated: 2026-04-04T08:20:07.460Z
+Last Updated: 2026-04-04T08:23:32.280Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - QRW-001: Type check — zero errors on both frontend and backend after merge — DONE (claude, claude-sonnet-4-6, 598s)
+- QRW-002: DB migration — workflow_configs table exists with correct schema and seed data — DONE (claude, claude-sonnet-4-6, 183s)
