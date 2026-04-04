@@ -11188,7 +11188,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
 
     const parseResult = UpdateSpecSchema.safeParse(req.body);
     if (!parseResult.success) {
-      throw new ValidationError(parseResult.error.errors.map(e => e.message).join(', '));
+      throw new ValidationError(parseResult.error.issues.map((e: { message: string }) => e.message).join(', '));
     }
 
     const { workspaceId, model, title, _notes, autoWorktree, agentOverride, thinkingEnabled, thinkingBudget, effortLevel } = parseResult.data;
@@ -11198,7 +11198,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = await getWorkspace(workspaceId);
+    const workspace = await getWorkspace(String(workspaceId));
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
       return;

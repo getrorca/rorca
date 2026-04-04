@@ -388,7 +388,7 @@ export async function generateSpecViaOpenCode(opts: {
         stories: specJson.stories as OpenCodeSpecResult['stories'],
         diagrams: specJson.diagrams,
         mermaidDiagram: specJson.mermaidDiagram,
-        usage: { inputTokens: 0, outputTokens: 0 }, // OpenCode doesn't report token usage via JSON stream
+        usage: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0 }, // OpenCode doesn't report token usage via JSON stream
       });
     }
   });
