@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T09:49:15.913Z",
+  "lastUpdatedAt": "2026-04-04T09:55:33.344Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -133,6 +133,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 50188
+    },
+    {
+      "storyId": "QRW-014",
+      "title": "Backend integration — spec generation writes reasoning field to spec JSON",
+      "status": "passed",
+      "startedAt": "2026-04-04T09:49:36.406Z",
+      "finishedAt": "2026-04-04T09:55:33.344Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 356938
     }
   ],
   "failedStories": [],
