@@ -2,7 +2,7 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T07:47:51.497Z",
+  "lastUpdatedAt": "2026-04-04T07:04:34.202Z",
   "completedStories": [
     {
       "storyId": "RE-004",
@@ -15,44 +15,14 @@
       "elapsedMs": 699266
     },
     {
-      "storyId": "RE-015",
-      "title": "Graceful degradation: retry without reasoning on provider error",
+      "storyId": "RE-013",
+      "title": "Reasoning model highlighting in model selector dropdown",
       "status": "passed",
-      "startedAt": "2026-04-04T06:54:37.201Z",
-      "finishedAt": "2026-04-04T06:59:47.108Z",
+      "startedAt": "2026-04-04T06:54:37.341Z",
+      "finishedAt": "2026-04-04T07:04:34.202Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 309907
-    },
-    {
-      "storyId": "RE-018",
-      "title": "GET /api/config/model-capability endpoint and capability cache",
-      "status": "passed",
-      "startedAt": "2026-04-04T07:07:36.370Z",
-      "finishedAt": "2026-04-04T07:11:12.356Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 215986
-    },
-    {
-      "storyId": "RE-014",
-      "title": "rorca_model_capabilities MCP tool",
-      "status": "passed",
-      "startedAt": "2026-04-04T07:23:03.958Z",
-      "finishedAt": "2026-04-04T07:29:54.666Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 410708
-    },
-    {
-      "storyId": "RE-017",
-      "title": "Reasoning config in TriggerPopover.tsx run action",
-      "status": "passed",
-      "startedAt": "2026-04-04T07:35:05.281Z",
-      "finishedAt": "2026-04-04T07:47:51.497Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 766216
+      "elapsedMs": 596861
     }
   ],
   "failedStories": [],
