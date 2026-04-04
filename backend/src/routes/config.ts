@@ -13,6 +13,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { AuthError, NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
 import { detectCapability, OpenRouterModelMetadata } from '../lib/reasoning-detector';
+import { isModelMarkedNonReasoning } from '../lib/llm-client';
 
 /**
  * Context window overrides for OpenRouter models where the API reports the wrong value
@@ -1057,6 +1058,210 @@ router.put('/embedding-provider', async (req: Request, res: Response) => {
     model: resolved.model,
     dimensions: resolved.dimension,
     source,
+  });
+});
+
+// ─── Model Capability Endpoint (RE-018) ──────────────────────────────────────
+
+/** In-memory TTL cache for per-modelId capability lookups (5 min). */
+interface CapabilityCacheEntry {
+  capability: ReturnType<typeof detectCapability>;
+  cachedAt: number;
+}
+const MODEL_CAPABILITY_CACHE = new Map<string, CapabilityCacheEntry>();
+const MODEL_CAPABILITY_TTL = 5 * 60 * 1000; // 5 minutes
+
+/**
+ * Returns the OpenRouterModelMetadata for a given model ID from the current
+ * openRouterCache, or null if the cache is stale/missing.
+ */
+function getOpenRouterMetadataFromCache(modelId: string): OpenRouterModelMetadata | null {
+  if (!openRouterCache || Date.now() - openRouterCache.cachedAt >= OPENROUTER_CACHE_TTL) {
+    return null;
+  }
+  const entry = openRouterCache.models.find(m => m.id === modelId);
+  if (!entry) return null;
+  // Reconstruct minimal OpenRouterModelMetadata from stored model data
+  return { id: entry.id, name: entry.name };
+}
+
+/**
+ * @swagger
+ * /api/config/model-capability:
+ *   get:
+ *     summary: Get reasoning capability for any model ID
+ *     operationId: getModelCapability
+ *     description: |
+ *       Returns the ReasoningCapability for the given model ID. Results are cached in-memory
+ *       for 5 minutes per modelId. For OpenRouter models the response incorporates live
+ *       OpenRouter metadata when available (from the 1h catalog cache). For Anthropic and
+ *       OpenAI prefixed models, capability is determined by pattern-matching only (no
+ *       external API call). The graceful-degradation override cache from chatComplete()
+ *       is also consulted — if a model has been marked as non-reasoning in this session
+ *       the returned capability reflects that override.
+ *     tags: [Config]
+ *     parameters:
+ *       - in: query
+ *         name: modelId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Full model identifier (e.g. "claude-opus-4-6", "openai/o3", "openrouter/deepseek/deepseek-r1")
+ *     responses:
+ *       200:
+ *         description: ReasoningCapability for the model
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 modelId: { type: string }
+ *                 supportsReasoning: { type: boolean }
+ *                 reasoningType: { type: string, enum: [none, anthropic-thinking, effort-levels, native-cot] }
+ *                 effortLevels: { type: array, items: { type: string } }
+ *                 defaultEffort: { type: string, nullable: true }
+ *                 budgetTokensSupported: { type: boolean }
+ *                 budgetRange: { type: array, nullable: true, items: { type: integer } }
+ *                 costMultiplier: { type: number }
+ *                 fromGracefulDegradationCache: { type: boolean }
+ *                 cachedAt: { type: integer }
+ *       400:
+ *         description: modelId query parameter is required
+ */
+router.get('/model-capability', async (req: Request, res: Response) => {
+  const modelId = req.query.modelId as string | undefined;
+  if (!modelId || typeof modelId !== 'string' || modelId.trim() === '') {
+    throw new ValidationError('modelId query parameter is required');
+  }
+
+  const trimmedId = modelId.trim();
+
+  // ── Check graceful degradation override cache first ──────────────────────
+  // If chatComplete() has already determined this model doesn't support reasoning
+  // (provider rejected the params), honour that in-session override immediately.
+  const markedNonReasoning = isModelMarkedNonReasoning(trimmedId);
+
+  // ── Check per-modelId TTL cache ───────────────────────────────────────────
+  const cached = MODEL_CAPABILITY_CACHE.get(trimmedId);
+  if (cached && Date.now() - cached.cachedAt < MODEL_CAPABILITY_TTL) {
+    const capability = markedNonReasoning
+      ? { ...cached.capability, supportsReasoning: false }
+      : cached.capability;
+    res.json({
+      modelId: trimmedId,
+      ...capability,
+      fromGracefulDegradationCache: markedNonReasoning,
+      cachedAt: cached.cachedAt,
+    });
+    return;
+  }
+
+  // ── Determine if we need OpenRouter metadata ──────────────────────────────
+  // OpenRouter models have a vendor-prefixed ID like "openrouter/<provider>/<model>"
+  // or an un-prefixed ID resolved from the OpenRouter catalog. We skip the external
+  // API call for Anthropic and OpenAI models since their capability is fully
+  // determined by ID pattern-matching.
+  const isOpenRouterPrefixed = trimmedId.startsWith('openrouter/');
+  const isAnthropicPrefixed = trimmedId.startsWith('anthropic/') || trimmedId.startsWith('claude-');
+  const isOpenAIPrefixed = trimmedId.startsWith('openai/') || /^o\d/i.test(trimmedId);
+  const needsOpenRouterMeta = isOpenRouterPrefixed && !isAnthropicPrefixed && !isOpenAIPrefixed;
+
+  let metadata: OpenRouterModelMetadata | undefined;
+
+  if (needsOpenRouterMeta) {
+    // Bare OpenRouter model ID (strip the "openrouter/" prefix for catalog lookup)
+    const bareId = trimmedId.slice('openrouter/'.length);
+
+    // 1. Check the in-memory catalog cache first (no extra API call)
+    const fromCache = getOpenRouterMetadataFromCache(bareId);
+    if (fromCache) {
+      metadata = fromCache;
+    } else {
+      // 2. Try fetching fresh catalog from OpenRouter (single call, result populates catalog cache)
+      const apiKey = await resolveOpenRouterKey();
+      if (apiKey) {
+        try {
+          const controller = new AbortController();
+          const timeout = setTimeout(() => controller.abort(), 10000);
+          const response = await fetch('https://openrouter.ai/api/v1/models', {
+            headers: {
+              'Authorization': `Bearer ${apiKey}`,
+              'HTTP-Referer': 'https://rorca.app',
+              'X-Title': 'Rorca',
+            },
+            signal: controller.signal,
+          });
+          clearTimeout(timeout);
+
+          if (response.ok) {
+            const data = await response.json() as { data: OpenRouterModel[] };
+            const rawModels = data.data ?? [];
+
+            // Populate the shared catalog cache so /openrouter-models benefits too
+            const models = rawModels
+              .filter(m => m.context_length >= 4096)
+              .map(m => {
+                const orMeta: OpenRouterModelMetadata = {
+                  id: m.id,
+                  name: m.name,
+                  context_length: m.context_length,
+                  pricing: m.pricing,
+                  top_provider: m.top_provider,
+                  supported_parameters: m.supported_parameters,
+                  architecture: m.architecture,
+                };
+                return {
+                  id: m.id,
+                  name: m.name,
+                  provider: getOpenRouterProviderFamily(m.id),
+                  contextWindow: OPENROUTER_CONTEXT_OVERRIDES[m.id] ?? m.context_length,
+                  free: parseFloat(m.pricing?.prompt ?? '1') === 0 && parseFloat(m.pricing?.completion ?? '1') === 0,
+                  pricingPrompt: parseFloat(m.pricing?.prompt ?? '0'),
+                  pricingCompletion: parseFloat(m.pricing?.completion ?? '0'),
+                  reasoningCapability: detectCapability(m.id, orMeta),
+                };
+              })
+              .sort((a, b) => a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name));
+
+            openRouterCache = { models, modelCount: models.length, cachedAt: Date.now() };
+
+            // Extract metadata for the requested model
+            const found = rawModels.find(m => m.id === bareId);
+            if (found) {
+              metadata = {
+                id: found.id,
+                name: found.name,
+                context_length: found.context_length,
+                pricing: found.pricing,
+                top_provider: found.top_provider,
+                supported_parameters: found.supported_parameters,
+                architecture: found.architecture,
+              };
+            }
+          }
+        } catch {
+          // Network error / timeout — fall through to pattern-matching only
+        }
+      }
+    }
+  }
+
+  // ── Detect capability ─────────────────────────────────────────────────────
+  const capability = detectCapability(trimmedId, metadata);
+
+  // ── Store in per-modelId TTL cache ────────────────────────────────────────
+  const now = Date.now();
+  MODEL_CAPABILITY_CACHE.set(trimmedId, { capability, cachedAt: now });
+
+  const finalCapability = markedNonReasoning
+    ? { ...capability, supportsReasoning: false }
+    : capability;
+
+  res.json({
+    modelId: trimmedId,
+    ...finalCapability,
+    fromGracefulDegradationCache: markedNonReasoning,
+    cachedAt: now,
   });
 });
 
