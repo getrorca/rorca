@@ -1029,11 +1029,12 @@ const PipelineTriggerSchema = z.object({
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().int().positive().optional(),
   effortLevel: z.enum(['low', 'medium', 'high']).optional(),
+  reasoningEffort: z.string().optional(),
 });
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, thinkingEnabled, thinkingBudget, effortLevel } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = req.body;
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1588,6 +1589,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
       ...(thinkingBudget !== undefined ? { thinkingBudget } : {}),
       ...(effortLevel ? { effortLevel } : {}),
+      ...(reasoningEffort ? { reasoningEffort } : {}),
     };
 
     await getBoss().send('pipeline:run', jobPayload, {
