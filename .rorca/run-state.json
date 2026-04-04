@@ -2,8 +2,19 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T06:37:36.897Z",
-  "completedStories": [],
+  "lastUpdatedAt": "2026-04-04T06:53:58.866Z",
+  "completedStories": [
+    {
+      "storyId": "RE-004",
+      "title": "Provider-agnostic reasoning mapping in llm-client.ts",
+      "status": "passed",
+      "startedAt": "2026-04-04T06:42:19.600Z",
+      "finishedAt": "2026-04-04T06:53:58.866Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 699266
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
