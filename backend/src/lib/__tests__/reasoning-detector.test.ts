@@ -1,0 +1,167 @@
+import { detectCapability, OpenRouterModelMetadata } from '../reasoning-detector';
+import type { ReasoningCapability } from '../llm-client';
+
+// ─── Helper ───────────────────────────────────────────────────────────────────
+
+function cap(modelId: string, metadata?: OpenRouterModelMetadata): ReasoningCapability {
+  return detectCapability(modelId, metadata);
+}
+
+// ─── 1. Claude 4.x → anthropic-thinking ──────────────────────────────────────
+
+describe('Claude 4.x models → anthropic-thinking', () => {
+  const opusModels = [
+    'claude-opus-4-6',
+    'claude-opus-4-5-20250929',
+    'claude-opus-4-0',
+  ];
+
+  const nonOpusModels = [
+    'claude-sonnet-4-5-20250929',
+    'claude-sonnet-4-6',
+    'claude-haiku-4-5-20251001',
+  ];
+
+  test.each(opusModels)('%s → reasoningType anthropic-thinking with max effort', (id) => {
+    const result = cap(id);
+    expect(result.supportsReasoning).toBe(true);
+    expect(result.reasoningType).toBe('anthropic-thinking');
+    expect(result.effortLevels).toEqual(['low', 'medium', 'high', 'max']);
+    expect(result.defaultEffort).toBe('medium');
+    expect(result.budgetTokensSupported).toBe(true);
+    expect(result.budgetRange).toEqual([1024, 65536]);
+  });
+
+  test.each(nonOpusModels)('%s → reasoningType anthropic-thinking without max effort', (id) => {
+    const result = cap(id);
+    expect(result.supportsReasoning).toBe(true);
+    expect(result.reasoningType).toBe('anthropic-thinking');
+    expect(result.effortLevels).toEqual(['low', 'medium', 'high']);
+    expect(result.effortLevels).not.toContain('max');
+    expect(result.budgetTokensSupported).toBe(true);
+    expect(result.budgetRange).toEqual([1024, 65536]);
+  });
+
+  test('budgetRange min is 1024 and max is 65536', () => {
+    const result = cap('claude-sonnet-4-6');
+    expect(result.budgetRange![0]).toBe(1024);
+    expect(result.budgetRange![1]).toBe(65536);
+  });
+
+  test('Claude 3.x models are NOT matched (no 4-)', () => {
+    const result = cap('claude-3-5-sonnet-20241022');
+    expect(result.reasoningType).not.toBe('anthropic-thinking');
+  });
+});
+
+// ─── 2. OpenAI o-series → effort-levels ──────────────────────────────────────
+
+describe('OpenAI o-series models → effort-levels', () => {
+  const oModels = [
+    'o1',
+    'o3',
+    'o4-mini',
+    'o1-mini',
+    'o1-preview',
+    'openai/o3',
+    'openai/o4-mini',
+  ];
+
+  test.each(oModels)('%s → reasoningType effort-levels', (id) => {
+    const result = cap(id);
+    expect(result.supportsReasoning).toBe(true);
+    expect(result.reasoningType).toBe('effort-levels');
+    expect(result.effortLevels).toEqual(['low', 'medium', 'high']);
+    expect(result.defaultEffort).toBe('medium');
+    expect(result.budgetTokensSupported).toBe(false);
+    expect(result.budgetRange).toBeNull();
+  });
+
+  test('gpt-4o is NOT matched as o-series (starts with g)', () => {
+    const result = cap('gpt-4o');
+    expect(result.reasoningType).not.toBe('effort-levels');
+  });
+
+  test('gpt-4o-mini is NOT matched as o-series', () => {
+    const result = cap('gpt-4o-mini');
+    expect(result.reasoningType).not.toBe('effort-levels');
+  });
+});
+
+// ─── 3. Native CoT keyword models → native-cot ───────────────────────────────
+
+describe('Native CoT keyword models → native-cot', () => {
+  const nativeCoTModels = [
+    'deepseek/deepseek-r1',
+    'deepseek-r1-distill-qwen-32b',
+    'qwq-32b-preview',
+    'qwen/qwq-32b',
+    'gemini-2.0-flash-thinking-exp',
+    'thinking-llama-70b',
+    'some-reasoning-model',
+  ];
+
+  test.each(nativeCoTModels)('%s → reasoningType native-cot', (id) => {
+    const result = cap(id);
+    expect(result.supportsReasoning).toBe(true);
+    expect(result.reasoningType).toBe('native-cot');
+    expect(result.effortLevels).toEqual([]);
+    expect(result.defaultEffort).toBeNull();
+    expect(result.budgetTokensSupported).toBe(false);
+    expect(result.budgetRange).toBeNull();
+  });
+});
+
+// ─── 4. Unknown models → none ────────────────────────────────────────────────
+
+describe('Unknown models → no reasoning capability', () => {
+  const unknownModels = [
+    'gpt-4o',
+    'gpt-4-turbo',
+    'claude-3-5-sonnet-20241022',
+    'claude-2.1',
+    'llama-3-70b-instruct',
+    'mistral-7b',
+    'gemini-1.5-pro',
+    'anthropic/claude-3-haiku',
+  ];
+
+  test.each(unknownModels)('%s → supportsReasoning false', (id) => {
+    const result = cap(id);
+    expect(result.supportsReasoning).toBe(false);
+    expect(result.reasoningType).toBe('none');
+    expect(result.effortLevels).toEqual([]);
+    expect(result.defaultEffort).toBeNull();
+    expect(result.budgetTokensSupported).toBe(false);
+    expect(result.budgetRange).toBeNull();
+  });
+
+  test('never throws on empty string', () => {
+    expect(() => cap('')).not.toThrow();
+    expect(cap('')).toMatchObject({ supportsReasoning: false, reasoningType: 'none' });
+  });
+
+  test('never throws on nonsense input', () => {
+    expect(() => cap('!!??##')).not.toThrow();
+    expect(cap('!!??##')).toMatchObject({ supportsReasoning: false });
+  });
+});
+
+// ─── 5. metadata parameter accepted without error ────────────────────────────
+
+describe('metadata parameter', () => {
+  test('accepted without error for known model', () => {
+    const meta: OpenRouterModelMetadata = {
+      id: 'claude-opus-4-6',
+      name: 'Claude Opus 4.6',
+      context_length: 200000,
+    };
+    expect(() => cap('claude-opus-4-6', meta)).not.toThrow();
+  });
+
+  test('accepted without error for unknown model', () => {
+    const meta: OpenRouterModelMetadata = { id: 'unknown-model-xyz' };
+    expect(() => cap('unknown-model-xyz', meta)).not.toThrow();
+    expect(cap('unknown-model-xyz', meta).supportsReasoning).toBe(false);
+  });
+});
