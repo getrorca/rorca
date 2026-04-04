@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T09:55:33.344Z",
+  "lastUpdatedAt": "2026-04-04T10:03:08.655Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -143,6 +143,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 356938
+    },
+    {
+      "storyId": "QRW-015",
+      "title": "Frontend — ConnectionsHubSection component renders and manages vault keys",
+      "status": "passed",
+      "startedAt": "2026-04-04T09:55:53.814Z",
+      "finishedAt": "2026-04-04T10:03:08.654Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 434840
     }
   ],
   "failedStories": [],
