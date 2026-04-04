@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T09:11:22.225Z",
+  "lastUpdatedAt": "2026-04-04T09:12:57.241Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -83,6 +83,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 462699
+    },
+    {
+      "storyId": "QRW-009",
+      "title": "Unit tests — workflow-config-resolver.ts covers fallback chain and validation",
+      "status": "passed",
+      "startedAt": "2026-04-04T09:11:43.722Z",
+      "finishedAt": "2026-04-04T09:12:57.241Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 73519
     }
   ],
   "failedStories": [],
