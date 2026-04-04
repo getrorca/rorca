@@ -2146,7 +2146,9 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   }, []);
 
   const [reasoningEnabled, setReasoningEnabled] = useState(false);
+  // 'auto' means compute effort from spec complexity; other values are explicit selections
   const [reasoningEffort, setReasoningEffort] = useState<string>('medium');
+  const [effortIsAuto, setEffortIsAuto] = useState(false);
 
   // When model changes, load saved prefs (or fall back to capability defaults)
   useEffect(() => {
@@ -2172,6 +2174,30 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     if (!reasoningCapability.supportsReasoning) return;
     try { localStorage.setItem(`rorca:reasoning:${effectiveModelId}`, JSON.stringify({ enabled: reasoningEnabled, effort: reasoningEffort })); } catch { /* ignore */ }
   }, [reasoningEnabled, reasoningEffort, effectiveModelId, reasoningCapability.supportsReasoning]);
+
+  // Auto-effort: compute suggested effort from spec size when effortIsAuto is true.
+  // We synthesize a proxy story list from storyCount (0 = auto → assume ~10 stories).
+  const autoEffortResult = useMemo(() => {
+    if (!effortIsAuto || !reasoningEnabled || !reasoningCapability.supportsReasoning) return null;
+    const count = storyCount > 0 ? storyCount : 10;
+    // Build proxy stories: no dependsOn info available pre-generation, so depth = 0.
+    const proxyStories = Array.from({ length: count }, () => ({}));
+    // We import computeAutoEffort inline to avoid a backend import — inline the same logic.
+    let effort: 'low' | 'medium' | 'high';
+    let rationale: string;
+    if (count > 20) {
+      effort = 'high';
+      rationale = `This ${count}-story spec is complex. Reasoning: high recommended. ~4x base cost`;
+    } else if (count >= 10) {
+      effort = 'medium';
+      rationale = `This ${count}-story spec is moderate. Reasoning: medium recommended. ~2x base cost`;
+    } else {
+      effort = 'low';
+      rationale = `This ${count}-story spec is straightforward. Reasoning: low recommended.`;
+    }
+    void proxyStories; // suppress unused var
+    return { effort, rationale };
+  }, [effortIsAuto, reasoningEnabled, reasoningCapability.supportsReasoning, storyCount]);
 
   // Auto-match & auto-suggest toggles (persisted in localStorage)
   const [autoMatchSkills, setAutoMatchSkills] = useState(() => {
@@ -2422,7 +2448,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     try {
       const result = await apiFetch<GeneratedSpec>('/api/specs/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
-        body: JSON.stringify({ workspaceId, domain: workspace?.domain || undefined, specName: specName || undefined, storyCount, specBrief, model: selectedModel || undefined, ...(reasoningCapability.supportsReasoning && reasoningEnabled ? { reasoning: { enabled: true, effort: reasoningEffort } } : {}) }),
+        body: JSON.stringify({ workspaceId, domain: workspace?.domain || undefined, specName: specName || undefined, storyCount, specBrief, model: selectedModel || undefined, ...(reasoningCapability.supportsReasoning && reasoningEnabled ? { reasoning: { enabled: true, effort: effortIsAuto ? (autoEffortResult?.effort ?? 'medium') : reasoningEffort } } : {}) }),
       });
       setApiDone(true);
       // Map backend response fields: backend returns { slug, title } but GeneratedSpec expects { slug, specName }
@@ -3056,13 +3082,28 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                     <div className="ml-10 space-y-1.5">
                       <label className="block text-xs font-medium text-muted">Effort Level</label>
                       <div className="flex gap-1">
+                        {/* Auto chip — computes effort from spec size */}
+                        <button
+                          key="auto"
+                          type="button"
+                          onClick={() => { setEffortIsAuto(true); setReasoningEffort('medium'); }}
+                          className={`px-2.5 py-1 text-xs rounded transition-colors ${effortIsAuto ? 'bg-accent text-white' : 'bg-panel border border-border text-text hover:border-accent/50'}`}
+                        >
+                          Auto
+                        </button>
                         {reasoningCapability.effortLevels.map(level => (
-                          <button key={level} type="button" onClick={() => setReasoningEffort(level)}
-                            className={`px-2.5 py-1 text-xs rounded capitalize transition-colors ${reasoningEffort === level ? 'bg-accent text-white' : 'bg-panel border border-border text-text hover:border-accent/50'}`}>
+                          <button key={level} type="button" onClick={() => { setEffortIsAuto(false); setReasoningEffort(level); }}
+                            className={`px-2.5 py-1 text-xs rounded capitalize transition-colors ${!effortIsAuto && reasoningEffort === level ? 'bg-accent text-white' : 'bg-panel border border-border text-text hover:border-accent/50'}`}>
                             {level}
                           </button>
                         ))}
                       </div>
+                      {/* Auto-effort rationale banner */}
+                      {effortIsAuto && autoEffortResult && (
+                        <div className="mt-2 px-3 py-2 rounded bg-accent/10 border border-accent/20 text-xs text-text leading-relaxed">
+                          {autoEffortResult.rationale}
+                        </div>
+                      )}
                     </div>
                   )}
                 </div>
