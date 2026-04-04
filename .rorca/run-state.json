@@ -2,7 +2,7 @@
   "specId": "rorca-workflow-router",
   "runId": 20260316000091,
   "startedAt": "2026-04-04T06:06:05.615Z",
-  "lastUpdatedAt": "2026-04-04T06:25:41.407Z",
+  "lastUpdatedAt": "2026-04-04T06:27:19.166Z",
   "completedStories": [
     {
       "storyId": "WR-001",
@@ -43,6 +43,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 83282
+    },
+    {
+      "storyId": "WR-005",
+      "title": "Dual-write — PUT /api/config/agent also upserts workflow_configs pipeline_execution row",
+      "status": "passed",
+      "startedAt": "2026-04-04T06:25:56.691Z",
+      "finishedAt": "2026-04-04T06:27:19.166Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 82475
     }
   ],
   "failedStories": [],
