@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T08:20:07.460Z",
+  "lastUpdatedAt": "2026-04-04T08:23:32.280Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 597581
+    },
+    {
+      "storyId": "QRW-002",
+      "title": "DB migration — workflow_configs table exists with correct schema and seed data",
+      "status": "passed",
+      "startedAt": "2026-04-04T08:20:28.998Z",
+      "finishedAt": "2026-04-04T08:23:32.280Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 183282
     }
   ],
   "failedStories": [],
