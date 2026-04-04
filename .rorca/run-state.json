@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T08:34:14.710Z",
+  "lastUpdatedAt": "2026-04-04T08:35:58.560Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 620585
+    },
+    {
+      "storyId": "QRW-004",
+      "title": "API — GET /api/workflow-router returns 3 rows with correct shape",
+      "status": "passed",
+      "startedAt": "2026-04-04T08:34:37.309Z",
+      "finishedAt": "2026-04-04T08:35:58.559Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 81250
     }
   ],
   "failedStories": [],
