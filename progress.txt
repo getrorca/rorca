@@ -3,9 +3,9 @@
 Spec: rorca-workflow-router
 Run ID: 20260316000091
 Started: 2026-04-04T06:06:05.615Z
-Last Updated: 2026-04-04T06:37:42.762Z
+Last Updated: 2026-04-04T06:44:55.939Z
 
-## Completed Stories (8)
+## Completed Stories (9)
 - WR-001: DB migration — create workflow_configs table with constraints and seed rows — DONE (claude, claude-opus-4-6, 32s)
 - WR-002: New lib workflow-config-resolver.ts — resolveWorkflowConfig with full fallback chain — DONE (claude, claude-opus-4-6, 797s)
 - WR-003: New route workflow-router.ts — GET/PUT/resolved endpoints — DONE (claude, claude-opus-4-6, 216s)
@@ -14,3 +14,4 @@ Last Updated: 2026-04-04T06:37:42.762Z
 - WR-006: Migrate pipeline.ts trigger to use resolveWorkflowConfig for runtime + model + vault key — DONE (claude, claude-opus-4-6, 211s)
 - WR-007: Migrate auto-memory.ts to use resolveWorkflowConfig('memory_consolidation') — DONE (claude, claude-opus-4-6, 70s)
 - WR-008: Migrate specs.ts spec generation to use resolveWorkflowConfig('spec_generation') — DONE (claude, claude-opus-4-6, 288s)
+- WR-009: Frontend ConnectionsHubSection component — one card per connection with status and key management — DONE (claude, claude-opus-4-6, 411s)
