@@ -436,7 +436,7 @@ export function ProviderSettingsTab() {
 
         {/* (6) Providers + API Keys */}
         <div ref={el => { sectionRefs.current['providers'] = el; }}>
-          <ProviderConnectionsAndVaultSection />
+          <ConnectionsHubSection />
         </div>
 
         {/* (7) Display card */}
@@ -1679,421 +1679,422 @@ function SemanticEngineSection() {
   );
 }
 
-// ─── Provider Connections + API Key Vault (PM-006) ──────────────────────────
+// ─── Connections Hub (WR-009) ───────────────────────────────────────────────
 
-interface ProviderRowDef {
-  id: string;
+interface ConnectionCardProps {
+  icon: React.ReactNode;
   name: string;
-  dot: 'green' | 'amber' | 'grey';
+  description: string;
+  statusDot: 'green' | 'amber' | 'grey';
   statusLabel: string;
-  actionLabel?: string;
-  actionVariant?: 'connect' | 'disconnect';
-  onAction?: () => void;
-  actionDisabled?: boolean;
+  maskedKey?: string;
+  keyId?: string;
+  showAddKey?: boolean;
+  addKeyPlaceholder?: string;
+  showBaseUrl?: boolean;
+  baseUrlPlaceholder?: string;
+  baseUrlValue?: string;
+  onAddKey?: (key: string, label: string, baseUrl?: string) => Promise<void>;
+  onRemoveKey?: (id: string) => Promise<void>;
+  onTestConnection?: () => Promise<void>;
+  testResult?: { ok: boolean; latencyMs?: number; error?: string } | null;
+  testingConnection?: boolean;
+  children?: React.ReactNode;
 }
 
-function ProviderConnectionsAndVaultSection() {
+function ConnectionCard({
+  icon, name, description, statusDot, statusLabel,
+  maskedKey, keyId, showAddKey, addKeyPlaceholder, showBaseUrl, baseUrlPlaceholder, baseUrlValue,
+  onAddKey, onRemoveKey, onTestConnection, testResult, testingConnection,
+  children,
+}: ConnectionCardProps) {
+  const [addingKey, setAddingKey] = useState(false);
+  const [keyInput, setKeyInput] = useState('');
+  const [labelInput, setLabelInput] = useState('');
+  const [baseUrlInput, setBaseUrlInput] = useState(baseUrlValue || '');
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [confirmRemove, setConfirmRemove] = useState(false);
+
+  const dotClass = statusDot === 'green' ? 'bg-green-500' : statusDot === 'amber' ? 'bg-amber-400' : 'bg-zinc-500';
+
+  const handleSave = async () => {
+    if (!onAddKey || !keyInput) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await onAddKey(keyInput, labelInput, showBaseUrl ? baseUrlInput : undefined);
+      setKeyInput('');
+      setLabelInput('');
+      setBaseUrlInput('');
+      setAddingKey(false);
+    } catch (err: any) {
+      setError(err.message || 'Failed to save key');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const handleRemove = async () => {
+    if (!onRemoveKey || !keyId) return;
+    await onRemoveKey(keyId);
+    setConfirmRemove(false);
+  };
+
+  return (
+    <div className="rounded-xl border border-border bg-panel p-4">
+      {/* Header row */}
+      <div className="flex items-start gap-3">
+        <div className="mt-0.5 text-muted shrink-0">{icon}</div>
+        <div className="flex-1 min-w-0">
+          <div className="flex items-center gap-2">
+            <span className="text-sm font-medium text-[var(--text)]">{name}</span>
+            <span className={`w-2 h-2 rounded-full shrink-0 ${dotClass}`} />
+            <span className="text-xs text-muted truncate">{statusLabel}</span>
+          </div>
+          <p className="text-[11px] text-muted mt-0.5">{description}</p>
+        </div>
+        {/* Action buttons */}
+        <div className="flex items-center gap-1.5 shrink-0">
+          {onTestConnection && statusDot !== 'grey' && (
+            <button
+              onClick={onTestConnection}
+              disabled={testingConnection}
+              className="flex items-center gap-1 px-2 py-1 text-[11px] border border-border rounded hover:border-accent/40 text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50"
+            >
+              {testingConnection ? <Loader2 size={10} className="animate-spin" /> : <Globe size={10} />}
+              Test
+            </button>
+          )}
+          {showAddKey && !maskedKey && onAddKey && (
+            <button
+              onClick={() => setAddingKey(!addingKey)}
+              className="flex items-center gap-1 px-2 py-1 text-[11px] bg-accent text-white rounded hover:bg-accent/90 transition-colors"
+            >
+              <Plus size={10} /> Add Key
+            </button>
+          )}
+          {maskedKey && keyId && onRemoveKey && (
+            <button
+              onClick={() => setConfirmRemove(!confirmRemove)}
+              className="flex items-center gap-1 px-2 py-1 text-[11px] border border-red-500/30 text-red-400 rounded hover:bg-red-500/10 transition-colors"
+            >
+              <Trash2 size={10} /> Remove
+            </button>
+          )}
+          {showAddKey && maskedKey && onAddKey && (
+            <button
+              onClick={() => setAddingKey(!addingKey)}
+              className="flex items-center gap-1 px-2 py-1 text-[11px] border border-border rounded text-muted hover:text-[var(--text)] hover:border-accent/40 transition-colors"
+            >
+              <Key size={10} /> Replace
+            </button>
+          )}
+        </div>
+      </div>
+
+      {/* Masked key display */}
+      {maskedKey && (
+        <div className="mt-2 ml-7 flex items-center gap-2 text-xs">
+          <Lock size={10} className="text-muted" />
+          <span className="font-mono text-muted">{maskedKey}</span>
+          <span className="text-[10px] text-muted">AES-256-GCM</span>
+        </div>
+      )}
+
+      {/* Test result */}
+      {testResult && (
+        <div className={`mt-2 ml-7 px-2.5 py-1.5 rounded text-[11px] flex items-center gap-1.5 ${
+          testResult.ok
+            ? 'bg-green-500/10 border border-green-500/20 text-green-400'
+            : 'bg-red-500/10 border border-red-500/20 text-red-400'
+        }`}>
+          {testResult.ok ? (
+            <><CheckCircle2 size={12} /> Connected ({testResult.latencyMs}ms)</>
+          ) : (
+            <><XCircle size={12} /> {testResult.error}</>
+          )}
+        </div>
+      )}
+
+      {/* Remove confirmation */}
+      {confirmRemove && (
+        <div className="mt-2 ml-7 flex items-center gap-2">
+          <span className="text-xs text-red-400">Remove this key?</span>
+          <button
+            onClick={handleRemove}
+            className="px-2 py-0.5 text-[11px] bg-red-500/20 text-red-400 rounded hover:bg-red-500/30 transition-colors"
+          >
+            Confirm
+          </button>
+          <button
+            onClick={() => setConfirmRemove(false)}
+            className="px-2 py-0.5 text-[11px] text-muted hover:text-[var(--text)] transition-colors"
+          >
+            Cancel
+          </button>
+        </div>
+      )}
+
+      {/* Inline add key form */}
+      {addingKey && (
+        <div className="mt-3 ml-7 border border-border rounded p-3 space-y-2 bg-bg">
+          <div className="grid grid-cols-2 gap-2">
+            <div>
+              <label className="block text-[10px] text-muted mb-1">API Key</label>
+              <input
+                type="password"
+                value={keyInput}
+                onChange={e => setKeyInput(e.target.value)}
+                placeholder={addKeyPlaceholder || 'sk-...'}
+                className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none font-mono"
+              />
+            </div>
+            <div>
+              <label className="block text-[10px] text-muted mb-1">Label (optional)</label>
+              <input
+                type="text"
+                value={labelInput}
+                onChange={e => setLabelInput(e.target.value)}
+                placeholder="e.g. Personal"
+                className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none"
+              />
+            </div>
+          </div>
+          {showBaseUrl && (
+            <div>
+              <label className="block text-[10px] text-muted mb-1">Base URL</label>
+              <input
+                type="url"
+                value={baseUrlInput}
+                onChange={e => setBaseUrlInput(e.target.value)}
+                placeholder={baseUrlPlaceholder || 'https://api.openai.com/v1'}
+                className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none font-mono"
+              />
+            </div>
+          )}
+          {error && <p className="text-[11px] text-red-500">{error}</p>}
+          <div className="flex items-center gap-2">
+            <button
+              onClick={handleSave}
+              disabled={saving || !keyInput}
+              className="flex items-center gap-1.5 px-2.5 py-1 text-[11px] bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+            >
+              {saving ? <Loader2 size={10} className="animate-spin" /> : <Save size={10} />}
+              Save
+            </button>
+            <button
+              onClick={() => { setAddingKey(false); setError(null); }}
+              className="px-2.5 py-1 text-[11px] text-muted hover:text-[var(--text)] transition-colors"
+            >
+              Cancel
+            </button>
+          </div>
+        </div>
+      )}
+
+      {/* Optional extra content (e.g. Ollama models list) */}
+      {children}
+    </div>
+  );
+}
+
+function ConnectionsHubSection() {
   const toast = useGlobalToast();
-  const { user } = useAuth();
-  const { workspaceId } = useWorkspace();
-  const isFreePlan = !user?.plan || user.plan === 'free';
 
-  // ── Vault key state ──────────────────────────────────────────────────────
+  // ── State ──────────────────────────────────────────────────────────────────
   const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
-  const [keysLoading, setKeysLoading] = useState(true);
-
-  // Add key form
-  const [addProvider, setAddProvider] = useState('anthropic');
-  const [addKey, setAddKey] = useState('');
-  const [addBaseUrl, setAddBaseUrl] = useState('');
-  const [addLabel, setAddLabel] = useState('');
-  const [addError, setAddError] = useState<string | null>(null);
-  const [adding, setAdding] = useState(false);
-
-  // ── Agent config / provider status state ────────────────────────────────
+  const [claudeAuth, setClaudeAuth] = useState<ClaudeAuthState | null>(null);
   const [agentConfig, setAgentConfig] = useState<AgentConfig | null>(null);
-  const [providers, setProviders] = useState<ProviderStatus[]>([]);
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null);
-  const [copilotStatus, setCopilotStatus] = useState<CopilotStatus>({ connected: false, githubUsername: null, connectedAt: null });
-  const [copilotLoading, setCopilotLoading] = useState(false);
-  const [openRouterConnected, setOpenRouterConnected] = useState(false);
-  const [openRouterModelCount, setOpenRouterModelCount] = useState<number | null>(null);
-  const [configLoading, setConfigLoading] = useState(true);
+  const [loading, setLoading] = useState(true);
 
-  // ── Default provider (for workspace) ────────────────────────────────────
-  const [defaultProvider, setDefaultProvider] = useState('claude-cli');
+  // Test connection state
+  const [testingProvider, setTestingProvider] = useState<string | null>(null);
+  const [testResults, setTestResults] = useState<Record<string, { ok: boolean; latencyMs?: number; error?: string }>>({});
 
   const fetchData = useCallback(async () => {
     try {
-      const [agentCfg, provData, keyData, ollama, defaultData] = await Promise.all([
-        apiFetch<AgentConfig>('/api/config'),
-        apiFetch<{ providers: ProviderStatus[] }>('/api/vault/keys/providers'),
+      const [keyData, config, claude, ollama] = await Promise.all([
         apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
+        apiFetch<AgentConfig>('/api/config'),
+        apiFetch<ClaudeAuthState>('/api/config/claude-auth'),
         apiFetch<OllamaStatus>('/api/config/ollama'),
-        workspaceId
-          ? apiFetch<{ provider: string }>(`/api/vault/keys/default-provider?workspaceId=${workspaceId}`)
-          : Promise.resolve({ provider: 'claude-cli' }),
       ]);
-      setAgentConfig(agentCfg);
-      setCopilotStatus({ connected: agentCfg.copilotConnected, githubUsername: agentCfg.copilotUsername, connectedAt: null });
-      setProviders(provData.providers);
       setKeys(keyData.keys);
+      setAgentConfig(config);
+      setClaudeAuth(claude);
       setOllamaStatus(ollama);
-      setDefaultProvider(defaultData.provider);
-      // Check OpenRouter connection
-      const orProvider = provData.providers.find(p => p.id === 'openrouter');
-      if (orProvider?.configured) {
-        setOpenRouterConnected(true);
-        try {
-          const orData = await apiFetch<{ modelCount: number }>('/api/config/openrouter-models');
-          setOpenRouterModelCount(orData.modelCount);
-        } catch { /* silent */ }
-      }
     } catch { /* silent */ } finally {
-      setConfigLoading(false);
-      setKeysLoading(false);
+      setLoading(false);
     }
-  }, [workspaceId]);
+  }, []);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
-  // ── Copilot connect / disconnect ─────────────────────────────────────────
-  const handleCopilotConnect = async () => {
-    setCopilotLoading(true);
-    try {
-      const { url } = await apiFetch<{ url: string }>('/api/copilot/connect');
-      window.location.href = url;
-    } catch { setCopilotLoading(false); }
+  // ── Key helpers ────────────────────────────────────────────────────────────
+  const findKey = (provider: string) => keys.find(k => k.provider === provider);
+
+  const addKey = async (provider: string, key: string, label: string, baseUrl?: string) => {
+    await apiFetch('/api/vault/keys', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ provider, key, label, base_url: baseUrl }),
+    });
+    toast.show('API key added', 'success');
+    fetchData();
   };
 
-  const handleCopilotDisconnect = async () => {
-    setCopilotLoading(true);
-    try {
-      await apiFetch('/api/copilot/disconnect', { method: 'DELETE' });
-      setCopilotStatus({ connected: false, githubUsername: null, connectedAt: null });
-    } catch { /* silent */ } finally {
-      setCopilotLoading(false);
-    }
-  };
-
-  // ── Vault key handlers ───────────────────────────────────────────────────
   const removeKey = async (id: string) => {
-    try {
-      await apiFetch(`/api/vault/keys/${id}`, { method: 'DELETE' });
-      toast.show('API key removed', 'success');
-      fetchData();
-    } catch {
-      toast.show('Failed to remove API key', 'error');
-    }
+    await apiFetch(`/api/vault/keys/${id}`, { method: 'DELETE' });
+    toast.show('API key removed', 'success');
+    fetchData();
   };
 
-  const handleAddKey = async () => {
-    setAdding(true);
-    setAddError(null);
+  const testConnection = async (provider: string) => {
+    setTestingProvider(provider);
     try {
-      await apiFetch('/api/vault/keys', {
+      const result = await apiFetch<{ ok: boolean; latencyMs: number; response: string }>('/api/vault/keys/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          provider: addProvider,
-          key: addKey,
-          label: addLabel,
-          base_url: addProvider === 'openai-compat' && addBaseUrl ? addBaseUrl : undefined,
-        }),
+        body: JSON.stringify({ provider }),
       });
-      setAddKey('');
-      setAddBaseUrl('');
-      setAddLabel('');
-      toast.show('API key added', 'success');
-      fetchData();
+      setTestResults(prev => ({ ...prev, [provider]: { ok: true, latencyMs: result.latencyMs } }));
     } catch (err: any) {
-      const msg = err.message || 'Failed to add key';
-      setAddError(msg);
-      toast.show(msg, 'error');
+      setTestResults(prev => ({ ...prev, [provider]: { ok: false, error: err.message || 'Connection failed' } }));
     } finally {
-      setAdding(false);
+      setTestingProvider(null);
     }
   };
 
-  // ── Build provider row definitions ───────────────────────────────────────
-  const providerRows: ProviderRowDef[] = (() => {
-    // Claude
-    const claudeAuth = agentConfig;
-    const claudeRow: ProviderRowDef = {
-      id: 'claude',
-      name: 'Claude',
-      dot: claudeAuth ? 'green' : 'grey',
-      statusLabel: claudeAuth?.opencodeInstalled !== false ? 'Connected' : 'CLI not found',
-      actionLabel: 'Manage',
-      actionVariant: 'connect',
-    };
+  if (loading) {
+    return (
+      <div className="flex items-center gap-2 text-muted text-xs py-8 justify-center">
+        <Loader2 size={14} className="animate-spin" /> Loading connections...
+      </div>
+    );
+  }
 
-    // Codex
-    const codexRow: ProviderRowDef = {
-      id: 'codex',
-      name: 'Codex',
-      dot: agentConfig?.codexInstalled ? 'green' : 'grey',
-      statusLabel: agentConfig?.codexInstalled
-        ? `Installed${agentConfig.codexVersion ? ` (v${agentConfig.codexVersion})` : ''}`
-        : 'Not configured',
-    };
-
-    // GitHub Copilot
-    const copilotRow: ProviderRowDef = {
-      id: 'copilot',
-      name: 'GitHub Copilot',
-      dot: copilotStatus.connected ? 'green' : 'grey',
-      statusLabel: copilotStatus.connected
-        ? `Connected${copilotStatus.githubUsername ? ` (${copilotStatus.githubUsername})` : ''}`
-        : 'Not configured',
-      actionLabel: copilotStatus.connected ? 'Disconnect' : 'Connect',
-      actionVariant: copilotStatus.connected ? 'disconnect' : 'connect',
-      onAction: copilotStatus.connected ? handleCopilotDisconnect : handleCopilotConnect,
-      actionDisabled: copilotLoading,
-    };
-
-    // OpenRouter
-    const orProvider = providers.find(p => p.id === 'openrouter');
-    const openRouterRow: ProviderRowDef = {
-      id: 'openrouter',
-      name: 'OpenRouter',
-      dot: openRouterConnected ? 'green' : orProvider?.configured ? 'amber' : 'grey',
-      statusLabel: openRouterConnected
-        ? `Running${openRouterModelCount !== null ? ` (${openRouterModelCount} models)` : ''}`
-        : orProvider?.configured ? 'API key set' : 'Not configured',
-    };
-
-    // Ollama
-    const ollamaRow: ProviderRowDef = {
-      id: 'ollama',
-      name: 'Ollama',
-      dot: ollamaStatus?.available ? 'green' : 'grey',
-      statusLabel: ollamaStatus?.available
-        ? `Running (${ollamaStatus.models.length} model${ollamaStatus.models.length !== 1 ? 's' : ''})`
-        : 'Not configured',
-    };
-
-    // Exa
-    const exaRow: ProviderRowDef = {
-      id: 'exa',
-      name: 'Exa Search',
-      dot: 'grey',
-      statusLabel: isFreePlan ? 'Upgrade to unlock' : 'Coming soon',
-      actionLabel: isFreePlan ? 'Upgrade' : undefined,
-      actionVariant: isFreePlan ? 'connect' : undefined,
-    };
-
-    return [claudeRow, codexRow, copilotRow, openRouterRow, ollamaRow, exaRow];
-  })();
-
-  const dotColor = (dot: ProviderRowDef['dot']) => {
-    if (dot === 'green') return 'bg-green-500';
-    if (dot === 'amber') return 'bg-amber-400';
-    return 'bg-zinc-500';
-  };
-
-  const VAULT_PROVIDER_OPTIONS = [
-    { id: 'anthropic', name: 'Anthropic' },
-    { id: 'openai-compat', name: 'OpenAI / compatible' },
-    { id: 'openrouter', name: 'OpenRouter' },
-    { id: 'google', name: 'Google' },
-    { id: 'mistral', name: 'Mistral' },
-  ];
+  // ── Derive card data ───────────────────────────────────────────────────────
+  const anthropicKey = findKey('anthropic');
+  const openRouterKey = findKey('openrouter');
+  const openAiKey = findKey('openai-compat');
 
   return (
-    <div className="space-y-4 mt-4">
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start">
-
-        {/* ── Left: Provider Connections ──────────────────────────────────── */}
-        <div className="rounded-xl border border-border bg-panel p-5">
-          <div className="flex items-center gap-2 mb-4">
-            <Globe size={15} className="text-accent flex-shrink-0" />
-            <span className="text-sm font-semibold text-[var(--text)]">Provider Connections</span>
-          </div>
-          {configLoading ? (
-            <div className="flex items-center gap-2 text-muted text-xs">
-              <Loader2 size={12} className="animate-spin" /> Loading...
-            </div>
-          ) : (
-            <div>
-              {providerRows.map(row => (
-                <div key={row.id} className="flex items-center gap-3 py-2.5 border-b border-border last:border-0">
-                  <span className={`w-2 h-2 rounded-full shrink-0 ${dotColor(row.dot)}`} />
-                  <span className="text-xs font-medium text-[var(--text)] min-w-0 flex-1">{row.name}</span>
-                  <span className="text-xs text-muted truncate">{row.statusLabel}</span>
-                  {row.actionLabel && (
-                    row.id === 'exa' && isFreePlan ? (
-                      <a
-                        href="#billing"
-                        className="shrink-0 px-2.5 py-1 text-xs rounded border border-accent/40 text-accent hover:bg-accent/10 transition-colors"
-                      >
-                        {row.actionLabel}
-                      </a>
-                    ) : row.onAction ? (
-                      <button
-                        onClick={row.onAction}
-                        disabled={row.actionDisabled}
-                        className={`shrink-0 px-2.5 py-1 text-xs rounded border transition-colors disabled:opacity-50 ${
-                          row.actionVariant === 'disconnect'
-                            ? 'border-red-500/30 text-red-400 hover:bg-red-500/10'
-                            : 'border-accent/40 text-accent hover:bg-accent/10'
-                        }`}
-                      >
-                        {row.actionDisabled ? <Loader2 size={10} className="animate-spin inline" /> : row.actionLabel}
-                      </button>
-                    ) : null
-                  )}
-                </div>
-              ))}
-            </div>
-          )}
-        </div>
-
-        {/* ── Right: API Key Vault ─────────────────────────────────────────── */}
-        <div className="rounded-xl border border-border bg-panel p-5">
-          <div className="flex items-center gap-2 mb-4">
-            <Key size={15} className="text-accent flex-shrink-0" />
-            <span className="text-sm font-semibold text-[var(--text)]">API Key Vault</span>
-          </div>
-          {keysLoading ? (
-            <div className="flex items-center gap-2 text-muted text-xs">
-              <Loader2 size={12} className="animate-spin" /> Loading...
-            </div>
-          ) : (
-            <div>
-              {/* Existing keys */}
-              {keys.length > 0 && (
-                <div className="mb-4">
-                  {keys.map(k => (
-                    <div key={k.id} className="flex items-center gap-2 py-2 border-b border-border last:border-0 text-xs">
-                      <Key size={11} className="text-muted shrink-0" />
-                      <span className="font-mono text-muted truncate">{k.masked_key}</span>
-                      {k.label && <span className="text-[var(--text)] truncate">{k.label}</span>}
-                      <span className="text-muted capitalize">{k.provider}</span>
-                      {k.spend_total_usd > 0 && (
-                        <span className="text-muted ml-auto shrink-0">${k.spend_total_usd.toFixed(2)}</span>
-                      )}
-                      {k.last_used_at && (
-                        <span className="text-muted shrink-0" title={k.last_used_at}>
-                          {new Date(k.last_used_at).toLocaleDateString()}
-                        </span>
-                      )}
-                      <button
-                        onClick={() => removeKey(k.id)}
-                        className="ml-auto shrink-0 p-1 text-muted hover:text-red-500 transition-colors"
-                        title="Remove key"
-                        aria-label="Remove API key"
-                      >
-                        <Trash2 size={11} />
-                      </button>
-                    </div>
-                  ))}
-                </div>
-              )}
-              {keys.length === 0 && (
-                <p className="text-xs text-muted mb-4">No API keys stored yet.</p>
-              )}
-
-              {/* Add Key form */}
-              <div className="border border-border rounded p-3 space-y-2.5 bg-bg">
-                <p className="text-xs font-medium text-[var(--text)]">Add Key</p>
-                <div className="grid grid-cols-2 gap-2">
-                  <div>
-                    <label className="block text-[10px] text-muted mb-1">Provider</label>
-                    <select
-                      value={addProvider}
-                      onChange={e => setAddProvider(e.target.value)}
-                      className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none"
-                    >
-                      {VAULT_PROVIDER_OPTIONS.map(p => (
-                        <option key={p.id} value={p.id}>{p.name}</option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label className="block text-[10px] text-muted mb-1">Label (optional)</label>
-                    <input
-                      type="text"
-                      value={addLabel}
-                      onChange={e => setAddLabel(e.target.value)}
-                      placeholder="e.g. Personal"
-                      className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none"
-                    />
-                  </div>
-                </div>
-                <div>
-                  <label className="block text-[10px] text-muted mb-1">API Key</label>
-                  <input
-                    type="password"
-                    value={addKey}
-                    onChange={e => setAddKey(e.target.value)}
-                    placeholder="sk-..."
-                    className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none font-mono"
-                  />
-                </div>
-                {addProvider === 'openai-compat' && (
-                  <div>
-                    <label className="block text-[10px] text-muted mb-1">Base URL</label>
-                    <input
-                      type="url"
-                      value={addBaseUrl}
-                      onChange={e => setAddBaseUrl(e.target.value)}
-                      placeholder="https://api.openai.com/v1"
-                      className="w-full px-2 py-1.5 text-xs bg-panel border border-border rounded focus:border-accent outline-none font-mono"
-                    />
-                    <p className="text-[10px] text-muted mt-1">Groq, Together, DeepSeek, Ollama, etc.</p>
-                  </div>
-                )}
-                {addError && <p className="text-xs text-red-500">{addError}</p>}
-                <button
-                  onClick={handleAddKey}
-                  disabled={adding || !addKey}
-                  className="flex items-center gap-2 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
-                >
-                  {adding ? <Loader2 size={11} className="animate-spin" /> : <Save size={11} />}
-                  Save Key
-                </button>
-              </div>
-              <p className="text-[10px] text-muted mt-2">Keys are AES-256-GCM encrypted at rest.</p>
-            </div>
-          )}
-        </div>
-
+    <div className="space-y-3 mt-4">
+      <div className="flex items-center gap-2 mb-1">
+        <Globe size={15} className="text-accent flex-shrink-0" />
+        <span className="text-sm font-semibold text-[var(--text)]">Connections Hub</span>
+        <span className="text-[10px] text-muted ml-1">Keys are AES-256-GCM encrypted at rest</span>
       </div>
 
-      {/* Default provider (workspace-scoped) */}
-      {workspaceId && providers.length > 0 && (
-        <div className="border border-border rounded p-4 bg-bg">
-          <div className="flex items-center justify-between mb-2">
-            <div>
-              <h3 className="text-sm font-medium text-[var(--text)]">Default Provider</h3>
-              <p className="text-xs text-muted mt-0.5">Used when no per-spec model override is set</p>
+      {/* 1. Claude CLI */}
+      <ConnectionCard
+        icon={<Terminal size={16} />}
+        name="Claude CLI"
+        description="Uses your Claude subscription via the claude CLI. No API key needed."
+        statusDot={claudeAuth?.cliInstalled ? 'green' : 'grey'}
+        statusLabel={
+          claudeAuth?.cliInstalled
+            ? `Installed${claudeAuth.cliVersion ? ` (v${claudeAuth.cliVersion})` : ''}${claudeAuth.connected ? ` — ${claudeAuth.email || 'authenticated'}` : ''}`
+            : 'Not found'
+        }
+      >
+        {claudeAuth?.cliInstalled && !claudeAuth.connected && (
+          <p className="mt-2 ml-7 text-[11px] text-amber-400">CLI installed but not authenticated. Run: claude auth login</p>
+        )}
+      </ConnectionCard>
+
+      {/* 2. Anthropic API */}
+      <ConnectionCard
+        icon={<Cpu size={16} />}
+        name="Anthropic API"
+        description="Direct API access to Claude models. Requires an Anthropic API key."
+        statusDot={anthropicKey ? 'green' : 'grey'}
+        statusLabel={anthropicKey ? 'Configured' : 'Not configured'}
+        maskedKey={anthropicKey?.masked_key}
+        keyId={anthropicKey?.id}
+        showAddKey
+        addKeyPlaceholder="sk-ant-..."
+        onAddKey={(key, label) => addKey('anthropic', key, label)}
+        onRemoveKey={removeKey}
+        onTestConnection={() => testConnection('anthropic')}
+        testingConnection={testingProvider === 'anthropic'}
+        testResult={testResults['anthropic'] ?? null}
+      />
+
+      {/* 3. OpenRouter */}
+      <ConnectionCard
+        icon={<Globe size={16} />}
+        name="OpenRouter"
+        description="Access 200+ models through a single API key."
+        statusDot={openRouterKey ? 'green' : 'grey'}
+        statusLabel={openRouterKey ? 'Configured' : 'Not configured'}
+        maskedKey={openRouterKey?.masked_key}
+        keyId={openRouterKey?.id}
+        showAddKey
+        addKeyPlaceholder="sk-or-..."
+        onAddKey={(key, label) => addKey('openrouter', key, label)}
+        onRemoveKey={removeKey}
+        onTestConnection={() => testConnection('openrouter')}
+        testingConnection={testingProvider === 'openrouter'}
+        testResult={testResults['openrouter'] ?? null}
+      />
+
+      {/* 4. OpenAI-Compatible */}
+      <ConnectionCard
+        icon={<Zap size={16} />}
+        name="OpenAI-Compatible"
+        description="Any OpenAI-compatible endpoint (OpenAI, Groq, Together, DeepSeek, etc.)."
+        statusDot={openAiKey ? 'green' : 'grey'}
+        statusLabel={openAiKey ? `Configured${openAiKey.base_url ? ` — ${openAiKey.base_url}` : ''}` : 'Not configured'}
+        maskedKey={openAiKey?.masked_key}
+        keyId={openAiKey?.id}
+        showAddKey
+        showBaseUrl
+        addKeyPlaceholder="sk-..."
+        baseUrlPlaceholder="https://api.openai.com/v1"
+        baseUrlValue={openAiKey?.base_url || ''}
+        onAddKey={(key, label, baseUrl) => addKey('openai-compat', key, label, baseUrl)}
+        onRemoveKey={removeKey}
+        onTestConnection={() => testConnection('openai-compat')}
+        testingConnection={testingProvider === 'openai-compat'}
+        testResult={testResults['openai-compat'] ?? null}
+      />
+
+      {/* 5. Ollama */}
+      <ConnectionCard
+        icon={<Cpu size={16} />}
+        name="Ollama"
+        description="Local model execution. No API key needed — configure host and port."
+        statusDot={ollamaStatus?.available ? 'green' : 'grey'}
+        statusLabel={
+          ollamaStatus?.available
+            ? `Running (${ollamaStatus.models.length} model${ollamaStatus.models.length !== 1 ? 's' : ''})`
+            : ollamaStatus?.error || 'Not running'
+        }
+      >
+        {ollamaStatus?.available && ollamaStatus.models.length > 0 && (
+          <div className="mt-2 ml-7">
+            <p className="text-[10px] text-muted mb-1">Available models:</p>
+            <div className="flex flex-wrap gap-1">
+              {ollamaStatus.models.slice(0, 8).map(m => (
+                <span key={m.id} className="px-1.5 py-0.5 text-[10px] bg-bg border border-border rounded font-mono text-muted">
+                  {m.name}
+                </span>
+              ))}
+              {ollamaStatus.models.length > 8 && (
+                <span className="px-1.5 py-0.5 text-[10px] text-muted">+{ollamaStatus.models.length - 8} more</span>
+              )}
             </div>
           </div>
-          <select
-            value={defaultProvider}
-            onChange={async e => {
-              const provider = e.target.value;
-              setDefaultProvider(provider);
-              try {
-                await apiFetch('/api/vault/keys/default-provider', {
-                  method: 'PUT',
-                  headers: { 'Content-Type': 'application/json' },
-                  body: JSON.stringify({ workspaceId, provider }),
-                });
-                toast.show('Default provider saved', 'success');
-              } catch { /* silent */ }
-            }}
-            className="w-full px-3 py-2 text-sm bg-panel border border-border rounded focus:border-accent outline-none"
-          >
-            {providers.map(p => (
-              <option key={p.id} value={p.id} disabled={p.id !== 'claude-cli' && !p.configured}>
-                {p.name}{!p.configured && p.id !== 'claude-cli' ? ' (not configured)' : ''}
-              </option>
-            ))}
-          </select>
-        </div>
-      )}
+        )}
+        {!ollamaStatus?.available && (
+          <p className="mt-2 ml-7 text-[11px] text-muted">
+            Install Ollama from ollama.com, then run: ollama serve
+          </p>
+        )}
+      </ConnectionCard>
     </div>
   );
 }
