@@ -515,11 +515,19 @@ function chatCompleteCLI(messages: ChatMessage[], model?: string): Promise<ChatR
 
 // ─── Anthropic SDK ───────────────────────────────────────────────────────────
 
+/** Maps effort level strings to Anthropic thinking budget_tokens values. */
+const ANTHROPIC_EFFORT_BUDGET: Record<string, number> = {
+  low: 4096,
+  medium: 16384,
+  high: 32768,
+  max: 32768, // same cap as high for budget; 'max' is a quality signal, not a token limit
+};
+
 async function chatCompleteAnthropic(
   messages: ChatMessage[],
   model: string,
   apiKey: string,
-  opts?: Pick<ChatOptions, 'thinking' | 'maxTokens'>,
+  opts?: Pick<ChatOptions, 'thinking' | 'maxTokens' | 'reasoning'>,
 ): Promise<ChatResult> {
   const client = new Anthropic({ apiKey });
   const maxTokens = opts?.maxTokens ?? 16384;
@@ -530,7 +538,21 @@ async function chatCompleteAnthropic(
     messages: messages.map(m => ({ role: m.role, content: m.content })),
   };
 
-  if (opts?.thinking) {
+  // `reasoning` takes precedence over legacy `thinking` field.
+  const reasoningOpts = opts?.reasoning;
+  if (reasoningOpts?.enabled) {
+    const budgetTokens = reasoningOpts.budgetTokens
+      ?? ANTHROPIC_EFFORT_BUDGET[reasoningOpts.effort ?? 'medium']
+      ?? ANTHROPIC_EFFORT_BUDGET.medium;
+    createParams.thinking = {
+      type: 'enabled',
+      budget_tokens: budgetTokens,
+    };
+    // max_tokens must be > budget_tokens
+    if ((createParams.max_tokens as number) <= budgetTokens) {
+      createParams.max_tokens = budgetTokens + 16384;
+    }
+  } else if (opts?.thinking) {
     createParams.thinking = {
       type: 'enabled',
       budget_tokens: opts.thinking.budgetTokens,
@@ -541,11 +563,11 @@ async function chatCompleteAnthropic(
     }
   }
 
-  const response = await client.messages.create(createParams as Parameters<typeof client.messages.create>[0]);
+  const response = await client.messages.create(createParams as unknown as Parameters<typeof client.messages.create>[0]) as Anthropic.Message;
 
   const text = response.content
     .filter((b): b is Anthropic.TextBlock => b.type === 'text')
-    .map(b => b.text)
+    .map((b: Anthropic.TextBlock) => b.text)
     .join('');
 
   return {
@@ -559,23 +581,34 @@ async function chatCompleteAnthropic(
 
 // ─── OpenAI-compatible (OpenAI, Groq, Together, DeepSeek, Mistral, Ollama) ──
 
+/** OpenAI o-series reasoning model pattern. */
+const OPENAI_REASONING_MODEL_RE = /^o\d/i;
+
 async function chatCompleteOpenAICompat(
   messages: ChatMessage[],
   model: string,
   apiKey: string,
   baseUrl?: string,
-  opts?: Pick<ChatOptions, 'maxTokens'>,
+  opts?: Pick<ChatOptions, 'maxTokens' | 'reasoning'>,
 ): Promise<ChatResult> {
   const client = new OpenAI({
     apiKey,
     baseURL: baseUrl || 'https://api.openai.com/v1',
   });
 
-  const response = await client.chat.completions.create({
+  const createParams: Record<string, unknown> = {
     model,
     messages: messages.map(m => ({ role: m.role as 'user' | 'assistant', content: m.content })),
     max_tokens: opts?.maxTokens ?? 16384,
-  });
+  };
+
+  // Inject reasoning_effort for OpenAI o-series models that support it.
+  const reasoningOpts = opts?.reasoning;
+  if (reasoningOpts?.enabled && reasoningOpts.effort && OPENAI_REASONING_MODEL_RE.test(model)) {
+    createParams.reasoning_effort = reasoningOpts.effort;
+  }
+
+  const response = await client.chat.completions.create(createParams as unknown as Parameters<typeof client.chat.completions.create>[0]) as OpenAI.ChatCompletion;
 
   const text = response.choices[0]?.message?.content ?? '';
   const usage = response.usage;
@@ -611,7 +644,7 @@ async function chatCompleteOpenRouter(
   messages: ChatMessage[],
   model: string,
   apiKey: string,
-  opts?: Pick<ChatOptions, 'maxTokens' | 'openRouterProvider'>,
+  opts?: Pick<ChatOptions, 'maxTokens' | 'openRouterProvider' | 'reasoning'>,
 ): Promise<ChatResult> {
   const client = new OpenAI({
     apiKey,
@@ -636,13 +669,14 @@ async function chatCompleteOpenRouter(
     createParams.provider = providerPrefs;
   }
 
-  // Enable reasoning/thinking for models that support it.
-  // GLM-5: thinking mode with highest effort by default.
-  if (/glm-?5/i.test(model) && !model.includes('turbo') && !model.includes('flash')) {
-    createParams.reasoning = { effort: 'high' };
+  // Pass through reasoning options when explicitly requested.
+  // Only set when reasoning.enabled is true — avoids sending reasoning: {} to models that don't support it.
+  const reasoningOpts = opts?.reasoning;
+  if (reasoningOpts?.enabled && reasoningOpts.effort) {
+    createParams.reasoning = { effort: reasoningOpts.effort };
   }
 
-  const response = await client.chat.completions.create(createParams as Parameters<typeof client.chat.completions.create>[0]);
+  const response = await client.chat.completions.create(createParams as unknown as Parameters<typeof client.chat.completions.create>[0]) as OpenAI.ChatCompletion;
 
   const text = response.choices[0]?.message?.content ?? '';
   const usage = response.usage;
