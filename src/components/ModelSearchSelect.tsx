@@ -1,6 +1,17 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Search, ChevronDown, ChevronRight, Check, Sparkles, Zap, Clock, Turtle, Brain } from 'lucide-react';
 
+/** Inline shape matching the backend ReasoningCapability — kept here to avoid a cross-package import. */
+export interface ReasoningCapability {
+  supportsReasoning: boolean;
+  reasoningType: 'anthropic-thinking' | 'effort-levels' | 'native-cot' | 'none';
+  effortLevels: string[];
+  defaultEffort: string | null;
+  budgetTokensSupported: boolean;
+  budgetRange: [number, number] | null;
+  costMultiplier?: Record<string, number>;
+}
+
 export interface ModelOption {
   id: string;
   label: string;
@@ -16,6 +27,8 @@ export interface ModelOption {
   supportsReasoning?: boolean;
   /** Effort levels supported by this model (e.g. ['low', 'medium', 'high', 'max']). */
   effortLevels?: string[];
+  /** Full reasoning capability descriptor returned by the backend. */
+  reasoningCapability?: ReasoningCapability;
 }
 
 interface ModelSearchSelectProps {
