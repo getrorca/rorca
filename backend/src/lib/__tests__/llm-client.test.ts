@@ -97,7 +97,7 @@ describe('llm-client', () => {
     const result = await chatComplete([{ role: 'user', content: 'hello' }]);
 
     expect(result.text).toBe('LLM response');
-    expect(result.usage).toEqual({ inputTokens: 100, outputTokens: 200 });
+    expect(result.usage).toEqual({ inputTokens: 100, outputTokens: 200, reasoningTokens: 0 });
     expect(mockSpawn).toHaveBeenCalledWith(
       expect.any(String),
       expect.arrayContaining(['--print', '--output-format', 'json', 'hello']),
@@ -125,7 +125,7 @@ describe('llm-client', () => {
     const result = await chatComplete([{ role: 'user', content: 'test' }]);
 
     expect(result.text).toBe('plain text response');
-    expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+    expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0, reasoningTokens: 0 });
   });
 
   test('chatComplete concatenates multi-turn messages', async () => {
@@ -223,7 +223,7 @@ describe('llm-client', () => {
       );
 
       expect(result.text).toBe('anthropic response');
-      expect(result.usage).toEqual({ inputTokens: 50, outputTokens: 100 });
+      expect(result.usage).toEqual({ inputTokens: 50, outputTokens: 100, reasoningTokens: 0 });
       expect(mockAnthropicCreate).toHaveBeenCalledWith(
         expect.objectContaining({ model: 'claude-opus-4-6', max_tokens: 16384 }),
       );
@@ -259,7 +259,7 @@ describe('llm-client', () => {
       );
 
       expect(result.text).toBe('openai response');
-      expect(result.usage).toEqual({ inputTokens: 30, outputTokens: 60 });
+      expect(result.usage).toEqual({ inputTokens: 30, outputTokens: 60, reasoningTokens: 0 });
       expect(mockOpenAICreate).toHaveBeenCalledWith(
         expect.objectContaining({ model: 'gpt-4o', max_tokens: 16384 }),
       );
@@ -279,7 +279,7 @@ describe('llm-client', () => {
       );
 
       expect(result.text).toBe('openrouter response');
-      expect(result.usage).toEqual({ inputTokens: 25, outputTokens: 50 });
+      expect(result.usage).toEqual({ inputTokens: 25, outputTokens: 50, reasoningTokens: 0 });
       expect(mockOpenAICreate).toHaveBeenCalled();
     });
 
@@ -329,28 +329,28 @@ describe('llm-client', () => {
       expect(mockAnthropicCreate).not.toHaveBeenCalled();
     });
 
-    test('throws when anthropic provider has no apiKey', () => {
+    test('throws when anthropic provider has no apiKey', async () => {
       const { chatComplete } = require('../llm-client');
-      expect(() => chatComplete(
+      await expect(chatComplete(
         [{ role: 'user', content: 'test' }],
         { provider: 'anthropic' },
-      )).toThrow('Anthropic provider requires an API key');
+      )).rejects.toThrow('Anthropic provider requires an API key');
     });
 
-    test('throws when openai-compat provider has no apiKey', () => {
+    test('throws when openai-compat provider has no apiKey', async () => {
       const { chatComplete } = require('../llm-client');
-      expect(() => chatComplete(
+      await expect(chatComplete(
         [{ role: 'user', content: 'test' }],
-        { provider: 'openai-compat' },
-      )).toThrow('OpenAI-compatible provider requires an API key');
+        { provider: 'openai-compat', model: 'gpt-4o' },
+      )).rejects.toThrow('OpenAI-compatible provider requires an API key');
     });
 
-    test('throws when openrouter provider has no apiKey', () => {
+    test('throws when openrouter provider has no apiKey', async () => {
       const { chatComplete } = require('../llm-client');
-      expect(() => chatComplete(
+      await expect(chatComplete(
         [{ role: 'user', content: 'test' }],
-        { provider: 'openrouter' },
-      )).toThrow('OpenRouter provider requires an API key');
+        { provider: 'openrouter', model: 'google/gemini-2.5-pro-preview' },
+      )).rejects.toThrow('OpenRouter provider requires an API key');
     });
 
     test('normalizes openai-compat usage to { inputTokens, outputTokens }', async () => {
@@ -365,7 +365,7 @@ describe('llm-client', () => {
         { provider: 'openai-compat', apiKey: 'sk-test', model: 'gpt-4o' },
       );
 
-      expect(result.usage).toEqual({ inputTokens: 42, outputTokens: 84 });
+      expect(result.usage).toEqual({ inputTokens: 42, outputTokens: 84, reasoningTokens: 0 });
     });
 
     test('handles missing usage from openai-compat gracefully', async () => {
@@ -380,7 +380,7 @@ describe('llm-client', () => {
         { provider: 'openai-compat', apiKey: 'sk-test', model: 'gpt-4o' },
       );
 
-      expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0 });
+      expect(result.usage).toEqual({ inputTokens: 0, outputTokens: 0, reasoningTokens: 0 });
     });
   });
 
