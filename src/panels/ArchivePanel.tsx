@@ -24,7 +24,7 @@ import {
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import { apiFetch } from '../lib/apiFetch';
-import TriggerPopover from '../components/TriggerPopover';
+import TriggerPopover, { type TriggerOptions } from '../components/TriggerPopover';
 import PricingModal from '../components/PricingModal';
 import { StoryCard } from '../components/StoryCard';
 import type { Story } from '../components/StoryCard';
@@ -63,6 +63,7 @@ interface ArchiveSpec {
   forkedFrom?: string;
   reviewStatus?: ReviewStatus;
   source?: string;
+  model?: string;
 }
 
 interface ArchiveResponse {
@@ -738,7 +739,7 @@ function SpecPreviewDrawer({
     }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; autoMerge?: boolean; includeGraph?: boolean; modelOverride?: string }) => {
+  const handleRun = async (autoWorktree: boolean, options?: TriggerOptions) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -756,7 +757,10 @@ function SpecPreviewDrawer({
             ...(options?.forceSequential ? { forceSequential: true } : {}),
             ...(options?.autoMerge !== undefined ? { autoMerge: options.autoMerge } : {}),
             ...(options?.includeGraph ? { includeGraph: true } : {}),
-            ...(options?.modelOverride ? { modelOverride: options.modelOverride } : {}),
+            ...(options?.effortLevel ? { effortLevel: options.effortLevel } : {}),
+            ...(options?.thinkingEnabled !== undefined ? { thinkingEnabled: options.thinkingEnabled } : {}),
+            ...(options?.thinkingBudget !== undefined ? { thinkingBudget: options.thinkingBudget } : {}),
+            ...(options?.reasoningOverride !== undefined ? { reasoning: options.reasoningOverride } : {}),
           }),
         }
       );
@@ -764,7 +768,7 @@ function SpecPreviewDrawer({
         setRunState('conflict');
       } else {
         setRunState('success');
-        setTimeout(() => onNavigate('pipeline'), 1200);
+        setTimeout(() => onNavigate('runs'), 1200);
       }
     } catch (err) {
       setRunError(err instanceof Error ? err.message : 'Failed to trigger run');
@@ -985,7 +989,7 @@ function SpecPreviewDrawer({
                         onClose={() => setShowTriggerPopover(false)}
                         specPath={`forge/specs/approved/${summary.id}.json`}
                         workspaceId={workspaceId ?? undefined}
-                        specId={summary.id}
+                        specModel={summary.model}
                       />
                     )}
                     <button
