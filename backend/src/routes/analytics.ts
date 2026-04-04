@@ -14,6 +14,7 @@ interface UsageRow {
   group_key: string;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_reasoning_tokens: number;
   total_cost_usd: number;
   count: number;
 }
@@ -22,6 +23,7 @@ interface TimeSeriesRow {
   date: string;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_reasoning_tokens: number;
   total_cost_usd: number;
 }
 
@@ -101,6 +103,7 @@ router.get('/usage', async (req: Request, res: Response) => {
         ${groupCol} AS group_key,
         SUM(tu.input_tokens) AS total_input_tokens,
         SUM(tu.output_tokens) AS total_output_tokens,
+        COALESCE(SUM(tu.reasoning_tokens), 0) AS total_reasoning_tokens,
         SUM(tu.cost_usd) AS total_cost_usd,
         COUNT(*)::int AS count
       FROM token_usage tu
@@ -129,6 +132,7 @@ router.get('/usage', async (req: Request, res: Response) => {
         DATE(tu.recorded_at) AS date,
         SUM(tu.input_tokens) AS total_input_tokens,
         SUM(tu.output_tokens) AS total_output_tokens,
+        COALESCE(SUM(tu.reasoning_tokens), 0) AS total_reasoning_tokens,
         SUM(tu.cost_usd) AS total_cost_usd
       FROM token_usage tu
       WHERE tu.recorded_at >= $${tsParamIdx++} AND tu.recorded_at <= $${tsParamIdx++}
@@ -148,6 +152,7 @@ router.get('/usage', async (req: Request, res: Response) => {
       SELECT
         COALESCE(SUM(tu.input_tokens), 0) AS total_input_tokens,
         COALESCE(SUM(tu.output_tokens), 0) AS total_output_tokens,
+        COALESCE(SUM(tu.reasoning_tokens), 0) AS total_reasoning_tokens,
         COALESCE(SUM(tu.cost_usd), 0) AS total_cost_usd,
         COUNT(*)::int AS total_records
       FROM token_usage tu
@@ -162,6 +167,7 @@ router.get('/usage', async (req: Request, res: Response) => {
     const totals = await queryOne<{
       total_input_tokens: number;
       total_output_tokens: number;
+      total_reasoning_tokens: number;
       total_cost_usd: number;
       total_records: number;
     }>(totalSql, totParams);
@@ -176,6 +182,7 @@ router.get('/usage', async (req: Request, res: Response) => {
         ...r,
         total_input_tokens: Number(r.total_input_tokens),
         total_output_tokens: Number(r.total_output_tokens),
+        total_reasoning_tokens: Number(r.total_reasoning_tokens),
         total_cost_usd: Number(r.total_cost_usd),
         count: Number(r.count),
       })),
@@ -183,11 +190,13 @@ router.get('/usage', async (req: Request, res: Response) => {
         ...r,
         total_input_tokens: Number(r.total_input_tokens),
         total_output_tokens: Number(r.total_output_tokens),
+        total_reasoning_tokens: Number(r.total_reasoning_tokens),
         total_cost_usd: Number(r.total_cost_usd),
       })),
       totals: totals ? {
         total_input_tokens: Number(totals.total_input_tokens),
         total_output_tokens: Number(totals.total_output_tokens),
+        total_reasoning_tokens: Number(totals.total_reasoning_tokens),
         total_cost_usd: Number(totals.total_cost_usd),
         total_records: Number(totals.total_records),
       } : totals,
@@ -2097,6 +2106,7 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
         DATE(tu.recorded_at) AS date,
         SUM(tu.input_tokens) AS input_tokens,
         SUM(tu.output_tokens) AS output_tokens,
+        COALESCE(SUM(tu.reasoning_tokens), 0) AS reasoning_tokens,
         SUM(tu.cost_usd) AS cost_usd,
         COUNT(DISTINCT tu.story_id || '-' || tu.run_id) AS story_count
       FROM token_usage tu
@@ -2105,7 +2115,7 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
       ORDER BY date ASC
     `;
     const dailyTrend = await query<{
-      date: string; input_tokens: number; output_tokens: number; cost_usd: number; story_count: number;
+      date: string; input_tokens: number; output_tokens: number; reasoning_tokens: number; cost_usd: number; story_count: number;
     }>(dailySql, params);
 
     // By workspace
@@ -2155,6 +2165,7 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
         SUM(tu.cost_usd) AS total_cost,
         SUM(tu.input_tokens) AS input_tokens,
         SUM(tu.output_tokens) AS output_tokens,
+        COALESCE(SUM(tu.reasoning_tokens), 0) AS reasoning_tokens,
         COUNT(DISTINCT tu.run_id) AS run_count,
         COUNT(DISTINCT tu.story_id || '-' || tu.run_id) AS story_count
       FROM token_usage tu
@@ -2164,7 +2175,7 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
     `;
     const byMonth = await query<{
       month: string; total_cost: number; input_tokens: number;
-      output_tokens: number; run_count: number; story_count: number;
+      output_tokens: number; reasoning_tokens: number; run_count: number; story_count: number;
     }>(byMonthSql, params);
 
     // Model distribution across all runs
@@ -2228,6 +2239,7 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
         cost: Math.round(d.cost_usd * 100) / 100,
         inputTokens: Number(d.input_tokens),
         outputTokens: Number(d.output_tokens),
+        reasoningTokens: Number(d.reasoning_tokens),
         storyCount: Number(d.story_count),
       })),
       byWorkspace: byWorkspace.map(w => ({
@@ -2250,6 +2262,7 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
         totalCost: Math.round(m.total_cost * 100) / 100,
         inputTokens: Number(m.input_tokens),
         outputTokens: Number(m.output_tokens),
+        reasoningTokens: Number(m.reasoning_tokens),
         runCount: Number(m.run_count),
         storyCount: Number(m.story_count),
       })),
