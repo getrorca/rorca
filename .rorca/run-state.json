@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T08:39:17.918Z",
+  "lastUpdatedAt": "2026-04-04T08:44:10.662Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -53,6 +53,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 179013
+    },
+    {
+      "storyId": "QRW-006",
+      "title": "API — GET /api/workflow-router/resolved/:workflowId returns full fallback chain",
+      "status": "passed",
+      "startedAt": "2026-04-04T08:39:38.779Z",
+      "finishedAt": "2026-04-04T08:44:10.662Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 271883
     }
   ],
   "failedStories": [],
