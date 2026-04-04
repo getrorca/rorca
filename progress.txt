@@ -1,9 +1,9 @@
 # Run State Summary
 
 Spec: rorca-reasoning-engine
-Run ID: 20260316000092
-Started: 2026-04-04T06:20:42.643Z
-Last Updated: 2026-04-04T06:41:53.529Z
+Run ID: 20260316000094
+Started: 2026-04-04T06:37:36.897Z
+Last Updated: 2026-04-04T06:47:01.201Z
 
 ## Completed Stories (1)
-- RE-002: ReasoningCapabilityDetector — algorithmic detection core — DONE (claude, claude-sonnet-4-6, 248s)
+- RE-003: OpenRouter metadata reasoning detection — DONE (claude, claude-sonnet-4-6, 282s)
