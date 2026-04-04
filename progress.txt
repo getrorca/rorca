@@ -3,11 +3,12 @@
 Spec: qa-reasoning-engine-workflow-router
 Run ID: 20260316000097
 Started: 2026-04-04T08:10:02.760Z
-Last Updated: 2026-04-04T08:39:17.918Z
+Last Updated: 2026-04-04T08:44:10.662Z
 
-## Completed Stories (5)
+## Completed Stories (6)
 - QRW-001: Type check — zero errors on both frontend and backend after merge — DONE (claude, claude-sonnet-4-6, 598s)
 - QRW-002: DB migration — workflow_configs table exists with correct schema and seed data — DONE (claude, claude-sonnet-4-6, 183s)
 - QRW-003: DB migration — reasoning_tokens column exists in token_usage table — DONE (claude, claude-sonnet-4-6, 621s)
 - QRW-004: API — GET /api/workflow-router returns 3 rows with correct shape — DONE (claude, claude-sonnet-4-6, 81s)
 - QRW-005: API — PUT /api/workflow-router/:workflowId validates and persists — DONE (claude, claude-sonnet-4-6, 179s)
+- QRW-006: API — GET /api/workflow-router/resolved/:workflowId returns full fallback chain — DONE (claude, claude-sonnet-4-6, 272s)
