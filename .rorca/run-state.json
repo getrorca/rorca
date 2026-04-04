@@ -2,7 +2,7 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T07:05:06.411Z",
+  "lastUpdatedAt": "2026-04-04T06:59:47.108Z",
   "completedStories": [
     {
       "storyId": "RE-004",
@@ -15,14 +15,14 @@
       "elapsedMs": 699266
     },
     {
-      "storyId": "RE-012",
-      "title": "FinOps dashboard: reasoning tokens breakdown",
+      "storyId": "RE-015",
+      "title": "Graceful degradation: retry without reasoning on provider error",
       "status": "passed",
-      "startedAt": "2026-04-04T06:54:37.206Z",
-      "finishedAt": "2026-04-04T07:05:06.411Z",
+      "startedAt": "2026-04-04T06:54:37.201Z",
+      "finishedAt": "2026-04-04T06:59:47.108Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 629205
+      "elapsedMs": 309907
     }
   ],
   "failedStories": [],
