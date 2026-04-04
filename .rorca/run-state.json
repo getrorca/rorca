@@ -2,7 +2,7 @@
   "specId": "rorca-workflow-router",
   "runId": 20260316000091,
   "startedAt": "2026-04-04T06:06:05.615Z",
-  "lastUpdatedAt": "2026-04-04T06:24:02.101Z",
+  "lastUpdatedAt": "2026-04-04T06:25:41.407Z",
   "completedStories": [
     {
       "storyId": "WR-001",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 215626
+    },
+    {
+      "storyId": "WR-004",
+      "title": "Startup seeding — ensurePersistedConfig seeds workflow_configs from agent_config",
+      "status": "passed",
+      "startedAt": "2026-04-04T06:24:18.125Z",
+      "finishedAt": "2026-04-04T06:25:41.407Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 83282
     }
   ],
   "failedStories": [],
