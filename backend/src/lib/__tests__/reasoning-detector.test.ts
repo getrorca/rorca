@@ -165,3 +165,96 @@ describe('metadata parameter', () => {
     expect(cap('unknown-model-xyz', meta).supportsReasoning).toBe(false);
   });
 });
+
+// ─── 6. OpenRouter metadata supported_parameters → reasoning detection ────────
+
+describe('OpenRouter metadata supported_parameters', () => {
+  test('model with supported_parameters: ["reasoning"] → supportsReasoning true', () => {
+    const meta: OpenRouterModelMetadata = {
+      id: 'some-provider/unknown-model-v1',
+      name: 'Unknown Reasoning Model',
+      context_length: 32000,
+      supported_parameters: ['reasoning'],
+    };
+    const result = cap('some-provider/unknown-model-v1', meta);
+    expect(result.supportsReasoning).toBe(true);
+    expect(result.reasoningType).toBe('native-cot');
+  });
+
+  test('model with supported_parameters: ["thinking"] → supportsReasoning true', () => {
+    const meta: OpenRouterModelMetadata = {
+      id: 'some-provider/model-with-thinking',
+      supported_parameters: ['thinking'],
+    };
+    const result = cap('some-provider/model-with-thinking', meta);
+    expect(result.supportsReasoning).toBe(true);
+    expect(result.reasoningType).toBe('native-cot');
+  });
+
+  test('model with supported_parameters: ["reasoning_effort"] → supportsReasoning true', () => {
+    const meta: OpenRouterModelMetadata = {
+      id: 'some-provider/effort-model',
+      supported_parameters: ['temperature', 'max_tokens', 'reasoning_effort'],
+    };
+    const result = cap('some-provider/effort-model', meta);
+    expect(result.supportsReasoning).toBe(true);
+    expect(result.reasoningType).toBe('native-cot');
+  });
+
+  test('model with supported_parameters not containing reasoning keywords → supportsReasoning false', () => {
+    const meta: OpenRouterModelMetadata = {
+      id: 'some-provider/plain-model',
+      supported_parameters: ['temperature', 'max_tokens', 'top_p'],
+    };
+    const result = cap('some-provider/plain-model', meta);
+    expect(result.supportsReasoning).toBe(false);
+    expect(result.reasoningType).toBe('none');
+  });
+
+  test('model with supported_parameters: [] (empty array) → supportsReasoning false', () => {
+    const meta: OpenRouterModelMetadata = {
+      id: 'some-provider/no-params-model',
+      supported_parameters: [],
+    };
+    const result = cap('some-provider/no-params-model', meta);
+    expect(result.supportsReasoning).toBe(false);
+  });
+
+  test('model with supported_parameters missing entirely → supportsReasoning false', () => {
+    const meta: OpenRouterModelMetadata = {
+      id: 'some-provider/no-meta-params',
+      name: 'No Params Model',
+    };
+    const result = cap('some-provider/no-meta-params', meta);
+    expect(result.supportsReasoning).toBe(false);
+  });
+
+  test('ID-pattern detection takes priority over metadata for Claude 4.x', () => {
+    // Claude 4.x detected by ID → anthropic-thinking, regardless of metadata
+    const meta: OpenRouterModelMetadata = {
+      id: 'claude-sonnet-4-6',
+      supported_parameters: ['reasoning'],
+    };
+    const result = cap('claude-sonnet-4-6', meta);
+    expect(result.reasoningType).toBe('anthropic-thinking');
+    expect(result.supportsReasoning).toBe(true);
+  });
+
+  test('ID-pattern detection takes priority over metadata for OpenAI o-series', () => {
+    const meta: OpenRouterModelMetadata = {
+      id: 'openai/o3',
+      supported_parameters: ['reasoning'],
+    };
+    const result = cap('openai/o3', meta);
+    expect(result.reasoningType).toBe('effort-levels');
+  });
+
+  test('metadata fallback does not throw when metadata is malformed (non-array supported_parameters)', () => {
+    const meta = {
+      id: 'some-model',
+      supported_parameters: 'reasoning' as unknown as string[],
+    } as OpenRouterModelMetadata;
+    expect(() => cap('some-model', meta)).not.toThrow();
+    expect(cap('some-model', meta).supportsReasoning).toBe(false);
+  });
+});
