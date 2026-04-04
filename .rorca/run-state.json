@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T10:39:30.557Z",
+  "lastUpdatedAt": "2026-04-04T10:52:04.445Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -183,6 +183,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 1380371
+    },
+    {
+      "storyId": "QRW-019",
+      "title": "Frontend — model picker shows reasoning badges and filter chip",
+      "status": "passed",
+      "startedAt": "2026-04-04T10:39:53.585Z",
+      "finishedAt": "2026-04-04T10:52:04.445Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 730860
     }
   ],
   "failedStories": [],
