@@ -36,6 +36,7 @@ export const PipelineRunJobPayload = z.object({
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().int().positive().optional(),
   effortLevel: z.enum(['low', 'medium', 'high', 'max']).optional(),
+  reasoningEffort: z.string().optional(),
 }).strict();
 
 export type PipelineRunJobPayloadType = z.infer<typeof PipelineRunJobPayload>;
