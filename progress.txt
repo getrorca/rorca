@@ -3,9 +3,9 @@
 Spec: qa-reasoning-engine-workflow-router
 Run ID: 20260316000097
 Started: 2026-04-04T08:10:02.760Z
-Last Updated: 2026-04-04T10:03:08.655Z
+Last Updated: 2026-04-04T10:10:00.299Z
 
-## Completed Stories (15)
+## Completed Stories (16)
 - QRW-001: Type check — zero errors on both frontend and backend after merge — DONE (claude, claude-sonnet-4-6, 598s)
 - QRW-002: DB migration — workflow_configs table exists with correct schema and seed data — DONE (claude, claude-sonnet-4-6, 183s)
 - QRW-003: DB migration — reasoning_tokens column exists in token_usage table — DONE (claude, claude-sonnet-4-6, 621s)
@@ -21,3 +21,4 @@ Last Updated: 2026-04-04T10:03:08.655Z
 - QRW-013: Backend integration — graceful degradation retries without reasoning on provider error — DONE (claude, claude-sonnet-4-6, 50s)
 - QRW-014: Backend integration — spec generation writes reasoning field to spec JSON — DONE (claude, claude-sonnet-4-6, 357s)
 - QRW-015: Frontend — ConnectionsHubSection component renders and manages vault keys — DONE (claude, claude-sonnet-4-6, 435s)
+- QRW-016: Frontend — WorkflowRouterSection renders matrix table with interactive controls — DONE (claude, claude-sonnet-4-6, 391s)
