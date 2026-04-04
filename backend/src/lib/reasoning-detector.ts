@@ -74,6 +74,21 @@ function hasNativeCoTKeyword(modelId: string): boolean {
   return /think|r1\b|qwq|reasoning/.test(id);
 }
 
+// ─── OpenRouter metadata reasoning keywords ───────────────────────────────────
+
+/** Parameter names that indicate reasoning support in OpenRouter's supported_parameters array. */
+const OPENROUTER_REASONING_PARAMS = new Set(['reasoning', 'thinking', 'reasoning_effort']);
+
+/**
+ * Returns true if the OpenRouter metadata explicitly declares reasoning support
+ * via the `supported_parameters` array.  Safely handles missing/malformed metadata.
+ */
+function metadataSupportsReasoning(metadata: OpenRouterModelMetadata): boolean {
+  const params = metadata.supported_parameters;
+  if (!Array.isArray(params)) return false;
+  return params.some(p => typeof p === 'string' && OPENROUTER_REASONING_PARAMS.has(p));
+}
+
 // ─── No-reasoning sentinel ────────────────────────────────────────────────────
 
 const NO_REASONING: ReasoningCapability = {
@@ -95,11 +110,14 @@ const NO_REASONING: ReasoningCapability = {
  *   1. Claude 4.x  → 'anthropic-thinking'
  *   2. OpenAI o-series → 'effort-levels'
  *   3. Native CoT keyword (think/r1/qwq/reasoning) → 'native-cot'
- *   4. Unknown → { supportsReasoning: false, reasoningType: 'none' }
+ *   4. OpenRouter metadata `supported_parameters` contains 'reasoning' / 'thinking' / 'reasoning_effort' → 'native-cot'
+ *   5. Unknown → { supportsReasoning: false, reasoningType: 'none' }
  *
- * The optional `metadata` parameter (OpenRouter model metadata) is accepted
- * for future extensibility but is not required for current detection paths.
- * When provided it can be used by callers to enrich results.
+ * When `metadata` is provided and `supported_parameters` contains a recognised
+ * reasoning flag (step 4), the function returns a `native-cot` capability even
+ * if the model ID would otherwise be undetected.  When metadata is unavailable
+ * or malformed the function falls back gracefully to ID-pattern matching only —
+ * it never throws.
  *
  * @param modelId   The model identifier string (e.g. "claude-opus-4-6", "o3", "openai/o4-mini").
  * @param metadata  Optional OpenRouter model metadata for the same model.
@@ -158,6 +176,22 @@ export function detectCapability(
     };
   }
 
-  // ── 4. Unknown ────────────────────────────────────────────────────────────
+  // ── 4. OpenRouter metadata: supported_parameters → native-cot ───────────
+  // Only reached when ID-pattern matching fails. Treats any model with an
+  // explicit reasoning parameter declaration as a native-CoT model because
+  // we have no structural information to distinguish effort-level APIs.
+  if (metadata && metadataSupportsReasoning(metadata)) {
+    return {
+      supportsReasoning: true,
+      reasoningType: 'native-cot',
+      effortLevels: [],
+      defaultEffort: null,
+      budgetTokensSupported: false,
+      budgetRange: null,
+      costMultiplier: 1.0,
+    };
+  }
+
+  // ── 5. Unknown ────────────────────────────────────────────────────────────
   return NO_REASONING;
 }
