@@ -5,6 +5,16 @@ import { apiFetch } from '../lib/apiFetch';
 import { fetchStoryOutput, retryRun } from '../api/pipeline';
 import type { WalEvent } from '../hooks/usePipelineSSE';
 
+/** Safely parse a WAL event payload string into an object. Returns null if unparseable. */
+function parsePayload(payload: string | null): Record<string, unknown> | null {
+  if (!payload) return null;
+  try {
+    return typeof payload === 'string' ? JSON.parse(payload) : (payload as Record<string, unknown>);
+  } catch {
+    return null;
+  }
+}
+
 interface StoryResult {
   id: number;
   run_id: number;
@@ -566,7 +576,8 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
     const running = new Set<string>();
     for (const evt of walEvents) {
       if (!evt.story_id) continue;
-      if (evt.payload?.run_id !== undefined && evt.payload.run_id !== runId) continue;
+      const p = parsePayload(evt.payload);
+      if (p?.run_id !== undefined && p.run_id !== runId) continue;
       if (evt.event_type === 'story_started') {
         running.add(evt.story_id);
       } else if (
@@ -587,7 +598,8 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
     const map = new Map<string, number>();
     for (const evt of walEvents) {
       if (evt.event_type === 'story_started' && evt.story_id) {
-        if (evt.payload?.run_id !== undefined && evt.payload.run_id !== runId) continue;
+        const p = parsePayload(evt.payload);
+        if (p?.run_id !== undefined && p.run_id !== runId) continue;
         map.set(evt.story_id, new Date(evt.ts).getTime());
       }
     }

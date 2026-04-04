@@ -34,8 +34,8 @@ function deriveConcurrentStories(events: WalEvent[]): ConcurrentStory[] {
       case 'story_started':
         storyMap.set(e.story_id, {
           storyId: e.story_id,
-          title: payload.story_title || payload.title || e.story_id,
-          waveIndex: payload.wave_index ?? 0,
+          title: String(payload.story_title || payload.title || e.story_id),
+          waveIndex: Number(payload.wave_index ?? 0),
           status: 'running',
         });
         break;

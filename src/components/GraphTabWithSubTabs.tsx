@@ -39,7 +39,8 @@ type GraphSubTab = 'dependencies' | 'knowledge';
 
 function CollapsibleSection({ title, icon: Icon, count, children }: {
   title: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  icon: React.ComponentType<any>;
   count: number;
   children: React.ReactNode;
 }) {
