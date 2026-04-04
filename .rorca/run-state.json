@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T09:40:01.832Z",
+  "lastUpdatedAt": "2026-04-04T09:48:04.007Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -113,6 +113,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 638845
+    },
+    {
+      "storyId": "QRW-012",
+      "title": "Backend integration — execution-engine passes reasoning flags to Claude and OpenCode subprocesses",
+      "status": "passed",
+      "startedAt": "2026-04-04T09:40:22.297Z",
+      "finishedAt": "2026-04-04T09:48:04.007Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 461710
     }
   ],
   "failedStories": [],
