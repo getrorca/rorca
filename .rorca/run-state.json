@@ -2,7 +2,7 @@
   "specId": "rorca-workflow-router",
   "runId": 20260316000091,
   "startedAt": "2026-04-04T06:06:05.615Z",
-  "lastUpdatedAt": "2026-04-04T07:02:27.040Z",
+  "lastUpdatedAt": "2026-04-04T07:05:14.577Z",
   "completedStories": [
     {
       "storyId": "WR-001",
@@ -133,6 +133,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 302066
+    },
+    {
+      "storyId": "WR-014",
+      "title": "ProviderSettingsTab tab navigation update — new tabs replacing old structure",
+      "status": "passed",
+      "startedAt": "2026-04-04T07:02:49.169Z",
+      "finishedAt": "2026-04-04T07:05:14.576Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 145407
     }
   ],
   "failedStories": [],
