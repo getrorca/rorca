@@ -2123,21 +2123,55 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Advanced options
   const [advancedOpen, setAdvancedOpen] = useState(false);
 
-  // Extended thinking (persisted in localStorage)
-  const [thinkingEnabled, setThinkingEnabled] = useState(() => {
-    try { return localStorage.getItem('rorca:forge:thinkingEnabled') === 'true'; } catch { return false; }
-  });
-  const THINKING_BUDGET_PRESETS = [
-    { label: 'Low', value: 4096 },
-    { label: 'Medium', value: 8192 },
-    { label: 'High', value: 16384 },
-    { label: 'Max', value: 32768 },
-  ] as const;
-  const [thinkingBudget, setThinkingBudget] = useState(() => {
-    try { const v = localStorage.getItem('rorca:forge:thinkingBudget'); return v ? parseInt(v, 10) : 8192; } catch { return 8192; }
-  });
-  useEffect(() => { try { localStorage.setItem('rorca:forge:thinkingEnabled', String(thinkingEnabled)); } catch {} }, [thinkingEnabled]);
-  useEffect(() => { try { localStorage.setItem('rorca:forge:thinkingBudget', String(thinkingBudget)); } catch {} }, [thinkingBudget]);
+  // Reasoning — per-model preferences stored in localStorage under rorca:reasoning:<modelId>
+  // Derives effective modelId (selected or default) for keying prefs
+  const effectiveModelId = useMemo(
+    () => selectedModel || defaultModelId || 'claude-sonnet-4-6',
+    [selectedModel, defaultModelId]
+  );
+
+  // Capability of the currently selected model (derived from availableModels)
+  const reasoningCapability = useMemo(() => {
+    const m = availableModels.find(m => m.id === effectiveModelId);
+    return m?.reasoningCapability ?? { supportsReasoning: false, reasoningType: 'none' as const, effortLevels: [], defaultEffort: null, budgetTokensSupported: false, budgetRange: null, costMultiplier: 1.0 };
+  }, [availableModels, effectiveModelId]);
+
+  // Load saved prefs for a model from localStorage
+  const loadReasoningPrefs = useCallback((modelId: string) => {
+    try {
+      const raw = localStorage.getItem(`rorca:reasoning:${modelId}`);
+      if (raw) return JSON.parse(raw) as { enabled: boolean; effort: string };
+    } catch { /* ignore */ }
+    return null;
+  }, []);
+
+  const [reasoningEnabled, setReasoningEnabled] = useState(false);
+  const [reasoningEffort, setReasoningEffort] = useState<string>('medium');
+
+  // When model changes, load saved prefs (or fall back to capability defaults)
+  useEffect(() => {
+    const cap = availableModels.find(m => m.id === effectiveModelId)?.reasoningCapability;
+    if (!cap?.supportsReasoning) {
+      setReasoningEnabled(false);
+      return;
+    }
+    const saved = loadReasoningPrefs(effectiveModelId);
+    if (saved) {
+      setReasoningEnabled(saved.enabled);
+      // Clamp effort to what the model actually supports
+      const validEffort = cap.effortLevels.includes(saved.effort) ? saved.effort : (cap.defaultEffort ?? 'medium');
+      setReasoningEffort(validEffort);
+    } else {
+      setReasoningEnabled(false);
+      setReasoningEffort(cap.defaultEffort ?? 'medium');
+    }
+  }, [effectiveModelId, availableModels, loadReasoningPrefs]);
+
+  // Persist reasoning prefs whenever they change
+  useEffect(() => {
+    if (!reasoningCapability.supportsReasoning) return;
+    try { localStorage.setItem(`rorca:reasoning:${effectiveModelId}`, JSON.stringify({ enabled: reasoningEnabled, effort: reasoningEffort })); } catch { /* ignore */ }
+  }, [reasoningEnabled, reasoningEffort, effectiveModelId, reasoningCapability.supportsReasoning]);
 
   // Auto-match & auto-suggest toggles (persisted in localStorage)
   const [autoMatchSkills, setAutoMatchSkills] = useState(() => {
@@ -2388,7 +2422,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     try {
       const result = await apiFetch<GeneratedSpec>('/api/specs/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
-        body: JSON.stringify({ workspaceId, domain: workspace?.domain || undefined, specName: specName || undefined, storyCount, specBrief, model: selectedModel || undefined, ...(thinkingEnabled ? { thinkingEnabled, thinkingBudget } : {}) }),
+        body: JSON.stringify({ workspaceId, domain: workspace?.domain || undefined, specName: specName || undefined, storyCount, specBrief, model: selectedModel || undefined, ...(reasoningCapability.supportsReasoning && reasoningEnabled ? { reasoning: { enabled: true, effort: reasoningEffort } } : {}) }),
       });
       setApiDone(true);
       // Map backend response fields: backend returns { slug, title } but GeneratedSpec expects { slug, specName }
@@ -3000,34 +3034,39 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                 </div>
               </div>
 
-              {/* Extended Thinking */}
-              <div className="border-t border-border mt-4 pt-4 space-y-3">
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted">Reasoning</span>
+              {/* Reasoning Mode — only shown when selected model supports reasoning */}
+              {reasoningCapability.supportsReasoning && (
+                <div className="border-t border-border mt-4 pt-4 space-y-3">
+                  <span className="text-xs font-semibold uppercase tracking-wider text-muted">Reasoning Mode</span>
 
-                <label className="flex items-center gap-2 cursor-pointer group">
-                  <button type="button" role="switch" aria-checked={thinkingEnabled} onClick={() => setThinkingEnabled(v => !v)}
-                    className={`relative w-8 h-[18px] rounded-full transition-colors ${thinkingEnabled ? 'bg-accent' : 'bg-border group-hover:bg-muted/40'}`}>
-                    <span className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-switch-knob transition-transform ${thinkingEnabled ? 'translate-x-[14px]' : ''}`} />
-                  </button>
-                  <span className="text-xs font-medium text-text">Extended thinking</span>
-                  <span className="text-[10px] text-muted">(Anthropic models)</span>
-                </label>
+                  {/* Enable/disable toggle */}
+                  <label className="flex items-center gap-2 cursor-pointer group">
+                    <button type="button" role="switch" aria-checked={reasoningEnabled} onClick={() => setReasoningEnabled(v => !v)}
+                      className={`relative w-8 h-[18px] rounded-full transition-colors ${reasoningEnabled ? 'bg-accent' : 'bg-border group-hover:bg-muted/40'}`}>
+                      <span className={`absolute top-0.5 left-0.5 w-3.5 h-3.5 rounded-full bg-switch-knob transition-transform ${reasoningEnabled ? 'translate-x-[14px]' : ''}`} />
+                    </button>
+                    <span className="text-xs font-medium text-text">Enable reasoning</span>
+                    {reasoningCapability.reasoningType === 'anthropic-thinking' && (
+                      <span className="text-[10px] text-muted">(extended thinking)</span>
+                    )}
+                  </label>
 
-                {thinkingEnabled && (
-                  <div className="ml-10 space-y-2">
-                    <label className="block text-xs font-medium text-muted mb-1">Thinking Budget</label>
-                    <div className="flex gap-1.5">
-                      {THINKING_BUDGET_PRESETS.map(({ label, value }) => (
-                        <button key={value} type="button" onClick={() => setThinkingBudget(value)}
-                          className={`px-2.5 py-1 text-xs rounded transition-colors ${thinkingBudget === value ? 'bg-accent text-white' : 'bg-panel border border-border text-text hover:border-accent/50'}`}>
-                          {label}
-                        </button>
-                      ))}
+                  {/* Effort level segmented control — only when enabled and effortLevels available */}
+                  {reasoningEnabled && reasoningCapability.effortLevels.length > 0 && (
+                    <div className="ml-10 space-y-1.5">
+                      <label className="block text-xs font-medium text-muted">Effort Level</label>
+                      <div className="flex gap-1">
+                        {reasoningCapability.effortLevels.map(level => (
+                          <button key={level} type="button" onClick={() => setReasoningEffort(level)}
+                            className={`px-2.5 py-1 text-xs rounded capitalize transition-colors ${reasoningEffort === level ? 'bg-accent text-white' : 'bg-panel border border-border text-text hover:border-accent/50'}`}>
+                            {level}
+                          </button>
+                        ))}
+                      </div>
                     </div>
-                    <p className="text-[10px] text-muted">{thinkingBudget.toLocaleString()} tokens — higher = deeper reasoning, more cost</p>
-                  </div>
-                )}
-              </div>
+                  )}
+                </div>
+              )}
 
               {/* Skills & Models */}
               <div className="border-t border-border mt-4 pt-4 space-y-3">

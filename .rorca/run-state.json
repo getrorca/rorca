@@ -2,7 +2,7 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T07:03:50.767Z",
+  "lastUpdatedAt": "2026-04-04T07:00:59.075Z",
   "completedStories": [
     {
       "storyId": "RE-004",
@@ -15,14 +15,14 @@
       "elapsedMs": 699266
     },
     {
-      "storyId": "RE-005",
-      "title": "Claude CLI reasoning pass-through in execution-engine.ts",
+      "storyId": "RE-008",
+      "title": "Reasoning controls in SpecsPanel.tsx Forge brief flow",
       "status": "passed",
-      "startedAt": "2026-04-04T06:54:37.208Z",
-      "finishedAt": "2026-04-04T07:03:50.767Z",
+      "startedAt": "2026-04-04T06:54:37.299Z",
+      "finishedAt": "2026-04-04T07:00:59.075Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 553559
+      "elapsedMs": 381776
     }
   ],
   "failedStories": [],
