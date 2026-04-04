@@ -87,6 +87,13 @@ interface WorkspaceConfig {
   };
 }
 
+interface ModelCapability {
+  supportsReasoning: boolean;
+  reasoningType: 'anthropic-thinking' | 'effort-levels' | 'native-cot' | 'none';
+  effortLevels: string[];
+  defaultEffort: string | null;
+}
+
 function formatTokenCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
@@ -162,6 +169,8 @@ interface TriggerPopoverProps {
   initialThinkingBudget?: number;
   /** Reasoning config from spec generation — shown as badge and editable before run */
   initialReasoning?: ReasoningConfig;
+  /** Model ID from spec JSON — used to fetch reasoning capability */
+  specModel?: string | null;
 }
 
 export default function TriggerPopover({
@@ -177,6 +186,7 @@ export default function TriggerPopover({
   initialThinkingEnabled,
   initialThinkingBudget,
   initialReasoning,
+  specModel,
 }: TriggerPopoverProps) {
   const [autoWorktree, setAutoWorktree] = useState(false);
   const [autoMerge, setAutoMerge] = useState(true);
@@ -198,6 +208,8 @@ export default function TriggerPopover({
   // Reasoning override — mirrors spec.reasoning but editable per-run without saving to spec
   const [reasoningEnabled, setReasoningEnabled] = useState(initialReasoning?.enabled ?? false);
   const [reasoningEffort, setReasoningEffort] = useState(initialReasoning?.effort ?? 'medium');
+  const [modelCapability, setModelCapability] = useState<ModelCapability | null>(null);
+  const [reasoningSectionExpanded, setReasoningSectionExpanded] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
   const [portalStyle, setPortalStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
@@ -283,6 +295,24 @@ export default function TriggerPopover({
       })
       .catch(() => {});
   }, [workspaceId]);
+
+  // Fetch model reasoning capability on mount
+  useEffect(() => {
+    if (!specModel) return;
+    apiFetch<ModelCapability>(`/api/config/model-capability?modelId=${encodeURIComponent(specModel)}`)
+      .then((cap) => {
+        setModelCapability(cap);
+        // If the model supports reasoning and spec has reasoning config, pre-expand the section
+        if (cap.supportsReasoning) {
+          setReasoningSectionExpanded(initialReasoning?.enabled ?? false);
+          // If no initial reasoning, use model default effort
+          if (!initialReasoning?.enabled && cap.defaultEffort) {
+            setReasoningEffort(cap.defaultEffort);
+          }
+        }
+      })
+      .catch(() => {});
+  }, [specModel, initialReasoning?.enabled, initialReasoning?.effort]);
 
   // Fetch context preview on mount
   useEffect(() => {
@@ -837,40 +867,55 @@ export default function TriggerPopover({
           onEffortChange={setEffortLevel}
           thinkingEnabled={thinkingEnabled}
           onThinkingEnabledChange={setThinkingEnabled}
-          thinkingBudget={thinkingBudget}
-          onThinkingBudgetChange={setThinkingBudget}
         />
 
-        {/* Reasoning override — only shown when spec was generated with reasoning */}
-        {initialReasoning?.enabled && (
+        {/* Reasoning — shown when the spec's model supports reasoning */}
+        {modelCapability?.supportsReasoning && modelCapability.reasoningType !== 'none' && (
           <>
             <div className="border-t border-border/50" />
             <div className="space-y-2">
-              <div className="flex items-center gap-1.5">
+              <button
+                type="button"
+                onClick={() => setReasoningSectionExpanded(x => !x)}
+                className="flex items-center gap-1.5 w-full text-left"
+              >
+                {reasoningSectionExpanded
+                  ? <ChevronDown size={12} className="text-muted shrink-0" />
+                  : <ChevronRight size={12} className="text-muted shrink-0" />
+                }
                 <Brain size={12} className="text-purple-400 shrink-0" />
-                <span className="text-xs font-semibold uppercase tracking-wider text-muted">Reasoning Override</span>
-              </div>
-              <label className="flex items-center gap-2 cursor-pointer select-none">
-                <input
-                  type="checkbox"
-                  checked={reasoningEnabled}
-                  onChange={e => setReasoningEnabled(e.target.checked)}
-                  className="w-3.5 h-3.5 accent-purple-500"
-                />
-                <span className="text-xs text-[var(--text)]">Enable reasoning for this run</span>
-              </label>
-              {reasoningEnabled && (
-                <div className="ml-5 flex gap-1.5">
-                  {(['low', 'medium', 'high'] as const).map(level => (
-                    <button
-                      key={level}
-                      type="button"
-                      onClick={() => setReasoningEffort(level)}
-                      className={`px-2.5 py-1 text-[11px] rounded capitalize transition-colors ${reasoningEffort === level ? 'bg-purple-500/80 text-white' : 'bg-panel border border-border text-text hover:border-purple-400/50'}`}
-                    >
-                      {level}
-                    </button>
-                  ))}
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Reasoning</span>
+                {initialReasoning?.enabled && (
+                  <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/15 text-purple-400 border border-purple-500/30">
+                    from spec
+                  </span>
+                )}
+              </button>
+              {reasoningSectionExpanded && (
+                <div className="space-y-2 pl-1">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={reasoningEnabled}
+                      onChange={e => setReasoningEnabled(e.target.checked)}
+                      className="w-3.5 h-3.5 accent-purple-500"
+                    />
+                    <span className="text-xs text-[var(--text)]">Enable reasoning for this run</span>
+                  </label>
+                  {reasoningEnabled && modelCapability.effortLevels.length > 0 && (
+                    <div className="ml-5 flex gap-1.5">
+                      {modelCapability.effortLevels.map(level => (
+                        <button
+                          key={level}
+                          type="button"
+                          onClick={() => setReasoningEffort(level)}
+                          className={`px-2.5 py-1 text-[11px] rounded capitalize transition-colors ${reasoningEffort === level ? 'bg-purple-500/80 text-white' : 'bg-panel border border-border text-text hover:border-purple-400/50'}`}
+                        >
+                          {level}
+                        </button>
+                      ))}
+                    </div>
+                  )}
                 </div>
               )}
             </div>
@@ -894,7 +939,7 @@ export default function TriggerPopover({
               effortLevel: thinkingApplies ? effortLevel : undefined,
               thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
               thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
-              reasoningOverride: initialReasoning?.enabled ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
+              reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
             });
           }}
           disabled={triggerDisabled}
@@ -922,7 +967,7 @@ export default function TriggerPopover({
                 effortLevel: thinkingApplies ? effortLevel : undefined,
                 thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
                 thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
-                reasoningOverride: initialReasoning?.enabled ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
+                reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
               });
             }}
             disabled={triggerDisabled}
