@@ -2302,9 +2302,12 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       apiFetch<{ provider: string }>(`/api/vault/keys/default-provider?workspaceId=${workspaceId}`),
       apiFetch<{ agentType: AgentType; agentModel: string | null; modelDisplayName: string | null; opencodeInstalled?: boolean; codexInstalled?: boolean }>('/api/config'),
       apiFetch<{ models: Array<{ id: string; name: string; provider: string; contextWindow: number; costPer1kInput?: number; costPer1kOutput?: number; speedTier?: string; costTier?: string }> }>('/api/config/opencode-models'),
-    ]).then(([modelData, providerData, configData, ocModels]) => {
+      apiFetch<{ model: string | null }>('/api/workflow-router/resolved/spec_generation').catch(() => null),
+    ]).then(([modelData, providerData, configData, ocModels, resolvedWf]) => {
       setAvailableModels(modelData.models);
-      setDefaultModelId(modelData.defaultModel);
+      // Workflow router model takes priority over direction models default
+      const wrModel = resolvedWf?.model ?? null;
+      setDefaultModelId(wrModel || modelData.defaultModel);
       setActiveProvider(providerData.provider);
       setWsAgentType(configData.agentType);
       setWsAgentModel(configData.agentModel);
