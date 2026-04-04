@@ -2,7 +2,7 @@
   "specId": "rorca-workflow-router",
   "runId": 20260316000091,
   "startedAt": "2026-04-04T06:06:05.615Z",
-  "lastUpdatedAt": "2026-04-04T07:23:22.744Z",
+  "lastUpdatedAt": "2026-04-04T07:27:32.995Z",
   "completedStories": [
     {
       "storyId": "WR-001",
@@ -163,6 +163,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 840354
+    },
+    {
+      "storyId": "WR-017",
+      "title": "Backward compat test — env vars still work as fallback when DB has default seed rows",
+      "status": "passed",
+      "startedAt": "2026-04-04T07:23:46.951Z",
+      "finishedAt": "2026-04-04T07:27:32.994Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 226043
     }
   ],
   "failedStories": [],
