@@ -2279,6 +2279,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         mermaidDiagram: mermaidDiagram || undefined,
         model: resolvedModel,
         contextUsed,
+        ...(thinkingEnabled ? { reasoning: { enabled: true, ...(reasoningEffort ? { effort: reasoningEffort } : {}) } } : {}),
       });
       specPath = writeResult.specPath;
       diagramsPath = writeResult.diagramsPath;

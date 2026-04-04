@@ -3,9 +3,9 @@
 Spec: rorca-reasoning-engine
 Run ID: 20260316000094
 Started: 2026-04-04T06:37:36.897Z
-Last Updated: 2026-04-04T07:15:30.654Z
+Last Updated: 2026-04-04T07:22:19.249Z
 
 ## Completed Stories (3)
 - RE-004: Provider-agnostic reasoning mapping in llm-client.ts — DONE (claude, claude-sonnet-4-6, 699s)
 - RE-015: Graceful degradation: retry without reasoning on provider error — DONE (claude, claude-sonnet-4-6, 310s)
-- RE-006: OpenCode reasoning pass-through in execution-engine.ts — DONE (claude, claude-sonnet-4-6, 474s)
+- RE-007: Reasoning config stored in spec JSON and read on pipeline trigger — DONE (claude, claude-sonnet-4-6, 883s)
