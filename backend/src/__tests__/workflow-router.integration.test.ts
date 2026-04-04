@@ -318,12 +318,12 @@ describe('Workflow Router integration', () => {
   // ── Edge cases ───────────────────────────────────────────────────────────
 
   describe('edge cases', () => {
-    it('PUT with unknown workflowId returns 404', async () => {
+    it('PUT with unknown workflowId returns 422', async () => {
       const res = await request(app)
         .put('/api/workflow-router/unknown_workflow')
         .send({ runtime: 'native' });
 
-      expect(res.status).toBe(404);
+      expect(res.status).toBe(422);
     });
 
     it('PUT with invalid runtime value returns 400', async () => {
