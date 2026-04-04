@@ -1,5 +1,5 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
-import { Search, ChevronDown, ChevronRight, Check, Sparkles, Zap, Clock, Turtle } from 'lucide-react';
+import { Search, ChevronDown, ChevronRight, Check, Sparkles, Zap, Clock, Turtle, Brain } from 'lucide-react';
 
 export interface ModelOption {
   id: string;
@@ -12,6 +12,10 @@ export interface ModelOption {
   speedTier?: string;
   costTier?: string;
   recommended: boolean;
+  /** Whether this model supports reasoning/thinking. */
+  supportsReasoning?: boolean;
+  /** Effort levels supported by this model (e.g. ['low', 'medium', 'high', 'max']). */
+  effortLevels?: string[];
 }
 
 interface ModelSearchSelectProps {
@@ -440,6 +444,16 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
                               <span className={`truncate ${isSelected ? 'font-medium' : ''}`}>
                                 {m.label}
                               </span>
+                              {m.supportsReasoning && (
+                                <span
+                                  title={m.effortLevels && m.effortLevels.length > 0
+                                    ? `Supports reasoning: ${m.effortLevels.join(', ')} effort`
+                                    : 'Supports native reasoning'}
+                                  className="shrink-0"
+                                >
+                                  <Brain size={11} className="text-violet-400" />
+                                </span>
+                              )}
                               {m.id === defaultModelId && (
                                 <span className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-accent/10 text-accent font-medium">
                                   Default
