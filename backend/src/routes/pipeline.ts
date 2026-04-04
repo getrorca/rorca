@@ -1071,7 +1071,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         }
       }
 
-      const estimate = await estimateDryRunCost(specJson, workspaceId, model);
+      const dryRunReasoningOptions = thinkingEnabled !== undefined
+        ? { enabled: Boolean(thinkingEnabled), effort: reasoningEffort ?? effortLevel ?? undefined }
+        : undefined;
+      const estimate = await estimateDryRunCost(specJson, workspaceId, model, dryRunReasoningOptions);
       res.json({ dryRun: true, estimate });
       return;
     }
