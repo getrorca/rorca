@@ -2,7 +2,7 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T06:59:47.108Z",
+  "lastUpdatedAt": "2026-04-04T07:15:30.654Z",
   "completedStories": [
     {
       "storyId": "RE-004",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 309907
+    },
+    {
+      "storyId": "RE-006",
+      "title": "OpenCode reasoning pass-through in execution-engine.ts",
+      "status": "passed",
+      "startedAt": "2026-04-04T07:07:36.648Z",
+      "finishedAt": "2026-04-04T07:15:30.653Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 474005
     }
   ],
   "failedStories": [],
