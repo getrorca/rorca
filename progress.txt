@@ -3,9 +3,9 @@
 Spec: qa-reasoning-engine-workflow-router
 Run ID: 20260316000097
 Started: 2026-04-04T08:10:02.760Z
-Last Updated: 2026-04-04T09:12:57.241Z
+Last Updated: 2026-04-04T09:29:04.232Z
 
-## Completed Stories (9)
+## Completed Stories (10)
 - QRW-001: Type check — zero errors on both frontend and backend after merge — DONE (claude, claude-sonnet-4-6, 598s)
 - QRW-002: DB migration — workflow_configs table exists with correct schema and seed data — DONE (claude, claude-sonnet-4-6, 183s)
 - QRW-003: DB migration — reasoning_tokens column exists in token_usage table — DONE (claude, claude-sonnet-4-6, 621s)
@@ -15,3 +15,4 @@ Last Updated: 2026-04-04T09:12:57.241Z
 - QRW-007: API — GET /api/config/model-capability returns correct ReasoningCapability — DONE (claude, claude-sonnet-4-6, 222s)
 - QRW-008: Unit tests — reasoning-detector.ts covers all 4 detection paths — DONE (claude, claude-sonnet-4-6, 463s)
 - QRW-009: Unit tests — workflow-config-resolver.ts covers fallback chain and validation — DONE (claude, claude-sonnet-4-6, 74s)
+- QRW-010: Backend integration — pipeline trigger uses resolveWorkflowConfig not raw env vars — DONE (claude, claude-sonnet-4-6, 946s)
