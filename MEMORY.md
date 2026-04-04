@@ -36,11 +36,11 @@ Context: Machine-readable, human-editable. Categories: Architecture, Convention,
 Context: .rorca/config.json routing section defines globals, scopes, and tags. micromatch handles glob matching.
 > Source: CIE-004
 
-## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
-> Rule: Marketplace UI components follow extract-then-enhance pattern: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
+## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
+> Rule: TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
 
-Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incremental approach of establishing shared utilities before complex features reduces integration risk.
-> Source: SM-003
+Context: SM-001 failed with reason='typecheck' despite potentially working at runtime. The execution engine enforces strict type safety as a quality gate. Always verify both frontend and backend type checks before committing.
+> Source: SM-001
 
 ## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
 > Rule: Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
@@ -48,23 +48,35 @@ Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incrementa
 Context: SM-001 failed in wave 0, causing SM-002, SM-004, and SM-006 to skip despite not being directly tested. This cascading failure pattern means early wave failures have exponential impact on run completion rate.
 > Source: SM-001
 
-## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
-> Rule: TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
+## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
+> Rule: Marketplace UI components follow extract-then-enhance pattern: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
 
-Context: SM-001 failed with reason='typecheck' despite potentially working at runtime. The execution engine enforces strict type safety as a quality gate. Always verify both frontend and backend type checks before committing.
-> Source: SM-001
-
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-> Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-
-Context: PR-051 creates plan_quotas table + requirePlan middleware. This centralizes enforcement logic and makes quota changes (free → paid tier) declarative. Route handlers stay clean.
-> Source: PR-051
+Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incremental approach of establishing shared utilities before complex features reduces integration risk.
+> Source: SM-003
 
 ## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
 > Rule: PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
 
 Context: PR-049 and PR-050 (SQLite optimization + benchmarks) were superseded by the rorca-postgres-migration spec. This teaches us that production-grade DB decisions should be made upfront, not incrementally optimized from dev-grade solutions.
 > Source: rorca-postgres-migration
+
+## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+
+Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
+> Source: PR-QUEUE-1
+
+## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
+> Rule: Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
+
+Context: PR-052 implements upgrade prompts + feature badges. This creates a progressive disclosure UX where users discover features organically rather than via docs. Version gate prevents showing unavailable features.
+> Source: PR-052
+
+## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+> Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+
+Context: PR-051 creates plan_quotas table + requirePlan middleware. This centralizes enforcement logic and makes quota changes (free → paid tier) declarative. Route handlers stay clean.
+> Source: PR-051
 
 ## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
 > Rule: Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
@@ -89,18 +101,6 @@ Context: PR-003 establishes Docker Compose as the canonical self-hosted deployme
 
 Context: Implemented via workspace-echolocation.ts echolocate() function. Penalties apply: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit. This structured breakdown enables actionable remediation.
 > Source: CIE workspace health
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
-> Source: PR-QUEUE-1
-
-## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-> Rule: Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-
-Context: PR-052 implements upgrade prompts + feature badges. This creates a progressive disclosure UX where users discover features organically rather than via docs. Version gate prevents showing unavailable features.
-> Source: PR-052
 
 ## 2026-03-10 [Gotcha] pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
 > Rule: pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
@@ -3092,3 +3092,15 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-03 [Bug Fix] Wave parallel broken by two separate issues: ArchivePanel options drop + waveParallelism config: Wave parallel execution requires two things to be correct simultaneously: (1) ArchivePanel.handleRun must forward all TriggerPopover options (forceSequential, autoMerge, includeGraph) to the pipeline trigger API — since ULT-007, the options parameter was silently dropped, so forceSequential was never sent and backend defaulted to sequential; (2) the target workspace's .rorca/config.json must have waveParallelism: true in the execution block — Cashflow-App had it hardcoded to false, blocking wave parallel regardless of UI toggle. Both must be correct or parallelism stays at 1.
 > Rule: Wave parallel broken by two separate issues: ArchivePanel options drop + waveParallelism config: Wave parallel execution requires two things to be correct simultaneously: (1) ArchivePanel.handleRun must forward all TriggerPopover options (forceSequential, autoMerge, includeGraph) to the pipeline trigger API — since ULT-007, the options parameter was silently dropped, so forceSequential was never sent and backend defaulted to sequential; (2) the target workspace's .rorca/config.json must have waveParallelism: true in the execution block — Cashflow-App had it hardcoded to false, blocking wave parallel regardless of UI toggle. Both must be correct or parallelism stays at 1.
+
+## 2026-04-03 [Gotcha] Model picker must filter by engine type: When engine is OpenCode (API), the model picker must NOT show Anthropic subscription models (Opus, Sonnet, Haiku). Filter by `m.provider !== 'Anthropic'` on the `/api/direction/models` response. Only OpenRouter models should appear. OpenRouter section should also start expanded (not collapsed) when OpenCode is selected.
+> Rule: Model picker must filter by engine type: When engine is OpenCode (API), the model picker must NOT show Anthropic subscription models (Opus, Sonnet, Haiku). Filter by `m.provider !== 'Anthropic'` on the `/api/direction/models` response. Only OpenRouter models should appear. OpenRouter section should also start expanded (not collapsed) when OpenCode is selected.
+
+## 2026-04-03 [Gotcha] Effort level 'max' is Opus-only: Claude CLI supports 4 effort levels: low, medium, high, max. However 'max' is only available for Opus models. When Sonnet is selected, the ThinkingControls component must hide the Max button (only show Low/Medium/High). If effort was set to 'max' and user switches to Sonnet, clamp down to 'high'.
+> Rule: Effort level 'max' is Opus-only: Claude CLI supports 4 effort levels: low, medium, high, max. However 'max' is only available for Opus models. When Sonnet is selected, the ThinkingControls component must hide the Max button (only show Low/Medium/High). If effort was set to 'max' and user switches to Sonnet, clamp down to 'high'.
+
+## 2026-04-03 [Gotcha] No --thinking-budget CLI flag — budget slider removed: Claude Code CLI has `--thinking` (on/off toggle) and `--effort` (low/medium/high/max) but NO `--thinking-budget` flag. The thinking budget slider was removed from ThinkingControls. The `thinkingBudget` field is kept in the data model for backward compat but the UI no longer renders a slider for it. Extended thinking is just an on/off toggle.
+> Rule: No --thinking-budget CLI flag — budget slider removed: Claude Code CLI has `--thinking` (on/off toggle) and `--effort` (low/medium/high/max) but NO `--thinking-budget` flag. The thinking budget slider was removed from ThinkingControls. The `thinkingBudget` field is kept in the data model for backward compat but the UI no longer renders a slider for it. Extended thinking is just an on/off toggle.
+
+## 2026-04-03 [Bug Fix] Model picker merge left conflict markers in 3 files: The feat/rorca-spec-model-picker merge with stash/restore left `<<<<<<< Updated upstream` conflict markers in SpecDetailSlideOver.tsx, TriggerPopover.tsx, and WorktreesPanel.tsx. Blindly taking one side of conflict resolution caused missing variable definitions (hasStoryOverride, isSpecLevel, specModelFields). Fix was to restore from the last working commit (aef070f) rather than manual conflict patching.
+> Rule: Model picker merge left conflict markers in 3 files: The feat/rorca-spec-model-picker merge with stash/restore left `<<<<<<< Updated upstream` conflict markers in SpecDetailSlideOver.tsx, TriggerPopover.tsx, and WorktreesPanel.tsx. Blindly taking one side of conflict resolution caused missing variable definitions (hasStoryOverride, isSpecLevel, specModelFields). Fix was to restore from the last working commit (aef070f) rather than manual conflict patching.
