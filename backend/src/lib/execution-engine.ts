@@ -33,6 +33,7 @@ import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
 import { detectOpenCode } from './opencode-detector';
+import { detectCapability } from './reasoning-detector';
 import {
   score as scoreStory,
   resolveModelId,
@@ -110,6 +111,8 @@ interface SpecJson {
   model?: string;
   userStories?: UserStory[];
   phases?: Array<{ stories: UserStory[] }>;
+  /** Optional default reasoning config for all stories in this spec. */
+  reasoning?: { enabled: boolean; effort?: string };
 }
 
 interface EngineConfig {
@@ -710,8 +713,7 @@ function runAgent(
     case 'claude':
       return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel);
     case 'opencode':
-      // thinking/effort flags are not forwarded to OpenCode
-      return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr);
+      return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr, thinkingEnabled, thinkingBudget, effortLevel);
     case 'codex':
       // thinking/effort flags are not forwarded to Codex
       return spawnCodex(prompt, cwd, timeoutMs, logFile);
@@ -891,9 +893,46 @@ function spawnClaude(
 }
 
 /**
+ * Compute the reasoning-related environment variables to inject into an OpenCode
+ * child process based on the model's detected capability and the caller's config.
+ *
+ * Rules:
+ *   - When reasoning is disabled (thinkingEnabled falsy) → empty object
+ *   - When model has reasoningType 'effort-levels' and effortLevel is provided
+ *     → { OPENCODE_REASONING_EFFORT: effortLevel }
+ *   - When model has reasoningType 'anthropic-thinking' and thinkingBudget > 0
+ *     → { OPENCODE_THINKING_BUDGET: String(thinkingBudget) }
+ *   - All other cases (native-cot, none, missing model) → empty object
+ *
+ * Exported for unit testing.
+ */
+export function buildOpenCodeReasoningEnv(
+  agentModel: string | null,
+  thinkingEnabled?: boolean,
+  thinkingBudget?: number,
+  effortLevel?: 'low' | 'medium' | 'high' | 'max',
+): Record<string, string> {
+  if (!thinkingEnabled || !agentModel) return {};
+  const cap = detectCapability(agentModel);
+  if (!cap.supportsReasoning) return {};
+  if (cap.reasoningType === 'effort-levels' && effortLevel) {
+    return { OPENCODE_REASONING_EFFORT: effortLevel };
+  }
+  if (cap.reasoningType === 'anthropic-thinking' && thinkingBudget && thinkingBudget > 0) {
+    return { OPENCODE_THINKING_BUDGET: String(thinkingBudget) };
+  }
+  return {};
+}
+
+/**
  * Spawn `opencode run --format json --attach <addr> --model <model>`.
  * Prompt is passed via stdin. ATTACH_ADDR comes from function argument,
  * not from env vars.
+ *
+ * When the model supports reasoning, injects provider-specific env vars:
+ *   - effort-levels (e.g. OpenAI o-series): OPENCODE_REASONING_EFFORT
+ *   - anthropic-thinking (Claude 4.x): OPENCODE_THINKING_BUDGET
+ * No extra env vars are injected when reasoning is disabled or unsupported.
  */
 function spawnOpenCode(
   prompt: string,
@@ -902,9 +941,15 @@ function spawnOpenCode(
   logFile: string,
   agentModel: string | null,
   attachAddr: string | null,
+  thinkingEnabled?: boolean,
+  thinkingBudget?: number,
+  effortLevel?: 'low' | 'medium' | 'high' | 'max',
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
-    const env = buildCleanEnv();
+    const env = {
+      ...buildCleanEnv(),
+      ...buildOpenCodeReasoningEnv(agentModel, thinkingEnabled, thinkingBudget, effortLevel),
+    };
     const startTime = Date.now();
 
     // Resolve opencode binary
@@ -3650,6 +3695,9 @@ function parseArgs(): EngineConfig {
       case '--effort-level':
         effortLevel = args[++i] as 'low' | 'medium' | 'high' | 'max';
         break;
+      case '--reasoning-effort':
+        effortLevel = args[++i] as 'low' | 'medium' | 'high' | 'max';
+        break;
       default:
         logger.error(`Unknown arg: ${args[i]}`);
         process.exit(1);
@@ -3657,7 +3705,7 @@ function parseArgs(): EngineConfig {
   }
 
   if (!jsonPath || !cwd || !runId) {
-    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>]');
+    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>] [--reasoning-effort <low|medium|high|max>]');
     process.exit(1);
   }
 

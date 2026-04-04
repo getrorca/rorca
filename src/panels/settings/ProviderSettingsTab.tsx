@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal, GitBranch, X } from 'lucide-react';
+import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal, GitBranch, X, Brain } from 'lucide-react';
+import { type EffortLevel } from '../../components/ThinkingControls';
 import { ProBadge } from '../../components/UpgradePrompt';
 import { useAuth } from '../../contexts/AuthContext';
 import ModelSearchSelect, { type ModelOption } from '../../components/ModelSearchSelect';
@@ -291,6 +292,7 @@ const PROVIDER_TABS = [
   { id: 'model-browser', label: 'Model Browser' },
   { id: 'embeddings', label: 'Embeddings' },
   { id: 'routing', label: 'Routing' },
+  { id: 'reasoning', label: 'Reasoning' },
   { id: 'display', label: 'Display' },
 ] as const;
 
@@ -307,6 +309,7 @@ export function ProviderSettingsTab() {
     'model-browser': null,
     'embeddings': null,
     'routing': null,
+    'reasoning': null,
     'display': null,
   });
 
@@ -322,7 +325,7 @@ export function ProviderSettingsTab() {
     const visibilityMap: Record<string, number> = {};
 
     // Observe the 5 distinct DOM sections (embeddings shares connections' ref)
-    const observedTabs: ProviderTabId[] = ['connections', 'workflow-router', 'model-browser', 'routing', 'display'];
+    const observedTabs: ProviderTabId[] = ['connections', 'workflow-router', 'model-browser', 'routing', 'reasoning', 'display'];
     observedTabs.forEach((id) => {
       const el = sectionRefs.current[id];
       if (!el) return;
@@ -410,7 +413,12 @@ export function ProviderSettingsTab() {
           <ModelRoutingSection />
         </div>
 
-        {/* (5) Display card */}
+        {/* (5) Reasoning Defaults card */}
+        <div ref={el => { sectionRefs.current['reasoning'] = el; }}>
+          <ReasoningDefaultsSection />
+        </div>
+
+        {/* (6) Display card */}
         <div ref={el => { sectionRefs.current['display'] = el; }}>
           <DisplaySection />
         </div>
@@ -3019,5 +3027,440 @@ function ThresholdSlider({
         </div>
       </div>
     </div>
+  );
+}
+// ─── Reasoning Defaults Section (RE-010) ─────────────────────────────────────
+
+const EFFORT_OPTIONS: { value: EffortLevel; label: string }[] = [
+  { value: 'low', label: 'Low' },
+  { value: 'medium', label: 'Medium' },
+  { value: 'high', label: 'High' },
+  { value: 'max', label: 'Max' },
+];
+
+const OVERRIDE_OPTIONS: { value: ReasoningModelDefault['override']; label: string; description: string }[] = [
+  { value: 'auto', label: 'Auto', description: 'Use global setting' },
+  { value: 'force-on', label: 'Force On', description: 'Always enable for this model' },
+  { value: 'force-off', label: 'Force Off', description: 'Always disable for this model' },
+];
+
+interface ReasoningModelRowProps {
+  modelId: string;
+  modelLabel: string;
+  supportsReasoning: boolean;
+  effortLevels: EffortLevel[];
+  current: ReasoningModelDefault;
+  onChange: (modelId: string, value: ReasoningModelDefault) => void;
+}
+
+function ReasoningModelRow({ modelId, modelLabel, supportsReasoning, effortLevels, current, onChange }: ReasoningModelRowProps) {
+  const visibleEffortOptions = EFFORT_OPTIONS.filter(o => effortLevels.includes(o.value));
+
+  return (
+    <div className="flex flex-col sm:flex-row sm:items-center gap-3 py-3 border-b border-border last:border-0">
+      {/* Model name + badge */}
+      <div className="flex items-center gap-2 min-w-0 sm:w-52 flex-shrink-0">
+        <span className="text-xs text-[var(--text)] truncate font-mono">{modelLabel}</span>
+        {supportsReasoning ? (
+          <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium bg-purple-500/15 text-purple-400 border border-purple-500/30 flex-shrink-0">
+            <Brain size={9} />
+            Reasoning
+          </span>
+        ) : (
+          <span className="inline-flex items-center px-1.5 py-0.5 rounded text-[10px] font-medium bg-border text-muted flex-shrink-0">
+            None
+          </span>
+        )}
+      </div>
+
+      {/* Effort level dropdown */}
+      <div className="flex items-center gap-2 flex-1">
+        <select
+          value={current.effort}
+          onChange={e => onChange(modelId, { ...current, effort: e.target.value as EffortLevel })}
+          disabled={!supportsReasoning || visibleEffortOptions.length === 0}
+          className="text-xs bg-bg border border-border rounded px-2 py-1 text-[var(--text)] focus:border-accent outline-none disabled:opacity-40 disabled:cursor-not-allowed"
+        >
+          {visibleEffortOptions.length === 0 ? (
+            <option value="medium">—</option>
+          ) : (
+            visibleEffortOptions.map(o => (
+              <option key={o.value} value={o.value}>{o.label}</option>
+            ))
+          )}
+        </select>
+
+        {/* Override radio group */}
+        <div className="flex gap-1">
+          {OVERRIDE_OPTIONS.map(opt => (
+            <button
+              key={opt.value}
+              type="button"
+              title={opt.description}
+              onClick={() => onChange(modelId, { ...current, override: opt.value })}
+              className={`px-2 py-1 text-[11px] rounded border transition-colors ${
+                current.override === opt.value
+                  ? 'bg-accent text-white border-accent'
+                  : 'bg-bg text-muted border-border hover:border-accent/40 hover:text-[var(--text)]'
+              }`}
+            >
+              {opt.label}
+            </button>
+          ))}
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function ReasoningDefaultsSection() {
+  const toast = useGlobalToast();
+  const { workspaceId } = useWorkspace();
+
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  // All models from direction/models
+  const [allModels, setAllModels] = useState<DisplayModelOption[]>([]);
+  // Current display settings (for fetching/saving reasoningDefaults)
+  const [displaySettings, setDisplaySettings] = useState<DisplaySettings | null>(null);
+  // Local state for global toggle
+  const [globalAutoEnable, setGlobalAutoEnable] = useState(false);
+  // Per-model defaults keyed by modelId
+  const [modelDefaults, setModelDefaults] = useState<Record<string, ReasoningModelDefault>>({});
+
+  useEffect(() => {
+    Promise.all([
+      apiFetch<DisplaySettings>('/api/settings/display'),
+      apiFetch<{ models: DisplayModelOption[] }>(`/api/direction/models${workspaceId ? `?workspaceId=${workspaceId}` : ''}`),
+    ]).then(([displayData, modelData]) => {
+      setDisplaySettings(displayData);
+      setAllModels(modelData.models);
+      const rd = displayData.reasoningDefaults ?? { globalAutoEnable: false, models: {} };
+      setGlobalAutoEnable(rd.globalAutoEnable);
+      setModelDefaults(rd.models);
+    }).catch(() => { }).finally(() => setLoading(false));
+  }, [workspaceId]);
+
+  // Models that support reasoning — filter list for the table
+  const reasoningModels = useMemo(() => {
+    return allModels.filter(m => {
+      const id = m.id.toLowerCase();
+      // Claude 4.x, OpenAI o-series, or native CoT keywords
+      return /^claude-[a-z]+-4[-.]/.test(id)
+        || /^o\d/i.test(id.includes('/') ? id.split('/').pop()! : id)
+        || /think|r1\b|qwq|reasoning/.test(id);
+    });
+  }, [allModels]);
+
+  const getEffortLevelsForModel = (modelId: string): EffortLevel[] => {
+    const id = modelId.toLowerCase();
+    if (/^claude-[a-z]+-4[-.]/.test(id)) {
+      return /opus/i.test(id) ? ['low', 'medium', 'high', 'max'] : ['low', 'medium', 'high'];
+    }
+    if (/^o\d/i.test(id.includes('/') ? id.split('/').pop()! : id)) {
+      return ['low', 'medium', 'high'];
+    }
+    return [];
+  };
+
+  const handleModelChange = (modelId: string, value: ReasoningModelDefault) => {
+    setModelDefaults(prev => ({ ...prev, [modelId]: value }));
+  };
+
+  const handleSave = async () => {
+    if (!displaySettings) return;
+    setSaving(true);
+    setSaved(false);
+    try {
+      const rd: ReasoningDefaults = { globalAutoEnable, models: modelDefaults };
+      await apiFetch('/api/settings/display', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          defaultModel: displaySettings.defaultModel,
+          itemsPerPage: displaySettings.itemsPerPage,
+          reasoningDefaults: rd,
+        }),
+      });
+      setDisplaySettings(prev => prev ? { ...prev, reasoningDefaults: rd } : prev);
+      setSaved(true);
+      toast.show('Reasoning defaults saved', 'success');
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      toast.show('Failed to save reasoning defaults', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  if (loading) {
+    return (
+      <div className="rounded-xl border border-border bg-panel p-5">
+        <div className="flex items-center gap-2 text-muted text-sm">
+          <Loader2 size={16} className="animate-spin" /> Loading reasoning defaults...
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div className="rounded-xl border border-border bg-panel p-5">
+      {/* Card header */}
+      <div className="flex items-center justify-between mb-4">
+        <div className="flex items-center gap-2">
+          <Brain size={15} className="text-accent" />
+          <span className="text-sm font-semibold text-[var(--text)]">Reasoning Defaults</span>
+        </div>
+        <button
+          onClick={handleSave}
+          disabled={saving}
+          className="flex items-center gap-1.5 px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors"
+        >
+          {saving ? (
+            <Loader2 size={12} className="animate-spin" />
+          ) : saved ? (
+            <Check size={12} />
+          ) : (
+            <Save size={12} />
+          )}
+          {saved ? 'Saved' : 'Save'}
+        </button>
+      </div>
+
+      {/* Global toggle */}
+      <div className="flex items-center justify-between py-3 border-b border-border mb-1">
+        <div>
+          <p className="text-xs font-medium text-[var(--text)]">Always enable reasoning for capable models</p>
+          <p className="text-[11px] text-muted mt-0.5">Default for all models without individual overrides</p>
+        </div>
+        <ToggleSwitch checked={globalAutoEnable} onChange={() => setGlobalAutoEnable(v => !v)} />
+      </div>
+
+      {/* Per-model defaults table */}
+      {reasoningModels.length === 0 ? (
+        <p className="text-xs text-muted py-4 text-center">No reasoning-capable models found. Install an API key for Claude 4.x, OpenAI o-series, or other reasoning models.</p>
+      ) : (
+        <div>
+          {/* Table header */}
+          <div className="flex flex-col sm:flex-row sm:items-center gap-3 py-2">
+            <span className="text-[10px] font-semibold uppercase tracking-wider text-muted sm:w-52 flex-shrink-0">Model</span>
+            <div className="flex items-center gap-2 text-[10px] font-semibold uppercase tracking-wider text-muted">
+              <span>Default Effort</span>
+              <span className="ml-2">Override</span>
+            </div>
+          </div>
+
+          {reasoningModels.map(model => {
+            const effortLevels = getEffortLevelsForModel(model.id);
+            const current = modelDefaults[model.id] ?? {
+              effort: (effortLevels[1] ?? effortLevels[0] ?? 'medium') as EffortLevel,
+              override: 'auto' as const,
+            };
+            return (
+              <ReasoningModelRow
+                key={model.id}
+                modelId={model.id}
+                modelLabel={model.label}
+                supportsReasoning={effortLevels.length > 0}
+                effortLevels={effortLevels}
+                current={current}
+                onChange={handleModelChange}
+              />
+            );
+          })}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function DisplaySection() {
+  const toast = useGlobalToast();
+  const { mode, setMode } = useTheme();
+  const { workspaceId } = useWorkspace();
+  const [settings, setSettings] = useState<DisplaySettings | null>(null);
+  const [models, setModels] = useState<DisplayModelOption[]>([]);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [saved, setSaved] = useState(false);
+
+  const [defaultModel, setDefaultModel] = useState('claude-sonnet-4-6');
+  const [itemsPerPage, setItemsPerPage] = useState(20);
+
+  // Per-workspace preferred model override
+  const [workspaceModel, setWorkspaceModel] = useState<string | null>(null);
+  const [workspaceModelInitial, setWorkspaceModelInitial] = useState<string | null>(null);
+  const [savingWorkspace, setSavingWorkspace] = useState(false);
+  const [savedWorkspace, setSavedWorkspace] = useState(false);
+
+  useEffect(() => {
+    const fetchPromises: Promise<any>[] = [
+      apiFetch<DisplaySettings>('/api/settings/display'),
+      apiFetch<{ models: DisplayModelOption[]; defaultModel: string }>(`/api/direction/models${workspaceId ? `?workspaceId=${workspaceId}` : ''}`),
+    ];
+    if (workspaceId) {
+      fetchPromises.push(
+        apiFetch<{ contentYaml: string; preferredModel: string | null }>(`/api/direction?layer=3&workspaceId=${workspaceId}`)
+      );
+    }
+
+    Promise.all(fetchPromises).then(([displayData, modelData, l3Data]) => {
+      setSettings(displayData);
+      setDefaultModel(displayData.defaultModel);
+      setItemsPerPage(displayData.itemsPerPage);
+      setModels(modelData.models);
+      if (l3Data) {
+        setWorkspaceModel(l3Data.preferredModel);
+        setWorkspaceModelInitial(l3Data.preferredModel);
+      }
+    }).catch(() => { })
+      .finally(() => setLoading(false));
+  }, [workspaceId]);
+
+  const saveDisplay = async () => {
+    setSaving(true);
+    setSaved(false);
+    try {
+      await apiFetch('/api/settings/display', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ defaultModel, itemsPerPage }),
+      });
+      setSettings(prev => prev ? { ...prev, defaultModel, itemsPerPage } : prev);
+      setSaved(true);
+      toast.show('Display settings saved', 'success');
+      setTimeout(() => setSaved(false), 2000);
+    } catch {
+      toast.show('Failed to save display settings', 'error');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const saveWorkspaceModel = async (modelId: string | null) => {
+    if (!workspaceId) return;
+    setSavingWorkspace(true);
+    setSavedWorkspace(false);
+    try {
+      const l3 = await apiFetch<{ contentYaml: string; preferredModel: string | null }>(`/api/direction?layer=3&workspaceId=${workspaceId}`);
+      await apiFetch('/api/direction', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          layer: 3,
+          workspaceId,
+          contentYaml: l3.contentYaml || '',
+          preferredModel: modelId,
+          skipValidation: true,
+        }),
+      });
+      setWorkspaceModel(modelId);
+      setWorkspaceModelInitial(modelId);
+      setSavedWorkspace(true);
+      setTimeout(() => setSavedWorkspace(false), 2000);
+    } catch {
+      // silent
+    } finally {
+      setSavingWorkspace(false);
+    }
+  };
+
+  if (loading) {
+    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading display settings...</div>;
+  }
+
+  const hasChanges = settings !== null && defaultModel !== settings.defaultModel;
+
+  return (
+      <div className="rounded-xl border border-border bg-panel p-5">
+        {/* Card header */}
+        <div className="flex items-center gap-2 mb-4">
+          <SlidersHorizontal size={15} className="text-accent" />
+          <span className="text-sm font-semibold text-[var(--text)]">Display</span>
+        </div>
+
+        {/* Two-column grid: Theme | Default Model */}
+        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
+          {/* Theme */}
+          <div>
+            <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">Theme</p>
+            <div className="flex rounded-lg border border-border overflow-hidden">
+              {(['light', 'dark', 'system'] as ThemeMode[]).map((m, i) => (
+                <button
+                  key={m}
+                  onClick={() => setMode(m)}
+                  className={`flex-1 px-3 py-1.5 text-xs capitalize transition-colors ${i > 0 ? 'border-l border-border' : ''} ${mode === m
+                      ? 'bg-accent text-white'
+                      : 'bg-bg text-muted hover:text-[var(--text)]'
+                    }`}
+                >
+                  {m}
+                </button>
+              ))}
+            </div>
+          </div>
+
+          {/* Default Model */}
+          <div>
+            <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">Default Model</p>
+            <div className="flex gap-2 items-center">
+              <div className="flex-1 min-w-0">
+                <ModelSearchSelect
+                  models={models}
+                  value={defaultModel}
+                  defaultModelId={null}
+                  onChange={setDefaultModel}
+                />
+              </div>
+              {hasChanges && (
+                <button
+                  onClick={saveDisplay}
+                  disabled={saving}
+                  className="px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors shrink-0"
+                >
+                  {saving ? <Loader2 size={12} className="animate-spin inline" /> : saved ? <Check size={12} className="inline" /> : 'Save'}
+                </button>
+              )}
+            </div>
+          </div>
+        </div>
+
+        {/* Workspace Model Override — full-width row below grid */}
+        {workspaceId && (
+          <div className="mt-6 pt-5 border-t border-border">
+            <div className="flex items-center justify-between mb-2">
+              <p className="text-xs font-semibold text-muted uppercase tracking-wider">Workspace Model Override</p>
+              {savedWorkspace && (
+                <span className="flex items-center gap-1 text-xs text-green-500"><Check size={12} /> Saved</span>
+              )}
+            </div>
+            <div className="flex gap-2 items-center">
+              <div className="flex-1 min-w-0">
+                <ModelSearchSelect
+                  models={[
+                    { id: '', label: `Use global default (${models.find(m => m.id === defaultModel)?.label ?? defaultModel})`, provider: '', costPer1kInput: 0, costPer1kOutput: 0, recommended: false },
+                    ...models,
+                  ]}
+                  value={workspaceModel ?? ''}
+                  defaultModelId={null}
+                  onChange={modelId => setWorkspaceModel(modelId || null)}
+                  disabled={savingWorkspace}
+                />
+              </div>
+              <button
+                onClick={() => saveWorkspaceModel(workspaceModel)}
+                disabled={savingWorkspace || workspaceModel === workspaceModelInitial}
+                className="px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors shrink-0"
+              >
+                {savingWorkspace ? <Loader2 size={12} className="animate-spin inline" /> : 'Save'}
+              </button>
+            </div>
+          </div>
+        )}
+
+        {/* itemsPerPage deprecated */}
+      </div>
   );
 }

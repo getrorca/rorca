@@ -1,10 +1,31 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert, Info } from 'lucide-react';
+import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert, Info, Brain, DollarSign } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { preflightCheck, type CapabilityWarning } from '../api/pipeline';
 import type { PanelId } from './Sidebar';
 import ThinkingControls, { type EffortLevel } from './ThinkingControls';
+import type { ReasoningConfig } from './SpecModelControlBar';
+
+// ── Client-side reasoning cost multiplier lookup ──────────────────────────────
+// Mirrors backend reasoning-detector.ts logic without importing it.
+function getReasoningCostMultipliers(modelId: string | null): Record<string, number> | undefined {
+  if (!modelId) return undefined;
+  const m = modelId.toLowerCase();
+  // Claude 4.x
+  if (/^claude-[a-z]+-4[-.]/.test(m)) {
+    const isOpus = /opus/i.test(m);
+    const mult: Record<string, number> = { low: 1.5, medium: 2.0, high: 3.0 };
+    if (isOpus) mult['max'] = 4.0;
+    return mult;
+  }
+  // OpenAI o-series
+  const bare = m.includes('/') ? m.split('/').pop()! : m;
+  if (/^o\d/i.test(bare)) return { low: 1.0, medium: 1.5, high: 2.5 };
+  // Native CoT keywords
+  if (/think|r1\b|qwq|reasoning/.test(m)) return { default: 1.5 };
+  return undefined;
+}
 
 interface HealthBadge {
   score: number;
@@ -86,6 +107,19 @@ interface WorkspaceConfig {
   };
 }
 
+interface ModelCapability {
+  supportsReasoning: boolean;
+  reasoningType: 'anthropic-thinking' | 'effort-levels' | 'native-cot' | 'none';
+  effortLevels: string[];
+  defaultEffort: string | null;
+}
+
+interface DryRunCostEstimate {
+  model: string;
+  totalEstimatedCostUsd: number;
+  reasoningCostMultiplier?: number;
+}
+
 function formatTokenCount(n: number): string {
   if (n >= 1_000_000) return `${(n / 1_000_000).toFixed(1)}M`;
   if (n >= 1_000) return `${(n / 1_000).toFixed(1)}K`;
@@ -132,6 +166,8 @@ export interface TriggerOptions {
   effortLevel?: EffortLevel;
   thinkingEnabled?: boolean;
   thinkingBudget?: number;
+  /** Override reasoning config for this run without mutating spec JSON */
+  reasoningOverride?: ReasoningConfig;
 }
 
 interface TriggerPopoverProps {
@@ -157,6 +193,10 @@ interface TriggerPopoverProps {
   initialThinkingEnabled?: boolean;
   /** Pre-populate thinking budget from spec JSON */
   initialThinkingBudget?: number;
+  /** Reasoning config from spec generation — shown as badge and editable before run */
+  initialReasoning?: ReasoningConfig;
+  /** Model ID from spec JSON — used to fetch reasoning capability */
+  specModel?: string | null;
 }
 
 export default function TriggerPopover({
@@ -171,6 +211,8 @@ export default function TriggerPopover({
   initialEffortLevel,
   initialThinkingEnabled,
   initialThinkingBudget,
+  initialReasoning,
+  specModel,
 }: TriggerPopoverProps) {
   const [autoWorktree, setAutoWorktree] = useState(false);
   const [autoMerge, setAutoMerge] = useState(true);
@@ -189,6 +231,13 @@ export default function TriggerPopover({
   const [effortLevel, setEffortLevel] = useState<EffortLevel>(initialEffortLevel ?? 'medium');
   const [thinkingEnabled, setThinkingEnabled] = useState(initialThinkingEnabled ?? false);
   const [thinkingBudget, setThinkingBudget] = useState(initialThinkingBudget ?? 5000);
+  // Reasoning override — mirrors spec.reasoning but editable per-run without saving to spec
+  const [reasoningEnabled, setReasoningEnabled] = useState(initialReasoning?.enabled ?? false);
+  const [reasoningEffort, setReasoningEffort] = useState(initialReasoning?.effort ?? 'medium');
+  const [modelCapability, setModelCapability] = useState<ModelCapability | null>(null);
+  const [reasoningSectionExpanded, setReasoningSectionExpanded] = useState(false);
+  const [dryRunEstimate, setDryRunEstimate] = useState<DryRunCostEstimate | null>(null);
+  const [dryRunLoading, setDryRunLoading] = useState(false);
   const ref = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
   const [portalStyle, setPortalStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
@@ -275,6 +324,24 @@ export default function TriggerPopover({
       .catch(() => {});
   }, [workspaceId]);
 
+  // Fetch model reasoning capability on mount
+  useEffect(() => {
+    if (!specModel) return;
+    apiFetch<ModelCapability>(`/api/config/model-capability?modelId=${encodeURIComponent(specModel)}`)
+      .then((cap) => {
+        setModelCapability(cap);
+        // If the model supports reasoning and spec has reasoning config, pre-expand the section
+        if (cap.supportsReasoning) {
+          setReasoningSectionExpanded(initialReasoning?.enabled ?? false);
+          // If no initial reasoning, use model default effort
+          if (!initialReasoning?.enabled && cap.defaultEffort) {
+            setReasoningEffort(cap.defaultEffort);
+          }
+        }
+      })
+      .catch(() => {});
+  }, [specModel, initialReasoning?.enabled, initialReasoning?.effort]);
+
   // Fetch context preview on mount
   useEffect(() => {
     if (!specPath || !workspaceId) return;
@@ -326,6 +393,37 @@ export default function TriggerPopover({
 
   const isWaveParallel = orchestration?.mode === 'wave-parallel';
 
+  // Reasoning cost multipliers for the current model (used in ThinkingControls and dry-run preview)
+  const reasoningCostMultipliers = getReasoningCostMultipliers(agentConfig?.agentModel ?? null);
+
+  const handleDryRun = async () => {
+    if (!specPath || !workspaceId) return;
+    setDryRunLoading(true);
+    try {
+      const isClaude = agentConfig?.agentType === 'claude';
+      const m = agentConfig?.agentModel?.toLowerCase() ?? '';
+      const thinkingApplies = isClaude && (m.includes('opus') || m.includes('sonnet'));
+      const res = await apiFetch<{ dryRun: true; estimate: DryRunCostEstimate }>(
+        '/api/pipeline/trigger',
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({
+            specPath,
+            workspaceId,
+            dryRun: true,
+            thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
+            reasoningEffort: thinkingApplies ? effortLevel : undefined,
+          }),
+        }
+      );
+      if ('estimate' in res) setDryRunEstimate(res.estimate);
+    } catch {
+      // Ignore errors silently — the UI shows nothing if estimate is null
+    } finally {
+      setDryRunLoading(false);
+    }
+  };
 
   return (
     <>
@@ -825,12 +923,66 @@ export default function TriggerPopover({
           engine={agentConfig?.agentType ?? null}
           model={agentConfig?.agentModel ?? null}
           effortLevel={effortLevel}
-          onEffortChange={setEffortLevel}
+          onEffortChange={(level) => { setEffortLevel(level); setDryRunEstimate(null); }}
           thinkingEnabled={thinkingEnabled}
-          onThinkingEnabledChange={setThinkingEnabled}
+          onThinkingEnabledChange={(enabled) => { setThinkingEnabled(enabled); setDryRunEstimate(null); }}
           thinkingBudget={thinkingBudget}
           onThinkingBudgetChange={setThinkingBudget}
+          costMultiplier={reasoningCostMultipliers}
         />
+
+        {/* Reasoning — shown when the spec's model supports reasoning */}
+        {modelCapability?.supportsReasoning && modelCapability.reasoningType !== 'none' && (
+          <>
+            <div className="border-t border-border/50" />
+            <div className="space-y-2">
+              <button
+                type="button"
+                onClick={() => setReasoningSectionExpanded(x => !x)}
+                className="flex items-center gap-1.5 w-full text-left"
+              >
+                {reasoningSectionExpanded
+                  ? <ChevronDown size={12} className="text-muted shrink-0" />
+                  : <ChevronRight size={12} className="text-muted shrink-0" />
+                }
+                <Brain size={12} className="text-purple-400 shrink-0" />
+                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Reasoning</span>
+                {initialReasoning?.enabled && (
+                  <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/15 text-purple-400 border border-purple-500/30">
+                    from spec
+                  </span>
+                )}
+              </button>
+              {reasoningSectionExpanded && (
+                <div className="space-y-2 pl-1">
+                  <label className="flex items-center gap-2 cursor-pointer select-none">
+                    <input
+                      type="checkbox"
+                      checked={reasoningEnabled}
+                      onChange={e => setReasoningEnabled(e.target.checked)}
+                      className="w-3.5 h-3.5 accent-purple-500"
+                    />
+                    <span className="text-xs text-[var(--text)]">Enable reasoning for this run</span>
+                  </label>
+                  {reasoningEnabled && modelCapability.effortLevels.length > 0 && (
+                    <div className="ml-5 flex gap-1.5">
+                      {modelCapability.effortLevels.map(level => (
+                        <button
+                          key={level}
+                          type="button"
+                          onClick={() => setReasoningEffort(level)}
+                          className={`px-2.5 py-1 text-[11px] rounded capitalize transition-colors ${reasoningEffort === level ? 'bg-purple-500/80 text-white' : 'bg-panel border border-border text-text hover:border-purple-400/50'}`}
+                        >
+                          {level}
+                        </button>
+                      ))}
+                    </div>
+                  )}
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </div>
 
       {/* Action buttons */}
@@ -849,6 +1001,7 @@ export default function TriggerPopover({
               effortLevel: thinkingApplies ? effortLevel : undefined,
               thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
               thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
+              reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
             });
           }}
           disabled={triggerDisabled}
@@ -876,6 +1029,7 @@ export default function TriggerPopover({
                 effortLevel: thinkingApplies ? effortLevel : undefined,
                 thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
                 thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
+                reasoningOverride: modelCapability?.supportsReasoning ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
               });
             }}
             disabled={triggerDisabled}
@@ -888,6 +1042,53 @@ export default function TriggerPopover({
               <><ListPlus size={15} /> Add to Queue</>
             )}
           </button>
+        )}
+
+        {/* Preview Cost — dry-run estimate (only when specPath is available) */}
+        {specPath && workspaceId && (
+          <button
+            onClick={handleDryRun}
+            disabled={dryRunLoading}
+            className="flex items-center justify-center gap-2 w-full py-2 rounded-lg text-xs font-medium border border-border/60 text-muted hover:text-[var(--text)] hover:border-border disabled:opacity-40 transition-all"
+          >
+            {dryRunLoading ? (
+              <><Loader2 size={12} className="animate-spin" /> Estimating...</>
+            ) : (
+              <><DollarSign size={12} /> Preview Cost</>
+            )}
+          </button>
+        )}
+
+        {/* Dry-run cost preview panel */}
+        {dryRunEstimate && (
+          <div className="rounded-lg border border-border/60 bg-[var(--bg)] p-3 space-y-1.5 text-xs">
+            <div className="flex items-center gap-1.5 mb-2">
+              <DollarSign size={11} className="text-muted" />
+              <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Cost Estimate</span>
+            </div>
+            <div className="flex items-center justify-between">
+              <span className="text-muted">Base cost</span>
+              <span className="font-medium tabular-nums text-[var(--text)]">
+                {dryRunEstimate.totalEstimatedCostUsd >= 0.01
+                  ? `$${dryRunEstimate.totalEstimatedCostUsd.toFixed(3)}`
+                  : `$${dryRunEstimate.totalEstimatedCostUsd.toFixed(5)}`}
+              </span>
+            </div>
+            {dryRunEstimate.reasoningCostMultiplier !== undefined && (
+              <div className="flex items-center justify-between">
+                <span className="text-muted">With reasoning ({dryRunEstimate.reasoningCostMultiplier}x)</span>
+                <span className="font-medium tabular-nums text-amber-400">
+                  {(() => {
+                    const withReasoning = dryRunEstimate.totalEstimatedCostUsd * dryRunEstimate.reasoningCostMultiplier!;
+                    return withReasoning >= 0.01
+                      ? `$${withReasoning.toFixed(3)}`
+                      : `$${withReasoning.toFixed(5)}`;
+                  })()}
+                </span>
+              </div>
+            )}
+            <p className="text-[9px] text-muted/50 pt-1">Estimate only — actual cost depends on story complexity</p>
+          </div>
         )}
       </div>
         </div>,
