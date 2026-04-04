@@ -1,6 +1,16 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { Search, ChevronDown, ChevronRight, Check, Sparkles, Zap, Clock, Turtle } from 'lucide-react';
 
+export interface ReasoningCapability {
+  supportsReasoning: boolean;
+  reasoningType: 'anthropic-thinking' | 'effort-levels' | 'native-cot' | 'none';
+  effortLevels: string[];
+  defaultEffort: string | null;
+  budgetTokensSupported: boolean;
+  budgetRange: [number, number] | null;
+  costMultiplier: number;
+}
+
 export interface ModelOption {
   id: string;
   label: string;
@@ -12,6 +22,7 @@ export interface ModelOption {
   speedTier?: string;
   costTier?: string;
   recommended: boolean;
+  reasoningCapability?: ReasoningCapability;
 }
 
 interface ModelSearchSelectProps {
