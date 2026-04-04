@@ -2,7 +2,7 @@
   "specId": "rorca-workflow-router",
   "runId": 20260316000091,
   "startedAt": "2026-04-04T06:06:05.615Z",
-  "lastUpdatedAt": "2026-04-04T07:05:14.577Z",
+  "lastUpdatedAt": "2026-04-04T07:08:50.115Z",
   "completedStories": [
     {
       "storyId": "WR-001",
@@ -143,6 +143,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 145407
+    },
+    {
+      "storyId": "WR-015",
+      "title": "SpecsPanel default model from workflow config — fetch resolved spec_generation config",
+      "status": "passed",
+      "startedAt": "2026-04-04T07:05:35.108Z",
+      "finishedAt": "2026-04-04T07:08:50.115Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 195007
     }
   ],
   "failedStories": [],
