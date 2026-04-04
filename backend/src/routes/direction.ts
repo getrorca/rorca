@@ -436,19 +436,23 @@ router.get('/models', async (req: Request, res: Response, next: NextFunction) =>
     }
 
     res.json({
-      models: models.map(info => ({
-        id: info.id,
-        label: info.label,
-        provider: info.provider,
-        providerType: info.providerType,
-        costPer1kInput: info.costPer1kInput,
-        costPer1kOutput: info.costPer1kOutput,
-        contextWindow: info.contextWindow,
-        speedTier: info.speedTier,
-        costTier: info.costTier,
-        recommended: info.id === recommendedId,
-        reasoningCapability: detectCapability(info.id),
-      })),
+      models: models.map(info => {
+        const cap = detectCapability(info.id, (info as any).metadata);
+        return {
+          id: info.id,
+          label: info.label,
+          provider: info.provider,
+          providerType: info.providerType,
+          costPer1kInput: info.costPer1kInput,
+          costPer1kOutput: info.costPer1kOutput,
+          contextWindow: info.contextWindow,
+          speedTier: info.speedTier,
+          costTier: info.costTier,
+          recommended: info.id === recommendedId,
+          supportsReasoning: cap.supportsReasoning,
+          effortLevels: cap.effortLevels,
+        };
+      }),
       defaultModel: recommendedId,
       configuredProviders,
     });
