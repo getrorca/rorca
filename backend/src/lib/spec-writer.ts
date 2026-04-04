@@ -41,6 +41,11 @@ export interface ContextUsed {
   meta: ContextUsedMeta;
 }
 
+export interface SpecReasoning {
+  enabled: boolean;
+  effort?: string;
+}
+
 export interface GeneratedSpec {
   title: string;
   slug: string;
@@ -49,6 +54,7 @@ export interface GeneratedSpec {
   mermaidDiagram?: string;
   model?: string;
   contextUsed?: ContextUsed;
+  reasoning?: SpecReasoning;
 }
 
 export interface WriteResult {
@@ -72,6 +78,7 @@ export function writeSpec(workspacePath: string, spec: GeneratedSpec): WriteResu
     title: spec.title,
     generatedAt: new Date().toISOString(),
     ...(spec.model ? { model: spec.model } : {}),
+    ...(spec.reasoning ? { reasoning: spec.reasoning } : {}),
     autoWorktree: true,
     userStories: spec.stories.map(s => ({
       id: s.id,
