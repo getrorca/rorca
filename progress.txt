@@ -1,12 +1,9 @@
 # Run State Summary
 
-Spec: rorca-reasoning-engine
-Run ID: 20260316000094
-Started: 2026-04-04T06:37:36.897Z
-Last Updated: 2026-04-04T07:32:34.259Z
+Spec: qa-reasoning-engine-workflow-router
+Run ID: 20260316000097
+Started: 2026-04-04T08:10:02.760Z
+Last Updated: 2026-04-04T08:20:07.460Z
 
-## Completed Stories (4)
-- RE-004: Provider-agnostic reasoning mapping in llm-client.ts — DONE (claude, claude-sonnet-4-6, 699s)
-- RE-015: Graceful degradation: retry without reasoning on provider error — DONE (claude, claude-sonnet-4-6, 310s)
-- RE-018: GET /api/config/model-capability endpoint and capability cache — DONE (claude, claude-sonnet-4-6, 216s)
-- RE-011: Cost multiplier display in Forge brief and dry-run — DONE (claude, claude-sonnet-4-6, 570s)
+## Completed Stories (1)
+- QRW-001: Type check — zero errors on both frontend and backend after merge — DONE (claude, claude-sonnet-4-6, 598s)

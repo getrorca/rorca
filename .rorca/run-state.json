@@ -1,48 +1,18 @@
 {
-  "specId": "rorca-reasoning-engine",
-  "runId": 20260316000094,
-  "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T07:32:34.259Z",
+  "specId": "qa-reasoning-engine-workflow-router",
+  "runId": 20260316000097,
+  "startedAt": "2026-04-04T08:10:02.760Z",
+  "lastUpdatedAt": "2026-04-04T08:20:07.460Z",
   "completedStories": [
     {
-      "storyId": "RE-004",
-      "title": "Provider-agnostic reasoning mapping in llm-client.ts",
+      "storyId": "QRW-001",
+      "title": "Type check — zero errors on both frontend and backend after merge",
       "status": "passed",
-      "startedAt": "2026-04-04T06:42:19.600Z",
-      "finishedAt": "2026-04-04T06:53:58.866Z",
+      "startedAt": "2026-04-04T08:10:09.878Z",
+      "finishedAt": "2026-04-04T08:20:07.459Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 699266
-    },
-    {
-      "storyId": "RE-015",
-      "title": "Graceful degradation: retry without reasoning on provider error",
-      "status": "passed",
-      "startedAt": "2026-04-04T06:54:37.201Z",
-      "finishedAt": "2026-04-04T06:59:47.108Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 309907
-    },
-    {
-      "storyId": "RE-018",
-      "title": "GET /api/config/model-capability endpoint and capability cache",
-      "status": "passed",
-      "startedAt": "2026-04-04T07:07:36.370Z",
-      "finishedAt": "2026-04-04T07:11:12.356Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 215986
-    },
-    {
-      "storyId": "RE-011",
-      "title": "Cost multiplier display in Forge brief and dry-run",
-      "status": "passed",
-      "startedAt": "2026-04-04T07:23:03.877Z",
-      "finishedAt": "2026-04-04T07:32:34.259Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 570382
+      "elapsedMs": 597581
     }
   ],
   "failedStories": [],
