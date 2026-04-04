@@ -2,7 +2,7 @@
   "specId": "rorca-workflow-router",
   "runId": 20260316000091,
   "startedAt": "2026-04-04T06:06:05.615Z",
-  "lastUpdatedAt": "2026-04-04T06:44:55.939Z",
+  "lastUpdatedAt": "2026-04-04T06:48:51.780Z",
   "completedStories": [
     {
       "storyId": "WR-001",
@@ -93,6 +93,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 411353
+    },
+    {
+      "storyId": "WR-010",
+      "title": "Frontend WorkflowRouterSection skeleton — mount, fetch, and render table",
+      "status": "passed",
+      "startedAt": "2026-04-04T06:45:19.066Z",
+      "finishedAt": "2026-04-04T06:48:51.780Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 212714
     }
   ],
   "failedStories": [],
