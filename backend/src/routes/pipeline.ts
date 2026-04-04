@@ -22,6 +22,7 @@ import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
 import { agentConfig, type AgentType } from '../lib/config';
+import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { synthesize } from '../lib/direction-stack';
 import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
@@ -1082,19 +1083,22 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       return;
     }
 
-    // 3. Resolve agent type and verify execution engine is available.
-    //    Priority: request agentOverride > RORCA_AGENT env var > default (claude)
-    //    execution-engine.ts (universal) → bash run-loop.sh (legacy fallback)
-    // Model priority: RORCA_MODEL env var > spec-level model > workspace L3 preferred_model > null (agent default)
-    const l3WorkspaceModel = workspaceId
-      ? (await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined)?.preferred_model ?? null
-      : null;
+    // 3. Resolve agent type and model via Workflow Config Router (WR-006).
+    //    resolveWorkflowConfig('pipeline_execution') consults:
+    //      DB workflow_configs → agent_config → env vars → hardcoded defaults
+    //    Override chain preserved:
+    //      Agent: request agentOverride > spec agentOverride > wfConfig.runtime
+    //      Model: request modelOverride > spec model > wfConfig.model
+    const pipelineUser = await getEffectiveUser(req);
+    const wfConfig = await resolveWorkflowConfig('pipeline_execution', pipelineUser?.id);
+
     const specModelPath = path.join(workspace.path, specPath);
     const specModelJson = fs.existsSync(specModelPath) ? JSON.parse(fs.readFileSync(specModelPath, 'utf8')) : {};
     const specLevelModel: string | null = specModelJson.model ?? null;
     // Read spec-level agent override saved by SpecModelControlBar (PUT /api/specs/:id)
     const specLevelAgent: AgentType | null = specModelJson.agentOverride ?? null;
-    const resolvedAgentModel: string | null = modelOverride ?? agentConfig.agentModel ?? specLevelModel ?? l3WorkspaceModel;
+    // Model chain: request modelOverride > spec model > wfConfig.model (replaces agentConfig.agentModel + L3 lookup)
+    const resolvedAgentModel: string | null = modelOverride ?? specLevelModel ?? wfConfig.model;
 
     // Auto-detect agent from model string: if model has a provider prefix (e.g. openrouter/z-ai/glm-5,
     // openai/gpt-4o) it cannot run on Claude CLI — switch to opencode automatically.
@@ -1102,9 +1106,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const modelNeedsOpenCode = resolvedAgentModel != null && OPENCODE_PROVIDER_PREFIXES.some(p => resolvedAgentModel.startsWith(p));
     // Also catch bare provider/model strings like "z-ai/glm-5" that contain "/" but aren't claude- models
     const modelIsNonClaude = resolvedAgentModel != null && resolvedAgentModel.includes('/') && !resolvedAgentModel.startsWith('claude-');
-    const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !specLevelAgent && agentConfig.agentType === 'claude';
-    // Priority: request agentOverride > spec-level agentOverride > auto-detect from model > RORCA_AGENT env
-    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : agentConfig.agentType);
+    const wfRuntime = wfConfig.runtime as AgentType;
+    const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !specLevelAgent && wfRuntime === 'claude';
+    // Priority: request agentOverride > spec-level agentOverride > auto-detect from model > wfConfig.runtime
+    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : wfRuntime);
 
     // OC-025: Block pipeline trigger if Claude is selected but not authenticated
     if (resolvedAgentType === 'claude') {
@@ -1457,22 +1462,39 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       envOverrides[k] = v;
     }
 
-    // Inject vault API keys for all configured providers
-    const pipelineUser = await getEffectiveUser(req);
-    const anthropicVaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, 'anthropic') : null;
-    if (anthropicVaultKey) {
-      envOverrides['ANTHROPIC_API_KEY'] = anthropicVaultKey.key;
-    }
-    const openaiVaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, 'openai-compat') : null;
-    if (openaiVaultKey) {
-      envOverrides['OPENAI_API_KEY'] = openaiVaultKey.key;
-      if (openaiVaultKey.baseUrl) {
-        envOverrides['OPENAI_BASE_URL'] = openaiVaultKey.baseUrl;
+    // Inject vault API key from workflow config (WR-006).
+    // wfConfig.apiKey is the resolved key for the primary provider (vault → env fallback).
+    // Map it to the correct env var based on the provider from wfConfig.
+    if (wfConfig.apiKey) {
+      const providerEnvMap: Record<string, string> = {
+        anthropic: 'ANTHROPIC_API_KEY',
+        openrouter: 'OPENROUTER_API_KEY',
+        'openai-compat': 'OPENAI_API_KEY',
+      };
+      const envVarName = providerEnvMap[wfConfig.provider];
+      if (envVarName) {
+        envOverrides[envVarName] = wfConfig.apiKey;
+      }
+      if (wfConfig.baseUrl && wfConfig.provider === 'openai-compat') {
+        envOverrides['OPENAI_BASE_URL'] = wfConfig.baseUrl;
       }
     }
-    const openrouterVaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, 'openrouter') : null;
-    if (openrouterVaultKey) {
-      envOverrides['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
+    // Also inject vault keys for OTHER providers — stories may use per-story agent assignments
+    // (OC-029) that require a different provider than the primary one.
+    const otherProviders: Array<{ provider: string; envKey: string; baseUrlKey?: string }> = [
+      { provider: 'anthropic', envKey: 'ANTHROPIC_API_KEY' },
+      { provider: 'openai-compat', envKey: 'OPENAI_API_KEY', baseUrlKey: 'OPENAI_BASE_URL' },
+      { provider: 'openrouter', envKey: 'OPENROUTER_API_KEY' },
+    ];
+    for (const { provider, envKey, baseUrlKey } of otherProviders) {
+      if (envOverrides[envKey]) continue; // Already set by wfConfig above
+      const vaultKey = pipelineUser ? await getVaultKey(pipelineUser.id, provider) : null;
+      if (vaultKey) {
+        envOverrides[envKey] = vaultKey.key;
+        if (baseUrlKey && vaultKey.baseUrl) {
+          envOverrides[baseUrlKey] = vaultKey.baseUrl;
+        }
+      }
     }
 
     // Inject GitHub Copilot token when using github/copilot model
