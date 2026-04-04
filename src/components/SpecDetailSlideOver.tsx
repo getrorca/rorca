@@ -67,6 +67,7 @@ interface SpecDetailData {
   thinkingEnabled?: boolean;
   thinkingBudget?: number;
   effortLevel?: 'low' | 'medium' | 'high' | 'max';
+  reasoning?: { enabled: boolean; effort?: string };
   readinessPercent?: number;
   [key: string]: unknown;
 }
@@ -498,7 +499,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max'; thinkingEnabled?: boolean; thinkingBudget?: number }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string } }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -515,6 +516,7 @@ function SpecDetailContent({
           ...(options?.effortLevel ? { effortLevel: options.effortLevel } : {}),
           ...(options?.thinkingEnabled !== undefined ? { thinkingEnabled: options.thinkingEnabled } : {}),
           ...(options?.thinkingBudget !== undefined ? { thinkingBudget: options.thinkingBudget } : {}),
+          ...(options?.reasoningOverride !== undefined ? { reasoning: options.reasoningOverride } : {}),
         }) },
       );
       if (res.conflict) setRunState('conflict');
@@ -724,6 +726,7 @@ function SpecDetailContent({
                   thinkingEnabled: detail?.thinkingEnabled,
                   thinkingBudget: detail?.thinkingBudget,
                   effortLevel: detail?.effortLevel,
+                  reasoning: detail?.reasoning,
                 }}
                 onSpecModelUpdated={(fields) => setDetail(prev => prev ? { ...prev, ...fields, model: fields.model ?? undefined } : prev)} />
             )}
@@ -783,7 +786,8 @@ function SpecDetailContent({
                       specPath={`forge/specs/approved/${summary!.id}.json`} workspaceId={workspaceId ?? undefined}
                       initialEffortLevel={detail?.effortLevel}
                       initialThinkingEnabled={detail?.thinkingEnabled}
-                      initialThinkingBudget={detail?.thinkingBudget} />
+                      initialThinkingBudget={detail?.thinkingBudget}
+                      initialReasoning={detail?.reasoning} />
                   )}
                   {hasActiveRun && runState !== 'triggering' && (
                     <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 mb-2 flex items-center gap-2">
@@ -1013,6 +1017,7 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
     thinkingEnabled?: boolean;
     thinkingBudget?: number;
     effortLevel?: 'low' | 'medium' | 'high' | 'max';
+    reasoning?: { enabled: boolean; effort?: string };
   };
   onSpecModelUpdated?: (fields: SpecModelFields) => void;
 }) {
@@ -1063,6 +1068,7 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
           initialThinkingEnabled={specModelFields?.thinkingEnabled}
           initialThinkingBudget={specModelFields?.thinkingBudget}
           initialEffortLevel={specModelFields?.effortLevel}
+          initialReasoning={specModelFields?.reasoning}
           onSpecUpdated={onSpecModelUpdated}
         />
         <div className="flex items-center justify-center h-full text-muted text-sm">No stories found in this spec</div>
