@@ -2,7 +2,7 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T07:11:12.357Z",
+  "lastUpdatedAt": "2026-04-04T07:29:54.666Z",
   "completedStories": [
     {
       "storyId": "RE-004",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 215986
+    },
+    {
+      "storyId": "RE-014",
+      "title": "rorca_model_capabilities MCP tool",
+      "status": "passed",
+      "startedAt": "2026-04-04T07:23:03.958Z",
+      "finishedAt": "2026-04-04T07:29:54.666Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 410708
     }
   ],
   "failedStories": [],

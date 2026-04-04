@@ -285,18 +285,18 @@ async function executeApiCall(
     fetchOptions.body = JSON.stringify(bodyParams);
   }
 
-  let res: Response;
+  let fetchRes: Awaited<ReturnType<typeof fetch>>;
   try {
-    res = await fetch(url, fetchOptions);
+    fetchRes = await fetch(url, fetchOptions);
   } finally {
     clearTimeout(timeoutId);
   }
-  const contentType = res.headers.get('content-type') || '';
+  const contentType = fetchRes.headers.get('content-type') || '';
   const body = contentType.includes('application/json')
-    ? await res.json()
-    : await res.text();
+    ? await fetchRes.json()
+    : await fetchRes.text();
 
-  return { status: res.status, body };
+  return { status: fetchRes.status, body };
 }
 
 // ─── Create MCP server with auto-generated tools ────────────────────────────

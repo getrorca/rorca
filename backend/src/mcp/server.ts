@@ -17,6 +17,7 @@ import { z } from 'zod';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
 import { logger } from '../lib/logger';
+import { detectCapability } from '../lib/reasoning-detector';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
@@ -35,7 +36,7 @@ const IDEMPOTENT_TOOLS = new Set([
   'rorca_list_workspaces', 'rorca_recall_memories', 'rorca_workspace_stats',
   'rorca_get_context', 'rorca_synthesize_direction', 'rorca_search_stories',
   'rorca_run_status', 'rorca_pipeline_status', 'rorca_usage_stats',
-  'rorca_recall_workspace',
+  'rorca_recall_workspace', 'rorca_model_capabilities',
 ]);
 
 /** Cacheable tool names → { data, cachedAt } */
@@ -244,6 +245,27 @@ server.registerTool(
 );
 
 server.registerTool(
+  'rorca_model_capabilities',
+  {
+    description: 'Returns the computed ReasoningCapability for a given model ID. Use this to check whether a model supports extended thinking, effort levels, or native chain-of-thought before configuring a spec or pipeline run.',
+    inputSchema: {
+      modelId: z.string().describe('The model identifier string (e.g. "claude-opus-4-6", "o3", "openai/o4-mini")'),
+    },
+  },
+  async ({ modelId }) => {
+    return wrapToolCall('rorca_model_capabilities', async () => {
+      const capability = detectCapability(modelId);
+      return {
+        content: [{
+          type: 'text' as const,
+          text: JSON.stringify({ ok: true, modelId, capability }, null, 2),
+        }],
+      };
+    });
+  }
+);
+
+server.registerTool(
   'rorca_generate_spec',
   {
     description: 'Generate a spec JSON (with userStories array) from a spec brief. Calls the Rorca synthesis engine which injects the full Direction Stack before sending to the LLM. Returns the generated spec as a JSON string ready to save as prd.json or submit for review.',
@@ -254,14 +276,31 @@ server.registerTool(
       storyCount: z.number().min(1).max(500).optional().default(8).describe('Target number of user stories (default 8)'),
       includeDiagrams: z.boolean().optional().default(true).describe('Whether to include Mermaid and ASCII diagrams in output'),
       model: z.string().optional().describe('LLM model to use for generation (any model ID). If omitted, uses workspace default or claude-sonnet-4-6.'),
-      thinkingEnabled: z.boolean().optional().default(false).describe('Enable extended thinking for deeper reasoning during spec generation (Anthropic models). Increases cost but improves spec quality for complex briefs.'),
-      thinkingBudget: z.number().min(1024).max(65536).optional().default(8192).describe('Token budget for extended thinking (only used when thinkingEnabled=true). Higher = deeper reasoning. Default 8192.'),
+      thinkingEnabled: z.boolean().optional().default(false).describe('(Deprecated — use reasoning.enabled) Enable extended thinking for deeper reasoning during spec generation (Anthropic models).'),
+      thinkingBudget: z.number().min(1024).max(65536).optional().default(8192).describe('(Deprecated — use reasoning.budgetTokens) Token budget for extended thinking (only used when thinkingEnabled=true). Default 8192.'),
+      reasoning: z.object({
+        enabled: z.boolean().describe('Enable reasoning/extended thinking for this spec generation'),
+        effort: z.string().optional().describe('Effort level for reasoning (low/medium/high/max — model-dependent)'),
+      }).optional().describe('Reasoning config. Takes precedence over thinkingEnabled/thinkingBudget if both are provided.'),
     },
   },
-  async ({ workspaceId, specBrief, title, storyCount, includeDiagrams, model, thinkingEnabled, thinkingBudget }) => {
+  async ({ workspaceId, specBrief, title, storyCount, includeDiagrams, model, thinkingEnabled, thinkingBudget, reasoning }) => {
     return wrapToolCall('rorca_generate_spec', async () => {
       const resolvedStoryCount = storyCount ?? 8;
       const resolvedIncludeDiagrams = includeDiagrams ?? true;
+
+      // Build reasoning payload: new `reasoning` param takes precedence; fall back to legacy thinkingEnabled/thinkingBudget
+      let reasoningPayload: Record<string, unknown> = {};
+      if (reasoning) {
+        reasoningPayload = { reasoning };
+        // Also propagate as legacy fields for backward compat with older backend versions
+        if (reasoning.enabled) {
+          reasoningPayload.thinkingEnabled = true;
+        }
+      } else if (thinkingEnabled) {
+        reasoningPayload = { thinkingEnabled, thinkingBudget: thinkingBudget ?? 8192 };
+      }
+
       const res = await timedFetch(`${RORCA_API}/api/specs/generate`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
@@ -270,7 +309,7 @@ server.registerTool(
           storyCount: resolvedStoryCount,
           includeDiagrams: resolvedIncludeDiagrams,
           ...(model ? { model } : {}),
-          ...(thinkingEnabled ? { thinkingEnabled, thinkingBudget: thinkingBudget ?? 8192 } : {}),
+          ...reasoningPayload,
         }),
       }, 600_000); // 10 min — Opus with 20+ stories can take 90s+
       if (!res.ok) return httpError('rorca_generate_spec', res);
@@ -389,9 +428,10 @@ server.registerTool(
       specId: z.string().describe('Spec ID (filename slug) — must be in approved status'),
       dryRun: z.boolean().optional().default(false).describe('If true, returns a cost estimate without spawning the run'),
       autoWorktree: z.boolean().optional().default(false).describe('If true, creates an isolated git worktree branch for this run'),
+      reasoningEffort: z.string().optional().describe('Override reasoning effort level for this run (low/medium/high/max — model-dependent). Uses spec-level config if omitted.'),
     },
   },
-  async ({ workspaceId, specId, dryRun, autoWorktree }) => {
+  async ({ workspaceId, specId, dryRun, autoWorktree, reasoningEffort }) => {
     return wrapToolCall('rorca_trigger_run', async () => {
       const res = await timedFetch(`${RORCA_API}/api/pipeline/trigger`, {
         method: 'POST',
@@ -401,6 +441,7 @@ server.registerTool(
           specPath: `forge/specs/approved/${specId}.json`,
           dryRun: dryRun ?? false,
           autoWorktree: autoWorktree ?? false,
+          ...(reasoningEffort ? { reasoningEffort } : {}),
         }),
       });
       const data = await res.json() as Record<string, unknown>;
