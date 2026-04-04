@@ -2,7 +2,7 @@
   "specId": "rorca-billing-launch",
   "runId": 20260316000045,
   "startedAt": "2026-03-19T20:45:48.038Z",
-  "lastUpdatedAt": "2026-04-03T19:48:18.958Z",
+  "lastUpdatedAt": "2026-04-04T06:27:05.998Z",
   "completedStories": [
     {
       "storyId": "BL-012",
@@ -133,6 +133,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 532094
+    },
+    {
+      "storyId": "RE-001",
+      "title": "ReasoningCapability schema and type definitions",
+      "status": "passed",
+      "startedAt": "2026-04-04T06:21:06.032Z",
+      "finishedAt": "2026-04-04T06:27:05.998Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 359966
     }
   ],
   "failedStories": [],
