@@ -3,11 +3,8 @@
 Spec: rorca-reasoning-engine
 Run ID: 20260316000094
 Started: 2026-04-04T06:37:36.897Z
-Last Updated: 2026-04-04T07:47:51.497Z
+Last Updated: 2026-04-04T07:04:34.202Z
 
-## Completed Stories (5)
+## Completed Stories (2)
 - RE-004: Provider-agnostic reasoning mapping in llm-client.ts — DONE (claude, claude-sonnet-4-6, 699s)
-- RE-015: Graceful degradation: retry without reasoning on provider error — DONE (claude, claude-sonnet-4-6, 310s)
-- RE-018: GET /api/config/model-capability endpoint and capability cache — DONE (claude, claude-sonnet-4-6, 216s)
-- RE-014: rorca_model_capabilities MCP tool — DONE (claude, claude-sonnet-4-6, 411s)
-- RE-017: Reasoning config in TriggerPopover.tsx run action — DONE (claude, claude-sonnet-4-6, 766s)
+- RE-013: Reasoning model highlighting in model selector dropdown — DONE (claude, claude-sonnet-4-6, 597s)
