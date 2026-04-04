@@ -16,6 +16,7 @@ interface DailyTrend {
   cost: number;
   inputTokens: number;
   outputTokens: number;
+  reasoningTokens: number;
   storyCount: number;
 }
 
@@ -41,6 +42,7 @@ interface ByMonth {
   totalCost: number;
   inputTokens: number;
   outputTokens: number;
+  reasoningTokens: number;
   runCount: number;
   storyCount: number;
 }
@@ -435,6 +437,7 @@ export default function FinOpsDashboardPanel() {
                       const v = value ?? 0;
                       if (name === 'totalCost') return [formatCost(v), 'Cost'];
                       if (name === 'inputTokens') return [formatTokens(v), 'Input Tokens'];
+                      if (name === 'reasoningTokens') return [formatTokens(v), 'Thinking Tokens'];
                       return [formatTokens(v), 'Output Tokens'];
                     }}
                   />
@@ -442,6 +445,9 @@ export default function FinOpsDashboardPanel() {
                     <>
                       <Bar dataKey="inputTokens" fill="#3b82f6" radius={[4, 4, 0, 0]} name="inputTokens" />
                       <Bar dataKey="outputTokens" fill="#06b6d4" radius={[4, 4, 0, 0]} name="outputTokens" />
+                      {data.byMonth.some(m => (m.reasoningTokens ?? 0) > 0) && (
+                        <Bar dataKey="reasoningTokens" fill="#f59e0b" radius={[4, 4, 0, 0]} name="reasoningTokens" />
+                      )}
                     </>
                   ) : (
                     <Bar dataKey="totalCost" fill="var(--accent)" radius={[4, 4, 0, 0]} name="totalCost" />

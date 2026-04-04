@@ -32,6 +32,7 @@ interface UsageGroupRow {
   group_key: string;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_reasoning_tokens: number;
   total_cost_usd: number;
   count: number;
 }
@@ -40,12 +41,14 @@ interface TimeSeriesRow {
   date: string;
   total_input_tokens: number;
   total_output_tokens: number;
+  total_reasoning_tokens: number;
   total_cost_usd: number;
 }
 
 interface UsageTotals {
   total_input_tokens: number;
   total_output_tokens: number;
+  total_reasoning_tokens: number;
   total_cost_usd: number;
   total_records: number;
 }
@@ -271,16 +274,19 @@ export default function UsageDashboardPanel() {
                       }}
                       formatter={(value?: number, name?: string) => [
                         formatTokens(value ?? 0),
-                        name === 'total_input_tokens' ? 'Input' : 'Output',
+                        name === 'total_input_tokens' ? 'Input' : name === 'total_reasoning_tokens' ? 'Reasoning' : 'Output',
                       ]}
                     />
                     <Legend
                       formatter={(value: string) =>
-                        value === 'total_input_tokens' ? 'Input Tokens' : 'Output Tokens'
+                        value === 'total_input_tokens' ? 'Input Tokens' : value === 'total_reasoning_tokens' ? 'Reasoning Tokens' : 'Output Tokens'
                       }
                     />
                     <Bar dataKey="total_input_tokens" fill="#6366f1" radius={[3, 3, 0, 0]} />
                     <Bar dataKey="total_output_tokens" fill="#22d3ee" radius={[3, 3, 0, 0]} />
+                    {data.totals.total_reasoning_tokens > 0 && (
+                      <Bar dataKey="total_reasoning_tokens" fill="#f59e0b" radius={[3, 3, 0, 0]} />
+                    )}
                   </BarChart>
                 </ResponsiveContainer>
               </div>
@@ -291,6 +297,9 @@ export default function UsageDashboardPanel() {
                     <th scope="col" role="columnheader">{groupBy}</th>
                     <th scope="col" role="columnheader">Input Tokens</th>
                     <th scope="col" role="columnheader">Output Tokens</th>
+                    {data.totals.total_reasoning_tokens > 0 && (
+                      <th scope="col" role="columnheader">Reasoning Tokens</th>
+                    )}
                     <th scope="col" role="columnheader">Cost</th>
                   </tr>
                 </thead>
@@ -300,6 +309,9 @@ export default function UsageDashboardPanel() {
                       <td>{row.group_key}</td>
                       <td>{formatTokens(row.total_input_tokens)}</td>
                       <td>{formatTokens(row.total_output_tokens)}</td>
+                      {data.totals.total_reasoning_tokens > 0 && (
+                        <td>{formatTokens(row.total_reasoning_tokens)}</td>
+                      )}
                       <td>{formatCost(row.total_cost_usd)}</td>
                     </tr>
                   ))}
@@ -343,18 +355,23 @@ export default function UsageDashboardPanel() {
                         formatter={(value?: number, name?: string) => {
                           const v = value ?? 0;
                           if (name === 'total_cost_usd') return [formatCost(v), 'Cost'];
+                          if (name === 'total_reasoning_tokens') return [formatTokens(v), 'Reasoning'];
                           return [formatTokens(v), name === 'total_input_tokens' ? 'Input' : 'Output'];
                         }}
                       />
                       <Legend
                         formatter={(value: string) => {
                           if (value === 'total_cost_usd') return 'Cost (USD)';
+                          if (value === 'total_reasoning_tokens') return 'Reasoning Tokens';
                           return value === 'total_input_tokens' ? 'Input Tokens' : 'Output Tokens';
                         }}
                       />
                       <Line yAxisId="tokens" type="monotone" dataKey="total_input_tokens" stroke="#6366f1" strokeWidth={2} dot={false} />
                       <Line yAxisId="tokens" type="monotone" dataKey="total_output_tokens" stroke="#22d3ee" strokeWidth={2} dot={false} />
-                      <Line yAxisId="cost" type="monotone" dataKey="total_cost_usd" stroke="#f59e0b" strokeWidth={2} dot={false} strokeDasharray="5 5" />
+                      {data.totals.total_reasoning_tokens > 0 && (
+                        <Line yAxisId="tokens" type="monotone" dataKey="total_reasoning_tokens" stroke="#f59e0b" strokeWidth={2} dot={false} strokeDasharray="4 4" />
+                      )}
+                      <Line yAxisId="cost" type="monotone" dataKey="total_cost_usd" stroke="#a855f7" strokeWidth={2} dot={false} strokeDasharray="5 5" />
                     </LineChart>
                   </ResponsiveContainer>
                 </div>
@@ -373,6 +390,9 @@ export default function UsageDashboardPanel() {
                     <th className="pb-2 font-medium capitalize" role="columnheader">{groupBy}</th>
                     <th className="pb-2 font-medium text-right" role="columnheader">Input</th>
                     <th className="pb-2 font-medium text-right" role="columnheader">Output</th>
+                    {data.totals.total_reasoning_tokens > 0 && (
+                      <th className="pb-2 font-medium text-right" role="columnheader">Reasoning</th>
+                    )}
                     <th className="pb-2 font-medium text-right" role="columnheader">Cost</th>
                     <th className="pb-2 font-medium text-right" role="columnheader">Runs</th>
                   </tr>
@@ -392,6 +412,9 @@ export default function UsageDashboardPanel() {
                       </td>
                       <td className="py-2 text-right text-muted">{formatTokens(row.total_input_tokens)}</td>
                       <td className="py-2 text-right text-muted">{formatTokens(row.total_output_tokens)}</td>
+                      {data.totals.total_reasoning_tokens > 0 && (
+                        <td className="py-2 text-right text-amber-400">{formatTokens(row.total_reasoning_tokens)}</td>
+                      )}
                       <td className="py-2 text-right font-medium">{formatCost(row.total_cost_usd)}</td>
                       <td className="py-2 text-right text-muted">{row.count}</td>
                     </tr>
