@@ -98,7 +98,6 @@ const NO_REASONING: ReasoningCapability = {
   defaultEffort: null,
   budgetTokensSupported: false,
   budgetRange: null,
-  costMultiplier: 1.0,
 };
 
 // ─── Auto-effort computation ──────────────────────────────────────────────────
@@ -217,6 +216,11 @@ export function detectCapability(
       ? ['low', 'medium', 'high', 'max']
       : ['low', 'medium', 'high'];
 
+    // Approximate cost multipliers per effort level for Anthropic extended thinking.
+    // Based on typical token overhead: low ~1.5x, medium ~2x, high ~3x, max ~4x.
+    const costMultiplier: Record<string, number> = { low: 1.5, medium: 2.0, high: 3.0 };
+    if (isOpus(modelId)) costMultiplier['max'] = 4.0;
+
     return {
       supportsReasoning: true,
       reasoningType: 'anthropic-thinking',
@@ -224,7 +228,7 @@ export function detectCapability(
       defaultEffort: 'medium',
       budgetTokensSupported: true,
       budgetRange: [1024, 65536],
-      costMultiplier: 1.0,
+      costMultiplier,
     };
   }
 
@@ -237,7 +241,7 @@ export function detectCapability(
       defaultEffort: 'medium',
       budgetTokensSupported: false,
       budgetRange: null,
-      costMultiplier: 1.0,
+      costMultiplier: { low: 1.0, medium: 1.5, high: 2.5 },
     };
   }
 
@@ -250,7 +254,7 @@ export function detectCapability(
       defaultEffort: null,
       budgetTokensSupported: false,
       budgetRange: null,
-      costMultiplier: 1.0,
+      costMultiplier: { default: 1.5 },
     };
   }
 
@@ -266,7 +270,7 @@ export function detectCapability(
       defaultEffort: null,
       budgetTokensSupported: false,
       budgetRange: null,
-      costMultiplier: 1.0,
+      costMultiplier: { default: 1.5 },
     };
   }
 

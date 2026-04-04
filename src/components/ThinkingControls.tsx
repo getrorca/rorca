@@ -13,6 +13,11 @@ export interface ThinkingControlsProps {
   /** Whether extended thinking is enabled */
   thinkingEnabled: boolean;
   onThinkingEnabledChange: (enabled: boolean) => void;
+  /** Cost multiplier per effort level from ReasoningCapability. Used to render cost impact label. */
+  costMultiplier?: Record<string, number>;
+  /** Accepted but unused — kept for backward compat with callers that pass thinkingBudget */
+  thinkingBudget?: number;
+  onThinkingBudgetChange?: (n: number) => void;
 }
 
 const EFFORT_LEVELS: { value: EffortLevel; label: string }[] = [
@@ -41,6 +46,7 @@ export default function ThinkingControls({
   onEffortChange,
   thinkingEnabled,
   onThinkingEnabledChange,
+  costMultiplier,
 }: ThinkingControlsProps) {
   const active = isClaudeOpusOrSonnet(engine, model);
   const disabledClass = !active ? 'opacity-50 pointer-events-none' : '';
@@ -102,6 +108,15 @@ export default function ThinkingControls({
           <div className="absolute left-0.5 top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-[14px]" />
         </div>
         <span className="text-xs font-medium text-[var(--text)]">Extended thinking</span>
+        {/* Cost impact label — shown when thinking is enabled */}
+        {thinkingEnabled && active && (() => {
+          const multiplier = costMultiplier
+            ? (costMultiplier[effectiveEffort] ?? costMultiplier['default'])
+            : undefined;
+          return multiplier !== undefined
+            ? <span className="ml-auto text-[10px] font-medium text-amber-400/80">~{multiplier}x base cost</span>
+            : <span className="ml-auto text-[10px] text-muted/60">Cost impact unknown</span>;
+        })()}
       </label>
     </div>
   );
