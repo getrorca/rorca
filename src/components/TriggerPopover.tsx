@@ -1,10 +1,11 @@
 import { useState, useEffect, useLayoutEffect, useRef } from 'react';
 import { createPortal } from 'react-dom';
-import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert, Info } from 'lucide-react';
+import { Play, GitBranch, Loader2, ListPlus, AlertTriangle, Cpu, Layers, ArrowRight, HeartPulse, FileText, ChevronDown, ChevronRight, ShieldAlert, Info, Brain } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { preflightCheck, type CapabilityWarning } from '../api/pipeline';
 import type { PanelId } from './Sidebar';
 import ThinkingControls, { type EffortLevel } from './ThinkingControls';
+import type { ReasoningConfig } from './SpecModelControlBar';
 
 interface HealthBadge {
   score: number;
@@ -132,6 +133,8 @@ export interface TriggerOptions {
   effortLevel?: EffortLevel;
   thinkingEnabled?: boolean;
   thinkingBudget?: number;
+  /** Override reasoning config for this run without mutating spec JSON */
+  reasoningOverride?: ReasoningConfig;
 }
 
 interface TriggerPopoverProps {
@@ -157,6 +160,8 @@ interface TriggerPopoverProps {
   initialThinkingEnabled?: boolean;
   /** Pre-populate thinking budget from spec JSON */
   initialThinkingBudget?: number;
+  /** Reasoning config from spec generation — shown as badge and editable before run */
+  initialReasoning?: ReasoningConfig;
 }
 
 export default function TriggerPopover({
@@ -171,6 +176,7 @@ export default function TriggerPopover({
   initialEffortLevel,
   initialThinkingEnabled,
   initialThinkingBudget,
+  initialReasoning,
 }: TriggerPopoverProps) {
   const [autoWorktree, setAutoWorktree] = useState(false);
   const [autoMerge, setAutoMerge] = useState(true);
@@ -189,6 +195,9 @@ export default function TriggerPopover({
   const [effortLevel, setEffortLevel] = useState<EffortLevel>(initialEffortLevel ?? 'medium');
   const [thinkingEnabled, setThinkingEnabled] = useState(initialThinkingEnabled ?? false);
   const [thinkingBudget, setThinkingBudget] = useState(initialThinkingBudget ?? 5000);
+  // Reasoning override — mirrors spec.reasoning but editable per-run without saving to spec
+  const [reasoningEnabled, setReasoningEnabled] = useState(initialReasoning?.enabled ?? false);
+  const [reasoningEffort, setReasoningEffort] = useState(initialReasoning?.effort ?? 'medium');
   const ref = useRef<HTMLDivElement>(null);
   const anchorRef = useRef<HTMLDivElement>(null);
   const [portalStyle, setPortalStyle] = useState<React.CSSProperties>({ visibility: 'hidden' });
@@ -831,6 +840,42 @@ export default function TriggerPopover({
           thinkingBudget={thinkingBudget}
           onThinkingBudgetChange={setThinkingBudget}
         />
+
+        {/* Reasoning override — only shown when spec was generated with reasoning */}
+        {initialReasoning?.enabled && (
+          <>
+            <div className="border-t border-border/50" />
+            <div className="space-y-2">
+              <div className="flex items-center gap-1.5">
+                <Brain size={12} className="text-purple-400 shrink-0" />
+                <span className="text-xs font-semibold uppercase tracking-wider text-muted">Reasoning Override</span>
+              </div>
+              <label className="flex items-center gap-2 cursor-pointer select-none">
+                <input
+                  type="checkbox"
+                  checked={reasoningEnabled}
+                  onChange={e => setReasoningEnabled(e.target.checked)}
+                  className="w-3.5 h-3.5 accent-purple-500"
+                />
+                <span className="text-xs text-[var(--text)]">Enable reasoning for this run</span>
+              </label>
+              {reasoningEnabled && (
+                <div className="ml-5 flex gap-1.5">
+                  {(['low', 'medium', 'high'] as const).map(level => (
+                    <button
+                      key={level}
+                      type="button"
+                      onClick={() => setReasoningEffort(level)}
+                      className={`px-2.5 py-1 text-[11px] rounded capitalize transition-colors ${reasoningEffort === level ? 'bg-purple-500/80 text-white' : 'bg-panel border border-border text-text hover:border-purple-400/50'}`}
+                    >
+                      {level}
+                    </button>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
       </div>
 
       {/* Action buttons */}
@@ -849,6 +894,7 @@ export default function TriggerPopover({
               effortLevel: thinkingApplies ? effortLevel : undefined,
               thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
               thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
+              reasoningOverride: initialReasoning?.enabled ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
             });
           }}
           disabled={triggerDisabled}
@@ -876,6 +922,7 @@ export default function TriggerPopover({
                 effortLevel: thinkingApplies ? effortLevel : undefined,
                 thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
                 thinkingBudget: thinkingApplies && thinkingEnabled ? thinkingBudget : undefined,
+                reasoningOverride: initialReasoning?.enabled ? { enabled: reasoningEnabled, effort: reasoningEnabled ? reasoningEffort : undefined } : undefined,
               });
             }}
             disabled={triggerDisabled}

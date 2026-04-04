@@ -8,13 +8,20 @@
  * Height: ~48px collapsed, expands when thinking toggle is on.
  */
 import { useState, useCallback } from 'react';
-import { Loader2 } from 'lucide-react';
+import { Loader2, Brain } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { EngineSelector } from './EngineSelector';
 import type { EngineValue } from './EngineSelector';
 import ModelPickerPopover from './ModelPickerPopover';
 import ThinkingControls from './ThinkingControls';
 import type { EffortLevel } from './ThinkingControls';
+
+/* ─── Reasoning types ────────────────────────────────────────────────── */
+
+export interface ReasoningConfig {
+  enabled: boolean;
+  effort?: string;
+}
 
 /* ─── Props ──────────────────────────────────────────────────────────────── */
 
@@ -31,6 +38,8 @@ export interface SpecModelControlBarProps {
   initialThinkingBudget?: number;
   /** Initial effort level from spec JSON */
   initialEffortLevel?: EffortLevel;
+  /** Reasoning config from spec JSON (set at generation time) */
+  initialReasoning?: ReasoningConfig;
   /** Called after a successful PUT so parent can sync local state */
   onSpecUpdated?: (fields: SpecModelFields) => void;
 }
@@ -58,6 +67,7 @@ export function SpecModelControlBar({
   initialModel,
   initialThinkingEnabled = false,
   initialEffortLevel = DEFAULT_EFFORT,
+  initialReasoning,
   onSpecUpdated,
 }: SpecModelControlBarProps) {
   const [engine, setEngine] = useState<EngineValue>(initialEngine ?? DEFAULT_ENGINE);
@@ -121,6 +131,14 @@ export function SpecModelControlBar({
             workspaceId={workspaceId}
           />
         </div>
+
+        {/* Reasoning badge — shown when spec was generated with reasoning enabled */}
+        {initialReasoning?.enabled && (
+          <div className="shrink-0 flex items-center gap-1 px-2 py-0.5 rounded-full text-[11px] font-medium bg-purple-500/15 text-purple-400 border border-purple-500/30">
+            <Brain size={10} />
+            <span>Reasoning{initialReasoning.effort ? `: ${initialReasoning.effort}` : ''}</span>
+          </div>
+        )}
 
         {/* Saving indicator — right */}
         <div className="shrink-0 w-4 flex items-center justify-center">
