@@ -3,9 +3,9 @@
 Spec: qa-reasoning-engine-workflow-router
 Run ID: 20260316000097
 Started: 2026-04-04T08:10:02.760Z
-Last Updated: 2026-04-04T10:16:08.422Z
+Last Updated: 2026-04-04T10:39:30.557Z
 
-## Completed Stories (17)
+## Completed Stories (18)
 - QRW-001: Type check — zero errors on both frontend and backend after merge — DONE (claude, claude-sonnet-4-6, 598s)
 - QRW-002: DB migration — workflow_configs table exists with correct schema and seed data — DONE (claude, claude-sonnet-4-6, 183s)
 - QRW-003: DB migration — reasoning_tokens column exists in token_usage table — DONE (claude, claude-sonnet-4-6, 621s)
@@ -23,3 +23,4 @@ Last Updated: 2026-04-04T10:16:08.422Z
 - QRW-015: Frontend — ConnectionsHubSection component renders and manages vault keys — DONE (claude, claude-sonnet-4-6, 435s)
 - QRW-016: Frontend — WorkflowRouterSection renders matrix table with interactive controls — DONE (claude, claude-sonnet-4-6, 391s)
 - QRW-017: Frontend — ReasoningDefaultsSection renders and saves per-model defaults — DONE (claude, claude-sonnet-4-6, 345s)
+- QRW-018: Frontend — reasoning controls in Forge brief and TriggerPopover — DONE (claude, claude-sonnet-4-6, 1380s)
