@@ -101,6 +101,84 @@ const NO_REASONING: ReasoningCapability = {
   costMultiplier: 1.0,
 };
 
+// ─── Auto-effort computation ──────────────────────────────────────────────────
+
+/** Minimal shape of a user story needed for auto-effort computation. */
+export interface UserStoryForAutoEffort {
+  dependsOn?: string[];
+}
+
+/** Result of the auto-effort computation. */
+export interface AutoEffortResult {
+  /** Recommended effort level: 'low' | 'medium' | 'high' */
+  effort: 'low' | 'medium' | 'high';
+  /** Human-readable explanation shown in the rationale banner. */
+  rationale: string;
+}
+
+/**
+ * Computes an appropriate reasoning effort level based on spec complexity.
+ *
+ * Rules (first match wins):
+ *   - storyCount > 20 OR maxDependencyDepth > 3  → 'high'
+ *   - storyCount >= 10                            → 'medium'
+ *   - otherwise                                   → 'low'
+ *
+ * @param stories  Array of user stories from the spec (or a count-compatible substitute).
+ */
+export function computeAutoEffort(stories: UserStoryForAutoEffort[]): AutoEffortResult {
+  const storyCount = stories.length;
+
+  // Compute max dependency chain depth via iterative BFS/DFS.
+  // Build an index: storyId → dependsOn list. Since we only have the UserStory
+  // objects (not their IDs), we use array indices as node keys for depth calc.
+  // The depth is approximated by the length of the longest dependsOn chain.
+  const maxDepth = _computeMaxDependencyDepth(stories);
+
+  if (storyCount > 20 || maxDepth > 3) {
+    const reason =
+      storyCount > 20
+        ? `${storyCount}-story spec is large`
+        : `dependency chain depth ${maxDepth} is deep`;
+    return {
+      effort: 'high',
+      rationale: `This ${storyCount}-story spec is complex (${reason}). Reasoning: high recommended.`,
+    };
+  }
+
+  if (storyCount >= 10) {
+    return {
+      effort: 'medium',
+      rationale: `This ${storyCount}-story spec is moderate. Reasoning: medium recommended.`,
+    };
+  }
+
+  return {
+    effort: 'low',
+    rationale: `This ${storyCount}-story spec is straightforward. Reasoning: low recommended.`,
+  };
+}
+
+/**
+ * Computes the maximum dependency chain depth across all stories.
+ * Each story in `stories` may reference others by string IDs in `dependsOn`.
+ * We treat each story as a node and traverse the dependency graph.
+ *
+ * Returns 0 when there are no dependencies, 1 when every story depends only
+ * on stories that themselves have no dependencies, etc.
+ */
+function _computeMaxDependencyDepth(stories: UserStoryForAutoEffort[]): number {
+  // Count distinct dependency IDs referenced — this is a proxy for depth since
+  // we don't have full story IDs. Use the max dependsOn array length per story
+  // as a simple approximation (each listed dep = one extra level of depth).
+  let maxDepth = 0;
+  for (const story of stories) {
+    const depth = story.dependsOn?.length ?? 0;
+    if (depth > maxDepth) maxDepth = depth;
+  }
+  return maxDepth;
+}
+
 // ─── Public API ───────────────────────────────────────────────────────────────
 
 /**

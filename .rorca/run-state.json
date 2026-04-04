@@ -2,7 +2,7 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T06:59:47.108Z",
+  "lastUpdatedAt": "2026-04-04T07:13:36.049Z",
   "completedStories": [
     {
       "storyId": "RE-004",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 309907
+    },
+    {
+      "storyId": "RE-016",
+      "title": "Auto-suggest reasoning based on spec complexity",
+      "status": "passed",
+      "startedAt": "2026-04-04T07:07:37.715Z",
+      "finishedAt": "2026-04-04T07:13:36.049Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 358334
     }
   ],
   "failedStories": [],
