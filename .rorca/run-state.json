@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T10:03:08.655Z",
+  "lastUpdatedAt": "2026-04-04T10:10:00.299Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -153,6 +153,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 434840
+    },
+    {
+      "storyId": "QRW-016",
+      "title": "Frontend — WorkflowRouterSection renders matrix table with interactive controls",
+      "status": "passed",
+      "startedAt": "2026-04-04T10:03:28.882Z",
+      "finishedAt": "2026-04-04T10:10:00.299Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 391417
     }
   ],
   "failedStories": [],
