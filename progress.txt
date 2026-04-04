@@ -3,9 +3,9 @@
 Spec: rorca-workflow-router
 Run ID: 20260316000091
 Started: 2026-04-04T06:06:05.615Z
-Last Updated: 2026-04-04T07:02:27.040Z
+Last Updated: 2026-04-04T07:05:14.577Z
 
-## Completed Stories (13)
+## Completed Stories (14)
 - WR-001: DB migration — create workflow_configs table with constraints and seed rows — DONE (claude, claude-opus-4-6, 32s)
 - WR-002: New lib workflow-config-resolver.ts — resolveWorkflowConfig with full fallback chain — DONE (claude, claude-opus-4-6, 797s)
 - WR-003: New route workflow-router.ts — GET/PUT/resolved endpoints — DONE (claude, claude-opus-4-6, 216s)
@@ -19,3 +19,4 @@ Last Updated: 2026-04-04T07:02:27.040Z
 - WR-011: WorkflowRouterSection runtime picker — segmented control with install badges — DONE (claude, claude-opus-4-6, 235s)
 - WR-012: WorkflowRouterSection provider picker — filtered select with auto-lock — DONE (claude, claude-opus-4-6, 212s)
 - WR-013: WorkflowRouterSection model picker — ModelSearchSelect filtered by provider — DONE (claude, claude-opus-4-6, 302s)
+- WR-014: ProviderSettingsTab tab navigation update — new tabs replacing old structure — DONE (claude, claude-opus-4-6, 145s)
