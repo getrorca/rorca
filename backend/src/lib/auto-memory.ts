@@ -12,6 +12,7 @@ import { chatComplete, type ChatMessage } from './llm-client';
 import { embedText, prepareText } from './embedding-pipeline';
 import { logger } from './logger';
 import { broadcastAll, type WalEvent } from './sse-hub';
+import { resolveWorkflowConfig } from './workflow-config-resolver';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -93,12 +94,20 @@ export async function autoSynthesizeMemory(
   const t0 = Date.now();
 
   try {
+    // ── Resolve model/provider/apiKey from workflow config (WR-007) ────
+    const wfConfig = await resolveWorkflowConfig('memory_consolidation');
+    const synthesisModel = wfConfig.model ?? SYNTHESIS_MODEL;
+
     // ── LLM synthesis with timeout ──────────────────────────────────────
     const prompt = buildSynthesisPrompt(storyText, storyOutput, status);
     const messages: ChatMessage[] = [{ role: 'user', content: prompt }];
 
     const llmResult = await Promise.race([
-      chatComplete(messages, SYNTHESIS_MODEL),
+      chatComplete(messages, {
+        model: synthesisModel,
+        provider: wfConfig.provider,
+        apiKey: wfConfig.apiKey ?? undefined,
+      }),
       new Promise<never>((_, reject) =>
         setTimeout(() => reject(new Error('synthesis_timeout')), SYNTHESIS_TIMEOUT_MS),
       ),
