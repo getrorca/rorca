@@ -124,6 +124,35 @@ export interface ChatOptions {
   reasoning?: ReasoningOptions;
 }
 
+// ─── Reasoning Capability Override Cache ─────────────────────────────────────
+
+/**
+ * In-memory cache of per-model reasoning capability overrides.
+ * Populated when a provider rejects a request due to reasoning params,
+ * so subsequent calls skip reasoning without retrying.
+ * Intentionally not exported — use markModelAsNonReasoning() to update.
+ * Resets on process restart (in-memory only by design).
+ */
+const reasoningCapabilityCache = new Map<string, Pick<ReasoningCapability, 'supportsReasoning'>>();
+
+/**
+ * Mark a model as non-reasoning in the capability cache.
+ * Called automatically by chatComplete() on reasoning-related provider errors.
+ * Exported for testing only.
+ */
+export function markModelAsNonReasoning(model: string): void {
+  reasoningCapabilityCache.set(model, { supportsReasoning: false });
+}
+
+/**
+ * Check if a model has been marked as non-reasoning in this session.
+ * Returns true if the model is known not to support reasoning params.
+ */
+export function isModelMarkedNonReasoning(model: string): boolean {
+  const entry = reasoningCapabilityCache.get(model);
+  return entry !== undefined && !entry.supportsReasoning;
+}
+
 // ─── Model Registry ──────────────────────────────────────────────────────────
 
 /** Speed classification for model selection UI. */
@@ -759,6 +788,16 @@ export async function fetchOpenRouterModels(apiKey: string): Promise<ModelInfo[]
 // ─── Unified Entry Point ─────────────────────────────────────────────────────
 
 /**
+ * Returns true if the error message suggests the provider rejected reasoning params.
+ * Matches messages containing 'reasoning' or 'thinking' (case-insensitive).
+ */
+function isReasoningError(err: unknown): boolean {
+  if (!(err instanceof Error)) return false;
+  const msg = err.message.toLowerCase();
+  return msg.includes('reasoning') || msg.includes('thinking');
+}
+
+/**
  * Unified LLM completion that routes to the correct provider.
  *
  * Provider resolution order:
@@ -766,8 +805,13 @@ export async function fetchOpenRouterModels(apiKey: string): Promise<ModelInfo[]
  * 2. Infer from model registry (look up providerType)
  * 3. If apiKey provided but no provider, assume 'anthropic' (backward compat)
  * 4. Default: 'claude-cli' (subscription path)
+ *
+ * Reasoning fallback: if reasoning params are included and the provider returns
+ * an error containing 'reasoning' or 'thinking', the request is retried once
+ * without reasoning params. The model is then marked in the session cache so
+ * subsequent calls skip reasoning immediately without retrying.
  */
-export function chatComplete(messages: ChatMessage[], modelOrOpts?: string | ChatOptions): Promise<ChatResult> {
+export async function chatComplete(messages: ChatMessage[], modelOrOpts?: string | ChatOptions): Promise<ChatResult> {
   // Normalize overloaded parameter (backward compat: string = model name)
   const opts: ChatOptions = typeof modelOrOpts === 'string'
     ? { model: modelOrOpts }
@@ -776,31 +820,62 @@ export function chatComplete(messages: ChatMessage[], modelOrOpts?: string | Cha
   const provider = resolveProvider(opts);
   const model = opts.model ?? DEFAULT_MODEL;
 
-  switch (provider) {
-    case 'claude-cli':
-      return chatCompleteCLI(messages, model);
+  // If this model was already marked as non-reasoning in this session, strip
+  // reasoning params before the first attempt (no retry needed).
+  const effectiveOpts: ChatOptions = isModelMarkedNonReasoning(model) && opts.reasoning?.enabled
+    ? { ...opts, reasoning: { ...opts.reasoning, enabled: false } }
+    : opts;
 
-    case 'anthropic':
-      if (!opts.apiKey) {
-        throw new Error('Anthropic provider requires an API key (set via BYOB vault or ANTHROPIC_API_KEY)');
+  const attemptCall = (callOpts: ChatOptions): Promise<ChatResult> => {
+    switch (provider) {
+      case 'claude-cli':
+        return chatCompleteCLI(messages, model);
+
+      case 'anthropic':
+        if (!callOpts.apiKey) {
+          throw new Error('Anthropic provider requires an API key (set via BYOB vault or ANTHROPIC_API_KEY)');
+        }
+        return chatCompleteAnthropic(messages, model, callOpts.apiKey, callOpts);
+
+      case 'openai-compat':
+        if (!callOpts.apiKey) {
+          throw new Error('OpenAI-compatible provider requires an API key');
+        }
+        return chatCompleteOpenAICompat(messages, model, callOpts.apiKey, callOpts.baseUrl, callOpts);
+
+      case 'openrouter':
+        if (!callOpts.apiKey) {
+          throw new Error('OpenRouter provider requires an API key');
+        }
+        return chatCompleteOpenRouter(messages, model, callOpts.apiKey, callOpts);
+
+      default:
+        throw new Error(`Unknown provider: ${provider}`);
+    }
+  };
+
+  // Only attempt the reasoning-error retry path when reasoning is actually enabled.
+  if (effectiveOpts.reasoning?.enabled) {
+    try {
+      return await attemptCall(effectiveOpts);
+    } catch (err) {
+      if (isReasoningError(err)) {
+        // Update the session cache so future calls skip reasoning immediately.
+        markModelAsNonReasoning(model);
+        logger.warn({
+          model,
+          error: err instanceof Error ? err.message : String(err),
+          action: 'retried_without_reasoning',
+        });
+        // Retry the same request with reasoning disabled.
+        const fallbackOpts: ChatOptions = { ...effectiveOpts, reasoning: { ...effectiveOpts.reasoning, enabled: false } };
+        return attemptCall(fallbackOpts);
       }
-      return chatCompleteAnthropic(messages, model, opts.apiKey, opts);
-
-    case 'openai-compat':
-      if (!opts.apiKey) {
-        throw new Error('OpenAI-compatible provider requires an API key');
-      }
-      return chatCompleteOpenAICompat(messages, model, opts.apiKey, opts.baseUrl, opts);
-
-    case 'openrouter':
-      if (!opts.apiKey) {
-        throw new Error('OpenRouter provider requires an API key');
-      }
-      return chatCompleteOpenRouter(messages, model, opts.apiKey, opts);
-
-    default:
-      throw new Error(`Unknown provider: ${provider}`);
+      throw err;
+    }
   }
+
+  return attemptCall(effectiveOpts);
 }
 
 /**
