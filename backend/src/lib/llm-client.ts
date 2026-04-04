@@ -85,6 +85,8 @@ export interface ChatMessage { role: 'user' | 'assistant'; content: string; }
 export interface TokenUsage {
   inputTokens: number;
   outputTokens: number;
+  /** Reasoning/thinking tokens reported separately by the provider (0 when not applicable). */
+  reasoningTokens: number;
 }
 
 export interface ChatResult {
@@ -501,13 +503,20 @@ function chatCompleteCLI(messages: ChatMessage[], model?: string): Promise<ChatR
       try {
         const parsed = JSON.parse(stdout.trim());
         const text = parsed.result ?? parsed.text ?? stdout.trim();
+        // Count thinking block tokens if present in the content array
+        const thinkingTokens = Array.isArray(parsed.content)
+          ? (parsed.content as Array<{ type: string; thinking?: string }>)
+              .filter(b => b.type === 'thinking' && b.thinking)
+              .reduce((sum, b) => sum + Math.ceil((b.thinking?.length ?? 0) / 4), 0)
+          : 0;
         const usage: TokenUsage = {
           inputTokens: parsed.input_tokens ?? parsed.usage?.input_tokens ?? 0,
           outputTokens: parsed.output_tokens ?? parsed.usage?.output_tokens ?? 0,
+          reasoningTokens: thinkingTokens,
         };
         resolve({ text: typeof text === 'string' ? text : JSON.stringify(text), usage });
       } catch {
-        resolve({ text: stdout.trim(), usage: { inputTokens: 0, outputTokens: 0 } });
+        resolve({ text: stdout.trim(), usage: { inputTokens: 0, outputTokens: 0, reasoningTokens: 0 } });
       }
     });
   });
@@ -570,11 +579,19 @@ async function chatCompleteAnthropic(
     .map((b: Anthropic.TextBlock) => b.text)
     .join('');
 
+  // Sum token lengths across thinking blocks as a proxy for reasoning token count.
+  // Anthropic does not expose a discrete reasoning_tokens field in the usage object,
+  // so we estimate from thinking block character counts (÷4 ≈ tokens).
+  const reasoningTokens = (response.content as Array<{ type: string; thinking?: string }>)
+    .filter(b => b.type === 'thinking' && typeof b.thinking === 'string')
+    .reduce((sum, b) => sum + Math.ceil((b.thinking?.length ?? 0) / 4), 0);
+
   return {
     text,
     usage: {
       inputTokens: response.usage.input_tokens,
       outputTokens: response.usage.output_tokens,
+      reasoningTokens,
     },
   };
 }
@@ -612,12 +629,15 @@ async function chatCompleteOpenAICompat(
 
   const text = response.choices[0]?.message?.content ?? '';
   const usage = response.usage;
+  // OpenAI o-series models report reasoning tokens in completion_tokens_details
+  const reasoningTokens = (usage as any)?.completion_tokens_details?.reasoning_tokens ?? 0;
 
   return {
     text,
     usage: {
       inputTokens: usage?.prompt_tokens ?? 0,
       outputTokens: usage?.completion_tokens ?? 0,
+      reasoningTokens,
     },
   };
 }
@@ -680,12 +700,15 @@ async function chatCompleteOpenRouter(
 
   const text = response.choices[0]?.message?.content ?? '';
   const usage = response.usage;
+  // OpenRouter passes through reasoning_tokens from upstream providers that support it
+  const reasoningTokens = (usage as any)?.completion_tokens_details?.reasoning_tokens ?? 0;
 
   return {
     text,
     usage: {
       inputTokens: usage?.prompt_tokens ?? 0,
       outputTokens: usage?.completion_tokens ?? 0,
+      reasoningTokens,
     },
   };
 }
