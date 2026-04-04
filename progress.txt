@@ -3,9 +3,9 @@
 Spec: rorca-billing-launch
 Run ID: 20260316000045
 Started: 2026-03-19T20:45:48.038Z
-Last Updated: 2026-04-03T19:48:18.958Z
+Last Updated: 2026-04-04T06:27:05.998Z
 
-## Completed Stories (14)
+## Completed Stories (15)
 - BL-012: Billing webhook idempotency — prevent duplicate billing state transitions — DONE (claude, 33s)
 - BL-013: Self-hosted offline license activation — RORCA_LICENSE_KEY env var — DONE (claude, 1158s)
 - US-004: Update buildPrompt() to instruct claude agent to use rorca_save_memory MCP tool — DONE (claude, 159s)
@@ -20,3 +20,4 @@ Last Updated: 2026-04-03T19:48:18.958Z
 - MP-009: Add engine health status to GET /api/health and expose to frontend — DONE (claude, claude-sonnet-4-6, 275s)
 - MP-007: Integrate SpecModelControlBar into SpecDetailSlideOver Stories tab — DONE (claude, claude-sonnet-4-6, 265s)
 - MP-008: Wire spec-level model into TriggerPopover run action and update story ModelBadge reactivity — DONE (claude, claude-sonnet-4-6, 532s)
+- RE-001: ReasoningCapability schema and type definitions — DONE (claude, claude-sonnet-4-6, 360s)

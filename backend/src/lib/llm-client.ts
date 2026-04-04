@@ -7,6 +7,79 @@ import { logger } from './logger';
 
 export type ProviderType = 'claude-cli' | 'anthropic' | 'openai-compat' | 'openrouter';
 
+// ─── Reasoning Engine Types ───────────────────────────────────────────────────
+
+/**
+ * Discriminated union of reasoning mechanism types.
+ *
+ * - 'anthropic-thinking': Claude extended thinking (budget_tokens, effort levels low/medium/high/max).
+ *   Opus 4.6 supports all 4 effort levels; Sonnet 4.6 supports low/medium/high only (not 'max').
+ * - 'effort-levels': OpenRouter / OpenAI models that accept an effort parameter (e.g. o3, GLM-5).
+ * - 'native-cot': Model reasons natively without explicit control (e.g. Gemini Flash Thinking).
+ * - 'none': Model has no reasoning capability.
+ */
+export type ReasoningType = 'anthropic-thinking' | 'effort-levels' | 'native-cot' | 'none';
+
+/**
+ * Describes the reasoning capability of a model, as returned by the
+ * GET /api/direction/models endpoint and used by ThinkingControls UI.
+ */
+export interface ReasoningCapability {
+  /** Whether this model supports any form of reasoning/thinking. */
+  supportsReasoning: boolean;
+  /** Which reasoning mechanism the model uses. */
+  reasoningType: ReasoningType;
+  /**
+   * The effort level strings accepted by this model.
+   * Empty array when reasoningType is 'none' or 'native-cot'.
+   * For 'anthropic-thinking': ['low', 'medium', 'high'] for Sonnet,
+   *   ['low', 'medium', 'high', 'max'] for Opus.
+   * For 'effort-levels': provider-specific (e.g. ['low', 'medium', 'high']).
+   */
+  effortLevels: string[];
+  /**
+   * The default effort level to pre-select in UI.
+   * null when reasoningType is 'none' or 'native-cot'.
+   */
+  defaultEffort: string | null;
+  /**
+   * Whether the model accepts an explicit token budget for reasoning.
+   * true for 'anthropic-thinking', false for all others.
+   */
+  budgetTokensSupported: boolean;
+  /**
+   * Valid [min, max] range for budgetTokens when budgetTokensSupported is true.
+   * null when budgetTokensSupported is false.
+   */
+  budgetRange: [number, number] | null;
+  /**
+   * Approximate cost multiplier relative to the base model price when
+   * reasoning is enabled (e.g. 1.0 means same cost, 1.5 means 50% more).
+   * Informational only — used in FinOps display.
+   */
+  costMultiplier: number;
+}
+
+/**
+ * Reasoning options that can be attached to a pipeline trigger request,
+ * a spec JSON, or a story. These flow into the execution engine and are
+ * translated into provider-specific API parameters by llm-client.ts.
+ */
+export interface ReasoningOptions {
+  /** Whether reasoning/thinking is enabled for this run or story. */
+  enabled: boolean;
+  /**
+   * Effort level string. Only meaningful when the model supports effort levels.
+   * Must be one of the values in ReasoningCapability.effortLevels for the model.
+   */
+  effort?: string;
+  /**
+   * Explicit token budget for thinking blocks (anthropic-thinking only).
+   * Must be within ReasoningCapability.budgetRange when provided.
+   */
+  budgetTokens?: number;
+}
+
 export interface ChatMessage { role: 'user' | 'assistant'; content: string; }
 
 export interface TokenUsage {
@@ -38,6 +111,15 @@ export interface ChatOptions {
   maxTokens?: number;
   /** OpenRouter provider routing preferences (order, ignore, allow_fallbacks). */
   openRouterProvider?: OpenRouterProviderPrefs;
+  /**
+   * Unified reasoning options. Supersedes the legacy `thinking` field for new callers.
+   * When both are present, `reasoning` takes precedence.
+   * Translated to provider-specific params by each chatComplete* function:
+   *   - anthropic: → extended_thinking block with budget_tokens
+   *   - openrouter: → reasoning.effort param
+   *   - openai-compat: → ignored (model reasons natively or not at all)
+   */
+  reasoning?: ReasoningOptions;
 }
 
 // ─── Model Registry ──────────────────────────────────────────────────────────
