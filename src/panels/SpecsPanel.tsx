@@ -3075,6 +3075,18 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
                     {reasoningCapability.reasoningType === 'anthropic-thinking' && (
                       <span className="text-[10px] text-muted">(extended thinking)</span>
                     )}
+                    {/* Cost impact label — shown when reasoning is enabled */}
+                    {reasoningEnabled && (() => {
+                      const effectiveEffort = effortIsAuto
+                        ? (autoEffortResult?.effort ?? reasoningEffort)
+                        : reasoningEffort;
+                      const multiplier = reasoningCapability.costMultiplier
+                        ? (reasoningCapability.costMultiplier[effectiveEffort] ?? reasoningCapability.costMultiplier['default'])
+                        : undefined;
+                      return multiplier !== undefined
+                        ? <span className="ml-auto text-[10px] font-medium text-amber-400/80">~{multiplier}x base cost</span>
+                        : <span className="ml-auto text-[10px] text-muted/60">Cost impact unknown</span>;
+                    })()}
                   </label>
 
                   {/* Effort level segmented control — only when enabled and effortLevels available */}
