@@ -1,6 +1,6 @@
 import { useState, useRef, useEffect, useMemo, useCallback } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { ChevronDown, Search, Check, Zap, Clock, Turtle, Sparkles } from 'lucide-react';
+import { ChevronDown, Search, Check, Zap, Clock, Turtle, Sparkles, Brain } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import type { ModelOption } from './ModelSearchSelect';
 
@@ -17,6 +17,8 @@ const CLAUDE_MODELS: ModelOption[] = [
     speedTier: 'slow',
     costTier: 'subscription',
     recommended: false,
+    supportsReasoning: true,
+    effortLevels: ['low', 'medium', 'high', 'max'],
   },
   {
     id: 'claude-sonnet-4-6',
@@ -29,6 +31,8 @@ const CLAUDE_MODELS: ModelOption[] = [
     speedTier: 'medium',
     costTier: 'subscription',
     recommended: true,
+    supportsReasoning: true,
+    effortLevels: ['low', 'medium', 'high'],
   },
   {
     id: 'claude-haiku-4-5-20251001',
@@ -41,6 +45,8 @@ const CLAUDE_MODELS: ModelOption[] = [
     speedTier: 'fast',
     costTier: 'subscription',
     recommended: false,
+    supportsReasoning: true,
+    effortLevels: ['low', 'medium', 'high'],
   },
 ];
 
@@ -71,9 +77,9 @@ interface ModelGroup {
   models: ModelOption[];
 }
 
-function buildGroups(models: ModelOption[], query: string): ModelGroup[] {
+function buildGroups(models: ModelOption[], query: string, reasoningOnly: boolean): ModelGroup[] {
   const q = query.toLowerCase().trim();
-  const filtered = q
+  let filtered = q
     ? models.filter(
         m =>
           m.label.toLowerCase().includes(q) ||
@@ -81,6 +87,10 @@ function buildGroups(models: ModelOption[], query: string): ModelGroup[] {
           m.id.toLowerCase().includes(q)
       )
     : models;
+
+  if (reasoningOnly) {
+    filtered = filtered.filter(m => m.supportsReasoning);
+  }
 
   const recommended: ModelOption[] = [];
   const byProvider = new Map<string, ModelOption[]>();
@@ -171,6 +181,7 @@ export default function ModelPickerPopover({
   const [loading, setLoading] = useState(false);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(['OpenRouter']));
   const [highlightIdx, setHighlightIdx] = useState(0);
+  const [reasoningOnly, setReasoningOnly] = useState(false);
 
   const triggerRef = useRef<HTMLButtonElement>(null);
   const popoverRef = useRef<HTMLDivElement>(null);
@@ -219,6 +230,7 @@ export default function ModelPickerPopover({
     if (!open) {
       setPopoverPos(null);
       setQuery('');
+      setReasoningOnly(false);
       // For OpenCode, OpenRouter is the primary model source — start expanded
       setCollapsed(engine === 'opencode' ? new Set() : new Set(['OpenRouter']));
       return;
@@ -294,7 +306,7 @@ export default function ModelPickerPopover({
   }, [open]);
 
   // ── Groups + flat list ─────────────────────────────────────────────────────
-  const groups = useMemo(() => buildGroups(models, query), [models, query]);
+  const groups = useMemo(() => buildGroups(models, query, reasoningOnly), [models, query, reasoningOnly]);
   const flatList = useMemo(() => buildFlatList(groups, collapsed), [groups, collapsed]);
 
   // model-only flat list for keyboard navigation
@@ -445,6 +457,21 @@ export default function ModelPickerPopover({
               className="flex-1 bg-transparent text-sm text-[var(--text)] placeholder:text-[var(--text-muted)]/40 outline-none"
               aria-label="Search models"
             />
+            {/* Reasoning filter chip */}
+            <button
+              type="button"
+              onClick={() => setReasoningOnly(v => !v)}
+              title="Show only reasoning-capable models"
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors shrink-0 ${
+                reasoningOnly
+                  ? 'bg-violet-500/20 text-violet-400 border border-violet-500/30'
+                  : 'bg-[var(--surface-200)] text-[var(--text-muted)]/60 hover:text-[var(--text-muted)] border border-transparent'
+              }`}
+              aria-pressed={reasoningOnly}
+            >
+              <Brain size={10} />
+              Reasoning
+            </button>
             {query && (
               <button
                 type="button"
@@ -541,11 +568,21 @@ export default function ModelPickerPopover({
                                 {isSelected && <Check size={12} className="text-[var(--accent)]" />}
                               </span>
 
-                              {/* Label + default badge */}
+                              {/* Label + reasoning icon + default badge */}
                               <div className="flex-1 min-w-0 flex items-center gap-1.5">
                                 <span className={`truncate ${isSelected ? 'font-medium' : ''}`}>
                                   {model.label}
                                 </span>
+                                {model.supportsReasoning && (
+                                  <span
+                                    title={model.effortLevels && model.effortLevels.length > 0
+                                      ? `Supports reasoning: ${model.effortLevels.join(', ')} effort`
+                                      : 'Supports native reasoning'}
+                                    className="shrink-0"
+                                  >
+                                    <Brain size={11} className="text-violet-400" />
+                                  </span>
+                                )}
                                 {isDefault && (
                                   <span className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-[var(--accent)]/10 text-[var(--accent)] font-medium">
                                     Default
@@ -556,9 +593,9 @@ export default function ModelPickerPopover({
                               {/* Meta: speed, context, cost */}
                               <div className="flex items-center gap-2 shrink-0">
                                 <SpeedIcon tier={model.speedTier} />
-                                {model.contextWindow > 0 && (
+                                {(model.contextWindow ?? 0) > 0 && (
                                   <span className="text-[10px] font-mono text-[var(--text-muted)]/40 tabular-nums w-8 text-right">
-                                    {formatContext(model.contextWindow)}
+                                    {formatContext(model.contextWindow ?? 0)}
                                   </span>
                                 )}
                                 <span className="text-[10px] font-mono text-[var(--text-muted)]/60 tabular-nums w-20 text-right">
