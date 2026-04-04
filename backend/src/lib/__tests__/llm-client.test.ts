@@ -37,6 +37,17 @@ jest.mock('openai', () => {
   }));
 });
 
+// Mock logger so we can spy on warn calls in tests
+const mockLoggerWarn = jest.fn();
+jest.mock('../logger', () => ({
+  logger: {
+    info: jest.fn(),
+    warn: mockLoggerWarn,
+    error: jest.fn(),
+    debug: jest.fn(),
+  },
+}));
+
 describe('llm-client', () => {
   beforeEach(() => {
     jest.resetModules();
@@ -52,6 +63,14 @@ describe('llm-client', () => {
         chat: { completions: { create: mockOpenAICreate } },
       }));
     });
+    jest.doMock('../logger', () => ({
+      logger: {
+        info: jest.fn(),
+        warn: mockLoggerWarn,
+        error: jest.fn(),
+        debug: jest.fn(),
+      },
+    }));
   });
 
   // ── Existing tests (backward compat) ──────────────────────────────────────
@@ -703,6 +722,196 @@ describe('llm-client', () => {
       expect(MODEL_INFO['claude-sonnet-4-6']).toBeDefined();
       expect(MODEL_INFO['claude-opus-4-6']).toBeDefined();
       expect(MODEL_INFO['claude-haiku-4-5-20251001']).toBeDefined();
+    });
+  });
+
+  // ── Reasoning fallback / capability cache tests ───────────────────────────
+
+  describe('reasoning fallback and capability cache', () => {
+    beforeEach(() => {
+      // Reset module registry so the in-memory cache is fresh for each test.
+      jest.resetModules();
+      jest.clearAllMocks();
+      jest.doMock('child_process', () => ({ spawn: mockSpawn }));
+      jest.doMock('@anthropic-ai/sdk', () => {
+        return jest.fn().mockImplementation(() => ({
+          messages: { create: mockAnthropicCreate },
+        }));
+      });
+      jest.doMock('openai', () => {
+        return jest.fn().mockImplementation(() => ({
+          chat: { completions: { create: mockOpenAICreate } },
+        }));
+      });
+      // Re-register logger mock after resetModules so warn spy works inside llm-client.
+      jest.doMock('../logger', () => ({
+        logger: {
+          info: jest.fn(),
+          warn: mockLoggerWarn,
+          error: jest.fn(),
+          debug: jest.fn(),
+        },
+      }));
+    });
+
+    test('anthropic: retries without reasoning on reasoning-related error', async () => {
+      // First call (with reasoning) throws a reasoning-related error.
+      mockAnthropicCreate
+        .mockRejectedValueOnce(new Error('thinking is not supported for this model'))
+        .mockResolvedValueOnce({
+          content: [{ type: 'text', text: 'fallback response' }],
+          usage: { input_tokens: 10, output_tokens: 20 },
+        });
+
+      const { chatComplete } = require('../llm-client');
+      const result = await chatComplete(
+        [{ role: 'user', content: 'test' }],
+        {
+          provider: 'anthropic',
+          apiKey: 'sk-ant-test',
+          model: 'claude-opus-4-6',
+          reasoning: { enabled: true, effort: 'medium' },
+        },
+      );
+
+      expect(result.text).toBe('fallback response');
+      expect(mockAnthropicCreate).toHaveBeenCalledTimes(2);
+
+      // Second call must NOT contain the thinking block.
+      const secondCall = mockAnthropicCreate.mock.calls[1][0];
+      expect(secondCall.thinking).toBeUndefined();
+    });
+
+    test('anthropic: retry logs structured warning with model, error, action', async () => {
+      mockAnthropicCreate
+        .mockRejectedValueOnce(new Error('reasoning is not enabled'))
+        .mockResolvedValueOnce({
+          content: [{ type: 'text', text: 'ok' }],
+          usage: { input_tokens: 5, output_tokens: 10 },
+        });
+
+      const { chatComplete } = require('../llm-client');
+      await chatComplete(
+        [{ role: 'user', content: 'test' }],
+        {
+          provider: 'anthropic',
+          apiKey: 'sk-ant-test',
+          model: 'claude-sonnet-4-6',
+          reasoning: { enabled: true, effort: 'low' },
+        },
+      );
+
+      expect(mockLoggerWarn).toHaveBeenCalledWith(
+        expect.objectContaining({
+          model: 'claude-sonnet-4-6',
+          action: 'retried_without_reasoning',
+          error: expect.stringContaining('reasoning'),
+        }),
+      );
+    });
+
+    test('capability cache: subsequent call for same model skips reasoning without retrying', async () => {
+      // First call fails with reasoning error.
+      mockAnthropicCreate
+        .mockRejectedValueOnce(new Error('thinking is not available'))
+        .mockResolvedValue({
+          content: [{ type: 'text', text: 'cached path response' }],
+          usage: { input_tokens: 5, output_tokens: 10 },
+        });
+
+      const { chatComplete, isModelMarkedNonReasoning } = require('../llm-client');
+
+      // First call — triggers retry and populates the cache.
+      await chatComplete(
+        [{ role: 'user', content: 'first' }],
+        {
+          provider: 'anthropic',
+          apiKey: 'sk-ant-test',
+          model: 'claude-opus-4-6',
+          reasoning: { enabled: true, effort: 'high' },
+        },
+      );
+
+      // Cache should now mark this model as non-reasoning.
+      expect(isModelMarkedNonReasoning('claude-opus-4-6')).toBe(true);
+      jest.clearAllMocks();
+
+      // Second call — must not throw and must NOT include thinking block.
+      mockAnthropicCreate.mockResolvedValueOnce({
+        content: [{ type: 'text', text: 'second response' }],
+        usage: { input_tokens: 5, output_tokens: 10 },
+      });
+
+      const result = await chatComplete(
+        [{ role: 'user', content: 'second' }],
+        {
+          provider: 'anthropic',
+          apiKey: 'sk-ant-test',
+          model: 'claude-opus-4-6',
+          reasoning: { enabled: true, effort: 'high' },
+        },
+      );
+
+      // Only ONE call — no retry needed because cache already knows.
+      expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
+      const call = mockAnthropicCreate.mock.calls[0][0];
+      expect(call.thinking).toBeUndefined();
+      expect(result.text).toBe('second response');
+    });
+
+    test('openrouter: retries without reasoning on reasoning-related error', async () => {
+      mockOpenAICreate
+        .mockRejectedValueOnce(new Error('reasoning parameter is not supported'))
+        .mockResolvedValueOnce({
+          choices: [{ message: { content: 'fallback openrouter' } }],
+          usage: { prompt_tokens: 10, completion_tokens: 20 },
+        });
+
+      const { chatComplete } = require('../llm-client');
+      const result = await chatComplete(
+        [{ role: 'user', content: 'test' }],
+        {
+          provider: 'openrouter',
+          apiKey: 'sk-or-test',
+          model: 'x-ai/grok-3',
+          reasoning: { enabled: true, effort: 'medium' },
+        },
+      );
+
+      expect(result.text).toBe('fallback openrouter');
+      expect(mockOpenAICreate).toHaveBeenCalledTimes(2);
+
+      // Second call must NOT include reasoning param.
+      const secondCall = mockOpenAICreate.mock.calls[1][0];
+      expect(secondCall.reasoning).toBeUndefined();
+    });
+
+    test('non-reasoning error is re-thrown and does not trigger retry', async () => {
+      mockAnthropicCreate.mockRejectedValueOnce(new Error('network timeout'));
+
+      const { chatComplete } = require('../llm-client');
+      await expect(
+        chatComplete(
+          [{ role: 'user', content: 'test' }],
+          {
+            provider: 'anthropic',
+            apiKey: 'sk-ant-test',
+            model: 'claude-opus-4-6',
+            reasoning: { enabled: true, effort: 'medium' },
+          },
+        ),
+      ).rejects.toThrow('network timeout');
+
+      // No retry — only one call.
+      expect(mockAnthropicCreate).toHaveBeenCalledTimes(1);
+    });
+
+    test('markModelAsNonReasoning and isModelMarkedNonReasoning are exported and work correctly', () => {
+      const { markModelAsNonReasoning, isModelMarkedNonReasoning } = require('../llm-client');
+
+      expect(isModelMarkedNonReasoning('some-model')).toBe(false);
+      markModelAsNonReasoning('some-model');
+      expect(isModelMarkedNonReasoning('some-model')).toBe(true);
     });
   });
 });
