@@ -3,9 +3,9 @@
 Spec: rorca-reasoning-engine
 Run ID: 20260316000094
 Started: 2026-04-04T06:37:36.897Z
-Last Updated: 2026-04-04T07:13:36.049Z
+Last Updated: 2026-04-04T07:11:12.357Z
 
 ## Completed Stories (3)
 - RE-004: Provider-agnostic reasoning mapping in llm-client.ts — DONE (claude, claude-sonnet-4-6, 699s)
 - RE-015: Graceful degradation: retry without reasoning on provider error — DONE (claude, claude-sonnet-4-6, 310s)
-- RE-016: Auto-suggest reasoning based on spec complexity — DONE (claude, claude-sonnet-4-6, 358s)
+- RE-018: GET /api/config/model-capability endpoint and capability cache — DONE (claude, claude-sonnet-4-6, 216s)
