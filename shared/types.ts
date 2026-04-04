@@ -45,10 +45,12 @@ export interface ReasoningCapability {
   budgetRange: [number, number] | null;
   /**
    * Approximate cost multiplier relative to the base model price when
-   * reasoning is enabled (e.g. 1.0 means same cost, 1.5 means 50% more).
-   * Informational only — used in FinOps display.
+   * reasoning is enabled, keyed by effort level (e.g. { low: 1.5, medium: 2.0, high: 3.0, max: 4.0 }).
+   * When the model has no effort levels (native-cot), keyed by 'default'.
+   * undefined when reasoningType is 'none'.
+   * Informational only — used in FinOps display and Forge cost impact labels.
    */
-  costMultiplier: number;
+  costMultiplier?: Record<string, number>;
 }
 
 // ─── Chat / Execution Reasoning Options ──────────────────────────────────────

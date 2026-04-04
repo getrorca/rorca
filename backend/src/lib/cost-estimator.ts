@@ -1,5 +1,6 @@
 import { queryOne } from '../db/index';
 import { synthesize } from './direction-stack';
+import { detectCapability } from './reasoning-detector';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -19,6 +20,11 @@ export interface DryRunEstimate {
   totalEstimatedCostUsd: number;
   inputCostPer1k: number;
   outputCostPer1k: number;
+  /**
+   * Cost multiplier applied when reasoning is enabled at the requested effort level.
+   * undefined when reasoning was not requested or no multiplier data is available.
+   */
+  reasoningCostMultiplier?: number;
 }
 
 interface UserStory {
@@ -77,6 +83,7 @@ export async function estimateDryRunCost(
   specJson: { userStories: UserStory[]; model?: string },
   workspaceId: string,
   model: string,
+  reasoningOptions?: { enabled: boolean; effort?: string },
 ): Promise<DryRunEstimate> {
   // 1. Fetch model pricing
   const pricing = await queryOne<ModelPricingRow>(
@@ -158,6 +165,16 @@ export async function estimateDryRunCost(
   const totalOutputTokens = stories.reduce((sum, s) => sum + s.estimatedOutputTokens, 0);
   const totalEstimatedCostUsd = stories.reduce((sum, s) => sum + s.estimatedCostUsd, 0);
 
+  // Compute reasoning cost multiplier for the requested effort level (if any)
+  let reasoningCostMultiplier: number | undefined;
+  if (reasoningOptions?.enabled) {
+    const capability = detectCapability(model);
+    if (capability.costMultiplier) {
+      const effort = reasoningOptions.effort ?? capability.defaultEffort ?? 'default';
+      reasoningCostMultiplier = capability.costMultiplier[effort] ?? capability.costMultiplier['default'];
+    }
+  }
+
   return {
     model,
     stories,
@@ -166,5 +183,6 @@ export async function estimateDryRunCost(
     totalEstimatedCostUsd: Math.round(totalEstimatedCostUsd * 1_000_000) / 1_000_000,
     inputCostPer1k: pricing.input_cost_per_1k,
     outputCostPer1k: pricing.output_cost_per_1k,
+    reasoningCostMultiplier,
   };
 }
