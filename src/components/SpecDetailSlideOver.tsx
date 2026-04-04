@@ -787,7 +787,8 @@ function SpecDetailContent({
                       initialEffortLevel={detail?.effortLevel}
                       initialThinkingEnabled={detail?.thinkingEnabled}
                       initialThinkingBudget={detail?.thinkingBudget}
-                      initialReasoning={detail?.reasoning} />
+                      initialReasoning={detail?.reasoning}
+                      specModel={detail?.model ?? summary?.model ?? undefined} />
                   )}
                   {hasActiveRun && runState !== 'triggering' && (
                     <div className="rounded border border-amber-500/30 bg-amber-500/10 px-3 py-2 mb-2 flex items-center gap-2">
