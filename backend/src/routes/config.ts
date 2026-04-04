@@ -12,6 +12,7 @@ import { loadRorcaConfig, writeRorcaConfig, invalidateConfigCache } from '../lib
 import * as fs from 'fs';
 import * as path from 'path';
 import { AuthError, NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
+import { detectCapability, OpenRouterModelMetadata } from '../lib/reasoning-detector';
 
 /**
  * Context window overrides for OpenRouter models where the API reports the wrong value
@@ -309,6 +310,14 @@ interface OpenRouterModel {
   context_length: number;
   pricing: { prompt: string; completion: string };
   top_provider?: { is_moderated: boolean };
+  /** Capability flags declared by the OpenRouter model catalog. */
+  supported_parameters?: string[];
+  /** Architecture metadata from OpenRouter. */
+  architecture?: {
+    tokenizer?: string;
+    instruct_type?: string | null;
+    modality?: string;
+  };
 }
 
 interface OpenRouterCatalog {
@@ -320,6 +329,7 @@ interface OpenRouterCatalog {
     free: boolean;
     pricingPrompt: number;
     pricingCompletion: number;
+    reasoningCapability: ReturnType<typeof detectCapability>;
   }>;
   modelCount: number;
   cachedAt: number;
@@ -429,15 +439,28 @@ router.get('/openrouter-models', async (_req: Request, res: Response) => {
     // Filter and transform
     const models = rawModels
       .filter(m => m.context_length >= 4096) // Skip tiny models
-      .map(m => ({
-        id: m.id,
-        name: m.name,
-        provider: getOpenRouterProviderFamily(m.id),
-        contextWindow: OPENROUTER_CONTEXT_OVERRIDES[m.id] ?? m.context_length,
-        free: parseFloat(m.pricing?.prompt ?? '1') === 0 && parseFloat(m.pricing?.completion ?? '1') === 0,
-        pricingPrompt: parseFloat(m.pricing?.prompt ?? '0'),
-        pricingCompletion: parseFloat(m.pricing?.completion ?? '0'),
-      }))
+      .map(m => {
+        // Build OpenRouterModelMetadata for capability detection
+        const orMeta: OpenRouterModelMetadata = {
+          id: m.id,
+          name: m.name,
+          context_length: m.context_length,
+          pricing: m.pricing,
+          top_provider: m.top_provider,
+          supported_parameters: m.supported_parameters,
+          architecture: m.architecture,
+        };
+        return {
+          id: m.id,
+          name: m.name,
+          provider: getOpenRouterProviderFamily(m.id),
+          contextWindow: OPENROUTER_CONTEXT_OVERRIDES[m.id] ?? m.context_length,
+          free: parseFloat(m.pricing?.prompt ?? '1') === 0 && parseFloat(m.pricing?.completion ?? '1') === 0,
+          pricingPrompt: parseFloat(m.pricing?.prompt ?? '0'),
+          pricingCompletion: parseFloat(m.pricing?.completion ?? '0'),
+          reasoningCapability: detectCapability(m.id, orMeta),
+        };
+      })
       .sort((a, b) => a.provider.localeCompare(b.provider) || a.name.localeCompare(b.name));
 
     // Group by provider family
