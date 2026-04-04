@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T08:23:32.280Z",
+  "lastUpdatedAt": "2026-04-04T08:34:14.710Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 183282
+    },
+    {
+      "storyId": "QRW-003",
+      "title": "DB migration — reasoning_tokens column exists in token_usage table",
+      "status": "passed",
+      "startedAt": "2026-04-04T08:23:54.125Z",
+      "finishedAt": "2026-04-04T08:34:14.710Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 620585
     }
   ],
   "failedStories": [],
