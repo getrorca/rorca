@@ -22,7 +22,18 @@ interface UserSettingsRow {
   user_id: string;
   default_model: string;
   items_per_page: number;
+  reasoning_defaults: ReasoningDefaults | null;
   updated_at: string;
+}
+
+interface ReasoningModelDefault {
+  effort: string;
+  override: 'auto' | 'force-on' | 'force-off';
+}
+
+interface ReasoningDefaults {
+  globalAutoEnable: boolean;
+  models: Record<string, ReasoningModelDefault>;
 }
 
 /**
@@ -245,9 +256,12 @@ router.get('/display', async (req: Request, res: Response) => {
     [user.id],
   );
 
+  const defaultReasoningDefaults: ReasoningDefaults = { globalAutoEnable: false, models: {} };
+
   res.json({
     defaultModel: row?.default_model ?? 'claude-sonnet-4-5-20250929',
     itemsPerPage: row?.items_per_page ?? 20,
+    reasoningDefaults: row?.reasoning_defaults ?? defaultReasoningDefaults,
   });
 });
 
@@ -285,24 +299,47 @@ router.get('/display', async (req: Request, res: Response) => {
 router.put('/display', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-  const { defaultModel, itemsPerPage } = req.body;
+  const { defaultModel, itemsPerPage, reasoningDefaults } = req.body;
 
   const model = typeof defaultModel === 'string' ? defaultModel.trim() : 'claude-sonnet-4-5-20250929';
   const perPage = typeof itemsPerPage === 'number' && itemsPerPage >= 5 && itemsPerPage <= 100
     ? Math.round(itemsPerPage)
     : 20;
 
+  // Validate and sanitize reasoningDefaults
+  const defaultRd: ReasoningDefaults = { globalAutoEnable: false, models: {} };
+  let rd: ReasoningDefaults = defaultRd;
+  if (reasoningDefaults && typeof reasoningDefaults === 'object') {
+    rd = {
+      globalAutoEnable: reasoningDefaults.globalAutoEnable === true,
+      models: {},
+    };
+    if (reasoningDefaults.models && typeof reasoningDefaults.models === 'object') {
+      for (const [modelId, v] of Object.entries(reasoningDefaults.models)) {
+        if (v && typeof v === 'object') {
+          const entry = v as Record<string, unknown>;
+          const effort = typeof entry.effort === 'string' ? entry.effort : 'medium';
+          const override = ['auto', 'force-on', 'force-off'].includes(entry.override as string)
+            ? (entry.override as ReasoningModelDefault['override'])
+            : 'auto';
+          rd.models[modelId] = { effort, override };
+        }
+      }
+    }
+  }
+
   await execute(
-    `INSERT INTO user_settings (user_id, default_model, items_per_page, updated_at)
-     VALUES ($1, $2, $3, NOW())
+    `INSERT INTO user_settings (user_id, default_model, items_per_page, reasoning_defaults, updated_at)
+     VALUES ($1, $2, $3, $4, NOW())
      ON CONFLICT(user_id) DO UPDATE SET
        default_model = excluded.default_model,
        items_per_page = excluded.items_per_page,
+       reasoning_defaults = excluded.reasoning_defaults,
        updated_at = excluded.updated_at`,
-    [user.id, model, perPage],
+    [user.id, model, perPage, JSON.stringify(rd)],
   );
 
-  res.json({ ok: true, defaultModel: model, itemsPerPage: perPage });
+  res.json({ ok: true, defaultModel: model, itemsPerPage: perPage, reasoningDefaults: rd });
 });
 
 interface WorkerSettingRow {
