@@ -30,6 +30,30 @@ let currentAgentType: AgentType = agentType;
 let currentAgentModel: string | null = agentModel;
 let _persistedLoaded = false;
 
+/**
+ * Derive the workflow_configs provider value from agent runtime and model.
+ * claude/codex → 'claude-cli' (subscription auth).
+ * opencode → resolve from model prefix (openai/, google/ → 'openai-compat', etc.).
+ */
+function providerForRuntime(runtime: string, model: string | null): string {
+  if (runtime === 'claude' || runtime === 'codex') return 'claude-cli';
+  if (runtime !== 'opencode' || !model) return 'claude-cli';
+  const prefix = model.split('/')[0];
+  switch (prefix) {
+    case 'openai':
+    case 'google':
+    case 'ollama':
+    case 'github':
+      return 'openai-compat';
+    case 'anthropic':
+      return 'anthropic';
+    case 'openrouter':
+      return 'openrouter';
+    default:
+      return 'openai-compat';
+  }
+}
+
 async function ensurePersistedConfig(): Promise<void> {
   if (_persistedLoaded) return;
   _persistedLoaded = true;
@@ -40,6 +64,20 @@ async function ensurePersistedConfig(): Promise<void> {
     if (row && (VALID_AGENT_TYPES as readonly string[]).includes(row.agent_type)) {
       currentAgentType = row.agent_type as AgentType;
       currentAgentModel = row.agent_model;
+
+      // Seed workflow_configs from agent_config so existing users get their
+      // pipeline_execution row without a manual migration step.
+      try {
+        const provider = providerForRuntime(row.agent_type, row.agent_model);
+        await execute(
+          `INSERT INTO workflow_configs (workflow_id, runtime, provider, model)
+           VALUES ('pipeline_execution', $1, $2, $3)
+           ON CONFLICT (workflow_id) DO NOTHING`,
+          [row.agent_type, provider, row.agent_model],
+        );
+      } catch {
+        // workflow_configs table may not exist yet — safe to ignore
+      }
     }
   } catch {
     // Table may not exist yet on first run — fall through to env defaults
