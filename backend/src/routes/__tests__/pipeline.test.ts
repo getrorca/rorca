@@ -319,6 +319,83 @@ describe('POST /api/pipeline/trigger', () => {
     // May get 201 (trigger succeeds), 422 (validation), or 404 (workspace).
     expect([200, 201, 400, 404, 422]).toContain(res.status);
   });
+
+  test('RE-007: spec JSON reasoning config is used as default in job payload when trigger omits reasoning params', async () => {
+    // Create a spec file with reasoning config embedded
+    const dir = path.join(wsDir, 'forge', 'specs', 'approved');
+    const spec = {
+      title: 'Reasoning Spec',
+      model: 'claude-sonnet-4-5-20250929',
+      reasoning: { enabled: true, effort: 'high' },
+      userStories: [
+        { id: 'US-001', title: 'Story one', description: 'Desc', acceptanceCriteria: ['AC1'], dependsOn: [], passes: false },
+      ],
+      generatedAt: '2026-02-20T12:00:00.000Z',
+    };
+    fs.writeFileSync(path.join(dir, 'reasoning-spec.json'), JSON.stringify(spec, null, 2), 'utf8');
+
+    // Get a reference to the mocked getBoss().send so we can inspect call args
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      // No thinkingEnabled or reasoningEffort in request body — should fall back to spec JSON
+      .send({ specPath: 'forge/specs/approved/reasoning-spec.json', workspaceId: 'ws-pipe' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.ok).toBe(true);
+
+    // Assert the job payload sent to pg-boss contains the spec-level reasoning defaults
+    expect(mockSend).toHaveBeenCalledWith(
+      'pipeline:run',
+      expect.objectContaining({
+        thinkingEnabled: true,
+        reasoningEffort: 'high',
+      }),
+      expect.any(Object),
+    );
+  });
+
+  test('RE-007: explicit trigger reasoning params override spec JSON reasoning config', async () => {
+    // Create a spec file with reasoning config embedded
+    const dir = path.join(wsDir, 'forge', 'specs', 'approved');
+    const spec = {
+      title: 'Reasoning Override Spec',
+      model: 'claude-sonnet-4-5-20250929',
+      reasoning: { enabled: true, effort: 'low' },
+      userStories: [
+        { id: 'US-001', title: 'Story one', description: 'Desc', acceptanceCriteria: ['AC1'], dependsOn: [], passes: false },
+      ],
+      generatedAt: '2026-02-20T12:00:00.000Z',
+    };
+    fs.writeFileSync(path.join(dir, 'reasoning-override-spec.json'), JSON.stringify(spec, null, 2), 'utf8');
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      // Explicit params override spec JSON defaults
+      .send({
+        specPath: 'forge/specs/approved/reasoning-override-spec.json',
+        workspaceId: 'ws-pipe',
+        thinkingEnabled: false,
+        reasoningEffort: 'medium',
+      });
+
+    expect(res.status).toBe(201);
+
+    // Explicit thinkingEnabled=false should override spec reasoning.enabled=true
+    // Explicit reasoningEffort='medium' should override spec reasoning.effort='low'
+    const callArgs = mockSend.mock.calls[0][1];
+    expect(callArgs.thinkingEnabled).toBe(false);
+    expect(callArgs.reasoningEffort).toBe('medium');
+  });
 });
 
 // ─── GET /api/pipeline/runs (list) ──────────────────────────────────────────

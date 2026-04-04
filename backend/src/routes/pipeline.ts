@@ -1095,6 +1095,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const specLevelModel: string | null = specModelJson.model ?? null;
     // Read spec-level agent override saved by SpecModelControlBar (PUT /api/specs/:id)
     const specLevelAgent: AgentType | null = specModelJson.agentOverride ?? null;
+    // Read spec-level reasoning config — used as defaults when trigger request omits reasoning params
+    const specReasoning: { enabled: boolean; effort?: string } | undefined = specModelJson.reasoning;
+    const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined ? thinkingEnabled : (specReasoning?.enabled ?? undefined);
+    const resolvedReasoningEffort: string | undefined = reasoningEffort ?? specReasoning?.effort;
     const resolvedAgentModel: string | null = modelOverride ?? agentConfig.agentModel ?? specLevelModel ?? l3WorkspaceModel;
 
     // Auto-detect agent from model string: if model has a provider prefix (e.g. openrouter/z-ai/glm-5,
@@ -1586,10 +1590,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       triggeredVia,
       includeGraph: includeGraph ?? false,
       ...(agentOverride ? { agentOverride } : {}),
-      ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
+      ...(resolvedThinkingEnabled !== undefined ? { thinkingEnabled: resolvedThinkingEnabled } : {}),
       ...(thinkingBudget !== undefined ? { thinkingBudget } : {}),
       ...(effortLevel ? { effortLevel } : {}),
-      ...(reasoningEffort ? { reasoningEffort } : {}),
+      ...(resolvedReasoningEffort ? { reasoningEffort: resolvedReasoningEffort } : {}),
     };
 
     await getBoss().send('pipeline:run', jobPayload, {
