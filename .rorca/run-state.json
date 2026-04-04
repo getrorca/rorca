@@ -2,8 +2,19 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T06:37:36.897Z",
-  "completedStories": [],
+  "lastUpdatedAt": "2026-04-04T06:47:01.201Z",
+  "completedStories": [
+    {
+      "storyId": "RE-003",
+      "title": "OpenRouter metadata reasoning detection",
+      "status": "passed",
+      "startedAt": "2026-04-04T06:42:19.589Z",
+      "finishedAt": "2026-04-04T06:47:01.200Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 281611
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
