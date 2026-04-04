@@ -3,7 +3,7 @@
 Spec: rorca-reasoning-engine
 Run ID: 20260316000094
 Started: 2026-04-04T06:37:36.897Z
-Last Updated: 2026-04-04T06:47:01.201Z
+Last Updated: 2026-04-04T06:53:58.866Z
 
 ## Completed Stories (1)
-- RE-003: OpenRouter metadata reasoning detection — DONE (claude, claude-sonnet-4-6, 282s)
+- RE-004: Provider-agnostic reasoning mapping in llm-client.ts — DONE (claude, claude-sonnet-4-6, 699s)
