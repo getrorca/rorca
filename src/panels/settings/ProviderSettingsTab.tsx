@@ -309,36 +309,34 @@ function StatusBar() {
 // ─── Main Export ──────────────────────────────────────────────────────────────
 
 const PROVIDER_TABS = [
-  { id: 'execution', label: 'Execution Engine' },
+  { id: 'connections', label: 'Connections' },
+  { id: 'workflow-router', label: 'Workflow Router' },
   { id: 'model-browser', label: 'Model Browser' },
   { id: 'embeddings', label: 'Embeddings' },
   { id: 'routing', label: 'Routing' },
-  { id: 'workflow-router', label: 'Workflow Router' },
-  { id: 'providers', label: 'Providers' },
   { id: 'display', label: 'Display' },
 ] as const;
 
 type ProviderTabId = typeof PROVIDER_TABS[number]['id'];
 
 export function ProviderSettingsTab() {
-  const [activeTab, setActiveTab] = useState<ProviderTabId>('execution');
+  const [activeTab, setActiveTab] = useState<ProviderTabId>('connections');
 
-  // Refs for each scrollable section. 'embeddings' maps to the same DOM node as 'execution'
+  // Refs for each scrollable section. 'embeddings' maps to the same DOM node as 'connections'
   // (they share a card row), so clicking Embeddings tab scrolls to top of that grid.
   const sectionRefs = useRef<Record<ProviderTabId, HTMLDivElement | null>>({
-    'execution': null,
+    'connections': null,
+    'workflow-router': null,
     'model-browser': null,
     'embeddings': null,
     'routing': null,
-    'workflow-router': null,
-    'providers': null,
     'display': null,
   });
 
   const scrollToSection = (id: ProviderTabId) => {
     setActiveTab(id);
-    // 'embeddings' and 'execution' share the same card row — scroll to execution ref
-    const targetId: ProviderTabId = id === 'embeddings' ? 'execution' : id;
+    // 'embeddings' and 'connections' share the same card row — scroll to connections ref
+    const targetId: ProviderTabId = id === 'embeddings' ? 'connections' : id;
     sectionRefs.current[targetId]?.scrollIntoView({ behavior: 'smooth', block: 'start' });
   };
 
@@ -346,8 +344,8 @@ export function ProviderSettingsTab() {
     const observers: IntersectionObserver[] = [];
     const visibilityMap: Record<string, number> = {};
 
-    // Observe the 5 distinct DOM sections (embeddings shares execution's ref)
-    const observedTabs: ProviderTabId[] = ['execution', 'model-browser', 'routing', 'workflow-router', 'providers', 'display'];
+    // Observe the 5 distinct DOM sections (embeddings shares connections' ref)
+    const observedTabs: ProviderTabId[] = ['connections', 'workflow-router', 'model-browser', 'routing', 'display'];
     observedTabs.forEach((id) => {
       const el = sectionRefs.current[id];
       if (!el) return;
@@ -356,7 +354,7 @@ export function ProviderSettingsTab() {
           visibilityMap[id] = entry.intersectionRatio;
           const mostVisible = Object.entries(visibilityMap).reduce(
             (best, [k, v]) => (v > best[1] ? [k, v] : best),
-            ['execution', 0] as [string, number]
+            ['connections', 0] as [string, number]
           );
           if (mostVisible[1] > 0) setActiveTab(mostVisible[0] as ProviderTabId);
         },
@@ -396,25 +394,19 @@ export function ProviderSettingsTab() {
         </div>
       </div>
 
-      {/* (3–7) Section cards — space-y-4 provides visual separation, no border dividers */}
+      {/* Section cards — space-y-4 provides visual separation, no border dividers */}
       <div className="space-y-4 pt-4">
-        {/* (3) Execution Engine + Embeddings side-by-side grid */}
+        {/* (1) Connections Hub + Embeddings side-by-side grid */}
         <div
           ref={el => {
-            sectionRefs.current['execution'] = el;
+            sectionRefs.current['connections'] = el;
             // 'embeddings' tab maps to this same row
             sectionRefs.current['embeddings'] = el;
           }}
           className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start"
         >
-          {/* Execution Engine card */}
-          <div className="rounded-xl border border-border bg-panel p-5">
-            <div className="flex items-center gap-2 mb-4">
-              <Zap size={15} className="text-accent flex-shrink-0" />
-              <span className="text-sm font-semibold text-[var(--text)]">Execution Engine</span>
-            </div>
-            <ExecutionEngineSection />
-          </div>
+          {/* Connections Hub card */}
+          <ConnectionsHubSection />
 
           {/* Embeddings / Semantic Engine card */}
           <div className="rounded-xl border border-border bg-panel p-5">
@@ -426,27 +418,22 @@ export function ProviderSettingsTab() {
           </div>
         </div>
 
+        {/* (2) Workflow Router */}
+        <div ref={el => { sectionRefs.current['workflow-router'] = el; }}>
+          <WorkflowRouterSection />
+        </div>
+
+        {/* (3) Model Browser */}
+        <div ref={el => { sectionRefs.current['model-browser'] = el; }}>
+          <ModelBrowserContainer />
+        </div>
+
         {/* (4) Model Routing card */}
         <div ref={el => { sectionRefs.current['routing'] = el; }}>
           <ModelRoutingSection />
         </div>
 
-        {/* (5) Model Browser */}
-        <div ref={el => { sectionRefs.current['model-browser'] = el; }}>
-          <ModelBrowserContainer />
-        </div>
-
-        {/* (5b) Workflow Router */}
-        <div ref={el => { sectionRefs.current['workflow-router'] = el; }}>
-          <WorkflowRouterSection />
-        </div>
-
-        {/* (6) Providers + API Keys */}
-        <div ref={el => { sectionRefs.current['providers'] = el; }}>
-          <ConnectionsHubSection />
-        </div>
-
-        {/* (7) Display card */}
+        {/* (5) Display card */}
         <div ref={el => { sectionRefs.current['display'] = el; }}>
           <DisplaySection />
         </div>
