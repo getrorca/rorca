@@ -2934,24 +2934,43 @@ const RUNTIME_SEGMENTS: { value: string; label: string; installedKey: keyof CliI
 
 // ─── Workflow Router Section ──────────────────────────────────────────────
 
+// Provider options that require API keys (vault keys)
+const API_PROVIDER_OPTIONS: { value: string; label: string }[] = [
+  { value: 'anthropic', label: 'Anthropic API' },
+  { value: 'openrouter', label: 'OpenRouter' },
+  { value: 'openai-compat', label: 'OpenAI-Compatible' },
+];
+
 function WorkflowRouterSection() {
   const toast = useGlobalToast();
   const [configs, setConfigs] = useState<WorkflowConfig[]>([]);
   const [loading, setLoading] = useState(true);
   const [cliStatus, setCliStatus] = useState<CliInstallStatus>({ opencodeInstalled: false, codexInstalled: false });
+  const [vaultKeys, setVaultKeys] = useState<ApiKeyEntry[]>([]);
 
   useEffect(() => {
     Promise.all([
       apiFetch<WorkflowConfig[]>('/api/workflow-router'),
       apiFetch<CliInstallStatus>('/api/config'),
+      apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
     ])
-      .then(([cfgs, status]) => {
+      .then(([cfgs, status, keyData]) => {
         setConfigs(cfgs);
         setCliStatus({ opencodeInstalled: status.opencodeInstalled, codexInstalled: status.codexInstalled });
+        setVaultKeys(keyData.keys);
       })
       .catch(() => { /* silently fail — table shows empty */ })
       .finally(() => setLoading(false));
   }, []);
+
+  // Providers that have a configured vault key
+  const configuredProviders = useMemo(() => {
+    const providerSet = new Set(vaultKeys.map(k => k.provider));
+    return API_PROVIDER_OPTIONS.filter(p => providerSet.has(p.value));
+  }, [vaultKeys]);
+
+  // Set of providers with vault keys (for warning badge check)
+  const vaultProviderSet = useMemo(() => new Set(vaultKeys.map(k => k.provider)), [vaultKeys]);
 
   // Sort by canonical order
   const sorted = useMemo(() => {
@@ -2979,6 +2998,27 @@ function WorkflowRouterSection() {
       // Revert on failure
       setConfigs(cs => cs.map(c => c.workflowId === 'pipeline_execution' ? prev : c));
       toast.show('Failed to update runtime', 'error');
+    }
+  }, [configs, toast]);
+
+  const handleProviderChange = useCallback(async (workflowId: string, newProvider: string) => {
+    const prev = configs.find(c => c.workflowId === workflowId);
+    if (!prev || prev.provider === newProvider) return;
+
+    // Optimistic update
+    setConfigs(cs => cs.map(c => c.workflowId === workflowId ? { ...c, provider: newProvider } : c));
+
+    try {
+      const updated = await apiFetch<{ workflowId: string; runtime: string; provider: string; model: string | null; updatedAt: string }>(
+        `/api/workflow-router/${workflowId}`,
+        { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ provider: newProvider }) },
+      );
+      setConfigs(cs => cs.map(c => c.workflowId === workflowId
+        ? { ...c, provider: updated.provider, model: updated.model, updatedAt: updated.updatedAt }
+        : c));
+    } catch {
+      setConfigs(cs => cs.map(c => c.workflowId === workflowId ? prev : c));
+      toast.show('Failed to update provider', 'error');
     }
   }, [configs, toast]);
 
@@ -3064,7 +3104,47 @@ function WorkflowRouterSection() {
                       )}
                     </td>
                     <td className="py-3 pr-4">
-                      <span className="text-[var(--text)]">{cfg.provider}</span>
+                      {(() => {
+                        // Pipeline execution: locked when runtime is 'claude' or 'codex'
+                        const isProviderLocked = isPipeline && (cfg.runtime === 'claude' || cfg.runtime === 'codex');
+                        // Warning: selected provider is an API provider but has no vault key
+                        const needsWarning = cfg.provider !== 'claude-cli' && !vaultProviderSet.has(cfg.provider);
+
+                        if (isProviderLocked) {
+                          return (
+                            <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-surface-100 text-muted">
+                              <Lock size={10} className="flex-shrink-0" />
+                              claude-cli
+                            </span>
+                          );
+                        }
+
+                        return (
+                          <div className="inline-flex items-center gap-1.5">
+                            <select
+                              value={cfg.provider}
+                              onChange={e => handleProviderChange(cfg.workflowId, e.target.value)}
+                              className="px-2 py-1 text-xs bg-panel border border-border rounded focus:border-accent outline-none text-[var(--text)] cursor-pointer appearance-none pr-6"
+                              style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='10' height='10' viewBox='0 0 24 24' fill='none' stroke='%236b7280' stroke-width='2'%3E%3Cpath d='M6 9l6 6 6-6'/%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 6px center' }}
+                            >
+                              {configuredProviders.map(p => (
+                                <option key={p.value} value={p.value}>{p.label}</option>
+                              ))}
+                              {/* Show current value even if its key was removed */}
+                              {cfg.provider !== 'claude-cli' && !configuredProviders.some(p => p.value === cfg.provider) && (
+                                <option value={cfg.provider}>
+                                  {API_PROVIDER_OPTIONS.find(p => p.value === cfg.provider)?.label ?? cfg.provider}
+                                </option>
+                              )}
+                            </select>
+                            {needsWarning && (
+                              <span title="API key not configured for this provider" className="text-amber-400 flex-shrink-0">
+                                <AlertTriangle size={12} />
+                              </span>
+                            )}
+                          </div>
+                        );
+                      })()}
                     </td>
                     <td className="py-3">
                       <span className="text-[var(--text)] font-mono text-xs">
