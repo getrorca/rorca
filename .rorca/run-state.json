@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T09:48:04.007Z",
+  "lastUpdatedAt": "2026-04-04T09:49:15.913Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -123,6 +123,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 461710
+    },
+    {
+      "storyId": "QRW-013",
+      "title": "Backend integration — graceful degradation retries without reasoning on provider error",
+      "status": "passed",
+      "startedAt": "2026-04-04T09:48:25.725Z",
+      "finishedAt": "2026-04-04T09:49:15.913Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 50188
     }
   ],
   "failedStories": [],
