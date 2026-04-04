@@ -2,7 +2,7 @@
   "specId": "rorca-workflow-router",
   "runId": 20260316000091,
   "startedAt": "2026-04-04T06:06:05.615Z",
-  "lastUpdatedAt": "2026-04-04T07:27:32.995Z",
+  "lastUpdatedAt": "2026-04-04T07:36:50.656Z",
   "completedStories": [
     {
       "storyId": "WR-001",
@@ -173,6 +173,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 226043
+    },
+    {
+      "storyId": "WR-018",
+      "title": "Cleanup — remove OpenRouter key input from ExecutionEngineSection, confirm single source in ConnectionsHub",
+      "status": "passed",
+      "startedAt": "2026-04-04T07:27:58.538Z",
+      "finishedAt": "2026-04-04T07:36:50.655Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 532117
     }
   ],
   "failedStories": [],
