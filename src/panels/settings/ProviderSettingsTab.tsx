@@ -2919,15 +2919,36 @@ const WORKFLOW_LABELS: Record<string, { name: string; description: string }> = {
 
 const WORKFLOW_ORDER = ['spec_generation', 'pipeline_execution', 'memory_consolidation'];
 
+// ─── Runtime Segment Options ──────────────────────────────────────────────
+
+interface CliInstallStatus {
+  opencodeInstalled: boolean;
+  codexInstalled: boolean;
+}
+
+const RUNTIME_SEGMENTS: { value: string; label: string; installedKey: keyof CliInstallStatus | null }[] = [
+  { value: 'claude', label: 'Claude', installedKey: null }, // always installed
+  { value: 'opencode', label: 'OpenCode', installedKey: 'opencodeInstalled' },
+  { value: 'codex', label: 'Codex', installedKey: 'codexInstalled' },
+];
+
 // ─── Workflow Router Section ──────────────────────────────────────────────
 
 function WorkflowRouterSection() {
+  const toast = useGlobalToast();
   const [configs, setConfigs] = useState<WorkflowConfig[]>([]);
   const [loading, setLoading] = useState(true);
+  const [cliStatus, setCliStatus] = useState<CliInstallStatus>({ opencodeInstalled: false, codexInstalled: false });
 
   useEffect(() => {
-    apiFetch<WorkflowConfig[]>('/api/workflow-router')
-      .then(data => setConfigs(data))
+    Promise.all([
+      apiFetch<WorkflowConfig[]>('/api/workflow-router'),
+      apiFetch<CliInstallStatus>('/api/config'),
+    ])
+      .then(([cfgs, status]) => {
+        setConfigs(cfgs);
+        setCliStatus({ opencodeInstalled: status.opencodeInstalled, codexInstalled: status.codexInstalled });
+      })
       .catch(() => { /* silently fail — table shows empty */ })
       .finally(() => setLoading(false));
   }, []);
@@ -2937,6 +2958,29 @@ function WorkflowRouterSection() {
     const map = new Map(configs.map(c => [c.workflowId, c]));
     return WORKFLOW_ORDER.map(id => map.get(id)).filter(Boolean) as WorkflowConfig[];
   }, [configs]);
+
+  const handleRuntimeChange = useCallback(async (newRuntime: string) => {
+    const prev = configs.find(c => c.workflowId === 'pipeline_execution');
+    if (!prev || prev.runtime === newRuntime) return;
+
+    // Optimistic update
+    setConfigs(cs => cs.map(c => c.workflowId === 'pipeline_execution' ? { ...c, runtime: newRuntime } : c));
+
+    try {
+      const updated = await apiFetch<{ workflowId: string; runtime: string; provider: string; model: string | null; updatedAt: string }>(
+        '/api/workflow-router/pipeline_execution',
+        { method: 'PUT', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify({ runtime: newRuntime }) },
+      );
+      // Apply server response
+      setConfigs(cs => cs.map(c => c.workflowId === 'pipeline_execution'
+        ? { ...c, runtime: updated.runtime, provider: updated.provider, model: updated.model, updatedAt: updated.updatedAt }
+        : c));
+    } catch {
+      // Revert on failure
+      setConfigs(cs => cs.map(c => c.workflowId === 'pipeline_execution' ? prev : c));
+      toast.show('Failed to update runtime', 'error');
+    }
+  }, [configs, toast]);
 
   return (
     <div className="rounded-xl border border-border bg-panel p-5">
@@ -2979,6 +3023,7 @@ function WorkflowRouterSection() {
             ) : (
               sorted.map(cfg => {
                 const label = WORKFLOW_LABELS[cfg.workflowId];
+                const isPipeline = cfg.workflowId === 'pipeline_execution';
                 return (
                   <tr key={cfg.workflowId} className="border-b border-border/50 last:border-0">
                     <td className="py-3 pr-4">
@@ -2986,9 +3031,37 @@ function WorkflowRouterSection() {
                       <div className="text-xs text-muted mt-0.5">{label?.description ?? ''}</div>
                     </td>
                     <td className="py-3 pr-4">
-                      <span className="inline-flex items-center px-2 py-0.5 rounded text-xs font-medium bg-surface-100 text-[var(--text)]">
-                        {cfg.runtime}
-                      </span>
+                      {isPipeline ? (
+                        <div className="inline-flex rounded-lg border border-border overflow-hidden">
+                          {RUNTIME_SEGMENTS.map(seg => {
+                            const isActive = cfg.runtime === seg.value;
+                            const isInstalled = seg.installedKey === null || cliStatus[seg.installedKey];
+                            return (
+                              <button
+                                key={seg.value}
+                                onClick={() => handleRuntimeChange(seg.value)}
+                                className={`flex items-center gap-1.5 px-2.5 py-1 text-xs font-medium transition-colors ${
+                                  isActive
+                                    ? 'bg-accent/10 text-accent'
+                                    : 'bg-panel text-muted hover:text-[var(--text)] hover:bg-surface-100'
+                                }`}
+                              >
+                                <span
+                                  className={`inline-block w-1.5 h-1.5 rounded-full flex-shrink-0 ${
+                                    isInstalled ? 'bg-emerald-500' : 'bg-amber-500'
+                                  }`}
+                                />
+                                {seg.label}
+                              </button>
+                            );
+                          })}
+                        </div>
+                      ) : (
+                        <span className="inline-flex items-center gap-1.5 px-2 py-0.5 rounded text-xs font-medium bg-surface-100 text-muted">
+                          <Lock size={10} className="flex-shrink-0" />
+                          Native Engine
+                        </span>
+                      )}
                     </td>
                     <td className="py-3 pr-4">
                       <span className="text-[var(--text)]">{cfg.provider}</span>
