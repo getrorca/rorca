@@ -6,6 +6,7 @@ import { synthesize } from '../lib/direction-stack';
 import { chatComplete } from '../lib/llm-client';
 import { DEFAULT_MODEL, ALL_MODELS, getModelsForProviders, fetchOpenRouterModels } from '../lib/llm-client';
 import type { ProviderType, ModelInfo } from '../lib/llm-client';
+import { detectCapability } from '../lib/reasoning-detector';
 import { validateDirectionYaml, getPreviewWarnings } from '../lib/direction-validator';
 import { getVaultKey } from './vault';
 import { logger } from '../lib/logger';
@@ -446,6 +447,7 @@ router.get('/models', async (req: Request, res: Response, next: NextFunction) =>
         speedTier: info.speedTier,
         costTier: info.costTier,
         recommended: info.id === recommendedId,
+        reasoningCapability: detectCapability(info.id),
       })),
       defaultModel: recommendedId,
       configuredProviders,
