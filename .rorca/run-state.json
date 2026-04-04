@@ -2,7 +2,7 @@
   "specId": "qa-reasoning-engine-workflow-router",
   "runId": 20260316000097,
   "startedAt": "2026-04-04T08:10:02.760Z",
-  "lastUpdatedAt": "2026-04-04T09:29:04.232Z",
+  "lastUpdatedAt": "2026-04-04T09:40:01.832Z",
   "completedStories": [
     {
       "storyId": "QRW-001",
@@ -103,6 +103,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 946011
+    },
+    {
+      "storyId": "QRW-011",
+      "title": "Backend integration — chatComplete handles reasoning params for all 3 providers",
+      "status": "passed",
+      "startedAt": "2026-04-04T09:29:22.987Z",
+      "finishedAt": "2026-04-04T09:40:01.832Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 638845
     }
   ],
   "failedStories": [],
