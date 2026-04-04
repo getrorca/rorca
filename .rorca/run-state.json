@@ -2,7 +2,7 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T07:15:30.654Z",
+  "lastUpdatedAt": "2026-04-04T07:22:19.249Z",
   "completedStories": [
     {
       "storyId": "RE-004",
@@ -25,14 +25,14 @@
       "elapsedMs": 309907
     },
     {
-      "storyId": "RE-006",
-      "title": "OpenCode reasoning pass-through in execution-engine.ts",
+      "storyId": "RE-007",
+      "title": "Reasoning config stored in spec JSON and read on pipeline trigger",
       "status": "passed",
-      "startedAt": "2026-04-04T07:07:36.648Z",
-      "finishedAt": "2026-04-04T07:15:30.653Z",
+      "startedAt": "2026-04-04T07:07:36.483Z",
+      "finishedAt": "2026-04-04T07:22:19.249Z",
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
-      "elapsedMs": 474005
+      "elapsedMs": 882766
     }
   ],
   "failedStories": [],
