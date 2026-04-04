@@ -2,7 +2,7 @@
   "specId": "rorca-workflow-router",
   "runId": 20260316000091,
   "startedAt": "2026-04-04T06:06:05.615Z",
-  "lastUpdatedAt": "2026-04-04T06:32:35.935Z",
+  "lastUpdatedAt": "2026-04-04T06:37:42.762Z",
   "completedStories": [
     {
       "storyId": "WR-001",
@@ -73,6 +73,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 69745
+    },
+    {
+      "storyId": "WR-008",
+      "title": "Migrate specs.ts spec generation to use resolveWorkflowConfig('spec_generation')",
+      "status": "passed",
+      "startedAt": "2026-04-04T06:32:55.081Z",
+      "finishedAt": "2026-04-04T06:37:42.761Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 287680
     }
   ],
   "failedStories": [],
