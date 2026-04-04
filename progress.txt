@@ -3,7 +3,8 @@
 Spec: rorca-reasoning-engine
 Run ID: 20260316000094
 Started: 2026-04-04T06:37:36.897Z
-Last Updated: 2026-04-04T06:53:58.866Z
+Last Updated: 2026-04-04T07:00:59.075Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - RE-004: Provider-agnostic reasoning mapping in llm-client.ts — DONE (claude, claude-sonnet-4-6, 699s)
+- RE-008: Reasoning controls in SpecsPanel.tsx Forge brief flow — DONE (claude, claude-sonnet-4-6, 382s)
