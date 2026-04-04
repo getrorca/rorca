@@ -2,7 +2,7 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T06:53:58.866Z",
+  "lastUpdatedAt": "2026-04-04T07:04:34.202Z",
   "completedStories": [
     {
       "storyId": "RE-004",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 699266
+    },
+    {
+      "storyId": "RE-013",
+      "title": "Reasoning model highlighting in model selector dropdown",
+      "status": "passed",
+      "startedAt": "2026-04-04T06:54:37.341Z",
+      "finishedAt": "2026-04-04T07:04:34.202Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 596861
     }
   ],
   "failedStories": [],

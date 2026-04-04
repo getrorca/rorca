@@ -141,6 +141,15 @@ export interface ModelInfo {
   contextWindow: number;
   speedTier: SpeedTier;
   costTier: CostTier;
+  /** Whether this model supports reasoning/thinking. */
+  supportsReasoning?: boolean;
+  /** Effort levels supported (e.g. ['low', 'medium', 'high', 'max']). */
+  effortLevels?: string[];
+  /**
+   * Raw OpenRouter metadata (supported_parameters etc.) for reasoning detection.
+   * Populated only for OpenRouter-sourced models.
+   */
+  metadata?: { supported_parameters?: string[] };
 }
 
 /** All known models across providers. */
@@ -711,7 +720,9 @@ export async function fetchOpenRouterModels(apiKey: string): Promise<ModelInfo[]
     data: Array<{
       id: string;
       name: string;
+      context_length?: number;
       pricing?: { prompt?: string; completion?: string };
+      supported_parameters?: string[];
     }>;
   };
 
@@ -726,9 +737,10 @@ export async function fetchOpenRouterModels(apiKey: string): Promise<ModelInfo[]
       providerType: 'openrouter' as ProviderType,
       costPer1kInput: inputCost,
       costPer1kOutput: outputCost,
-      contextWindow: CONTEXT_WINDOW_OVERRIDES[m.id] ?? (m as any).context_length ?? 128000,
+      contextWindow: CONTEXT_WINDOW_OVERRIDES[m.id] ?? m.context_length ?? 128000,
       speedTier: 'medium' as SpeedTier,
       costTier: (avgCost === 0 ? 'free' : avgCost < 0.002 ? 'low' : avgCost < 0.01 ? 'medium' : avgCost < 0.05 ? 'high' : 'premium') as CostTier,
+      metadata: m.supported_parameters ? { supported_parameters: m.supported_parameters } : undefined,
     };
   });
 }
