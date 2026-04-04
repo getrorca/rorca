@@ -1030,11 +1030,12 @@ const PipelineTriggerSchema = z.object({
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().int().positive().optional(),
   effortLevel: z.enum(['low', 'medium', 'high']).optional(),
+  reasoningEffort: z.string().optional(),
 });
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, thinkingEnabled, thinkingBudget, effortLevel } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = req.body;
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1071,7 +1072,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         }
       }
 
-      const estimate = await estimateDryRunCost(specJson, workspaceId, model);
+      const dryRunReasoningOptions = thinkingEnabled !== undefined
+        ? { enabled: Boolean(thinkingEnabled), effort: reasoningEffort ?? effortLevel ?? undefined }
+        : undefined;
+      const estimate = await estimateDryRunCost(specJson, workspaceId, model, dryRunReasoningOptions);
       res.json({ dryRun: true, estimate });
       return;
     }
@@ -1097,6 +1101,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const specLevelModel: string | null = specModelJson.model ?? null;
     // Read spec-level agent override saved by SpecModelControlBar (PUT /api/specs/:id)
     const specLevelAgent: AgentType | null = specModelJson.agentOverride ?? null;
+    // Read spec-level reasoning config — used as defaults when trigger request omits reasoning params
+    const specReasoning: { enabled: boolean; effort?: string } | undefined = specModelJson.reasoning;
+    const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined ? thinkingEnabled : (specReasoning?.enabled ?? undefined);
+    const resolvedReasoningEffort: string | undefined = reasoningEffort ?? specReasoning?.effort;
     // Model chain: request modelOverride > spec model > wfConfig.model (replaces agentConfig.agentModel + L3 lookup)
     const resolvedAgentModel: string | null = modelOverride ?? specLevelModel ?? wfConfig.model;
 
@@ -1607,9 +1615,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       triggeredVia,
       includeGraph: includeGraph ?? false,
       ...(agentOverride ? { agentOverride } : {}),
-      ...(thinkingEnabled !== undefined ? { thinkingEnabled } : {}),
+      ...(resolvedThinkingEnabled !== undefined ? { thinkingEnabled: resolvedThinkingEnabled } : {}),
       ...(thinkingBudget !== undefined ? { thinkingBudget } : {}),
       ...(effortLevel ? { effortLevel } : {}),
+      ...(resolvedReasoningEffort ? { reasoningEffort: resolvedReasoningEffort } : {}),
     };
 
     await getBoss().send('pipeline:run', jobPayload, {
@@ -3770,7 +3779,7 @@ interface ModelPricingRow {
   output_cost_per_1k: number;
 }
 
-async function recordTokenUsage(runId: number, storyId: string, inputTokens: number, outputTokens: number, model?: string) {
+async function recordTokenUsage(runId: number, storyId: string, inputTokens: number, outputTokens: number, model?: string, reasoningTokens?: number) {
   const run = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: string } | undefined;
   if (!run) return;
 
@@ -3781,8 +3790,8 @@ async function recordTokenUsage(runId: number, storyId: string, inputTokens: num
     ? (inputTokens / 1000) * pricing.input_cost_per_1k + (outputTokens / 1000) * pricing.output_cost_per_1k
     : 0;
 
-  await execute(`INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd)
-     VALUES ($1, $2, $3, $4, $5, $6, $7)`, [runId, storyId, run.workspace_id, modelName, inputTokens, outputTokens, Math.round(costUsd * 1_000_000) / 1_000_000]);
+  await execute(`INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, reasoning_tokens, cost_usd)
+     VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [runId, storyId, run.workspace_id, modelName, inputTokens, outputTokens, reasoningTokens ?? 0, Math.round(costUsd * 1_000_000) / 1_000_000]);
 }
 
 // ─── POST /api/pipeline/story-result — Record story outcome from run-loop.ts ──
@@ -3825,12 +3834,12 @@ router.post('/story-result', async (req: Request, res: Response) => {
   try {
     const {
       runId, storyId, status, worktreePath, worktreeBranch,
-      inputTokens, outputTokens, modelUsed, costUsd,
+      inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
       logPath, blockedBy, activeSkills,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string;
-      inputTokens?: number; outputTokens?: number; modelUsed?: string; costUsd?: number;
+      inputTokens?: number; outputTokens?: number; reasoningTokens?: number; modelUsed?: string; costUsd?: number;
       logPath?: string; blockedBy?: string[]; activeSkills?: string[];
     };
 
@@ -3855,7 +3864,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
 
     // Also record into token_usage analytics table if tokens are present
     if ((inputTokens && inputTokens > 0) || (outputTokens && outputTokens > 0)) {
-      recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, modelUsed);
+      recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, modelUsed, reasoningTokens ?? 0);
     }
 
     res.status(201).json({ ok: true });
@@ -3904,7 +3913,7 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
   try {
     const runId = parseInt(String(req.params.runId), 10);
     const storyId = String(req.params.storyId);
-    const { inputTokens, outputTokens, model } = req.body as { inputTokens?: number; outputTokens?: number; model?: string };
+    const { inputTokens, outputTokens, reasoningTokens, model } = req.body as { inputTokens?: number; outputTokens?: number; reasoningTokens?: number; model?: string };
 
     if (isNaN(runId)) {
       throw new ValidationError('Invalid runId');
@@ -3927,7 +3936,7 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
     await execute(`UPDATE story_results SET input_tokens = COALESCE($1, input_tokens), output_tokens = COALESCE($2, output_tokens) WHERE id = $3`, [inputTokens ?? null, outputTokens ?? null, row.id]);
 
     // Also record into token_usage analytics table
-    recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, model);
+    recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, model, reasoningTokens ?? 0);
 
     res.json({ ok: true });
   } catch (error: any) {

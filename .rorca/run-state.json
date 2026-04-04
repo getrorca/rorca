@@ -1,188 +1,48 @@
 {
-  "specId": "rorca-workflow-router",
-  "runId": 20260316000091,
-  "startedAt": "2026-04-04T06:06:05.615Z",
-  "lastUpdatedAt": "2026-04-04T07:36:50.656Z",
+  "specId": "rorca-reasoning-engine",
+  "runId": 20260316000094,
+  "startedAt": "2026-04-04T06:37:36.897Z",
+  "lastUpdatedAt": "2026-04-04T07:32:34.259Z",
   "completedStories": [
     {
-      "storyId": "WR-001",
-      "title": "DB migration — create workflow_configs table with constraints and seed rows",
+      "storyId": "RE-004",
+      "title": "Provider-agnostic reasoning mapping in llm-client.ts",
       "status": "passed",
-      "startedAt": "2026-04-04T06:06:06.481Z",
-      "finishedAt": "2026-04-04T06:06:38.186Z",
+      "startedAt": "2026-04-04T06:42:19.600Z",
+      "finishedAt": "2026-04-04T06:53:58.866Z",
       "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 31705
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 699266
     },
     {
-      "storyId": "WR-002",
-      "title": "New lib workflow-config-resolver.ts — resolveWorkflowConfig with full fallback chain",
+      "storyId": "RE-015",
+      "title": "Graceful degradation: retry without reasoning on provider error",
       "status": "passed",
-      "startedAt": "2026-04-04T06:06:53.686Z",
-      "finishedAt": "2026-04-04T06:20:11.050Z",
+      "startedAt": "2026-04-04T06:54:37.201Z",
+      "finishedAt": "2026-04-04T06:59:47.108Z",
       "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 797364
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 309907
     },
     {
-      "storyId": "WR-003",
-      "title": "New route workflow-router.ts — GET/PUT/resolved endpoints",
+      "storyId": "RE-018",
+      "title": "GET /api/config/model-capability endpoint and capability cache",
       "status": "passed",
-      "startedAt": "2026-04-04T06:20:26.475Z",
-      "finishedAt": "2026-04-04T06:24:02.101Z",
+      "startedAt": "2026-04-04T07:07:36.370Z",
+      "finishedAt": "2026-04-04T07:11:12.356Z",
       "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 215626
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 215986
     },
     {
-      "storyId": "WR-004",
-      "title": "Startup seeding — ensurePersistedConfig seeds workflow_configs from agent_config",
+      "storyId": "RE-011",
+      "title": "Cost multiplier display in Forge brief and dry-run",
       "status": "passed",
-      "startedAt": "2026-04-04T06:24:18.125Z",
-      "finishedAt": "2026-04-04T06:25:41.407Z",
+      "startedAt": "2026-04-04T07:23:03.877Z",
+      "finishedAt": "2026-04-04T07:32:34.259Z",
       "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 83282
-    },
-    {
-      "storyId": "WR-005",
-      "title": "Dual-write — PUT /api/config/agent also upserts workflow_configs pipeline_execution row",
-      "status": "passed",
-      "startedAt": "2026-04-04T06:25:56.691Z",
-      "finishedAt": "2026-04-04T06:27:19.166Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 82475
-    },
-    {
-      "storyId": "WR-006",
-      "title": "Migrate pipeline.ts trigger to use resolveWorkflowConfig for runtime + model + vault key",
-      "status": "passed",
-      "startedAt": "2026-04-04T06:27:34.355Z",
-      "finishedAt": "2026-04-04T06:31:04.977Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 210622
-    },
-    {
-      "storyId": "WR-007",
-      "title": "Migrate auto-memory.ts to use resolveWorkflowConfig('memory_consolidation')",
-      "status": "passed",
-      "startedAt": "2026-04-04T06:31:26.190Z",
-      "finishedAt": "2026-04-04T06:32:35.935Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 69745
-    },
-    {
-      "storyId": "WR-008",
-      "title": "Migrate specs.ts spec generation to use resolveWorkflowConfig('spec_generation')",
-      "status": "passed",
-      "startedAt": "2026-04-04T06:32:55.081Z",
-      "finishedAt": "2026-04-04T06:37:42.761Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 287680
-    },
-    {
-      "storyId": "WR-009",
-      "title": "Frontend ConnectionsHubSection component — one card per connection with status and key management",
-      "status": "passed",
-      "startedAt": "2026-04-04T06:38:04.586Z",
-      "finishedAt": "2026-04-04T06:44:55.939Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 411353
-    },
-    {
-      "storyId": "WR-010",
-      "title": "Frontend WorkflowRouterSection skeleton — mount, fetch, and render table",
-      "status": "passed",
-      "startedAt": "2026-04-04T06:45:19.066Z",
-      "finishedAt": "2026-04-04T06:48:51.780Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 212714
-    },
-    {
-      "storyId": "WR-011",
-      "title": "WorkflowRouterSection runtime picker — segmented control with install badges",
-      "status": "passed",
-      "startedAt": "2026-04-04T06:49:13.968Z",
-      "finishedAt": "2026-04-04T06:53:08.988Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 235020
-    },
-    {
-      "storyId": "WR-012",
-      "title": "WorkflowRouterSection provider picker — filtered select with auto-lock",
-      "status": "passed",
-      "startedAt": "2026-04-04T06:53:30.608Z",
-      "finishedAt": "2026-04-04T06:57:02.608Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 212000
-    },
-    {
-      "storyId": "WR-013",
-      "title": "WorkflowRouterSection model picker — ModelSearchSelect filtered by provider",
-      "status": "passed",
-      "startedAt": "2026-04-04T06:57:24.974Z",
-      "finishedAt": "2026-04-04T07:02:27.040Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 302066
-    },
-    {
-      "storyId": "WR-014",
-      "title": "ProviderSettingsTab tab navigation update — new tabs replacing old structure",
-      "status": "passed",
-      "startedAt": "2026-04-04T07:02:49.169Z",
-      "finishedAt": "2026-04-04T07:05:14.576Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 145407
-    },
-    {
-      "storyId": "WR-015",
-      "title": "SpecsPanel default model from workflow config — fetch resolved spec_generation config",
-      "status": "passed",
-      "startedAt": "2026-04-04T07:05:35.108Z",
-      "finishedAt": "2026-04-04T07:08:50.115Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 195007
-    },
-    {
-      "storyId": "WR-016",
-      "title": "Integration test — workflow config survives restart and resolveWorkflowConfig returns correct runtime",
-      "status": "passed",
-      "startedAt": "2026-04-04T07:09:22.388Z",
-      "finishedAt": "2026-04-04T07:23:22.742Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 840354
-    },
-    {
-      "storyId": "WR-017",
-      "title": "Backward compat test — env vars still work as fallback when DB has default seed rows",
-      "status": "passed",
-      "startedAt": "2026-04-04T07:23:46.951Z",
-      "finishedAt": "2026-04-04T07:27:32.994Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 226043
-    },
-    {
-      "storyId": "WR-018",
-      "title": "Cleanup — remove OpenRouter key input from ExecutionEngineSection, confirm single source in ConnectionsHub",
-      "status": "passed",
-      "startedAt": "2026-04-04T07:27:58.538Z",
-      "finishedAt": "2026-04-04T07:36:50.655Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 532117
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 570382
     }
   ],
   "failedStories": [],
