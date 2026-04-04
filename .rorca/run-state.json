@@ -2,7 +2,7 @@
   "specId": "rorca-workflow-router",
   "runId": 20260316000091,
   "startedAt": "2026-04-04T06:06:05.615Z",
-  "lastUpdatedAt": "2026-04-04T07:08:50.115Z",
+  "lastUpdatedAt": "2026-04-04T07:23:22.744Z",
   "completedStories": [
     {
       "storyId": "WR-001",
@@ -153,6 +153,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 195007
+    },
+    {
+      "storyId": "WR-016",
+      "title": "Integration test — workflow config survives restart and resolveWorkflowConfig returns correct runtime",
+      "status": "passed",
+      "startedAt": "2026-04-04T07:09:22.388Z",
+      "finishedAt": "2026-04-04T07:23:22.742Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 840354
     }
   ],
   "failedStories": [],
