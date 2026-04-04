@@ -2,7 +2,7 @@
   "specId": "rorca-reasoning-engine",
   "runId": 20260316000094,
   "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T07:29:54.666Z",
+  "lastUpdatedAt": "2026-04-04T07:47:51.497Z",
   "completedStories": [
     {
       "storyId": "RE-004",
@@ -43,6 +43,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 410708
+    },
+    {
+      "storyId": "RE-017",
+      "title": "Reasoning config in TriggerPopover.tsx run action",
+      "status": "passed",
+      "startedAt": "2026-04-04T07:35:05.281Z",
+      "finishedAt": "2026-04-04T07:47:51.497Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 766216
     }
   ],
   "failedStories": [],
