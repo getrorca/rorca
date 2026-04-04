@@ -805,6 +805,10 @@ const GenerateSpecSchema = z.object({
   async: z.boolean().optional(), // Force async chunked generation
   thinkingEnabled: z.boolean().optional(), // Enable extended thinking (Anthropic models)
   thinkingBudget: z.number().int().positive().max(65536).optional(), // Token budget for thinking
+  reasoning: z.object({ // Unified reasoning config (from RE-008 Reasoning Mode UI)
+    enabled: z.boolean(),
+    effort: z.string().optional(),
+  }).optional(),
 }).refine(data => !!(data.brief || data.specBrief), {
   message: 'brief (or specBrief) is required',
   path: ['brief'],
@@ -906,8 +910,11 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     const storyCount: number = rawCount === 0 ? 0 : Math.min(500, Math.max(1, rawCount || 8));
     const requestedModel: string | undefined = req.body.model;
     const multiPass: boolean = req.body.multiPass === true;
-    const thinkingEnabled: boolean = req.body.thinkingEnabled === true;
+    // Support both legacy thinkingEnabled/thinkingBudget and new reasoning object (RE-008)
+    const reasoningBody: { enabled: boolean; effort?: string } | undefined = req.body.reasoning;
+    const thinkingEnabled: boolean = reasoningBody?.enabled === true || req.body.thinkingEnabled === true;
     const thinkingBudget: number | undefined = req.body.thinkingBudget;
+    const reasoningEffort: string | undefined = reasoningBody?.effort;
 
     const effectiveTitle = title || brief;
 
@@ -2274,6 +2281,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         mermaidDiagram: mermaidDiagram || undefined,
         model: resolvedModel,
         contextUsed,
+        ...(thinkingEnabled ? { reasoning: { enabled: true, ...(reasoningEffort ? { effort: reasoningEffort } : {}) } } : {}),
       });
       specPath = writeResult.specPath;
       diagramsPath = writeResult.diagramsPath;
@@ -11182,7 +11190,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
 
     const parseResult = UpdateSpecSchema.safeParse(req.body);
     if (!parseResult.success) {
-      throw new ValidationError(parseResult.error.errors.map(e => e.message).join(', '));
+      throw new ValidationError(parseResult.error.issues.map((e: { message: string }) => e.message).join(', '));
     }
 
     const { workspaceId, model, title, _notes, autoWorktree, agentOverride, thinkingEnabled, thinkingBudget, effortLevel } = parseResult.data;
@@ -11192,7 +11200,7 @@ router.put('/:specId', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = await getWorkspace(workspaceId);
+    const workspace = await getWorkspace(String(workspaceId));
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
       return;

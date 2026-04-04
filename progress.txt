@@ -1,26 +1,12 @@
 # Run State Summary
 
-Spec: rorca-workflow-router
-Run ID: 20260316000091
-Started: 2026-04-04T06:06:05.615Z
-Last Updated: 2026-04-04T07:36:50.656Z
+Spec: rorca-reasoning-engine
+Run ID: 20260316000094
+Started: 2026-04-04T06:37:36.897Z
+Last Updated: 2026-04-04T07:32:34.259Z
 
-## Completed Stories (18)
-- WR-001: DB migration — create workflow_configs table with constraints and seed rows — DONE (claude, claude-opus-4-6, 32s)
-- WR-002: New lib workflow-config-resolver.ts — resolveWorkflowConfig with full fallback chain — DONE (claude, claude-opus-4-6, 797s)
-- WR-003: New route workflow-router.ts — GET/PUT/resolved endpoints — DONE (claude, claude-opus-4-6, 216s)
-- WR-004: Startup seeding — ensurePersistedConfig seeds workflow_configs from agent_config — DONE (claude, claude-opus-4-6, 83s)
-- WR-005: Dual-write — PUT /api/config/agent also upserts workflow_configs pipeline_execution row — DONE (claude, claude-opus-4-6, 82s)
-- WR-006: Migrate pipeline.ts trigger to use resolveWorkflowConfig for runtime + model + vault key — DONE (claude, claude-opus-4-6, 211s)
-- WR-007: Migrate auto-memory.ts to use resolveWorkflowConfig('memory_consolidation') — DONE (claude, claude-opus-4-6, 70s)
-- WR-008: Migrate specs.ts spec generation to use resolveWorkflowConfig('spec_generation') — DONE (claude, claude-opus-4-6, 288s)
-- WR-009: Frontend ConnectionsHubSection component — one card per connection with status and key management — DONE (claude, claude-opus-4-6, 411s)
-- WR-010: Frontend WorkflowRouterSection skeleton — mount, fetch, and render table — DONE (claude, claude-opus-4-6, 213s)
-- WR-011: WorkflowRouterSection runtime picker — segmented control with install badges — DONE (claude, claude-opus-4-6, 235s)
-- WR-012: WorkflowRouterSection provider picker — filtered select with auto-lock — DONE (claude, claude-opus-4-6, 212s)
-- WR-013: WorkflowRouterSection model picker — ModelSearchSelect filtered by provider — DONE (claude, claude-opus-4-6, 302s)
-- WR-014: ProviderSettingsTab tab navigation update — new tabs replacing old structure — DONE (claude, claude-opus-4-6, 145s)
-- WR-015: SpecsPanel default model from workflow config — fetch resolved spec_generation config — DONE (claude, claude-opus-4-6, 195s)
-- WR-016: Integration test — workflow config survives restart and resolveWorkflowConfig returns correct runtime — DONE (claude, claude-opus-4-6, 840s)
-- WR-017: Backward compat test — env vars still work as fallback when DB has default seed rows — DONE (claude, claude-opus-4-6, 226s)
-- WR-018: Cleanup — remove OpenRouter key input from ExecutionEngineSection, confirm single source in ConnectionsHub — DONE (claude, claude-opus-4-6, 532s)
+## Completed Stories (4)
+- RE-004: Provider-agnostic reasoning mapping in llm-client.ts — DONE (claude, claude-sonnet-4-6, 699s)
+- RE-015: Graceful degradation: retry without reasoning on provider error — DONE (claude, claude-sonnet-4-6, 310s)
+- RE-018: GET /api/config/model-capability endpoint and capability cache — DONE (claude, claude-sonnet-4-6, 216s)
+- RE-011: Cost multiplier display in Forge brief and dry-run — DONE (claude, claude-sonnet-4-6, 570s)
