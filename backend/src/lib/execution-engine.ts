@@ -110,6 +110,8 @@ interface SpecJson {
   model?: string;
   userStories?: UserStory[];
   phases?: Array<{ stories: UserStory[] }>;
+  /** Optional default reasoning config for all stories in this spec. */
+  reasoning?: { enabled: boolean; effort?: string };
 }
 
 interface EngineConfig {
