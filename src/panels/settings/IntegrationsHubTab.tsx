@@ -24,7 +24,8 @@ interface IntegrationStatus {
 interface ProviderMeta {
   name: string;
   description: string;
-  icon: React.ComponentType<{ size?: number; className?: string }>;
+  // eslint-disable-next-line @typescript-eslint/no-explicit-any
+  icon: React.ComponentType<any>;
   configTab: string;
 }
 
