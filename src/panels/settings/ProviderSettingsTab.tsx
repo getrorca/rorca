@@ -30,9 +30,20 @@ interface ProviderStatus {
   baseUrl: string | null;
 }
 
+interface ReasoningModelDefault {
+  override: 'auto' | 'force-on' | 'force-off';
+  effort: EffortLevel;
+}
+
+interface ReasoningDefaults {
+  globalAutoEnable: boolean;
+  models: Record<string, ReasoningModelDefault>;
+}
+
 interface DisplaySettings {
   defaultModel: string;
   itemsPerPage: number;
+  reasoningDefaults?: ReasoningDefaults;
 }
 
 interface DisplayModelOption {
@@ -183,7 +194,7 @@ function StatusBar() {
         agentModel: agentRes.status === 'fulfilled' ? agentRes.value.agentModel : null,
         defaultModel: displayRes.status === 'fulfilled' ? displayRes.value.defaultModel : null,
         embeddingProvider: embedProvRes.status === 'fulfilled' ? embedProvRes.value.provider : null,
-        vectorCount: embedStatusRes.status === 'fulfilled' ? (embedStatusRes.value.embeddings ?? null) : null,
+        vectorCount: embedStatusRes.status === 'fulfilled' ? (embedStatusRes.value.embeddingCount ?? null) : null,
         keyCount: keysRes.status === 'fulfilled' ? keysRes.value.keys.length : null,
       });
     }).finally(() => setLoading(false));
@@ -3273,194 +3284,5 @@ function ReasoningDefaultsSection() {
         </div>
       )}
     </div>
-  );
-}
-
-function DisplaySection() {
-  const toast = useGlobalToast();
-  const { mode, setMode } = useTheme();
-  const { workspaceId } = useWorkspace();
-  const [settings, setSettings] = useState<DisplaySettings | null>(null);
-  const [models, setModels] = useState<DisplayModelOption[]>([]);
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-
-  const [defaultModel, setDefaultModel] = useState('claude-sonnet-4-6');
-  const [itemsPerPage, setItemsPerPage] = useState(20);
-
-  // Per-workspace preferred model override
-  const [workspaceModel, setWorkspaceModel] = useState<string | null>(null);
-  const [workspaceModelInitial, setWorkspaceModelInitial] = useState<string | null>(null);
-  const [savingWorkspace, setSavingWorkspace] = useState(false);
-  const [savedWorkspace, setSavedWorkspace] = useState(false);
-
-  useEffect(() => {
-    const fetchPromises: Promise<any>[] = [
-      apiFetch<DisplaySettings>('/api/settings/display'),
-      apiFetch<{ models: DisplayModelOption[]; defaultModel: string }>(`/api/direction/models${workspaceId ? `?workspaceId=${workspaceId}` : ''}`),
-    ];
-    if (workspaceId) {
-      fetchPromises.push(
-        apiFetch<{ contentYaml: string; preferredModel: string | null }>(`/api/direction?layer=3&workspaceId=${workspaceId}`)
-      );
-    }
-
-    Promise.all(fetchPromises).then(([displayData, modelData, l3Data]) => {
-      setSettings(displayData);
-      setDefaultModel(displayData.defaultModel);
-      setItemsPerPage(displayData.itemsPerPage);
-      setModels(modelData.models);
-      if (l3Data) {
-        setWorkspaceModel(l3Data.preferredModel);
-        setWorkspaceModelInitial(l3Data.preferredModel);
-      }
-    }).catch(() => { })
-      .finally(() => setLoading(false));
-  }, [workspaceId]);
-
-  const saveDisplay = async () => {
-    setSaving(true);
-    setSaved(false);
-    try {
-      await apiFetch('/api/settings/display', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ defaultModel, itemsPerPage }),
-      });
-      setSettings(prev => prev ? { ...prev, defaultModel, itemsPerPage } : prev);
-      setSaved(true);
-      toast.show('Display settings saved', 'success');
-      setTimeout(() => setSaved(false), 2000);
-    } catch {
-      toast.show('Failed to save display settings', 'error');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  const saveWorkspaceModel = async (modelId: string | null) => {
-    if (!workspaceId) return;
-    setSavingWorkspace(true);
-    setSavedWorkspace(false);
-    try {
-      const l3 = await apiFetch<{ contentYaml: string; preferredModel: string | null }>(`/api/direction?layer=3&workspaceId=${workspaceId}`);
-      await apiFetch('/api/direction', {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          layer: 3,
-          workspaceId,
-          contentYaml: l3.contentYaml || '',
-          preferredModel: modelId,
-          skipValidation: true,
-        }),
-      });
-      setWorkspaceModel(modelId);
-      setWorkspaceModelInitial(modelId);
-      setSavedWorkspace(true);
-      setTimeout(() => setSavedWorkspace(false), 2000);
-    } catch {
-      // silent
-    } finally {
-      setSavingWorkspace(false);
-    }
-  };
-
-  if (loading) {
-    return <div className="flex items-center gap-2 text-muted text-sm"><Loader2 size={16} className="animate-spin" /> Loading display settings...</div>;
-  }
-
-  const hasChanges = settings !== null && defaultModel !== settings.defaultModel;
-
-  return (
-      <div className="rounded-xl border border-border bg-panel p-5">
-        {/* Card header */}
-        <div className="flex items-center gap-2 mb-4">
-          <SlidersHorizontal size={15} className="text-accent" />
-          <span className="text-sm font-semibold text-[var(--text)]">Display</span>
-        </div>
-
-        {/* Two-column grid: Theme | Default Model */}
-        <div className="grid grid-cols-1 sm:grid-cols-2 gap-6">
-          {/* Theme */}
-          <div>
-            <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">Theme</p>
-            <div className="flex rounded-lg border border-border overflow-hidden">
-              {(['light', 'dark', 'system'] as ThemeMode[]).map((m, i) => (
-                <button
-                  key={m}
-                  onClick={() => setMode(m)}
-                  className={`flex-1 px-3 py-1.5 text-xs capitalize transition-colors ${i > 0 ? 'border-l border-border' : ''} ${mode === m
-                      ? 'bg-accent text-white'
-                      : 'bg-bg text-muted hover:text-[var(--text)]'
-                    }`}
-                >
-                  {m}
-                </button>
-              ))}
-            </div>
-          </div>
-
-          {/* Default Model */}
-          <div>
-            <p className="text-xs font-semibold text-muted uppercase tracking-wider mb-2">Default Model</p>
-            <div className="flex gap-2 items-center">
-              <div className="flex-1 min-w-0">
-                <ModelSearchSelect
-                  models={models}
-                  value={defaultModel}
-                  defaultModelId={null}
-                  onChange={setDefaultModel}
-                />
-              </div>
-              {hasChanges && (
-                <button
-                  onClick={saveDisplay}
-                  disabled={saving}
-                  className="px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors shrink-0"
-                >
-                  {saving ? <Loader2 size={12} className="animate-spin inline" /> : saved ? <Check size={12} className="inline" /> : 'Save'}
-                </button>
-              )}
-            </div>
-          </div>
-        </div>
-
-        {/* Workspace Model Override — full-width row below grid */}
-        {workspaceId && (
-          <div className="mt-6 pt-5 border-t border-border">
-            <div className="flex items-center justify-between mb-2">
-              <p className="text-xs font-semibold text-muted uppercase tracking-wider">Workspace Model Override</p>
-              {savedWorkspace && (
-                <span className="flex items-center gap-1 text-xs text-green-500"><Check size={12} /> Saved</span>
-              )}
-            </div>
-            <div className="flex gap-2 items-center">
-              <div className="flex-1 min-w-0">
-                <ModelSearchSelect
-                  models={[
-                    { id: '', label: `Use global default (${models.find(m => m.id === defaultModel)?.label ?? defaultModel})`, provider: '', costPer1kInput: 0, costPer1kOutput: 0, recommended: false },
-                    ...models,
-                  ]}
-                  value={workspaceModel ?? ''}
-                  defaultModelId={null}
-                  onChange={modelId => setWorkspaceModel(modelId || null)}
-                  disabled={savingWorkspace}
-                />
-              </div>
-              <button
-                onClick={() => saveWorkspaceModel(workspaceModel)}
-                disabled={savingWorkspace || workspaceModel === workspaceModelInitial}
-                className="px-3 py-1.5 text-xs bg-accent text-white rounded hover:bg-accent/90 disabled:opacity-50 transition-colors shrink-0"
-              >
-                {savingWorkspace ? <Loader2 size={12} className="animate-spin inline" /> : 'Save'}
-              </button>
-            </div>
-          </div>
-        )}
-
-        {/* itemsPerPage deprecated */}
-      </div>
   );
 }
