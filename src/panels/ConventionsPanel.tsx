@@ -11,7 +11,7 @@ import {
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
-import { useToast, ToastContainer } from '../components/Toast';
+import { useGlobalToast } from '../contexts/ToastContext';
 import AppHeader from '../components/AppHeader';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -94,7 +94,8 @@ const CONFIDENCE_COLORS: Record<string, string> = {
 
 export default function ConventionsPanel() {
   const { workspaceId } = useWorkspace();
-  const { toasts, show: showToast, dismiss } = useToast();
+  const toast = useGlobalToast();
+  const showToast = toast.show;
 
   const [proposals, setProposals] = useState<ProposalItem[]>([]);
   const [loading, setLoading] = useState(true);
@@ -343,7 +344,6 @@ export default function ConventionsPanel() {
         </div>
       )}
 
-      <ToastContainer toasts={toasts} onDismiss={dismiss} />
     </div>
   );
 }
