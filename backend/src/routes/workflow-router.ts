@@ -174,9 +174,12 @@ router.put('/:workflowId', async (req: Request, res: Response) => {
   try {
     const workflowId = req.params.workflowId as string;
 
-    // Validate workflowId
+    // Validate workflowId — treat unknown values as input validation errors (422)
     if (!(VALID_WORKFLOW_IDS as readonly string[]).includes(workflowId)) {
-      throw new NotFoundError(`Unknown workflowId: ${workflowId}`);
+      throw new UnprocessableError(
+        `Invalid workflowId: '${workflowId}'. Must be one of: ${VALID_WORKFLOW_IDS.join(', ')}`,
+        { workflowId, allowed: VALID_WORKFLOW_IDS },
+      );
     }
 
     // Parse and validate body
