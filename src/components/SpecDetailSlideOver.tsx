@@ -386,6 +386,7 @@ function SpecDetailContent({
 
   // Stories
   const [localStories, setLocalStories] = useState<Story[]>([]);
+  const storiesInitialized = useRef(false);
 
   // Run state
   const [runState, setRunState] = useState<'idle' | 'triggering' | 'conflict' | 'queued' | 'success' | 'error'>('idle');
@@ -429,6 +430,7 @@ function SpecDetailContent({
     if (!specId || !workspaceId) return;
     let cancelled = false;
     setDetailLoading(true);
+    storiesInitialized.current = false; // reset so fresh fetch re-populates stories
 
     apiFetch<SpecDetailData>(`/api/specs/${specId}?workspaceId=${workspaceId}`)
       .then(d => { if (!cancelled) setDetail(d); })
@@ -445,8 +447,15 @@ function SpecDetailContent({
     return () => { cancelled = true; };
   }, [specId, workspaceId, initialSummary]);
 
-  // Sync stories from detail
-  useEffect(() => { setLocalStories(detail?.userStories ?? detail?.stories ?? []); }, [detail]);
+  // Sync stories from detail — only on initial load, not on spec-level field updates
+  // (spec model/engine changes update `detail` but should not clobber story model overrides)
+  useEffect(() => {
+    const incoming = detail?.userStories ?? detail?.stories ?? [];
+    if (!storiesInitialized.current && incoming.length > 0) {
+      setLocalStories(incoming);
+      storiesInitialized.current = true;
+    }
+  }, [detail]);
 
   // Sync autoWorktree from detail (default true for specs without the field)
   useEffect(() => { setIsolateInBranch(detail?.autoWorktree !== false); }, [detail]);
@@ -716,8 +725,8 @@ function SpecDetailContent({
 
           {/* Tab content */}
           <div role="tabpanel" className="flex-1 overflow-y-auto">
-            {activeTab === 'stories' && (
-              <StoriesTabContent stories={stories} specId={specId} workspaceId={workspaceId ?? ''}
+            {activeTab === 'stories' && workspaceId && (
+              <StoriesTabContent stories={stories} specId={specId} workspaceId={workspaceId}
                 onToggleExclude={summary?.status === 'approved' ? handleToggleExclude : undefined}
                 onStoryUpdated={(updated) => setLocalStories(prev => prev.map(s => s.id === updated.id ? { ...s, ...updated } : s))}
                 specModelFields={{
@@ -938,14 +947,19 @@ function ModelBadge({ story, specId, workspaceId, specModel, onModelChanged }: {
   }, [open, models.length]);
 
   const patchModel = async (model: string | null) => {
+    console.log('[ModelBadge] patchModel called', { model, specId, storyId: story.id, workspaceId });
     setSaving(true);
     try {
       const result = await apiFetch<{ ok: boolean; story: Story }>(`/api/specs/${specId}/stories/${story.id}`, {
         method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ workspaceId, model: model ?? '' }),
       });
+      console.log('[ModelBadge] patchModel success', result);
       onModelChanged(result.story);
       setOpen(false);
+    } catch (err) {
+      console.error('[ModelBadge] patchModel failed', err);
     } finally {
       setSaving(false);
     }
@@ -983,16 +997,31 @@ function ModelBadge({ story, specId, workspaceId, specModel, onModelChanged }: {
       {open && (
         <div className="absolute left-0 top-full mt-1 z-50 w-64 bg-panel border border-border rounded-md shadow-lg p-2 space-y-2">
           <p className="text-[10px] text-muted px-1">Model override for this story</p>
-          <select
-            className="w-full text-xs bg-bg border border-border rounded px-2 py-1.5 text-text overflow-y-auto max-h-40"
-            size={Math.min(models.length + 1, 6)}
-            value={story.model ?? ''}
-            onChange={e => patchModel(e.target.value || null)}
-            disabled={saving}
-          >
-            <option value="">{specModel ? `spec default (${specModel})` : 'auto (let pipeline decide)'}</option>
-            {models.map(m => <option key={m} value={m}>{m}</option>)}
-          </select>
+          <div className="w-full text-xs bg-bg border border-border rounded overflow-y-auto max-h-40">
+            <button
+              type="button"
+              disabled={saving}
+              onClick={() => patchModel(null)}
+              className={`w-full text-left px-2 py-1.5 hover:bg-accent/10 transition-colors disabled:opacity-50 ${
+                !story.model ? 'bg-accent/15 text-accent' : 'text-text'
+              }`}
+            >
+              {specModel ? `spec default (${specModel})` : 'auto (let pipeline decide)'}
+            </button>
+            {models.map(m => (
+              <button
+                key={m}
+                type="button"
+                disabled={saving}
+                onClick={() => patchModel(m)}
+                className={`w-full text-left px-2 py-1.5 hover:bg-accent/10 transition-colors disabled:opacity-50 ${
+                  story.model === m ? 'bg-accent/15 text-accent' : 'text-text'
+                }`}
+              >
+                {m}
+              </button>
+            ))}
+          </div>
           <button
             onClick={() => patchModel(null)}
             disabled={saving || !hasStoryOverride}
