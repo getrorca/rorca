@@ -1,27 +1,9 @@
 # Run State Summary
 
-Spec: qa-reasoning-engine-workflow-router
-Run ID: 20260316000097
-Started: 2026-04-04T08:10:02.760Z
-Last Updated: 2026-04-04T10:52:04.445Z
+Spec: rorca-browser-mcp-integration
+Run ID: 20260316000161
+Started: 2026-04-12T03:44:38.262Z
+Last Updated: 2026-04-12T03:46:28.523Z
 
-## Completed Stories (19)
-- QRW-001: Type check — zero errors on both frontend and backend after merge — DONE (claude, claude-sonnet-4-6, 598s)
-- QRW-002: DB migration — workflow_configs table exists with correct schema and seed data — DONE (claude, claude-sonnet-4-6, 183s)
-- QRW-003: DB migration — reasoning_tokens column exists in token_usage table — DONE (claude, claude-sonnet-4-6, 621s)
-- QRW-004: API — GET /api/workflow-router returns 3 rows with correct shape — DONE (claude, claude-sonnet-4-6, 81s)
-- QRW-005: API — PUT /api/workflow-router/:workflowId validates and persists — DONE (claude, claude-sonnet-4-6, 179s)
-- QRW-006: API — GET /api/workflow-router/resolved/:workflowId returns full fallback chain — DONE (claude, claude-sonnet-4-6, 272s)
-- QRW-007: API — GET /api/config/model-capability returns correct ReasoningCapability — DONE (claude, claude-sonnet-4-6, 222s)
-- QRW-008: Unit tests — reasoning-detector.ts covers all 4 detection paths — DONE (claude, claude-sonnet-4-6, 463s)
-- QRW-009: Unit tests — workflow-config-resolver.ts covers fallback chain and validation — DONE (claude, claude-sonnet-4-6, 74s)
-- QRW-010: Backend integration — pipeline trigger uses resolveWorkflowConfig not raw env vars — DONE (claude, claude-sonnet-4-6, 946s)
-- QRW-011: Backend integration — chatComplete handles reasoning params for all 3 providers — DONE (claude, claude-sonnet-4-6, 639s)
-- QRW-012: Backend integration — execution-engine passes reasoning flags to Claude and OpenCode subprocesses — DONE (claude, claude-sonnet-4-6, 462s)
-- QRW-013: Backend integration — graceful degradation retries without reasoning on provider error — DONE (claude, claude-sonnet-4-6, 50s)
-- QRW-014: Backend integration — spec generation writes reasoning field to spec JSON — DONE (claude, claude-sonnet-4-6, 357s)
-- QRW-015: Frontend — ConnectionsHubSection component renders and manages vault keys — DONE (claude, claude-sonnet-4-6, 435s)
-- QRW-016: Frontend — WorkflowRouterSection renders matrix table with interactive controls — DONE (claude, claude-sonnet-4-6, 391s)
-- QRW-017: Frontend — ReasoningDefaultsSection renders and saves per-model defaults — DONE (claude, claude-sonnet-4-6, 345s)
-- QRW-018: Frontend — reasoning controls in Forge brief and TriggerPopover — DONE (claude, claude-sonnet-4-6, 1380s)
-- QRW-019: Frontend — model picker shows reasoning badges and filter chip — DONE (claude, claude-sonnet-4-6, 731s)
+## Completed Stories (1)
+- BMC-001: Add browserMcp flag to UserStory and SpecJson interfaces + storyWantsBrowserMcp helper — DONE (claude, claude-sonnet-4-6, 110s)
