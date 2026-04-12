@@ -35,18 +35,6 @@ export interface ScoringThresholds {
   // score sonnet+1..∞ → opus
 }
 
-export interface CascadeModelIds {
-  haiku: string;
-  sonnet: string;
-  opus: string;
-}
-
-export interface EscalationConfig {
-  enabled: boolean;
-  maxRetriesOnTier: number;
-  escalateTo: Record<string, ModelTier | null>;  // e.g. { haiku: 'sonnet', sonnet: 'opus', opus: null }
-}
-
 export type RouterMode = 'auto' | 'fixed' | 'manual';
 
 export type TaskType = 'echolocation' | 'planning' | 'coding' | 'lintFix' | 'testing' | 'documentation';
@@ -64,9 +52,7 @@ export type CapabilityMismatchMode = 'warn' | 'reroute' | 'block';
 export interface OrchestrationConfig {
   router: RouterMode;
   thresholds: ScoringThresholds;
-  cascades: Record<string, CascadeModelIds>;
   taskCascades: Record<TaskType, string>;
-  escalation: EscalationConfig;
   tokenBudgetPerStory: number;
   /** Secondary engine for rate limit overflow rerouting. null = disabled. */
   fallbackEngine: 'claude' | 'opencode' | 'codex' | null;
@@ -81,39 +67,6 @@ const DEFAULT_THRESHOLDS: ScoringThresholds = {
   sonnet: 65,
 };
 
-const DEFAULT_CASCADES: Record<string, CascadeModelIds> = {
-  anthropic: {
-    haiku: 'claude-haiku-4-5-20251001',
-    sonnet: 'claude-sonnet-4-6',
-    opus: 'claude-opus-4-6',
-  },
-  openai: {
-    haiku: 'gpt-4o-mini',
-    sonnet: 'gpt-4o',
-    opus: 'o3',
-  },
-  google: {
-    haiku: 'gemini-2.0-flash',
-    sonnet: 'gemini-2.0-flash',
-    opus: 'gemini-2.5-pro',
-  },
-  openrouter: {
-    haiku: 'anthropic/claude-haiku-4-5-20251001',
-    sonnet: 'anthropic/claude-sonnet-4-6',
-    opus: 'anthropic/claude-opus-4-6',
-  },
-  ollama: {
-    haiku: 'llama3',
-    sonnet: 'codellama',
-    opus: 'codellama',
-  },
-  github: {
-    haiku: 'copilot',
-    sonnet: 'copilot',
-    opus: 'copilot',
-  },
-};
-
 const DEFAULT_TASK_CASCADES: Record<TaskType, string> = {
   echolocation: 'claude-haiku-4-5-20251001',
   planning: 'claude-sonnet-4-6',
@@ -124,16 +77,6 @@ const DEFAULT_TASK_CASCADES: Record<TaskType, string> = {
 };
 
 const DEFAULT_TOKEN_BUDGET_PER_STORY = 50000;
-
-const DEFAULT_ESCALATION: EscalationConfig = {
-  enabled: true,
-  maxRetriesOnTier: 2,
-  escalateTo: {
-    haiku: 'sonnet',
-    sonnet: 'opus',
-    opus: null,  // no further escalation
-  },
-};
 
 // ─── Keyword Detection ──────────────────────────────────────────────────────
 
@@ -223,9 +166,7 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
   const defaults: OrchestrationConfig = {
     router: 'auto',
     thresholds: { ...DEFAULT_THRESHOLDS },
-    cascades: { ...DEFAULT_CASCADES },
     taskCascades: { ...DEFAULT_TASK_CASCADES },
-    escalation: { ...DEFAULT_ESCALATION, escalateTo: { ...DEFAULT_ESCALATION.escalateTo } },
     tokenBudgetPerStory: DEFAULT_TOKEN_BUDGET_PER_STORY,
     fallbackEngine: null,
     capabilityMismatch: 'warn',
@@ -271,42 +212,13 @@ export function loadOrchestrationConfig(cwd?: string): OrchestrationConfig {
         haiku: parseThreshold(orch.thresholds?.haiku, DEFAULT_THRESHOLDS.haiku),
         sonnet: parseThreshold(orch.thresholds?.sonnet, DEFAULT_THRESHOLDS.sonnet),
       },
-      cascades: { ...DEFAULT_CASCADES },
       taskCascades: { ...DEFAULT_TASK_CASCADES },
-      escalation: {
-        enabled: typeof orch.escalation?.enabled === 'boolean' ? orch.escalation.enabled : DEFAULT_ESCALATION.enabled,
-        maxRetriesOnTier: typeof orch.escalation?.maxRetriesOnTier === 'number' ? orch.escalation.maxRetriesOnTier : DEFAULT_ESCALATION.maxRetriesOnTier,
-        escalateTo: { ...DEFAULT_ESCALATION.escalateTo },
-      },
       tokenBudgetPerStory: typeof orch.tokenBudgetPerStory === 'number' && orch.tokenBudgetPerStory > 0
         ? orch.tokenBudgetPerStory
         : DEFAULT_TOKEN_BUDGET_PER_STORY,
       fallbackEngine: parsedFallback,
       capabilityMismatch: parsedMismatch,
     };
-
-    // Merge user-provided escalateTo overrides
-    if (orch.escalation?.escalateTo && typeof orch.escalation.escalateTo === 'object') {
-      for (const [fromTier, toTier] of Object.entries(orch.escalation.escalateTo)) {
-        if (toTier === null || (typeof toTier === 'string' && ['haiku', 'sonnet', 'opus'].includes(toTier))) {
-          config.escalation.escalateTo[fromTier] = toTier as ModelTier | null;
-        }
-      }
-    }
-
-    // Merge user-provided cascade overrides (provider → tier model IDs)
-    if (orch.cascades && typeof orch.cascades === 'object') {
-      for (const [provider, tiers] of Object.entries(orch.cascades)) {
-        if (tiers && typeof tiers === 'object') {
-          const t = tiers as Record<string, unknown>;
-          config.cascades[provider] = {
-            haiku: typeof t.haiku === 'string' ? t.haiku : (DEFAULT_CASCADES[provider]?.haiku ?? ''),
-            sonnet: typeof t.sonnet === 'string' ? t.sonnet : (DEFAULT_CASCADES[provider]?.sonnet ?? ''),
-            opus: typeof t.opus === 'string' ? t.opus : (DEFAULT_CASCADES[provider]?.opus ?? ''),
-          };
-        }
-      }
-    }
 
     // Merge user-provided task cascade overrides (taskType → model ID)
     if (orch.taskCascades && typeof orch.taskCascades === 'object') {
@@ -479,38 +391,3 @@ export function score(
   return { tier, score: totalScore, signals };
 }
 
-/**
- * Resolve a ModelTier to a concrete model ID for a given provider.
- *
- * @param tier - The assigned model tier
- * @param provider - Provider name (e.g. 'anthropic', 'openai', 'google')
- * @param cwd - Workspace root for config loading
- * @returns The concrete model ID string
- */
-/**
- * Get the next escalation tier for a given tier.
- * Returns null if no further escalation is possible (opus or escalation disabled).
- */
-export function getNextEscalationTier(
-  currentTier: ModelTier,
-  cwd?: string,
-): ModelTier | null {
-  const config = loadOrchestrationConfig(cwd);
-  if (!config.escalation.enabled) return null;
-  const next = config.escalation.escalateTo[currentTier];
-  return next ?? null;
-}
-
-export function resolveModelId(
-  tier: ModelTier,
-  provider: string,
-  cwd?: string,
-): string {
-  const config = loadOrchestrationConfig(cwd);
-  const providerCascade = config.cascades[provider];
-  if (!providerCascade) {
-    // Fall back to anthropic cascade
-    return config.cascades.anthropic[tier];
-  }
-  return providerCascade[tier];
-}
