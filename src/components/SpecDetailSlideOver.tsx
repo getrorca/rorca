@@ -11,7 +11,7 @@ import {
   X, Clock, CheckCircle2, XCircle, AlertCircle,
   Download, Copy, Check, Play, GitFork, GitBranch,
   Loader2, Plus, Sparkles, Trash2, History, FileSearch, Paperclip,
-  FileText, FileImage, File, ZoomIn, Cpu,
+  FileText, FileImage, File, ZoomIn, Cpu, Globe,
 } from 'lucide-react';
 import type { Attachment } from '../types/attachment';
 import { BASE_URL } from '../lib/apiFetch';
@@ -663,6 +663,12 @@ function SpecDetailContent({
             {(detail?.model ?? summary.model) && (
               <span className="px-1.5 py-0.5 text-[10px] font-mono rounded bg-panel border border-border">
                 {detail?.model ?? summary.model}
+              </span>
+            )}
+            {(detail?.browserMcp as boolean) === true && (
+              <span className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-xs bg-purple-500/10 text-purple-400 border border-purple-500/20">
+                <Globe className="w-3 h-3" />
+                Browser MCP
               </span>
             )}
           </div>
