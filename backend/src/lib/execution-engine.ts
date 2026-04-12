@@ -97,6 +97,13 @@ interface UserStory {
   reviewers?: string[];
   /** SK-002: LLM-suggested skills from spec generation. */
   suggestedSkills?: Array<{ name: string; relevance: number; reason: string }>;
+  /**
+   * Per-story browser MCP override.
+   * true  = inject browser tools for this story.
+   * false = opt out even if spec.browserMcp is true.
+   * undefined = inherit from spec.browserMcp (defaults to false).
+   */
+  browserMcp?: boolean;
 }
 
 interface SpecJson {
@@ -108,6 +115,11 @@ interface SpecJson {
   phases?: Array<{ stories: UserStory[] }>;
   /** Optional default reasoning config for all stories in this spec. */
   reasoning?: { enabled: boolean; effort?: string };
+  /**
+   * When true, all stories in this spec receive @playwright/mcp browser tools.
+   * Story-level browserMcp overrides this value (true or false).
+   */
+  browserMcp?: boolean;
 }
 
 interface EngineConfig {
@@ -137,6 +149,12 @@ interface EngineConfig {
   thinkingBudget?: number;
   /** Effort level hint for models that support it (e.g. 'low'|'medium'|'high'). */
   effortLevel?: 'low' | 'medium' | 'high' | 'max';
+}
+
+/** Returns true if this story should receive @playwright/mcp browser tools. */
+function storyWantsBrowserMcp(story: UserStory, spec: SpecJson): boolean {
+  if (story.browserMcp !== undefined) return story.browserMcp;
+  return spec.browserMcp ?? false;
 }
 
 // ─── Per-Story Agent Resolution ──────────────────────────────────────────────
