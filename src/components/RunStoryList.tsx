@@ -1,6 +1,6 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText, Github, Share2 } from 'lucide-react';
+import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText, Github, Share2, Globe } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { fetchStoryOutput, retryRun } from '../api/pipeline';
 import type { WalEvent } from '../hooks/usePipelineSSE';
@@ -146,6 +146,7 @@ interface MergedStory {
   githubStatusPending: boolean; // US-027: true when commit status is being posted to GitHub
   prSyncPending: boolean; // US-034: true transiently when PR body is being updated
   graphHits: number | null; // US-007: graph node hit count from WAL event payload
+  browserMcp: boolean; // BMC-005: true when story_started WAL event has browser_mcp: true
 }
 
 // ─── Live elapsed timer ──────────────────────────────────────────────────────
@@ -299,6 +300,10 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
             <Share2 size={10} />
             Graph{story.graphHits != null ? `: ${story.graphHits} hits` : ''}
           </span>
+        )}
+        {/* BMC-005: Browser MCP indicator — shown when story_started WAL event has browser_mcp: true */}
+        {story.browserMcp && (
+          <Globe className="w-3 h-3 text-purple-400 shrink-0" title="Browser MCP active" />
         )}
         {/* Blocked by badge — grey with upstream story ID */}
         {isBlocked && story.blockedBy && story.blockedBy.length > 0 && (
@@ -676,6 +681,23 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
     return map;
   }, [walEvents, includeGraph]);
 
+  // BMC-005: Extract browser_mcp flag per story from story_started WAL event payloads
+  const browserMcpStoryIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const evt of walEvents) {
+      if (!evt.story_id) continue;
+      if (evt.event_type === 'story_started' && evt.payload) {
+        try {
+          const payload = typeof evt.payload === 'string' ? JSON.parse(evt.payload) : evt.payload;
+          if (payload.browser_mcp === true) {
+            set.add(evt.story_id);
+          }
+        } catch { /* ignore */ }
+      }
+    }
+    return set;
+  }, [walEvents]);
+
   // Merge spec stories with results to derive status
   const mergedStories = useMemo(() => {
     const source: SpecStory[] = specStories.length > 0
@@ -748,9 +770,10 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
         githubStatusPending: status === 'running' || status === 'retry',
         prSyncPending: prSyncActive && (status === 'pass' || status === 'fail'),
         graphHits: graphHitsMap.get(spec.id) ?? null,
+        browserMcp: browserMcpStoryIds.has(spec.id),
       };
     });
-  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents, prSyncActive, graphHitsMap]);
+  }, [specStories, storyResults, resultMap, runningStoryIds, storyStartTimes, rateLimitedStories, retryingStories, walEvents, prSyncActive, graphHitsMap, browserMcpStoryIds]);
 
   // Build merged story lookup
   const mergedMap = useMemo(() => {
