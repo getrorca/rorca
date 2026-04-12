@@ -953,6 +953,14 @@ router.post('/preflight', async (req: Request, res: Response) => {
     const report = checkSpec(stories, resolvedAgent);
     const orchConfig = loadOrchestrationConfig(workspace.path);
 
+    let browserMcpAvailable = false;
+    try {
+      require.resolve('@playwright/mcp');
+      browserMcpAvailable = true;
+    } catch {
+      browserMcpAvailable = false;
+    }
+
     res.json({
       compatible: report.compatible,
       mismatchMode: orchConfig.capabilityMismatch,
@@ -964,6 +972,8 @@ router.post('/preflight', async (req: Request, res: Response) => {
         missingTools: s.result.missingTools,
         warnings: s.result.warnings,
       })),
+      browserMcpAvailable,
+      browserMcpPort: 4040,
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Preflight');
