@@ -31,7 +31,7 @@ import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
 import { loadRorcaConfig } from '../lib/rorca-config';
 import { getWorkspaceEnvVars } from './env-vars';
-import { score as scoreStory, resolveModelId, type ScorerStory } from '../lib/complexity-scorer';
+import { score as scoreStory, type ScorerStory } from '../lib/complexity-scorer';
 // git-hydrator imports removed — git_memory column dropped in migration 075
 import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
@@ -11652,15 +11652,7 @@ router.post('/:id/assign-models', async (req: Request, res: Response) => {
       return;
     }
 
-    // Determine provider prefix for model resolution
-    // For claude agent: always anthropic cascade
-    // For opencode: parse provider from RORCA_MODEL (e.g. "openai/gpt-4o" → "openai")
-    let provider = 'anthropic';
-    if (agent === 'opencode' && modelEnv.includes('/')) {
-      provider = modelEnv.split('/')[0].toLowerCase();
-    }
-
-    // Score each story and build breakdown
+    // Score each story for complexity display (model cascading has been removed)
     const scorerStories: ScorerStory[] = userStories.map(s => ({
       id: String(s.id ?? ''),
       title: String(s.title ?? ''),
@@ -11674,26 +11666,16 @@ router.post('/:id/assign-models', async (req: Request, res: Response) => {
     for (const story of scorerStories) {
       const result = scoreStory(story, scorerStories, workspace.path as string);
       const complexity: 'low' | 'medium' | 'high' = result.tier === 'haiku' ? 'low' : result.tier === 'sonnet' ? 'medium' : 'high';
-      const model = resolveModelId(result.tier, provider, workspace.path as string);
       breakdown.push({
         storyId: story.id,
         complexity,
-        model,
+        model: modelEnv || '(user-configured)',
         reason: result.signals.join('; ') || 'default scoring',
       });
     }
 
-    // Write story.model to spec JSON unless dryRun
-    if (!dryRun) {
-      for (let i = 0; i < userStories.length; i++) {
-        const entry = breakdown[i];
-        if (entry) {
-          userStories[i].model = entry.model;
-        }
-      }
-      specContent.userStories = userStories;
-      fs.writeFileSync(specFile, JSON.stringify(specContent, null, 2), 'utf8');
-    }
+    // Model cascading removed — stories use the user's configured model.
+    // No per-story model overrides are written to spec JSON.
 
     res.json({
       storiesAssigned: breakdown.length,
