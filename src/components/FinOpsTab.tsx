@@ -1,5 +1,5 @@
 import { useState, useEffect, useCallback, useMemo } from 'react';
-import { ChevronDown, ChevronRight, Download, TrendingDown, ArrowUpRight, Info } from 'lucide-react';
+import { ChevronDown, ChevronRight, Download, Info } from 'lucide-react';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -23,27 +23,9 @@ interface RunSummaryRow {
   cost: number;
 }
 
-interface EscalationEntry {
-  storyId: string;
-  fromTier: string;
-  toTier: string;
-  attemptNumber: number;
-  errorCategory: string | null;
-  errorMessage: string | null;
-  ts: string;
-  additionalCost: number;
-}
-
 interface ModelDistEntry {
   tier: string;
   count: number;
-  percentage: number;
-}
-
-interface Savings {
-  opusBaseline: number;
-  actual: number;
-  saved: number;
   percentage: number;
 }
 
@@ -59,11 +41,9 @@ interface FinOpsData {
   agentType: string;
   isSubscription: boolean;
   runSummary: RunSummaryRow[];
-  savings: Savings | null;
   totals: Totals;
   modelDistribution: ModelDistEntry[];
   perStory: PerStory[];
-  escalationLog: EscalationEntry[];
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -109,7 +89,6 @@ export default function FinOpsTab({ runId }: FinOpsTabProps) {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [expandedStories, setExpandedStories] = useState(false);
-  const [expandedEscalations, setExpandedEscalations] = useState(false);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -166,29 +145,6 @@ export default function FinOpsTab({ runId }: FinOpsTabProps) {
           <div className="flex items-center gap-2 px-3 py-2 rounded-lg bg-orange-500/10 border border-orange-500/20 text-xs text-orange-400">
             <Info size={14} className="shrink-0" />
             <span>Claude subscription — token counts shown, no dollar cost (flat-rate billing).</span>
-          </div>
-        )}
-
-        {/* Savings banner (API key path only) */}
-        {data.savings && (
-          <div className="rounded-lg bg-emerald-500/10 border border-emerald-500/20 p-4">
-            <div className="flex items-center gap-2 mb-2">
-              <TrendingDown size={16} className="text-emerald-400" />
-              <span className="text-sm font-semibold text-emerald-400">Model Cascading Savings</span>
-            </div>
-            <div className="flex items-center gap-4 text-sm">
-              <span className="text-[var(--text-muted)]">
-                vs All-Opus baseline: <span className="font-mono text-[var(--text)] line-through opacity-60">{formatCost(data.savings.opusBaseline)}</span>
-              </span>
-              <span className="text-[var(--text-muted)]">&rarr;</span>
-              <span className="text-[var(--text-muted)]">
-                Actual: <span className="font-mono text-[var(--text)]">{formatCost(data.savings.actual)}</span>
-              </span>
-              <span className="text-[var(--text-muted)]">&rarr;</span>
-              <span className="font-semibold text-emerald-400">
-                Saved: {formatCost(data.savings.saved)} ({data.savings.percentage}%)
-              </span>
-            </div>
           </div>
         )}
 
@@ -361,65 +317,6 @@ export default function FinOpsTab({ runId }: FinOpsTabProps) {
           )}
         </div>
 
-        {/* Escalation log (expandable) */}
-        {data.escalationLog.length > 0 && (
-          <div className="rounded-lg bg-[var(--surface)] border border-amber-500/20 overflow-hidden">
-            <button
-              onClick={() => setExpandedEscalations(!expandedEscalations)}
-              className="w-full flex items-center justify-between px-3 py-2 text-xs font-medium text-amber-400 uppercase tracking-wide hover:bg-amber-500/5 transition-colors"
-            >
-              <span className="flex items-center gap-1.5">
-                {expandedEscalations ? <ChevronDown size={14} /> : <ChevronRight size={14} />}
-                <ArrowUpRight size={14} />
-                Escalation Log
-                <span className="normal-case font-normal text-[var(--text-muted)]">({data.escalationLog.length} escalations)</span>
-              </span>
-            </button>
-
-            {expandedEscalations && (
-              <div className="border-t border-amber-500/20">
-                <table className="w-full text-xs">
-                  <thead>
-                    <tr className="border-b border-amber-500/10">
-                      <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">Story</th>
-                      <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">From</th>
-                      <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">To</th>
-                      <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">Reason</th>
-                      {!data.isSubscription && (
-                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Extra Cost</th>
-                      )}
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {data.escalationLog.map((esc, i) => (
-                      <tr key={`${esc.storyId}-${i}`} className="border-b border-amber-500/10 last:border-0">
-                        <td className="px-3 py-1.5 font-mono">{esc.storyId}</td>
-                        <td className="px-3 py-1.5">
-                          <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded border ${TIER_BG[esc.fromTier] || ''}`}>
-                            {esc.fromTier}
-                          </span>
-                        </td>
-                        <td className="px-3 py-1.5">
-                          <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-medium rounded border ${TIER_BG[esc.toTier] || ''}`}>
-                            {esc.toTier}
-                          </span>
-                        </td>
-                        <td className="px-3 py-1.5 text-[var(--text-muted)] max-w-[200px] truncate">
-                          {esc.errorCategory || 'max retries on tier'}
-                        </td>
-                        {!data.isSubscription && (
-                          <td className="px-3 py-1.5 text-right font-mono text-amber-400">
-                            {esc.additionalCost > 0 ? `+${formatCost(esc.additionalCost)}` : '—'}
-                          </td>
-                        )}
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-              </div>
-            )}
-          </div>
-        )}
       </div>
     </div>
   );

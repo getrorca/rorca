@@ -218,7 +218,6 @@ export default function TriggerPopover({
   const [autoMerge, setAutoMerge] = useState(true);
   const [agentConfig, setAgentConfig] = useState<AgentConfigSummary | null>(null);
   const [capWarnings, setCapWarnings] = useState<CapabilityWarning[]>([]);
-  const [capMismatchMode, setCapMismatchMode] = useState<string>('warn');
   const [orchestration, setOrchestration] = useState<OrchestrationPreview | null>(null);
   const [healthBadge, setHealthBadge] = useState<HealthBadge | null>(null);
   const [contextPreview, setContextPreview] = useState<ContextPreviewData | null>(null);
@@ -288,7 +287,6 @@ export default function TriggerPopover({
     preflightCheck({ specPath, workspaceId })
       .then((report) => {
         setCapWarnings(report.stories);
-        setCapMismatchMode(report.mismatchMode);
       })
       .catch(() => {});
   }, [specPath, workspaceId]);
@@ -369,8 +367,7 @@ export default function TriggerPopover({
   const isOpenCode = agentConfig?.agentType === 'opencode';
   const noModelConfigured = isOpenCode && !agentConfig?.agentModel;
   const noApiKey = isOpenCode && !noModelConfigured && !agentConfig?.hasApiKey;
-  const isBlocked = capMismatchMode === 'block' && capWarnings.length > 0;
-  const triggerDisabled = loading || queueLoading || noModelConfigured || noApiKey || isBlocked;
+  const triggerDisabled = loading || queueLoading || noModelConfigured || noApiKey;
 
   const isCodex = agentConfig?.agentType === 'codex';
   const isOpenRouterModel = isOpenCode && agentConfig?.agentModel?.startsWith('openrouter/');
@@ -538,28 +535,17 @@ export default function TriggerPopover({
       {/* OC-031: Capability warnings */}
       {capWarnings.length > 0 && (
         <div>
-          <label className="block text-xs text-muted mb-1">
-            {isBlocked ? 'Incompatible stories' : 'Capability warnings'}
-          </label>
+          <label className="block text-xs text-muted mb-1">Capability warnings</label>
           <div className="space-y-1 max-h-24 overflow-y-auto">
             {capWarnings.map((w) => (
-              <div
-                key={w.storyId}
-                className={`flex items-start gap-1.5 ${isBlocked ? 'text-red-400' : 'text-amber-500'}`}
-              >
+              <div key={w.storyId} className="flex items-start gap-1.5 text-amber-500">
                 <AlertTriangle size={11} className="shrink-0 mt-0.5" />
                 <span className="text-[10px] leading-tight">
                   {w.storyId} uses {w.missingTools.join(', ')} — not supported by {w.engine}
-                  {capMismatchMode === 'reroute' && ', will reroute to Claude'}
                 </span>
               </div>
             ))}
           </div>
-          {isBlocked && (
-            <p className="text-[10px] text-red-400 mt-1">
-              Run blocked — change engine or set capabilityMismatch to &quot;warn&quot; or &quot;reroute&quot;
-            </p>
-          )}
         </div>
       )}
 
