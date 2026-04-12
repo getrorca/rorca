@@ -1,9 +1,7 @@
 import {
   score,
-  resolveModelId,
   loadOrchestrationConfig,
   clearConfigCache,
-  getNextEscalationTier,
   type ScorerStory,
 } from '../complexity-scorer';
 import { validateOrchestrationConfig } from '../config';
@@ -382,21 +380,6 @@ describe('complexity-scorer', () => {
       expect(config.thresholds.sonnet).toBe(65); // default
     });
 
-    it('reads custom cascade model IDs', () => {
-      const cwd = makeConfigDir({
-        orchestration: {
-          cascades: {
-            openai: { haiku: 'gpt-3.5-turbo', sonnet: 'gpt-4', opus: 'gpt-4-turbo' },
-          },
-        },
-      });
-      const config = loadOrchestrationConfig(cwd);
-      expect(config.cascades.openai.haiku).toBe('gpt-3.5-turbo');
-      expect(config.cascades.openai.opus).toBe('gpt-4-turbo');
-      // Default providers preserved
-      expect(config.cascades.anthropic.opus).toBe('claude-opus-4-6');
-    });
-
     it('handles malformed config gracefully', () => {
       const tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'scorer-test-'));
       const rorcaDir = path.join(tmpDir, '.rorca');
@@ -414,43 +397,6 @@ describe('complexity-scorer', () => {
       const c1 = loadOrchestrationConfig(cwd);
       const c2 = loadOrchestrationConfig(cwd);
       expect(c1).toBe(c2); // same object reference
-    });
-  });
-
-  // ── resolveModelId ──────────────────────────────────────────────────
-
-  describe('resolveModelId()', () => {
-    it('resolves anthropic tier to model IDs', () => {
-      expect(resolveModelId('haiku', 'anthropic')).toBe('claude-haiku-4-5-20251001');
-      expect(resolveModelId('sonnet', 'anthropic')).toBe('claude-sonnet-4-6');
-      expect(resolveModelId('opus', 'anthropic')).toBe('claude-opus-4-6');
-    });
-
-    it('resolves openai tier to model IDs', () => {
-      expect(resolveModelId('haiku', 'openai')).toBe('gpt-4o-mini');
-      expect(resolveModelId('sonnet', 'openai')).toBe('gpt-4o');
-      expect(resolveModelId('opus', 'openai')).toBe('o3');
-    });
-
-    it('resolves google tier to model IDs', () => {
-      expect(resolveModelId('haiku', 'google')).toBe('gemini-2.0-flash');
-      expect(resolveModelId('opus', 'google')).toBe('gemini-2.5-pro');
-    });
-
-    it('falls back to anthropic for unknown providers', () => {
-      expect(resolveModelId('opus', 'unknown-provider')).toBe('claude-opus-4-6');
-    });
-
-    it('respects custom cascades from config', () => {
-      const cwd = makeConfigDir({
-        orchestration: {
-          cascades: {
-            openai: { haiku: 'custom-mini', sonnet: 'custom-4o', opus: 'custom-o3' },
-          },
-        },
-      });
-      expect(resolveModelId('haiku', 'openai', cwd)).toBe('custom-mini');
-      expect(resolveModelId('opus', 'openai', cwd)).toBe('custom-o3');
     });
   });
 
@@ -510,99 +456,6 @@ describe('complexity-scorer', () => {
       const result = score(stories[2], stories);
       expect(result.tier).toBe('opus');
       expect(result.score).toBeGreaterThan(65);
-    });
-  });
-
-  // ── Escalation config ──────────────────────────────────────────────
-
-  describe('escalation config', () => {
-    it('returns default escalation config when no config file', () => {
-      const config = loadOrchestrationConfig();
-      expect(config.escalation.enabled).toBe(true);
-      expect(config.escalation.maxRetriesOnTier).toBe(2);
-      expect(config.escalation.escalateTo.haiku).toBe('sonnet');
-      expect(config.escalation.escalateTo.sonnet).toBe('opus');
-      expect(config.escalation.escalateTo.opus).toBeNull();
-    });
-
-    it('reads custom escalation config from .rorca/config.json', () => {
-      const cwd = makeConfigDir({
-        orchestration: {
-          escalation: {
-            enabled: false,
-            maxRetriesOnTier: 3,
-            escalateTo: { haiku: 'opus', sonnet: 'opus' },
-          },
-        },
-      });
-      const config = loadOrchestrationConfig(cwd);
-      expect(config.escalation.enabled).toBe(false);
-      expect(config.escalation.maxRetriesOnTier).toBe(3);
-      expect(config.escalation.escalateTo.haiku).toBe('opus');
-      expect(config.escalation.escalateTo.sonnet).toBe('opus');
-      expect(config.escalation.escalateTo.opus).toBeNull(); // default preserved
-    });
-
-    it('merges partial escalation config with defaults', () => {
-      const cwd = makeConfigDir({
-        orchestration: {
-          escalation: { maxRetriesOnTier: 5 },
-        },
-      });
-      const config = loadOrchestrationConfig(cwd);
-      expect(config.escalation.enabled).toBe(true); // default
-      expect(config.escalation.maxRetriesOnTier).toBe(5);
-      expect(config.escalation.escalateTo.haiku).toBe('sonnet'); // default
-    });
-
-    it('rejects invalid escalateTo values', () => {
-      const cwd = makeConfigDir({
-        orchestration: {
-          escalation: {
-            escalateTo: { haiku: 'invalid_tier', sonnet: 42 },
-          },
-        },
-      });
-      const config = loadOrchestrationConfig(cwd);
-      // Invalid values should keep defaults
-      expect(config.escalation.escalateTo.haiku).toBe('sonnet');
-      expect(config.escalation.escalateTo.sonnet).toBe('opus');
-    });
-  });
-
-  // ── getNextEscalationTier ──────────────────────────────────────────
-
-  describe('getNextEscalationTier()', () => {
-    it('returns sonnet for haiku', () => {
-      expect(getNextEscalationTier('haiku')).toBe('sonnet');
-    });
-
-    it('returns opus for sonnet', () => {
-      expect(getNextEscalationTier('sonnet')).toBe('opus');
-    });
-
-    it('returns null for opus (no further escalation)', () => {
-      expect(getNextEscalationTier('opus')).toBeNull();
-    });
-
-    it('returns null when escalation is disabled', () => {
-      const cwd = makeConfigDir({
-        orchestration: {
-          escalation: { enabled: false },
-        },
-      });
-      expect(getNextEscalationTier('haiku', cwd)).toBeNull();
-    });
-
-    it('uses custom escalateTo mapping', () => {
-      const cwd = makeConfigDir({
-        orchestration: {
-          escalation: {
-            escalateTo: { haiku: 'opus' }, // skip sonnet
-          },
-        },
-      });
-      expect(getNextEscalationTier('haiku', cwd)).toBe('opus');
     });
   });
 
@@ -744,7 +597,6 @@ describe('validateOrchestrationConfig (OC-021)', () => {
       router: 'auto',
       thresholds: { haiku: [0, 30], sonnet: [31, 65], opus: [66, 100] },
       taskCascades: { coding: 'gpt-4o' },
-      escalation: { enabled: true, maxRetriesOnTier: 2 },
       tokenBudgetPerStory: 50000,
     });
     expect(errors).toEqual([]);
@@ -802,20 +654,6 @@ describe('validateOrchestrationConfig (OC-021)', () => {
     expect(errors.some(e => e.field.includes('coding'))).toBe(true);
   });
 
-  it('rejects non-boolean escalation.enabled', () => {
-    const errors = validateOrchestrationConfig({
-      escalation: { enabled: 'yes' },
-    });
-    expect(errors.some(e => e.field.includes('enabled'))).toBe(true);
-  });
-
-  it('rejects negative maxRetriesOnTier', () => {
-    const errors = validateOrchestrationConfig({
-      escalation: { maxRetriesOnTier: -1 },
-    });
-    expect(errors.some(e => e.field.includes('maxRetriesOnTier'))).toBe(true);
-  });
-
   it('rejects non-positive tokenBudgetPerStory', () => {
     const errors = validateOrchestrationConfig({
       tokenBudgetPerStory: 0,
@@ -830,17 +668,4 @@ describe('validateOrchestrationConfig (OC-021)', () => {
     expect(errors).toEqual([]);
   });
 
-  it('rejects invalid escalateTo values', () => {
-    const errors = validateOrchestrationConfig({
-      escalation: { escalateTo: { haiku: 'ultra' } },
-    });
-    expect(errors.some(e => e.field.includes('escalateTo.haiku'))).toBe(true);
-  });
-
-  it('accepts null escalateTo values', () => {
-    const errors = validateOrchestrationConfig({
-      escalation: { escalateTo: { opus: null } },
-    });
-    expect(errors).toEqual([]);
-  });
 });

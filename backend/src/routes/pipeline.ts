@@ -1061,16 +1061,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         return;
       }
 
-      // Resolve model: spec-level > workspace L3 preferred_model > default
-      let model: string = DEFAULT_MODEL;
-      if (specJson.model) {
-        model = specJson.model;
-      } else {
-        const l3Pref = await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined;
-        if (l3Pref?.preferred_model) {
-          model = l3Pref.preferred_model;
-        }
-      }
+      // Model comes from spec JSON only
+      const model: string = specJson.model ?? DEFAULT_MODEL;
 
       const dryRunReasoningOptions = thinkingEnabled !== undefined
         ? { enabled: Boolean(thinkingEnabled), effort: reasoningEffort ?? effortLevel ?? undefined }
@@ -1087,12 +1079,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       return;
     }
 
-    // 3. Resolve agent type and model via Workflow Config Router (WR-006).
-    //    resolveWorkflowConfig('pipeline_execution') consults:
-    //      DB workflow_configs → agent_config → env vars → hardcoded defaults
-    //    Override chain preserved:
-    //      Agent: request agentOverride > spec agentOverride > wfConfig.runtime
-    //      Model: request modelOverride > spec model > wfConfig.model
+    // 3. Resolve agent type and model.
+    //    Model: ONLY from spec JSON or per-story override. No hidden DB/env fallbacks.
+    //    Agent runtime: request agentOverride > spec agentOverride > wfConfig.runtime
     const pipelineUser = await getEffectiveUser(req);
     const wfConfig = await resolveWorkflowConfig('pipeline_execution', pipelineUser?.id);
 
@@ -1105,19 +1094,63 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const specReasoning: { enabled: boolean; effort?: string } | undefined = specModelJson.reasoning;
     const resolvedThinkingEnabled: boolean | undefined = thinkingEnabled !== undefined ? thinkingEnabled : (specReasoning?.enabled ?? undefined);
     const resolvedReasoningEffort: string | undefined = reasoningEffort ?? specReasoning?.effort;
-    // Model chain: request modelOverride > spec model > wfConfig.model (replaces agentConfig.agentModel + L3 lookup)
-    const resolvedAgentModel: string | null = modelOverride ?? specLevelModel ?? wfConfig.model;
+    // Model comes from: request modelOverride > spec.model > null (no hidden DB/env fallbacks)
+    const resolvedAgentModel: string | null = modelOverride ?? specLevelModel;
 
     // Auto-detect agent from model string: if model has a provider prefix (e.g. openrouter/z-ai/glm-5,
     // openai/gpt-4o) it cannot run on Claude CLI — switch to opencode automatically.
-    const OPENCODE_PROVIDER_PREFIXES = ['openrouter/', 'openai/', 'google/', 'anthropic/', 'ollama/', 'github/', 'bedrock/', 'vertex/'];
+    const OPENCODE_PROVIDER_PREFIXES = ['openrouter/', 'openai/', 'google/', 'ollama/', 'github/', 'bedrock/', 'vertex/'];
+    // Note: 'anthropic/' prefix is intentionally excluded — anthropic/claude-* models must stay on Claude CLI.
+    // Only non-Claude provider prefixes trigger the OpenCode auto-switch.
     const modelNeedsOpenCode = resolvedAgentModel != null && OPENCODE_PROVIDER_PREFIXES.some(p => resolvedAgentModel.startsWith(p));
-    // Also catch bare provider/model strings like "z-ai/glm-5" that contain "/" but aren't claude- models
-    const modelIsNonClaude = resolvedAgentModel != null && resolvedAgentModel.includes('/') && !resolvedAgentModel.startsWith('claude-');
+    // Also catch bare provider/model strings like "z-ai/glm-5" that contain "/" but aren't claude- models.
+    // Exclude anthropic/claude-* (OpenRouter format for Claude models — should still use Claude CLI).
+    const modelIsNonClaude = resolvedAgentModel != null
+      && resolvedAgentModel.includes('/')
+      && !resolvedAgentModel.startsWith('claude-')
+      && !resolvedAgentModel.startsWith('anthropic/claude-');
     const wfRuntime = wfConfig.runtime as AgentType;
     const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !specLevelAgent && wfRuntime === 'claude';
     // Priority: request agentOverride > spec-level agentOverride > auto-detect from model > wfConfig.runtime
     const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : wfRuntime);
+
+    // Translate model IDs for OpenCode execution.
+    // OpenCode expects "provider/org/model" format (e.g. "openrouter/anthropic/claude-opus-4.6").
+    // Rorca stores models as either:
+    //   - Claude-style IDs: "claude-opus-4-6" (Anthropic SDK format, dashes)
+    //   - OpenRouter catalog IDs: "z-ai/glm-5", "anthropic/claude-opus-4.6" (org/model)
+    //   - Already-prefixed: "openrouter/z-ai/glm-5", "openai/gpt-4o"
+    let finalAgentModel = resolvedAgentModel;
+    if (finalAgentModel && resolvedAgentType === 'opencode') {
+      // Already has a known provider prefix — pass through as-is
+      if (modelNeedsOpenCode) {
+        // e.g. "openrouter/z-ai/glm-5", "openai/gpt-4o" — already correct
+      }
+      // Claude SDK model IDs → OpenRouter format (dashes to dots, add anthropic/ prefix)
+      else if (/^claude-/.test(finalAgentModel) && !finalAgentModel.includes('/')) {
+        // claude-opus-4-6 → anthropic/claude-opus-4.6
+        // claude-sonnet-4-6 → anthropic/claude-sonnet-4.6
+        // claude-haiku-4-5-20251001 → anthropic/claude-haiku-4.5 (strip date suffix)
+        const openRouterId = finalAgentModel
+          .replace(/-(\d+)-(\d+)(?:-\d{8})?$/, '-$1.$2')  // "4-6" → "4.6", strip date
+          .replace(/-(\d{8})$/, '');                         // catch remaining date suffixes
+        finalAgentModel = `openrouter/anthropic/${openRouterId}`;
+      }
+      // Bare org/model from OpenRouter catalog (e.g. "z-ai/glm-5", "anthropic/claude-opus-4.6")
+      else if (modelIsNonClaude) {
+        finalAgentModel = `openrouter/${finalAgentModel}`;
+      }
+    }
+
+    // When running with Claude CLI, only claude-* model IDs are valid.
+    // If the spec has an OpenRouter model (e.g. "z-ai/glm-5") but the user
+    // explicitly selected Claude CLI, clear the model so Claude uses its default.
+    if (resolvedAgentType === 'claude' && finalAgentModel) {
+      const isClaudeModel = /^claude-/.test(finalAgentModel) && !finalAgentModel.includes('/');
+      if (!isClaudeModel) {
+        finalAgentModel = null;
+      }
+    }
 
     // OC-025: Block pipeline trigger if Claude is selected but not authenticated
     if (resolvedAgentType === 'claude') {
@@ -1605,7 +1638,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       specPath,
       workspacePath: workspace.path,
       agent: resolvedAgentType,
-      model: resolvedAgentModel ?? null,
+      model: finalAgentModel ?? null,
       worktreePath: worktreePath ?? null,
       branchName: branchName ?? null,
       autoWorktree: needsWorktree,
@@ -1994,16 +2027,8 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       return;
     }
 
-    // 5. Resolve model
-    let resolvedModel: string = DEFAULT_MODEL;
-    if (requestedModel) {
-      resolvedModel = requestedModel;
-    } else {
-      const l3Pref = await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [workspaceId]) as { preferred_model: string | null } | undefined;
-      if (l3Pref?.preferred_model) {
-        resolvedModel = l3Pref.preferred_model;
-      }
-    }
+    // 5. Resolve model — from request only, no hidden DB fallbacks
+    const resolvedModel: string = requestedModel ?? DEFAULT_MODEL;
 
     // 6. Resolve vault creds for LLM call
     const user = await getEffectiveUser(req);

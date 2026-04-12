@@ -92,7 +92,22 @@ export async function estimateDryRunCost(
   );
 
   if (!pricing) {
-    throw new Error(`No pricing data for model: ${model}. Add it to model_pricing table.`);
+    // Unknown model — return a zero-cost estimate rather than crashing the trigger
+    return {
+      model,
+      stories: specJson.userStories.map(s => ({
+        storyId: s.id,
+        title: s.title,
+        estimatedInputTokens: 0,
+        estimatedOutputTokens: 0,
+        estimatedCostUsd: 0,
+      })),
+      totalInputTokens: 0,
+      totalOutputTokens: 0,
+      totalEstimatedCostUsd: 0,
+      inputCostPer1k: 0,
+      outputCostPer1k: 0,
+    };
   }
 
   // 2. Build direction stack context to estimate base input size
