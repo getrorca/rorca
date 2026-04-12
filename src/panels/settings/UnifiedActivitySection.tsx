@@ -108,7 +108,7 @@ const SPEC_EVENTS = [
 ];
 const RUN_EVENTS = [
   'run_started', 'run_finished', 'run_failed', 'run_paused', 'run_resumed',
-  'story_started', 'story_skipped', 'story_escalated',
+  'story_started', 'story_skipped',
 ];
 const AUTH_EVENTS = [
   'user_registered', 'team_created', 'team_invite_sent', 'team_invite_accepted',

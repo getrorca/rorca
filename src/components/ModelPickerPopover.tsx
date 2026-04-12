@@ -4,6 +4,7 @@ import { ChevronDown, Search, Check, Zap, Clock, Turtle, Sparkles, Brain } from 
 import { apiFetch } from '../lib/apiFetch';
 import type { ModelOption } from './ModelSearchSelect';
 
+
 // ─── Hardcoded Claude models (subscription path) ──────────────────────────────
 const CLAUDE_MODELS: ModelOption[] = [
   {
@@ -195,8 +196,6 @@ export default function ModelPickerPopover({
     openUp: boolean;
   } | null>(null);
 
-  const isDisabled = engine === 'codex';
-
   // ── Load models ────────────────────────────────────────────────────────────
   useEffect(() => {
     if (!open) return;
@@ -207,6 +206,30 @@ export default function ModelPickerPopover({
       setModels(
         CLAUDE_MODELS.map(m => ({ ...m, recommended: m.id === rec }))
       );
+      return;
+    }
+
+    if (engine === 'codex') {
+      setLoading(true);
+      apiFetch<{ models: Array<{ id: string; label: string; reasoningLevels: string[]; contextWindow: number | null; recommended: boolean }> }>('/api/config/codex-models')
+        .then(data => {
+          const rec = value || data.models[0]?.id;
+          setModels(data.models.map(m => ({
+            id: m.id,
+            label: m.label,
+            provider: 'OpenAI',
+            providerType: 'openai' as const,
+            costPer1kInput: 0,
+            costPer1kOutput: 0,
+            contextWindow: m.contextWindow ?? 200000,
+            speedTier: undefined,
+            costTier: 'subscription' as const,
+            recommended: m.id === rec,
+            supportsReasoning: m.reasoningLevels.length > 0,
+          })));
+        })
+        .catch(() => setModels([]))
+        .finally(() => setLoading(false));
       return;
     }
 
@@ -232,7 +255,7 @@ export default function ModelPickerPopover({
       setQuery('');
       setReasoningOnly(false);
       // For OpenCode, OpenRouter is the primary model source — start expanded
-      setCollapsed(engine === 'opencode' ? new Set() : new Set(['OpenRouter']));
+      setCollapsed(engine === 'opencode' || engine === 'codex' ? new Set() : new Set(['OpenRouter']));
       return;
     }
 
@@ -392,7 +415,7 @@ export default function ModelPickerPopover({
     : engine === 'claude'
       ? 'Claude Sonnet 4.6'
       : engine === 'codex'
-        ? 'ChatGPT (subscription)'
+        ? 'Select GPT model'
         : 'Select model';
 
   // ─── Render ────────────────────────────────────────────────────────────────
@@ -402,17 +425,12 @@ export default function ModelPickerPopover({
       <button
         ref={triggerRef}
         type="button"
-        onClick={() => !isDisabled && setOpen(v => !v)}
-        disabled={isDisabled}
-        title={isDisabled ? 'Model is set by your ChatGPT subscription and cannot be changed here.' : undefined}
+        onClick={() => setOpen(v => !v)}
         className={`
           inline-flex items-center gap-1.5 px-2.5 py-1.5 rounded
           border text-sm transition-colors outline-none
           bg-[var(--panel)] border-[var(--border)] text-[var(--text)]
-          ${isDisabled
-            ? 'opacity-50 cursor-not-allowed'
-            : 'hover:border-[var(--accent)]/50 focus:border-[var(--accent)] cursor-pointer'
-          }
+          hover:border-[var(--accent)]/50 focus:border-[var(--accent)] cursor-pointer
         `}
         aria-expanded={open}
         aria-haspopup="listbox"
