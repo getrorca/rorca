@@ -1,8 +1,8 @@
 {
   "specId": "rorca-reasoning-engine",
-  "runId": 20260316000094,
-  "startedAt": "2026-04-04T06:37:36.897Z",
-  "lastUpdatedAt": "2026-04-04T07:32:34.259Z",
+  "runId": 20260316000162,
+  "startedAt": "2026-04-12T03:50:46.426Z",
+  "lastUpdatedAt": "2026-04-12T03:54:01.985Z",
   "completedStories": [
     {
       "storyId": "RE-004",
@@ -43,11 +43,21 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 570382
+    },
+    {
+      "storyId": "RE-011",
+      "title": "Cost multiplier display in Forge brief and dry-run",
+      "status": "passed",
+      "startedAt": "2026-04-12T03:50:46.991Z",
+      "finishedAt": "2026-04-12T03:54:01.985Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 194994
     }
   ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
-  "resumedFromStory": null
+  "resumedFromStory": "RE-011"
 }

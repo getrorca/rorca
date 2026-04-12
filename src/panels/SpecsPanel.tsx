@@ -2133,7 +2133,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   // Capability of the currently selected model (derived from availableModels)
   const reasoningCapability = useMemo(() => {
     const m = availableModels.find(m => m.id === effectiveModelId);
-    return m?.reasoningCapability ?? { supportsReasoning: false, reasoningType: 'none' as const, effortLevels: [], defaultEffort: null, budgetTokensSupported: false, budgetRange: null, costMultiplier: 1.0 };
+    return m?.reasoningCapability ?? { supportsReasoning: false, reasoningType: 'none' as const, effortLevels: [], defaultEffort: null, budgetTokensSupported: false, budgetRange: null };
   }, [availableModels, effectiveModelId]);
 
   // Load saved prefs for a model from localStorage
