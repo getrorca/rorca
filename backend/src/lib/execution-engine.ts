@@ -28,6 +28,7 @@
 
 import { spawn, execSync, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
+import * as os from 'os';
 import * as path from 'path';
 import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
@@ -792,15 +793,16 @@ function runAgent(
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
   effortLevel?: 'low' | 'medium' | 'high' | 'max',
+  mcpServerUrl?: string | null,
 ): Promise<AgentResult> {
   switch (agentType) {
     case 'claude':
-      return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel);
+      return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel, mcpServerUrl);
     case 'opencode':
-      return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr, thinkingEnabled, thinkingBudget, effortLevel);
+      return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr, thinkingEnabled, thinkingBudget, effortLevel, mcpServerUrl);
     case 'codex':
       // thinking/effort flags are not forwarded to Codex
-      return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel);
+      return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServerUrl);
   }
 }
 
@@ -815,10 +817,22 @@ function spawnClaude(
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
   effortLevel?: 'low' | 'medium' | 'high' | 'max',
+  mcpServerUrl?: string | null,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildCleanEnv();
     const startTime = Date.now();
+
+    let mcpConfigPath: string | null = null;
+    if (mcpServerUrl) {
+      const mcpConfig = {
+        mcpServers: {
+          playwright: { type: 'http', url: mcpServerUrl },
+        },
+      };
+      mcpConfigPath = path.join(os.tmpdir(), `rorca-browser-mcp-${Date.now()}.json`);
+      fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
+    }
 
     const args = [
       '--dangerously-skip-permissions',
@@ -831,6 +845,7 @@ function spawnClaude(
       ...(thinkingEnabled ? ['--thinking'] : []),
       ...(thinkingBudget && thinkingBudget > 0 ? ['--thinking-budget', String(thinkingBudget)] : []),
       ...(effortLevel ? ['--effort', effortLevel] : []),
+      ...(mcpConfigPath ? ['--mcp-config', mcpConfigPath] : []),
       prompt,
     ];
 
@@ -973,6 +988,9 @@ function spawnClaude(
       logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
       const elapsedMs = Date.now() - startTime;
+      if (mcpConfigPath) {
+        try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
+      }
       if (code === null || watchdogFired) {
         resolve({ exitCode: 124, stderrTail, elapsedMs });
       } else {
@@ -1039,6 +1057,7 @@ function spawnOpenCode(
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
   effortLevel?: 'low' | 'medium' | 'high' | 'max',
+  mcpServerUrl?: string | null,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = {
@@ -1046,6 +1065,24 @@ function spawnOpenCode(
       ...buildOpenCodeReasoningEnv(agentModel, thinkingEnabled, thinkingBudget, effortLevel),
     };
     const startTime = Date.now();
+
+    let openCodeMcpConfigPath: string | null = null;
+    if (mcpServerUrl) {
+      openCodeMcpConfigPath = path.join(cwd, 'opencode.json');
+      // Preserve any existing opencode.json content
+      let existingConfig: Record<string, unknown> = {};
+      if (fs.existsSync(openCodeMcpConfigPath)) {
+        try { existingConfig = JSON.parse(fs.readFileSync(openCodeMcpConfigPath, 'utf8')); } catch { /* ignore */ }
+      }
+      const merged = {
+        ...existingConfig,
+        mcp: {
+          ...(existingConfig.mcp as Record<string, unknown> ?? {}),
+          playwright: { type: 'remote', url: mcpServerUrl, enabled: true },
+        },
+      };
+      fs.writeFileSync(openCodeMcpConfigPath, JSON.stringify(merged, null, 2), 'utf8');
+    }
 
     // Resolve opencode binary
     const status = detectOpenCode();
@@ -1153,6 +1190,23 @@ function spawnOpenCode(
       logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
       const elapsedMs = Date.now() - startTime;
+      if (openCodeMcpConfigPath) {
+        try {
+          const current: Record<string, unknown> = JSON.parse(fs.readFileSync(openCodeMcpConfigPath, 'utf8'));
+          const currentMcp = (current.mcp ?? {}) as Record<string, unknown>;
+          delete currentMcp.playwright;
+          if (Object.keys(currentMcp).length === 0) {
+            delete current.mcp;
+          } else {
+            current.mcp = currentMcp;
+          }
+          if (Object.keys(current).length === 0) {
+            fs.unlinkSync(openCodeMcpConfigPath);
+          } else {
+            fs.writeFileSync(openCodeMcpConfigPath, JSON.stringify(current, null, 2), 'utf8');
+          }
+        } catch { /* ignore cleanup errors */ }
+      }
       if (code === null || watchdogFired) {
         resolve({ exitCode: 124, stderrTail, elapsedMs });
       } else {
@@ -1177,10 +1231,24 @@ function spawnCodex(
   timeoutMs: number,
   logFile: string,
   model?: string | null,
+  mcpServerUrl?: string | null,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildCleanEnv();
     const startTime = Date.now();
+
+    let codexMcpRegistered = false;
+    if (mcpServerUrl) {
+      try {
+        execSync(`${CODEX_BIN} mcp add playwright --url ${mcpServerUrl}`, { stdio: 'pipe' });
+        codexMcpRegistered = true;
+        process.stdout.write(`[BrowserMCP] Registered playwright MCP in codex config\n`);
+      } catch (e: unknown) {
+        const msg = e instanceof Error ? e.message : String(e);
+        process.stdout.write(`[BrowserMCP] WARNING: Failed to register playwright MCP in codex: ${msg}\n`);
+        // codexMcpRegistered stays false — cleanup will be skipped
+      }
+    }
 
     const args: string[] = ['exec', '--dangerously-bypass-approvals-and-sandbox'];
     if (model) args.push('--model', model);
@@ -1254,6 +1322,11 @@ function spawnCodex(
       logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
       const elapsedMs = Date.now() - startTime;
+      if (codexMcpRegistered) {
+        try {
+          execSync(`${CODEX_BIN} mcp remove playwright`, { stdio: 'pipe' });
+        } catch { /* ignore if already gone */ }
+      }
       if (code === null || watchdogFired) {
         resolve({ exitCode: 124, stderrTail, elapsedMs });
       } else {
