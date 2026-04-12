@@ -165,11 +165,29 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
 
     // ── Attach chunk/output + semantic_step + done handlers to an EventSource ──
     const attachHandlers = (es: EventSource, chunkEvent: string) => {
+      let lineBuf = '';
       es.addEventListener(chunkEvent, (e: MessageEvent) => {
         try {
           receivedData = true;
           const text = decodeBase64Chunk(e.data);
-          pendingTextRef.current += text;
+          // Filter OpenCode JSON events line-by-line — same logic as RunTerminal.
+          // step_finish and tool_result contain large JSON blobs; suppress them.
+          lineBuf += text;
+          const lines = lineBuf.split('\n');
+          lineBuf = lines.pop() ?? '';
+          const display: string[] = [];
+          for (const line of lines) {
+            const trimmed = line.trim();
+            if (!trimmed) { display.push(''); continue; }
+            if (trimmed.startsWith('{')) {
+              try {
+                const ev = JSON.parse(trimmed) as { type?: string };
+                if (ev.type === 'step_finish' || ev.type === 'step_start' || ev.type === 'tool_result' || ev.type === 'system' || ev.type === 'user') continue;
+              } catch { /* not valid JSON — pass through */ }
+            }
+            display.push(line);
+          }
+          if (display.length > 0) pendingTextRef.current += display.join('\n') + '\n';
         } catch { /* ignore malformed chunk */ }
       });
 
