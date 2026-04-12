@@ -20,7 +20,7 @@
     },
     {
       "id": "RE-002",
-      "title": "ReasoningCapabilityDetector \u2014 algorithmic detection core",
+      "title": "ReasoningCapabilityDetector — algorithmic detection core",
       "description": "Build the ReasoningCapabilityDetector class in backend/src/lib/reasoning-detector.ts that algorithmically computes ReasoningCapability for any model ID without hardcoded lists. Supports Anthropic, OpenAI, and pattern-based detection.",
       "acceptanceCriteria": [
         "detectCapability(modelId: string, metadata?: OpenRouterModelMetadata): ReasoningCapability function exported from reasoning-detector.ts",
@@ -60,10 +60,10 @@
       "title": "Provider-agnostic reasoning mapping in llm-client.ts",
       "description": "Extend chatComplete() to translate the provider-agnostic ChatOptions.reasoning field into each provider's native format: Anthropic thinking blocks, OpenAI reasoning_effort, OpenRouter reasoning param. Remove the hardcoded GLM-5 reasoning logic.",
       "acceptanceCriteria": [
-        "Anthropic provider maps reasoning.enabled=true to thinking: { type: 'enabled', budget_tokens: budgetTokens ?? effort-mapped value } where effort 'low'\u21924096, 'medium'\u219216384, 'high'\u219232768",
+        "Anthropic provider maps reasoning.enabled=true to thinking: { type: 'enabled', budget_tokens: budgetTokens ?? effort-mapped value } where effort 'low'→4096, 'medium'→16384, 'high'→32768",
         "OpenAI provider maps reasoning.effort to reasoning_effort parameter in the request body when model is reasoning-capable",
         "OpenRouter provider maps reasoning to { reasoning: { effort } } in request body",
-        "The hardcoded GLM-5 reasoning: { effort: 'high' } block is removed \u2014 replaced by the generic reasoning pass-through",
+        "The hardcoded GLM-5 reasoning: { effort: 'high' } block is removed — replaced by the generic reasoning pass-through",
         "When reasoning.enabled is false or reasoning is undefined, no reasoning params are sent to any provider",
         "Integration test with mocked provider responses asserts correct native param shape for each provider"
       ],
@@ -211,8 +211,8 @@
         "RE-007"
       ],
       "complexity": 3,
-      "passes": false,
-      "notes": "Merge conflict \u2014 code passed but failed to merge into parent branch. Re-run to retry.",
+      "passes": true,
+      "notes": "Completed by Rorca engine",
       "skipped": false
     },
     {
@@ -251,8 +251,8 @@
         "RE-001"
       ],
       "complexity": 3,
-      "passes": false,
-      "notes": "Merge conflict \u2014 code passed but failed to merge into parent branch. Re-run to retry.",
+      "passes": true,
+      "notes": "Completed by Rorca engine",
       "skipped": false
     },
     {
@@ -360,7 +360,7 @@
       "notes": "Completed by Rorca engine"
     }
   ],
-  "mermaidDiagram": "graph TD\n  RE-001[\"ReasoningCapability schema and type defi\"]\n  RE-002[\"ReasoningCapabilityDetector \u2014 algorithmi\"]\n  RE-003[\"OpenRouter metadata reasoning detection\"]\n  RE-004[\"Provider-agnostic reasoning mapping in l\"]\n  RE-005[\"Claude CLI reasoning pass-through in exe\"]\n  RE-006[\"OpenCode reasoning pass-through in execu\"]\n  RE-007[\"Reasoning config stored in spec JSON and\"]\n  RE-008[\"Reasoning controls in SpecsPanel.tsx For\"]\n  RE-009[\"Reasoning badge and controls in SpecMode\"]\n  RE-010[\"Reasoning defaults table in Settings > M\"]\n  RE-011[\"Cost multiplier display in Forge brief a\"]\n  RE-012[\"FinOps dashboard: reasoning tokens break\"]\n  RE-013[\"Reasoning model highlighting in model se\"]\n  RE-014[\"rorca_model_capabilities MCP tool\"]\n  RE-015[\"Graceful degradation: retry without reas\"]\n  RE-016[\"Auto-suggest reasoning based on spec com\"]\n  RE-017[\"Reasoning config in TriggerPopover.tsx r\"]\n  RE-018[\"GET /api/config/model-capability endpoin\"]\n  RE-001 --> RE-002\n  RE-002 --> RE-003\n  RE-001 --> RE-004\n  RE-002 --> RE-004\n  RE-001 --> RE-005\n  RE-004 --> RE-005\n  RE-002 --> RE-006\n  RE-005 --> RE-006\n  RE-001 --> RE-007\n  RE-005 --> RE-007\n  RE-001 --> RE-008\n  RE-003 --> RE-008\n  RE-001 --> RE-009\n  RE-007 --> RE-009\n  RE-008 --> RE-009\n  RE-001 --> RE-010\n  RE-003 --> RE-010\n  RE-008 --> RE-011\n  RE-007 --> RE-011\n  RE-004 --> RE-012\n  RE-001 --> RE-012\n  RE-003 --> RE-013\n  RE-001 --> RE-013\n  RE-002 --> RE-014\n  RE-007 --> RE-014\n  RE-005 --> RE-014\n  RE-004 --> RE-015\n  RE-002 --> RE-015\n  RE-008 --> RE-016\n  RE-002 --> RE-016\n  RE-009 --> RE-017\n  RE-005 --> RE-017\n  RE-003 --> RE-017\n  RE-002 --> RE-018\n  RE-003 --> RE-018\n  RE-015 --> RE-018",
+  "mermaidDiagram": "graph TD\n  RE-001[\"ReasoningCapability schema and type defi\"]\n  RE-002[\"ReasoningCapabilityDetector — algorithmi\"]\n  RE-003[\"OpenRouter metadata reasoning detection\"]\n  RE-004[\"Provider-agnostic reasoning mapping in l\"]\n  RE-005[\"Claude CLI reasoning pass-through in exe\"]\n  RE-006[\"OpenCode reasoning pass-through in execu\"]\n  RE-007[\"Reasoning config stored in spec JSON and\"]\n  RE-008[\"Reasoning controls in SpecsPanel.tsx For\"]\n  RE-009[\"Reasoning badge and controls in SpecMode\"]\n  RE-010[\"Reasoning defaults table in Settings > M\"]\n  RE-011[\"Cost multiplier display in Forge brief a\"]\n  RE-012[\"FinOps dashboard: reasoning tokens break\"]\n  RE-013[\"Reasoning model highlighting in model se\"]\n  RE-014[\"rorca_model_capabilities MCP tool\"]\n  RE-015[\"Graceful degradation: retry without reas\"]\n  RE-016[\"Auto-suggest reasoning based on spec com\"]\n  RE-017[\"Reasoning config in TriggerPopover.tsx r\"]\n  RE-018[\"GET /api/config/model-capability endpoin\"]\n  RE-001 --> RE-002\n  RE-002 --> RE-003\n  RE-001 --> RE-004\n  RE-002 --> RE-004\n  RE-001 --> RE-005\n  RE-004 --> RE-005\n  RE-002 --> RE-006\n  RE-005 --> RE-006\n  RE-001 --> RE-007\n  RE-005 --> RE-007\n  RE-001 --> RE-008\n  RE-003 --> RE-008\n  RE-001 --> RE-009\n  RE-007 --> RE-009\n  RE-008 --> RE-009\n  RE-001 --> RE-010\n  RE-003 --> RE-010\n  RE-008 --> RE-011\n  RE-007 --> RE-011\n  RE-004 --> RE-012\n  RE-001 --> RE-012\n  RE-003 --> RE-013\n  RE-001 --> RE-013\n  RE-002 --> RE-014\n  RE-007 --> RE-014\n  RE-005 --> RE-014\n  RE-004 --> RE-015\n  RE-002 --> RE-015\n  RE-008 --> RE-016\n  RE-002 --> RE-016\n  RE-009 --> RE-017\n  RE-005 --> RE-017\n  RE-003 --> RE-017\n  RE-002 --> RE-018\n  RE-003 --> RE-018\n  RE-015 --> RE-018",
   "model": "claude-sonnet-4-6",
   "generatedAt": "2026-04-03T23:14:08.740Z",
   "source": "chunked-gen",
