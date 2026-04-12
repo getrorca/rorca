@@ -232,5 +232,130 @@
 
 ## 2026-04-03 [Bug Fix] Model picker merge left conflict markers in 3 files
 > Rule: The feat/rorca-spec-model-picker merge with stash/restore left `<<<<<<< Updated upstream` conflict markers in SpecDetailSlideOver.tsx, TriggerPopover.tsx, and WorktreesPanel.tsx. Blindly taking one side of conflict resolution caused missing variable definitions (hasStoryOverride, isSpecLevel, specModelFields). Fix was to restore from the last working commit (aef070f) rather than manual conflict patching.
-> Context: 
+> Context:  
 > Source: MP-008
+
+## 2026-04-06 [Bug Fix] Worker crashes on pg DatabaseError — now non-fatal
+> Rule: The unhandledRejection handler in worker.ts was triggering full shutdown on ANY unhandled rejection, including PostgreSQL errors (missing column, constraint violation). A single bad INSERT (e.g. missing reasoning_tokens column) would close the DB pool and kill the entire server. Fixed by adding isPgError check: if reason instanceof Error and has a string 'code' field (pg error codes like 42703), log and continue — do NOT call shutdown().
+> Context: Root cause of repeated "connection lost" disconnections on 2026-04-05. The reasoning_tokens column was missing from token_usage table. Every time a run completed, recordTokenUsage() threw a DatabaseError → unhandledRejection → shutdown() → pool closed → concurrently killed frontend too.
+> Source:  
+
+## 2026-04-06 [Bug Fix] Missing migrations cause server crash — apply manually when health shows pending
+> Rule: When health endpoint reports pending migrations, apply them manually before running specs. Missing columns cause unhandledRejection crashes. Apply via: node -e with Pool, run SQL, INSERT INTO schema_migrations (version, filename) VALUES (...) ON CONFLICT DO NOTHING. DB is postgres://rorca:rorca@localhost:5433/rorca (port 5433). On 2026-04-05: 5 migrations were unapplied (20260403000000 through 20260404000001) causing reasoning_tokens crash.
+> Context: Migration runner only applies on startup. If a spec run adds a migration file but the server was already running, the column won't exist until next restart + migration run. Check health.components.migrations.pending before triggering runs.
+> Source:  
+
+## 2026-04-06 [Bug Fix] Kill button 409 after backend restart — use direct SIGTERM via PID
+> Rule: After backend restarts, activeProcesses map is wiped. Kill button returns 409 "Process is no longer running" even when the execution engine subprocess is still alive. Workaround: get PID from DB (SELECT pid FROM pipeline_runs WHERE id=...) or ps aux | grep execution-engine, then kill -SIGTERM <pid> directly. The execution engine process survives backend restarts — it is completely independent.
+> Context: Execution engine is spawned by the worker as a child process. Worker restart does not kill the engine. Backend restart does not kill the engine. Only SIGTERM to the engine PID stops it.
+> Source:  
+
+## 2026-04-06 [Gotcha] Server crashes from laptop logout — npm run dev dies on SIGHUP
+> Rule: npm run dev uses concurrently. When macOS sends SIGHUP (screen lock, auto-logout timer), concurrently exits, taking frontend + backend + worker all down. Caffeine prevents display sleep but NOT auto-logout. Check System Settings → Privacy & Security → Advanced → "Log out automatically after X minutes". Permanent fix: run with nohup or launchd plist so server survives logouts. Execution engine subprocesses survive (separate processes) but the worker/backend/frontend die.
+> Context: Caused repeated unexplained disconnections on 2026-04-05. DB pool errors in logs were symptoms (pool closed during shutdown), not root cause.
+> Source:  
+
+## 2026-04-06 [Bug Fix] Ghost passes — stories marked passed with zero code written
+> Rule: Stories can pass with only spec JSON + progress.txt changes (no feature code). Fixed by adding empty-commit guard in execution-engine.ts: after agent exits 0, run git status --porcelain, filter out metadata-only changes (forge/specs/, progress.txt, .rorca/, MEMORY.md), if no meaningful files changed treat as failure and retry. Confirmed ghost pass on ask-categoric-journal-entries US-003 — only metadata committed, no dispatcher code. US-006 re-implemented the missing dispatcher as a side effect of writing tests.
+> Context: Ghost passes happened because agent would update spec JSON to mark story done but write no implementation code. The gate check (type errors, lint) passed because nothing new was added.
+> Source:  
+
+## 2026-04-06 [Bug Fix] normalizeOpenCodeModel — two-phase fix for Claude version separators
+> Rule: Three model ID formats exist: Rorca internal (claude-opus-4-6, hyphens), OpenRouter catalog (anthropic/claude-opus-4.6, dots), OpenCode CLI triple (openrouter/anthropic/claude-opus-4.6). normalizeOpenCodeModel() must do Phase 1 first: fix Claude version hyphens→dots anywhere in the string via regex replace(/(claude-[a-z]+-\d+)-(\d+)/, '$1.$2') — this catches escalation-built IDs like openrouter/anthropic/claude-sonnet-4-6. Phase 2: add provider prefix if missing. Cascade table in complexity-scorer.ts must use dot format: anthropic/claude-sonnet-4.6 not anthropic/claude-sonnet-4-6.
+> Context: Old code checked openrouter/ prefix BEFORE fixing dots, so escalation-built IDs passed through broken. Cascade table used hyphens but OpenRouter API requires dots.
+> Source:  
+
+## 2026-04-06 [Gotcha] Claude CLI model guard — clear non-Claude models when agent=claude
+> Rule: When agent is claude, only pass --model flag for valid claude-* IDs (no slashes). If spec JSON has model: "z-ai/glm-5" or any OpenRouter model from a previous run, Claude CLI will fail. Guard in pipeline.ts: if resolvedAgentType === 'claude' and finalAgentModel doesn't match /^claude-/ or contains '/', set finalAgentModel = null. Guard in execution-engine.ts: only pass --model arg if /^claude-/.test(agentModel) && !agentModel.includes('/').
+> Context: User switched from OpenRouter/GLM-5 to Claude CLI but spec JSON still had model: z-ai/glm-5. The model resolution chain passed it through to Claude CLI which rejected it.
+> Source:  
+
+## 2026-04-06 [Bug Fix] Model escalation/cascade caused surprise OpenRouter charges
+> Rule: The complexity-scorer cascading system in execution-engine.ts silently replaced the user's chosen model (e.g. openrouter/qwen/qwen3.6-plus:free) with paid models (e.g. openrouter/anthropic/claude-opus-4.6) whenever a story scored as "opus" tier. extractProvider("openrouter/qwen/...") returned "openrouter", cascade table mapped openrouter.opus → "anthropic/claude-opus-4.6", final model became "openrouter/anthropic/claude-opus-4.6" — billed to OpenRouter account. Entire escalation/cascade system removed (2026-04-06): ~540 lines across 7 files. DEFAULT_CASCADES, resolveModelId(), getNextEscalationTier(), EscalationState, escalationStates map, story_escalated WAL events, and all escalation retry logic deleted.
+> Context: Discovered by user checking OpenRouter logs during a run using free Qwen model. Multiple rogue opencode processes running --model openrouter/anthropic/claude-opus-4.6 had to be killed (PIDs 19489, 25636, 26271, 26270, 25635). They kept respawning until the worker was stopped and the code fixed. Files changed: execution-engine.ts, complexity-scorer.ts, config.ts, routes/specs.ts, routes/config.ts, ProviderSettingsTab.tsx, complexity-scorer.test.ts.
+> Source:  
+
+## 2026-04-06 [Decision] Model resolution: story.model → spec.model → RORCA_MODEL env only
+> Rule: Pipeline execution model resolution chain (as of 2026-04-06): 1) story.model (per-story field in spec JSON userStories), 2) spec.model (top-level spec JSON field, passed as --model CLI flag), 3) RORCA_MODEL env var (system default only). No workspace model, no cascading, no L3 preferred_model direction layer lookup, no workflow_configs.model, no agent_config.agent_model. Never add hidden DB/env fallbacks back into pipeline model resolution — the only valid overrides are spec.model and story.model. If a spec has no model field, the agent runs with RORCA_MODEL env or its own default.
+> Context: Previously the chain was: RORCA_MODEL → specJson.model → L3 preferred_model → null (and on top of that, cascading could override to a different tier model entirely). All hidden layers removed after escalation bug caused unexpected charges. See Bug Fix: "Model escalation/cascade caused surprise OpenRouter charges".
+> Source:  
+
+## 2026-04-06 [Bug Fix] OpenCode sub-terminal JSON blobs — MiniTerminalPane had no event filtering
+> Rule: MiniTerminalPane decoded base64 log chunks and passed them raw to the ANSI converter with zero JSON filtering. step_finish events (token counters + git snapshots) and tool_result events (full file contents as escaped JSON) rendered as walls of text. Fixed by adding line-by-line JSON parsing in the chunk handler — suppress step_finish, step_start, tool_result, system, user events before appending to pendingTextRef. The log file still receives all raw bytes (for debugging); only the display path is filtered.
+> Context: The main terminal fix (spawnOpenCode process.stdout filtering) did NOT fix sub-terminals because sub-terminals read from the log file via the /log SSE endpoint, not from process.stdout. Two separate code paths required two separate fixes.
+> Source:  
+
+## 2026-04-06 [Bug Fix] OpenCode main terminal JSON blobs — spawnOpenCode dumped all stdout raw
+> Rule: spawnOpenCode in execution-engine.ts did process.stdout.write(chunk) on every byte of OpenCode output without any filtering. step_finish events (contain token counters + git snapshot hashes) and tool_result events (contain full file contents as escaped JSON strings) rendered as giant JSON blobs in the Raw terminal view. Fixed by buffering stdout line-by-line and skipping step_finish, step_start, tool_result event types before forwarding to process.stdout. logStream.write(chunk) still receives everything for the raw log file.
+> Context: The previous fix for Claude CLI stderr (skipping valid JSON diagnostic lines) only covered Claude's path. OpenCode stdout was an entirely different code path that had never been filtered.
+> Source:  
+
+## 2026-04-06 [Architecture] Two separate terminal data paths — process.stdout vs log file
+> Rule: Main terminal (RunTerminal) reads from run_output_chunks table which is populated from the execution-engine subprocess stdout via the worker. Sub-terminals in wave parallel (MiniTerminalPane) read from per-story log files via /api/pipeline/runs/:runId/stories/:storyId/log SSE endpoint. Any fix to process.stdout filtering does NOT affect sub-terminals. Any fix must be applied independently to both paths.
+> Context: RunTerminal also has formatStreamJsonForDisplay() which filters on the frontend, but MiniTerminalPane had no equivalent — it just ran everything through the ANSI converter directly.
+> Source:  
+
+## 2026-04-06 [Gotcha] Model routing UI still present after backend removal — must clean both sides
+> Rule: After removing the model escalation/cascading system from the backend (2026-04-06), the frontend still had: ModelRoutingSection + ThresholdSlider in ProviderSettingsTab (router mode picker, complexity thresholds, task cascade inputs, token budget), escalation log + savings banner in FinOpsTab, story_escalated in UnifiedActivitySection event filter, capMismatchMode + isBlocked blocking behavior in TriggerPopover. Backend removal is not enough — always audit the frontend for corresponding UI.
+> Context: The UI was removed in the same session. Files cleaned: ProviderSettingsTab.tsx, FinOpsTab.tsx, UnifiedActivitySection.tsx, TriggerPopover.tsx.
+> Source:  
+
+## 2026-04-06 [Bug Fix] OpenRouter billing leak — anthropic/ prefix caused auto-switch to OpenCode
+> Rule: OPENCODE_PROVIDER_PREFIXES in pipeline.ts included 'anthropic/' which caused Claude models (anthropic/claude-sonnet-4-6, anthropic/claude-opus-4-6) to auto-switch to OpenCode → OpenRouter, billing API credits instead of using the Claude CLI subscription. Fix: removed 'anthropic/' from the prefix list and added !resolvedAgentModel.startsWith('anthropic/claude-') to the modelIsNonClaude check. When a user selects Claude CLI + Claude model, it stays on Claude CLI (subscription). When they explicitly select OpenCode + any model, it routes through OpenRouter (API key).
+> Context:  
+> Source:  
+
+## 2026-04-06 [Bug Fix] ModelBadge story override — missing Content-Type header caused 400
+> Rule: apiFetch() does NOT auto-set Content-Type: application/json. Any PUT/POST/PATCH call with JSON.stringify(body) MUST include headers: { 'Content-Type': 'application/json' } or Express won't parse the body and required fields like workspaceId will be undefined → 400 error. Also replaced the HTML select element (size attribute listbox) with clickable button list because select onChange doesn't fire when re-selecting the already-selected value.
+> Context:  
+> Source:  
+
+## 2026-04-06 [Bug Fix] Spec JSON agentOverride leaked — rorca-reasoning-engine had agentOverride: opencode with Claude model
+> Rule: Spec JSON files can have agentOverride field set by the SpecModelControlBar. If agentOverride is 'opencode' but the model is a Claude model (claude-sonnet-4-6), the run routes through OpenCode → OpenRouter → API credits instead of Claude CLI subscription. The auto-detection fix in pipeline.ts only prevents auto-switching, NOT explicit overrides. Always check spec JSON for stale agentOverride values before running specs with Claude models.
+> Context:  
+> Source:  
+
+## 2026-04-06 [Gotcha] Disk full from orphaned worktree node_modules
+> Rule: Worktrees created by wave-parallel runs each get their own node_modules (500MB+ frontend, 275MB+ backend). With 70+ prunable worktrees, this consumed 27GB+. Symptoms: ENOSPC errors, backend crashes, pg-boss can't write jobs. Fix: periodically run 'git worktree prune' and delete node_modules from inactive worktrees. Active worktrees can be identified with 'ps aux | grep execution-engine'.
+> Context:  
+> Source:  
+
+## 2026-04-06 [Convention] Agent routing rule — Claude models must stay on Claude CLI
+> Rule: When resolving agent type in pipeline.ts: (1) Explicit agentOverride from request or spec JSON takes priority. (2) Auto-detection only switches to OpenCode for non-Claude provider prefixes (openrouter/, openai/, google/, ollama/, github/, bedrock/, vertex/). (3) anthropic/claude-* models must NEVER auto-switch to OpenCode — they use Claude CLI subscription. (4) Bare provider/model strings (e.g. z-ai/glm-5) get openrouter/ prefix added when running on OpenCode.
+> Context:  
+> Source:  
+
+## 2026-04-06 [Bug Fix] Pending migrations not tracked — manual psql apply skips schema_migrations row
+> Rule: If migrations are applied manually via psql (outside pg-index.ts runner), the schema_migrations tracking row is never inserted. Backend reports status: degraded with N pending migrations. Fix: apply the SQL file via psql, then INSERT INTO rorca.schema_migrations (version, filename) VALUES (...) manually. Always apply migrations through the runner to avoid this.
+> Context: Fixed 4 pending migrations (20260403170000–20260404000001) that were applied but untracked. Backend went from degraded to ok.
+> Source:  
+
+## 2026-04-07 [Bug Fix] Codex CLI invocation changed — --approval-mode no longer valid
+> Rule: Codex CLI no longer accepts `--approval-mode auto-edit` as a top-level flag. Correct non-interactive invocation is `codex exec --dangerously-bypass-approvals-and-sandbox`. Model passed via `-m <model>`. Prompt via stdin (codex exec reads stdin when no prompt arg given).
+> Context: execution-engine.ts spawnCodex() was failing with "unexpected argument '--approval-mode' found". Fixed by switching to `codex exec --dangerously-bypass-approvals-and-sandbox` subcommand pattern.
+> Source:  
+
+## 2026-04-07 [Architecture] Codex model selection — reads from ~/.codex/models_cache.json
+> Rule: Codex model picker fetches from GET /api/config/codex-models, which reads ~/.codex/models_cache.json and returns only visibility=list models sorted by priority. Falls back to hardcoded list if cache missing. Model passed to execution-engine as agentModel, forwarded to codex exec via -m flag. Do NOT hardcode GPT model lists — the cache reflects the user's actual Codex version and updates automatically.
+> Context: Initial implementation hardcoded o3/o4-mini/gpt-4o/gpt-4.1 — wrong. Real models from Codex 0.118.0 cache: gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini. All support reasoning levels low/medium/high/xhigh.
+> Source:  
+
+## 2026-04-07 [Bug Fix] API server must be restarted for new routes to register — tsx does not hot-reload
+> Rule: The Express API server (src/server.ts) runs under plain `tsx` — NOT `tsx watch`. It does NOT auto-restart on file changes. New routes added to route files (e.g. config.ts) will return 404 until the server process is killed and restarted. Kill with `lsof -ti:3030 | xargs kill -9` then restart. The worker (src/worker.ts) has the same behavior.
+> Context: Added GET /api/config/codex-models route but got 404 — server PID 42585 had been running since Monday 2AM and had not picked up the new route. Required manual kill + restart.
+> Source:  
+
+## 2026-04-07 [Bug Fix] OpenCode JSON blobs in terminals — two separate data paths require two fixes
+> Rule: OpenCode `--format json` outputs newline-delimited JSON events. Two completely separate paths feed terminal output: (1) Main terminal: execution-engine.ts spawnOpenCode() writes to process.stdout → run_output_chunks → SSE. Fix: filter step_finish/step_start/tool_result before writing to process.stdout (logStream still gets raw). (2) Wave parallel sub-terminals: MiniTerminalPane.tsx reads from /stories/:storyId/log SSE. Fix: add line-by-line JSON filtering in the SSE chunk event handler. Fixing only one path leaves the other showing blobs.
+> Context: Session 2026-04-06/07. Also filter stderr — Claude CLI writes diagnostic JSON metrics to stderr; skip valid JSON lines, only forward genuine errors.
+> Source:  
+
+## 2026-04-07 [Decision] Model escalation/cascade system fully removed — simplified to story→spec→env resolution
+> Rule: The entire model escalation/cascading system (ModelRoutingSection, ThresholdSlider, RouterMode, TaskType, OrchestrationState, capMismatchMode, story_escalated WAL events, EscalationEntry in FinOps) was removed in sessions 2026-04-06/07. Canonical model resolution is now: story.model → spec.model → RORCA_MODEL env. No DB cascades, no complexity scorer tiers, no automatic model swapping. Reason: caused surprise OpenRouter charges (Qwen free → Claude Opus swap without user awareness).
+> Context: UI remnants removed from: ProviderSettingsTab.tsx (ModelRoutingSection + ThresholdSlider ~370 lines), FinOpsTab.tsx (EscalationEntry, savings banner, escalation log), UnifiedActivitySection.tsx (story_escalated event), TriggerPopover.tsx (capMismatchMode, isBlocked logic).
+> Source:  
+
+## 2026-04-07 [Architecture] EngineSelector greyed pills = inactive state, not disabled — all three are always clickable
+> Rule: EngineSelector (Claude Sub / OpenCode API / Codex Sub) uses text-[var(--text-muted)] for inactive pills which appears grey. This is intentional inactive styling — all buttons are always clickable regardless of availability dot color. The availability dot (green/grey) reflects whether the binary is installed, but does NOT disable the button. ModelPickerPopover shows opacity-50 cursor-not-allowed only when engine===codex AND no model selection supported (now removed — Codex supports full GPT model selection).
+> Context: User asked why Codex appeared greyed out. Was normal inactive state. Separately identified that ModelPickerPopover was incorrectly disabled for Codex — fixed by adding full model selection support.
+> Source: 
