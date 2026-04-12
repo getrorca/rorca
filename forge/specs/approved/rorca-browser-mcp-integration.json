@@ -21,7 +21,8 @@
         "No other logic changed in execution-engine.ts"
       ],
       "dependsOn": [],
-      "passes": false
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "BMC-002",
@@ -42,8 +43,11 @@
         "RORCA_BROWSER_HEADLESS env var documented in backend/.env",
         "`cd backend && npx tsc --noEmit` exits 0 with zero errors"
       ],
-      "dependsOn": ["BMC-001"],
-      "passes": false
+      "dependsOn": [
+        "BMC-001"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "BMC-003",
@@ -66,8 +70,11 @@
         "runAgent() has new `mcpServerUrl?: string | null` parameter passed as last arg to all three spawn functions",
         "`cd backend && npx tsc --noEmit` exits 0 with zero errors"
       ],
-      "dependsOn": ["BMC-002"],
-      "passes": false
+      "dependsOn": [
+        "BMC-002"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "BMC-004",
@@ -89,8 +96,11 @@
         "`cd backend && npx tsc --noEmit` exits 0 with zero errors",
         "`cd backend && npm test` passes — no regressions in existing tests"
       ],
-      "dependsOn": ["BMC-003"],
-      "passes": false
+      "dependsOn": [
+        "BMC-003"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "BMC-005",
@@ -108,8 +118,11 @@
         "`npx tsc --noEmit` (root, frontend typecheck) exits 0 with zero errors",
         "`cd backend && npx tsc --noEmit` exits 0 with zero errors"
       ],
-      "dependsOn": ["BMC-004"],
-      "passes": false
+      "dependsOn": [
+        "BMC-004"
+      ],
+      "passes": true,
+      "notes": "Completed by Rorca engine"
     }
   ]
 }
