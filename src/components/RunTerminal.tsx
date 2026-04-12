@@ -217,6 +217,55 @@ function formatStreamJsonForDisplay(line: string): string | null {
     // User message (prompt injection by run-loop) — suppress
     if (ev.type === 'user') return null;
 
+    // ── OpenCode --format json events ──────────────────────────────────────
+    // Step lifecycle — always suppress first (step_finish can be large JSON)
+    if (ev.type === 'step_start' || ev.type === 'step_finish') return null;
+
+    // Text output from the model — blank line before for visual breathing room
+    if (ev.type === 'text' && ev.part?.text) {
+      const text = (ev.part.text as string).trim();
+      if (!text) return null;
+      // Don't truncate — model text is the primary signal, show it all
+      const converted = markdownToHtml(text);
+      // Prepend a blank line so each model response is visually separated
+      const lines = converted.split('\n').map((l: string) => HTML_LINE_PREFIX + l);
+      return '\n' + lines.join('\n') + '\n';
+    }
+
+    // Tool calls — render with icons like Claude's output
+    if (ev.type === 'tool_use' && ev.part) {
+      const tool: string = ev.part.tool ?? ev.part.state?.tool ?? '';
+      const state = ev.part.state ?? {};
+      const input = state.input ?? {};
+      const status: string = state.status ?? '';
+      // Only show completed tool calls (not pending — those show twice otherwise)
+      if (status === 'pending') return null;
+      const fp: string = input.filePath ?? input.file_path ?? input.path ?? '';
+      const cmd: string = input.command ?? '';
+      const pattern: string = input.pattern ?? input.query ?? '';
+      // Shorten path to last 2 segments for readability
+      const shortFp = fp ? fp.split('/').slice(-2).join('/') : '';
+      switch (tool) {
+        case 'read':      return `  📖 Read ${shortFp}`;
+        case 'write':     return `  📝 Write ${shortFp}`;
+        case 'edit':      return `  ✏️  Edit ${shortFp}`;
+        case 'bash':      return `  🔧 ${cmd.split('\n')[0].slice(0, 160)}`;
+        case 'glob':      return `  🔍 Glob ${pattern}`;
+        case 'grep':      return `  🔍 Grep ${pattern}`;
+        case 'webfetch':  return `  🌐 ${input.url ?? ''}`;
+        case 'websearch': return `  🔍 ${pattern}`;
+        default:          return tool ? `  🔧 ${tool}${shortFp ? ' ' + shortFp : ''}` : null;
+      }
+    }
+
+    // Error events — show prominently with spacing
+    if (ev.type === 'error') {
+      const errData = ev.error ?? ev.part?.error ?? ev.data ?? {};
+      const msg = typeof errData === 'string' ? errData
+        : (errData as any).message ?? (errData as any).name ?? JSON.stringify(errData).slice(0, 300);
+      return `\n❌ ${msg}\n`;
+    }
+
     // Anything else — suppress unknown JSON events
     return null;
   } catch {
@@ -247,15 +296,72 @@ const VERBOSE_PATTERNS: [RegExp, SemanticStep['type']][] = [
   [/(?:feat|fix|chore|test|refactor|style|docs|build)(?:\([^)]*\))?:/i, 'commit'],
 ];
 
-/** Parse a single line from claude --verbose output into a SemanticStep, or null. */
+/** Parse a single line into a SemanticStep. Handles both Claude --verbose text and OpenCode JSON. */
 function parseVerboseLine(line: string): SemanticStep | null {
   const clean = stripAnsi(line).trim();
   if (!clean || clean.length < 4) return null;
 
+  // ── OpenCode JSON event parsing ──
+  if (clean.startsWith('{')) {
+    try {
+      const ev = JSON.parse(clean);
+
+      // OpenCode tool_use event → semantic step
+      if (ev.type === 'tool_use' && ev.part) {
+        const tool: string = ev.part.tool ?? '';
+        const state = ev.part.state ?? {};
+        const input = state.input ?? {};
+        const status: string = state.status ?? '';
+        if (status === 'pending') return null;
+        const fp: string = input.filePath ?? input.file_path ?? '';
+        const shortFp = fp.split('/').slice(-2).join('/');
+        const cmd: string = input.command ?? '';
+        const pattern: string = input.pattern ?? input.query ?? '';
+
+        const TOOL_MAP: Record<string, SemanticStep['type']> = {
+          read: 'read', write: 'write', edit: 'edit', bash: 'bash',
+          glob: 'search', grep: 'search', webfetch: 'unknown', websearch: 'search',
+        };
+        const stepType = TOOL_MAP[tool] ?? 'unknown';
+        let label: string;
+        switch (tool) {
+          case 'read':      label = `Read ${shortFp}`; break;
+          case 'write':     label = `Write ${shortFp}`; break;
+          case 'edit':      label = `Edit ${shortFp}`; break;
+          case 'bash':      label = cmd.slice(0, 100) || 'Bash'; break;
+          case 'glob':      label = `Glob: ${pattern}`; break;
+          case 'grep':      label = `Grep: ${pattern}`; break;
+          case 'webfetch':  label = `WebFetch: ${(input.url ?? '').slice(0, 80)}`; break;
+          case 'websearch': label = `WebSearch: ${pattern}`; break;
+          default:          label = tool || 'Unknown tool';
+        }
+        return { type: stepType, label: label.slice(0, 100), ts: new Date().toISOString(), toolName: tool };
+      }
+
+      // OpenCode text event → plan step (model is reasoning/responding)
+      if (ev.type === 'text' && ev.part?.text) {
+        const text = (ev.part.text as string).trim();
+        if (text.length > 10) {
+          return { type: 'plan', label: text.slice(0, 80), ts: new Date().toISOString() };
+        }
+      }
+
+      // OpenCode error → error step
+      if (ev.type === 'error') {
+        const errData = ev.error ?? ev.data ?? {};
+        const msg = typeof errData === 'string' ? errData
+          : errData.message ?? errData.name ?? 'Unknown error';
+        return { type: 'unknown', label: `Error: ${String(msg).slice(0, 80)}`, ts: new Date().toISOString(), isError: true };
+      }
+    } catch {
+      // Not valid JSON — fall through to regex matching
+    }
+  }
+
+  // ── Claude --verbose text patterns ──
   for (const [pattern, type] of VERBOSE_PATTERNS) {
     const m = clean.match(pattern);
     if (m) {
-      // Build a short label from the captured group (path, command, etc.)
       const captured = m[1]?.trim() ?? '';
       let label: string;
       switch (type) {
