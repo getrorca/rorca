@@ -3,11 +3,12 @@
 Spec: rorca-reasoning-engine
 Run ID: 20260316000162
 Started: 2026-04-12T03:50:46.426Z
-Last Updated: 2026-04-12T03:54:01.985Z
+Last Updated: 2026-04-12T03:58:22.152Z
 
-## Completed Stories (5)
+## Completed Stories (6)
 - RE-004: Provider-agnostic reasoning mapping in llm-client.ts — DONE (claude, claude-sonnet-4-6, 699s)
 - RE-015: Graceful degradation: retry without reasoning on provider error — DONE (claude, claude-sonnet-4-6, 310s)
 - RE-018: GET /api/config/model-capability endpoint and capability cache — DONE (claude, claude-sonnet-4-6, 216s)
 - RE-011: Cost multiplier display in Forge brief and dry-run — DONE (claude, claude-sonnet-4-6, 570s)
 - RE-011: Cost multiplier display in Forge brief and dry-run — DONE (claude, claude-sonnet-4-6, 195s)
+- RE-013: Reasoning model highlighting in model selector dropdown — DONE (claude, claude-sonnet-4-6, 245s)

@@ -48,6 +48,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
   const [query, setQuery] = useState('');
   const [highlightIdx, setHighlightIdx] = useState(0);
   const [collapsed, setCollapsed] = useState<Set<string>>(() => new Set(['OpenRouter']));
+  const [reasoningOnly, setReasoningOnly] = useState(false);
   const [showAllOpenRouter, setShowAllOpenRouter] = useState(false);
   const containerRef = useRef<HTMLDivElement>(null);
   const triggerRef = useRef<HTMLButtonElement>(null);
@@ -101,6 +102,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
     if (!open) {
       setCollapsed(new Set(['OpenRouter']));
       setShowAllOpenRouter(false);
+      setReasoningOnly(false);
     }
   }, [open]);
 
@@ -120,13 +122,17 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
   // Filter + group models
   const { groups } = useMemo(() => {
     const q = query.toLowerCase().trim();
-    const filtered = q
+    let filtered = q
       ? models.filter(m =>
           m.label.toLowerCase().includes(q) ||
           m.provider.toLowerCase().includes(q) ||
           m.id.toLowerCase().includes(q)
         )
       : models;
+
+    if (reasoningOnly) {
+      filtered = filtered.filter(m => m.supportsReasoning);
+    }
 
     // Separate recommended, then group by provider
     const recommended: ModelOption[] = [];
@@ -170,10 +176,10 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
     }
 
     return { groups };
-  }, [models, query]);
+  }, [models, query, reasoningOnly]);
 
   // Reset highlight on filter change
-  useEffect(() => { setHighlightIdx(0); }, [query]);
+  useEffect(() => { setHighlightIdx(0); }, [query, reasoningOnly]);
 
   // Calculate dropdown position and focus input when opening
   useEffect(() => {
@@ -329,6 +335,21 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
               className="flex-1 bg-transparent text-sm text-text placeholder:text-muted/40 outline-none"
               aria-label="Search models"
             />
+            {/* Reasoning filter chip */}
+            <button
+              type="button"
+              onClick={() => setReasoningOnly(v => !v)}
+              title="Show only reasoning-capable models"
+              className={`flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors shrink-0 ${
+                reasoningOnly
+                  ? 'bg-violet-500/20 text-violet-400 border border-violet-500/30'
+                  : 'bg-[var(--surface-200)] text-muted/60 hover:text-muted border border-transparent'
+              }`}
+              aria-pressed={reasoningOnly}
+            >
+              <Brain size={10} />
+              Reasoning
+            </button>
             {query && (
               <button
                 onClick={() => setQuery('')}
