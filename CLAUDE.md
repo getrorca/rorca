@@ -59,7 +59,7 @@ Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 **Stack**:
 - Frontend: React 18 + TypeScript + Vite + Tailwind CSS + xterm.js
 - Backend: Express.js + TypeScript + PostgreSQL 16 (`pg` Pool, async, connection pooling, pgvector, Apache AGE)
-- Execution: `claude --print` (Claude sub) OR `opencode run --format json --attach` (OpenCode, any provider) OR `codex --approval-mode auto-edit` (ChatGPT sub)
+- Execution: `claude --print` (Claude sub) OR `opencode run --format json --attach` (OpenCode, any provider) OR `codex exec --dangerously-bypass-approvals-and-sandbox` (ChatGPT sub)
 - Spec generation: OpenCode (autonomous codebase exploration) OR SDK fallback (`SPEC_PROVIDER` env var)
 - MCP: API-first (OpenAPI spec → auto-generated MCP tools via HTTP transport on :3030)
 
@@ -92,7 +92,7 @@ Spec (N stories)
 - Configured via `RORCA_AGENT=opencode` + `RORCA_MODEL=openai/gpt-4o`
 
 **Codex CLI** (ChatGPT Plus/Pro subscription):
-- Binary: `codex --approval-mode auto-edit`
+- Binary: `codex exec --dangerously-bypass-approvals-and-sandbox`
 - Same tool set: file edit, bash, read, write, glob, grep (non-interactive mode)
 - Subscription-based — flat rate, no per-token cost. `RORCA_MODEL` is ignored.
 - No model cascading — single model tied to ChatGPT subscription
@@ -657,7 +657,7 @@ Rorca supports three first-class execution paths. All use the same tool set (edi
 - Recommended for: Multi-model workflows, cost optimization, teams without Claude subscription
 
 **Codex CLI** (`RORCA_AGENT=codex`):
-- Binary: `codex --approval-mode auto-edit`
+- Binary: `codex exec --dangerously-bypass-approvals-and-sandbox`
 - Auth: ChatGPT Plus/Pro subscription — no API key needed
 - Advantages:
   - **Subscription-based** — flat-rate, no per-token cost (like Claude subscription)
@@ -794,7 +794,7 @@ Escalation cascade on failure:
 
 **API arbitrage**: Cascading saves ~40–60% vs all-Opus baseline. FinOps dashboard (OC-023) shows realized savings per run and trend chart.
 
-**Claude/Codex subscription paths**: Cascading not applicable — `claude --print` and `codex --approval-mode auto-edit` use the same subscription regardless of story complexity. Quality difference is negligible for most stories; Opus is the recommended tier for all implementation runs.
+**Claude/Codex subscription paths**: Cascading not applicable — `claude --print` and `codex exec --dangerously-bypass-approvals-and-sandbox` use the same subscription regardless of story complexity. Quality difference is negligible for most stories; Opus is the recommended tier for all implementation runs.
 
 ## Spec Pipeline — Run Order
 
