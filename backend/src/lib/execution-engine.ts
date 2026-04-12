@@ -201,6 +201,11 @@ const reroutedStories = new Map<string, RerouteInfo>();
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
+const PLAYWRIGHT_MCP_PORT = 4040;
+const PLAYWRIGHT_MCP_URL = `http://localhost:${PLAYWRIGHT_MCP_PORT}/mcp`;
+let _playwrightMcpServerPid: number | null = null;
+let _playwrightMcpReady = false;
+
 const MAX_RETRIES = 3;
 const MAX_RATE_LIMIT_RETRIES = 4;
 const RATE_LIMIT_BACKOFF_MS = [30_000, 60_000, 120_000, 240_000];
@@ -232,6 +237,59 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
   'CLAUDE_AGENT_SDK_VERSION',
   'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
 ];
+
+/**
+ * Ensure @playwright/mcp HTTP server is running on port 4040.
+ * Idempotent — starts at most once per engine process.
+ * Returns the server URL on success, null on failure (caller handles gracefully — never throws).
+ */
+async function ensurePlaywrightMcpServer(): Promise<string | null> {
+  if (_playwrightMcpReady) return PLAYWRIGHT_MCP_URL;
+
+  // Check if port is already occupied (e.g. another story in a parallel run already started it)
+  try {
+    const probe = await fetch(PLAYWRIGHT_MCP_URL, { signal: AbortSignal.timeout(1000) });
+    if (probe.status < 500) {
+      _playwrightMcpReady = true;
+      return PLAYWRIGHT_MCP_URL;
+    }
+  } catch {
+    // Port not occupied — fall through to spawn
+  }
+
+  const headless = process.env.RORCA_BROWSER_HEADLESS !== 'false';
+
+  try {
+    const mcpProc = spawn(
+      'npx',
+      ['@playwright/mcp', '--port', String(PLAYWRIGHT_MCP_PORT), ...(headless ? ['--headless'] : [])],
+      { detached: true, stdio: 'ignore', env: { ...process.env } },
+    );
+    mcpProc.unref();
+    _playwrightMcpServerPid = mcpProc.pid ?? null;
+
+    // Poll for readiness up to 10s
+    const deadline = Date.now() + 10_000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 300));
+      try {
+        const check = await fetch(PLAYWRIGHT_MCP_URL, { signal: AbortSignal.timeout(500) });
+        if (check.status < 500) {
+          _playwrightMcpReady = true;
+          process.stdout.write(`[BrowserMCP] @playwright/mcp ready at ${PLAYWRIGHT_MCP_URL}\n`);
+          return PLAYWRIGHT_MCP_URL;
+        }
+      } catch { /* not ready yet */ }
+    }
+
+    process.stdout.write(`[BrowserMCP] WARNING: @playwright/mcp did not become ready within 10s — browser tools unavailable for this story\n`);
+    return null;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stdout.write(`[BrowserMCP] WARNING: Failed to start @playwright/mcp: ${msg} — browser tools unavailable\n`);
+    return null;
+  }
+}
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
@@ -3104,6 +3162,16 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => {
     logger.info('');
     logger.info('Engine stopped by user.');
+    if (_playwrightMcpServerPid) {
+      try { process.kill(_playwrightMcpServerPid, 'SIGTERM'); } catch { /* already gone */ }
+    }
+    process.exit(0);
+  });
+
+  process.on('SIGTERM', () => {
+    if (_playwrightMcpServerPid) {
+      try { process.kill(_playwrightMcpServerPid, 'SIGTERM'); } catch { /* already gone */ }
+    }
     process.exit(0);
   });
 
