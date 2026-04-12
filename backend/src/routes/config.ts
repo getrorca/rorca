@@ -11,6 +11,7 @@ import { getProviderAsync, getProviderSource, invalidateProviderCache } from '..
 import { loadRorcaConfig, writeRorcaConfig, invalidateConfigCache } from '../lib/rorca-config';
 import * as fs from 'fs';
 import * as path from 'path';
+import * as os from 'os';
 import { AuthError, NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
 import { detectCapability, OpenRouterModelMetadata } from '../lib/reasoning-detector';
 import { isModelMarkedNonReasoning } from '../lib/llm-client';
@@ -213,6 +214,9 @@ router.get('/', async (_req: Request, res: Response) => {
     copilotUsername = copilotRow?.provider_username ?? null;
   }
 
+  // Check if OpenRouter key is available via env var (even if not in vault)
+  const openrouterViaEnv = !!(process.env.OPENROUTER_API_KEY);
+
   res.json({
     agentType: currentAgentType,
     agentModel: currentAgentModel,
@@ -224,6 +228,7 @@ router.get('/', async (_req: Request, res: Response) => {
     opencodeVersion: opencode.opencodeVersion,
     codexInstalled: codex.codexInstalled,
     codexVersion: codex.codexVersion,
+    openrouterViaEnv,
   });
 });
 
@@ -773,7 +778,7 @@ async function resolveWorkspacePath(workspaceId: string | undefined): Promise<st
  *   get:
  *     summary: Get the full orchestration config for a workspace (merged with defaults)
  *     operationId: getOrchestrationConfig
- *     description: Returns the orchestration configuration for a workspace including routing, thresholds, cascades, and escalation settings.
+ *     description: Returns the orchestration configuration for a workspace including routing, thresholds, and task settings.
  *     tags: [Config]
  *     parameters:
  *       - name: workspaceId
@@ -798,9 +803,7 @@ router.get('/orchestration', async (req: Request, res: Response) => {
       sonnet: [config.thresholds.haiku + 1, config.thresholds.sonnet],
       opus: [config.thresholds.sonnet + 1, 100],
     },
-    cascades: config.cascades,
     taskCascades: config.taskCascades,
-    escalation: config.escalation,
     tokenBudgetPerStory: config.tokenBudgetPerStory,
   });
 });
@@ -880,9 +883,7 @@ router.put('/orchestration', async (req: Request, res: Response) => {
       sonnet: [merged.thresholds.haiku + 1, merged.thresholds.sonnet],
       opus: [merged.thresholds.sonnet + 1, 100],
     },
-    cascades: merged.cascades,
     taskCascades: merged.taskCascades,
-    escalation: merged.escalation,
     tokenBudgetPerStory: merged.tokenBudgetPerStory,
   });
 });
@@ -1319,6 +1320,63 @@ router.get('/model-capability', async (req: Request, res: Response) => {
     fromGracefulDegradationCache: markedNonReasoning,
     cachedAt: now,
   });
+});
+
+/**
+ * @swagger
+ * /api/config/codex-models:
+ *   get:
+ *     summary: Get available Codex models from local cache
+ *     description: Reads ~/.codex/models_cache.json and returns all visible models with their reasoning levels.
+ *     responses:
+ *       200:
+ *         description: List of Codex models
+ */
+router.get('/codex-models', (_req: Request, res: Response) => {
+  const cacheFile = path.join(os.homedir(), '.codex', 'models_cache.json');
+
+  interface CodexReasoningLevel { effort: string; description: string }
+  interface CodexModelRaw {
+    slug: string;
+    display_name: string;
+    description?: string;
+    visibility: 'list' | 'hide';
+    priority: number;
+    supported_reasoning_levels?: CodexReasoningLevel[];
+    context_window_tokens?: number;
+  }
+  interface CodexCache { models: CodexModelRaw[] }
+
+  // Hardcoded fallback if cache file is missing
+  const FALLBACK = [
+    { id: 'gpt-5.4', label: 'GPT-5.4', reasoningLevels: ['low', 'medium', 'high', 'xhigh'], recommended: true },
+    { id: 'gpt-5.4-mini', label: 'GPT-5.4-Mini', reasoningLevels: ['low', 'medium', 'high', 'xhigh'], recommended: false },
+    { id: 'gpt-5.3-codex', label: 'GPT-5.3-Codex', reasoningLevels: ['low', 'medium', 'high', 'xhigh'], recommended: false },
+    { id: 'gpt-5.1-codex-mini', label: 'GPT-5.1-Codex-Mini', reasoningLevels: ['medium', 'high'], recommended: false },
+  ];
+
+  try {
+    if (!fs.existsSync(cacheFile)) {
+      return res.json({ models: FALLBACK, fromCache: false });
+    }
+
+    const raw: CodexCache = JSON.parse(fs.readFileSync(cacheFile, 'utf8'));
+    const models = raw.models
+      .filter(m => m.visibility === 'list')
+      .sort((a, b) => a.priority - b.priority)
+      .map((m, i) => ({
+        id: m.slug,
+        label: m.display_name,
+        description: m.description ?? '',
+        reasoningLevels: (m.supported_reasoning_levels ?? []).map(r => r.effort),
+        contextWindow: m.context_window_tokens ?? null,
+        recommended: i === 0, // highest priority = recommended
+      }));
+
+    return res.json({ models, fromCache: true });
+  } catch {
+    return res.json({ models: FALLBACK, fromCache: false });
+  }
 });
 
 export default router;

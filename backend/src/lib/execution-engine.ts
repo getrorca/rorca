@@ -35,12 +35,7 @@ import { parseAgentConfig, type AgentType } from './config';
 import { detectOpenCode } from './opencode-detector';
 import { detectCapability } from './reasoning-detector';
 import {
-  score as scoreStory,
-  resolveModelId,
-  getNextEscalationTier,
   loadOrchestrationConfig,
-  type ModelTier,
-  type ScorerStory,
 } from './complexity-scorer';
 import { parseClaudeLogTokens } from './claude-token-parser';
 import { parseOpenCodeStream, aggregateTokenUsage } from './opencode-parser';
@@ -142,26 +137,6 @@ interface EngineConfig {
   thinkingBudget?: number;
   /** Effort level hint for models that support it (e.g. 'low'|'medium'|'high'). */
   effortLevel?: 'low' | 'medium' | 'high' | 'max';
-}
-
-// ─── Escalation Tracking ─────────────────────────────────────────────────────
-
-interface EscalationState {
-  currentTier: ModelTier;
-  originalTier: ModelTier;
-  retriesOnCurrentTier: number;
-  escalationHistory: Array<{ fromTier: ModelTier; toTier: ModelTier; attemptNumber: number }>;
-}
-
-/**
- * Extract provider prefix from a model string like "openai/gpt-4o" → "openai".
- * Falls back to "anthropic" if no prefix present.
- */
-function extractProvider(modelString: string | null): string {
-  if (!modelString) return 'anthropic';
-  const slashIdx = modelString.indexOf('/');
-  if (slashIdx > 0) return modelString.substring(0, slashIdx);
-  return 'anthropic';
 }
 
 // ─── Per-Story Agent Resolution ──────────────────────────────────────────────
@@ -386,6 +361,39 @@ async function postStoryResult(
     };
     writeFallbackResult(_fallbackCwd, entry);
   }
+}
+
+/**
+ * Translate any model ID to the format OpenCode expects: "provider/org/model".
+ * OpenCode requires the full triple format, e.g. "openrouter/z-ai/glm-5".
+ *
+ * Two-phase normalization:
+ *   Phase 1 — Fix Claude version separators ANYWHERE in the string.
+ *             Rorca uses hyphens (claude-sonnet-4-6), OpenRouter uses dots (claude-sonnet-4.6).
+ *             This runs first so IDs like "openrouter/anthropic/claude-sonnet-4-6"
+ *             are fixed BEFORE the prefix check (which would otherwise pass them through broken).
+ *   Phase 2 — Add provider prefix if missing.
+ *             "claude-sonnet-4.6" → "openrouter/anthropic/claude-sonnet-4.6"
+ *             "z-ai/glm-5" → "openrouter/z-ai/glm-5"
+ */
+function normalizeOpenCodeModel(model: string): string {
+  // Phase 1: Normalize Claude version separators (hyphens→dots, strip date suffixes).
+  // "openrouter/anthropic/claude-sonnet-4-6" → "openrouter/anthropic/claude-sonnet-4.6"
+  let m = model.replace(/(claude-[a-z]+-\d+)-(\d+)(?:-\d{8})?/, '$1.$2');
+
+  // Phase 2: Ensure correct provider prefix
+  const KNOWN_PREFIXES = ['openrouter/', 'openai/', 'google/', 'ollama/', 'github/', 'bedrock/', 'vertex/', 'opencode/'];
+  if (KNOWN_PREFIXES.some(p => m.startsWith(p))) return m;
+
+  // Bare Claude ID → needs openrouter/anthropic/ prefix
+  if (/^claude-/.test(m)) return `openrouter/anthropic/${m}`;
+
+  // anthropic/claude-* without outer prefix → needs openrouter/ prefix
+  if (/^anthropic\/claude-/.test(m)) return `openrouter/${m}`;
+
+  // Other bare catalog IDs (z-ai/glm-5) → needs openrouter/ prefix
+  if (m.includes('/')) return `openrouter/${m}`;
+  return m;
 }
 
 function buildCleanEnv(): Record<string, string> {
@@ -716,7 +724,7 @@ function runAgent(
       return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr, thinkingEnabled, thinkingBudget, effortLevel);
     case 'codex':
       // thinking/effort flags are not forwarded to Codex
-      return spawnCodex(prompt, cwd, timeoutMs, logFile);
+      return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel);
   }
 }
 
@@ -741,7 +749,9 @@ function spawnClaude(
       '--print',
       '--verbose',
       '--output-format', 'stream-json',
-      ...(agentModel ? ['--model', agentModel] : []),
+      // Only pass --model to Claude CLI if it's a valid claude-* ID.
+      // OpenRouter models (z-ai/glm-5, etc.) must not be forwarded here.
+      ...(agentModel && /^claude-/.test(agentModel) && !agentModel.includes('/') ? ['--model', agentModel] : []),
       ...(thinkingEnabled ? ['--thinking'] : []),
       ...(thinkingBudget && thinkingBudget > 0 ? ['--thinking-budget', String(thinkingBudget)] : []),
       ...(effortLevel ? ['--effort', effortLevel] : []),
@@ -786,22 +796,31 @@ function spawnClaude(
         try {
           const event = JSON.parse(trimmed);
 
-          // Extract human-readable text from assistant messages
+          // Claude stream-json format: assistant message with content blocks
           if (event.type === 'assistant' && event.message?.content) {
             for (const block of event.message.content as { type: string; text?: string }[]) {
               if (block.type === 'text' && block.text) {
-                // Ensure the text block ends with a newline so RunTerminal's line-buffer
-                // flushes it immediately — without a trailing \n the text stays in
-                // lineBufferRef indefinitely and never reaches the display.
                 process.stdout.write(block.text.endsWith('\n') ? block.text : block.text + '\n');
               }
             }
           }
 
-          // Token usage from result events
-          if (event.type === 'result' && event.usage && onTokenUpdate) {
-            const input = (event.usage.input_tokens ?? 0) as number;
-            const output = (event.usage.output_tokens ?? 0) as number;
+          // OpenCode --format json events: forward as raw JSON lines so the
+          // frontend formatStreamJsonForDisplay can parse them with full structure
+          // (tool names, file paths, error messages, etc.)
+          if (event.type === 'text' || event.type === 'tool_use' || event.type === 'error') {
+            // Write the original JSON line — frontend parses it for icons/formatting
+            process.stdout.write(trimmed + '\n');
+          }
+
+          // Token usage from result events (Claude) or step_finish events (OpenCode)
+          const usage = event.usage
+            ?? (event.type === 'step_finish' && (event as any).part?.tokens
+              ? { input_tokens: (event as any).part.tokens.input, output_tokens: (event as any).part.tokens.output }
+              : null);
+          if (usage && onTokenUpdate) {
+            const input = (usage.input_tokens ?? 0) as number;
+            const output = (usage.output_tokens ?? 0) as number;
             if (input > 0 || output > 0) {
               const turnInput = input - cumulativeInput;
               const turnOutput = output - cumulativeOutput;
@@ -963,7 +982,7 @@ function spawnOpenCode(
     }
 
     if (agentModel) {
-      args.push('--model', agentModel);
+      args.push('--model', normalizeOpenCodeModel(agentModel));
     }
 
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
@@ -989,10 +1008,28 @@ function spawnOpenCode(
       child.stdin.end();
     }
 
+    // OpenCode stdout: always log raw bytes; only forward display-relevant events
+    // to process.stdout. step_finish (token counters + git snapshots) and
+    // tool_result (full file contents as escaped JSON) produce giant JSON blobs
+    // in the terminal — skip them.
+    let ocLineBuf = '';
     child.stdout?.on('data', (chunk: Buffer) => {
       watchdog.reset();
-      logStream.write(chunk);
-      process.stdout.write(chunk);
+      logStream.write(chunk); // full raw log always
+      ocLineBuf += chunk.toString('utf8');
+      const lines = ocLineBuf.split('\n');
+      ocLineBuf = lines.pop() ?? '';
+      for (const line of lines) {
+        const trimmed = line.trim();
+        if (!trimmed) continue;
+        try {
+          const ev = JSON.parse(trimmed);
+          if (ev.type === 'step_finish' || ev.type === 'step_start' || ev.type === 'tool_result') continue;
+          process.stdout.write(trimmed + '\n');
+        } catch {
+          process.stdout.write(line + '\n');
+        }
+      }
     });
 
     const stderrChunks: Buffer[] = [];
@@ -1002,7 +1039,12 @@ function spawnOpenCode(
     child.stderr?.on('data', (chunk: Buffer) => {
       watchdog.reset();
       logStream.write(chunk);
-      process.stdout.write(chunk);
+      // Skip valid JSON lines (OpenCode diagnostic metrics) — only forward genuine errors
+      const text = chunk.toString('utf8');
+      for (const line of text.split('\n')) {
+        if (!line.trim()) continue;
+        try { JSON.parse(line); } catch { process.stdout.write(line + '\n'); }
+      }
       stderrChunks.push(chunk);
       stderrSize += chunk.length;
       while (stderrSize > MAX_STDERR && stderrChunks.length > 1) {
@@ -1050,20 +1092,22 @@ function spawnOpenCode(
 }
 
 /**
- * Spawn `codex --approval-mode auto-edit`.
- * Prompt is passed via stdin.
+ * Spawn `codex exec --dangerously-bypass-approvals-and-sandbox`.
+ * Prompt is passed via stdin (codex exec reads stdin when no prompt arg given).
  */
 function spawnCodex(
   prompt: string,
   cwd: string,
   timeoutMs: number,
   logFile: string,
+  model?: string | null,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildCleanEnv();
     const startTime = Date.now();
 
-    const args: string[] = ['--approval-mode', 'auto-edit'];
+    const args: string[] = ['exec', '--dangerously-bypass-approvals-and-sandbox'];
+    if (model) args.push('--model', model);
 
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
     // stdin: pipe (to send prompt), stdout: pipe (tee to log + process.stdout), stderr: pipe (capture)
@@ -2187,7 +2231,7 @@ async function executeStory(
   retryCounts: Map<string, number>,
   storyCwd?: string,
   worktreeInfo?: StoryWorktree,
-  escalationStates?: Map<string, EscalationState>,
+  _escalationStatesRemoved?: unknown,
   allStories?: UserStory[],
   storyAgentOverride?: AgentType,
   storyAttachAddr?: string | null,
@@ -2252,44 +2296,8 @@ async function executeStory(
 
   const effectiveAttach = effectiveAgent === 'opencode' ? (storyAttachAddr ?? config.attachAddr) : null;
 
-  // ── Escalation: determine current model tier ────────────────────────
-  // Escalation only applies to opencode (API-key models). Claude and Codex are subscription-based.
-  const escalationEnabled = effectiveAgent === 'opencode' && escalationStates !== undefined;
-  // Per-story model override takes precedence over run-level model; escalation still applies on top.
+  // Per-story model override takes precedence over run-level model.
   let currentModel = story.model ?? config.agentModel;
-
-  if (escalationEnabled && escalationStates) {
-    const orchConfig = loadOrchestrationConfig(config.cwd);
-    if (orchConfig.escalation.enabled) {
-      let escState = escalationStates.get(story.id);
-      if (!escState) {
-        // Score story to determine initial tier
-        const scorerStory: ScorerStory = {
-          id: story.id,
-          title: story.title,
-          description: story.description,
-          acceptanceCriteria: story.acceptanceCriteria,
-          dependsOn: story.dependsOn,
-        };
-        const scorerAllStories: ScorerStory[] = (allStories ?? []).map(s => ({
-          id: s.id, title: s.title, description: s.description,
-          acceptanceCriteria: s.acceptanceCriteria, dependsOn: s.dependsOn,
-        }));
-        const { tier } = scoreStory(scorerStory, scorerAllStories, config.cwd);
-        escState = {
-          currentTier: tier,
-          originalTier: tier,
-          retriesOnCurrentTier: 0,
-          escalationHistory: [],
-        };
-        escalationStates.set(story.id, escState);
-      }
-      // Resolve model from tier
-      const provider = extractProvider(config.agentModel);
-      currentModel = `${provider}/${resolveModelId(escState.currentTier, provider, config.cwd)}`;
-      logger.info(`  [escalation] Tier: ${escState.currentTier} → model: ${currentModel}`);
-    }
-  }
 
   logger.info(`[${mode}] ${story.id}: ${story.title} (agent: ${effectiveAgent})`);
   if (worktreeInfo) logger.info(`  Worktree: ${worktreeInfo.worktreePath}`);
@@ -2393,7 +2401,6 @@ async function executeStory(
 
   // Emit story_started WAL event
   if (workspaceId) {
-    const escState = escalationStates?.get(story.id);
     await emitWalEvent(config.port, 'story_started', workspaceId, {
       run_id: config.runId,
       story_id: story.id,
@@ -2401,7 +2408,7 @@ async function executeStory(
       agent_type: effectiveAgent,
       log_file: storyLogFile,
       ...(waveIndex != null ? { wave_index: waveIndex } : {}),
-      ...(currentModel !== config.agentModel ? { model_override: currentModel, model_tier: escState?.currentTier } : {}),
+      ...(currentModel !== config.agentModel ? { model_override: currentModel } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
       ...(injectedContextFiles.length > 0 ? { context_files: injectedContextFiles } : {}),
       ...(activeSkillNames.length > 0 ? { active_skills: activeSkillNames } : {}),
@@ -2508,7 +2515,7 @@ async function executeStory(
           retryCounts.delete(rateLimitKey);
           return executeStory(
             story, config, mode, playbook, logDir, workspaceId, retryCounts,
-            storyCwd, worktreeInfo, escalationStates, allStories,
+            storyCwd, worktreeInfo, undefined, allStories,
             fallback, fallback === 'opencode' ? config.attachAddr : null,
             personaRegistry,
           );
@@ -2574,47 +2581,7 @@ async function executeStory(
       if (!gate.passed) {
         logger.info(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
 
-        // Gate failure counts toward escalation retries too
-        const escState = escalationStates?.get(story.id);
-        const orchConfig2 = loadOrchestrationConfig(config.cwd);
-        const gateEscalationActive = escalationEnabled && escState && orchConfig2.escalation.enabled;
-
-        if (gateEscalationActive && escState) {
-          escState.retriesOnCurrentTier++;
-          const maxOnTier = orchConfig2.escalation.maxRetriesOnTier;
-
-          if (escState.retriesOnCurrentTier >= maxOnTier) {
-            const nextTier = getNextEscalationTier(escState.currentTier, config.cwd);
-            if (nextTier) {
-              const fromTier = escState.currentTier;
-              const totalAttempts = escState.escalationHistory.length + escState.retriesOnCurrentTier;
-              escState.escalationHistory.push({ fromTier, toTier: nextTier, attemptNumber: totalAttempts });
-              escState.currentTier = nextTier;
-              escState.retriesOnCurrentTier = 0;
-
-              const provider = extractProvider(config.agentModel);
-              currentModel = `${provider}/${resolveModelId(nextTier, provider, config.cwd)}`;
-              logger.info(`${story.id} gate failed — escalating: ${fromTier} → ${nextTier} (model: ${currentModel})`);
-              recordDecision(effectiveCwd, {
-                storyId: story.id, timestamp: new Date().toISOString(),
-                type: 'escalation', description: `Gate ${gate.reason} failed — escalated ${fromTier} → ${nextTier}`,
-              });
-
-              if (workspaceId) {
-                await emitWalEvent(config.port, 'story_escalated', workspaceId, {
-                  run_id: config.runId, story_id: story.id,
-                  fromTier, toTier: nextTier, attemptNumber: totalAttempts,
-                  model: currentModel, reason: `gate_${gate.reason}`,
-                }, story.id);
-              }
-              retryCounts.delete(story.id);
-              retryCounts.delete(rateLimitKey);
-              continue;
-            }
-          }
-        }
-
-        // Standard gate failure handling (no escalation possible)
+        // Standard gate failure handling — retry up to MAX_RETRIES, then skip
         const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
         retryCounts.set(story.id, currentRetries);
 
@@ -2653,7 +2620,38 @@ async function executeStory(
         return 'failed';
       }
 
-      // Gate passed
+      // Gate passed — verify agent produced meaningful code changes (not just metadata)
+      try {
+        const porcelain = execSync('git status --porcelain', { cwd: effectiveCwd, encoding: 'utf8' }).trim();
+        const METADATA_PREFIXES = ['forge/specs/', 'progress', '.rorca/', '.claude/', '.opencode/', '.playwright-mcp/'];
+        const meaningfulChanges = porcelain.split('\n').filter(line => {
+          if (!line.trim()) return false;
+          const file = line.substring(3); // strip git status prefix
+          return !METADATA_PREFIXES.some(p => file.startsWith(p));
+        });
+        if (meaningfulChanges.length === 0) {
+          logger.warn(`${story.id}: Agent exited 0 but produced no code changes — treating as failure`);
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_failed', workspaceId, {
+              run_id: config.runId, story_id: story.id, reason: 'no_code_changes',
+              summary: 'Agent subprocess exited successfully but did not modify any code files.',
+              log_file: storyLogFile,
+            }, story.id);
+            await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+          }
+          const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
+          retryCounts.set(story.id, noChangeRetries);
+          if (noChangeRetries >= MAX_RETRIES) {
+            markStorySkipped(config.jsonPath, story.id);
+            return 'failed';
+          }
+          continue;
+        }
+      } catch {
+        // git status failed — proceed normally rather than blocking
+      }
+
+      // All checks passed — mark story as done
       markStoryPassed(config.jsonPath, story.id);
       retryCounts.delete(story.id);
       retryCounts.delete(rateLimitKey);
@@ -2882,102 +2880,7 @@ async function executeStory(
       return 'failed';
     }
 
-    // ── Escalation-aware retry logic ──────────────────────────────────
-    const escState = escalationStates?.get(story.id);
-    const orchConfig = loadOrchestrationConfig(config.cwd);
-    const escalationActive = escalationEnabled && escState && orchConfig.escalation.enabled;
-
-    if (escalationActive && escState) {
-      escState.retriesOnCurrentTier++;
-      const maxOnTier = orchConfig.escalation.maxRetriesOnTier;
-
-      if (escState.retriesOnCurrentTier >= maxOnTier) {
-        // Check if we can escalate to a higher tier
-        const nextTier = getNextEscalationTier(escState.currentTier, config.cwd);
-
-        if (nextTier) {
-          const fromTier = escState.currentTier;
-          const totalAttempts = escState.escalationHistory.length + escState.retriesOnCurrentTier;
-          escState.escalationHistory.push({ fromTier, toTier: nextTier, attemptNumber: totalAttempts });
-          escState.currentTier = nextTier;
-          escState.retriesOnCurrentTier = 0;
-
-          // Resolve new model from escalated tier
-          const provider = extractProvider(config.agentModel);
-          currentModel = `${provider}/${resolveModelId(nextTier, provider, config.cwd)}`;
-
-          logger.info(`${story.id} escalating: ${fromTier} → ${nextTier} (model: ${currentModel})`);
-          recordDecision(effectiveCwd, {
-            storyId: story.id, timestamp: new Date().toISOString(),
-            type: 'escalation', description: `${classified.category} — escalated ${fromTier} → ${nextTier}`,
-          });
-
-          // Emit story_escalated WAL event
-          if (workspaceId) {
-            await emitWalEvent(config.port, 'story_escalated', workspaceId, {
-              run_id: config.runId,
-              story_id: story.id,
-              fromTier,
-              toTier: nextTier,
-              attemptNumber: totalAttempts,
-              model: currentModel,
-              error_category: classified.category,
-              error_message: classified.message,
-            }, story.id);
-          }
-
-          // Reset retry count for the new tier and loop back to retry
-          retryCounts.delete(story.id);
-          retryCounts.delete(rateLimitKey);
-          continue;
-        }
-
-        // At opus (top tier) and still failing — give up
-        logger.info(`${story.id} failed at top tier (${escState.currentTier}) after ${escState.retriesOnCurrentTier} attempts. Skipping.`);
-        logger.info(`   Escalation history: ${escState.escalationHistory.map(h => `${h.fromTier}→${h.toTier}`).join(', ') || 'none'}`);
-        logger.info(`   Log: ${storyLogFile}`);
-        logger.info(`   Error: ${classified.message}`);
-        markStorySkipped(config.jsonPath, story.id);
-        rsMarkStoryFailed(effectiveCwd, {
-          storyId: story.id, title: story.title, status: 'failed',
-          startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
-          finishedAt: new Date().toISOString(), agentType: effectiveAgent,
-          failReason: 'max_retries_all_tiers', retries: escState.retriesOnCurrentTier,
-          model: currentModel ?? undefined, elapsedMs: result.elapsedMs,
-        });
-        writeProgressTxt(effectiveCwd);
-
-        if (workspaceId) {
-          await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId, story_id: story.id,
-            reason: 'max_retries_all_tiers',
-            attempts: escState.escalationHistory.reduce((sum, h) => sum + h.attemptNumber, 0) + escState.retriesOnCurrentTier,
-            final_tier: escState.currentTier,
-            escalation_history: escState.escalationHistory,
-            error_category: classified.category, error_message: classified.message,
-            agent_type: effectiveAgent,
-            log_file: storyLogFile,
-            ...(graphHits != null ? { graph_hits: graphHits } : {}),
-          }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
-
-          // PG-020: Auto-synthesize memory from escalation-exhausted failure
-          await autoSynthesizeMemory(
-            story.id, workspaceId, buildStoryText(story),
-            readLogTail(storyLogFile), 'failed', config.runId, config.port,
-          );
-        }
-        return 'failed';
-      }
-
-      // Still have retries on current tier
-      logger.info(`${story.id} failed on ${escState.currentTier} (attempt ${escState.retriesOnCurrentTier}/${maxOnTier}): ${classified.category}`);
-      logger.info(`   Log: ${storyLogFile}`);
-      logger.info(`   Error: ${classified.message}`);
-      return 'failed';
-    }
-
-    // ── Standard retry logic (no escalation: claude path or escalation disabled) ──
+    // ── Standard retry logic — retry up to MAX_RETRIES with same model, then skip ──
     const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
     retryCounts.set(story.id, currentRetries);
 
@@ -3148,7 +3051,6 @@ async function main(): Promise<void> {
 
   const workspaceId = await resolveWorkspaceId(config.port, config.cwd);
   const retryCounts = new Map<string, number>();
-  const escalationStates = new Map<string, EscalationState>();
 
   // Set fallback context for emitWalEvent / postStoryResult fallback file writes
   setFallbackContext(config.cwd, config.runId);
@@ -3209,7 +3111,7 @@ async function main(): Promise<void> {
 
   // ─── Parallel execution path (N > 1) ──────────────────────────────
   if (config.parallelism > 1 && !config.specificStory) {
-    await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, stories, escalationStates, personaRegistry);
+    await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, stories, personaRegistry);
     return;
   }
 
@@ -3298,10 +3200,9 @@ async function main(): Promise<void> {
       process.exit(0);
     }
 
-    // Sequential path delegates to executeStory (which handles escalation)
     const seqResult = await executeStory(
       story, config, mode, playbook, logDir, workspaceId, retryCounts,
-      undefined, undefined, escalationStates, currentStories,
+      undefined, undefined, undefined, currentStories,
       undefined, undefined, personaRegistry,
     );
 
@@ -3324,7 +3225,6 @@ async function runParallel(
   workspaceId: string | null,
   retryCounts: Map<string, number>,
   stories: UserStory[],
-  escalationStates?: Map<string, EscalationState>,
   personaRegistry?: PersonaRegistry,
 ): Promise<void> {
   const waveStories: WaveUserStory[] = stories.map(s => ({
@@ -3444,7 +3344,7 @@ async function runParallel(
     const tasks = storiesWithWorktrees.map(story => {
       const wt = worktreeMap.get(story.id)!;
       return () =>
-        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, escalationStates, stories, undefined, undefined, personaRegistry, wave.index)
+        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, undefined, stories, undefined, undefined, personaRegistry, wave.index)
           .then(result => ({ storyId: story.id, result }));
     });
 
