@@ -338,7 +338,7 @@ router.post('/test', async (req: Request, res: Response) => {
         provider: provider as ProviderType,
         apiKey,
         baseUrl,
-        model: provider === 'claude-cli' ? 'claude-haiku-4-5-20251001' : undefined,
+        model: provider === 'openrouter' ? 'anthropic/claude-haiku-4-5' : 'claude-haiku-4-5-20251001',
       },
     );
     const latencyMs = Date.now() - startMs;

@@ -897,7 +897,20 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
 
         const wasCancelled = cancellingRuns.delete(runId);
-        const status = wasCancelled ? 'cancelled' : (code === 0 ? 'done' : 'failed');
+        let status = wasCancelled ? 'cancelled' : (code === 0 ? 'done' : 'failed');
+
+        // A run where every story was skipped is not "done" — it failed
+        if (status === 'done') {
+          const storyCheck = await queryOne<{ total: string; skipped: string }>(
+            `SELECT COUNT(*) AS total, COUNT(*) FILTER (WHERE status = 'skip') AS skipped FROM story_results WHERE run_id = $1`,
+            [runId],
+          );
+          if (storyCheck && parseInt(storyCheck.total) > 0 && storyCheck.total === storyCheck.skipped) {
+            status = 'failed';
+            logger.warn({ runId }, '[worker] All stories skipped — marking run as failed');
+          }
+        }
+
         logger.info({ runId, code, status, wasCancelled }, '[worker] execution-engine exited');
 
         await execute(
@@ -1996,6 +2009,16 @@ process.on('unhandledRejection', (reason) => {
     logger.warn({ reason }, '[worker] unhandledRejection (non-fatal AppError) — process kept alive');
     return;
   }
+
+  // PostgreSQL errors (missing column, missing table, constraint violations, etc.)
+  // are non-fatal — a bad INSERT from one story should never kill the whole worker.
+  // pg errors have a 'code' field (e.g. '42703' = undefined_column, '42P01' = undefined_table).
+  const isPgError = reason instanceof Error && 'code' in reason && typeof (reason as any).code === 'string';
+  if (isPgError) {
+    logger.error({ reason }, '[worker] unhandledRejection (pg DatabaseError) — process kept alive');
+    return;
+  }
+
   logger.error({ reason }, '[worker] unhandledRejection — triggering shutdown');
   void shutdown('unhandledRejection');
 });
