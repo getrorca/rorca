@@ -2,7 +2,7 @@
   "specId": "rorca-browser-mcp-integration",
   "runId": 20260316000161,
   "startedAt": "2026-04-12T03:44:38.262Z",
-  "lastUpdatedAt": "2026-04-12T03:46:28.523Z",
+  "lastUpdatedAt": "2026-04-12T03:49:03.822Z",
   "completedStories": [
     {
       "storyId": "BMC-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-sonnet-4-6",
       "elapsedMs": 109567
+    },
+    {
+      "storyId": "BMC-002",
+      "title": "ensurePlaywrightMcpServer() — idempotent HTTP server lifecycle manager on port 4040",
+      "status": "passed",
+      "startedAt": "2026-04-12T03:46:43.560Z",
+      "finishedAt": "2026-04-12T03:49:03.822Z",
+      "agentType": "claude",
+      "model": "claude-sonnet-4-6",
+      "elapsedMs": 140262
     }
   ],
   "failedStories": [],
