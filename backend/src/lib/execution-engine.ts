@@ -2386,6 +2386,7 @@ async function executeStory(
   storyAttachAddr?: string | null,
   personaRegistry?: PersonaRegistry,
   waveIndex?: number,
+  spec?: SpecJson,
 ): Promise<'passed' | 'failed' | 'skipped'> {
   const effectiveCwd = storyCwd ?? config.cwd;
   const timeoutMin = story.timeoutMinutes ?? DEFAULT_TIMEOUT_MINUTES;
@@ -2540,7 +2541,32 @@ async function executeStory(
     }
   }
 
-  const prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath, roleSection, personaRegistry, skillsSection, graphSection);
+  // Resolve browser MCP for this story
+  const wantsBrowser = storyWantsBrowserMcp(story, spec ?? {});
+  let browserMcpUrl: string | null = null;
+  if (wantsBrowser) {
+    browserMcpUrl = await ensurePlaywrightMcpServer();
+    if (browserMcpUrl) {
+      process.stdout.write(`[BrowserMCP] Browser tools active for story ${story.id}\n`);
+    }
+  }
+
+  let prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath, roleSection, personaRegistry, skillsSection, graphSection);
+
+  if (wantsBrowser && browserMcpUrl) {
+    prompt += [
+      '',
+      '## Browser MCP',
+      'The `playwright` MCP server is active for this story. Use it for all UI verification:',
+      '- `browser_navigate` — navigate to a URL',
+      '- `browser_snapshot` — capture accessibility snapshot of current page',
+      '- `browser_click` / `browser_type` — interact with elements',
+      '- `browser_console_messages` — read JS console output',
+      '- `browser_network_requests` — inspect network activity',
+      '',
+      'Do NOT fall back to headless Chrome CLI (`/Applications/Google Chrome.app/...`). Use the playwright MCP tools exclusively.',
+    ].join('\n');
+  }
 
   const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
   fs.writeFileSync(promptLogFile, prompt);
@@ -2556,6 +2582,7 @@ async function executeStory(
       story_title: story.title,
       agent_type: effectiveAgent,
       log_file: storyLogFile,
+      browser_mcp: wantsBrowser,
       ...(waveIndex != null ? { wave_index: waveIndex } : {}),
       ...(currentModel !== config.agentModel ? { model_override: currentModel } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
@@ -2616,6 +2643,7 @@ async function executeStory(
       config.thinkingEnabled,
       config.thinkingBudget,
       config.effortLevel,
+      browserMcpUrl,
     );
 
     // Extract token usage from log file after agent exits
@@ -3363,6 +3391,8 @@ async function main(): Promise<void> {
       story, config, mode, playbook, logDir, workspaceId, retryCounts,
       undefined, undefined, undefined, currentStories,
       undefined, undefined, personaRegistry,
+      undefined, // waveIndex
+      currentSpec, // spec — for storyWantsBrowserMcp()
     );
 
     if (config.specificStory) {
@@ -3426,6 +3456,8 @@ async function runParallel(
   const specSlug = path.basename(config.jsonPath, '.json').replace(/[^a-z0-9-]/gi, '-');
   const failedIds = new Set<string>();
   const processedIds = new Set<string>();
+  // Read spec once for browserMcp resolution (before wave loop)
+  const specForBrowserMcp: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
 
   for (const wave of waves) {
     logger.info('==========================================');
@@ -3503,7 +3535,7 @@ async function runParallel(
     const tasks = storiesWithWorktrees.map(story => {
       const wt = worktreeMap.get(story.id)!;
       return () =>
-        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, undefined, stories, undefined, undefined, personaRegistry, wave.index)
+        executeStory(story, config, mode, playbook, logDir, workspaceId, retryCounts, wt.worktreePath, wt, undefined, stories, undefined, undefined, personaRegistry, wave.index, specForBrowserMcp)
           .then(result => ({ storyId: story.id, result }));
     });
 

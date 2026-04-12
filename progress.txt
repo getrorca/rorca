@@ -3,9 +3,10 @@
 Spec: rorca-browser-mcp-integration
 Run ID: 20260316000161
 Started: 2026-04-12T03:44:38.262Z
-Last Updated: 2026-04-12T03:54:26.579Z
+Last Updated: 2026-04-12T04:26:28.658Z
 
-## Completed Stories (3)
+## Completed Stories (4)
 - BMC-001: Add browserMcp flag to UserStory and SpecJson interfaces + storyWantsBrowserMcp helper — DONE (claude, claude-sonnet-4-6, 110s)
 - BMC-002: ensurePlaywrightMcpServer() — idempotent HTTP server lifecycle manager on port 4040 — DONE (claude, claude-sonnet-4-6, 140s)
 - BMC-003: Per-agent browser MCP injection — claude (--mcp-config), opencode (opencode.json in cwd), codex (mcp add/remove) — DONE (claude, claude-sonnet-4-6, 308s)
+- BMC-004: Story loop integration — resolve browserMcp per story, start server, inject URL, enrich prompt and WAL event — DONE (claude, claude-sonnet-4-6, 1907s)
