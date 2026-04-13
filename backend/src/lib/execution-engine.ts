@@ -99,12 +99,20 @@ interface UserStory {
   /** SK-002: LLM-suggested skills from spec generation. */
   suggestedSkills?: Array<{ name: string; relevance: number; reason: string }>;
   /**
-   * Per-story browser MCP override.
+   * Per-story browser MCP override (@playwright/mcp — fresh isolated browser).
    * true  = inject browser tools for this story.
    * false = opt out even if spec.browserMcp is true.
    * undefined = inherit from spec.browserMcp (defaults to false).
    */
   browserMcp?: boolean;
+  /**
+   * Per-story Chrome DevTools MCP override (chrome-devtools-mcp — attaches to
+   * the user's already-running, already-authenticated Chrome via CDP on port 9222).
+   * true  = inject Chrome DevTools tools for this story.
+   * false = opt out even if spec.chromeMcp is true.
+   * undefined = inherit from spec.chromeMcp (defaults to false).
+   */
+  chromeMcp?: boolean;
 }
 
 interface SpecJson {
@@ -117,10 +125,18 @@ interface SpecJson {
   /** Optional default reasoning config for all stories in this spec. */
   reasoning?: { enabled: boolean; effort?: string };
   /**
-   * When true, all stories in this spec receive @playwright/mcp browser tools.
+   * When true, all stories in this spec receive @playwright/mcp browser tools
+   * (fresh isolated headless browser, no existing session).
    * Story-level browserMcp overrides this value (true or false).
    */
   browserMcp?: boolean;
+  /**
+   * When true, all stories receive chrome-devtools-mcp tools that attach to the
+   * user's already-running Chrome instance (requires Chrome launched with
+   * --remote-debugging-port=9222). Gives access to the live authenticated session.
+   * Story-level chromeMcp overrides this value.
+   */
+  chromeMcp?: boolean;
 }
 
 interface EngineConfig {
@@ -156,6 +172,12 @@ interface EngineConfig {
 function storyWantsBrowserMcp(story: UserStory, spec: SpecJson): boolean {
   if (story.browserMcp !== undefined) return story.browserMcp;
   return spec.browserMcp ?? false;
+}
+
+/** Returns true if this story should receive chrome-devtools-mcp tools. */
+function storyWantsChromeMcp(story: UserStory, spec: SpecJson): boolean {
+  if (story.chromeMcp !== undefined) return story.chromeMcp;
+  return spec.chromeMcp ?? false;
 }
 
 // ─── Per-Story Agent Resolution ──────────────────────────────────────────────
@@ -206,6 +228,13 @@ const PLAYWRIGHT_MCP_PORT = 4040;
 const PLAYWRIGHT_MCP_URL = `http://localhost:${PLAYWRIGHT_MCP_PORT}/mcp`;
 let _playwrightMcpServerPid: number | null = null;
 let _playwrightMcpReady = false;
+
+// Chrome DevTools MCP — stdio→HTTP bridge running on port 4041.
+// Attaches to the user's existing Chrome via CDP (--remote-debugging-port=9222).
+const CHROME_MCP_PORT = 4041;
+const CHROME_MCP_URL = `http://localhost:${CHROME_MCP_PORT}/mcp`;
+let _chromeMcpProxyPid: number | null = null;
+let _chromeMcpReady = false;
 
 const MAX_RETRIES = 3;
 const MAX_RATE_LIMIT_RETRIES = 4;
@@ -288,6 +317,150 @@ async function ensurePlaywrightMcpServer(): Promise<string | null> {
   } catch (err: unknown) {
     const msg = err instanceof Error ? err.message : String(err);
     process.stdout.write(`[BrowserMCP] WARNING: Failed to start @playwright/mcp: ${msg} — browser tools unavailable\n`);
+    return null;
+  }
+}
+
+/**
+ * Ensure chrome-devtools-mcp is running as an HTTP MCP server on port 4041.
+ *
+ * chrome-devtools-mcp is a stdio-only process. We bridge it to HTTP using a
+ * lightweight in-process proxy built on the @modelcontextprotocol/sdk:
+ *   - Spawn `chrome-devtools-mcp --browser-url http://127.0.0.1:9222
+ *            --no-usage-statistics --no-performance-crux` as a child process
+ *   - The SDK StdioClientTransport connects to it over stdin/stdout
+ *   - An Express server + StreamableHTTPServerTransport exposes it on port 4041
+ *
+ * CDP port: reads RORCA_CDP_PORT env var (default 9222). Chrome must be running
+ * with --remote-debugging-port=<CDP_PORT> for this to work.
+ *
+ * Idempotent — starts at most once per engine process.
+ * Returns the server URL on success, null on failure (never throws).
+ */
+async function ensureChromeDevToolsMcpServer(): Promise<string | null> {
+  if (_chromeMcpReady) return CHROME_MCP_URL;
+
+  // Check if port is already occupied (another story already started it)
+  try {
+    const probe = await fetch(CHROME_MCP_URL, { signal: AbortSignal.timeout(1000) });
+    if (probe.status < 500) {
+      _chromeMcpReady = true;
+      return CHROME_MCP_URL;
+    }
+  } catch {
+    // Port not occupied — fall through to spawn
+  }
+
+  const cdpPort = process.env.RORCA_CDP_PORT ?? '9222';
+  const browserUrl = `http://127.0.0.1:${cdpPort}`;
+
+  // First: verify Chrome is actually reachable on the CDP port.
+  try {
+    const cdpCheck = await fetch(`${browserUrl}/json/version`, { signal: AbortSignal.timeout(2000) });
+    if (!cdpCheck.ok) {
+      process.stdout.write(
+        `[ChromeMCP] WARNING: Chrome not reachable at ${browserUrl} (HTTP ${cdpCheck.status}). ` +
+        `Launch Chrome with --remote-debugging-port=${cdpPort} to use chrome-devtools-mcp.\n`,
+      );
+      return null;
+    }
+    const version = await cdpCheck.json() as Record<string, string>;
+    process.stdout.write(`[ChromeMCP] Chrome found at ${browserUrl} — ${version['Browser'] ?? 'unknown version'}\n`);
+  } catch {
+    process.stdout.write(
+      `[ChromeMCP] WARNING: Chrome not reachable at ${browserUrl}. ` +
+      `Launch Chrome with --remote-debugging-port=${cdpPort} to use chrome-devtools-mcp.\n`,
+    );
+    return null;
+  }
+
+  // Resolve chrome-devtools-mcp binary — prefer local node_modules over global npx.
+  const localBin = path.join(path.dirname(require.resolve('chrome-devtools-mcp/package.json')), 'build/src/bin/chrome-devtools-mcp.js');
+  const chromeMcpCmd = fs.existsSync(localBin) ? process.execPath : 'node';
+  const chromeMcpArgs = fs.existsSync(localBin)
+    ? [localBin, `--browser-url=${browserUrl}`, '--no-usage-statistics', '--no-performance-crux']
+    : [require.resolve('chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js'), `--browser-url=${browserUrl}`, '--no-usage-statistics', '--no-performance-crux'];
+
+  try {
+    // Lazy-load MCP SDK to avoid importing at module level (keeps startup fast when not needed).
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { Client } = require('@modelcontextprotocol/sdk/client/index.js') as typeof import('@modelcontextprotocol/sdk/client/index.js');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { StdioClientTransport } = require('@modelcontextprotocol/sdk/client/stdio.js') as typeof import('@modelcontextprotocol/sdk/client/stdio.js');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { Server } = require('@modelcontextprotocol/sdk/server/index.js') as typeof import('@modelcontextprotocol/sdk/server/index.js');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { StreamableHTTPServerTransport } = require('@modelcontextprotocol/sdk/server/streamableHttp.js') as typeof import('@modelcontextprotocol/sdk/server/streamableHttp.js');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const { CallToolRequestSchema, ListToolsRequestSchema } = require('@modelcontextprotocol/sdk/types.js') as typeof import('@modelcontextprotocol/sdk/types.js');
+    // eslint-disable-next-line @typescript-eslint/no-var-requires
+    const expressLib = require('express') as typeof import('express');
+
+    // 1. Connect to chrome-devtools-mcp via stdio
+    const stdioTransport = new StdioClientTransport({
+      command: chromeMcpCmd,
+      args: chromeMcpArgs,
+      env: { ...process.env } as Record<string, string>,
+    });
+    const client = new Client({ name: 'rorca-chrome-bridge', version: '1.0.0' });
+    await client.connect(stdioTransport);
+    _chromeMcpProxyPid = (stdioTransport as unknown as { _process?: { pid?: number } })._process?.pid ?? null;
+    process.stdout.write(`[ChromeMCP] chrome-devtools-mcp connected (PID ${_chromeMcpProxyPid ?? 'unknown'})\n`);
+
+    // 2. List tools from the upstream server so we can re-expose them.
+    const { tools: upstreamTools } = await client.listTools();
+
+    // 3. Create a transparent proxy MCP server using the low-level Server class.
+    //    This avoids McpServer's Zod schema requirement — we forward tool calls as-is.
+    const proxyServer = new Server(
+      { name: 'rorca-chrome-devtools-proxy', version: '1.0.0' },
+      { capabilities: { tools: {} } },
+    );
+
+    proxyServer.setRequestHandler(ListToolsRequestSchema, async () => ({
+      tools: upstreamTools,
+    }));
+
+    proxyServer.setRequestHandler(CallToolRequestSchema, async (req) => {
+      const result = await client.callTool({
+        name: req.params.name,
+        arguments: (req.params.arguments ?? {}) as Record<string, unknown>,
+      });
+      return result;
+    });
+
+    // 4. Expose the proxy server over HTTP on CHROME_MCP_PORT via Express.
+    const app = expressLib();
+    app.use(expressLib.json());
+
+    // Each request gets its own StreamableHTTPServerTransport (stateless — suitable for MCP).
+    app.all('/mcp', async (req, res) => {
+      const transport = new StreamableHTTPServerTransport({ sessionIdGenerator: undefined });
+      res.on('close', () => { transport.close().catch(() => {}); });
+      await proxyServer.connect(transport);
+      await transport.handleRequest(req, res, req.body as Record<string, unknown>);
+    });
+
+    const httpServer = app.listen(CHROME_MCP_PORT, '127.0.0.1', () => {
+      _chromeMcpReady = true;
+      process.stdout.write(`[ChromeMCP] Proxy ready at ${CHROME_MCP_URL} (${upstreamTools.length} tools forwarded)\n`);
+    });
+
+    // Store reference so we can close on SIGINT/SIGTERM.
+    (global as Record<string, unknown>).__rorcaChromeMcpHttpServer = httpServer;
+
+    // Wait for the server to become ready (listen callback fires async).
+    const deadline = Date.now() + 5_000;
+    while (Date.now() < deadline) {
+      if (_chromeMcpReady) return CHROME_MCP_URL;
+      await new Promise(r => setTimeout(r, 100));
+    }
+
+    process.stdout.write(`[ChromeMCP] WARNING: Proxy HTTP server did not become ready within 5s\n`);
+    return null;
+  } catch (err: unknown) {
+    const msg = err instanceof Error ? err.message : String(err);
+    process.stdout.write(`[ChromeMCP] WARNING: Failed to start chrome-devtools-mcp bridge: ${msg}\n`);
     return null;
   }
 }
@@ -793,16 +966,16 @@ function runAgent(
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
   effortLevel?: 'low' | 'medium' | 'high' | 'max',
-  mcpServerUrl?: string | null,
+  mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   switch (agentType) {
     case 'claude':
-      return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel, mcpServerUrl);
+      return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel, mcpServers);
     case 'opencode':
-      return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr, thinkingEnabled, thinkingBudget, effortLevel, mcpServerUrl);
+      return spawnOpenCode(prompt, cwd, timeoutMs, logFile, agentModel, attachAddr, thinkingEnabled, thinkingBudget, effortLevel, mcpServers);
     case 'codex':
       // thinking/effort flags are not forwarded to Codex
-      return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServerUrl);
+      return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServers);
   }
 }
 
@@ -817,19 +990,18 @@ function spawnClaude(
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
   effortLevel?: 'low' | 'medium' | 'high' | 'max',
-  mcpServerUrl?: string | null,
+  mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildCleanEnv();
     const startTime = Date.now();
 
     let mcpConfigPath: string | null = null;
-    if (mcpServerUrl) {
-      const mcpConfig = {
-        mcpServers: {
-          playwright: { type: 'http', url: mcpServerUrl },
-        },
-      };
+    if (mcpServers && Object.keys(mcpServers).length > 0) {
+      const mcpConfig: Record<string, unknown> = { mcpServers: {} };
+      for (const [name, url] of Object.entries(mcpServers)) {
+        (mcpConfig.mcpServers as Record<string, unknown>)[name] = { type: 'http', url };
+      }
       mcpConfigPath = path.join(os.tmpdir(), `rorca-browser-mcp-${Date.now()}.json`);
       fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
     }
@@ -1057,7 +1229,7 @@ function spawnOpenCode(
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
   effortLevel?: 'low' | 'medium' | 'high' | 'max',
-  mcpServerUrl?: string | null,
+  mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = {
@@ -1067,20 +1239,18 @@ function spawnOpenCode(
     const startTime = Date.now();
 
     let openCodeMcpConfigPath: string | null = null;
-    if (mcpServerUrl) {
+    if (mcpServers && Object.keys(mcpServers).length > 0) {
       openCodeMcpConfigPath = path.join(cwd, 'opencode.json');
       // Preserve any existing opencode.json content
       let existingConfig: Record<string, unknown> = {};
       if (fs.existsSync(openCodeMcpConfigPath)) {
         try { existingConfig = JSON.parse(fs.readFileSync(openCodeMcpConfigPath, 'utf8')); } catch { /* ignore */ }
       }
-      const merged = {
-        ...existingConfig,
-        mcp: {
-          ...(existingConfig.mcp as Record<string, unknown> ?? {}),
-          playwright: { type: 'remote', url: mcpServerUrl, enabled: true },
-        },
-      };
+      const mcpEntries: Record<string, unknown> = existingConfig.mcp as Record<string, unknown> ?? {};
+      for (const [name, url] of Object.entries(mcpServers)) {
+        mcpEntries[name] = { type: 'remote', url, enabled: true };
+      }
+      const merged = { ...existingConfig, mcp: mcpEntries };
       fs.writeFileSync(openCodeMcpConfigPath, JSON.stringify(merged, null, 2), 'utf8');
     }
 
@@ -1231,22 +1401,23 @@ function spawnCodex(
   timeoutMs: number,
   logFile: string,
   model?: string | null,
-  mcpServerUrl?: string | null,
+  mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
     const env = buildCleanEnv();
     const startTime = Date.now();
 
-    let codexMcpRegistered = false;
-    if (mcpServerUrl) {
-      try {
-        execSync(`${CODEX_BIN} mcp add playwright --url ${mcpServerUrl}`, { stdio: 'pipe' });
-        codexMcpRegistered = true;
-        process.stdout.write(`[BrowserMCP] Registered playwright MCP in codex config\n`);
-      } catch (e: unknown) {
-        const msg = e instanceof Error ? e.message : String(e);
-        process.stdout.write(`[BrowserMCP] WARNING: Failed to register playwright MCP in codex: ${msg}\n`);
-        // codexMcpRegistered stays false — cleanup will be skipped
+    const codexMcpRegisteredNames: string[] = [];
+    if (mcpServers && Object.keys(mcpServers).length > 0) {
+      for (const [name, url] of Object.entries(mcpServers)) {
+        try {
+          execSync(`${CODEX_BIN} mcp add ${name} --url ${url}`, { stdio: 'pipe' });
+          codexMcpRegisteredNames.push(name);
+          process.stdout.write(`[BrowserMCP] Registered ${name} MCP in codex config\n`);
+        } catch (e: unknown) {
+          const msg = e instanceof Error ? e.message : String(e);
+          process.stdout.write(`[BrowserMCP] WARNING: Failed to register ${name} MCP in codex: ${msg}\n`);
+        }
       }
     }
 
@@ -1322,9 +1493,9 @@ function spawnCodex(
       logStream.end();
       const stderrTail = Buffer.concat(stderrChunks).toString('utf8');
       const elapsedMs = Date.now() - startTime;
-      if (codexMcpRegistered) {
+      for (const name of codexMcpRegisteredNames) {
         try {
-          execSync(`${CODEX_BIN} mcp remove playwright`, { stdio: 'pipe' });
+          execSync(`${CODEX_BIN} mcp remove ${name}`, { stdio: 'pipe' });
         } catch { /* ignore if already gone */ }
       }
       if (code === null || watchdogFired) {
@@ -2541,13 +2712,25 @@ async function executeStory(
     }
   }
 
-  // Resolve browser MCP for this story
+  // Resolve browser MCP for this story (@playwright/mcp — fresh isolated browser)
   const wantsBrowser = storyWantsBrowserMcp(story, spec ?? {});
   let browserMcpUrl: string | null = null;
   if (wantsBrowser) {
     browserMcpUrl = await ensurePlaywrightMcpServer();
     if (browserMcpUrl) {
       process.stdout.write(`[BrowserMCP] Browser tools active for story ${story.id}\n`);
+    }
+  }
+
+  // Resolve Chrome DevTools MCP for this story (attaches to live authenticated Chrome)
+  const wantsChrome = storyWantsChromeMcp(story, spec ?? {});
+  let chromeMcpUrl: string | null = null;
+  if (wantsChrome) {
+    chromeMcpUrl = await ensureChromeDevToolsMcpServer();
+    if (chromeMcpUrl) {
+      process.stdout.write(`[ChromeMCP] Chrome DevTools tools active for story ${story.id}\n`);
+    } else {
+      process.stdout.write(`[ChromeMCP] Chrome DevTools unavailable for story ${story.id} — continuing without (Chrome may not be running with --remote-debugging-port)\n`);
     }
   }
 
@@ -2565,6 +2748,25 @@ async function executeStory(
       '- `browser_network_requests` — inspect network activity',
       '',
       'Do NOT fall back to headless Chrome CLI (`/Applications/Google Chrome.app/...`). Use the playwright MCP tools exclusively.',
+    ].join('\n');
+  }
+
+  if (wantsChrome && chromeMcpUrl) {
+    prompt += [
+      '',
+      '## Chrome DevTools MCP',
+      'The `chrome-devtools` MCP server is active for this story. It is attached to the',
+      'user\'s existing Chrome browser that is already open and authenticated. Use it to:',
+      '- Inspect the live DOM of the running app (no login needed — session is already active)',
+      '- Capture screenshots of the current page state',
+      '- Read the browser console for errors and log messages',
+      '- Intercept and inspect network requests',
+      '- Execute JavaScript in the page context',
+      '',
+      'Prefer chrome-devtools MCP tools over playwright when the user\'s authenticated',
+      'session is required. Do NOT attempt to log in — the session is already established.',
+      'If the tool returns an error about no browser connection, report it clearly rather',
+      'than silently falling back.',
     ].join('\n');
   }
 
@@ -2631,6 +2833,11 @@ async function executeStory(
 
   // Rate limit retry loop
   while (true) {
+    // Build the MCP servers map — only include entries that are actually available.
+    const mcpServers: Record<string, string> = {};
+    if (browserMcpUrl) mcpServers['playwright'] = browserMcpUrl;
+    if (chromeMcpUrl) mcpServers['chrome-devtools'] = chromeMcpUrl;
+
     const result = await runAgent(
       effectiveAgent,
       prompt,
@@ -2643,7 +2850,7 @@ async function executeStory(
       config.thinkingEnabled,
       config.thinkingBudget,
       config.effortLevel,
-      browserMcpUrl,
+      Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
     );
 
     // Extract token usage from log file after agent exits
@@ -3260,19 +3467,31 @@ async function main(): Promise<void> {
   initRunState(config.cwd, specId, config.runId);
   const resumeCtx = getResumeContext(config.cwd, specId);
 
-  process.on('SIGINT', () => {
-    logger.info('');
-    logger.info('Engine stopped by user.');
+  function cleanupBrowserServers() {
     if (_playwrightMcpServerPid) {
       try { process.kill(_playwrightMcpServerPid, 'SIGTERM'); } catch { /* already gone */ }
     }
+    // Close the chrome-devtools-mcp HTTP proxy server if it was started.
+    const chromeMcpServer = (global as Record<string, unknown>).__rorcaChromeMcpHttpServer as
+      { close: (cb?: () => void) => void } | undefined;
+    if (chromeMcpServer) {
+      try { chromeMcpServer.close(); } catch { /* already closed */ }
+    }
+    // Kill the chrome-devtools-mcp stdio child if we tracked its PID.
+    if (_chromeMcpProxyPid) {
+      try { process.kill(_chromeMcpProxyPid, 'SIGTERM'); } catch { /* already gone */ }
+    }
+  }
+
+  process.on('SIGINT', () => {
+    logger.info('');
+    logger.info('Engine stopped by user.');
+    cleanupBrowserServers();
     process.exit(0);
   });
 
   process.on('SIGTERM', () => {
-    if (_playwrightMcpServerPid) {
-      try { process.kill(_playwrightMcpServerPid, 'SIGTERM'); } catch { /* already gone */ }
-    }
+    cleanupBrowserServers();
     process.exit(0);
   });
 
