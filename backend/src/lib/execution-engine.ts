@@ -354,25 +354,84 @@ async function ensureChromeDevToolsMcpServer(): Promise<string | null> {
   const cdpPort = process.env.RORCA_CDP_PORT ?? '9222';
   const browserUrl = `http://127.0.0.1:${cdpPort}`;
 
-  // First: verify Chrome is actually reachable on the CDP port.
-  try {
-    const cdpCheck = await fetch(`${browserUrl}/json/version`, { signal: AbortSignal.timeout(2000) });
-    if (!cdpCheck.ok) {
+  // Helper: probe CDP endpoint, return version string or null.
+  async function probeCdp(): Promise<string | null> {
+    try {
+      const r = await fetch(`${browserUrl}/json/version`, { signal: AbortSignal.timeout(2000) });
+      if (!r.ok) return null;
+      const v = await r.json() as Record<string, string>;
+      return v['Browser'] ?? 'unknown version';
+    } catch {
+      return null;
+    }
+  }
+
+  // First: check if Chrome is already running with CDP enabled.
+  let chromeVersion = await probeCdp();
+
+  if (!chromeVersion) {
+    // Chrome not reachable — try to launch it automatically.
+    process.stdout.write(`[ChromeMCP] Chrome not found at ${browserUrl} — attempting to launch Chrome with --remote-debugging-port=${cdpPort}...\n`);
+
+    // Resolve Chrome binary path (macOS, Linux, Windows).
+    const chromeCandidates = [
+      process.env.RORCA_CHROME_BIN,
+      '/Applications/Google Chrome.app/Contents/MacOS/Google Chrome',
+      '/Applications/Chromium.app/Contents/MacOS/Chromium',
+      '/usr/bin/google-chrome',
+      '/usr/bin/google-chrome-stable',
+      '/usr/bin/chromium-browser',
+      '/usr/bin/chromium',
+      'C:\\Program Files\\Google\\Chrome\\Application\\chrome.exe',
+      'C:\\Program Files (x86)\\Google\\Chrome\\Application\\chrome.exe',
+    ].filter(Boolean) as string[];
+
+    const chromeBin = chromeCandidates.find(p => {
+      try { return fs.existsSync(p); } catch { return false; }
+    });
+
+    if (!chromeBin) {
       process.stdout.write(
-        `[ChromeMCP] WARNING: Chrome not reachable at ${browserUrl} (HTTP ${cdpCheck.status}). ` +
-        `Launch Chrome with --remote-debugging-port=${cdpPort} to use chrome-devtools-mcp.\n`,
+        `[ChromeMCP] WARNING: Chrome binary not found. Set RORCA_CHROME_BIN env var or install Chrome.\n`,
       );
       return null;
     }
-    const version = await cdpCheck.json() as Record<string, string>;
-    process.stdout.write(`[ChromeMCP] Chrome found at ${browserUrl} — ${version['Browser'] ?? 'unknown version'}\n`);
-  } catch {
-    process.stdout.write(
-      `[ChromeMCP] WARNING: Chrome not reachable at ${browserUrl}. ` +
-      `Launch Chrome with --remote-debugging-port=${cdpPort} to use chrome-devtools-mcp.\n`,
+
+    // Use a dedicated user-data-dir so we don't stomp on the user's real profile.
+    const userDataDir = path.join(os.tmpdir(), `rorca-chrome-${cdpPort}`);
+    fs.mkdirSync(userDataDir, { recursive: true });
+
+    const chromeProc = spawn(
+      chromeBin,
+      [
+        `--remote-debugging-port=${cdpPort}`,
+        `--user-data-dir=${userDataDir}`,
+        '--no-first-run',
+        '--no-default-browser-check',
+        '--disable-extensions',
+        '--disable-translate',
+        '--disable-features=TranslateUI',
+      ],
+      { detached: true, stdio: 'ignore' },
     );
-    return null;
+    chromeProc.unref();
+    process.stdout.write(`[ChromeMCP] Chrome launched (PID ${chromeProc.pid ?? 'unknown'}) — waiting for CDP...\n`);
+
+    // Poll for CDP readiness up to 15s.
+    const deadline = Date.now() + 15_000;
+    while (Date.now() < deadline) {
+      await new Promise(r => setTimeout(r, 500));
+      chromeVersion = await probeCdp();
+      if (chromeVersion) break;
+    }
+
+    if (!chromeVersion) {
+      process.stdout.write(`[ChromeMCP] WARNING: Chrome did not become ready within 15s — chrome-devtools-mcp unavailable.\n`);
+      return null;
+    }
   }
+
+  process.stdout.write(`[ChromeMCP] Chrome ready at ${browserUrl} — ${chromeVersion}\n`);
 
   // Resolve chrome-devtools-mcp binary — prefer local node_modules over global npx.
   const localBin = path.join(path.dirname(require.resolve('chrome-devtools-mcp/package.json')), 'build/src/bin/chrome-devtools-mcp.js');
