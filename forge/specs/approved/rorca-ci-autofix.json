@@ -1,0 +1,108 @@
+{
+  "title": "rorca-ci-autofix",
+  "userStories": [
+    {
+      "id": "CAF-001",
+      "title": "Parse GitHub check_run webhook events and extract CI error annotations",
+      "description": "Register a handler for GitHub `check_run` webhook events using the existing `onGithubEvent()` registry in `backend/src/routes/webhooks.ts`. When a `check_run` event arrives with `action: 'completed'` and `conclusion: 'failure'`, extract the structured error annotations from the payload. GitHub delivers annotations inside `check_run.output.annotations[]` — each annotation has `path` (file path relative to repo root), `start_line`, `end_line`, `annotation_level` ('failure' | 'warning' | 'notice'), `message` (the error text), and `title`. Filter to only `annotation_level: 'failure'` entries. If annotations array is empty or absent (GitHub only includes up to 50 inline annotations per check run; a separate REST call is needed for more), fall back to the `check_run.output.text` field which contains the raw log summary. Parse this text field for lines matching TypeScript error format (`path(line,col): error TSxxxx: message`) and ESLint format (`path  line:col  error  message  rule-name`). Store the parsed result as a typed structure: `{ checkRunId: number, checkRunName: string, headSha: string, branchName: string, repoOwner: string, repoName: string, workspaceId: string, annotations: Array<{ path: string, line: number, message: string, level: 'failure' | 'warning' }> }`. Emit a WAL event `ci_check_failed` with this structure as payload. Do not trigger any fix run yet — that is CAF-002's job.",
+      "acceptanceCriteria": [
+        "Handler registered via `onGithubEvent('check_run', handler)` in a new file `backend/src/lib/ci-autofix/webhook-handler.ts`; handler is imported and registered in `backend/src/server.ts` alongside other webhook handler registrations",
+        "Handler only fires when `payload.action === 'completed'` AND `payload.check_run.conclusion === 'failure'`; all other check_run actions and conclusions are silently ignored",
+        "Workspace is resolved by matching `payload.repository.full_name` (`owner/repo`) against `github_connections` table column `repo_owner || '/' || repo_name`; if no matching workspace found, log warning and return without error",
+        "Annotations extracted from `payload.check_run.output.annotations` filtered to `annotation_level === 'failure'`; each mapped to `{ path, line: start_line, message, level: 'failure' }`",
+        "If `annotations` is empty or null, fallback parser runs against `payload.check_run.output.text`; TypeScript errors matched with regex `/^(.+?)\\((\\d+),\\d+\\): error TS\\d+: (.+)$/m` and ESLint errors matched with `/^(.+?)\\s+(\\d+):\\d+\\s+error\\s+(.+?)\\s+\\S+$/m`",
+        "WAL event `ci_check_failed` inserted via `INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('ci_check_failed', $1, $2)` with payload containing all fields listed in the description",
+        "If `check_run.name` does not match the pattern `CI Gate*` (case-insensitive), the handler returns early without processing — only CI gate failures trigger the autofix loop, not deploy or scan jobs",
+        "Unit test `backend/src/routes/__tests__/ci-autofix-webhook.test.ts` covers: valid check_run failure payload triggers WAL event, non-failure conclusion is ignored, unmatched repo is ignored, annotation fallback parser correctly extracts TS and ESLint errors from raw text"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "CAF-002",
+      "title": "Generate a single-story fix spec from CI error annotations and enqueue the run",
+      "description": "Subscribe to WAL events of type `ci_check_failed` (via `sse-hub.ts` `subscribe()`) in a new module `backend/src/lib/ci-autofix/fix-orchestrator.ts`. When a `ci_check_failed` event arrives: (1) check the `ci_autofix_runs` table (created in CAF-003) to count how many autofix attempts have been made for this `headSha` — if count >= 2, log and skip (infinite loop guard); (2) build a spec JSON with a single user story whose description enumerates every error annotation with file path, line number, and message; (3) write the spec JSON to `<workspace.path>/forge/specs/approved/ci-autofix-<sha7>.json` where `sha7` is the first 7 chars of `headSha`; (4) insert a `pipeline_runs` row with `trigger_type: 'ci-autofix'` and `triggered_via: 'ci_check_failed'`; (5) enqueue a `pipeline:run` pg-boss job pointing at the spec. The single story's description must be formatted as: `Fix the following CI failures on branch \\`<branchName>\\` (commit <sha7>):\\n\\n<for each annotation: '- **<path>:<line>** — <message>'>\\n\\nRun \\`npx tsc --noEmit\\` and \\`npm run lint\\` locally to verify all errors are resolved before committing. Do not modify test snapshots or skip lint rules — fix the root cause.`. The spec JSON structure must match the standard Rorca spec format: `{ title, userStories: [{ id: 'CAF-FIX-001', title: 'Fix CI TypeScript and lint errors', description, acceptanceCriteria: [...], dependsOn: [], passes: false }], model: '<workspace preferred model or RORCA_MODEL env>', generatedAt: '<ISO timestamp>' }`. Acceptance criteria in the story must be: one criterion per annotation (`'<path>:<line> error is resolved: <short message>'`), plus `'npx tsc --noEmit exits 0'`, plus `'npm run lint exits 0 with 0 errors'`.",
+      "acceptanceCriteria": [
+        "Module `backend/src/lib/ci-autofix/fix-orchestrator.ts` exports `startCiAutofixOrchestrator()` which calls `subscribe()` from sse-hub and registers the handler; function is called once in `backend/src/server.ts` startup",
+        "Infinite loop guard: query `SELECT COUNT(*) FROM ci_autofix_runs WHERE head_sha = $1 AND workspace_id = $2` before generating spec; if count >= 2, log `[CI Autofix] Max retries reached for <sha7> on <workspaceId>, skipping` and return",
+        "Spec file written to `<workspace.path>/forge/specs/approved/ci-autofix-<sha7>.json`; if file already exists (previous attempt), it is overwritten",
+        "Story description lists every annotation as `- **path:line** — message` with no truncation; if annotation count > 30, include all annotations but add a note `(${count} total errors — fix all of them)`",
+        "Model resolved in order: `workspace.preferred_model` column → `process.env.RORCA_MODEL` → `'claude-sonnet-4-6'`",
+        "`pipeline_runs` row inserted with `trigger_type = 'ci-autofix'`, `triggered_via = 'ci_check_failed'`, `spec_path = 'forge/specs/approved/ci-autofix-<sha7>.json'`, `workspace_id`, `status = 'queued'`, `queued_at = NOW()`",
+        "pg-boss job enqueued via `boss.send('pipeline:run', { runId, specPath, workspaceId, triggeredVia: 'ci-autofix' })`",
+        "Row inserted into `ci_autofix_runs` table: `(workspace_id, head_sha, branch_name, check_run_id, spec_path, run_id, annotation_count, created_at)`",
+        "WAL event `ci_autofix_triggered` emitted with payload `{ runId, specPath, headSha, branchName, annotationCount }`",
+        "Unit test covers: spec file content is valid JSON matching Rorca spec format, infinite loop guard fires on third attempt, model resolution order is correct"
+      ],
+      "dependsOn": [
+        "CAF-001"
+      ],
+      "passes": false
+    },
+    {
+      "id": "CAF-003",
+      "title": "Add ci_autofix_runs migration table and workspace-level enable/disable toggle",
+      "description": "Create a PostgreSQL migration `backend/src/db/pg-migrations/<timestamp>_ci_autofix_runs.sql` with the `ci_autofix_runs` table. Also add a `ci_autofix_enabled` boolean column to the `workspace_settings` table (or `workspaces` table if no `workspace_settings` exists) defaulting to `false` — CI autofix must be opt-in per workspace, never enabled by default. The fix-orchestrator (CAF-002) must check this flag before processing any event: if `ci_autofix_enabled = false` for the workspace, skip silently. Add a `GET /api/workspaces/:id/ci-autofix` endpoint that returns `{ enabled: boolean, recentRuns: CiAutofixRun[] }` (last 10 runs). Add a `PATCH /api/workspaces/:id/ci-autofix` endpoint that accepts `{ enabled: boolean }` and updates the flag. These endpoints are protected by `authRequired` middleware.",
+      "acceptanceCriteria": [
+        "Migration file named `<YYYYMMDDHHMMSS>_ci_autofix_runs.sql` (timestamp format per CLAUDE.md convention, not sequential number)",
+        "`ci_autofix_runs` table DDL: `id SERIAL PRIMARY KEY, workspace_id UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE, head_sha VARCHAR(40) NOT NULL, branch_name VARCHAR(255) NOT NULL, check_run_id BIGINT NOT NULL, spec_path TEXT NOT NULL, run_id INTEGER REFERENCES pipeline_runs(id), annotation_count INTEGER NOT NULL DEFAULT 0, status VARCHAR(20) NOT NULL DEFAULT 'triggered' CHECK (status IN ('triggered', 'completed', 'failed', 'skipped')), created_at TIMESTAMPTZ NOT NULL DEFAULT NOW()`",
+        "Index: `CREATE INDEX idx_ci_autofix_runs_workspace_sha ON ci_autofix_runs (workspace_id, head_sha)`",
+        "`ci_autofix_enabled` column added to `workspaces` table: `ALTER TABLE workspaces ADD COLUMN IF NOT EXISTS ci_autofix_enabled BOOLEAN NOT NULL DEFAULT false`",
+        "`GET /api/workspaces/:id/ci-autofix` returns `{ enabled: boolean, recentRuns: Array<{ id, headSha, branchName, annotationCount, status, createdAt, runId }> }` — recentRuns is last 10 ordered by `created_at DESC`",
+        "`PATCH /api/workspaces/:id/ci-autofix` accepts `{ enabled: boolean }`, validates it is a boolean, updates `workspaces.ci_autofix_enabled`, returns `{ enabled: boolean }`; returns 400 if `enabled` is not a boolean; returns 404 if workspace not found",
+        "Fix-orchestrator checks `SELECT ci_autofix_enabled FROM workspaces WHERE id = $1` before processing; returns early if false",
+        "Both endpoints have `@swagger` JSDoc annotations with correct operationId, request body schema, and response schemas",
+        "Migration runs cleanly on a database that already has the `workspaces` table; `IF NOT EXISTS` used on column add to be idempotent"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "CAF-004",
+      "title": "CI Autofix settings UI in Settings > GitHub tab with enable toggle and run history",
+      "description": "Add a CI Autofix section to the GitHub settings tab in `src/panels/SettingsPanel.tsx` (or whichever component renders the GitHub sub-tab). The section appears below the existing GitHub connection UI. It contains: (1) a toggle labeled 'Auto-fix CI failures' with description text 'When a CI gate fails on this workspace, Rorca automatically generates and runs a fix spec. Max 2 attempts per commit.'; (2) a table showing recent autofix runs with columns: Branch, Commit (7-char SHA linked to GitHub commit URL if `github_connections` data is available), Errors Fixed, Status (badge: triggered=amber, completed=green, failed=red, skipped=gray), Time. The toggle is disabled with tooltip 'Connect GitHub first' if no GitHub connection exists for the workspace. The section only renders if a workspace is selected. Wire the toggle to `PATCH /api/workspaces/:id/ci-autofix` and load initial state + history from `GET /api/workspaces/:id/ci-autofix` on mount.",
+      "acceptanceCriteria": [
+        "Section heading: `CI Autofix` rendered as `<h3>` with same styling as other Settings section headings in the file",
+        "Toggle uses the same `<Switch>` or toggle component pattern already used elsewhere in SettingsPanel — do not introduce a new toggle component",
+        "Toggle disabled state: when `githubConnection` is null/undefined, toggle is `disabled={true}` and wrapped in a `title='Connect GitHub first'` tooltip span",
+        "On toggle change: `PATCH /api/workspaces/:id/ci-autofix` called with `{ enabled: newValue }`; optimistic UI update; on error, revert toggle and show toast error via `useToast()`",
+        "Run history table renders up to 10 rows from `recentRuns`; empty state: `<p>No autofix runs yet.</p>` centered in table area",
+        "Status badge colors: `triggered` = amber (`bg-amber-100 text-amber-700`), `completed` = green (`bg-emerald-100 text-emerald-700`), `failed` = red (`bg-red-100 text-red-700`), `skipped` = gray (`bg-gray-100 text-gray-600`)",
+        "Commit column: renders `<code>{headSha.slice(0,7)}</code>`; if github connection has `repo_owner` and `repo_name`, wraps in `<a href={\\`https://github.com/${owner}/${repo}/commit/${headSha}\\`} target='_blank' rel='noopener noreferrer'>`",
+        "Data fetched via `apiFetch('/api/workspaces/:id/ci-autofix')` on mount and after toggle change; loading state shows skeleton rows (3 rows, same SkeletonRow pattern as rest of settings)",
+        "Section does not render at all if `selectedWorkspace` is null — guard with early return or conditional render",
+        "TypeScript: all API response types explicitly typed, no implicit `any`"
+      ],
+      "dependsOn": [
+        "CAF-003"
+      ],
+      "passes": false
+    },
+    {
+      "id": "CAF-005",
+      "title": "Post GitHub commit status check after autofix run completes",
+      "description": "When a `ci-autofix`-triggered pipeline run completes, post a GitHub commit status check on the original `headSha` to close the feedback loop. Subscribe to WAL events of type `run_finished` in the fix-orchestrator. When `run_finished` fires and `payload.triggered_via === 'ci-autofix'`, look up the corresponding `ci_autofix_runs` row by `run_id`. If the run `status` is `'passed'` (all stories passed), post a GitHub commit status of `success` with description `'Rorca autofix: all CI errors resolved'` using the existing `postCommitStatus()` function from `backend/src/lib/github-checks.ts`. If the run failed or had story failures, post status `failure` with description `'Rorca autofix: could not resolve all CI errors — manual fix required'`. Update the `ci_autofix_runs.status` column to `'completed'` (run passed) or `'failed'` (run failed). Emit WAL event `ci_autofix_completed` with `{ runId, headSha, branchName, success: boolean, storiesPassed, storiesFailed }`.",
+      "acceptanceCriteria": [
+        "WAL subscription for `run_finished` added inside `fix-orchestrator.ts` alongside the existing `ci_check_failed` subscription — both use the same `subscribe()` call pattern",
+        "Guard: only process `run_finished` events where `payload.triggered_via === 'ci-autofix'`; all other run_finished events are ignored",
+        "`ci_autofix_runs` row fetched by `SELECT * FROM ci_autofix_runs WHERE run_id = $1`; if not found, log warning and return",
+        "`postCommitStatus()` called with correct args: `(owner, repo, headSha, state, description, context)` where `context = 'Rorca CI Autofix'`; function imported from `../github-checks`",
+        "GitHub token fetched via the same pattern used in existing github-checks route: query `github_connections` for `workspace_id`, decrypt token via `decryptToken()`",
+        "If GitHub connection not found for workspace, log warning `[CI Autofix] No GitHub connection for workspace ${workspaceId}, skipping status post` and still update ci_autofix_runs row",
+        "`UPDATE ci_autofix_runs SET status = $1 WHERE id = $2` executed with `'completed'` or `'failed'`",
+        "WAL event `ci_autofix_completed` inserted with correct payload",
+        "Unit test covers: passed run posts success status and updates row to completed, failed run posts failure status and updates row to failed, missing GitHub connection logs warning but does not throw"
+      ],
+      "dependsOn": [
+        "CAF-002",
+        "CAF-003"
+      ],
+      "passes": false
+    }
+  ],
+  "model": "claude-sonnet-4-6",
+  "generatedAt": "2026-04-14T00:00:00.000Z",
+  "thinkingEnabled": true,
+  "agentOverride": "claude",
+  "effortLevel": "medium"
+}
