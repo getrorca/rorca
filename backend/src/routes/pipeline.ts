@@ -1041,11 +1041,12 @@ const PipelineTriggerSchema = z.object({
   thinkingBudget: z.number().int().positive().optional(),
   effortLevel: z.enum(['low', 'medium', 'high']).optional(),
   reasoningEffort: z.string().optional(),
+  forceRerun: z.boolean().optional(),
 });
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, forceRerun } = req.body;
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1621,7 +1622,18 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         broadcastAll(walEvent!);
       }
 
-      const alreadyPassing = (specJson.userStories ?? []).filter(
+      // forceRerun: reset all passes=true to false so every story runs fresh
+      if (forceRerun) {
+        let modified = false;
+        for (const s of (specJson.userStories ?? [])) {
+          if (s.passes === true) { s.passes = false; modified = true; }
+        }
+        if (modified) {
+          fs.writeFileSync(absSpecPath, JSON.stringify(specJson, null, 2), 'utf8');
+        }
+      }
+
+      const alreadyPassing = forceRerun ? [] : (specJson.userStories ?? []).filter(
         (s: { passes?: boolean; excluded?: boolean }) => s.passes === true && s.excluded !== true
       );
       for (const s of alreadyPassing) {
@@ -1634,6 +1646,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       }
 
       // Compute startFromStoryId: first story where passes !== true and not excluded
+      // When forceRerun, all passes are already reset so start from the first non-excluded story
       const startFromStory = (specJson.userStories ?? []).find(
         (s: { passes?: boolean; excluded?: boolean }) => s.passes !== true && s.excluded !== true
       );
