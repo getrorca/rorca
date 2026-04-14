@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-14T06:03:41.695Z",
+  "lastUpdatedAt": "2026-04-14T06:04:00.222Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -33,6 +33,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 290667
+    },
+    {
+      "storyId": "CAF-004",
+      "title": "CI Autofix settings UI — enable toggle, check pattern editor, and run history",
+      "status": "passed",
+      "startedAt": "2026-04-14T06:03:58.519Z",
+      "finishedAt": "2026-04-14T06:04:00.222Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 1703
     }
   ],
   "failedStories": [],
