@@ -24,17 +24,17 @@ Context: The return type was changed from string to ChatResult in US-003 (model 
 Context: Changes to backend code are not picked up automatically. Forgetting to restart causes stale behavior.
 > Source: v2-platform
 
-## 2026-02-28 [Architecture] Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
-> Rule: Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
-
-Context: Machine-readable, human-editable. Categories: Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha.
-> Source: CIE-005
-
 ## 2026-02-28 [Architecture] Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
 > Rule: Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
 
 Context: .rorca/config.json routing section defines globals, scopes, and tags. micromatch handles glob matching.
 > Source: CIE-004
+
+## 2026-02-28 [Architecture] Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
+> Rule: Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
+
+Context: Machine-readable, human-editable. Categories: Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha.
+> Source: CIE-005
 
 ## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
 > Rule: TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
@@ -59,18 +59,6 @@ Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incrementa
 
 Context: PR-052 implements upgrade prompts + feature badges. This creates a progressive disclosure UX where users discover features organically rather than via docs. Version gate prevents showing unavailable features.
 > Source: PR-052
-
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-> Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-
-Context: PR-051 creates plan_quotas table + requirePlan middleware. This centralizes enforcement logic and makes quota changes (free → paid tier) declarative. Route handlers stay clean.
-> Source: PR-051
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
-> Source: PR-QUEUE-1
 
 ## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
 > Rule: PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
@@ -101,6 +89,18 @@ Context: PR-003 establishes Docker Compose as the canonical self-hosted deployme
 
 Context: Implemented via workspace-echolocation.ts echolocate() function. Penalties apply: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit. This structured breakdown enables actionable remediation.
 > Source: CIE workspace health
+
+## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+
+Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
+> Source: PR-QUEUE-1
+
+## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+> Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+
+Context: PR-051 creates plan_quotas table + requirePlan middleware. This centralizes enforcement logic and makes quota changes (free → paid tier) declarative. Route handlers stay clean.
+> Source: PR-051
 
 ## 2026-03-10 [Gotcha] pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
 > Rule: pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
@@ -3182,3 +3182,27 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-07 [Architecture] EngineSelector greyed pills = inactive state, not disabled — all three are always clickable: EngineSelector (Claude Sub / OpenCode API / Codex Sub) uses text-[var(--text-muted)] for inactive pills which appears grey. This is intentional inactive styling — all buttons are always clickable regardless of availability dot color. The availability dot (green/grey) reflects whether the binary is installed, but does NOT disable the button. ModelPickerPopover shows opacity-50 cursor-not-allowed only when engine===codex AND no model selection supported (now removed — Codex supports full GPT model selection).
 > Rule: EngineSelector greyed pills = inactive state, not disabled — all three are always clickable: EngineSelector (Claude Sub / OpenCode API / Codex Sub) uses text-[var(--text-muted)] for inactive pills which appears grey. This is intentional inactive styling — all buttons are always clickable regardless of availability dot color. The availability dot (green/grey) reflects whether the binary is installed, but does NOT disable the button. ModelPickerPopover shows opacity-50 cursor-not-allowed only when engine===codex AND no model selection supported (now removed — Codex supports full GPT model selection).
+
+## 2026-04-14 [Bug Fix] Specs with all passes=true blocked re-runs — forceRerun feature added: When all stories in a spec had passes=true, the pipeline skipped them all and no new run could be triggered. This was a major blocker — user couldn't re-run completed specs. Fix: added forceRerun param to POST /api/pipeline/trigger (pipeline.ts PipelineTriggerSchema) which resets all passes=true to false in the spec JSON before executing. SpecDetailSlideOver.tsx shows a "Re-run from scratch" button (RotateCcw icon) when allPassed=true. Committed as fc773cc on main.
+> Rule: Specs with all passes=true blocked re-runs — forceRerun feature added: When all stories in a spec had passes=true, the pipeline skipped them all and no new run could be triggered. This was a major blocker — user couldn't re-run completed specs. Fix: added forceRerun param to POST /api/pipeline/trigger (pipeline.ts PipelineTriggerSchema) which resets all passes=true to false in the spec JSON before executing. SpecDetailSlideOver.tsx shows a "Re-run from scratch" button (RotateCcw icon) when allPassed=true. Committed as fc773cc on main.
+
+## 2026-04-14 [Bug Fix] CI TypeScript errors that pass locally but fail in GitHub Actions: Three classes of TS errors slip through local dev but fail CI: (1) unused declared components left in JSX after removing their usage, (2) wrong re-export names in index.ts (e.g. `export type { Bank }` when the actual export is `BankInstitution`), (3) test mock type annotations too narrow (missing optional fields). CI runs `npx tsc --noEmit` from scratch with no incremental cache — local TS Language Server uses cached .tsbuildinfo and misses these. Always run `npx tsc --noEmit` from repo root before pushing.
+> Rule: CI TypeScript errors that pass locally but fail in GitHub Actions: Three classes of TS errors slip through local dev but fail CI: (1) unused declared components left in JSX after removing their usage, (2) wrong re-export names in index.ts (e.g. `export type { Bank }` when the actual export is `BankInstitution`), (3) test mock type annotations too narrow (missing optional fields). CI runs `npx tsc --noEmit` from scratch with no incremental cache — local TS Language Server uses cached .tsbuildinfo and misses these. Always run `npx tsc --noEmit` from repo root before pushing.
+
+## 2026-04-14 [Architecture] rorca-ci-autofix spec — 5-story CI feedback loop: New spec `rorca-ci-autofix` (CAF-001–005) approved and ready to run. Implements: (1) CAF-001 — `check_run` webhook handler parsing CI failure annotations into WAL event `ci_check_failed`; (2) CAF-002 — fix-orchestrator subscribes to WAL, generates single-story fix spec, enqueues pipeline run, max 2 attempts per SHA guard; (3) CAF-003 — `ci_autofix_runs` migration table + `ci_autofix_enabled` boolean on workspaces (opt-in, default false) + GET/PATCH `/api/workspaces/:id/ci-autofix` endpoints; (4) CAF-004 — Settings > GitHub tab UI: enable toggle + run history table; (5) CAF-005 — post GitHub commit status back on run completion. Uses `onGithubEvent()` registry + `subscribe()` from sse-hub. Only fires on check runs named `CI Gate*`.
+> Rule: rorca-ci-autofix spec — 5-story CI feedback loop: New spec `rorca-ci-autofix` (CAF-001–005) approved and ready to run. Implements: (1) CAF-001 — `check_run` webhook handler parsing CI failure annotations into WAL event `ci_check_failed`; (2) CAF-002 — fix-orchestrator subscribes to WAL, generates single-story fix spec, enqueues pipeline run, max 2 attempts per SHA guard; (3) CAF-003 — `ci_autofix_runs` migration table + `ci_autofix_enabled` boolean on workspaces (opt-in, default false) + GET/PATCH `/api/workspaces/:id/ci-autofix` endpoints; (4) CAF-004 — Settings > GitHub tab UI: enable toggle + run history table; (5) CAF-005 — post GitHub commit status back on run completion. Uses `onGithubEvent()` registry + `subscribe()` from sse-hub. Only fires on check runs named `CI Gate*`.
+
+## 2026-04-14 [Decision] Execution mode UI: segmented control instead of dual toggles: Sequential vs Wave Parallel is a mode choice, not an on/off toggle. Use a segmented control (same pattern as Effort Low/Medium/High) — both options always visible, active = filled teal, inactive = outlined. Wave Parallel pill is disabled with "no parallel stories" label when spec has no independent stories. Wave breakdown (Wave 0/1/2 + story IDs) renders below the control when Wave Parallel is selected. Story count line renders below when Sequential is selected.
+> Rule: Execution mode UI: segmented control instead of dual toggles: Sequential vs Wave Parallel is a mode choice, not an on/off toggle. Use a segmented control (same pattern as Effort Low/Medium/High) — both options always visible, active = filled teal, inactive = outlined. Wave Parallel pill is disabled with "no parallel stories" label when spec has no independent stories. Wave breakdown (Wave 0/1/2 + story IDs) renders below the control when Wave Parallel is selected. Story count line renders below when Sequential is selected.
+
+## 2026-04-14 [Decision] REASONING section removed from TriggerPopover — duplicate of Thinking: The collapsible REASONING section in TriggerPopover (with "Enable reasoning for this run" checkbox + effort buttons) was redundant with the THINKING section (Effort segmented control + Extended thinking toggle). Removed REASONING entirely. ThinkingControls.tsx is the single place for thinking/reasoning controls. Also removed "Haiku only — not available" label from ThinkingControls header — not useful to show a disabled state label for a model tier users aren't on.
+> Rule: REASONING section removed from TriggerPopover — duplicate of Thinking: The collapsible REASONING section in TriggerPopover (with "Enable reasoning for this run" checkbox + effort buttons) was redundant with the THINKING section (Effort segmented control + Extended thinking toggle). Removed REASONING entirely. ThinkingControls.tsx is the single place for thinking/reasoning controls. Also removed "Haiku only — not available" label from ThinkingControls header — not useful to show a disabled state label for a model tier users aren't on.
+
+## 2026-04-14 [Bug Fix] Vite stale module cache causes SyntaxError on case-variant filenames: On macOS (case-insensitive filesystem), Vite can cache a module under two different case variants (e.g. `ArAgingWidget.tsx` vs `ARAgingWidget.tsx`) from a previous HMR cycle. This produces `SyntaxError: Module does not provide export named X` even though the code and imports are correct. Fix: restart the Vite dev server (`lsof -ti:5173 | xargs kill -9 && npm run dev`). No code changes needed.
+> Rule: Vite stale module cache causes SyntaxError on case-variant filenames: On macOS (case-insensitive filesystem), Vite can cache a module under two different case variants (e.g. `ArAgingWidget.tsx` vs `ARAgingWidget.tsx`) from a previous HMR cycle. This produces `SyntaxError: Module does not provide export named X` even though the code and imports are correct. Fix: restart the Vite dev server (`lsof -ti:5173 | xargs kill -9 && npm run dev`). No code changes needed.
+
+## 2026-04-14 [Bug Fix] MCP auto-generated tools 30s timeout kills LLM-powered endpoints silently: Auto-generated MCP HTTP tools in `backend/src/lib/mcp-http.ts` have a 30-second default timeout. Only paths in the `SLOW_PATHS` array get 5 minutes. LLM-powered endpoints like `/enrich`, `/match-skills`, `/suggest-skills`, `/add-stories`, `/knowledge-graph` were missing from this list — MCP calls timed out silently while the backend kept processing and completed successfully. The MCP client (Claude Code) reported "Tool timed out" but the operation actually finished with full results (e.g. 21 CAG hits). Fix: add all LLM-powered path fragments to SLOW_PATHS. When adding new LLM-powered API routes, remember to add them to SLOW_PATHS or they'll timeout at 30s via MCP.
+> Rule: MCP auto-generated tools 30s timeout kills LLM-powered endpoints silently: Auto-generated MCP HTTP tools in `backend/src/lib/mcp-http.ts` have a 30-second default timeout. Only paths in the `SLOW_PATHS` array get 5 minutes. LLM-powered endpoints like `/enrich`, `/match-skills`, `/suggest-skills`, `/add-stories`, `/knowledge-graph` were missing from this list — MCP calls timed out silently while the backend kept processing and completed successfully. The MCP client (Claude Code) reported "Tool timed out" but the operation actually finished with full results (e.g. 21 CAG hits). Fix: add all LLM-powered path fragments to SLOW_PATHS. When adding new LLM-powered API routes, remember to add them to SLOW_PATHS or they'll timeout at 30s via MCP.
+
+## 2026-04-14 [Gotcha] Two MCP tool paths for the same API: hand-written (stdio) vs auto-generated (HTTP): Rorca has TWO sets of MCP tools: (1) hand-written tools in `backend/src/mcp/server.ts` (24 tools, stdio transport, use `timedFetch` with 5-min default) and (2) auto-generated tools in `backend/src/lib/mcp-http.ts` (397+ tools from OpenAPI spec, HTTP transport on /mcp, use 30s default timeout). The auto-generated tools are named `rorca_{operation}` (e.g. `rorca_specs_by_id_enrich`) while hand-written ones use shorter names (e.g. `rorca_enrich_spec`). When debugging MCP issues, check WHICH tool was called — they have different timeouts and error handling.
+> Rule: Two MCP tool paths for the same API: hand-written (stdio) vs auto-generated (HTTP): Rorca has TWO sets of MCP tools: (1) hand-written tools in `backend/src/mcp/server.ts` (24 tools, stdio transport, use `timedFetch` with 5-min default) and (2) auto-generated tools in `backend/src/lib/mcp-http.ts` (397+ tools from OpenAPI spec, HTTP transport on /mcp, use 30s default timeout). The auto-generated tools are named `rorca_{operation}` (e.g. `rorca_specs_by_id_enrich`) while hand-written ones use shorter names (e.g. `rorca_enrich_spec`). When debugging MCP issues, check WHICH tool was called — they have different timeouts and error handling.

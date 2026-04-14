@@ -1,58 +1,18 @@
 {
-  "specId": "rorca-browser-mcp-integration",
-  "runId": 20260316000161,
-  "startedAt": "2026-04-12T03:44:38.262Z",
-  "lastUpdatedAt": "2026-04-12T04:30:42.306Z",
+  "specId": "rorca-ci-autofix",
+  "runId": 20260316000171,
+  "startedAt": "2026-04-14T05:27:51.531Z",
+  "lastUpdatedAt": "2026-04-14T05:50:33.128Z",
   "completedStories": [
     {
-      "storyId": "BMC-001",
-      "title": "Add browserMcp flag to UserStory and SpecJson interfaces + storyWantsBrowserMcp helper",
+      "storyId": "CAF-001",
+      "title": "Universal CI failure parser — extract structured errors from any GitHub check_run",
       "status": "passed",
-      "startedAt": "2026-04-12T03:44:38.956Z",
-      "finishedAt": "2026-04-12T03:46:28.523Z",
+      "startedAt": "2026-04-14T05:27:52.746Z",
+      "finishedAt": "2026-04-14T05:50:33.127Z",
       "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 109567
-    },
-    {
-      "storyId": "BMC-002",
-      "title": "ensurePlaywrightMcpServer() — idempotent HTTP server lifecycle manager on port 4040",
-      "status": "passed",
-      "startedAt": "2026-04-12T03:46:43.560Z",
-      "finishedAt": "2026-04-12T03:49:03.822Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 140262
-    },
-    {
-      "storyId": "BMC-003",
-      "title": "Per-agent browser MCP injection — claude (--mcp-config), opencode (opencode.json in cwd), codex (mcp add/remove)",
-      "status": "passed",
-      "startedAt": "2026-04-12T03:49:18.277Z",
-      "finishedAt": "2026-04-12T03:54:26.579Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 308302
-    },
-    {
-      "storyId": "BMC-004",
-      "title": "Story loop integration — resolve browserMcp per story, start server, inject URL, enrich prompt and WAL event",
-      "status": "passed",
-      "startedAt": "2026-04-12T03:54:41.630Z",
-      "finishedAt": "2026-04-12T04:26:28.658Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 1907028
-    },
-    {
-      "storyId": "BMC-005",
-      "title": "Preflight API browserMcpAvailable + SpecDetailSlideOver badge + Run View story browser indicator",
-      "status": "passed",
-      "startedAt": "2026-04-12T04:26:44.240Z",
-      "finishedAt": "2026-04-12T04:30:42.306Z",
-      "agentType": "claude",
-      "model": "claude-sonnet-4-6",
-      "elapsedMs": 238066
+      "model": "claude-opus-4-6",
+      "elapsedMs": 1360381
     }
   ],
   "failedStories": [],
