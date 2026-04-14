@@ -10,7 +10,7 @@ export type SettingsTab =
   // Execution group
   | 'providers' | 'direction' | 'pipeline'
   // Integrations group
-  | 'integrations' | 'github' | 'slack' | 'linear' | 'vercel' | 'audit-log'
+  | 'integrations' | 'github' | 'slack' | 'linear' | 'vercel' | 'audit-log' | 'ci-autofix'
   // Account group
   | 'account' | 'billing' | 'shortcuts' | 'notifications'
   // System group
@@ -98,6 +98,10 @@ const IntegrationAuditLogTab = lazy(() =>
   import('./settings/IntegrationAuditLogTab').then((m) => ({ default: m.IntegrationAuditLogTab })),
 );
 
+const CiAutofixSettingsTab = lazy(() =>
+  import('./settings/CiAutofixSettingsTab').then((m) => ({ default: m.CiAutofixSettingsTab })),
+);
+
 // ─── Loading fallback ────────────────────────────────────────────────────────
 
 function TabLoader() {
@@ -135,6 +139,7 @@ export default function SettingsPanel() {
           {activeTab === 'integrations' && <IntegrationsHubTab />}
           {activeTab === 'audit-log' && <IntegrationAuditLogTab />}
           {activeTab === 'github' && <GitHubSettingsTab />}
+          {activeTab === 'ci-autofix' && <CiAutofixSettingsTab />}
           {activeTab === 'slack' && <IntegrationPlaceholder name="Slack" description="Get run notifications, approve specs via interactive buttons, and receive failure alerts — all in your team's Slack channels." />}
           {activeTab === 'linear' && <IntegrationPlaceholder name="Linear" description="Import Linear issues as specs, sync story progress to sub-issues, and auto-update parent issues when runs complete." />}
           {activeTab === 'vercel' && <IntegrationPlaceholder name="Vercel" description="Auto-deploy on run completion, get preview URLs in Run View, and promote to production with one click." />}
