@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-14T05:50:33.128Z",
+  "lastUpdatedAt": "2026-04-14T05:58:35.607Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -13,6 +13,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 1360381
+    },
+    {
+      "storyId": "CAF-002",
+      "title": "Direction-stack-aware fix spec generator with universal verification",
+      "status": "passed",
+      "startedAt": "2026-04-14T05:50:50.040Z",
+      "finishedAt": "2026-04-14T05:58:35.606Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 465566
     }
   ],
   "failedStories": [],
