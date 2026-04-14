@@ -16,9 +16,11 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { subscribe, broadcastAll, type WalEvent } from '../sse-hub';
-import { queryOne, execute } from '../../db/index';
+import { queryOne, query, execute } from '../../db/index';
 import { getBoss } from '../pg-boss';
 import { logger } from '../logger';
+import { decryptToken } from '../../routes/auth';
+import { githubRateLimiter } from '../github-rate-limiter';
 import type { CiCheckFailure, CiAnnotation } from './webhook-handler';
 import type { AgentType } from '../config';
 
@@ -38,6 +40,37 @@ interface WorkspaceRow {
 
 interface CiAutofixConfig {
   max_retries?: number;
+}
+
+interface CiAutofixRunRow {
+  id: number;
+  workspace_id: string;
+  head_sha: string;
+  branch_name: string;
+  check_run_name: string;
+  run_id: number;
+  agent_type: string;
+}
+
+interface GitHubWebhookRow {
+  repo_owner: string;
+  repo_name: string;
+}
+
+interface GitHubConnectionRow {
+  encrypted_token: string;
+}
+
+interface StoryResultRow {
+  story_id: string;
+  status: string;
+  reason: string | null;
+}
+
+interface PipelineRunRow {
+  id: number;
+  status: string;
+  trigger_type: string;
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────
@@ -291,10 +324,169 @@ async function handleCiCheckFailed(event: WalEvent): Promise<void> {
   );
 }
 
+// ─── Feedback Loop Handler ──────────────────────────────────────────────────
+
+/**
+ * When a pipeline run triggered by CI autofix completes, close the feedback loop:
+ * 1. Look up ci_autofix_runs row by run_id
+ * 2. Determine outcome from pipeline_runs.status and story_results
+ * 3. Post GitHub commit status on the original SHA
+ * 4. Update ci_autofix_runs row with final status
+ * 5. Emit ci_autofix_completed WAL event
+ */
+async function handleRunFinished(event: WalEvent): Promise<void> {
+  if (event.event_type !== 'run_finished') return;
+  if (!event.payload) return;
+
+  const payload = JSON.parse(event.payload);
+  const runId: number | undefined = payload.run_id;
+  if (!runId) return;
+
+  // Check if this run was triggered by ci-autofix via pipeline_runs.trigger_type
+  const pipelineRun = await queryOne<PipelineRunRow>(
+    'SELECT id, status, trigger_type FROM pipeline_runs WHERE id = $1',
+    [runId],
+  );
+  if (!pipelineRun || pipelineRun.trigger_type !== 'ci-autofix') return;
+
+  // 1. Look up ci_autofix_runs row
+  const autofixRow = await queryOne<CiAutofixRunRow>(
+    'SELECT id, workspace_id, head_sha, branch_name, check_run_name, run_id, agent_type FROM ci_autofix_runs WHERE run_id = $1',
+    [runId],
+  );
+  if (!autofixRow) {
+    logger.warn(`[CI Autofix] No ci_autofix_runs row found for run_id=${runId}, skipping feedback`);
+    return;
+  }
+
+  // 2. Determine outcome from story_results
+  const storyResults = await query<StoryResultRow>(
+    'SELECT story_id, status, reason FROM story_results WHERE run_id = $1',
+    [runId],
+  );
+
+  const passed = storyResults.filter((s) => s.status === 'pass');
+  const failed = storyResults.filter((s) => s.status === 'fail' || s.status === 'timeout');
+  const success = failed.length === 0 && passed.length > 0;
+
+  // Build error summary for failed stories (first 500 chars)
+  let errorSummary: string | null = null;
+  if (!success && failed.length > 0) {
+    const messages = failed.map((s) => {
+      const reason = s.reason ? `: ${s.reason}` : '';
+      return `${s.story_id} (${s.status}${reason})`;
+    });
+    errorSummary = messages.join('; ').substring(0, 500);
+  }
+
+  const finalStatus = success ? 'completed' : 'failed';
+
+  // 3. Post GitHub commit status
+  const repoInfo = await queryOne<GitHubWebhookRow>(
+    'SELECT repo_owner, repo_name FROM workspace_github_webhooks WHERE workspace_id = $1',
+    [autofixRow.workspace_id],
+  );
+
+  if (repoInfo) {
+    const token = await getGithubTokenForWorkspace();
+    if (token) {
+      const state = success ? 'success' : 'failure';
+      const description = success
+        ? `Rorca autofix: all errors in ${autofixRow.check_run_name} resolved`
+        : `Rorca autofix: could not resolve all errors in ${autofixRow.check_run_name} — manual fix required`;
+
+      const baseUrl = process.env.RORCA_BASE_URL || 'http://localhost:5210';
+      const targetUrl = `${baseUrl}/runs/${runId}`;
+
+      const url = `https://api.github.com/repos/${repoInfo.repo_owner}/${repoInfo.repo_name}/statuses/${autofixRow.head_sha}`;
+      try {
+        const res = await githubRateLimiter.execute(() =>
+          fetch(url, {
+            method: 'POST',
+            headers: {
+              Authorization: `Bearer ${token}`,
+              Accept: 'application/vnd.github+json',
+              'Content-Type': 'application/json',
+              'X-GitHub-Api-Version': '2022-11-28',
+            },
+            body: JSON.stringify({
+              state,
+              context: 'Rorca CI Autofix',
+              description: description.slice(0, 140),
+              target_url: targetUrl,
+            }),
+          }),
+        );
+
+        if (!res.ok) {
+          const text = await res.text();
+          logger.warn({ status: res.status, text }, '[CI Autofix] GitHub commit status API error');
+        } else {
+          logger.info(
+            `[CI Autofix] Posted ${state} commit status for ${autofixRow.head_sha.slice(0, 7)} (${autofixRow.check_run_name})`,
+          );
+        }
+      } catch (err) {
+        logger.warn({ err }, '[CI Autofix] Failed to post GitHub commit status');
+      }
+    } else {
+      logger.warn('[CI Autofix] No GitHub token available — skipping commit status post');
+    }
+  } else {
+    logger.warn(
+      `[CI Autofix] No GitHub connection for workspace ${autofixRow.workspace_id} — skipping commit status post`,
+    );
+  }
+
+  // 4. Update ci_autofix_runs row
+  await execute(
+    'UPDATE ci_autofix_runs SET status = $1, finished_at = NOW(), error_summary = $2 WHERE id = $3',
+    [finalStatus, errorSummary, autofixRow.id],
+  );
+
+  // 5. Emit WAL event
+  const walEvent = await queryOne<WalEvent>(
+    `INSERT INTO wal_events (event_type, workspace_id, actor, payload)
+     VALUES ('ci_autofix_completed', $1, 'ci-autofix', $2)
+     RETURNING *`,
+    [
+      autofixRow.workspace_id,
+      JSON.stringify({
+        runId,
+        headSha: autofixRow.head_sha,
+        branchName: autofixRow.branch_name,
+        checkRunName: autofixRow.check_run_name,
+        success,
+        storiesPassed: passed.length,
+        storiesFailed: failed.length,
+        agentType: autofixRow.agent_type,
+      }),
+    ],
+  );
+
+  if (walEvent) {
+    broadcastAll(walEvent);
+  }
+
+  logger.info(
+    `[CI Autofix] Feedback loop complete for run #${runId}: ${finalStatus} (${passed.length} passed, ${failed.length} failed)`,
+  );
+}
+
+/** Get GitHub OAuth token (workspace-agnostic, single-user mode). */
+async function getGithubTokenForWorkspace(): Promise<string | null> {
+  const row = await queryOne<GitHubConnectionRow>(
+    'SELECT encrypted_token FROM github_connections LIMIT 1',
+  );
+  if (!row) return null;
+  return decryptToken(row.encrypted_token);
+}
+
 // ─── Startup ────────────────────────────────────────────────────────────────
 
 /**
- * Subscribe to WAL events for `ci_check_failed`. Called once in server.ts startup.
+ * Subscribe to WAL events for `ci_check_failed` and `run_finished`.
+ * Called once in server.ts startup.
  */
 export function startCiAutofixOrchestrator(): void {
   subscribe((event: WalEvent) => {
@@ -304,8 +496,14 @@ export function startCiAutofixOrchestrator(): void {
         '[CI Autofix] Failed to handle ci_check_failed event',
       );
     });
+    handleRunFinished(event).catch((err) => {
+      logger.error(
+        { err },
+        '[CI Autofix] Failed to handle run_finished event',
+      );
+    });
   });
-  logger.info('[CI Autofix] Orchestrator subscribed to ci_check_failed events');
+  logger.info('[CI Autofix] Orchestrator subscribed to WAL events');
 }
 
 // ─── Exports for testing ────────────────────────────────────────────────────
@@ -316,4 +514,5 @@ export {
   resolveAgent,
   resolveModel,
   handleCiCheckFailed,
+  handleRunFinished,
 };
