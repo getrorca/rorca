@@ -40,6 +40,7 @@ import backupsRouter from './routes/backups';
 import healthRouter from './routes/health';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
+import { registerCiAutofixHandler } from './lib/ci-autofix/webhook-handler';
 import agentHooksRouter from './routes/agent-hooks';
 import agentProfilesRouter from './routes/agent-profiles';
 import notificationsRouter from './routes/notifications';
@@ -217,6 +218,7 @@ app.use('/api/invites', rateLimiter, invitesRouter);
 // EQ-007: Public review routes (no auth required — accessed via shareable token)
 app.use('/api/review', rateLimiter, publicReviewRouter);
 registerWebhookHandlers();
+registerCiAutofixHandler();
 
 // CA-021: MCP Streamable HTTP transport — auto-generated from OpenAPI spec
 // MCP clients (Claude Code, IDE extensions) connect over HTTP without browser
