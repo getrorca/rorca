@@ -66,9 +66,6 @@ export default function ThinkingControls({
       <div className="flex items-center gap-1.5">
         <Brain size={12} className="text-muted shrink-0" />
         <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Thinking</span>
-        {!active && engine === 'claude' && (
-          <span className="text-[9px] text-muted/60 italic ml-1">Haiku only — not available</span>
-        )}
         {!active && engine !== 'claude' && (
           <span className="text-[9px] text-muted/60 italic ml-1">Claude only</span>
         )}
@@ -108,7 +105,6 @@ export default function ThinkingControls({
           <div className="absolute left-0.5 top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-[14px]" />
         </div>
         <span className="text-xs font-medium text-[var(--text)]">Extended thinking</span>
-        {/* Cost impact label — shown when thinking is enabled */}
         {thinkingEnabled && active && (() => {
           const multiplier = costMultiplier
             ? (costMultiplier[effectiveEffort] ?? costMultiplier['default'])

@@ -733,83 +733,66 @@ export default function TriggerPopover({
       <div className="rounded-lg border border-border bg-[var(--bg)] p-3 space-y-2.5">
         <span className="block text-[10px] font-semibold uppercase tracking-wider text-muted mb-1">Run Options</span>
 
-        {/* Wave Parallel toggle */}
-        <label className={`flex items-center gap-3 py-1 ${isWaveParallel ? 'cursor-pointer' : 'cursor-default'}`}>
-          <div className="relative flex items-center justify-center shrink-0">
-            <input
-              type="checkbox"
-              checked={isWaveParallel && !forceSequential}
-              onChange={(e) => { if (isWaveParallel) setForceSequential(!e.target.checked); }}
+        {/* Execution mode — segmented control: Sequential | Wave Parallel */}
+        <div className="space-y-2">
+          <div className="flex gap-1">
+            {/* Sequential pill */}
+            <button
+              type="button"
+              onClick={() => { if (isWaveParallel) setForceSequential(true); }}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-[11px] font-medium transition-colors border ${
+                !isWaveParallel || forceSequential
+                  ? 'bg-accent text-white border-accent'
+                  : 'bg-[var(--bg)] text-muted border-border hover:border-accent/40 hover:text-[var(--text)]'
+              }`}
+            >
+              <span>Sequential</span>
+            </button>
+            {/* Wave Parallel pill */}
+            <button
+              type="button"
+              onClick={() => { if (isWaveParallel) setForceSequential(false); }}
               disabled={!isWaveParallel}
-              className="peer sr-only"
-            />
-            <div className={`w-8 h-[18px] rounded-full transition-colors ${isWaveParallel ? 'bg-[var(--border)] peer-checked:bg-accent' : 'bg-[var(--border)] opacity-40'}`} />
-            <div className="absolute left-0.5 top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-[14px]" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1.5">
-              <Layers size={12} className={`shrink-0 ${isWaveParallel && !forceSequential ? 'text-accent' : 'text-muted'}`} />
-              <span className="text-xs font-medium text-[var(--text)]">Wave Parallel</span>
-              <span className="relative group/tip">
-                <Info size={11} className="text-muted/60 cursor-help" />
-                <span className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-2 rounded-md bg-[var(--bg-elevated)] border border-border text-[10px] text-muted leading-snug w-64 opacity-0 pointer-events-none group-hover/tip:opacity-100 group-hover/tip:pointer-events-auto transition-opacity z-[200] shadow-xl">
-                  Groups stories into dependency waves and runs each wave simultaneously in parallel worktrees. Typically 3× faster than sequential for specs with independent stories.
-                </span>
-              </span>
+              className={`flex-1 flex items-center justify-center gap-1.5 py-1.5 rounded text-[11px] font-medium transition-colors border ${
+                isWaveParallel && !forceSequential
+                  ? 'bg-accent text-white border-accent'
+                  : isWaveParallel
+                    ? 'bg-[var(--bg)] text-muted border-border hover:border-accent/40 hover:text-[var(--text)]'
+                    : 'bg-[var(--bg)] text-muted/40 border-border/40 cursor-not-allowed'
+              }`}
+            >
+              <Layers size={11} className="shrink-0" />
+              <span>Wave Parallel</span>
               {!isWaveParallel && orchestration && (
-                <span className="text-[9px] text-muted/60 italic">no independent stories</span>
+                <span className="text-[9px] opacity-60 italic">no parallel stories</span>
               )}
               {!orchestration && (
-                <span className="text-[9px] text-muted animate-pulse">analyzing…</span>
+                <span className="text-[9px] opacity-60 animate-pulse">analyzing…</span>
               )}
-            </div>
-            {isWaveParallel && !forceSequential && orchestration && (
-              <div className="mt-1.5 space-y-2">
-                {orchestration.waves.map((w) => (
-                  <div key={w.index}>
-                    <div className="text-[10px] font-medium text-muted mb-0.5">Wave {w.index}</div>
-                    <div className="flex flex-wrap gap-1">
-                      {w.storyIds.map((id) => (
-                        <span key={id} className="px-1.5 py-0.5 rounded bg-accent/10 text-accent font-mono text-[9px]">{id}</span>
-                      ))}
-                    </div>
-                  </div>
-                ))}
-              </div>
-            )}
+            </button>
           </div>
-        </label>
 
-        {/* Sequential toggle */}
-        <label className={`flex items-center gap-3 py-1 ${isWaveParallel ? 'cursor-pointer' : 'cursor-default'}`}>
-          <div className="relative flex items-center justify-center shrink-0">
-            <input
-              type="checkbox"
-              checked={!isWaveParallel || forceSequential}
-              onChange={(e) => { if (isWaveParallel) setForceSequential(e.target.checked); }}
-              disabled={!isWaveParallel}
-              className="peer sr-only"
-            />
-            <div className={`w-8 h-[18px] rounded-full transition-colors ${isWaveParallel ? 'bg-[var(--border)] peer-checked:bg-violet-500' : 'bg-violet-500 opacity-60'}`} />
-            <div className="absolute left-0.5 top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-[14px]" />
-          </div>
-          <div className="flex-1 min-w-0">
-            <div className="flex items-center gap-1.5">
-              <span className="text-xs font-medium text-[var(--text)]">Sequential</span>
-              <span className="relative group/tip">
-                <Info size={11} className="text-muted/60 cursor-help" />
-                <span className="absolute left-full top-1/2 -translate-y-1/2 ml-2 px-2.5 py-2 rounded-md bg-[var(--bg-elevated)] border border-border text-[10px] text-muted leading-snug w-64 opacity-0 pointer-events-none group-hover/tip:opacity-100 group-hover/tip:pointer-events-auto transition-opacity z-[200] shadow-xl">
-                  Runs stories one at a time in dependency order. Simpler execution with no worktree overhead — useful when stories have tight sequential dependencies.
-                </span>
-              </span>
+          {/* Context below the segmented control */}
+          {isWaveParallel && !forceSequential && orchestration && (
+            <div className="space-y-1.5 pt-0.5">
+              {orchestration.waves.map((w) => (
+                <div key={w.index}>
+                  <div className="text-[10px] font-medium text-muted mb-0.5">Wave {w.index}</div>
+                  <div className="flex flex-wrap gap-1">
+                    {w.storyIds.map((id) => (
+                      <span key={id} className="px-1.5 py-0.5 rounded bg-accent/10 text-accent font-mono text-[9px]">{id}</span>
+                    ))}
+                  </div>
+                </div>
+              ))}
             </div>
-            {orchestration && (
-              <p className="text-[10px] text-muted leading-tight mt-0.5">
-                {orchestration.totalStories} {orchestration.totalStories === 1 ? 'story' : 'stories'} · one at a time
-              </p>
-            )}
-          </div>
-        </label>
+          )}
+          {(!isWaveParallel || forceSequential) && orchestration && (
+            <p className="text-[10px] text-muted leading-tight">
+              {orchestration.totalStories} {orchestration.totalStories === 1 ? 'story' : 'stories'} · one at a time
+            </p>
+          )}
+        </div>
 
         {/* Divider */}
         <div className="border-t border-border/50" />
@@ -917,58 +900,6 @@ export default function TriggerPopover({
           costMultiplier={reasoningCostMultipliers}
         />
 
-        {/* Reasoning — shown when the spec's model supports reasoning */}
-        {modelCapability?.supportsReasoning && modelCapability.reasoningType !== 'none' && (
-          <>
-            <div className="border-t border-border/50" />
-            <div className="space-y-2">
-              <button
-                type="button"
-                onClick={() => setReasoningSectionExpanded(x => !x)}
-                className="flex items-center gap-1.5 w-full text-left"
-              >
-                {reasoningSectionExpanded
-                  ? <ChevronDown size={12} className="text-muted shrink-0" />
-                  : <ChevronRight size={12} className="text-muted shrink-0" />
-                }
-                <Brain size={12} className="text-purple-400 shrink-0" />
-                <span className="text-[10px] font-semibold uppercase tracking-wider text-muted">Reasoning</span>
-                {initialReasoning?.enabled && (
-                  <span className="ml-auto text-[10px] px-1.5 py-0.5 rounded-full bg-purple-500/15 text-purple-400 border border-purple-500/30">
-                    from spec
-                  </span>
-                )}
-              </button>
-              {reasoningSectionExpanded && (
-                <div className="space-y-2 pl-1">
-                  <label className="flex items-center gap-2 cursor-pointer select-none">
-                    <input
-                      type="checkbox"
-                      checked={reasoningEnabled}
-                      onChange={e => setReasoningEnabled(e.target.checked)}
-                      className="w-3.5 h-3.5 accent-purple-500"
-                    />
-                    <span className="text-xs text-[var(--text)]">Enable reasoning for this run</span>
-                  </label>
-                  {reasoningEnabled && modelCapability.effortLevels.length > 0 && (
-                    <div className="ml-5 flex gap-1.5">
-                      {modelCapability.effortLevels.map(level => (
-                        <button
-                          key={level}
-                          type="button"
-                          onClick={() => setReasoningEffort(level)}
-                          className={`px-2.5 py-1 text-[11px] rounded capitalize transition-colors ${reasoningEffort === level ? 'bg-purple-500/80 text-white' : 'bg-panel border border-border text-text hover:border-purple-400/50'}`}
-                        >
-                          {level}
-                        </button>
-                      ))}
-                    </div>
-                  )}
-                </div>
-              )}
-            </div>
-          </>
-        )}
       </div>
 
       {/* Action buttons */}
