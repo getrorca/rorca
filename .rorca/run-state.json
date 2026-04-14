@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-14T05:58:35.607Z",
+  "lastUpdatedAt": "2026-04-14T06:03:41.695Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -23,6 +23,16 @@
       "agentType": "claude",
       "model": "claude-opus-4-6",
       "elapsedMs": 465566
+    },
+    {
+      "storyId": "CAF-003",
+      "title": "Database migration + configurable workspace CI autofix settings",
+      "status": "passed",
+      "startedAt": "2026-04-14T05:58:51.025Z",
+      "finishedAt": "2026-04-14T06:03:41.692Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 290667
     }
   ],
   "failedStories": [],
