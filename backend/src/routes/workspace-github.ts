@@ -90,7 +90,7 @@ router.get('/', async (req: Request, res: Response) => {
       autoPr: {
         enabled: !!row.auto_pr_enabled,
         targetBranch: row.auto_pr_target_branch || 'main',
-        reviewers: JSON.parse(row.auto_pr_reviewers ?? '[]') as string[],
+        reviewers: (() => { try { return JSON.parse(row.auto_pr_reviewers || '[]'); } catch { return []; } })() as string[],
       },
     });
   } catch (error: any) {
