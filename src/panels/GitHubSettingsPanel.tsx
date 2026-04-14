@@ -2,7 +2,7 @@ import { useState, useEffect, useCallback, useDeferredValue } from 'react';
 import {
   Github, Link2, Unlink, Loader2, CheckCircle2, AlertCircle,
   Webhook, FileText, RotateCcw, Download, Shield, ExternalLink,
-  RefreshCw, GitPullRequest, Users, X, Plus, Zap,
+  RefreshCw, GitPullRequest, Users, X, Plus, Zap, Bot, ScrollText,
 } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, BASE_URL, getAccessToken } from '../lib/apiFetch';
@@ -1205,6 +1205,260 @@ export default function GitHubSettingsPanel() {
           )}
         </section>
       )}
+
+      {/* ── CI Autofix ───────────────────────────────────────────────────────── */}
+      <CiAutofixSection workspaceId={workspaceId} />
     </div>
+  );
+}
+
+// ─── CI Autofix section (embedded in GitHub settings) ────────────────────────
+
+interface CiAutofixRun {
+  id: number;
+  headSha: string;
+  branchName: string;
+  checkRunName: string;
+  annotationCount: number;
+  agentType: string;
+  status: 'triggered' | 'completed' | 'failed' | 'skipped';
+  errorSummary: string | null;
+  createdAt: string;
+  finishedAt: string | null;
+  runId: number | null;
+}
+
+interface CiAutofixConfig {
+  enabled: boolean;
+  checkPatterns: string[] | null;
+  maxRetries: number;
+  recentRuns: CiAutofixRun[];
+}
+
+function shortSha(sha: string) { return sha.slice(0, 7); }
+
+function ciRelativeTime(iso: string): string {
+  const diff = Date.now() - new Date(iso).getTime();
+  const m = Math.floor(diff / 60_000);
+  if (m < 1) return 'just now';
+  if (m < 60) return `${m}m ago`;
+  const h = Math.floor(m / 60);
+  if (h < 24) return `${h}h ago`;
+  return `${Math.floor(h / 24)}d ago`;
+}
+
+function CiStatusBadge({ status }: { status: CiAutofixRun['status'] }) {
+  const map = {
+    triggered: { icon: Loader2, label: 'Running',  cls: 'text-amber-400 bg-amber-400/10', spin: true },
+    completed: { icon: CheckCircle2, label: 'Fixed', cls: 'text-green-400 bg-green-400/10', spin: false },
+    failed:    { icon: AlertCircle,  label: 'Failed', cls: 'text-red-400 bg-red-400/10', spin: false },
+    skipped:   { icon: AlertCircle,  label: 'Skipped', cls: 'text-muted bg-border/30', spin: false },
+  };
+  const { icon: Icon, label, cls, spin } = map[status] ?? map.skipped;
+  return (
+    <span className={`inline-flex items-center gap-1 px-2 py-0.5 rounded text-[11px] font-medium ${cls}`}>
+      <Icon size={11} className={spin ? 'animate-spin' : ''} />
+      {label}
+    </span>
+  );
+}
+
+function CiAutofixSection({ workspaceId }: { workspaceId: string | null }) {
+  const [config, setConfig] = useState<CiAutofixConfig | null>(null);
+  const [loading, setLoading] = useState(true);
+  const [saving, setSaving] = useState(false);
+  const [error, setError] = useState<string | null>(null);
+  const [enabled, setEnabled] = useState(false);
+  const [patterns, setPatterns] = useState<string[]>([]);
+  const [maxRetries, setMaxRetries] = useState(2);
+  const [newPattern, setNewPattern] = useState('');
+  const [dirty, setDirty] = useState(false);
+
+  const load = useCallback(async () => {
+    if (!workspaceId) return;
+    setLoading(true);
+    setError(null);
+    try {
+      const data = await apiFetch<CiAutofixConfig>(`/api/workspaces/${workspaceId}/ci-autofix`);
+      setConfig(data);
+      setEnabled(data.enabled);
+      setPatterns(data.checkPatterns ?? ['*']);
+      setMaxRetries(data.maxRetries);
+      setDirty(false);
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to load');
+    } finally {
+      setLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => { load(); }, [load]);
+
+  const save = async () => {
+    if (!workspaceId) return;
+    setSaving(true);
+    setError(null);
+    try {
+      await apiFetch(`/api/workspaces/${workspaceId}/ci-autofix`, {
+        method: 'PATCH',
+        body: JSON.stringify({ enabled, checkPatterns: patterns.length > 0 ? patterns : null, maxRetries }),
+      });
+      await load();
+    } catch (e) {
+      setError(e instanceof Error ? e.message : 'Failed to save');
+    } finally {
+      setSaving(false);
+    }
+  };
+
+  const addPattern = () => {
+    const val = newPattern.trim();
+    if (!val || patterns.includes(val)) return;
+    setPatterns(p => [...p, val]);
+    setNewPattern('');
+    setDirty(true);
+  };
+
+  if (!workspaceId) return null;
+
+  return (
+    <>
+      <hr className="border-border my-2" />
+
+      <section className="space-y-5">
+        {/* Header */}
+        <div className="flex items-center gap-2">
+          <Bot size={16} className="text-accent shrink-0" />
+          <h2 className="text-sm font-semibold text-[var(--text)]">CI Autofix</h2>
+        </div>
+        <p className="text-xs text-muted -mt-3 leading-relaxed">
+          When a GitHub check run fails, Rorca auto-generates a fix spec, runs it with your configured agent, and pushes the fix back to the source branch.
+        </p>
+
+        {error && (
+          <div className="flex items-start gap-2 p-3 rounded-lg bg-red-500/10 border border-red-500/20 text-red-400 text-xs">
+            <AlertCircle size={13} className="mt-0.5 shrink-0" />
+            {error}
+          </div>
+        )}
+
+        {loading ? (
+          <div className="flex items-center gap-2 text-muted text-sm">
+            <Loader2 size={14} className="animate-spin" /> Loading…
+          </div>
+        ) : (
+          <>
+            {/* Enable toggle */}
+            <label className="flex items-center justify-between p-3 rounded-lg border border-border cursor-pointer hover:border-accent/30 transition-colors">
+              <div>
+                <div className="text-sm font-medium text-[var(--text)]">Enable CI Autofix</div>
+                <div className="text-xs text-muted mt-0.5">
+                  Triggers on <code className="font-mono bg-border/40 px-1 rounded text-[10px]">check_run</code> webhook failures
+                </div>
+              </div>
+              <div className="relative flex items-center justify-center shrink-0 ml-4">
+                <input type="checkbox" checked={enabled} onChange={e => { setEnabled(e.target.checked); setDirty(true); }} className="peer sr-only" />
+                <div className="w-9 h-5 rounded-full bg-border peer-checked:bg-accent transition-colors" />
+                <div className="absolute left-0.5 top-0.5 w-4 h-4 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-4" />
+              </div>
+            </label>
+
+            {/* Check patterns */}
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-muted uppercase tracking-wider">Check Name Patterns</div>
+              <p className="text-xs text-muted">Glob patterns (micromatch) — which check names trigger autofix. Use <code className="font-mono bg-border/40 px-1 rounded">*</code> for all.</p>
+              <div className="flex flex-wrap gap-1.5 min-h-[28px]">
+                {patterns.map((p, i) => (
+                  <span key={i} className="inline-flex items-center gap-1 px-2 py-0.5 rounded bg-accent/15 text-accent text-[12px] font-mono border border-accent/20">
+                    {p}
+                    <button type="button" onClick={() => { setPatterns(prev => prev.filter((_, j) => j !== i)); setDirty(true); }} className="hover:text-red-400 transition-colors">
+                      <X size={10} />
+                    </button>
+                  </span>
+                ))}
+                {patterns.length === 0 && <span className="text-xs text-muted/60 italic">No patterns</span>}
+              </div>
+              <div className="flex gap-2">
+                <input
+                  type="text" value={newPattern} onChange={e => setNewPattern(e.target.value)}
+                  onKeyDown={e => e.key === 'Enter' && addPattern()}
+                  placeholder="e.g.  typecheck  or  ci / *"
+                  className="flex-1 px-3 py-1.5 rounded-lg border border-border bg-[var(--bg)] text-sm text-[var(--text)] placeholder:text-muted focus:outline-none focus:border-accent/60 font-mono"
+                />
+                <button type="button" onClick={addPattern} disabled={!newPattern.trim()}
+                  className="flex items-center gap-1 px-3 py-1.5 rounded-lg border border-border text-sm text-muted hover:border-accent/40 hover:text-accent disabled:opacity-40 transition-colors">
+                  <Plus size={13} /> Add
+                </button>
+              </div>
+            </div>
+
+            {/* Max retries */}
+            <div className="space-y-2">
+              <div className="text-xs font-medium text-muted uppercase tracking-wider">Max Retries per SHA</div>
+              <div className="flex gap-1.5">
+                {[1,2,3,4,5].map(n => (
+                  <button key={n} type="button" onClick={() => { setMaxRetries(n); setDirty(true); }}
+                    className={`w-10 py-1.5 rounded text-sm font-medium border transition-colors ${maxRetries === n ? 'bg-accent text-white border-accent' : 'bg-[var(--bg)] text-muted border-border hover:border-accent/40 hover:text-[var(--text)]'}`}>
+                    {n}
+                  </button>
+                ))}
+              </div>
+            </div>
+
+            {/* Save */}
+            {dirty && (
+              <div className="flex items-center gap-3">
+                <button type="button" onClick={save} disabled={saving}
+                  className="flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent/90 disabled:opacity-60 transition-colors">
+                  {saving && <RefreshCw size={13} className="animate-spin" />}
+                  {saving ? 'Saving…' : 'Save changes'}
+                </button>
+                <button type="button" onClick={() => { if (config) { setEnabled(config.enabled); setPatterns(config.checkPatterns ?? ['*']); setMaxRetries(config.maxRetries); setDirty(false); } }}
+                  className="text-sm text-muted hover:text-[var(--text)] transition-colors">Cancel</button>
+              </div>
+            )}
+
+            {/* Recent runs */}
+            <div className="space-y-2">
+              <div className="flex items-center justify-between">
+                <div className="text-xs font-medium text-muted uppercase tracking-wider flex items-center gap-1.5">
+                  <ScrollText size={12} /> Recent Autofix Runs
+                </div>
+                <button type="button" onClick={load} className="text-muted hover:text-[var(--text)] transition-colors" aria-label="Refresh">
+                  <RefreshCw size={12} />
+                </button>
+              </div>
+              {config?.recentRuns.length === 0 ? (
+                <div className="p-4 rounded-lg border border-border text-center text-xs text-muted">
+                  No autofix runs yet. Rorca will attempt fixes here once CI checks start failing.
+                </div>
+              ) : (
+                <div className="rounded-lg border border-border overflow-hidden divide-y divide-border">
+                  {config?.recentRuns.map(run => (
+                    <div key={run.id} className="flex items-start gap-3 px-3 py-2.5 hover:bg-white/2 transition-colors">
+                      <div className="flex-1 min-w-0">
+                        <div className="flex items-center gap-2 flex-wrap">
+                          <code className="text-xs font-mono text-[var(--text)]">{shortSha(run.headSha)}</code>
+                          <span className="text-xs text-muted truncate max-w-[140px]">{run.branchName}</span>
+                          <CiStatusBadge status={run.status} />
+                          <span className="text-[10px] text-muted/60 font-mono uppercase">{run.agentType}</span>
+                        </div>
+                        <div className="mt-0.5 text-xs text-muted truncate">{run.checkRunName}</div>
+                        {run.errorSummary && <div className="mt-0.5 text-[11px] text-red-400/80 line-clamp-1">{run.errorSummary}</div>}
+                      </div>
+                      <div className="flex items-center gap-2 shrink-0 text-[10px] text-muted">
+                        <span>{ciRelativeTime(run.createdAt)}</span>
+                        {run.runId && <a href={`/runs/${run.runId}`} className="text-accent hover:underline flex items-center gap-0.5">Run <ExternalLink size={9} /></a>}
+                        <span className="text-muted/50">{run.annotationCount}err</span>
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </section>
+    </>
   );
 }
