@@ -3,7 +3,7 @@
 
 CREATE TABLE IF NOT EXISTS ci_autofix_runs (
   id               SERIAL PRIMARY KEY,
-  workspace_id     UUID NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
+  workspace_id     TEXT NOT NULL REFERENCES workspaces(id) ON DELETE CASCADE,
   head_sha         VARCHAR(40) NOT NULL,
   branch_name      VARCHAR(255) NOT NULL,
   check_run_id     BIGINT NOT NULL,
