@@ -10,7 +10,7 @@ const VALID_SETTINGS_TABS: readonly SettingsTab[] = [
   // Execution group
   'providers', 'direction', 'pipeline',
   // Integrations group
-  'integrations', 'github', 'slack', 'linear', 'vercel', 'audit-log',
+  'integrations', 'github', 'slack', 'linear', 'vercel', 'audit-log', 'ci-autofix',
   // Account group
   'account', 'billing', 'shortcuts', 'notifications',
   // System group
