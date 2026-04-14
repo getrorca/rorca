@@ -41,6 +41,7 @@ import healthRouter from './routes/health';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
 import { registerCiAutofixHandler } from './lib/ci-autofix/webhook-handler';
+import { startCiAutofixOrchestrator } from './lib/ci-autofix/fix-orchestrator';
 import agentHooksRouter from './routes/agent-hooks';
 import agentProfilesRouter from './routes/agent-profiles';
 import notificationsRouter from './routes/notifications';
@@ -440,6 +441,9 @@ startCommitStatusPoster();
 
 // US-030: Subscribe check run poster to manage GitHub Check Runs for pipeline runs
 startCheckRunPoster();
+
+// CAF-002: Subscribe CI autofix orchestrator to generate fix specs on ci_check_failed events
+startCiAutofixOrchestrator();
 
 // PR-019: Auto-rotate memory after each pipeline run completion
 // PR-018: Auto-deduplicate memory after rotation (post-run)
