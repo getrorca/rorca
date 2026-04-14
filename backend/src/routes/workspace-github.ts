@@ -90,7 +90,7 @@ router.get('/', async (req: Request, res: Response) => {
       autoPr: {
         enabled: !!row.auto_pr_enabled,
         targetBranch: row.auto_pr_target_branch || 'main',
-        reviewers: JSON.parse(row.auto_pr_reviewers || '[]') as string[],
+        reviewers: JSON.parse(row.auto_pr_reviewers ?? '[]') as string[],
       },
     });
   } catch (error: any) {
@@ -204,7 +204,7 @@ router.post('/connect', async (req: Request, res: Response) => {
             body: JSON.stringify({
               name: 'web',
               active: true,
-              events: ['push', 'pull_request', 'issues'],
+              events: ['push', 'pull_request', 'issues', 'check_run'],
               config: {
                 url: webhookUrl,
                 content_type: 'json',
