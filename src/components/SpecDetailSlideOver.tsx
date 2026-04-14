@@ -11,7 +11,7 @@ import {
   X, Clock, CheckCircle2, XCircle, AlertCircle,
   Download, Copy, Check, Play, GitFork, GitBranch,
   Loader2, Plus, Sparkles, Trash2, History, FileSearch, Paperclip,
-  FileText, FileImage, File, ZoomIn, Cpu, Globe,
+  FileText, FileImage, File, ZoomIn, Cpu, Globe, RotateCcw,
 } from 'lucide-react';
 import type { Attachment } from '../types/attachment';
 import { BASE_URL } from '../lib/apiFetch';
@@ -508,7 +508,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string } }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string }; forceRerun?: boolean }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -526,6 +526,7 @@ function SpecDetailContent({
           ...(options?.thinkingEnabled !== undefined ? { thinkingEnabled: options.thinkingEnabled } : {}),
           ...(options?.thinkingBudget !== undefined ? { thinkingBudget: options.thinkingBudget } : {}),
           ...(options?.reasoningOverride !== undefined ? { reasoning: options.reasoningOverride } : {}),
+          ...(options?.forceRerun ? { forceRerun: true } : {}),
         }) },
       );
       if (res.conflict) setRunState('conflict');
@@ -612,6 +613,7 @@ function SpecDetailContent({
   const stories = localStories;
   const diagram = detail ? extractDiagramText(detail) : null;
   const deferredCount = stories.filter(s => s.excluded && !s.passes).length;
+  const allPassed = stories.length > 0 && stories.every(s => s.passes === true);
   const cfg = summary ? STATUS_CONFIG[summary.status] : null;
   const isDraft = summary?.status === 'pending';
   const canRun = summary?.status === 'approved' || summary?.status === 'completed';
@@ -826,6 +828,15 @@ function SpecDetailContent({
                       </button>
                     )}
                   </div>
+                  {allPassed && (
+                    <button
+                      onClick={() => handleRun(isolateInBranch, { forceRerun: true })}
+                      disabled={runState === 'triggering'}
+                      className="w-full flex items-center justify-center gap-1.5 py-2 mt-1 rounded text-sm font-medium bg-[var(--surface-2)] text-[var(--text-muted)] border border-[var(--border)] hover:text-[var(--text)] hover:border-[var(--border-hover)] disabled:opacity-60 transition-colors"
+                    >
+                      <RotateCcw size={13} /> Re-run from scratch
+                    </button>
+                  )}
                 </>
               )}
               {runState === 'error' && <p className="text-xs text-error mt-1">{runError}</p>}
