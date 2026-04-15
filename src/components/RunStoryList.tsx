@@ -303,7 +303,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
         )}
         {/* BMC-005: Browser MCP indicator — shown when story_started WAL event has browser_mcp: true */}
         {story.browserMcp && (
-          <Globe className="w-3 h-3 text-purple-400 shrink-0" title="Browser MCP active" />
+          <Globe className="w-3 h-3 text-purple-400 shrink-0" aria-label="Browser MCP active" />
         )}
         {/* Blocked by badge — grey with upstream story ID */}
         {isBlocked && story.blockedBy && story.blockedBy.length > 0 && (
