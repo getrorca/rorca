@@ -35,6 +35,8 @@ try {
 export interface PtySession {
   sessionId: string;
   workspaceId: number;
+  workspaceLabel: string;
+  model: string;
   ptyProcess: any; // IPty when available, null otherwise
   createdAt: Date;
   lastActivityAt: Date;
@@ -49,6 +51,8 @@ export interface PtySession {
   outputLimitSentinelInserted: boolean;
   totalOutputBytes: number;
   sockets: Set<WebSocket>;
+  bannerSent: boolean;
+  bannerTimeout: NodeJS.Timeout | null;
   shutdownNotified: boolean;
   commandStartTime: number | null;
   shellIntegrationCleanup: (() => void) | null;
@@ -59,6 +63,13 @@ export interface ShellEventMessage {
   event: 'command_end';
   exitCode: number;
   durationMs: number;
+}
+
+export interface TerminalBannerMessage {
+  type: 'banner';
+  workspaceLabel: string;
+  model: string;
+  cwd: string;
 }
 
 const sessions = new Map<string, PtySession>();
@@ -234,8 +245,38 @@ function closeSockets(session: PtySession): void {
   session.sockets.clear();
 }
 
+function notifySocketsBanner(session: PtySession): void {
+  if (session.bannerSent) {
+    return;
+  }
+
+  session.bannerSent = true;
+  if (session.bannerTimeout) {
+    clearTimeout(session.bannerTimeout);
+    session.bannerTimeout = null;
+  }
+
+  const payload = JSON.stringify({
+    type: 'banner',
+    workspaceLabel: session.workspaceLabel,
+    model: session.model,
+    cwd: session.cwd,
+  } satisfies TerminalBannerMessage);
+
+  session.sockets.forEach((socket) => {
+    try {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(payload);
+      }
+    } catch (err) {
+      logger.warn({ err, sessionId: session.sessionId }, '[pty-manager] Failed to send banner to socket');
+    }
+  });
+}
+
 export async function createSession(
   workspaceId: string,
+  workspaceLabel: string,
   cwd: string,
   env: Record<string, string>,
   rows: number,
@@ -291,6 +332,8 @@ export async function createSession(
   const session: PtySession = {
     sessionId,
     workspaceId: Number(workspaceId),
+    workspaceLabel,
+    model: env.RORCA_MODEL || process.env.RORCA_MODEL || 'default',
     ptyProcess,
     createdAt: new Date(),
     lastActivityAt: new Date(),
@@ -305,6 +348,8 @@ export async function createSession(
     outputLimitSentinelInserted: false,
     totalOutputBytes: 0,
     sockets: new Set<WebSocket>(),
+    bannerSent: false,
+    bannerTimeout: null,
     shutdownNotified: false,
     commandStartTime: null,
     shellIntegrationCleanup: shellCleanup,
@@ -318,6 +363,13 @@ export async function createSession(
 
   sessions.set(sessionId, session);
 
+  session.bannerTimeout = setTimeout(() => {
+    const activeSession = sessions.get(sessionId);
+    if (activeSession) {
+      notifySocketsBanner(activeSession);
+    }
+  }, 1500);
+
   // Update lastActivityAt on every data event to reset idle timer
   ptyProcess.onData((data: string) => {
     const s = sessions.get(sessionId);
@@ -327,6 +379,10 @@ export async function createSession(
 
     // OCT-030: Parse OSC 133 sequences and emit shell events to WebSocket clients
     const { stripped, events } = parseOsc133(data);
+
+    if (!s.bannerSent) {
+      notifySocketsBanner(s);
+    }
 
     // Buffer the stripped output (OSC sequences removed)
     bufferOutputChunk(s, stripped);
@@ -383,6 +439,10 @@ export async function createSession(
     } catch (err) {
       logger.error({ err, sessionId }, '[pty-manager] Failed to flush session on exit');
     } finally {
+      if (current.bannerTimeout) {
+        clearTimeout(current.bannerTimeout);
+        current.bannerTimeout = null;
+      }
       sessions.delete(sessionId);
       logger.info(`[pty-manager] Session ${sessionId} exited and removed`);
     }
