@@ -7,6 +7,7 @@ import * as ptyManager from '../lib/pty-manager';
 import { NotFoundError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
+import { broadcastAll } from '../lib/sse-hub';
 
 const router = Router();
 
@@ -117,6 +118,15 @@ router.post('/sessions', async (req: Request, res: Response) => {
     logger.info(
       `[terminal] Created session ${sessionId} for workspace ${body.workspaceId} (${workspace.path})`
     );
+
+    broadcastAll({
+      type: 'terminal_session_started',
+      workspaceId: body.workspaceId,
+      payload: {
+        sessionId,
+        cwd: workspace.path,
+      },
+    });
 
     res.status(201).json({
       sessionId,
