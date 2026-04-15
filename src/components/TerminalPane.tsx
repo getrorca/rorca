@@ -116,6 +116,14 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
 
     // Mount terminal to DOM
     terminal.open(container);
+
+    // Guard against null container before calling fit
+    if (!containerRef.current) {
+      terminal.dispose();
+      fitAddon.dispose();
+      return;
+    }
+
     fitAddon.fit();
 
     // Store refs
@@ -137,6 +145,11 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
       sendInput(data);
     });
 
+    // Send initial size after terminal is ready
+    setTimeout(() => {
+      sendResize(terminal.cols, terminal.rows);
+    }, 50);
+
     // Cleanup on unmount
     return () => {
       inputDisposable.dispose();
@@ -147,7 +160,7 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
       fitAddonRef.current = null;
       resizeObserverRef.current = null;
     };
-  }, []); // Only run once on mount
+  }, [sessionId, sendInput, sendResize]); // Include sessionId + callbacks in deps
 
   // ─── Scrollback replay ────────────────────────────────────────────────────────
 
@@ -228,16 +241,6 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
 
     return unsubscribe;
   }, [onSessionExit, onExit]);
-
-  // ─── Resize handler (on terminal resize) ─────────────────────────────────────
-
-  useEffect(() => {
-    const terminal = terminalRef.current;
-    if (!terminal) return;
-
-    // Send initial size after mount
-    sendResize(terminal.cols, terminal.rows);
-  }, [sendResize]);
 
   // ─── Render ───────────────────────────────────────────────────────────────────
 
