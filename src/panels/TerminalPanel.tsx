@@ -8,6 +8,8 @@ import {
   Plus,
   Trash2,
   X,
+  TerminalSquare,
+  Type,
 } from 'lucide-react';
 import TerminalPane from '../components/TerminalPane';
 import ReadOnlyTerminalPane from '../components/ReadOnlyTerminalPane';
@@ -17,6 +19,7 @@ import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, ApiError } from '../lib/apiFetch';
 import { getAllLayers } from '../api/direction';
 import type { DirectionLayer } from '../api/types';
+import { useNavigate } from 'react-router-dom';
 
 type TerminalMode = 'panel' | 'drawer';
 
@@ -60,6 +63,10 @@ interface DirectionLayersResponse {
 const LAYER_KEYS = ['l1', 'l2', 'l3', 'l4', 'l5'] as const;
 const MAX_SESSIONS = 5;
 const SHORT_BASH_COMMANDS = /^(ls|pwd|cd|cat|echo|git|npm|node|vim|vi|nano|clear|exit)$/;
+const MIN_FONT_SIZE = 10;
+const MAX_FONT_SIZE = 20;
+const DEFAULT_FONT_SIZE = 13;
+const FONT_SIZE_STORAGE_KEY = 'rorca:terminal:fontSize';
 
 function getBasename(input: string): string {
   const normalized = input.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -99,6 +106,7 @@ function getStatusBadgeClass(status: TerminalHistoryRecord['status']): string {
 
 export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPanelProps) {
   const { workspaceId, selectedWorkspace, workspaces, setWorkspaceId } = useWorkspace();
+  const navigate = useNavigate();
 
   const [sessions, setSessions] = useState<TerminalSessionRecord[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -114,6 +122,22 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [historyClearing, setHistoryClearing] = useState(false);
   const [historySessions, setHistorySessions] = useState<TerminalHistoryRecord[]>([]);
   const [selectedHistorySessionId, setSelectedHistorySessionId] = useState<string | null>(null);
+
+  // Font size state with localStorage persistence
+  const [fontSize, setFontSize] = useState(() => {
+    try {
+      const stored = localStorage.getItem(FONT_SIZE_STORAGE_KEY);
+      if (stored) {
+        const parsed = parseInt(stored, 10);
+        if (!isNaN(parsed) && parsed >= MIN_FONT_SIZE && parsed <= MAX_FONT_SIZE) {
+          return parsed;
+        }
+      }
+    } catch {
+      // Ignore localStorage errors
+    }
+    return DEFAULT_FONT_SIZE;
+  });
 
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const historyDrawerRef = useRef<HTMLDivElement>(null);
@@ -404,6 +428,26 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     }
   }, [workspaceId, loadHistory]);
 
+  const handleFontSizeChange = useCallback((delta: number) => {
+    setFontSize((current) => {
+      const next = Math.max(MIN_FONT_SIZE, Math.min(MAX_FONT_SIZE, current + delta));
+      return next;
+    });
+  }, []);
+
+  const handleFontSizeReset = useCallback(() => {
+    setFontSize(DEFAULT_FONT_SIZE);
+  }, []);
+
+  // Persist font size to localStorage
+  useEffect(() => {
+    try {
+      localStorage.setItem(FONT_SIZE_STORAGE_KEY, String(fontSize));
+    } catch {
+      // Ignore localStorage errors
+    }
+  }, [fontSize]);
+
   const showOverlay = creating && !activeSession;
 
   return (
@@ -466,6 +510,41 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             onChange={setActiveModel}
             compact
           />
+
+          <div className="flex shrink-0 items-center gap-0.5 rounded border border-border">
+            <Tooltip content="Decrease font size">
+              <button
+                type="button"
+                onClick={() => handleFontSizeChange(-1)}
+                disabled={fontSize <= MIN_FONT_SIZE}
+                className="inline-flex h-7 w-7 items-center justify-center text-[var(--text)] hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label="Decrease font size"
+              >
+                <Type size={11} />
+              </button>
+            </Tooltip>
+            <Tooltip content="Reset font size">
+              <button
+                type="button"
+                onClick={handleFontSizeReset}
+                className="inline-flex h-7 w-7 items-center justify-center border-x border-border text-[var(--text)] hover:bg-accent/5"
+                aria-label="Reset font size"
+              >
+                <Type size={13} />
+              </button>
+            </Tooltip>
+            <Tooltip content="Increase font size">
+              <button
+                type="button"
+                onClick={() => handleFontSizeChange(1)}
+                disabled={fontSize >= MAX_FONT_SIZE}
+                className="inline-flex h-7 w-7 items-center justify-center text-[var(--text)] hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-40"
+                aria-label="Increase font size"
+              >
+                <Type size={16} />
+              </button>
+            </Tooltip>
+          </div>
 
           <button
             type="button"
@@ -570,6 +649,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
           <TerminalPane
             sessionId={activeSessionId}
             className="h-full"
+            fontSize={fontSize}
             onExit={() => handleSessionExit(activeSessionId)}
             onInput={(data) => handleSessionInput(activeSessionId, data)}
           />
@@ -578,6 +658,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             <ReadOnlyTerminalPane
               key={selectedHistorySession.sessionId}
               sessionId={selectedHistorySession.sessionId}
+              fontSize={fontSize}
               className="flex-1"
             />
             <div className="border-t border-border px-3 py-2 text-xs text-muted">
@@ -614,11 +695,24 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
         {notInstalled && (
           <div className="absolute inset-0 z-10 flex items-center justify-center px-4">
-            <div className="max-w-md rounded-lg border border-[var(--border)] bg-[var(--panel)] px-4 py-3 text-sm text-[var(--text)] shadow-lg">
-              <div className="font-medium">OpenCode is not installed</div>
-              <div className="mt-1 text-xs text-muted">
-                Install `opencode` to use the terminal session panel.
+            <div className="flex max-w-md flex-col items-center text-center">
+              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-surface-200">
+                <TerminalSquare size={48} className="text-muted opacity-50" />
               </div>
+              <h3 className="mb-2 text-base font-medium text-[var(--text)]">OpenCode not installed</h3>
+              <p className="mb-4 text-[13px] text-muted">
+                The terminal requires OpenCode CLI. Install it to use the interactive terminal.
+              </p>
+              <div className="mb-4 w-full rounded bg-surface-200 px-3 py-2 font-mono text-sm text-[var(--text)]">
+                npm install -g opencode
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate('/settings/providers')}
+                className="rounded border border-accent bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"
+              >
+                Open Settings → Providers
+              </button>
             </div>
           </div>
         )}

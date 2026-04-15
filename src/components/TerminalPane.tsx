@@ -16,6 +16,7 @@ export interface TerminalPaneProps {
   onSessionLost?: () => void;
   onInput?: (data: string) => void;
   className?: string;
+  fontSize?: number;
 }
 
 type RendererType = 'webgl' | 'canvas';
@@ -35,6 +36,8 @@ const TERMINAL_OPTIONS = {
   cursorBlink: true,
   cursorStyle: 'block' as const,
   convertEol: true,
+  // Disable copy-on-select for explicit Cmd+C behavior
+  rightClickSelectsWord: false,
 };
 
 const SEARCH_DECORATIONS = {
@@ -175,7 +178,7 @@ function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): IL
   };
 }
 
-export default function TerminalPane({ sessionId, onExit, onSessionLost, onInput, className }: TerminalPaneProps) {
+export default function TerminalPane({ sessionId, onExit, onSessionLost, onInput, className, fontSize = 13 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -243,6 +246,7 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, onInput
 
     const terminal = new Terminal({
       ...TERMINAL_OPTIONS,
+      fontSize,
       theme: currentTheme,
     });
 
@@ -301,13 +305,48 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, onInput
 
     terminal.attachCustomKeyEventHandler((event) => {
       const key = event.key.toLowerCase();
-      const isFindShortcut = (event.metaKey || event.ctrlKey) && key === 'f';
+      const isMacCmd = event.metaKey;
+      const isWinLinuxCtrl = event.ctrlKey && !event.metaKey;
+      const isModifier = isMacCmd || isWinLinuxCtrl;
 
+      // Cmd+F / Ctrl+F — Find
+      const isFindShortcut = isModifier && key === 'f';
       if (isFindShortcut) {
         setIsSearchOpen(true);
         return false;
       }
 
+      // Cmd+C / Ctrl+C — Copy
+      const isCopyShortcut = isModifier && key === 'c';
+      if (isCopyShortcut && terminal.hasSelection()) {
+        event.preventDefault();
+        const selection = terminal.getSelection();
+        if (selection) {
+          navigator.clipboard.writeText(selection).catch((err) => {
+            console.warn('[TerminalPane] Failed to copy to clipboard:', err);
+          });
+        }
+        return false;
+      }
+
+      // Cmd+V / Ctrl+Shift+V — Paste
+      const isPasteShortcut = (isMacCmd && key === 'v') || (event.ctrlKey && event.shiftKey && key === 'v');
+      if (isPasteShortcut) {
+        event.preventDefault();
+        navigator.clipboard
+          .readText()
+          .then((text) => {
+            if (text) {
+              sendInput(text);
+            }
+          })
+          .catch((err) => {
+            console.warn('[TerminalPane] Failed to paste from clipboard:', err);
+          });
+        return false;
+      }
+
+      // Escape — Close search
       if (event.key === 'Escape' && isSearchOpenRef.current) {
         closeSearch();
         return false;
@@ -351,7 +390,7 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, onInput
       fileLinkProviderDisposableRef.current = null;
       setRendererType('canvas');
     };
-  }, [closeSearch, currentTheme, sessionId, sendInput, sendResize, sessionCwd, onInput]);
+  }, [closeSearch, currentTheme, sessionId, sendInput, sendResize, sessionCwd, onInput, fontSize]);
 
   useEffect(() => {
     if (terminalRef.current) {
@@ -363,6 +402,18 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, onInput
       containerRef.current.style.backgroundColor = currentTheme.background ?? '';
     }
   }, [currentTheme]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon) return;
+
+    terminal.options.fontSize = fontSize;
+    requestAnimationFrame(() => {
+      fitAddon.fit();
+      sendResize(terminal.cols, terminal.rows);
+    });
+  }, [fontSize, sendResize]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
