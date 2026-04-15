@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T19:05:33.560Z",
+  "lastUpdatedAt": "2026-04-15T19:08:41.878Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -104,7 +104,134 @@
     }
   ],
   "failedStories": [],
-  "skippedStories": [],
+  "skippedStories": [
+    {
+      "storyId": "OCT-019",
+      "title": "OCT-019",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:39.749Z",
+      "finishedAt": "2026-04-15T19:08:39.749Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-012"
+    },
+    {
+      "storyId": "OCT-031",
+      "title": "OCT-031",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:39.757Z",
+      "finishedAt": "2026-04-15T19:08:39.757Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-012"
+    },
+    {
+      "storyId": "OCT-033",
+      "title": "OCT-033",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:39.762Z",
+      "finishedAt": "2026-04-15T19:08:39.762Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-015"
+    },
+    {
+      "storyId": "OCT-035",
+      "title": "OCT-035",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:39.767Z",
+      "finishedAt": "2026-04-15T19:08:39.767Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-012"
+    },
+    {
+      "storyId": "OCT-039",
+      "title": "OCT-039",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:39.772Z",
+      "finishedAt": "2026-04-15T19:08:39.772Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-036"
+    },
+    {
+      "storyId": "OCT-040",
+      "title": "OCT-040",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:39.780Z",
+      "finishedAt": "2026-04-15T19:08:39.780Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-015"
+    },
+    {
+      "storyId": "OCT-041",
+      "title": "OCT-041",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:39.798Z",
+      "finishedAt": "2026-04-15T19:08:39.798Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-036"
+    },
+    {
+      "storyId": "OCT-019",
+      "title": "Settings integration — terminal session limit and idle timeout config",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:41.813Z",
+      "finishedAt": "2026-04-15T19:08:41.813Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-012"
+    },
+    {
+      "storyId": "OCT-031",
+      "title": "PTY title sync — dynamic tab labels from OSC 0/2",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:41.844Z",
+      "finishedAt": "2026-04-15T19:08:41.844Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-012"
+    },
+    {
+      "storyId": "OCT-035",
+      "title": "Workspace switch — session scope and tab state on workspace change",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:41.857Z",
+      "finishedAt": "2026-04-15T19:08:41.857Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-012"
+    },
+    {
+      "storyId": "OCT-033",
+      "title": "API key pre-validation before session spawn",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:41.861Z",
+      "finishedAt": "2026-04-15T19:08:41.861Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-015"
+    },
+    {
+      "storyId": "OCT-040",
+      "title": "OpenCode not-installed — auto-retry polling and install progress feedback",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:41.866Z",
+      "finishedAt": "2026-04-15T19:08:41.866Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-015"
+    },
+    {
+      "storyId": "OCT-039",
+      "title": "OpenCode terminal identity — AI agent branding, welcome banner, workspace context indicator",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:41.871Z",
+      "finishedAt": "2026-04-15T19:08:41.871Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-036"
+    },
+    {
+      "storyId": "OCT-041",
+      "title": "Run View taxonomy fix — rename pipeline output to 'Execution Trace' to eliminate terminal confusion",
+      "status": "skipped",
+      "startedAt": "2026-04-15T19:08:41.878Z",
+      "finishedAt": "2026-04-15T19:08:41.878Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-036"
+    }
+  ],
   "currentStory": null,
   "decisions": [],
   "resumedFromStory": null
