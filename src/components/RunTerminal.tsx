@@ -979,7 +979,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           <button
             onClick={handleCopy}
             className="ml-auto p-1.5 rounded-md text-muted hover:text-[var(--text)] transition-colors"
-            title="Copy terminal output"
+            title="Copy execution trace output"
+            aria-label="Copy execution trace output"
           >
             {copied ? <Check size={13} /> : <Copy size={13} />}
           </button>
