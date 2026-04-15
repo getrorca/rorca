@@ -1,5 +1,6 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
+  AlertTriangle,
   Bot,
   Check,
   ChevronDown,
@@ -133,6 +134,17 @@ function getNotInstalledHint(error: unknown): string {
   return 'Install OpenCode with: npm install -g opencode';
 }
 
+function isInvalidApiKeyError(error: unknown): boolean {
+  return error instanceof ApiError && error.status === 422 && error.code === 'INVALID_API_KEY';
+}
+
+function getInvalidApiKeyProvider(error: unknown): string {
+  if (error instanceof ApiError && typeof error.details.provider === 'string') {
+    return error.details.provider;
+  }
+  return 'provider';
+}
+
 function formatDuration(createdAt: string, exitedAt: string | null): string {
   const start = new Date(createdAt).getTime();
   const end = exitedAt ? new Date(exitedAt).getTime() : Date.now();
@@ -244,6 +256,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [error, setError] = useState<string | null>(null);
   const [notInstalled, setNotInstalled] = useState(false);
   const [notInstalledHint, setNotInstalledHint] = useState('Install OpenCode with: npm install -g opencode');
+  const [invalidApiKeyProvider, setInvalidApiKeyProvider] = useState<string | null>(null);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [activeModel, setActiveModel] = useState('Select model');
   const [sessionModels, setSessionModels] = useState<Record<string, string>>({});
@@ -420,6 +433,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     setError(null);
     setNotInstalled(false);
     setNotInstalledHint('Install OpenCode with: npm install -g opencode');
+    setInvalidApiKeyProvider(null);
 
     try {
       const res = await apiFetch<TerminalSessionResponse>('/api/terminal/sessions', {
@@ -472,6 +486,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       if (isNotInstalledError(err)) {
         setNotInstalledHint(getNotInstalledHint(err));
         setNotInstalled(true);
+      } else if (isInvalidApiKeyError(err)) {
+        setInvalidApiKeyProvider(getInvalidApiKeyProvider(err));
       } else {
         setError('Failed to start session — is OpenCode installed?');
       }
@@ -525,6 +541,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     setError(null);
     setNotInstalled(false);
     setNotInstalledHint('Install OpenCode with: npm install -g opencode');
+    setInvalidApiKeyProvider(null);
 
     const requestId = ++restoreRequestIdRef.current;
 
@@ -1200,6 +1217,27 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
                 className="rounded border border-accent bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"
               >
                 Open Settings → Providers
+              </button>
+            </div>
+          </div>
+        )}
+
+        {invalidApiKeyProvider && (
+          <div className="absolute inset-0 z-10 flex items-center justify-center px-4">
+            <div className="flex max-w-md flex-col items-center text-center">
+              <div className="mb-4 flex items-center justify-center">
+                <AlertTriangle size={48} className="text-warning/80" />
+              </div>
+              <h3 className="mb-2 text-base font-medium text-[var(--text)]">Invalid API key for {invalidApiKeyProvider}</h3>
+              <p className="mb-4 text-[13px] text-muted">
+                This terminal session cannot start until the provider key is updated.
+              </p>
+              <button
+                type="button"
+                onClick={() => navigate('/settings/providers')}
+                className="rounded border border-accent bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"
+              >
+                Go to Settings → Providers
               </button>
             </div>
           </div>
