@@ -95,7 +95,19 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const [scrollbackFetched, setScrollbackFetched] = useState(false);
 
-  const { onData, sendInput, sendResize, reconnecting, onExit: onSessionExit } = useTerminalSession(sessionId);
+  const { onData, sendInput, sendResize, reconnecting, onExit: onSessionExit, onShellEvent } = useTerminalSession(sessionId);
+
+  const writeCommandBadge = useCallback((exitCode: number, durationMs: number) => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+
+    const durationText = durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${durationMs}ms`;
+    const badgeText = exitCode === 0 ? `✓ ${durationText}` : `✗ ${exitCode}`;
+    const color = exitCode === 0 ? '\x1b[32m' : '\x1b[31m';
+    const col = Math.max(1, terminal.cols - badgeText.length + 1);
+
+    terminal.write(`\x1b[s\x1b[${col}G${color}${badgeText}\x1b[0m\x1b[u`);
+  }, []);
 
   // ─── Terminal initialization ──────────────────────────────────────────────────
 
@@ -241,6 +253,16 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
 
     return unsubscribe;
   }, [onSessionExit, onExit]);
+
+  useEffect(() => {
+    const unsubscribe = onShellEvent((event) => {
+      if (event.event === 'command_end') {
+        writeCommandBadge(event.exitCode, event.durationMs);
+      }
+    });
+
+    return unsubscribe;
+  }, [onShellEvent, writeCommandBadge]);
 
   // ─── Render ───────────────────────────────────────────────────────────────────
 

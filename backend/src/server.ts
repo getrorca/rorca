@@ -567,7 +567,16 @@ if (process.env.NODE_ENV !== 'test') {
     const dataListener = session.ptyProcess.onData((data: string) => {
       if (ws.readyState === WebSocket.OPEN) {
         try {
-          ws.send(JSON.stringify({ type: 'output', data }));
+          const parsed = ptyManager.parseOsc133Chunk(data, session.osc133State);
+          session.osc133State = parsed.state;
+
+          if (parsed.cleanData) {
+            ws.send(JSON.stringify({ type: 'output', data: parsed.cleanData }));
+          }
+
+          for (const shellEvent of parsed.events) {
+            ws.send(JSON.stringify(shellEvent));
+          }
         } catch (err) {
           logger.error({ err, sessionId }, '[ws] Failed to send PTY output to client');
         }

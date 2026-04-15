@@ -135,4 +135,32 @@ describe('pty-manager', () => {
       expect(active.map((s) => s.sessionId)).toContain(sessionId2);
     });
   });
+
+  describe('parseOsc133Chunk', () => {
+    it('should strip OSC 133 sequences and emit command_end event', () => {
+      const result = ptyManager.parseOsc133Chunk(
+        'hello\u001b]133;B\u0007world\u001b]133;D;0\u0007done'
+      );
+
+      expect(result.cleanData).toBe('helloworlddone');
+      expect(result.events).toHaveLength(1);
+      expect(result.events[0]).toMatchObject({
+        type: 'shell_event',
+        event: 'command_end',
+        exitCode: 0,
+      });
+    });
+
+    it('should buffer partial OSC 133 sequences across chunks', () => {
+      const first = ptyManager.parseOsc133Chunk('abc\u001b]133;D;', { pending: '' });
+      expect(first.cleanData).toBe('abc');
+      expect(first.events).toHaveLength(0);
+      expect(first.state.pending).toBe('\u001b]133;D;');
+
+      const second = ptyManager.parseOsc133Chunk('7\u0007xyz', first.state);
+      expect(second.cleanData).toBe('xyz');
+      expect(second.events).toHaveLength(1);
+      expect(second.events[0]).toMatchObject({ exitCode: 7 });
+    });
+  });
 });
