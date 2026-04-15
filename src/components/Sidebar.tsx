@@ -4,7 +4,7 @@ import { NavLink } from 'react-router-dom';
 import {
   Wand2, Layers, Settings,
   Search, PlayCircle, Compass,
-  BarChart3, Package,
+  BarChart3, Package, Bot,
 } from 'lucide-react';
 import WorkspaceSelector from './WorkspaceSelector';
 import ThemeToggle from './ThemeToggle';
@@ -14,9 +14,9 @@ import { UserMenu } from './Shell';
 import { PANEL_ROUTES } from '../routes';
 import { useBreakpoint } from '../hooks/useBreakpoint';
 
-// ULT-022: 5 primary panels + run-view + spec-review slide-over
+// ULT-022: 5 primary panels + run-view + spec-review slide-over + terminal
 export type PanelId =
-  | 'specs' | 'runs' | 'analytics' | 'direction' | 'settings' | 'marketplace'
+  | 'specs' | 'runs' | 'terminal' | 'analytics' | 'direction' | 'settings' | 'marketplace'
   | 'run-view'
   | 'spec-review';
 
@@ -37,11 +37,15 @@ interface NavSection {
 const SIDEBAR_ITEMS: NavItem[] = [
   { id: 'specs',       label: 'Specs',       icon: Layers },
   { id: 'runs',        label: 'Runs',        icon: PlayCircle },
+  { id: 'terminal',    label: 'OpenCode',    icon: Bot },
   { id: 'marketplace', label: 'Marketplace', icon: Package },
   { id: 'analytics',   label: 'Analytics',   icon: BarChart3 },
   { id: 'direction',   label: 'Direction',   icon: Compass },
   { id: 'settings',    label: 'Settings',    icon: Settings },
 ];
+
+// Items shown in mobile bottom tab bar — excludes Terminal (drawer is the mobile entry point)
+const MOBILE_TAB_ITEMS: NavItem[] = SIDEBAR_ITEMS.filter(i => i.id !== 'terminal');
 
 // ULT-022: Flat list matching the 5 sidebar items — CommandPalette uses NAV_ITEMS.
 export const NAV_SECTIONS: NavSection[] = [
@@ -57,6 +61,13 @@ export const NAV_SECTIONS: NavSection[] = [
     label: 'Runs',
     items: [
       { id: 'runs', label: 'Runs', icon: PlayCircle },
+    ],
+  },
+  {
+    id: 'terminal',
+    label: 'OpenCode',
+    items: [
+      { id: 'terminal', label: 'OpenCode', icon: Bot },
     ],
   },
   {
@@ -273,7 +284,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
   if (breakpoint === 'mobile') {
     return (
       <nav aria-label="Main navigation" className="fixed bottom-0 left-0 right-0 z-40 bg-panel border-t border-border flex items-center justify-around px-1 py-1 safe-area-bottom">
-        {SIDEBAR_ITEMS.map((item) => {
+        {MOBILE_TAB_ITEMS.map((item) => {
           const Icon = item.icon;
           return (
             <NavLink
