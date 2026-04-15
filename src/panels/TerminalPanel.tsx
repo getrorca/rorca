@@ -41,6 +41,21 @@ interface DirectionLayersResponse {
 }
 
 const LAYER_KEYS = ['l1', 'l2', 'l3', 'l4', 'l5'] as const;
+const DEFAULT_FONT_SIZE = 13;
+const MIN_FONT_SIZE = 10;
+const MAX_FONT_SIZE = 20;
+const FONT_SIZE_STORAGE_KEY = 'rorca:terminal:fontSize';
+
+function clampFontSize(fontSize: number): number {
+  return Math.min(MAX_FONT_SIZE, Math.max(MIN_FONT_SIZE, fontSize));
+}
+
+function loadInitialFontSize(): number {
+  if (typeof window === 'undefined') return DEFAULT_FONT_SIZE;
+  const raw = window.localStorage.getItem(FONT_SIZE_STORAGE_KEY);
+  const parsed = raw ? Number.parseInt(raw, 10) : Number.NaN;
+  return Number.isFinite(parsed) ? clampFontSize(parsed) : DEFAULT_FONT_SIZE;
+}
 
 function getBasename(input: string): string {
   const normalized = input.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -67,6 +82,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [activeModel, setActiveModel] = useState('Select model');
   const [layers, setLayers] = useState<Record<string, DirectionLayer>>({});
+  const [fontSize, setFontSize] = useState<number>(loadInitialFontSize);
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const initialSessionRequestedRef = useRef(false);
@@ -74,6 +91,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
   const headerHeightClass = mode === 'panel' ? 'h-10' : 'h-9';
   const headerTextClass = mode === 'panel' ? 'text-[12px]' : 'text-[11px]';
+  const fitKey = `${mode}:${isFullscreen ? 'fullscreen' : 'normal'}:${fontSize}`;
 
   const activeSession = useMemo(
     () => sessions.find((session) => session.sessionId === activeSessionId) ?? null,
@@ -83,6 +101,21 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  useEffect(() => {
+    window.localStorage.setItem(FONT_SIZE_STORAGE_KEY, String(fontSize));
+  }, [fontSize]);
+
+  useEffect(() => {
+    if (!isFullscreen) return undefined;
+
+    const previousOverflow = document.body.style.overflow;
+    document.body.style.overflow = 'hidden';
+
+    return () => {
+      document.body.style.overflow = previousOverflow;
+    };
+  }, [isFullscreen]);
 
   const directionEntries = useMemo(() => {
     return LAYER_KEYS
@@ -216,13 +249,24 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     )));
   }, []);
 
+  const adjustFontSize = useCallback((delta: number) => {
+    setFontSize((current) => clampFontSize(current + delta));
+  }, []);
+
+  const resetFontSize = useCallback(() => {
+    setFontSize(DEFAULT_FONT_SIZE);
+  }, []);
+
   const workspaceLabel = selectedWorkspace?.name ?? 'No workspace';
   const cwdLabel = activeSession?.cwd ? getBasename(activeSession.cwd) : (selectedWorkspace?.git_path ? getBasename(selectedWorkspace.git_path) : 'workspace');
   const isActive = Boolean(activeSession && !activeSession.exited && !creating && !error && !notInstalled);
   const showOverlay = creating || (!activeSessionId && !error && !notInstalled);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--panel)]">
+    <div className={[
+      'flex min-h-0 flex-col overflow-hidden bg-[var(--panel)]',
+      isFullscreen ? 'fixed inset-0 z-50 h-screen w-screen' : 'h-full',
+    ].join(' ')}>
       <div className={`flex shrink-0 items-center justify-between border-b border-border px-3 ${headerHeightClass}`}>
         <div className="min-w-0 flex items-center gap-2.5">
           <Bot size={14} className="shrink-0 text-accent" />
@@ -275,6 +319,36 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             />
           </div>
 
+          <div className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-1 py-1">
+            <button
+              type="button"
+              onClick={() => adjustFontSize(-1)}
+              className="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] text-[var(--text)] hover:bg-accent/5"
+              aria-label="Decrease terminal font size"
+              title="Decrease terminal font size"
+            >
+              A-
+            </button>
+            <button
+              type="button"
+              onClick={resetFontSize}
+              className="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] text-[var(--text)] hover:bg-accent/5"
+              aria-label="Reset terminal font size"
+              title="Reset terminal font size"
+            >
+              A
+            </button>
+            <button
+              type="button"
+              onClick={() => adjustFontSize(1)}
+              className="inline-flex items-center rounded px-1.5 py-0.5 text-[11px] text-[var(--text)] hover:bg-accent/5"
+              aria-label="Increase terminal font size"
+              title="Increase terminal font size"
+            >
+              A+
+            </button>
+          </div>
+
           <div className="shrink-0" title={directionTooltip}>
             <div className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted">
               <span>✦</span>
@@ -290,6 +364,16 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
           >
             <Plus size={12} />
             <span>New Session</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={() => setIsFullscreen((current) => !current)}
+            className="inline-flex shrink-0 items-center rounded border border-border p-1 text-muted hover:border-accent/40 hover:bg-accent/5 hover:text-[var(--text)]"
+            aria-label={isFullscreen ? 'Exit terminal fullscreen' : 'Enter terminal fullscreen'}
+            title={isFullscreen ? 'Exit fullscreen' : 'Enter fullscreen'}
+          >
+            {isFullscreen ? <Minimize2 size={14} /> : <Maximize2 size={14} />}
           </button>
 
           {mode === 'drawer' ? (
@@ -349,6 +433,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             sessionId={activeSessionId}
             className="h-full"
             onExit={() => handleSessionExit(activeSessionId)}
+            fontSize={fontSize}
+            fitKey={fitKey}
           />
         ) : (
           <div className="h-full w-full bg-[var(--terminal-bg)]" />

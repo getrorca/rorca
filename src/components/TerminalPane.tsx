@@ -1,4 +1,3 @@
-```typescript
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import type { ITheme, IBufferRange, ILink, ILinkProvider } from '@xterm/xterm';
@@ -8,6 +7,7 @@ import { WebLinksAddon } from '@xterm/addon-web-links';
 import { ChevronDown, ChevronUp, X } from 'lucide-react';
 import { useTerminalSession } from '../hooks/useTerminalSession';
 import { useTheme } from '../contexts/ThemeContext';
+import { useGlobalToast } from '../contexts/ToastContext';
 import '@xterm/xterm/css/xterm.css';
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -17,6 +17,8 @@ export interface TerminalPaneProps {
   onExit?: (exitCode: number) => void;
   onSessionLost?: () => void;
   className?: string;
+  fontSize?: number;
+  fitKey?: string | number;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -30,7 +32,14 @@ const TERMINAL_OPTIONS = {
   cursorBlink: true,
   cursorStyle: 'block' as const,
   convertEol: true,
+  copyOnSelect: false,
 };
+
+const DEFAULT_FONT_SIZE = 13;
+
+function clampFontSize(fontSize: number): number {
+  return Math.min(20, Math.max(10, fontSize));
+}
 
 const SEARCH_DECORATIONS = {
   matchBackground: '#264f78',
@@ -170,7 +179,7 @@ function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): IL
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function TerminalPane({ sessionId, onExit, onSessionLost, className }: TerminalPaneProps) {
+export default function TerminalPane({ sessionId, onExit, onSessionLost, className, fontSize = DEFAULT_FONT_SIZE, fitKey }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -184,10 +193,36 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
   const isSearchOpenRef = useRef(false);
   const [sessionCwd, setSessionCwd] = useState<string | undefined>(undefined);
   const { resolved } = useTheme();
+  const toast = useGlobalToast();
 
   const currentTheme = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
 
   const { onData, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId);
+
+  const copySelection = useCallback(async () => {
+    const selection = terminalRef.current?.getSelection()?.trim();
+    if (!selection) return false;
+
+    try {
+      await navigator.clipboard.writeText(selection);
+      return true;
+    } catch {
+      toast.error('Clipboard write was blocked by the browser.');
+      return false;
+    }
+  }, [toast]);
+
+  const pasteClipboard = useCallback(async () => {
+    try {
+      const text = await navigator.clipboard.readText();
+      if (!text) return false;
+      sendInput(text);
+      return true;
+    } catch {
+      toast.error('Clipboard read requires permission and a user gesture.');
+      return false;
+    }
+  }, [sendInput, toast]);
 
   const closeSearch = useCallback(() => {
     setIsSearchOpen(false);
@@ -234,6 +269,7 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
 
     const terminal = new Terminal({
       ...TERMINAL_OPTIONS,
+      fontSize: clampFontSize(fontSize),
       theme: currentTheme,
     });
 
@@ -273,9 +309,21 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
     terminal.attachCustomKeyEventHandler((event) => {
       const key = event.key.toLowerCase();
       const isFindShortcut = (event.metaKey || event.ctrlKey) && key === 'f';
+      const isCopyShortcut = (event.metaKey || event.ctrlKey) && key === 'c';
+      const isPasteShortcut = (event.metaKey && key === 'v') || (event.ctrlKey && event.shiftKey && key === 'v');
 
       if (isFindShortcut) {
         setIsSearchOpen(true);
+        return false;
+      }
+
+      if (isCopyShortcut && terminal.hasSelection()) {
+        void copySelection();
+        return false;
+      }
+
+      if (isPasteShortcut) {
+        void pasteClipboard();
         return false;
       }
 
@@ -319,7 +367,7 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       searchAddonRef.current = null;
       resizeObserverRef.current = null;
     };
-  }, [closeSearch, currentTheme, sessionId, sendInput, sendResize, sessionCwd]);
+  }, [closeSearch, copySelection, currentTheme, fontSize, pasteClipboard, sessionId, sendInput, sendResize, sessionCwd]);
 
   useEffect(() => {
     if (terminalRef.current) {
@@ -330,6 +378,29 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       containerRef.current.style.backgroundColor = currentTheme.background ?? '';
     }
   }, [currentTheme]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon) return;
+
+    terminal.options.fontSize = clampFontSize(fontSize);
+    window.requestAnimationFrame(() => {
+      fitAddon.fit();
+      sendResize(terminal.cols, terminal.rows);
+    });
+  }, [fontSize, sendResize]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon) return;
+
+    window.requestAnimationFrame(() => {
+      fitAddon.fit();
+      sendResize(terminal.cols, terminal.rows);
+    });
+  }, [fitKey, sendResize]);
 
   useEffect(() => {
     if (!isSearchOpen) return;
@@ -537,4 +608,3 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
     </div>
   );
 }
-```
