@@ -401,6 +401,7 @@ app.use('/api/conventions', conventionsRouter);
 app.use('/api/packs', packsRouter);
 app.use('/api/skills', skillsRouter);
 app.use('/api/attachments', attachmentsRouter);
+app.use('/api/terminal', terminalRouter); // OCT-002: PTY session management
 app.use('/api/personas', personasRouter);
 app.use('/api/marketplace', marketplaceRouter);
 app.use('/api/search', searchRouter);

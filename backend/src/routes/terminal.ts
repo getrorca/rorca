@@ -1,3 +1,4 @@
+<<<<<<< HEAD
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { queryOne } from '../db/index';
@@ -25,16 +26,38 @@ const resizeSessionSchema = z.object({
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
+=======
+/**
+ * OCT-002–OCT-004: Terminal WebSocket API Routes
+ * POST /api/terminal/sessions — Create PTY session
+ * WS /api/terminal/sessions/:sessionId — Attach to PTY via WebSocket
+ * POST /api/terminal/sessions/:sessionId/resize — Resize PTY
+ * DELETE /api/terminal/sessions/:sessionId — Kill PTY
+ */
+
+import { Router } from 'express';
+import { createSession, resizeSession, killSession, activeSessions } from '../lib/pty-manager';
+import { queryOne } from '../db';
+import { ServiceUnavailableError, NotFoundError, ValidationError } from '../lib/errors';
+
+const router = Router();
+
+>>>>>>> feat/rorca-opencode-terminal-OCT-024-1776241347295
 /**
  * @swagger
  * /api/terminal/sessions:
  *   post:
+<<<<<<< HEAD
  *     tags: [Terminal]
  *     summary: Create a new PTY session
  *     operationId: createTerminalSession
  *     description: |
  *       Spawns a new OpenCode PTY session for the specified workspace.
  *       The session is isolated with workspace-specific environment variables.
+=======
+ *     summary: Create a new PTY session for OpenCode
+ *     tags: [Terminal]
+>>>>>>> feat/rorca-opencode-terminal-OCT-024-1776241347295
  *     requestBody:
  *       required: true
  *       content:
@@ -44,6 +67,7 @@ const resizeSessionSchema = z.object({
  *             required: [workspaceId]
  *             properties:
  *               workspaceId:
+<<<<<<< HEAD
  *                 type: string
  *                 description: ID of the workspace to attach the session to
  *               rows:
@@ -57,6 +81,18 @@ const resizeSessionSchema = z.object({
  *     responses:
  *       201:
  *         description: PTY session created successfully
+=======
+ *                 type: integer
+ *               rows:
+ *                 type: integer
+ *                 default: 24
+ *               cols:
+ *                 type: integer
+ *                 default: 80
+ *     responses:
+ *       201:
+ *         description: PTY session created
+>>>>>>> feat/rorca-opencode-terminal-OCT-024-1776241347295
  *         content:
  *           application/json:
  *             schema:
@@ -64,6 +100,7 @@ const resizeSessionSchema = z.object({
  *               properties:
  *                 sessionId:
  *                   type: string
+<<<<<<< HEAD
  *                   description: Unique session identifier (UUID)
  *                 workspaceId:
  *                   type: string
@@ -128,6 +165,91 @@ router.post('/sessions', async (req: Request, res: Response) => {
     });
   } catch (err) {
     handleRouteError(req, res, err);
+=======
+ *                   format: uuid
+ *       503:
+ *         description: node-pty native module not available
+ */
+router.post('/sessions', async (req, res, next) => {
+  try {
+    const { workspaceId, rows = 24, cols = 80 } = req.body;
+
+    if (!workspaceId || typeof workspaceId !== 'number') {
+      throw new ValidationError('workspaceId is required and must be a number');
+    }
+
+    // Fetch workspace to get path
+    const workspace = await queryOne<{ id: number; path: string }>(
+      'SELECT id, path FROM rorca.workspaces WHERE id = $1',
+      [workspaceId]
+    );
+
+    if (!workspace) {
+      throw new NotFoundError('Workspace', String(workspaceId));
+    }
+
+    // Create PTY session — throws { code, message } if node-pty not available
+    let sessionId: string;
+    try {
+      sessionId = await createSession(workspaceId, workspace.path, process.env as Record<string, string>, rows, cols);
+    } catch (err: any) {
+      if (err.code === 'PTY_NOT_AVAILABLE') {
+        // OCT-024: Return 503 with hint when node-pty is not built
+        throw new ServiceUnavailableError(err.message);
+      }
+      throw err;
+    }
+
+    res.status(201).json({ sessionId });
+  } catch (err) {
+    next(err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/terminal/sessions/{sessionId}/resize:
+ *   post:
+ *     summary: Resize a PTY session
+ *     tags: [Terminal]
+ *     parameters:
+ *       - name: sessionId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [rows, cols]
+ *             properties:
+ *               rows:
+ *                 type: integer
+ *               cols:
+ *                 type: integer
+ *     responses:
+ *       200:
+ *         description: Session resized successfully
+ */
+router.post('/sessions/:sessionId/resize', async (req, res, next) => {
+  try {
+    const { sessionId } = req.params;
+    const { rows, cols } = req.body;
+
+    if (!rows || !cols || typeof rows !== 'number' || typeof cols !== 'number') {
+      throw new ValidationError('rows and cols are required and must be numbers');
+    }
+
+    resizeSession(sessionId, rows, cols);
+
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+>>>>>>> feat/rorca-opencode-terminal-OCT-024-1776241347295
   }
 });
 
@@ -135,6 +257,7 @@ router.post('/sessions', async (req: Request, res: Response) => {
  * @swagger
  * /api/terminal/sessions/{sessionId}:
  *   delete:
+<<<<<<< HEAD
  *     tags: [Terminal]
  *     summary: Kill a PTY session
  *     operationId: killTerminalSession
@@ -169,6 +292,30 @@ router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
     res.status(204).send();
   } catch (err) {
     handleRouteError(req, res, err);
+=======
+ *     summary: Kill a PTY session
+ *     tags: [Terminal]
+ *     parameters:
+ *       - name: sessionId
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *           format: uuid
+ *     responses:
+ *       200:
+ *         description: Session terminated successfully
+ */
+router.delete('/sessions/:sessionId', async (req, res, next) => {
+  try {
+    const { sessionId } = req.params;
+
+    killSession(sessionId);
+
+    res.json({ success: true });
+  } catch (err) {
+    next(err);
+>>>>>>> feat/rorca-opencode-terminal-OCT-024-1776241347295
   }
 });
 
@@ -176,6 +323,7 @@ router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
  * @swagger
  * /api/terminal/sessions:
  *   get:
+<<<<<<< HEAD
  *     tags: [Terminal]
  *     summary: List active PTY sessions
  *     operationId: listTerminalSessions
@@ -184,6 +332,13 @@ router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
  *     responses:
  *       200:
  *         description: List of active sessions
+=======
+ *     summary: List all active PTY sessions
+ *     tags: [Terminal]
+ *     responses:
+ *       200:
+ *         description: Array of active sessions
+>>>>>>> feat/rorca-opencode-terminal-OCT-024-1776241347295
  *         content:
  *           application/json:
  *             schema:
@@ -197,6 +352,7 @@ router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
  *                       sessionId:
  *                         type: string
  *                       workspaceId:
+<<<<<<< HEAD
  *                         type: number
  *                       cwd:
  *                         type: string
@@ -204,6 +360,11 @@ router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
  *                         type: integer
  *                       cols:
  *                         type: integer
+=======
+ *                         type: integer
+ *                       cwd:
+ *                         type: string
+>>>>>>> feat/rorca-opencode-terminal-OCT-024-1776241347295
  *                       createdAt:
  *                         type: string
  *                         format: date-time
@@ -211,6 +372,7 @@ router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
  *                         type: string
  *                         format: date-time
  */
+<<<<<<< HEAD
 router.get('/sessions', async (_req: Request, res: Response) => {
   try {
     const activeSessions = ptyManager.activeSessions();
@@ -295,6 +457,24 @@ router.patch('/sessions/:sessionId/resize', async (req: Request, res: Response) 
     res.json({ ok: true });
   } catch (err) {
     handleRouteError(req, res, err);
+=======
+router.get('/sessions', async (req, res, next) => {
+  try {
+    const sessions = activeSessions();
+    const serialized = sessions.map((s) => ({
+      sessionId: s.sessionId,
+      workspaceId: s.workspaceId,
+      cwd: s.cwd,
+      createdAt: s.createdAt.toISOString(),
+      lastActivityAt: s.lastActivityAt.toISOString(),
+      rows: s.rows,
+      cols: s.cols,
+    }));
+
+    res.json({ sessions: serialized });
+  } catch (err) {
+    next(err);
+>>>>>>> feat/rorca-opencode-terminal-OCT-024-1776241347295
   }
 });
 
