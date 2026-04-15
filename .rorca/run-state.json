@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T20:33:38.706Z",
+  "lastUpdatedAt": "2026-04-15T20:39:11.595Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -31,6 +31,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 160465
+    },
+    {
+      "storyId": "OCT-019",
+      "title": "Settings integration — terminal session limit and idle timeout config",
+      "status": "passed",
+      "startedAt": "2026-04-15T20:33:52.435Z",
+      "finishedAt": "2026-04-15T20:39:11.595Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 319160
     }
   ],
   "failedStories": [
@@ -45,44 +55,7 @@
       "elapsedMs": 185862
     }
   ],
-  "skippedStories": [
-    {
-      "storyId": "OCT-033",
-      "title": "OCT-033",
-      "status": "skipped",
-      "startedAt": "2026-04-15T20:33:36.646Z",
-      "finishedAt": "2026-04-15T20:33:36.646Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: OCT-015"
-    },
-    {
-      "storyId": "OCT-040",
-      "title": "OCT-040",
-      "status": "skipped",
-      "startedAt": "2026-04-15T20:33:36.663Z",
-      "finishedAt": "2026-04-15T20:33:36.663Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: OCT-015"
-    },
-    {
-      "storyId": "OCT-033",
-      "title": "API key pre-validation before session spawn",
-      "status": "skipped",
-      "startedAt": "2026-04-15T20:33:38.681Z",
-      "finishedAt": "2026-04-15T20:33:38.681Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: OCT-015"
-    },
-    {
-      "storyId": "OCT-040",
-      "title": "OpenCode not-installed — auto-retry polling and install progress feedback",
-      "status": "skipped",
-      "startedAt": "2026-04-15T20:33:38.706Z",
-      "finishedAt": "2026-04-15T20:33:38.706Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: OCT-015"
-    }
-  ],
+  "skippedStories": [],
   "currentStory": null,
   "decisions": [],
   "resumedFromStory": null
