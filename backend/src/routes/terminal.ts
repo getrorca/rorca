@@ -190,8 +190,8 @@ router.post('/sessions', async (req: Request, res: Response) => {
     }
 
     // Look up workspace
-    const workspace = await queryOne<{ id: string; path: string }>(
-      'SELECT id, path FROM workspaces WHERE id = $1',
+    const workspace = await queryOne<{ id: string; path: string; label?: string }>(
+      'SELECT id, path, label FROM workspaces WHERE id = $1',
       [body.workspaceId]
     );
 
@@ -241,6 +241,7 @@ router.post('/sessions', async (req: Request, res: Response) => {
     try {
       sessionId = await ptyManager.createSession(
         body.workspaceId,
+        workspace.label ?? workspace.path.split('/').pop() ?? 'Workspace',
         workspace.path,
         mergedEnv,
         body.rows,
