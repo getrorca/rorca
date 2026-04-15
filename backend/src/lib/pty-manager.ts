@@ -51,6 +51,30 @@ const CLAUDE_ENV_VARS = [
   'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
 ];
 
+function emitTerminalSessionEnded(session: PtySession, exitCode: number | null): void {
+  const port = process.env.PORT || '3030';
+  const durationMs = Date.now() - session.createdAt.getTime();
+
+  fetch(`http://localhost:${port}/api/wal`, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      event_type: 'terminal_session_ended',
+      workspace_id: String(session.workspaceId),
+      spec_id: null,
+      payload: {
+        sessionId: session.sessionId,
+        exitCode,
+        durationMs,
+      },
+    }),
+  }).catch((error) => {
+    logger.warn(
+      `[pty-manager] Failed to emit terminal_session_ended WAL event for session ${session.sessionId}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  });
+}
+
 /**
  * Spawn a new OpenCode PTY session.
  * Returns the unique session ID.
@@ -113,7 +137,8 @@ export async function createSession(
   });
 
   // Clean up session when process exits
-  ptyProcess.onExit(() => {
+  ptyProcess.onExit(({ exitCode }) => {
+    emitTerminalSessionEnded(session, exitCode ?? null);
     sessions.delete(sessionId);
     logger.info(`[pty-manager] Session ${sessionId} exited and removed`);
   });
