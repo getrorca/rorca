@@ -36,6 +36,8 @@ interface TerminalSessionRecord {
   cwd: string;
   createdAt: string;
   label: string;
+  title: string;
+  bellFlash: boolean;
   autoLabeled: boolean;
   status: 'active' | 'exited' | 'killed';
 }
@@ -72,6 +74,8 @@ const DEFAULT_FONT_SIZE = 13;
 const FONT_SIZE_STORAGE_KEY = 'rorca:terminal:fontSize';
 const SESSIONS_STORAGE_KEY = 'rorca:terminal:sessions';
 const MAX_PERSISTED_SESSIONS = 5;
+const SHELL_DEFAULT_TITLE_REGEX = /^(zsh|bash|sh|fish|tmux|screen)$/i;
+const PATH_LIKE_TITLE_REGEX = /^(~|\/|\.?\.\/|[A-Za-z]:[\\/]).*/;
 
 function getMaxSessionsSetting(): number {
   try {
@@ -91,6 +95,18 @@ function getBasename(input: string): string {
   const normalized = input.replace(/\\/g, '/').replace(/\/+$/, '');
   const parts = normalized.split('/').filter(Boolean);
   return parts[parts.length - 1] ?? input;
+}
+
+function getTerminalFallbackLabel(index: number): string {
+  return `Terminal ${index + 1}`;
+}
+
+function isUsefulTerminalTitle(title: string): boolean {
+  const normalized = title.trim();
+  if (!normalized) return false;
+  if (SHELL_DEFAULT_TITLE_REGEX.test(normalized)) return false;
+  if (PATH_LIKE_TITLE_REGEX.test(normalized)) return false;
+  return true;
 }
 
 function summarizeLayer(content: string): string {
@@ -217,6 +233,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const workspaceSessionsRef = useRef<Record<string, TerminalSessionRecord[]>>({});
   const activeWorkspaceIdRef = useRef<string | null>(workspaceId);
   const nextLabelNumRef = useRef(1);
+  const bellTimeoutsRef = useRef<Record<string, number>>({});
   const [backgroundSessionsVersion, setBackgroundSessionsVersion] = useState(0);
 
   const headerHeightClass = mode === 'panel' ? 'h-10' : 'h-9';
@@ -344,6 +361,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         cwd: res.cwd,
         createdAt: res.createdAt,
         label: `OpenCode ${labelNum}`,
+        title: 'Terminal',
+        bellFlash: false,
         autoLabeled: false,
         status: 'active',
       };
@@ -429,6 +448,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             cwd: res.cwd,
             createdAt: res.createdAt,
             label: session.label,
+            title: 'Terminal',
+            bellFlash: false,
             autoLabeled: true,
             status: 'active',
           });
@@ -490,6 +511,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
   useEffect(() => {
     return () => {
+      Object.values(bellTimeoutsRef.current).forEach((timeoutId) => {
+        window.clearTimeout(timeoutId);
+      });
       sessionsRef.current.forEach((session) => {
         void apiFetch(`/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`, {
           method: 'DELETE',
@@ -524,6 +548,30 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     syncWorkspaceSessions((prev) => prev.map((session) => (
       session.sessionId === sessionId ? { ...session, status: 'exited' } : session
     )));
+  }, [syncWorkspaceSessions]);
+
+  const handleSessionTitleChange = useCallback((sessionId: string, nextTitle: string) => {
+    syncWorkspaceSessions((prev) => prev.map((session) => (
+      session.sessionId === sessionId ? { ...session, title: nextTitle } : session
+    )));
+  }, [syncWorkspaceSessions]);
+
+  const handleSessionBell = useCallback((sessionId: string) => {
+    const existingTimeout = bellTimeoutsRef.current[sessionId];
+    if (existingTimeout) {
+      window.clearTimeout(existingTimeout);
+    }
+
+    syncWorkspaceSessions((prev) => prev.map((session) => (
+      session.sessionId === sessionId ? { ...session, bellFlash: true } : session
+    )));
+
+    bellTimeoutsRef.current[sessionId] = window.setTimeout(() => {
+      syncWorkspaceSessions((prev) => prev.map((session) => (
+        session.sessionId === sessionId ? { ...session, bellFlash: false } : session
+      )));
+      delete bellTimeoutsRef.current[sessionId];
+    }, 300);
   }, [syncWorkspaceSessions]);
 
   const handleSessionInput = useCallback((sessionId: string, data: string) => {
@@ -827,19 +875,30 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
           {sessions.map((session) => {
             const isCurrent = session.sessionId === activeSessionId;
             const statusDotClass = session.status === 'active' ? 'bg-emerald-400' : 'bg-muted/50';
+            const sessionIndex = sessions.findIndex((item) => item.sessionId === session.sessionId);
+            const displayLabel = isUsefulTerminalTitle(session.title)
+              ? session.title.trim()
+              : getTerminalFallbackLabel(Math.max(0, sessionIndex));
 
             return (
               <div
                 key={session.sessionId}
-                className={`group inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors ${isCurrent ? 'border-accent bg-surface-200 text-[var(--text)]' : 'border-border bg-transparent text-muted hover:border-accent/30 hover:bg-surface-100 hover:text-[var(--text)]'}`}
+                className={[
+                  'group inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors',
+                  session.bellFlash ? 'bg-amber-400/30' : '',
+                  isCurrent
+                    ? 'border-accent text-[var(--text)]'
+                    : 'border-border bg-transparent text-muted hover:border-accent/30 hover:bg-surface-100 hover:text-[var(--text)]',
+                  isCurrent && !session.bellFlash ? 'bg-surface-200' : '',
+                ].join(' ')}
               >
                 <button
                   type="button"
                   onClick={() => setActiveSessionId(session.sessionId)}
                   className="flex items-center gap-1.5"
-                  title={session.label}
+                  title={displayLabel}
                 >
-                  <span className="max-w-[120px] truncate">{session.label}</span>
+                  <span className="max-w-[120px] truncate">{displayLabel}</span>
                   <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass}`} />
                 </button>
                 <button
@@ -879,6 +938,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
                     fontSize={fontSize}
                     onExit={() => handleSessionExit(session.sessionId)}
                     onInput={(data) => handleSessionInput(session.sessionId, data)}
+                    onTitleChange={(title) => handleSessionTitleChange(session.sessionId, title)}
+                    onBell={() => handleSessionBell(session.sessionId)}
                   />
                 </div>
               );
