@@ -16,6 +16,7 @@ import ReadOnlyTerminalPane from '../components/ReadOnlyTerminalPane';
 import ModelPickerPopover from '../components/ModelPickerPopover';
 import Tooltip from '../components/Tooltip';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch, ApiError } from '../lib/apiFetch';
 import { getAllLayers } from '../api/direction';
 import type { DirectionLayer } from '../api/types';
@@ -69,6 +70,63 @@ const MIN_FONT_SIZE = 10;
 const MAX_FONT_SIZE = 20;
 const DEFAULT_FONT_SIZE = 13;
 const FONT_SIZE_STORAGE_KEY = 'rorca:terminal:fontSize';
+const SESSION_STORAGE_KEY = 'rorca:terminal:sessions';
+
+interface PersistedTerminalSession {
+  sessionId: string;
+  workspaceId: string;
+  label: string;
+  createdAt: string;
+}
+
+function readPersistedSessions(): PersistedTerminalSession[] {
+  try {
+    const raw = localStorage.getItem(SESSION_STORAGE_KEY);
+    if (!raw) return [];
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((entry): entry is PersistedTerminalSession => {
+      return typeof entry === 'object'
+        && entry !== null
+        && typeof entry.sessionId === 'string'
+        && typeof entry.workspaceId === 'string'
+        && typeof entry.label === 'string'
+        && typeof entry.createdAt === 'string';
+    });
+  } catch {
+    return [];
+  }
+}
+
+function writePersistedSessions(entries: PersistedTerminalSession[]): void {
+  try {
+    localStorage.setItem(SESSION_STORAGE_KEY, JSON.stringify(entries));
+  } catch {
+    // Ignore localStorage errors
+  }
+}
+
+function upsertPersistedSession(entry: PersistedTerminalSession): void {
+  const existing = readPersistedSessions().filter((session) => session.sessionId !== entry.sessionId);
+  const currentWorkspaceSessions = [...existing, entry]
+    .filter((session) => session.workspaceId === entry.workspaceId)
+    .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime())
+    .slice(0, MAX_SESSIONS);
+  const otherWorkspaceSessions = existing.filter((session) => session.workspaceId !== entry.workspaceId);
+  writePersistedSessions([...otherWorkspaceSessions, ...currentWorkspaceSessions]);
+}
+
+function removePersistedSession(sessionId: string): void {
+  writePersistedSessions(readPersistedSessions().filter((session) => session.sessionId !== sessionId));
+}
+
+function prunePersistedSessions(workspaceId: string, activeSessionIds: Set<string>): void {
+  const existing = readPersistedSessions();
+  const next = existing.filter((session) => session.workspaceId !== workspaceId || activeSessionIds.has(session.sessionId));
+  if (next.length !== existing.length) {
+    writePersistedSessions(next);
+  }
+}
 
 function getBasename(input: string): string {
   const normalized = input.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -108,6 +166,7 @@ function getStatusBadgeClass(status: TerminalHistoryRecord['status']): string {
 
 export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPanelProps) {
   const { workspaceId, selectedWorkspace, workspaces, setWorkspaceId } = useWorkspace();
+  const toast = useGlobalToast();
   const navigate = useNavigate();
 
   const [sessions, setSessions] = useState<TerminalSessionRecord[]>([]);
@@ -184,7 +243,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         const raw = layers[key]?.contentYaml?.trim() ?? '';
         return raw ? { key, label: `L${index + 1}`, summary: summarizeLayer(raw) } : null;
       })
-      .filter((entry): entry is { key: string; label: string; summary: string } => entry !== null);
+      .filter((entry): entry is { key: typeof LAYER_KEYS[number]; label: string; summary: string } => entry !== null);
   }, [layers]);
 
   const directionTooltip = useMemo(() => {
@@ -246,6 +305,13 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         status: 'active',
       };
 
+      upsertPersistedSession({
+        sessionId: nextSession.sessionId,
+        workspaceId: nextSession.workspaceId,
+        label: nextSession.label,
+        createdAt: nextSession.createdAt,
+      });
+
       setSessions((prev) => [...prev, nextSession]);
       if (activate) {
         setActiveSessionId(res.sessionId);
@@ -269,8 +335,64 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   useEffect(() => {
     if (!workspaceId || initialSessionRequestedRef.current) return;
     initialSessionRequestedRef.current = true;
-    void createSession(workspaceId, true);
-  }, [workspaceId, createSession]);
+
+    let cancelled = false;
+
+    const restoreOrCreateSession = async () => {
+      const persistedSessions = readPersistedSessions()
+        .filter((session) => session.workspaceId === workspaceId)
+        .sort((left, right) => new Date(right.createdAt).getTime() - new Date(left.createdAt).getTime());
+
+      if (persistedSessions.length === 0) {
+        if (!cancelled) {
+          await createSession(workspaceId, true);
+        }
+        return;
+      }
+
+      try {
+        const res = await apiFetch<{ sessions: TerminalSessionRecord[] }>(
+          `/api/terminal/sessions?workspaceId=${encodeURIComponent(workspaceId)}`
+        );
+
+        if (cancelled) return;
+
+        const activeSessions = Array.isArray(res.sessions) ? res.sessions : [];
+        const activeSessionIds = new Set(activeSessions.map((session) => session.sessionId));
+        prunePersistedSessions(workspaceId, activeSessionIds);
+
+        const matchingPersisted = persistedSessions.find((session) => activeSessionIds.has(session.sessionId));
+        if (matchingPersisted) {
+          const restoredSessions = activeSessions.map((session, index) => {
+            const persisted = persistedSessions.find((entry) => entry.sessionId === session.sessionId);
+            return {
+              ...session,
+              label: persisted?.label ?? `OpenCode ${index + 1}`,
+              autoLabeled: Boolean(persisted?.label),
+            };
+          });
+
+          setSessions(restoredSessions);
+          setActiveSessionId(matchingPersisted.sessionId);
+          nextLabelNumRef.current = restoredSessions.length + 1;
+          toast.info('Reconnected to existing session');
+          return;
+        }
+      } catch {
+        prunePersistedSessions(workspaceId, new Set());
+      }
+
+      if (!cancelled) {
+        await createSession(workspaceId, true);
+      }
+    };
+
+    void restoreOrCreateSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, createSession, toast]);
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -306,6 +428,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   useEffect(() => {
     return () => {
       sessionsRef.current.forEach((session) => {
+        removePersistedSession(session.sessionId);
         void apiFetch(`/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`, {
           method: 'DELETE',
         }).catch(() => undefined);
@@ -317,11 +440,12 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     if (nextWorkspaceId === workspaceId) return;
 
     await Promise.allSettled(
-      sessionsRef.current.map((session) =>
-        apiFetch(`/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`, {
+      sessionsRef.current.map((session) => {
+        removePersistedSession(session.sessionId);
+        return apiFetch(`/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`, {
           method: 'DELETE',
-        })
-      )
+        });
+      })
     );
 
     setSessions([]);
@@ -382,15 +506,26 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         newLabel = trimmed.slice(0, 40).trim();
       }
 
-      return {
+      const updatedSession = {
         ...session,
         label: newLabel,
         autoLabeled: true,
       };
+
+      upsertPersistedSession({
+        sessionId: updatedSession.sessionId,
+        workspaceId: updatedSession.workspaceId,
+        label: updatedSession.label,
+        createdAt: updatedSession.createdAt,
+      });
+
+      return updatedSession;
     }));
   }, []);
 
   const handleCloseSession = useCallback(async (sessionId: string) => {
+    removePersistedSession(sessionId);
+
     // Delete from backend
     try {
       await apiFetch(`/api/terminal/sessions/${encodeURIComponent(sessionId)}`, {
