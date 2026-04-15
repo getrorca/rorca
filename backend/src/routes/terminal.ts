@@ -8,8 +8,30 @@ import * as ptyManager from '../lib/pty-manager';
 import { NotFoundError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
+import { resolveVaultProvider } from '../lib/llm-client';
+import { getDecryptedProviderKey } from '../lib/vault';
 
 const router = Router();
+
+const CLAUDE_NESTED_SESSION_ENV_VARS = [
+  'CLAUDECODE',
+  'CLAUDE_CODE_ENTRYPOINT',
+  'CLAUDE_AGENT_SDK_VERSION',
+  'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
+] as const;
+
+function providerEnvVarName(vaultProvider: string): string | null {
+  switch (vaultProvider) {
+    case 'anthropic':
+      return 'ANTHROPIC_API_KEY';
+    case 'openai-compat':
+      return 'OPENAI_API_KEY';
+    case 'openrouter':
+      return 'OPENROUTER_API_KEY';
+    default:
+      return null;
+  }
+}
 
 // ─── Validation Schemas ─────────────────────────────────────────────────────
 
@@ -133,16 +155,42 @@ router.post('/sessions', async (req: Request, res: Response) => {
       throw new NotFoundError('Workspace not found');
     }
 
-    // Get workspace env vars and merge with process.env (workspace vars override)
+    // Resolve workspace model from workspace env, L3 preferred_model, then process env
     const workspaceEnv = await getWorkspaceEnvVars(body.workspaceId);
+    const l3Pref = await queryOne<{ preferred_model: string | null }>(
+      `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+      [body.workspaceId]
+    );
+    const activeModel = workspaceEnv.RORCA_MODEL ?? l3Pref?.preferred_model ?? process.env.RORCA_MODEL ?? '';
+
+    // Resolve active vault provider key for the model, surfacing failures clearly
+    const vaultProvider = activeModel ? resolveVaultProvider(activeModel) : null;
+    const vaultEnv: Record<string, string> = {};
+    if (vaultProvider) {
+      const apiKey = await getDecryptedProviderKey(body.workspaceId, vaultProvider);
+      if (!apiKey) {
+        throw new Error(`Failed to resolve active vault API key for provider '${vaultProvider}' and workspace '${body.workspaceId}'`);
+      }
+      const apiKeyEnvVar = providerEnvVarName(vaultProvider);
+      if (apiKeyEnvVar) {
+        vaultEnv[apiKeyEnvVar] = apiKey;
+      }
+    }
+
+    // Merge env with workspace vars and vault keys taking precedence over process.env
     const mergedEnv = {
       ...process.env,
+      RORCA_WORKSPACE_ID: body.workspaceId,
+      OPENCODE_MODEL: activeModel,
       ...workspaceEnv,
+      ...vaultEnv,
     } as Record<string, string>;
 
+    for (const key of CLAUDE_NESTED_SESSION_ENV_VARS) {
+      delete mergedEnv[key];
+    }
+
     // Create PTY session
-    // NOTE: pty-manager expects workspaceId as number but DB uses TEXT id
-    // Cast to any to bypass type check - this will be fixed in OCT-001
     const sessionId = await ptyManager.createSession(
       body.workspaceId as any,
       workspace.path,
