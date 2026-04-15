@@ -1,7 +1,9 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
+import type { ITheme } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { useTerminalSession } from '../hooks/useTerminalSession';
+import { useTheme } from '../contexts/ThemeContext';
 import '@xterm/xterm/css/xterm.css';
 
 // ─── Props ────────────────────────────────────────────────────────────────────
@@ -27,64 +29,53 @@ const TERMINAL_OPTIONS = {
 
 // ─── Theme colors ─────────────────────────────────────────────────────────────
 
-interface TerminalTheme {
-  background: string;
-  foreground: string;
-  cursor: string;
-  selection: string;
-  black: string;
-  red: string;
-  green: string;
-  yellow: string;
-  blue: string;
-  magenta: string;
-  cyan: string;
-  white: string;
-  brightBlack: string;
-  brightRed: string;
-  brightGreen: string;
-  brightYellow: string;
-  brightBlue: string;
-  brightMagenta: string;
-  brightCyan: string;
-  brightWhite: string;
-}
+const TERMINAL_THEME_DARK: ITheme = {
+  background: '#0d1117',
+  foreground: '#e6edf3',
+  cursor: '#58a6ff',
+  cursorAccent: '#0d1117',
+  selection: 'rgba(38,79,120,0.5)',
+  black: '#484f58',
+  red: '#ff7b72',
+  green: '#3fb950',
+  yellow: '#d29922',
+  blue: '#58a6ff',
+  magenta: '#bc8cff',
+  cyan: '#39c5cf',
+  white: '#b1bac4',
+  brightBlack: '#6e7681',
+  brightRed: '#ffa198',
+  brightGreen: '#56d364',
+  brightYellow: '#e3b341',
+  brightBlue: '#79c0ff',
+  brightMagenta: '#d2a8ff',
+  brightCyan: '#56d4dd',
+  brightWhite: '#f0f6fc',
+};
 
-/**
- * Build terminal theme from CSS variables at runtime to respect dynamic theme changes.
- * Falls back to hardcoded dark theme colors if CSS variables are not available.
- */
-function buildTerminalTheme(): TerminalTheme {
-  const style = getComputedStyle(document.documentElement);
-
-  return {
-    // Background/foreground
-    background: style.getPropertyValue('--terminal-bg')?.trim() || '#0d1117',
-    foreground: style.getPropertyValue('--terminal-fg')?.trim() || '#e6edf3',
-    cursor: style.getPropertyValue('--accent-border')?.trim() || '#58a6ff',
-    selection: '#264f78',
-
-    // ANSI colors (standard)
-    black: '#484f58',
-    red: '#ff7b72',
-    green: '#3fb950',
-    yellow: '#d29922',
-    blue: '#58a6ff',
-    magenta: '#bc8cff',
-    cyan: '#39c5cf',
-    white: '#b1bac4',
-
-    // ANSI colors (bright)
-    brightBlack: '#6e7681',
-    brightRed: '#ffa198',
-    brightGreen: '#56d364',
-    brightYellow: '#e3b341',
-    brightBlue: '#79c0ff',
-    brightMagenta: '#d2a8ff',
-    brightCyan: '#56d4dd',
-    brightWhite: '#f0f6fc',
-  };
-}
+const TERMINAL_THEME_LIGHT: ITheme = {
+  background: '#ffffff',
+  foreground: '#24292f',
+  cursor: '#0969da',
+  cursorAccent: '#ffffff',
+  selection: 'rgba(9,105,218,0.1)',
+  black: '#24292f',
+  red: '#cf222e',
+  green: '#116329',
+  yellow: '#9a6700',
+  blue: '#0969da',
+  magenta: '#8250df',
+  cyan: '#1b7c83',
+  white: '#6e7781',
+  brightBlack: '#57606a',
+  brightRed: '#a40e26',
+  brightGreen: '#1a7f37',
+  brightYellow: '#7d4e00',
+  brightBlue: '#218bff',
+  brightMagenta: '#a475f9',
+  brightCyan: '#3192aa',
+  brightWhite: '#8c959f',
+};
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
@@ -94,6 +85,9 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
   const fitAddonRef = useRef<FitAddon | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const [scrollbackFetched, setScrollbackFetched] = useState(false);
+  const { resolved } = useTheme();
+
+  const currentTheme = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
 
   const { onData, sendInput, sendResize, reconnecting, onExit: onSessionExit } = useTerminalSession(sessionId);
 
@@ -103,16 +97,16 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
     const container = containerRef.current;
     if (!container) return;
 
-    // Create terminal with theme from CSS variables
-    const theme = buildTerminalTheme();
     const terminal = new Terminal({
       ...TERMINAL_OPTIONS,
-      theme,
+      theme: currentTheme,
     });
 
     // Create fit addon
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+
+    container.style.backgroundColor = currentTheme.background ?? '';
 
     // Mount terminal to DOM
     terminal.open(container);
@@ -160,7 +154,17 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
       fitAddonRef.current = null;
       resizeObserverRef.current = null;
     };
-  }, [sessionId, sendInput, sendResize]); // Include sessionId + callbacks in deps
+  }, [currentTheme, sessionId, sendInput, sendResize]);
+
+  useEffect(() => {
+    if (terminalRef.current) {
+      terminalRef.current.options.theme = currentTheme;
+    }
+
+    if (containerRef.current) {
+      containerRef.current.style.backgroundColor = currentTheme.background ?? '';
+    }
+  }, [currentTheme]);
 
   // ─── Scrollback replay ────────────────────────────────────────────────────────
 
@@ -247,7 +251,7 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
   return (
     <div className={`relative w-full h-full ${className ?? ''}`}>
       {/* Terminal container */}
-      <div ref={containerRef} className="w-full h-full" />
+      <div ref={containerRef} className="w-full h-full" style={{ backgroundColor: currentTheme.background }} />
 
       {/* Reconnecting overlay */}
       {reconnecting && (
