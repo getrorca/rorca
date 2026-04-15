@@ -40,7 +40,7 @@ const getLastSequenceStorageKey = (sessionId: string) => `rorca:terminal:lastSeq
 
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
-export function useTerminalSession(sessionId: string | null): UseTerminalSessionReturn {
+export function useTerminalSession(sessionId: string | null, wsToken: string | null): UseTerminalSessionReturn {
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [connectionLost, setConnectionLost] = useState(false);
@@ -75,10 +75,11 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
 
   // ─── WebSocket URL construction ─────────────────────────────────────────────
 
-  const getWebSocketUrl = (sid: string): string => {
+  // OCT-021: Use wsToken instead of sessionId for WebSocket connection
+  const getWebSocketUrl = (token: string): string => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = import.meta.env.DEV ? 'localhost:3030' : window.location.host;
-    return `${protocol}//${host}/ws/terminal?sessionId=${encodeURIComponent(sid)}`;
+    return `${protocol}//${host}/ws/terminal?wsToken=${encodeURIComponent(token)}`;
   };
 
   // ─── Send helpers ───────────────────────────────────────────────────────────
@@ -112,7 +113,8 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
   // ─── WebSocket lifecycle ────────────────────────────────────────────────────
 
   useEffect(() => {
-    if (!sessionId) {
+    // OCT-021: Require both sessionId AND wsToken for connection
+    if (!sessionId || !wsToken) {
       setConnected(false);
       setReconnecting(false);
       setConnectionLost(false);
@@ -134,7 +136,7 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
         currentWs.close();
       }
 
-      const ws = new WebSocket(getWebSocketUrl(sessionId));
+      const ws = new WebSocket(getWebSocketUrl(wsToken));
       currentWs = ws;
       wsRef.current = ws;
 
@@ -242,7 +244,7 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
       setReconnecting(false);
       setConnectionLost(false);
     };
-  }, [sessionId]);
+  }, [sessionId, wsToken]);
 
   return {
     sendInput,
