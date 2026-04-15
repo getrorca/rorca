@@ -64,7 +64,16 @@ export interface ShellEventMessage {
 const sessions = new Map<string, PtySession>();
 
 // Idle timeout configuration
-const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
+const DEFAULT_IDLE_TIMEOUT_MINUTES = 30;
+const IDLE_TIMEOUT_MINUTES = (() => {
+  const rawValue = process.env.TERMINAL_IDLE_TIMEOUT_MINUTES;
+  const parsed = rawValue ? Number.parseInt(rawValue, 10) : NaN;
+  if (Number.isFinite(parsed) && parsed >= 5 && parsed <= 120) {
+    return parsed;
+  }
+  return DEFAULT_IDLE_TIMEOUT_MINUTES;
+})();
+const IDLE_TIMEOUT_MS = IDLE_TIMEOUT_MINUTES * 60 * 1000;
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
 const FLUSH_INTERVAL_MS = 100;
 const MAX_BUFFERED_CHUNKS = 50;
@@ -252,6 +261,7 @@ export async function createSession(
   const sessionId = randomUUID();
   const cleanEnv = { ...env };
   CLAUDE_ENV_VARS.forEach((key) => delete cleanEnv[key]);
+  cleanEnv.TERMINAL_IDLE_TIMEOUT_MINUTES = String(IDLE_TIMEOUT_MINUTES);
 
   const existingMax = await queryOne<{ max_seq: number | null }>(
     'SELECT MAX(sequence) AS max_seq FROM terminal_output_chunks WHERE session_id = $1',
