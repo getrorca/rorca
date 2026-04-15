@@ -106,15 +106,6 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
   const [tabletExpanded, setTabletExpanded] = useState(false);
   const collapsed = useSidebarCollapsed();
 
-  // Map toggle drawer event to Command Palette trigger for backwards compat
-  useEffect(() => {
-    const handler = () => {
-      document.dispatchEvent(new KeyboardEvent('keydown', { key: 'k', metaKey: true }));
-    };
-    window.addEventListener('rorca:toggle-drawer', handler);
-    return () => window.removeEventListener('rorca:toggle-drawer', handler);
-  }, []);
-
   const renderBadge = (item: NavItem) => {
     if (item.id === 'specs' && queueCount > 0) {
       return (
@@ -157,7 +148,7 @@ export default function Sidebar({ onNavigate, mobileOpen, onMobileClose, queueCo
   };
 
   const sidebarContent = (
-    <div className="flex flex-col h-full w-full bg-panel border-r border-border shrink-0 font-sans min-w-0">
+    <div className="flex flex-col h-full w-full bg-panel border-r border-border shrink-0 font-sans min-w-0" style={{ ['--sidebar-width' as string]: breakpoint === 'mobile' ? '0px' : collapsed ? '48px' : '220px' }}>
       {/* Top Section: Logo, Workspace & Search — hidden when collapsed */}
       {collapsed ? (
         /* Collapsed logo — centered icon only */

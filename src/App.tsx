@@ -6,7 +6,9 @@ import { HelpTipsProvider } from './contexts/HelpTipsContext';
 import { ToastProvider, useGlobalToast } from './contexts/ToastContext';
 import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import { NotificationProvider } from './contexts/NotificationContext';
+import { TerminalDrawerProvider, useTerminalDrawer } from './contexts/TerminalDrawerContext';
 import Shell from './components/Shell';
+import TerminalDrawer from './components/TerminalDrawer';
 import Sidebar, { type PanelId } from './components/Sidebar';
 import SettingsSidebar from './components/SettingsSidebar';
 import ResizableSidebar from './components/ResizableSidebar';
@@ -267,6 +269,33 @@ function AppRoutes() {
       </Route>
     </Routes>
   );
+}
+
+function TerminalDrawerHotkeys() {
+  const { toggle, isOpen, close } = useTerminalDrawer();
+
+  useEffect(() => {
+    const handler = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'j') {
+        event.preventDefault();
+        toggle();
+        return;
+      }
+      if (event.ctrlKey && event.code === 'Backquote') {
+        event.preventDefault();
+        toggle();
+        return;
+      }
+      if (event.key === 'Escape' && isOpen) {
+        close();
+      }
+    };
+
+    window.addEventListener('keydown', handler);
+    return () => window.removeEventListener('keydown', handler);
+  }, [toggle, isOpen, close]);
+
+  return null;
 }
 
 /** Returns the appropriate Suspense fallback skeleton for a given panel.
@@ -572,8 +601,12 @@ function App() {
       <HelpTipsProvider>
         <ToastProvider>
           <AuthProvider>
-            <GlobalErrorWiring />
-            <AuthGate />
+            <TerminalDrawerProvider>
+              <GlobalErrorWiring />
+              <TerminalDrawerHotkeys />
+              <AuthGate />
+              <TerminalDrawer />
+            </TerminalDrawerProvider>
           </AuthProvider>
         </ToastProvider>
       </HelpTipsProvider>

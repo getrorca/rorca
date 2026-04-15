@@ -6,12 +6,6 @@
 Context: Confusing these causes file-not-found errors in pipeline trigger and archive panel.
 > Source: v2-platform
 
-## 2026-02-27 [Architecture] Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
-> Rule: Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
-
-Context: L1-L2 are global engineering/domain principles. L3+ are per-workspace. L4/L5 come from spec brief and story annotations.
-> Source: CIE-003
-
 ## 2026-02-27 [Convention] chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
 > Rule: chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
 
@@ -23,6 +17,12 @@ Context: The return type was changed from string to ChatResult in US-003 (model 
 
 Context: Changes to backend code are not picked up automatically. Forgetting to restart causes stale behavior.
 > Source: v2-platform
+
+## 2026-02-27 [Architecture] Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
+> Rule: Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
+
+Context: L1-L2 are global engineering/domain principles. L3+ are per-workspace. L4/L5 come from spec brief and story annotations.
+> Source: CIE-003
 
 ## 2026-02-28 [Architecture] Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
 > Rule: Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
@@ -36,12 +36,6 @@ Context: .rorca/config.json routing section defines globals, scopes, and tags. m
 Context: Machine-readable, human-editable. Categories: Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha.
 > Source: CIE-005
 
-## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
-> Rule: Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
-
-Context: SM-001 failed in wave 0, causing SM-002, SM-004, and SM-006 to skip despite not being directly tested. This cascading failure pattern means early wave failures have exponential impact on run completion rate.
-> Source: SM-001
-
 ## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
 > Rule: TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
 
@@ -53,6 +47,24 @@ Context: SM-001 failed with reason='typecheck' despite potentially working at ru
 
 Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incremental approach of establishing shared utilities before complex features reduces integration risk.
 > Source: SM-003
+
+## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
+> Rule: Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
+
+Context: SM-001 failed in wave 0, causing SM-002, SM-004, and SM-006 to skip despite not being directly tested. This cascading failure pattern means early wave failures have exponential impact on run completion rate.
+> Source: SM-001
+
+## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
+> Rule: Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
+
+Context: Implemented via workspace-echolocation.ts echolocate() function. Penalties apply: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit. This structured breakdown enables actionable remediation.
+> Source: CIE workspace health
+
+## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+
+Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
+> Source: PR-QUEUE-1
 
 ## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
 > Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
@@ -83,18 +95,6 @@ Context: The production-ready spec shows these are interdependent: rate limiting
 
 Context: PR-003 establishes Docker Compose as the canonical self-hosted deployment method. This supersedes manual npm install flows and ensures consistent environments across installations.
 > Source: PR-003
-
-## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
-> Rule: Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
-
-Context: Implemented via workspace-echolocation.ts echolocate() function. Penalties apply: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit. This structured breakdown enables actionable remediation.
-> Source: CIE workspace health
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
-> Source: PR-QUEUE-1
 
 ## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
 > Rule: Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
@@ -3224,3 +3224,9 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-15 [Architecture] node-pty graceful degradation — try/catch at module load, not import time: When integrating native N-API modules like node-pty, wrap require() in a try/catch at module load (not dynamic import()). Set a module-scoped PTY_AVAILABLE boolean. Check this flag before calling native module functions and throw structured errors ({ code, message }) that routes can catch and convert to 503 Service Unavailable. This allows the server to start successfully even when the native module is not built, with the feature gracefully disabled.
 > Rule: node-pty graceful degradation — try/catch at module load, not import time: When integrating native N-API modules like node-pty, wrap require() in a try/catch at module load (not dynamic import()). Set a module-scoped PTY_AVAILABLE boolean. Check this flag before calling native module functions and throw structured errors ({ code, message }) that routes can catch and convert to 503 Service Unavailable. This allows the server to start successfully even when the native module is not built, with the feature gracefully disabled.
+
+## 2026-04-15 [Pattern] Terminal session route preflights OpenCode availability: Before creating an interactive terminal PTY session, check `detectOpenCode()` in `backend/src/routes/terminal.ts` and return a 422 `OPENCODE_NOT_INSTALLED` error with an install hint when the binary is missing.
+> Rule: Terminal session route preflights OpenCode availability: Before creating an interactive terminal PTY session, check `detectOpenCode()` in `backend/src/routes/terminal.ts` and return a 422 `OPENCODE_NOT_INSTALLED` error with an install hint when the binary is missing.
+
+## 2026-04-15 [Architecture] Terminal drawer is the sole OpenCode entry point: Use `TerminalDrawerContext` plus the always-mounted `TerminalDrawer` in `App.tsx` for terminal access; do not add sidebar navigation items for OpenCode terminal access.
+> Rule: Terminal drawer is the sole OpenCode entry point: Use `TerminalDrawerContext` plus the always-mounted `TerminalDrawer` in `App.tsx` for terminal access; do not add sidebar navigation items for OpenCode terminal access.
