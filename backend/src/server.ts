@@ -100,6 +100,7 @@ import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
+import terminalRouter from './routes/terminal';
 import { initBoss } from './lib/pg-boss';
 
 // OC-002: Fail-fast if RORCA_AGENT=opencode but binary is missing
@@ -397,6 +398,7 @@ app.use('/api/conventions', conventionsRouter);
 app.use('/api/packs', packsRouter);
 app.use('/api/skills', skillsRouter);
 app.use('/api/attachments', attachmentsRouter);
+app.use('/api/terminal', terminalRouter); // OCT-002: PTY session management
 app.use('/api/personas', personasRouter);
 app.use('/api/marketplace', marketplaceRouter);
 app.use('/api/search', searchRouter);

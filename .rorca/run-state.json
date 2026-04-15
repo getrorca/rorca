@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T08:19:42.028Z",
+  "lastUpdatedAt": "2026-04-15T08:27:44.121Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -72,6 +72,15 @@
       "finishedAt": "2026-04-15T08:19:42.028Z",
       "agentType": "claude",
       "elapsedMs": 79277
+    },
+    {
+      "storyId": "OCT-024",
+      "title": "node-pty native module — prebuilt binaries and Bun compatibility",
+      "status": "passed",
+      "startedAt": "2026-04-15T08:22:32.887Z",
+      "finishedAt": "2026-04-15T08:27:44.121Z",
+      "agentType": "claude",
+      "elapsedMs": 311234
     }
   ],
   "failedStories": [],
