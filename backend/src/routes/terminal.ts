@@ -4,7 +4,7 @@ import { queryOne } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { getWorkspaceEnvVars } from './env-vars';
 import * as ptyManager from '../lib/pty-manager';
-import { NotFoundError } from '../lib/errors';
+import { NotFoundError, TooManyRequestsError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 
@@ -127,6 +127,10 @@ router.post('/sessions', async (req: Request, res: Response) => {
       createdAt: new Date().toISOString(),
     });
   } catch (err) {
+    if (err instanceof TooManyRequestsError && err.message === 'Maximum terminal sessions reached') {
+      res.status(429).json({ error: 'SESSION_LIMIT_REACHED' });
+      return;
+    }
     handleRouteError(req, res, err);
   }
 });
