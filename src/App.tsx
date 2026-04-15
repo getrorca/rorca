@@ -1,4 +1,5 @@
 import { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
+import { Bot } from 'lucide-react';
 import { Routes, Route, Navigate, Outlet, useLocation, useNavigate as useRouterNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -14,6 +15,7 @@ import ErrorBoundary from './components/ErrorBoundary';
 import EmailVerificationBanner from './components/EmailVerificationBanner';
 import WorkspaceBootstrapBanner from './components/WorkspaceBootstrapBanner';
 import { useHotkeys, type HotkeyBinding } from './hooks/useHotkeys';
+import { useBreakpoint } from './hooks/useBreakpoint';
 import { apiFetch, onApiFetchError } from './lib/apiFetch';
 import {
   BoardSkeleton,
@@ -27,6 +29,7 @@ import SlideOver from './components/SlideOver';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
 import { usePipelineRuns } from './hooks/usePipelineRuns';
 import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
+import { TerminalDrawerProvider, useTerminalDrawer } from './contexts/TerminalDrawerContext';
 
 // — Lazy-loaded pages (not part of initial bundle) —
 const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
@@ -389,6 +392,8 @@ function AppLayout() {
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
   const [queueCount, setQueueCount] = useState(0);
   const [pendingSpecsCount, setPendingSpecsCount] = useState(0);
+  const breakpoint = useBreakpoint();
+  const { isOpen: isTerminalDrawerOpen, toggle: toggleTerminalDrawer } = useTerminalDrawer();
   // Derive activeRunId from URL path /runs/:runId
   const runMatch = location.pathname.match(/^\/runs\/(\d+)/);
   const activeRunId = runMatch ? Number(runMatch[1]) : null;
@@ -495,6 +500,24 @@ function AppLayout() {
 
   useHotkeys(hotkeys);
 
+  useEffect(() => {
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'j') {
+        event.preventDefault();
+        toggleTerminalDrawer();
+        return;
+      }
+
+      if (event.ctrlKey && event.code === 'Backquote') {
+        event.preventDefault();
+        toggleTerminalDrawer();
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [toggleTerminalDrawer]);
+
   const contextValue = useMemo<AppContentContextValue>(() => ({
     navigateToRun,
     navigateBackFromRun,
@@ -561,6 +584,16 @@ function AppLayout() {
             <KeyboardShortcutsPanel onClose={() => setShowShortcutsOverlay(false)} />
           </Suspense>
         )}
+        {breakpoint === 'mobile' && !isTerminalDrawerOpen && (
+          <button
+            type="button"
+            className="fixed bottom-4 right-4 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-accent text-white shadow-lg"
+            onClick={toggleTerminalDrawer}
+            aria-label="Toggle OpenCode terminal"
+          >
+            <Bot size={24} />
+          </button>
+        )}
       </Shell>
     </AppContentContext.Provider>
   );
@@ -571,10 +604,12 @@ function App() {
     <ThemeProvider>
       <HelpTipsProvider>
         <ToastProvider>
-          <AuthProvider>
-            <GlobalErrorWiring />
-            <AuthGate />
-          </AuthProvider>
+          <TerminalDrawerProvider>
+            <AuthProvider>
+              <GlobalErrorWiring />
+              <AuthGate />
+            </AuthProvider>
+          </TerminalDrawerProvider>
         </ToastProvider>
       </HelpTipsProvider>
     </ThemeProvider>
