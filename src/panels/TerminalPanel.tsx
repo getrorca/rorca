@@ -197,9 +197,11 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const historyDrawerRef = useRef<HTMLDivElement>(null);
-  const initialSessionRequestedRef = useRef(false);
   const sessionsRef = useRef<TerminalSessionRecord[]>([]);
+  const workspaceSessionsRef = useRef<Record<string, TerminalSessionRecord[]>>({});
+  const activeWorkspaceIdRef = useRef<string | null>(workspaceId);
   const nextLabelNumRef = useRef(1);
+  const [backgroundSessionsVersion, setBackgroundSessionsVersion] = useState(0);
 
   const headerHeightClass = mode === 'panel' ? 'h-10' : 'h-9';
   const headerTextClass = mode === 'panel' ? 'text-[12px]' : 'text-[11px]';
@@ -217,6 +219,24 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  const bumpBackgroundSessionsVersion = useCallback(() => {
+    setBackgroundSessionsVersion((value) => value + 1);
+  }, []);
+
+  const persistWorkspaceSessions = useCallback((targetWorkspaceId: string | null, nextSessions: TerminalSessionRecord[]) => {
+    if (!targetWorkspaceId) return;
+    workspaceSessionsRef.current[targetWorkspaceId] = nextSessions;
+    bumpBackgroundSessionsVersion();
+  }, [bumpBackgroundSessionsVersion]);
+
+  const syncWorkspaceSessions = useCallback((updater: (current: TerminalSessionRecord[]) => TerminalSessionRecord[]) => {
+    setSessions((prev) => {
+      const next = updater(prev);
+      persistWorkspaceSessions(activeWorkspaceIdRef.current, next);
+      return next;
+    });
+  }, [persistWorkspaceSessions]);
 
   useEffect(() => {
     if (mode !== 'drawer' || !isFullscreen) return;
@@ -312,7 +332,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         targetWorkspaceId
       );
 
-      setSessions((prev) => [...prev, nextSession]);
+      syncWorkspaceSessions((prev) => [...prev, nextSession]);
       if (activate) {
         setActiveSessionId(res.sessionId);
       }
@@ -325,7 +345,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     } finally {
       setCreating(false);
     }
-  }, [mode]);
+  }, [mode, syncWorkspaceSessions]);
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -333,63 +353,82 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, [workspaceId, loadDirections]);
 
   useEffect(() => {
-    if (!workspaceId || initialSessionRequestedRef.current) return;
-    initialSessionRequestedRef.current = true;
+    if (!workspaceId) return;
 
-    // Check localStorage for existing sessions to reattach
-    const attemptReattach = async () => {
-      const persisted = loadPersistedSessions().filter((s) => s.workspaceId === workspaceId);
+    const previousWorkspaceId = activeWorkspaceIdRef.current;
+    if (previousWorkspaceId && previousWorkspaceId !== workspaceId) {
+      workspaceSessionsRef.current[previousWorkspaceId] = sessionsRef.current;
+    }
 
+    activeWorkspaceIdRef.current = workspaceId;
+    setHistorySessions([]);
+    setSelectedHistorySessionId(null);
+    setError(null);
+    setNotInstalled(false);
+
+    const restoreWorkspaceSessions = async () => {
+      const storedSessions = workspaceSessionsRef.current[workspaceId];
+      if (storedSessions && storedSessions.length > 0) {
+        setSessions(storedSessions);
+        setActiveSessionId((current) => current && storedSessions.some((session) => session.sessionId === current)
+          ? current
+          : storedSessions[0]?.sessionId ?? null);
+        nextLabelNumRef.current = storedSessions.length + 1;
+        bumpBackgroundSessionsVersion();
+        return;
+      }
+
+      const persisted = loadPersistedSessions().filter((session) => session.workspaceId === workspaceId);
       if (persisted.length === 0) {
-        // No persisted sessions, create new
+        setSessions([]);
+        setActiveSessionId(null);
+        nextLabelNumRef.current = 1;
+        persistWorkspaceSessions(workspaceId, []);
         await createSession(workspaceId, true);
         return;
       }
 
-      // Check liveness of each persisted session
-      let reattached = false;
-      const stillAlive: PersistedSession[] = [];
-
+      const restoredSessions: TerminalSessionRecord[] = [];
       for (const session of persisted) {
         try {
           const res = await apiFetch<TerminalSessionResponse>(
             `/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`
           );
 
-          // Session is still alive, reattach
-          const reattachedSession: TerminalSessionRecord = {
+          restoredSessions.push({
             sessionId: res.sessionId,
             wsToken: res.wsToken,
             workspaceId: res.workspaceId,
             cwd: res.cwd,
             createdAt: res.createdAt,
             label: session.label,
-            autoLabeled: true, // Keep existing label
+            autoLabeled: true,
             status: 'active',
-          };
-
-          setSessions((prev) => [...prev, reattachedSession]);
-          if (!reattached) {
-            setActiveSessionId(res.sessionId);
-            reattached = true;
-            toast.info('Reconnected to existing session');
-          }
-
-          stillAlive.push(session);
+          });
         } catch {
-          // Session is dead, remove from localStorage
           removePersistedSession(session.sessionId);
         }
       }
 
-      // If no sessions survived, create a new one
-      if (!reattached) {
-        await createSession(workspaceId, true);
+      if (restoredSessions.length > 0) {
+        workspaceSessionsRef.current[workspaceId] = restoredSessions;
+        setSessions(restoredSessions);
+        setActiveSessionId(restoredSessions[0]?.sessionId ?? null);
+        nextLabelNumRef.current = restoredSessions.length + 1;
+        bumpBackgroundSessionsVersion();
+        toast.info('Reconnected to existing session');
+        return;
       }
+
+      setSessions([]);
+      setActiveSessionId(null);
+      nextLabelNumRef.current = 1;
+      persistWorkspaceSessions(workspaceId, []);
+      await createSession(workspaceId, true);
     };
 
-    void attemptReattach();
-  }, [workspaceId, createSession, toast]);
+    void restoreWorkspaceSessions();
+  }, [workspaceId, createSession, persistWorkspaceSessions, toast, bumpBackgroundSessionsVersion]);
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -435,25 +474,10 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const handleWorkspaceSelect = useCallback(async (nextWorkspaceId: string) => {
     if (nextWorkspaceId === workspaceId) return;
 
-    await Promise.allSettled(
-      sessionsRef.current.map((session) =>
-        apiFetch(`/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`, {
-          method: 'DELETE',
-        })
-      )
-    );
-
-    setSessions([]);
-    setActiveSessionId(null);
-    setHistorySessions([]);
-    setSelectedHistorySessionId(null);
-    initialSessionRequestedRef.current = false;
-    nextLabelNumRef.current = 1;
+    persistWorkspaceSessions(workspaceId, sessionsRef.current);
     setWorkspaceMenuOpen(false);
     setWorkspaceId(nextWorkspaceId);
-    await loadDirections(nextWorkspaceId);
-    await createSession(nextWorkspaceId, true);
-  }, [workspaceId, setWorkspaceId, loadDirections, createSession]);
+  }, [workspaceId, setWorkspaceId, persistWorkspaceSessions]);
 
   const handleNewSession = useCallback(async () => {
     if (!workspaceId || sessions.length >= MAX_SESSIONS) return;
@@ -470,13 +494,13 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, [handleNewSession]);
 
   const handleSessionExit = useCallback((sessionId: string) => {
-    setSessions((prev) => prev.map((session) => (
+    syncWorkspaceSessions((prev) => prev.map((session) => (
       session.sessionId === sessionId ? { ...session, status: 'exited' } : session
     )));
-  }, []);
+  }, [syncWorkspaceSessions]);
 
   const handleSessionInput = useCallback((sessionId: string, data: string) => {
-    setSessions((prev) => prev.map((session) => {
+    syncWorkspaceSessions((prev) => prev.map((session) => {
       if (session.sessionId !== sessionId || session.autoLabeled) {
         return session;
       }
@@ -507,7 +531,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         autoLabeled: true,
       };
     }));
-  }, []);
+  }, [syncWorkspaceSessions]);
 
   const handleCloseSession = useCallback(async (sessionId: string) => {
     // Delete from backend
@@ -523,7 +547,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     removePersistedSession(sessionId);
 
     // Remove from local state
-    setSessions((prev) => {
+    syncWorkspaceSessions((prev) => {
       const filtered = prev.filter((s) => s.sessionId !== sessionId);
 
       // If we're closing the active session, activate another one
@@ -538,7 +562,23 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
       return filtered;
     });
-  }, [activeSessionId]);
+  }, [activeSessionId, syncWorkspaceSessions]);
+
+  useEffect(() => {
+    const validWorkspaceIds = new Set(workspaces.map((workspace) => workspace.id));
+    let changed = false;
+
+    for (const workspaceKey of Object.keys(workspaceSessionsRef.current)) {
+      if (!validWorkspaceIds.has(workspaceKey)) {
+        delete workspaceSessionsRef.current[workspaceKey];
+        changed = true;
+      }
+    }
+
+    if (changed) {
+      bumpBackgroundSessionsVersion();
+    }
+  }, [workspaces, bumpBackgroundSessionsVersion]);
 
   const handleClearHistory = useCallback(async () => {
     if (!workspaceId) return;
@@ -574,6 +614,20 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, [fontSize]);
 
   const showOverlay = creating && !activeSession;
+  const backgroundWorkspaceSessions = useMemo(() => {
+    if (!workspaceId) return [];
+    return Object.entries(workspaceSessionsRef.current)
+      .filter(([id, workspaceSessions]) => id !== workspaceId && workspaceSessions.length > 0)
+      .map(([id, workspaceSessions]) => ({
+        workspaceId: id,
+        count: workspaceSessions.length,
+        label: workspaces.find((workspace) => workspace.id === id)?.name ?? 'Unknown workspace',
+      }));
+  }, [workspaceId, workspaces, backgroundSessionsVersion]);
+  const backgroundSessionCount = backgroundWorkspaceSessions.reduce((sum, workspace) => sum + workspace.count, 0);
+  const backgroundSessionsTooltip = backgroundWorkspaceSessions
+    .map((workspace) => `${workspace.label}: ${workspace.count}`)
+    .join('\n');
 
   return (
     <div className={[
@@ -628,6 +682,14 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
               </div>
             )}
           </div>
+
+          {backgroundSessionCount > 0 && (
+            <Tooltip content={backgroundSessionsTooltip}>
+              <span className="inline-flex shrink-0 items-center rounded-full bg-gray-100 px-2 py-0.5 text-xs text-gray-500 dark:bg-gray-800">
+                {backgroundSessionCount} background session{backgroundSessionCount === 1 ? '' : 's'}
+              </span>
+            </Tooltip>
+          )}
 
           <ModelPickerPopover
             engine="opencode"
