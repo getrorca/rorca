@@ -427,12 +427,12 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
   useEffect(() => {
     const unsubscribe = onSessionExit((exitCode) => {
       if (terminalRef.current) {
-        // Write exit message in muted color
-        const message = `\r\n\x1b[38;5;243m[Process exited with code ${exitCode}]\x1b[0m\r\n`;
+        const message = exitCode === -1
+          ? '\r\n\x1b[33m[Server shutdown — session terminated]\x1b[0m\r\n'
+          : `\r\n\x1b[38;5;243m[Process exited with code ${exitCode}]\x1b[0m\r\n`;
         terminalRef.current.write(message);
       }
 
-      // Call parent onExit handler
       onExit?.(exitCode);
     });
 
