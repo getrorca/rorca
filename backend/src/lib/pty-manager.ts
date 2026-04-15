@@ -2,15 +2,32 @@
 // OCT-001: Manages persistent PTY sessions for OpenCode terminal UI.
 // Each session is an isolated opencode process with its own workspace context.
 
-import { spawn as ptySpawn, IPty } from 'node-pty';
 import { randomUUID } from 'crypto';
 import { detectOpenCode } from './opencode-detector';
 import { logger } from './logger';
 
+// OCT-024: Graceful degradation when node-pty native module is not built
+let ptySpawn: typeof import('node-pty').spawn | null = null;
+let IPty: typeof import('node-pty').IPty | null = null;
+let PTY_AVAILABLE = false;
+
+try {
+  const nodePty = require('node-pty');
+  ptySpawn = nodePty.spawn;
+  IPty = nodePty.IPty;
+  PTY_AVAILABLE = true;
+  logger.info('[pty-manager] node-pty native module loaded successfully');
+} catch (err) {
+  logger.warn(
+    '[pty-manager] node-pty native module not available. Run: cd backend && npm rebuild node-pty'
+  );
+  logger.debug(`[pty-manager] node-pty load error: ${err instanceof Error ? err.message : String(err)}`);
+}
+
 export interface PtySession {
   sessionId: string;
   workspaceId: number;
-  ptyProcess: IPty;
+  ptyProcess: any; // IPty when available, null otherwise
   createdAt: Date;
   lastActivityAt: Date;
   cwd: string;
@@ -44,6 +61,14 @@ export async function createSession(
   rows: number,
   cols: number
 ): Promise<string> {
+  // OCT-024: Check if node-pty is available before proceeding
+  if (!PTY_AVAILABLE || !ptySpawn) {
+    throw {
+      code: 'PTY_NOT_AVAILABLE',
+      message: 'node-pty native module not loaded. Run: cd backend && npm rebuild node-pty',
+    };
+  }
+
   const status = detectOpenCode();
 
   if (!status.opencodeInstalled || !status.opencodeBinPath) {
