@@ -1,16 +1,14 @@
-```typescript
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
-import type { ITheme, IBufferRange, ILink, ILinkProvider } from '@xterm/xterm';
+import type { IDisposable, ITheme, IBufferRange, ILink, ILinkProvider } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
 import { WebLinksAddon } from '@xterm/addon-web-links';
 import { ChevronDown, ChevronUp, X } from 'lucide-react';
+import { useParams } from 'react-router-dom';
 import { useTerminalSession } from '../hooks/useTerminalSession';
 import { useTheme } from '../contexts/ThemeContext';
 import '@xterm/xterm/css/xterm.css';
-
-// ─── Props ────────────────────────────────────────────────────────────────────
 
 export interface TerminalPaneProps {
   sessionId: string;
@@ -19,7 +17,13 @@ export interface TerminalPaneProps {
   className?: string;
 }
 
-// ─── Constants ────────────────────────────────────────────────────────────────
+type RendererType = 'webgl' | 'canvas';
+
+const logger = {
+  warn: (...args: unknown[]) => {
+    console.warn('[TerminalPane]', ...args);
+  },
+};
 
 const TERMINAL_OPTIONS = {
   fontFamily: 'JetBrains Mono, Fira Code, Monaco, monospace',
@@ -43,8 +47,6 @@ const SEARCH_DECORATIONS = {
 
 const ABSOLUTE_PATH_REGEX = /(?:file:\/\/)?(\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\.[A-Za-z]{2,6})/g;
 const RELATIVE_PATH_REGEX = /(?<![A-Za-z0-9._/-])([A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\.[A-Za-z]{2,6})(?![A-Za-z0-9._-])/g;
-
-// ─── Theme colors ─────────────────────────────────────────────────────────────
 
 const TERMINAL_THEME_DARK: ITheme = {
   background: '#0d1117',
@@ -147,17 +149,21 @@ function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): IL
             range,
             text: fullMatch,
             activate: () => {
-              const absolutePath = resolveLinkPath(capturedPath, cwd);
-              window.dispatchEvent(new CustomEvent('rorca:open-file', {
-                detail: {
-                  path: absolutePath,
-                  workspacePath: cwd,
-                },
-              }));
+              const resolvedPath = resolveLinkPath(capturedPath, cwd);
+              window.open(`vscode://file${resolvedPath}`, '_blank', 'noopener');
             },
-            decorations: {
-              underline: true,
-              pointerCursor: true,
+            hover: (event, uri) => {
+              const target = event.target as HTMLElement | null;
+              if (target) {
+                target.title = uri;
+                target.style.cursor = 'pointer';
+              }
+            },
+            leave: (event) => {
+              const target = event.target as HTMLElement | null;
+              if (target) {
+                target.style.cursor = '';
+              }
             },
           });
         }
@@ -168,8 +174,6 @@ function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): IL
   };
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
-
 export default function TerminalPane({ sessionId, onExit, onSessionLost, className }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
@@ -177,16 +181,19 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
   const searchAddonRef = useRef<SearchAddon | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const searchInputRef = useRef<HTMLInputElement>(null);
+  const fileLinkProviderDisposableRef = useRef<IDisposable | null>(null);
   const [scrollbackFetched, setScrollbackFetched] = useState(false);
   const [isSearchOpen, setIsSearchOpen] = useState(false);
   const [searchQuery, setSearchQuery] = useState('');
   const [searchStatus, setSearchStatus] = useState<'idle' | 'searching' | 'found' | 'not-found'>('idle');
+  const [rendererType, setRendererType] = useState<RendererType>('canvas');
   const isSearchOpenRef = useRef(false);
   const [sessionCwd, setSessionCwd] = useState<string | undefined>(undefined);
   const { resolved } = useTheme();
+  const { tab } = useParams<{ tab?: string }>();
 
+  const showRendererBadge = tab === 'developer';
   const currentTheme = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
-
   const { onData, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId);
 
   const closeSearch = useCallback(() => {
@@ -226,11 +233,12 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
     setSearchStatus(found ? 'found' : 'not-found');
   }, []);
 
-  // ─── Terminal initialization ──────────────────────────────────────────────────
-
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
+
+    let cancelled = false;
+    const disposables: IDisposable[] = [];
 
     const terminal = new Terminal({
       ...TERMINAL_OPTIONS,
@@ -249,23 +257,43 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
     });
     terminal.loadAddon(webLinksAddon);
 
-    terminal.registerLinkProvider(createFileLinkProvider(terminal, sessionCwd));
-
     container.style.backgroundColor = currentTheme.background ?? '';
-
-    // Mount terminal to DOM
     terminal.open(container);
 
-    // Guard against null container before calling fit
     if (!containerRef.current) {
       terminal.dispose();
       fitAddon.dispose();
       return;
     }
 
+    const initRenderer = async () => {
+      try {
+        const { WebglAddon } = await import('@xterm/addon-webgl');
+        if (cancelled) {
+          return;
+        }
+
+        const webglAddon = new WebglAddon();
+        webglAddon.onContextLoss(() => {
+          webglAddon.dispose();
+          setRendererType('canvas');
+        });
+        terminal.loadAddon(webglAddon);
+        setRendererType('webgl');
+      } catch (error) {
+        logger.warn('WebGL not available, using canvas renderer', error);
+        setRendererType('canvas');
+      }
+    };
+
+    void initRenderer();
+
+    const fileLinkProviderDisposable = terminal.registerLinkProvider(createFileLinkProvider(terminal, sessionCwd));
+    fileLinkProviderDisposableRef.current = fileLinkProviderDisposable;
+    disposables.push(fileLinkProviderDisposable);
+
     fitAddon.fit();
 
-    // Store refs
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
     searchAddonRef.current = searchAddon;
@@ -287,7 +315,6 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       return true;
     });
 
-    // Setup resize observer
     const observer = new ResizeObserver(() => {
       if (fitAddon && terminal) {
         fitAddon.fit();
@@ -297,19 +324,20 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
     observer.observe(container);
     resizeObserverRef.current = observer;
 
-    // Wire terminal input to session
     const inputDisposable = terminal.onData((data) => {
       sendInput(data);
     });
+    disposables.push(inputDisposable);
 
-    // Send initial size after terminal is ready
     setTimeout(() => {
       sendResize(terminal.cols, terminal.rows);
     }, 50);
 
-    // Cleanup on unmount
     return () => {
-      inputDisposable.dispose();
+      cancelled = true;
+      for (const disposable of disposables) {
+        disposable.dispose();
+      }
       observer.disconnect();
       fitAddon.dispose();
       searchAddon.dispose();
@@ -318,18 +346,35 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       fitAddonRef.current = null;
       searchAddonRef.current = null;
       resizeObserverRef.current = null;
+      fileLinkProviderDisposableRef.current = null;
+      setRendererType('canvas');
     };
   }, [closeSearch, currentTheme, sessionId, sendInput, sendResize, sessionCwd]);
 
   useEffect(() => {
     if (terminalRef.current) {
       terminalRef.current.options.theme = currentTheme;
+      terminalRef.current.refresh(0, terminalRef.current.rows - 1);
     }
 
     if (containerRef.current) {
       containerRef.current.style.backgroundColor = currentTheme.background ?? '';
     }
   }, [currentTheme]);
+
+  useEffect(() => {
+    if (!terminalRef.current) return;
+
+    fileLinkProviderDisposableRef.current?.dispose();
+    fileLinkProviderDisposableRef.current = terminalRef.current.registerLinkProvider(
+      createFileLinkProvider(terminalRef.current, sessionCwd),
+    );
+
+    return () => {
+      fileLinkProviderDisposableRef.current?.dispose();
+      fileLinkProviderDisposableRef.current = null;
+    };
+  }, [sessionCwd]);
 
   useEffect(() => {
     if (!isSearchOpen) return;
@@ -354,8 +399,6 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
     };
   }, [isSearchOpen, runSearch, searchQuery]);
 
-  // ─── Scrollback replay ────────────────────────────────────────────────────────
-
   useEffect(() => {
     if (scrollbackFetched) return;
 
@@ -371,8 +414,6 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
 
         const response = await fetch(url, { signal: abortController.signal });
         if (!response.ok) {
-          // If scrollback endpoint returns error, it's likely a new session with no history
-          // This is not an error case — just skip replay
           setScrollbackFetched(true);
           return;
         }
@@ -382,7 +423,6 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
         const cwd = typeof data.cwd === 'string' ? data.cwd : undefined;
         setSessionCwd(cwd);
 
-        // Replay chunks in order
         if (terminalRef.current && chunks.length > 0) {
           for (const chunk of chunks) {
             terminalRef.current.write(chunk.data);
@@ -392,7 +432,6 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
 
         setScrollbackFetched(true);
       } catch (err) {
-        // Fetch aborted or network error — ignore
         if (!(err instanceof Error && err.name === 'AbortError')) {
           console.error('[TerminalPane] Failed to fetch scrollback:', err);
         }
@@ -407,10 +446,7 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
     };
   }, [sessionId, scrollbackFetched]);
 
-  // ─── WebSocket data subscription ──────────────────────────────────────────────
-
   useEffect(() => {
-    // Only start subscribing to live data after scrollback is fetched
     if (!scrollbackFetched) return;
 
     const unsubscribe = onData((data) => {
@@ -421,8 +457,6 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
 
     return unsubscribe;
   }, [onData, scrollbackFetched]);
-
-  // ─── Exit handler ─────────────────────────────────────────────────────────────
 
   useEffect(() => {
     const unsubscribe = onSessionExit((exitCode) => {
@@ -439,10 +473,23 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
     return unsubscribe;
   }, [onSessionExit, onExit]);
 
-  // ─── Render ───────────────────────────────────────────────────────────────────
-
   return (
     <div className={`relative w-full h-full ${className ?? ''}`}>
+      {showRendererBadge && (
+        <div className="pointer-events-none absolute right-2 top-2 z-20 hidden sm:block">
+          <span
+            className={[
+              'inline-flex items-center rounded-full border px-1.5 py-0.5 text-[9px] font-semibold uppercase tracking-[0.08em]',
+              rendererType === 'webgl'
+                ? 'border-emerald-500/30 bg-emerald-500/12 text-emerald-400'
+                : 'border-amber-500/30 bg-amber-500/12 text-amber-400',
+            ].join(' ')}
+          >
+            {rendererType === 'webgl' ? 'WebGL' : 'Canvas'}
+          </span>
+        </div>
+      )}
+
       <div
         className={[
           'absolute top-0 inset-x-0 z-10 h-8 border-b border-border bg-surface-200/90 backdrop-blur-sm',
@@ -505,10 +552,8 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
         </button>
       </div>
 
-      {/* Terminal container */}
       <div ref={containerRef} className="w-full h-full" style={{ backgroundColor: currentTheme.background }} />
 
-      {/* Reconnecting overlay */}
       {reconnecting && (
         <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
           <div className="flex items-center gap-2 text-sm text-white">
@@ -537,4 +582,3 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
     </div>
   );
 }
-```
