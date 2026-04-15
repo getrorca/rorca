@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T18:35:54.440Z",
+  "lastUpdatedAt": "2026-04-15T19:03:35.313Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -91,6 +91,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 170861
+    },
+    {
+      "storyId": "OCT-015",
+      "title": "OpenCode not installed — graceful error state in terminal panel",
+      "status": "passed",
+      "startedAt": "2026-04-15T19:01:12.805Z",
+      "finishedAt": "2026-04-15T19:03:35.313Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 142508
     }
   ],
   "failedStories": [],

@@ -6,12 +6,6 @@
 Context: Confusing these causes file-not-found errors in pipeline trigger and archive panel.
 > Source: v2-platform
 
-## 2026-02-27 [Architecture] Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
-> Rule: Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
-
-Context: L1-L2 are global engineering/domain principles. L3+ are per-workspace. L4/L5 come from spec brief and story annotations.
-> Source: CIE-003
-
 ## 2026-02-27 [Convention] chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
 > Rule: chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
 
@@ -24,17 +18,23 @@ Context: The return type was changed from string to ChatResult in US-003 (model 
 Context: Changes to backend code are not picked up automatically. Forgetting to restart causes stale behavior.
 > Source: v2-platform
 
-## 2026-02-28 [Architecture] Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
-> Rule: Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
+## 2026-02-27 [Architecture] Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
+> Rule: Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
 
-Context: .rorca/config.json routing section defines globals, scopes, and tags. micromatch handles glob matching.
-> Source: CIE-004
+Context: L1-L2 are global engineering/domain principles. L3+ are per-workspace. L4/L5 come from spec brief and story annotations.
+> Source: CIE-003
 
 ## 2026-02-28 [Architecture] Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
 > Rule: Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
 
 Context: Machine-readable, human-editable. Categories: Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha.
 > Source: CIE-005
+
+## 2026-02-28 [Architecture] Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
+> Rule: Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
+
+Context: .rorca/config.json routing section defines globals, scopes, and tags. micromatch handles glob matching.
+> Source: CIE-004
 
 ## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
 > Rule: Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
@@ -54,11 +54,11 @@ Context: SM-001 failed with reason='typecheck' despite potentially working at ru
 Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incremental approach of establishing shared utilities before complex features reduces integration risk.
 > Source: SM-003
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-> Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
+> Rule: Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
 
-Context: PR-051 creates plan_quotas table + requirePlan middleware. This centralizes enforcement logic and makes quota changes (free → paid tier) declarative. Route handlers stay clean.
-> Source: PR-051
+Context: PR-003 establishes Docker Compose as the canonical self-hosted deployment method. This supersedes manual npm install flows and ensures consistent environments across installations.
+> Source: PR-003
 
 ## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
 > Rule: PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
@@ -78,12 +78,6 @@ Context: To change limits: UPDATE rate_limits table then call invalidateRateLimi
 Context: The production-ready spec shows these are interdependent: rate limiting without CORS leaves attack vectors open; health checks without secrets management can't validate encrypted data access.
 > Source: rorca-production-ready
 
-## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
-> Rule: Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
-
-Context: PR-003 establishes Docker Compose as the canonical self-hosted deployment method. This supersedes manual npm install flows and ensures consistent environments across installations.
-> Source: PR-003
-
 ## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
 > Rule: Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
 
@@ -101,6 +95,12 @@ Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tab
 
 Context: PR-052 implements upgrade prompts + feature badges. This creates a progressive disclosure UX where users discover features organically rather than via docs. Version gate prevents showing unavailable features.
 > Source: PR-052
+
+## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+> Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+
+Context: PR-051 creates plan_quotas table + requirePlan middleware. This centralizes enforcement logic and makes quota changes (free → paid tier) declarative. Route handlers stay clean.
+> Source: PR-051
 
 ## 2026-03-10 [Gotcha] pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
 > Rule: pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
@@ -3224,3 +3224,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-15 [Architecture] node-pty graceful degradation — try/catch at module load, not import time: When integrating native N-API modules like node-pty, wrap require() in a try/catch at module load (not dynamic import()). Set a module-scoped PTY_AVAILABLE boolean. Check this flag before calling native module functions and throw structured errors ({ code, message }) that routes can catch and convert to 503 Service Unavailable. This allows the server to start successfully even when the native module is not built, with the feature gracefully disabled.
 > Rule: node-pty graceful degradation — try/catch at module load, not import time: When integrating native N-API modules like node-pty, wrap require() in a try/catch at module load (not dynamic import()). Set a module-scoped PTY_AVAILABLE boolean. Check this flag before calling native module functions and throw structured errors ({ code, message }) that routes can catch and convert to 503 Service Unavailable. This allows the server to start successfully even when the native module is not built, with the feature gracefully disabled.
+
+## 2026-04-15 [Pattern] Terminal session route preflights OpenCode availability: Before creating an interactive terminal PTY session, check `detectOpenCode()` in `backend/src/routes/terminal.ts` and return a 422 `OPENCODE_NOT_INSTALLED` error with an install hint when the binary is missing.
+> Rule: Terminal session route preflights OpenCode availability: Before creating an interactive terminal PTY session, check `detectOpenCode()` in `backend/src/routes/terminal.ts` and return a 422 `OPENCODE_NOT_INSTALLED` error with an install hint when the binary is missing.

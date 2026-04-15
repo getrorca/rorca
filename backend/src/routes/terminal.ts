@@ -5,12 +5,13 @@ import { execute, query, queryOne } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { getWorkspaceEnvVars } from './env-vars';
 import * as ptyManager from '../lib/pty-manager';
-import { NotFoundError, ServiceUnavailableError, ValidationError, TooManyRequestsError } from '../lib/errors';
+import { AppError, NotFoundError, ServiceUnavailableError, ValidationError, TooManyRequestsError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { broadcastAll } from '../lib/sse-hub';
 import { resolveVaultProvider } from '../lib/llm-client';
 import { getDecryptedProviderKey } from '../lib/vault';
+import { detectOpenCode } from '../lib/opencode-detector';
 
 const router = Router();
 
@@ -46,6 +47,16 @@ const resizeSessionSchema = z.object({
   rows: z.number().int().positive(),
   cols: z.number().int().positive(),
 });
+
+class OpenCodeNotInstalledError extends AppError {
+  readonly statusCode = 422 as const;
+
+  constructor() {
+    super('OpenCode binary not found', 'OPENCODE_NOT_INSTALLED', {
+      hint: 'Install OpenCode with: npm install -g opencode',
+    });
+  }
+}
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
@@ -103,12 +114,19 @@ const resizeSessionSchema = z.object({
  *                   format: date-time
  *       404:
  *         description: Workspace not found
+ *       422:
+ *         description: OpenCode binary not found
  *       503:
  *         description: node-pty native module not available
  */
 router.post('/sessions', async (req: Request, res: Response) => {
   try {
     const body = validateBody(createSessionSchema, req.body);
+
+    const opencodeStatus = detectOpenCode();
+    if (!opencodeStatus.opencodeInstalled) {
+      throw new OpenCodeNotInstalledError();
+    }
 
     // Look up workspace
     const workspace = await queryOne<{ id: string; path: string }>(

@@ -5,7 +5,9 @@ import {
   Maximize2,
   Minimize2,
   Plus,
+  TerminalSquare,
 } from 'lucide-react';
+import { useNavigate } from 'react-router-dom';
 import TerminalPane from '../components/TerminalPane';
 import ModelPickerPopover from '../components/ModelPickerPopover';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -58,6 +60,7 @@ function isNotInstalledError(error: unknown): boolean {
 
 export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPanelProps) {
   const { workspaceId, selectedWorkspace, workspaces, setWorkspaceId } = useWorkspace();
+  const navigate = useNavigate();
 
   const [sessions, setSessions] = useState<TerminalSessionRecord[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -379,12 +382,23 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         )}
 
         {notInstalled && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center px-4">
-            <div className="max-w-md rounded-lg border border-[var(--border)] bg-[var(--panel)] px-4 py-3 text-sm text-[var(--text)] shadow-lg">
-              <div className="font-medium">OpenCode is not installed</div>
-              <div className="mt-1 text-xs text-muted">
-                Install `opencode` to use the terminal session panel.
+          <div className="absolute inset-0 z-10 flex items-center justify-center px-6">
+            <div className="flex max-w-md flex-col items-center text-center">
+              <TerminalSquare size={48} className="text-muted/50" />
+              <h3 className="mt-4 text-base font-medium text-[var(--text)]">OpenCode not installed</h3>
+              <p className="mt-2 text-[13px] text-muted">
+                The terminal requires OpenCode CLI. Install it to use the interactive terminal.
+              </p>
+              <div className="mt-4 rounded-lg bg-surface-200 px-3 py-2 font-mono text-sm text-[var(--text)]">
+                npm install -g opencode
               </div>
+              <button
+                type="button"
+                onClick={() => navigate('/settings/providers')}
+                className="mt-4 inline-flex items-center rounded-md bg-accent px-3 py-2 text-sm font-medium text-white transition-colors hover:bg-accent-hover"
+              >
+                Open Settings → Providers
+              </button>
             </div>
           </div>
         )}
