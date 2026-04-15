@@ -667,15 +667,17 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             <Bot size={14} />
           </div>
           <div className="min-w-0">
-            <div className={`font-medium text-[var(--text)] ${headerTextClass}`}>Terminal</div>
-            <div className="text-[10px] text-muted" title={directionTooltip}>
-              {directionEntries.length > 0 ? (
-                <div className="inline-flex items-center gap-1">
-                  <span>✦</span>
-                  <span>{directionEntries.length} Directions</span>
+            <div className={`font-medium text-[var(--text)] ${headerTextClass}`}>OpenCode</div>
+            <div className="text-[10px] text-muted">
+              {activeSession ? (
+                <div className="inline-flex items-center gap-1.5">
+                  <span className={activeSession.status === 'active' ? 'h-2 w-2 rounded-full bg-emerald-400 animate-pulse' : 'h-2 w-2 rounded-full bg-muted/50'} />
+                  <span>{getBasename(activeSession.cwd)}</span>
                 </div>
               ) : (
-                <span>No directions</span>
+                <span title={directionTooltip}>
+                  {directionEntries.length > 0 ? `${directionEntries.length} Directions` : 'No directions'}
+                </span>
               )}
             </div>
           </div>
