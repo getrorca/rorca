@@ -100,6 +100,7 @@ import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
+import terminalRouter from './routes/terminal';
 import { initBoss } from './lib/pg-boss';
 
 // OC-002: Fail-fast if RORCA_AGENT=opencode but binary is missing
@@ -403,6 +404,7 @@ app.use('/api/search', searchRouter);
 app.use('/api/recall', recallRouter);
 app.use('/api/graph', graphRouter);
 app.use('/api/workflow-router', workflowRouterRouter);
+app.use('/api/terminal', terminalRouter); // OCT-005: PTY session scrollback
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);
