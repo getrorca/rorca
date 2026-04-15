@@ -15,6 +15,8 @@ type OutboundMessage =
 
 type TerminalOutputMessage = { type: 'output'; data: string; sequence: number };
 type TerminalExitMessage = { type: 'exit'; exitCode: number };
+type TerminalTitleChangeMessage = { type: 'title_change'; title: string };
+type TerminalBellMessage = { type: 'bell' };
 type TerminalBannerMessage = {
   type: 'banner';
   workspaceLabel: string;
@@ -28,7 +30,13 @@ type TerminalShellEventMessage = {
   durationMs: number;
 };
 
-type InboundMessage = TerminalOutputMessage | TerminalExitMessage | TerminalBannerMessage | TerminalShellEventMessage;
+type InboundMessage =
+  | TerminalOutputMessage
+  | TerminalExitMessage
+  | TerminalTitleChangeMessage
+  | TerminalBellMessage
+  | TerminalBannerMessage
+  | TerminalShellEventMessage;
 
 export interface TerminalShellEvent {
   event: 'command_end';
@@ -51,9 +59,11 @@ export interface UseTerminalSessionReturn {
   onExit: (handler: (exitCode: number) => void) => () => void;
   onBanner: (handler: (event: TerminalBannerEvent) => void) => () => void;
   onShellEvent: (handler: (event: TerminalShellEvent) => void) => () => void;
+  onBell: (handler: () => void) => () => void;
   connected: boolean;
   reconnecting: boolean;
   connectionLost: boolean;
+  title: string;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -70,12 +80,14 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
   const [connectionLost, setConnectionLost] = useState(false);
+  const [title, setTitle] = useState('Terminal');
 
   const wsRef = useRef<WebSocket | null>(null);
   const dataHandlersRef = useRef<Set<(data: string) => void>>(new Set());
   const exitHandlersRef = useRef<Set<(exitCode: number) => void>>(new Set());
   const bannerHandlersRef = useRef<Set<(event: TerminalBannerEvent) => void>>(new Set());
   const shellEventHandlersRef = useRef<Set<(event: TerminalShellEvent) => void>>(new Set());
+  const bellHandlersRef = useRef<Set<() => void>>(new Set());
 
   const reconnectCountRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -148,6 +160,11 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
     return () => { bannerHandlersRef.current.delete(handler); };
   };
 
+  const onBell = (handler: () => void): (() => void) => {
+    bellHandlersRef.current.add(handler);
+    return () => { bellHandlersRef.current.delete(handler); };
+  };
+
   // ─── WebSocket lifecycle ────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -156,10 +173,12 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
       setConnected(false);
       setReconnecting(false);
       setConnectionLost(false);
+      setTitle('Terminal');
       return;
     }
 
     setConnectionLost(false);
+    setTitle('Terminal');
     lastReceivedSequenceRef.current = getLastReceivedSequence(sessionId);
 
     let currentWs: WebSocket | null = null;
@@ -209,6 +228,12 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
           } else if (message.type === 'exit') {
             exitHandlersRef.current.forEach((handler) => {
               handler(message.exitCode);
+            });
+          } else if (message.type === 'title_change') {
+            setTitle(message.title);
+          } else if (message.type === 'bell') {
+            bellHandlersRef.current.forEach((handler) => {
+              handler();
             });
           } else if (message.type === 'banner') {
             bannerHandlersRef.current.forEach((handler) => {
@@ -307,8 +332,10 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
     onExit,
     onBanner,
     onShellEvent,
+    onBell,
     connected,
     reconnecting,
     connectionLost,
+    title,
   };
 }
