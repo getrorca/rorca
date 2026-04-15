@@ -148,7 +148,7 @@ function clearRecent() {
 /* ─── Component ───────────────────────────────────────────────────── */
 
 export default function CommandPalette({ onNavigate, onClose, activePanel, activeRunId, onSendToForge }: CommandPaletteProps) {
-  const { toggle } = useTerminalDrawer();
+  const { open, toggle } = useTerminalDrawer();
   const [query, setQuery] = useState('');
   const deferredQuery = useDeferredValue(query);
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -269,9 +269,19 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       description: 'Open or close the terminal drawer',
       shortcut: 'Cmd+J',
       icon: Bot,
-      keywords: ['terminal', 'opencode', 'shell', 'ai', 'chat'],
+      keywords: ['terminal', 'opencode', 'shell', 'ai', 'chat', 'tty'],
       group: 'Terminal',
       action: () => { toggle(); onClose(); },
+    });
+    items.push({
+      id: 'terminal-open',
+      label: 'Open OpenCode Terminal',
+      category: 'action',
+      description: 'Open the terminal drawer',
+      icon: Bot,
+      keywords: ['terminal', 'opencode', 'open'],
+      group: 'Terminal',
+      action: () => { open(); onClose(); },
     });
     items.push({
       id: 'terminal-new-session',
@@ -281,7 +291,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       icon: Plus,
       keywords: ['terminal', 'new', 'session', 'opencode'],
       group: 'Terminal',
-      action: () => { window.dispatchEvent(new Event('rorca:terminal-new-session')); onClose(); },
+      action: () => { window.dispatchEvent(new CustomEvent('rorca:terminal-new-session')); onClose(); },
     });
     items.push({
       id: 'action:new-spec',

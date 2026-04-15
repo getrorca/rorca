@@ -3,9 +3,9 @@
 Spec: rorca-ci-autofix
 Run ID: 20260316000171
 Started: 2026-04-14T05:27:51.531Z
-Last Updated: 2026-04-15T19:05:33.560Z
+Last Updated: 2026-04-15T19:10:04.722Z
 
-## Completed Stories (10)
+## Completed Stories (11)
 - CAF-001: Universal CI failure parser — extract structured errors from any GitHub check_run — DONE (claude, claude-opus-4-6, 1360s)
 - CAF-002: Direction-stack-aware fix spec generator with universal verification — DONE (claude, claude-opus-4-6, 466s)
 - CAF-003: Database migration + configurable workspace CI autofix settings — DONE (claude, claude-opus-4-6, 291s)
@@ -16,3 +16,4 @@ Last Updated: 2026-04-15T19:05:33.560Z
 - OCT-007: Frontend terminal component — TerminalPane with xterm.js PTY integration — DONE (claude, 164s)
 - OCT-034: Graceful backend shutdown — drain PTY sessions on SIGTERM — DONE (codex, gpt-5.4, 171s)
 - OCT-038: Direction stack injection into OpenCode session via .opencode config — DONE (codex, gpt-5.4, 261s)
+- OCT-013: Command palette integration — 'Toggle OpenCode Terminal' action — DONE (codex, gpt-5.4, 77s)
