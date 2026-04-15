@@ -63,7 +63,8 @@ interface DirectionLayersResponse {
 }
 
 const LAYER_KEYS = ['l1', 'l2', 'l3', 'l4', 'l5'] as const;
-const MAX_SESSIONS = 5;
+const MAX_SESSIONS_STORAGE_KEY = 'rorca:terminal:maxSessions';
+const DEFAULT_MAX_SESSIONS = 5;
 const SHORT_BASH_COMMANDS = /^(ls|pwd|cd|cat|echo|git|npm|node|vim|vi|nano|clear|exit)$/;
 const MIN_FONT_SIZE = 10;
 const MAX_FONT_SIZE = 20;
@@ -71,6 +72,20 @@ const DEFAULT_FONT_SIZE = 13;
 const FONT_SIZE_STORAGE_KEY = 'rorca:terminal:fontSize';
 const SESSIONS_STORAGE_KEY = 'rorca:terminal:sessions';
 const MAX_PERSISTED_SESSIONS = 5;
+
+function getMaxSessionsSetting(): number {
+  try {
+    const stored = localStorage.getItem(MAX_SESSIONS_STORAGE_KEY);
+    const parsed = stored ? Number.parseInt(stored, 10) : NaN;
+    if (Number.isFinite(parsed)) {
+      return Math.min(10, Math.max(1, parsed));
+    }
+  } catch {
+    // Ignore localStorage errors
+  }
+
+  return DEFAULT_MAX_SESSIONS;
+}
 
 function getBasename(input: string): string {
   const normalized = input.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -178,6 +193,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [historyClearing, setHistoryClearing] = useState(false);
   const [historySessions, setHistorySessions] = useState<TerminalHistoryRecord[]>([]);
   const [selectedHistorySessionId, setSelectedHistorySessionId] = useState<string | null>(null);
+  const [maxSessions, setMaxSessions] = useState(() => getMaxSessionsSetting());
 
   // Font size state with localStorage persistence
   const [fontSize, setFontSize] = useState(() => {
@@ -217,6 +233,17 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  useEffect(() => {
+    const syncMaxSessions = () => setMaxSessions(getMaxSessionsSetting());
+    syncMaxSessions();
+    window.addEventListener('storage', syncMaxSessions);
+    window.addEventListener('focus', syncMaxSessions);
+    return () => {
+      window.removeEventListener('storage', syncMaxSessions);
+      window.removeEventListener('focus', syncMaxSessions);
+    };
+  }, []);
 
   useEffect(() => {
     if (mode !== 'drawer' || !isFullscreen) return;
@@ -456,9 +483,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, [workspaceId, setWorkspaceId, loadDirections, createSession]);
 
   const handleNewSession = useCallback(async () => {
-    if (!workspaceId || sessions.length >= MAX_SESSIONS) return;
+    if (!workspaceId || sessions.length >= maxSessions) return;
     await createSession(workspaceId, true);
-  }, [workspaceId, createSession, sessions.length]);
+  }, [workspaceId, createSession, sessions.length, maxSessions]);
 
   useEffect(() => {
     const handleTerminalNewSession = () => {
@@ -681,11 +708,11 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             <span>History</span>
           </button>
 
-          <Tooltip content="Max 5 sessions" disabled={sessions.length < MAX_SESSIONS}>
+          <Tooltip content={`Max ${maxSessions} sessions`} disabled={sessions.length < maxSessions}>
             <button
               type="button"
               onClick={() => { void handleNewSession(); }}
-              disabled={!workspaceId || creating || sessions.length >= MAX_SESSIONS}
+              disabled={!workspaceId || creating || sessions.length >= maxSessions}
               className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-50"
             >
               <Plus size={12} />
