@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T21:14:15.167Z",
+  "lastUpdatedAt": "2026-04-15T21:18:16.957Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -51,6 +51,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 219736
+    },
+    {
+      "storyId": "OCT-033",
+      "title": "API key pre-validation before session spawn",
+      "status": "passed",
+      "startedAt": "2026-04-15T21:14:56.017Z",
+      "finishedAt": "2026-04-15T21:18:16.957Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 200940
     }
   ],
   "failedStories": [
