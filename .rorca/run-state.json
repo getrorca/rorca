@@ -1,60 +1,10 @@
 {
   "specId": "rorca-opencode-terminal",
-  "runId": 20260316000185,
-  "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T20:35:14.925Z",
-  "completedStories": [
-    {
-      "storyId": "OCT-016",
-      "title": "Terminal panel — copy/paste, font sizing, fullscreen toggle",
-      "status": "passed",
-      "startedAt": "2026-04-15T19:42:58.823Z",
-      "finishedAt": "2026-04-15T19:46:31.066Z",
-      "agentType": "claude",
-      "elapsedMs": 212243
-    },
-    {
-      "storyId": "OCT-021",
-      "title": "WebSocket security — Origin validation, localhost binding, session token",
-      "status": "passed",
-      "startedAt": "2026-04-15T19:46:46.968Z",
-      "finishedAt": "2026-04-15T19:52:28.428Z",
-      "agentType": "claude",
-      "elapsedMs": 341460
-    },
-    {
-      "storyId": "OCT-036",
-      "title": "Embedded terminal drawer — Cmd+J toggle, persistent bottom panel, drag-resize, fullscreen, mobile FAB",
-      "status": "passed",
-      "startedAt": "2026-04-15T20:18:14.988Z",
-      "finishedAt": "2026-04-15T20:20:55.453Z",
-      "agentType": "codex",
-      "model": "gpt-5.4",
-      "elapsedMs": 160465
-    },
-    {
-      "storyId": "OCT-041",
-      "title": "Run View taxonomy fix — rename pipeline output to 'Execution Trace' to eliminate terminal confusion",
-      "status": "passed",
-      "startedAt": "2026-04-15T20:33:52.280Z",
-      "finishedAt": "2026-04-15T20:35:14.925Z",
-      "agentType": "codex",
-      "model": "gpt-5.4",
-      "elapsedMs": 82645
-    }
-  ],
-  "failedStories": [
-    {
-      "storyId": "OCT-015",
-      "title": "OpenCode not installed — graceful error state in terminal panel",
-      "status": "failed",
-      "startedAt": "2026-04-15T19:39:32.942Z",
-      "finishedAt": "2026-04-15T19:42:38.804Z",
-      "agentType": "claude",
-      "failReason": "timeout",
-      "elapsedMs": 185862
-    }
-  ],
+  "runId": 20260316000189,
+  "startedAt": "2026-04-15T21:10:19.090Z",
+  "lastUpdatedAt": "2026-04-15T21:10:19.090Z",
+  "completedStories": [],
+  "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
