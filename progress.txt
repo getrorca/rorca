@@ -1,14 +1,17 @@
 # Run State Summary
 
-Spec: rorca-ci-autofix
-Run ID: 20260316000171
-Started: 2026-04-14T05:27:51.531Z
-Last Updated: 2026-04-14T06:17:29.635Z
+Spec: rorca-opencode-terminal
+Run ID: 20260316000185
+Started: 2026-04-15T19:33:43.854Z
+Last Updated: 2026-04-15T21:18:16.957Z
 
 ## Completed Stories (6)
-- CAF-001: Universal CI failure parser — extract structured errors from any GitHub check_run — DONE (claude, claude-opus-4-6, 1360s)
-- CAF-002: Direction-stack-aware fix spec generator with universal verification — DONE (claude, claude-opus-4-6, 466s)
-- CAF-003: Database migration + configurable workspace CI autofix settings — DONE (claude, claude-opus-4-6, 291s)
-- CAF-004: CI Autofix settings UI — enable toggle, check pattern editor, and run history — DONE (claude, claude-opus-4-6, 2s)
-- CAF-005: Post-fix commit status and autofix run lifecycle completion — DONE (claude, claude-opus-4-6, 761s)
-- CAF-006: Autofix push-back — commit and push fixes to the source branch — DONE (claude, claude-opus-4-6, 17s)
+- OCT-016: Terminal panel — copy/paste, font sizing, fullscreen toggle — DONE (claude, 212s)
+- OCT-021: WebSocket security — Origin validation, localhost binding, session token — DONE (claude, 341s)
+- OCT-036: Embedded terminal drawer — Cmd+J toggle, persistent bottom panel, drag-resize, fullscreen, mobile FAB — DONE (codex, gpt-5.4, 160s)
+- OCT-041: Run View taxonomy fix — rename pipeline output to 'Execution Trace' to eliminate terminal confusion — DONE (codex, gpt-5.4, 83s)
+- OCT-037: Per-session model picker — change model without affecting global config — DONE (codex, gpt-5.4, 220s)
+- OCT-033: API key pre-validation before session spawn — DONE (codex, gpt-5.4, 201s)
+
+## Failed Stories (1)
+- OCT-015: OpenCode not installed — graceful error state in terminal panel — FAILED (timeout)
