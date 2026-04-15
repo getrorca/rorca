@@ -8,6 +8,7 @@ import {
 } from 'lucide-react';
 import TerminalPane from '../components/TerminalPane';
 import ModelPickerPopover from '../components/ModelPickerPopover';
+import { useGlobalToast } from '../contexts/ToastContext';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, ApiError } from '../lib/apiFetch';
 import { getAllLayers } from '../api/direction';
@@ -36,11 +37,31 @@ interface TerminalSessionResponse {
   createdAt: string;
 }
 
+interface PersistedTerminalSession {
+  sessionId: string;
+  workspaceId: string;
+  label: string;
+  createdAt: string;
+}
+
+interface TerminalSessionsListResponse {
+  sessions: Array<{
+    sessionId: string;
+    workspaceId: string;
+    cwd: string;
+    rows: number;
+    cols: number;
+    createdAt: string;
+  }>;
+}
+
 interface DirectionLayersResponse {
   layers: Record<string, DirectionLayer>;
 }
 
 const LAYER_KEYS = ['l1', 'l2', 'l3', 'l4', 'l5'] as const;
+const TERMINAL_SESSIONS_STORAGE_KEY = 'rorca:terminal:sessions';
+const MAX_PERSISTED_SESSIONS_PER_WORKSPACE = 5;
 
 function getBasename(input: string): string {
   const normalized = input.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -56,8 +77,56 @@ function isNotInstalledError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 422 && error.code === 'OPENCODE_NOT_INSTALLED';
 }
 
+function readPersistedSessions(): PersistedTerminalSession[] {
+  if (typeof window === 'undefined') return [];
+
+  try {
+    const raw = window.localStorage.getItem(TERMINAL_SESSIONS_STORAGE_KEY);
+    if (!raw) return [];
+
+    const parsed = JSON.parse(raw);
+    if (!Array.isArray(parsed)) return [];
+
+    return parsed.filter((entry): entry is PersistedTerminalSession => {
+      return Boolean(
+        entry
+        && typeof entry === 'object'
+        && typeof entry.sessionId === 'string'
+        && typeof entry.workspaceId === 'string'
+        && typeof entry.label === 'string'
+        && typeof entry.createdAt === 'string',
+      );
+    });
+  } catch {
+    return [];
+  }
+}
+
+function writePersistedSessions(sessions: PersistedTerminalSession[]): void {
+  if (typeof window === 'undefined') return;
+  window.localStorage.setItem(TERMINAL_SESSIONS_STORAGE_KEY, JSON.stringify(sessions));
+}
+
+function persistSession(session: PersistedTerminalSession): void {
+  const existing = readPersistedSessions().filter((entry) => entry.sessionId !== session.sessionId);
+  const sameWorkspace = [...existing.filter((entry) => entry.workspaceId === session.workspaceId), session]
+    .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+    .slice(0, MAX_PERSISTED_SESSIONS_PER_WORKSPACE);
+  const otherWorkspaces = existing.filter((entry) => entry.workspaceId !== session.workspaceId);
+  writePersistedSessions([...otherWorkspaces, ...sameWorkspace]);
+}
+
+function removePersistedSession(sessionId: string): void {
+  writePersistedSessions(readPersistedSessions().filter((entry) => entry.sessionId !== sessionId));
+}
+
+function prunePersistedSessions(sessionIds: Set<string>): void {
+  writePersistedSessions(readPersistedSessions().filter((entry) => !sessionIds.has(entry.sessionId)));
+}
+
 export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPanelProps) {
   const { workspaceId, selectedWorkspace, workspaces, setWorkspaceId } = useWorkspace();
+  const toast = useGlobalToast();
 
   const [sessions, setSessions] = useState<TerminalSessionRecord[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -132,6 +201,12 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       };
 
       setSessions((prev) => [...prev, nextSession]);
+      persistSession({
+        sessionId: res.sessionId,
+        workspaceId: res.workspaceId,
+        label: getBasename(res.cwd),
+        createdAt: res.createdAt,
+      });
       if (activate) {
         setActiveSessionId(res.sessionId);
       }
@@ -154,8 +229,79 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   useEffect(() => {
     if (!workspaceId || initialSessionRequestedRef.current) return;
     initialSessionRequestedRef.current = true;
-    void createSession(workspaceId, true);
-  }, [workspaceId, createSession]);
+
+    let cancelled = false;
+
+    const bootstrapSession = async () => {
+      const persistedForWorkspace = readPersistedSessions()
+        .filter((entry) => entry.workspaceId === workspaceId)
+        .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime());
+
+      if (persistedForWorkspace.length > 0) {
+        try {
+          const res = await apiFetch<TerminalSessionsListResponse>('/api/terminal/sessions', {
+            method: 'GET',
+            silent: true,
+          });
+
+          if (cancelled) return;
+
+          const activeSessions = res.sessions ?? [];
+          const activeById = new Map(activeSessions.map((session) => [session.sessionId, session]));
+          const deadSessionIds = new Set<string>();
+
+          for (const persisted of persistedForWorkspace) {
+            const active = activeById.get(persisted.sessionId);
+            if (!active || active.workspaceId !== workspaceId) {
+              deadSessionIds.add(persisted.sessionId);
+              continue;
+            }
+
+            const reattachedSession: TerminalSessionRecord = {
+              sessionId: active.sessionId,
+              workspaceId: active.workspaceId,
+              cwd: active.cwd,
+              createdAt: active.createdAt,
+              exited: false,
+            };
+
+            setSessions((prev) => {
+              const withoutCurrent = prev.filter((session) => session.sessionId !== active.sessionId);
+              return [...withoutCurrent, reattachedSession];
+            });
+            setActiveSessionId(active.sessionId);
+            persistSession({
+              sessionId: active.sessionId,
+              workspaceId: active.workspaceId,
+              label: getBasename(active.cwd),
+              createdAt: active.createdAt,
+            });
+            toast.show('Reconnected to existing session', 'success');
+            if (deadSessionIds.size > 0) {
+              prunePersistedSessions(deadSessionIds);
+            }
+            return;
+          }
+
+          if (deadSessionIds.size > 0) {
+            prunePersistedSessions(deadSessionIds);
+          }
+        } catch {
+          // Fall through to fresh session creation if backend is unavailable or restarted.
+        }
+      }
+
+      if (!cancelled) {
+        await createSession(workspaceId, true);
+      }
+    };
+
+    void bootstrapSession();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [workspaceId, createSession, toast]);
 
   useEffect(() => {
     const onMouseDown = (event: MouseEvent) => {
@@ -171,17 +317,6 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     return () => document.removeEventListener('mousedown', onMouseDown);
   }, [workspaceMenuOpen]);
 
-  useEffect(() => {
-    return () => {
-      sessionsRef.current.forEach((session) => {
-        void apiFetch(`/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`, {
-          method: 'DELETE',
-          silent: true,
-        }).catch(() => undefined);
-      });
-    };
-  }, []);
-
   const handleWorkspaceSwitch = useCallback(async (nextWorkspaceId: string) => {
     setWorkspaceMenuOpen(false);
     if (nextWorkspaceId === workspaceId) return;
@@ -191,7 +326,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         apiFetch(`/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`, {
           method: 'DELETE',
           silent: true,
-        }).catch(() => undefined),
+        }).catch(() => undefined).finally(() => {
+          removePersistedSession(session.sessionId);
+        }),
       ),
     );
 
@@ -211,6 +348,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, [workspaceId, createSession]);
 
   const handleSessionExit = useCallback((sessionId: string) => {
+    removePersistedSession(sessionId);
     setSessions((prev) => prev.map((session) => (
       session.sessionId === sessionId ? { ...session, exited: true } : session
     )));
