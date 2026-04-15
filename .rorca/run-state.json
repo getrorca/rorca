@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T18:35:54.440Z",
+  "lastUpdatedAt": "2026-04-15T19:05:33.560Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -91,6 +91,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 170861
+    },
+    {
+      "storyId": "OCT-038",
+      "title": "Direction stack injection into OpenCode session via .opencode config",
+      "status": "passed",
+      "startedAt": "2026-04-15T19:01:12.453Z",
+      "finishedAt": "2026-04-15T19:05:33.560Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 261107
     }
   ],
   "failedStories": [],
