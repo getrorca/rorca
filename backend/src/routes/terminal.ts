@@ -121,6 +121,41 @@ const historyQuerySchema = z.object({
 
 /**
  * @swagger
+ * /api/terminal/opencode-status:
+ *   get:
+ *     tags: [Terminal]
+ *     summary: Get OpenCode installation status
+ *     operationId: getTerminalOpenCodeStatus
+ *     description: Detects whether the OpenCode CLI is installed and returns its version and resolved path.
+ *     responses:
+ *       200:
+ *         description: OpenCode installation status
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 installed:
+ *                   type: boolean
+ *                 version:
+ *                   type: string
+ *                   nullable: true
+ *                 path:
+ *                   type: string
+ *                   nullable: true
+ */
+router.get('/opencode-status', (_req: Request, res: Response) => {
+  const status = detectOpenCode();
+
+  res.status(200).json({
+    installed: status.opencodeInstalled,
+    version: status.opencodeVersion,
+    path: status.opencodeBinPath,
+  });
+});
+
+/**
+ * @swagger
  * /api/terminal/sessions:
  *   post:
  *     tags: [Terminal]

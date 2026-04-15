@@ -58,6 +58,12 @@ interface HealthResponse {
   };
 }
 
+interface OpenCodeStatusResponse {
+  installed: boolean;
+  version: string | null;
+  path: string | null;
+}
+
 interface TerminalHistoryRecord {
   sessionId: string;
   cwd: string;
@@ -244,6 +250,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [error, setError] = useState<string | null>(null);
   const [notInstalled, setNotInstalled] = useState(false);
   const [notInstalledHint, setNotInstalledHint] = useState('Install OpenCode with: npm install -g opencode');
+  const [pollingForInstall, setPollingForInstall] = useState(false);
+  const [detectedFlash, setDetectedFlash] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [activeModel, setActiveModel] = useState('Select model');
   const [sessionModels, setSessionModels] = useState<Record<string, string>>({});
@@ -287,6 +295,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const bellTimeoutsRef = useRef<Record<string, number>>({});
   const [backgroundSessionsVersion, setBackgroundSessionsVersion] = useState(0);
   const restoreRequestIdRef = useRef(0);
+  const installPollingIntervalRef = useRef<ReturnType<typeof setInterval> | null>(null);
+  const installPollingElapsedMsRef = useRef(0);
+  const detectionTimeoutRef = useRef<number | null>(null);
 
   const headerHeightClass = mode === 'panel' ? 'h-10' : 'h-9';
   const headerTextClass = mode === 'panel' ? 'text-[12px]' : 'text-[11px]';
@@ -415,10 +426,21 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     }
   }, [activeSessionId]);
 
+  const stopInstallPolling = useCallback(() => {
+    if (installPollingIntervalRef.current) {
+      clearInterval(installPollingIntervalRef.current);
+      installPollingIntervalRef.current = null;
+    }
+    installPollingElapsedMsRef.current = 0;
+    setPollingForInstall(false);
+  }, []);
+
   const createSession = useCallback(async (targetWorkspaceId: string, activate = true, modelOverride?: string) => {
     setCreating(true);
     setError(null);
-    setNotInstalled(false);
+    if (!detectedFlash) {
+      setNotInstalled(false);
+    }
     setNotInstalledHint('Install OpenCode with: npm install -g opencode');
 
     try {
@@ -449,7 +471,6 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         status: 'active',
       };
 
-      // Persist to localStorage
       savePersistedSession(
         {
           sessionId: res.sessionId,
@@ -468,17 +489,74 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       if (activate) {
         setActiveSessionId(res.sessionId);
       }
+
+      stopInstallPolling();
+      if (detectionTimeoutRef.current) {
+        window.clearTimeout(detectionTimeoutRef.current);
+        detectionTimeoutRef.current = null;
+      }
+      setDetectedFlash(false);
     } catch (err) {
       if (isNotInstalledError(err)) {
         setNotInstalledHint(getNotInstalledHint(err));
         setNotInstalled(true);
+        setDetectedFlash(false);
+        if (!installPollingIntervalRef.current) {
+          installPollingElapsedMsRef.current = 0;
+          setPollingForInstall(true);
+        }
       } else {
         setError('Failed to start session — is OpenCode installed?');
       }
     } finally {
       setCreating(false);
     }
-  }, [mode, syncWorkspaceSessions]);
+  }, [mode, syncWorkspaceSessions, detectedFlash, stopInstallPolling]);
+
+  const handleOpenCodeDetected = useCallback(async (targetWorkspaceId: string) => {
+    stopInstallPolling();
+    setDetectedFlash(true);
+    toast.success('OpenCode ready');
+
+    if (detectionTimeoutRef.current) {
+      window.clearTimeout(detectionTimeoutRef.current);
+    }
+
+    detectionTimeoutRef.current = window.setTimeout(() => {
+      setDetectedFlash(false);
+      detectionTimeoutRef.current = null;
+      void createSession(targetWorkspaceId, true);
+    }, 1500);
+  }, [createSession, stopInstallPolling, toast]);
+
+  const checkOpenCodeStatus = useCallback(async (targetWorkspaceId: string): Promise<boolean> => {
+    const status = await apiFetch<OpenCodeStatusResponse>('/api/terminal/opencode-status', { silent: true });
+    if (status.installed) {
+      await handleOpenCodeDetected(targetWorkspaceId);
+      return true;
+    }
+    return false;
+  }, [handleOpenCodeDetected]);
+
+  const startInstallPolling = useCallback((targetWorkspaceId: string) => {
+    if (installPollingIntervalRef.current) {
+      return;
+    }
+
+    installPollingElapsedMsRef.current = 0;
+    setPollingForInstall(true);
+
+    installPollingIntervalRef.current = setInterval(() => {
+      installPollingElapsedMsRef.current += 5000;
+
+      if (installPollingElapsedMsRef.current >= 600000) {
+        stopInstallPolling();
+        return;
+      }
+
+      void checkOpenCodeStatus(targetWorkspaceId).catch(() => undefined);
+    }, 5000);
+  }, [checkOpenCodeStatus, stopInstallPolling]);
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -525,6 +603,12 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     setError(null);
     setNotInstalled(false);
     setNotInstalledHint('Install OpenCode with: npm install -g opencode');
+    stopInstallPolling();
+    if (detectionTimeoutRef.current) {
+      window.clearTimeout(detectionTimeoutRef.current);
+      detectionTimeoutRef.current = null;
+    }
+    setDetectedFlash(false);
 
     const requestId = ++restoreRequestIdRef.current;
 
@@ -596,7 +680,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     };
 
     void restoreWorkspaceSessions();
-  }, [workspaceId, createSession, persistWorkspaceSessions, toast, bumpBackgroundSessionsVersion]);
+  }, [workspaceId, createSession, persistWorkspaceSessions, toast, bumpBackgroundSessionsVersion, stopInstallPolling]);
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -631,6 +715,11 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
   useEffect(() => {
     return () => {
+      stopInstallPolling();
+      if (detectionTimeoutRef.current) {
+        window.clearTimeout(detectionTimeoutRef.current);
+        detectionTimeoutRef.current = null;
+      }
       Object.values(bellTimeoutsRef.current).forEach((timeoutId) => {
         window.clearTimeout(timeoutId);
       });
@@ -641,7 +730,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         }).catch(() => undefined);
       });
     };
-  }, []);
+  }, [stopInstallPolling]);
 
   const handleWorkspaceSelect = useCallback(async (nextWorkspaceId: string) => {
     if (nextWorkspaceId === workspaceId) return;
@@ -655,6 +744,24 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     if (!workspaceId || sessions.length >= maxSessions) return;
     await createSession(workspaceId, true);
   }, [workspaceId, createSession, sessions.length, maxSessions]);
+
+  useEffect(() => {
+    if (!pollingForInstall || !workspaceId || installPollingIntervalRef.current) return;
+    startInstallPolling(workspaceId);
+  }, [pollingForInstall, workspaceId, startInstallPolling]);
+
+  const handleRetryInstall = useCallback(async () => {
+    if (!workspaceId) return;
+
+    try {
+      const installed = await checkOpenCodeStatus(workspaceId);
+      if (!installed) {
+        startInstallPolling(workspaceId);
+      }
+    } catch {
+      startInstallPolling(workspaceId);
+    }
+  }, [workspaceId, checkOpenCodeStatus, startInstallPolling]);
 
   useEffect(() => {
     const handleTerminalNewSession = () => {
@@ -1181,26 +1288,53 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
           </div>
         )}
 
-        {notInstalled && (
+        {(notInstalled || detectedFlash) && (
           <div className="absolute inset-0 z-10 flex items-center justify-center px-4">
             <div className="flex max-w-md flex-col items-center text-center">
-              <div className="mb-4 flex items-center justify-center">
-                <TerminalSquare size={48} className="text-muted opacity-50" />
-              </div>
-              <h3 className="mb-2 text-base font-medium text-[var(--text)]">OpenCode not installed</h3>
-              <p className="mb-4 text-[13px] text-muted">
-                The terminal requires OpenCode CLI. Install it to use the interactive terminal.
-              </p>
-              <div className="mb-4 w-full rounded bg-panel px-3 py-2 font-mono text-sm text-[var(--text)] border border-border">
-                {notInstalledHint.replace(/^Install OpenCode with:\s*/, '')}
-              </div>
-              <button
-                type="button"
-                onClick={() => navigate('/settings/providers')}
-                className="rounded border border-accent bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"
-              >
-                Open Settings → Providers
-              </button>
+              {detectedFlash ? (
+                <>
+                  <div className="mb-4 flex items-center justify-center">
+                    <Check size={48} className="text-emerald-400" />
+                  </div>
+                  <h3 className="mb-2 text-base font-medium text-emerald-300">OpenCode detected!</h3>
+                  <p className="text-[13px] text-emerald-200/90">Starting session...</p>
+                </>
+              ) : (
+                <>
+                  <div className="mb-4 flex items-center justify-center">
+                    <TerminalSquare size={48} className="text-muted opacity-50" />
+                  </div>
+                  <h3 className="mb-2 text-base font-medium text-[var(--text)]">OpenCode not installed</h3>
+                  <p className="mb-4 text-[13px] text-muted">
+                    The terminal requires OpenCode CLI. Install it to use the interactive terminal.
+                  </p>
+                  <div className="mb-2 w-full rounded border border-border bg-panel px-3 py-2 font-mono text-sm text-[var(--text)]">
+                    {notInstalledHint.replace(/^Install OpenCode with:\s*/, '')}
+                  </div>
+                  {pollingForInstall && (
+                    <div className="mb-4 flex items-center gap-2 text-[11px] text-muted">
+                      <span className="animate-pulse w-2 h-2 rounded-full bg-amber-400" />
+                      <span>Waiting for OpenCode...</span>
+                    </div>
+                  )}
+                  <div className="flex items-center gap-2">
+                    <button
+                      type="button"
+                      onClick={() => { void handleRetryInstall(); }}
+                      className="rounded border border-border px-3 py-2 text-sm font-medium text-[var(--text)] hover:border-accent/40 hover:bg-accent/5"
+                    >
+                      Retry
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => navigate('/settings/providers')}
+                      className="rounded border border-accent bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"
+                    >
+                      Open Settings → Providers
+                    </button>
+                  </div>
+                </>
+              )}
             </div>
           </div>
         )}

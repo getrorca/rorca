@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T21:14:15.167Z",
+  "lastUpdatedAt": "2026-04-15T21:18:11.036Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -51,6 +51,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 219736
+    },
+    {
+      "storyId": "OCT-040",
+      "title": "OpenCode not-installed — auto-retry polling and install progress feedback",
+      "status": "passed",
+      "startedAt": "2026-04-15T21:14:54.485Z",
+      "finishedAt": "2026-04-15T21:18:11.036Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 196551
     }
   ],
   "failedStories": [
