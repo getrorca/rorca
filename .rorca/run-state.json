@@ -1,8 +1,8 @@
 {
   "specId": "rorca-opencode-terminal",
-  "runId": 20260316000188,
-  "startedAt": "2026-04-15T20:17:53.148Z",
-  "lastUpdatedAt": "2026-04-15T20:17:53.148Z",
+  "runId": 20260316000185,
+  "startedAt": "2026-04-15T19:33:43.854Z",
+  "lastUpdatedAt": "2026-04-15T20:20:17.743Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -21,11 +21,32 @@
       "finishedAt": "2026-04-15T19:52:28.428Z",
       "agentType": "claude",
       "elapsedMs": 341460
+    },
+    {
+      "storyId": "OCT-012",
+      "title": "Multiple terminal sessions — tab management UI with async auto-rename",
+      "status": "passed",
+      "startedAt": "2026-04-15T20:18:16.346Z",
+      "finishedAt": "2026-04-15T20:20:17.743Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 121397
     }
   ],
-  "failedStories": [],
+  "failedStories": [
+    {
+      "storyId": "OCT-015",
+      "title": "OpenCode not installed — graceful error state in terminal panel",
+      "status": "failed",
+      "startedAt": "2026-04-15T19:39:32.942Z",
+      "finishedAt": "2026-04-15T19:42:38.804Z",
+      "agentType": "claude",
+      "failReason": "timeout",
+      "elapsedMs": 185862
+    }
+  ],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
-  "resumedFromStory": "OCT-030"
+  "resumedFromStory": null
 }

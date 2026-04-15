@@ -13,6 +13,7 @@ import '@xterm/xterm/css/xterm.css';
 export interface TerminalPaneProps {
   sessionId: string;
   wsToken: string | null; // OCT-021: Short-lived WebSocket connection token
+  visible?: boolean;
   onExit?: (exitCode: number) => void;
   onSessionLost?: () => void;
   onInput?: (data: string) => void;
@@ -58,7 +59,6 @@ const TERMINAL_THEME_DARK: ITheme = {
   foreground: '#e6edf3',
   cursor: '#58a6ff',
   cursorAccent: '#0d1117',
-  selection: 'rgba(38,79,120,0.5)',
   black: '#484f58',
   red: '#ff7b72',
   green: '#3fb950',
@@ -82,7 +82,6 @@ const TERMINAL_THEME_LIGHT: ITheme = {
   foreground: '#24292f',
   cursor: '#0969da',
   cursorAccent: '#ffffff',
-  selection: 'rgba(9,105,218,0.1)',
   black: '#24292f',
   red: '#cf222e',
   green: '#116329',
@@ -179,7 +178,7 @@ function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): IL
   };
 }
 
-export default function TerminalPane({ sessionId, wsToken, onExit, onSessionLost, onInput, className, fontSize = 13 }: TerminalPaneProps) {
+export default function TerminalPane({ sessionId, wsToken, visible = true, onExit, onSessionLost, onInput, className, fontSize = 13 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -407,14 +406,25 @@ export default function TerminalPane({ sessionId, wsToken, onExit, onSessionLost
   useEffect(() => {
     const terminal = terminalRef.current;
     const fitAddon = fitAddonRef.current;
-    if (!terminal || !fitAddon) return;
+    if (!terminal || !fitAddon || !visible) return;
 
     terminal.options.fontSize = fontSize;
     requestAnimationFrame(() => {
       fitAddon.fit();
       sendResize(terminal.cols, terminal.rows);
     });
-  }, [fontSize, sendResize]);
+  }, [fontSize, sendResize, visible]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon || !visible) return;
+
+    requestAnimationFrame(() => {
+      fitAddon.fit();
+      sendResize(terminal.cols, terminal.rows);
+    });
+  }, [visible, sendResize]);
 
   useEffect(() => {
     if (!terminalRef.current) return;
@@ -606,7 +616,14 @@ export default function TerminalPane({ sessionId, wsToken, onExit, onSessionLost
         </button>
       </div>
 
-      <div ref={containerRef} className="w-full h-full" style={{ backgroundColor: currentTheme.background }} />
+      <div
+        ref={containerRef}
+        className="w-full h-full"
+        style={{
+          backgroundColor: currentTheme.background,
+          display: visible ? 'block' : 'none',
+        }}
+      />
 
       {reconnecting && (
         <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
