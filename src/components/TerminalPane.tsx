@@ -1,3 +1,4 @@
+```typescript
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import type { IDisposable, ITheme, IBufferRange, ILink, ILinkProvider } from '@xterm/xterm';
@@ -38,6 +39,7 @@ const TERMINAL_OPTIONS = {
   cursorBlink: true,
   cursorStyle: 'block' as const,
   convertEol: true,
+  copyOnSelect: false,
   // Disable copy-on-select for explicit Cmd+C behavior
   rightClickSelectsWord: false,
 };
@@ -59,6 +61,7 @@ const TERMINAL_THEME_DARK: ITheme = {
   foreground: '#e6edf3',
   cursor: '#58a6ff',
   cursorAccent: '#0d1117',
+  selectionBackground: 'rgba(38,79,120,0.5)',
   black: '#484f58',
   red: '#ff7b72',
   green: '#3fb950',
@@ -82,6 +85,7 @@ const TERMINAL_THEME_LIGHT: ITheme = {
   foreground: '#24292f',
   cursor: '#0969da',
   cursorAccent: '#ffffff',
+  selectionBackground: 'rgba(9,105,218,0.1)',
   black: '#24292f',
   red: '#cf222e',
   green: '#116329',
@@ -653,3 +657,4 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
     </div>
   );
 }
+```
