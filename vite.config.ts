@@ -9,6 +9,13 @@ export default defineConfig({
   appType: 'spa',
   server: {
     port: 5210,
+    proxy: {
+      // WebSocket proxy for terminal sessions
+      '/ws': {
+        target: 'ws://localhost:3030',
+        ws: true,
+      },
+    },
   },
   build: {
     // Inject modulepreload hints for dynamically imported chunks
