@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T20:20:33.711Z",
+  "lastUpdatedAt": "2026-04-15T20:20:00.373Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -23,14 +23,14 @@
       "elapsedMs": 341460
     },
     {
-      "storyId": "OCT-016",
-      "title": "Terminal panel — copy/paste, font sizing, fullscreen toggle",
+      "storyId": "OCT-021",
+      "title": "WebSocket security — Origin validation, localhost binding, session token",
       "status": "passed",
-      "startedAt": "2026-04-15T20:18:14.931Z",
-      "finishedAt": "2026-04-15T20:20:33.710Z",
+      "startedAt": "2026-04-15T20:18:16.865Z",
+      "finishedAt": "2026-04-15T20:20:00.372Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 138779
+      "elapsedMs": 103507
     }
   ],
   "failedStories": [
