@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T20:39:11.595Z",
+  "lastUpdatedAt": "2026-04-15T20:36:17.024Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -33,14 +33,14 @@
       "elapsedMs": 160465
     },
     {
-      "storyId": "OCT-019",
-      "title": "Settings integration — terminal session limit and idle timeout config",
+      "storyId": "OCT-035",
+      "title": "Workspace switch — session scope and tab state on workspace change",
       "status": "passed",
-      "startedAt": "2026-04-15T20:33:52.435Z",
-      "finishedAt": "2026-04-15T20:39:11.595Z",
+      "startedAt": "2026-04-15T20:33:52.401Z",
+      "finishedAt": "2026-04-15T20:36:17.024Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 319160
+      "elapsedMs": 144623
     }
   ],
   "failedStories": [
