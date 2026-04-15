@@ -1,4 +1,4 @@
-<<<<<<< HEAD
+```typescript
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -7,6 +7,8 @@ import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { execute } from '../../db/index';
 import * as ptyManager from '../../lib/pty-manager';
+import { resolveVaultProvider } from '../../lib/llm-client';
+import { getDecryptedProviderKey } from '../../lib/vault';
 
 // Mock pty-manager before imports
 jest.mock('../../lib/pty-manager', () => ({
@@ -28,6 +30,10 @@ jest.mock('../../lib/llm-client', () => ({
   resolveVaultProvider: jest.fn().mockReturnValue(null),
   getModelInfo: jest.fn().mockReturnValue(undefined),
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
+}));
+
+jest.mock('../../lib/vault', () => ({
+  getDecryptedProviderKey: jest.fn().mockResolvedValue(null),
 }));
 
 let app: Express;
@@ -85,93 +91,87 @@ describe('POST /api/terminal/sessions', () => {
     expect(res.body.createdAt).toBeDefined();
 
     expect(ptyManager.createSession).toHaveBeenCalledWith(
-      parseInt(WORKSPACE_ID.split('-')[2], 10), // workspaceId as number
+      WORKSPACE_ID,
       tmpDir,
       expect.any(Object), // env
-=======
-/**
- * OCT-024: Terminal route tests — graceful node-pty failure
- */
-
-import request from 'supertest';
-import express from 'express';
-import terminalRouter from '../terminal';
-import { errorHandler } from '../../lib/error-handler';
-
-// Mock dependencies
-jest.mock('../../lib/pty-manager');
-jest.mock('../../db/index');
-
-const mockPtyManager = require('../../lib/pty-manager');
-const mockDb = require('../../db/index');
-
-describe('POST /api/terminal/sessions', () => {
-  let app: express.Application;
-
-  beforeEach(() => {
-    app = express();
-    app.use(express.json());
-    app.use('/api/terminal', terminalRouter);
-    app.use(errorHandler);
-    jest.clearAllMocks();
+      24,
+      80
+    );
   });
 
-  it('returns 503 when node-pty is not available', async () => {
-    // Mock workspace query to succeed
-    mockDb.queryOne.mockResolvedValue({ id: 1, path: '/fake/workspace' });
-
-    // Mock createSession to throw PTY_NOT_AVAILABLE error
-    mockPtyManager.createSession.mockRejectedValue({
+  test('returns 503 when node-pty is not available', async () => {
+    (ptyManager.createSession as jest.Mock).mockRejectedValue({
       code: 'PTY_NOT_AVAILABLE',
       message: 'node-pty native module not loaded. Run: cd backend && npm rebuild node-pty',
     });
 
     const res = await request(app)
       .post('/api/terminal/sessions')
-      .send({ workspaceId: 1, rows: 24, cols: 80 })
-      .expect(503);
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: WORKSPACE_ID, rows: 24, cols: 80 });
 
-    expect(res.body).toMatchObject({
-      error: expect.stringContaining('node-pty native module not loaded'),
-      code: 'SERVICE_UNAVAILABLE',
-    });
+    expect(res.status).toBe(503);
+    expect(res.body.error).toContain('node-pty native module not loaded');
+    expect(res.body.code).toBe('SERVICE_UNAVAILABLE');
   });
 
-  it('returns 404 when workspace does not exist', async () => {
-    mockDb.queryOne.mockResolvedValue(null);
+  test('injects workspace vars, vault key, model, workspace id, and strips Claude nested vars', async () => {
+    (ptyManager.createSession as jest.Mock).mockResolvedValue('session-env');
+    (resolveVaultProvider as jest.Mock).mockReturnValue('openrouter');
+    (getDecryptedProviderKey as jest.Mock).mockResolvedValue('vault-secret');
 
-    const res = await request(app)
-      .post('/api/terminal/sessions')
-      .send({ workspaceId: 999, rows: 24, cols: 80 })
-      .expect(404);
+    process.env.CLAUDECODE = '1';
+    process.env.CLAUDE_CODE_ENTRYPOINT = 'entry';
+    process.env.CLAUDE_AGENT_SDK_VERSION = 'sdk';
+    process.env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING = '1';
+    process.env.RORCA_MODEL = 'openai/old-model';
 
-    expect(res.body).toMatchObject({
-      error: expect.stringContaining('Workspace'),
-      code: 'NOT_FOUND',
-    });
-  });
-
-  it('returns 201 when PTY session is created successfully', async () => {
-    mockDb.queryOne.mockResolvedValue({ id: 1, path: '/fake/workspace' });
-    mockPtyManager.createSession.mockResolvedValue('test-session-id-123');
-
-    const res = await request(app)
-      .post('/api/terminal/sessions')
-      .send({ workspaceId: 1, rows: 24, cols: 80 })
-      .expect(201);
-
-    expect(res.body).toEqual({ sessionId: 'test-session-id-123' });
-    expect(mockPtyManager.createSession).toHaveBeenCalledWith(
-      1,
-      '/fake/workspace',
-      expect.any(Object), // process.env
->>>>>>> feat/rorca-opencode-terminal-OCT-024-1776241347295
-      24,
-      80
+    await execute(
+      `INSERT INTO workspace_env_vars (workspace_id, key, value, updated_at)
+       VALUES ($1, 'RORCA_MODEL', 'openrouter/auto', NOW()),
+              ($1, 'FOO', 'bar', NOW())
+       ON CONFLICT (workspace_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [WORKSPACE_ID]
     );
+
+    const res = await request(app)
+      .post('/api/terminal/sessions')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: WORKSPACE_ID, rows: 24, cols: 80 });
+
+    expect(res.status).toBe(201);
+    const env = (ptyManager.createSession as jest.Mock).mock.calls[0][2];
+    expect(env.FOO).toBe('bar');
+    expect(env.RORCA_WORKSPACE_ID).toBe(WORKSPACE_ID);
+    expect(env.OPENCODE_MODEL).toBe('openrouter/auto');
+    expect(env.OPENROUTER_API_KEY).toBe('vault-secret');
+    expect(env.RORCA_MODEL).toBe('openrouter/auto');
+    expect(env.CLAUDECODE).toBeUndefined();
+    expect(env.CLAUDE_CODE_ENTRYPOINT).toBeUndefined();
+    expect(env.CLAUDE_AGENT_SDK_VERSION).toBeUndefined();
+    expect(env.CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING).toBeUndefined();
   });
 
-<<<<<<< HEAD
+  test('returns 500 with descriptive error when vault key resolution fails', async () => {
+    (resolveVaultProvider as jest.Mock).mockReturnValue('anthropic');
+    (getDecryptedProviderKey as jest.Mock).mockResolvedValue(null);
+
+    await execute(
+      `INSERT INTO workspace_env_vars (workspace_id, key, value, updated_at)
+       VALUES ($1, 'RORCA_MODEL', 'anthropic/claude-sonnet-4-5-20250929', NOW())
+       ON CONFLICT (workspace_id, key) DO UPDATE SET value = EXCLUDED.value, updated_at = NOW()`,
+      [WORKSPACE_ID]
+    );
+
+    const res = await request(app)
+      .post('/api/terminal/sessions')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: WORKSPACE_ID, rows: 24, cols: 80 });
+
+    expect(res.status).toBe(500);
+    expect(String(res.body.error)).toContain('Failed to resolve active vault API key');
+  });
+
   test('returns 404 when workspace does not exist', async () => {
     const res = await request(app)
       .post('/api/terminal/sessions')
@@ -194,6 +194,17 @@ describe('POST /api/terminal/sessions', () => {
     expect(res.status).toBe(201);
     expect(res.body.rows).toBe(24);
     expect(res.body.cols).toBe(80);
+  });
+
+  test('returns 400 when workspaceId is missing', async () => {
+    const res = await request(app)
+      .post('/api/terminal/sessions')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ rows: 24, cols: 80 });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('workspaceId is required');
+    expect(res.body.code).toBe('VALIDATION_ERROR');
   });
 });
 
@@ -313,17 +324,6 @@ describe('PATCH /api/terminal/sessions/:sessionId/resize', () => {
 
     expect(res.status).toBe(404);
     expect(res.body.error).toContain('Session not found');
-=======
-  it('returns 400 when workspaceId is missing', async () => {
-    const res = await request(app)
-      .post('/api/terminal/sessions')
-      .send({ rows: 24, cols: 80 })
-      .expect(400);
-
-    expect(res.body).toMatchObject({
-      error: expect.stringContaining('workspaceId is required'),
-      code: 'VALIDATION_ERROR',
-    });
->>>>>>> feat/rorca-opencode-terminal-OCT-024-1776241347295
   });
 });
+```
