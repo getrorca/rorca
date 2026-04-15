@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T18:35:54.440Z",
+  "lastUpdatedAt": "2026-04-15T19:05:38.614Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -91,6 +91,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 170861
+    },
+    {
+      "storyId": "OCT-029",
+      "title": "xterm.js WebGL renderer — high-throughput output performance",
+      "status": "passed",
+      "startedAt": "2026-04-15T19:01:14.575Z",
+      "finishedAt": "2026-04-15T19:05:38.614Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 264039
     }
   ],
   "failedStories": [],
