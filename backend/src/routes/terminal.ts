@@ -9,7 +9,7 @@ import { NotFoundError, ServiceUnavailableError, ValidationError, TooManyRequest
 import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { broadcastAll } from '../lib/sse-hub';
-import { resolveVaultProvider } from '../lib/llm-client';
+import { resolveVaultProvider, ALL_MODELS, SUPPORTED_MODELS } from '../lib/llm-client';
 import { getDecryptedProviderKey } from '../lib/integration-vault';
 import { injectDirectionStack } from '../lib/terminal-context-injector';
 import { registerTerminalContextCleanup, runTerminalContextCleanup } from '../lib/terminal-context-cleanup';
@@ -99,7 +99,13 @@ const createSessionSchema = z.object({
   workspaceId: z.string().min(1, 'workspaceId is required'),
   rows: z.number().int().positive().default(24),
   cols: z.number().int().positive().default(80),
+  model: z.string().min(1).optional(),
 });
+
+function isSupportedSessionModel(model: string): boolean {
+  return (SUPPORTED_MODELS as readonly string[]).includes(model)
+    || ALL_MODELS.some((entry) => entry.id === model);
+}
 
 const resizeSessionSchema = z.object({
   rows: z.number().int().positive(),
@@ -199,13 +205,17 @@ router.post('/sessions', async (req: Request, res: Response) => {
       throw new NotFoundError('Workspace not found');
     }
 
-    // Resolve workspace model from workspace env, L3 preferred_model, then process env
+    if (body.model && !isSupportedSessionModel(body.model)) {
+      throw new ValidationError('Invalid model');
+    }
+
+    // Resolve workspace model from request override, workspace env, L3 preferred_model, then process env
     const workspaceEnv = await getWorkspaceEnvVars(body.workspaceId);
     const l3Pref = await queryOne<{ preferred_model: string | null }>(
       `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
       [body.workspaceId]
     );
-    const activeModel = workspaceEnv.RORCA_MODEL ?? l3Pref?.preferred_model ?? process.env.RORCA_MODEL ?? '';
+    const activeModel = body.model ?? workspaceEnv.RORCA_MODEL ?? l3Pref?.preferred_model ?? process.env.RORCA_MODEL ?? '';
 
     // Resolve active vault provider key for the model, surfacing failures clearly
     const vaultProvider = activeModel ? resolveVaultProvider(activeModel) : null;
@@ -227,6 +237,7 @@ router.post('/sessions', async (req: Request, res: Response) => {
     const mergedEnv = {
       ...process.env,
       RORCA_WORKSPACE_ID: body.workspaceId,
+      RORCA_MODEL: activeModel,
       OPENCODE_MODEL: activeModel,
       ...workspaceEnv,
       ...vaultEnv,
