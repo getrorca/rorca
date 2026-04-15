@@ -5,7 +5,7 @@ import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
-import { execute } from '../../db/index';
+import { execute, queryOne } from '../../db/index';
 import * as ptyManager from '../../lib/pty-manager';
 import { resolveVaultProvider } from '../../lib/llm-client';
 import { getDecryptedProviderKey } from '../../lib/vault';
@@ -205,6 +205,37 @@ describe('POST /api/terminal/sessions', () => {
     expect(res.status).toBe(400);
     expect(res.body.error).toContain('workspaceId is required');
     expect(res.body.code).toBe('VALIDATION_ERROR');
+  });
+
+  test('persists terminal session row after creation', async () => {
+    const mockSessionId = '11111111-1111-1111-1111-111111111111';
+    (ptyManager.createSession as jest.Mock).mockResolvedValue(mockSessionId);
+
+    const res = await request(app)
+      .post('/api/terminal/sessions')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: WORKSPACE_ID, rows: 24, cols: 80 });
+
+    expect(res.status).toBe(201);
+
+    const row = await queryOne<{
+      session_id: string;
+      workspace_id: string;
+      status: string;
+      rows: number;
+      cols: number;
+    }>(
+      `SELECT session_id, workspace_id, status, rows, cols
+       FROM terminal_sessions
+       WHERE session_id = $1`,
+      [mockSessionId]
+    );
+
+    expect(row).toBeDefined();
+    expect(row?.workspace_id).toBe(WORKSPACE_ID);
+    expect(row?.status).toBe('active');
+    expect(row?.rows).toBe(24);
+    expect(row?.cols).toBe(80);
   });
 });
 

@@ -27,6 +27,7 @@ export interface UseTerminalSessionReturn {
   onExit: (handler: (exitCode: number) => void) => () => void;
   connected: boolean;
   reconnecting: boolean;
+  connectionLost: boolean;
 }
 
 // ─── Constants ────────────────────────────────────────────────────────────────
@@ -40,6 +41,7 @@ const PING_INTERVAL_MS = 30000;
 export function useTerminalSession(sessionId: string | null): UseTerminalSessionReturn {
   const [connected, setConnected] = useState(false);
   const [reconnecting, setReconnecting] = useState(false);
+  const [connectionLost, setConnectionLost] = useState(false);
 
   const wsRef = useRef<WebSocket | null>(null);
   const dataHandlersRef = useRef<Set<(data: string) => void>>(new Set());
@@ -92,8 +94,11 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
     if (!sessionId) {
       setConnected(false);
       setReconnecting(false);
+      setConnectionLost(false);
       return;
     }
+
+    setConnectionLost(false);
 
     let currentWs: WebSocket | null = null;
 
@@ -114,6 +119,7 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
       ws.onopen = () => {
         setConnected(true);
         setReconnecting(false);
+        setConnectionLost(false);
         reconnectCountRef.current = 0;
 
         // Start ping interval
@@ -162,6 +168,9 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
           }, RECONNECT_DELAY_MS);
         } else if (reconnectCountRef.current >= MAX_RECONNECT_ATTEMPTS) {
           setReconnecting(false);
+          if (!manualCloseRef.current) {
+            setConnectionLost(true);
+          }
         }
       };
 
@@ -204,6 +213,7 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
       wsRef.current = null;
       setConnected(false);
       setReconnecting(false);
+      setConnectionLost(false);
     };
   }, [sessionId]);
 
@@ -214,5 +224,6 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
     onExit,
     connected,
     reconnecting,
+    connectionLost,
   };
 }
