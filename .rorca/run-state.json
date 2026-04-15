@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T20:20:55.454Z",
+  "lastUpdatedAt": "2026-04-15T20:33:38.706Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -45,7 +45,44 @@
       "elapsedMs": 185862
     }
   ],
-  "skippedStories": [],
+  "skippedStories": [
+    {
+      "storyId": "OCT-033",
+      "title": "OCT-033",
+      "status": "skipped",
+      "startedAt": "2026-04-15T20:33:36.646Z",
+      "finishedAt": "2026-04-15T20:33:36.646Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-015"
+    },
+    {
+      "storyId": "OCT-040",
+      "title": "OCT-040",
+      "status": "skipped",
+      "startedAt": "2026-04-15T20:33:36.663Z",
+      "finishedAt": "2026-04-15T20:33:36.663Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-015"
+    },
+    {
+      "storyId": "OCT-033",
+      "title": "API key pre-validation before session spawn",
+      "status": "skipped",
+      "startedAt": "2026-04-15T20:33:38.681Z",
+      "finishedAt": "2026-04-15T20:33:38.681Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-015"
+    },
+    {
+      "storyId": "OCT-040",
+      "title": "OpenCode not-installed — auto-retry polling and install progress feedback",
+      "status": "skipped",
+      "startedAt": "2026-04-15T20:33:38.706Z",
+      "finishedAt": "2026-04-15T20:33:38.706Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: OCT-015"
+    }
+  ],
   "currentStory": null,
   "decisions": [],
   "resumedFromStory": null
