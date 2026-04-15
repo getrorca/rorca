@@ -110,6 +110,20 @@ export function createEnvVar(
   });
 }
 
+export function updateEnvVar(
+  workspaceId: string,
+  key: string,
+  body: { value: string; isSecret?: boolean },
+  opts?: ApiOptions,
+): Promise<EnvVar> {
+  return apiFetch(`/api/workspaces/${workspaceId}/env-vars/${encodeURIComponent(key)}`, {
+    method: 'PUT',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+    signal: opts?.signal,
+  });
+}
+
 export function deleteEnvVar(
   workspaceId: string,
   key: string,
