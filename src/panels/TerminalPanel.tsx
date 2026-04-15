@@ -2,11 +2,14 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
   ChevronDown,
+  Clock3,
   Maximize2,
   Minimize2,
   Plus,
+  Trash2,
 } from 'lucide-react';
 import TerminalPane from '../components/TerminalPane';
+import ReadOnlyTerminalPane from '../components/ReadOnlyTerminalPane';
 import ModelPickerPopover from '../components/ModelPickerPopover';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, ApiError } from '../lib/apiFetch';
@@ -36,6 +39,16 @@ interface TerminalSessionResponse {
   createdAt: string;
 }
 
+interface TerminalHistoryRecord {
+  sessionId: string;
+  cwd: string;
+  status: 'active' | 'exited' | 'killed' | string;
+  exitCode: number | null;
+  createdAt: string;
+  exitedAt: string | null;
+  totalOutputBytes: number;
+}
+
 interface DirectionLayersResponse {
   layers: Record<string, DirectionLayer>;
 }
@@ -56,6 +69,28 @@ function isNotInstalledError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 422 && error.code === 'OPENCODE_NOT_INSTALLED';
 }
 
+function formatDuration(createdAt: string, exitedAt: string | null): string {
+  const start = new Date(createdAt).getTime();
+  const end = exitedAt ? new Date(exitedAt).getTime() : Date.now();
+  const diffSeconds = Math.max(0, Math.floor((end - start) / 1000));
+  const minutes = Math.floor(diffSeconds / 60);
+  const seconds = diffSeconds % 60;
+  if (minutes === 0) return `${seconds}s`;
+  return `${minutes}m ${seconds}s`;
+}
+
+function formatBytes(bytes: number): string {
+  if (bytes < 1024) return `${bytes} B`;
+  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
+  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
+}
+
+function getStatusBadgeClass(status: TerminalHistoryRecord['status']): string {
+  if (status === 'active') return 'border-emerald-500/30 bg-emerald-500/10 text-emerald-300';
+  if (status === 'killed') return 'border-rose-500/30 bg-rose-500/10 text-rose-300';
+  return 'border-border bg-surface-200 text-muted';
+}
+
 export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPanelProps) {
   const { workspaceId, selectedWorkspace, workspaces, setWorkspaceId } = useWorkspace();
 
@@ -68,8 +103,14 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [activeModel, setActiveModel] = useState('Select model');
   const [layers, setLayers] = useState<Record<string, DirectionLayer>>({});
   const [isFullscreen, setIsFullscreen] = useState(false);
+  const [historyOpen, setHistoryOpen] = useState(false);
+  const [historyLoading, setHistoryLoading] = useState(false);
+  const [historyClearing, setHistoryClearing] = useState(false);
+  const [historySessions, setHistorySessions] = useState<TerminalHistoryRecord[]>([]);
+  const [selectedHistorySessionId, setSelectedHistorySessionId] = useState<string | null>(null);
 
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
+  const historyDrawerRef = useRef<HTMLDivElement>(null);
   const initialSessionRequestedRef = useRef(false);
   const sessionsRef = useRef<TerminalSessionRecord[]>([]);
 
@@ -79,6 +120,11 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const activeSession = useMemo(
     () => sessions.find((session) => session.sessionId === activeSessionId) ?? null,
     [sessions, activeSessionId],
+  );
+
+  const selectedHistorySession = useMemo(
+    () => historySessions.find((session) => session.sessionId === selectedHistorySessionId) ?? null,
+    [historySessions, selectedHistorySessionId],
   );
 
   useEffect(() => {
@@ -122,6 +168,21 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     }
   }, []);
 
+  const loadHistory = useCallback(async (targetWorkspaceId: string) => {
+    setHistoryLoading(true);
+    try {
+      const res = await apiFetch<{ sessions: TerminalHistoryRecord[] }>(
+        `/api/terminal/sessions/history?workspaceId=${encodeURIComponent(targetWorkspaceId)}&limit=20`
+      );
+      setHistorySessions(res.sessions ?? []);
+      setSelectedHistorySessionId((current) => current && res.sessions.some((s) => s.sessionId === current)
+        ? current
+        : res.sessions[0]?.sessionId ?? null);
+    } finally {
+      setHistoryLoading(false);
+    }
+  }, []);
+
   const createSession = useCallback(async (targetWorkspaceId: string, activate = true) => {
     setCreating(true);
     setError(null);
@@ -134,7 +195,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         body: JSON.stringify({
           workspaceId: targetWorkspaceId,
           rows: mode === 'drawer' ? 20 : 28,
-          cols: 100,
+          cols: 120,
         }),
       });
 
@@ -153,9 +214,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     } catch (err) {
       if (isNotInstalledError(err)) {
         setNotInstalled(true);
-        return;
+      } else {
+        setError('Failed to start session — is OpenCode installed?');
       }
-      setError('Failed to start session — is OpenCode installed?');
     } finally {
       setCreating(false);
     }
@@ -173,49 +234,64 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, [workspaceId, createSession]);
 
   useEffect(() => {
-    const onMouseDown = (event: MouseEvent) => {
-      if (!workspaceMenuRef.current?.contains(event.target as Node)) {
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (workspaceMenuRef.current && !workspaceMenuRef.current.contains(target)) {
         setWorkspaceMenuOpen(false);
+      }
+      if (historyOpen && historyDrawerRef.current && !historyDrawerRef.current.contains(target)) {
+        setHistoryOpen(false);
       }
     };
 
-    if (workspaceMenuOpen) {
-      document.addEventListener('mousedown', onMouseDown);
-    }
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setWorkspaceMenuOpen(false);
+        setHistoryOpen(false);
+      }
+    };
 
-    return () => document.removeEventListener('mousedown', onMouseDown);
-  }, [workspaceMenuOpen]);
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [historyOpen]);
+
+  useEffect(() => {
+    if (!historyOpen || !workspaceId) return;
+    void loadHistory(workspaceId);
+  }, [historyOpen, workspaceId, loadHistory]);
 
   useEffect(() => {
     return () => {
       sessionsRef.current.forEach((session) => {
         void apiFetch(`/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`, {
           method: 'DELETE',
-          silent: true,
         }).catch(() => undefined);
       });
     };
   }, []);
 
-  const handleWorkspaceSwitch = useCallback(async (nextWorkspaceId: string) => {
-    setWorkspaceMenuOpen(false);
+  const handleWorkspaceSelect = useCallback(async (nextWorkspaceId: string) => {
     if (nextWorkspaceId === workspaceId) return;
 
-    await Promise.all(
+    await Promise.allSettled(
       sessionsRef.current.map((session) =>
         apiFetch(`/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`, {
           method: 'DELETE',
-          silent: true,
-        }).catch(() => undefined),
-      ),
+        })
+      )
     );
 
-    setWorkspaceId(nextWorkspaceId);
     setSessions([]);
     setActiveSessionId(null);
-    setError(null);
-    setNotInstalled(false);
+    setHistorySessions([]);
+    setSelectedHistorySessionId(null);
     initialSessionRequestedRef.current = false;
+    setWorkspaceMenuOpen(false);
+    setWorkspaceId(nextWorkspaceId);
     await loadDirections(nextWorkspaceId);
     await createSession(nextWorkspaceId, true);
   }, [workspaceId, setWorkspaceId, loadDirections, createSession]);
@@ -231,10 +307,20 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     )));
   }, []);
 
-  const workspaceLabel = selectedWorkspace?.name ?? 'No workspace';
-  const cwdLabel = activeSession?.cwd ? getBasename(activeSession.cwd) : (selectedWorkspace?.git_path ? getBasename(selectedWorkspace.git_path) : 'workspace');
-  const isActive = Boolean(activeSession && !activeSession.exited && !creating && !error && !notInstalled);
-  const showOverlay = creating || (!activeSessionId && !error && !notInstalled);
+  const handleClearHistory = useCallback(async () => {
+    if (!workspaceId) return;
+    setHistoryClearing(true);
+    try {
+      await apiFetch(`/api/terminal/sessions/history?workspaceId=${encodeURIComponent(workspaceId)}`, {
+        method: 'DELETE',
+      });
+      await loadHistory(workspaceId);
+    } finally {
+      setHistoryClearing(false);
+    }
+  }, [workspaceId, loadHistory]);
+
+  const showOverlay = creating && !activeSession;
 
   return (
     <div className={[
@@ -242,41 +328,47 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       mode === 'drawer' && isFullscreen ? 'fixed inset-0 z-50 h-screen' : 'h-full',
     ].join(' ')}>
       <div className={`flex shrink-0 items-center justify-between border-b border-border px-3 ${headerHeightClass}`}>
-        <div className="min-w-0 flex items-center gap-2.5">
-          <Bot size={14} className="shrink-0 text-accent" />
-          <div className="min-w-0 leading-tight">
-            <div className={`font-mono ${headerTextClass} text-muted`}>OpenCode</div>
-            <div className="flex items-center gap-1.5 text-[10px] text-muted">
-              <span className="truncate">{cwdLabel}</span>
-              <span className={`h-1.5 w-1.5 shrink-0 rounded-full ${isActive ? 'animate-pulse bg-emerald-400' : 'bg-muted/50'}`} />
+        <div className="flex min-w-0 items-center gap-2">
+          <div className="flex h-6 w-6 items-center justify-center rounded-md bg-accent/10 text-accent">
+            <Bot size={14} />
+          </div>
+          <div className="min-w-0">
+            <div className={`font-medium text-[var(--text)] ${headerTextClass}`}>Terminal</div>
+            <div className="text-[10px] text-muted" title={directionTooltip}>
+              {directionEntries.length > 0 ? (
+                <div className="inline-flex items-center gap-1">
+                  <span>✦</span>
+                  <span>{directionEntries.length} Directions</span>
+                </div>
+              ) : (
+                <span>No directions</span>
+              )}
             </div>
           </div>
         </div>
 
-        <div className="ml-3 flex items-center gap-1.5 overflow-x-auto pb-px">
-          <div ref={workspaceMenuRef} className="relative shrink-0">
+        <div className="flex min-w-0 items-center gap-2">
+          <div ref={workspaceMenuRef} className="relative">
             <button
               type="button"
-              onClick={() => setWorkspaceMenuOpen((open) => !open)}
-              className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5"
+              onClick={() => setWorkspaceMenuOpen((prev) => !prev)}
+              className="inline-flex max-w-[180px] items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5"
             >
-              <span className="truncate max-w-[180px]">[Workspace: {workspaceLabel}</span>
-              <ChevronDown size={12} className={`transition-transform ${workspaceMenuOpen ? 'rotate-180' : ''}`} />
-              <span>]</span>
+              <span className="truncate">{selectedWorkspace?.label ?? 'Select workspace'}</span>
+              <ChevronDown size={12} />
             </button>
             {workspaceMenuOpen && (
-              <div className="absolute right-0 top-[calc(100%+4px)] z-20 max-h-64 min-w-[220px] overflow-y-auto rounded-md border border-border bg-[var(--panel)] shadow-lg">
+              <div className="absolute right-0 top-full z-20 mt-1 min-w-[220px] rounded-md border border-border bg-panel p-1 shadow-lg">
                 {workspaces.map((workspace) => {
                   const active = workspace.id === workspaceId;
                   return (
                     <button
                       key={workspace.id}
                       type="button"
-                      onClick={() => { void handleWorkspaceSwitch(workspace.id); }}
-                      className={`flex w-full items-center justify-between gap-3 px-3 py-2 text-left text-xs transition-colors ${active ? 'bg-accent/10 text-[var(--text)]' : 'text-muted hover:bg-accent/5 hover:text-[var(--text)]'}`}
+                      onClick={() => { void handleWorkspaceSelect(workspace.id); }}
+                      className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-[11px] ${active ? 'bg-accent/10 text-[var(--text)]' : 'text-muted hover:bg-accent/5 hover:text-[var(--text)]'}`}
                     >
-                      <span className="truncate">{workspace.name}</span>
-                      {active && <span className="text-[10px] text-accent">Active</span>}
+                      <span className="truncate">{workspace.label}</span>
                     </button>
                   );
                 })}
@@ -284,21 +376,22 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             )}
           </div>
 
-          <div className="shrink-0">
-            <ModelPickerPopover
-              engine="opencode"
-              value={activeModel}
-              onChange={setActiveModel}
-              workspaceId={workspaceId ?? undefined}
-            />
-          </div>
+          <ModelPickerPopover
+            workspaceId={workspaceId ?? undefined}
+            value={activeModel}
+            onChange={setActiveModel}
+            compact
+          />
 
-          <div className="shrink-0" title={directionTooltip}>
-            <div className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-muted">
-              <span>✦</span>
-              <span>{directionEntries.length} Directions</span>
-            </div>
-          </div>
+          <button
+            type="button"
+            onClick={() => setHistoryOpen((prev) => !prev)}
+            disabled={!workspaceId}
+            className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            <Clock3 size={12} />
+            <span>History</span>
+          </button>
 
           <button
             type="button"
@@ -369,12 +462,23 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       )}
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        {(activeSessionId && !error && !notInstalled) ? (
+        {(activeSessionId && !error && !notInstalled && !selectedHistorySession) ? (
           <TerminalPane
             sessionId={activeSessionId}
             className="h-full"
             onExit={() => handleSessionExit(activeSessionId)}
           />
+        ) : selectedHistorySession ? (
+          <div className="flex h-full min-h-0 flex-col">
+            <ReadOnlyTerminalPane
+              key={selectedHistorySession.sessionId}
+              sessionId={selectedHistorySession.sessionId}
+              className="flex-1"
+            />
+            <div className="border-t border-border px-3 py-2 text-xs text-muted">
+              Read-only — session ended
+            </div>
+          </div>
         ) : (
           <div className="h-full w-full bg-[var(--terminal-bg)]" />
         )}
@@ -410,6 +514,64 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
               <div className="mt-1 text-xs text-muted">
                 Install `opencode` to use the terminal session panel.
               </div>
+            </div>
+          </div>
+        )}
+
+        {historyOpen && (
+          <div
+            ref={historyDrawerRef}
+            className="absolute top-0 right-0 bottom-0 z-10 flex w-80 flex-col border-l border-border bg-panel"
+          >
+            <div className="flex items-center justify-between border-b border-border px-3 py-2">
+              <div>
+                <div className="text-sm font-medium text-[var(--text)]">History</div>
+                <div className="text-[11px] text-muted">Recent terminal sessions</div>
+              </div>
+            </div>
+
+            <div className="min-h-0 flex-1 overflow-y-auto px-2 py-2">
+              {historyLoading ? (
+                <div className="px-2 py-3 text-xs text-muted">Loading history...</div>
+              ) : historySessions.length === 0 ? (
+                <div className="px-2 py-3 text-xs text-muted">No past sessions yet.</div>
+              ) : (
+                <div className="space-y-2">
+                  {historySessions.map((session) => {
+                    const isSelected = session.sessionId === selectedHistorySessionId;
+                    return (
+                      <button
+                        key={session.sessionId}
+                        type="button"
+                        onClick={() => setSelectedHistorySessionId(session.sessionId)}
+                        className={`w-full rounded-lg border px-3 py-2 text-left transition-colors ${isSelected ? 'border-accent bg-accent/10' : 'border-border hover:border-accent/30 hover:bg-accent/5'}`}
+                      >
+                        <div className="flex items-center justify-between gap-2">
+                          <span className="font-mono text-xs text-[var(--text)]">{session.sessionId.slice(0, 8)}</span>
+                          <span className={`rounded-full border px-2 py-0.5 text-[10px] capitalize ${getStatusBadgeClass(session.status)}`}>{session.status}</span>
+                        </div>
+                        <div className="mt-1 truncate text-xs text-[var(--text)]">{getBasename(session.cwd)}</div>
+                        <div className="mt-2 flex items-center justify-between text-[10px] text-muted">
+                          <span>{formatDuration(session.createdAt, session.exitedAt)}</span>
+                          <span>{formatBytes(session.totalOutputBytes)}</span>
+                        </div>
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
+
+            <div className="border-t border-border p-2">
+              <button
+                type="button"
+                onClick={() => { void handleClearHistory(); }}
+                disabled={!workspaceId || historyClearing}
+                className="flex w-full items-center justify-center gap-2 rounded border border-border px-3 py-2 text-xs text-[var(--text)] hover:border-accent/40 hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-50"
+              >
+                <Trash2 size={12} />
+                <span>{historyClearing ? 'Clearing...' : 'Clear History'}</span>
+              </button>
             </div>
           </div>
         )}
