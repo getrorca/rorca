@@ -67,7 +67,7 @@ import fileWatchRouter from './routes/file-watch';
 import { errorHandler } from './lib/error-handler';
 import { csrfProtection } from './lib/csrf';
 import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
-import { queryOne } from './db/index';
+import { execute, queryOne } from './db/index';
 import runQueueRouter from './routes/run-queue';
 import configRouter from './routes/config';
 import copilotRouter from './routes/copilot';
@@ -516,6 +516,11 @@ if (process.env.NODE_ENV !== 'test') {
 
   const httpServer = app.listen(PORT, () => {
     logger.info(`Rorca backend listening on port ${PORT}`);
+    execute(
+      `UPDATE terminal_sessions
+       SET status = 'killed', exited_at = NOW()
+       WHERE status = 'active'`
+    ).catch(err => logger.error({ err }, '[terminal] Startup cleanup failed'));
     // OC-015: Clean up orphan runs (stale status='running' from crashed backend)
     cleanupOrphanRuns();
     startScheduler();
