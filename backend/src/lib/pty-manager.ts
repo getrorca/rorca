@@ -1,9 +1,11 @@
-
 // ─── OpenCode PTY Session Manager ───────────────────────────────────────────
 // OCT-001: Manages persistent PTY sessions for OpenCode terminal UI.
 // Each session is an isolated opencode process with its own workspace context.
 
 import { randomUUID } from 'crypto';
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 import { WebSocket } from 'ws';
 import { detectOpenCode } from './opencode-detector';
 import { execute, queryOne, transaction } from '../db/index';
@@ -48,9 +50,15 @@ export interface PtySession {
   totalOutputBytes: number;
   sockets: Set<WebSocket>;
   shutdownNotified: boolean;
-  // OCT-030: Shell integration timing
   commandStartTime: number | null;
   shellIntegrationCleanup: (() => void) | null;
+}
+
+export interface ShellEventMessage {
+  type: 'shell_event';
+  event: 'command_end';
+  exitCode: number;
+  durationMs: number;
 }
 
 const sessions = new Map<string, PtySession>();
@@ -245,13 +253,13 @@ export async function createSession(
   const cleanEnv = { ...env };
   CLAUDE_ENV_VARS.forEach((key) => delete cleanEnv[key]);
 
-  // OCT-030: Prepare shell integration env vars and RC file overrides
-  const { env: shellEnv, cleanupFn: shellCleanup } = prepareShellIntegration(cleanEnv);
-
   const existingMax = await queryOne<{ max_seq: number | null }>(
     'SELECT MAX(sequence) AS max_seq FROM terminal_output_chunks WHERE session_id = $1',
     [sessionId]
   );
+
+  // OCT-030: Prepare shell integration env vars and RC file overrides
+  const { env: shellEnv, cleanupFn: shellCleanup } = prepareShellIntegration(cleanEnv);
 
   // OCT-030: Detect shell and pass --rcfile for bash
   const shellPath = shellEnv.SHELL || process.env.SHELL || '/bin/bash';
@@ -288,7 +296,6 @@ export async function createSession(
     totalOutputBytes: 0,
     sockets: new Set<WebSocket>(),
     shutdownNotified: false,
-    // OCT-030: Shell integration timing
     commandStartTime: null,
     shellIntegrationCleanup: shellCleanup,
   };
@@ -437,6 +444,25 @@ export function getSession(sessionId: string): PtySession | undefined {
   return sessions.get(sessionId);
 }
 
+export function processSessionOutput(sessionId: string, chunk: string): { cleanData: string; shellEvents: ShellEventMessage[] } {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    return { cleanData: chunk, shellEvents: [] };
+  }
+  const { stripped, events } = parseOsc133(chunk);
+  return {
+    cleanData: stripped,
+    shellEvents: events
+      .filter((e): e is ShellEvent & { type: 'command_end' } => e.type === 'command_end')
+      .map((e) => ({
+        type: 'shell_event',
+        event: 'command_end',
+        exitCode: e.exitCode,
+        durationMs: session.commandStartTime !== null ? Date.now() - session.commandStartTime : 0,
+      })),
+  };
+}
+
 export function activeSessions(): PtySession[] {
   return Array.from(sessions.values());
 }
@@ -546,4 +572,3 @@ setInterval(() => {
 logger.info(
   `[pty-manager] Initialized with ${IDLE_TIMEOUT_MS / 1000}s idle timeout, cleanup every ${CLEANUP_INTERVAL_MS / 1000}s`
 );
-
