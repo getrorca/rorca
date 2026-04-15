@@ -515,9 +515,10 @@ if (process.env.NODE_ENV !== 'test') {
     }
   })();
 
-  // OCT-021: Bind HTTP server to secure host (127.0.0.1 by default, 0.0.0.0 for Docker)
-  // RORCA_BIND_HOST env var can override (e.g., '0.0.0.0' for cloud deployments)
-  const bindHost = process.env.RORCA_BIND_HOST || '127.0.0.1';
+  // OCT-021: Bind HTTP server to loopback by default in local mode.
+  // This reduces exposure of the unauthenticated local API/WebSocket surface; cloud/Docker
+  // deployments can opt in to broader exposure with RORCA_BIND_HOST=0.0.0.0.
+  const bindHost = process.env.RORCA_BIND_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
   const httpServer = app.listen(PORT, bindHost, () => {
     logger.info(`Rorca backend listening on ${bindHost}:${PORT}`);
     execute(
@@ -576,13 +577,14 @@ if (process.env.NODE_ENV !== 'test') {
     },
   });
 
-  wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
-    // OCT-021: Add security headers to WebSocket upgrade response
-    if (req.socket && 'setHeader' in req.socket) {
-      (req.socket as any).setHeader('X-Content-Type-Options', 'nosniff');
-      (req.socket as any).setHeader('X-Frame-Options', 'DENY');
+  httpServer.on('headers', (headers, req) => {
+    if (req.url?.startsWith('/ws/terminal')) {
+      headers.push('X-Content-Type-Options: nosniff');
+      headers.push('X-Frame-Options: DENY');
     }
+  });
 
+  wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
     // OCT-021: Extract and validate wsToken (short-lived connection token)
     const url = new URL(req.url || '', `http://${req.headers.host}`);
     const wsToken = url.searchParams.get('wsToken');
