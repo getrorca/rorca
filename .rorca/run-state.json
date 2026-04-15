@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T19:52:28.429Z",
+  "lastUpdatedAt": "2026-04-15T20:21:50.008Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -21,6 +21,16 @@
       "finishedAt": "2026-04-15T19:52:28.428Z",
       "agentType": "claude",
       "elapsedMs": 341460
+    },
+    {
+      "storyId": "OCT-037",
+      "title": "Per-session model picker — change model without affecting global config",
+      "status": "passed",
+      "startedAt": "2026-04-15T20:18:16.274Z",
+      "finishedAt": "2026-04-15T20:21:50.008Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 213734
     }
   ],
   "failedStories": [

@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
+  Check,
   ChevronDown,
   Clock3,
   Maximize2,
@@ -10,15 +11,15 @@ import {
   X,
   TerminalSquare,
   Type,
+  Search,
 } from 'lucide-react';
 import TerminalPane from '../components/TerminalPane';
 import ReadOnlyTerminalPane from '../components/ReadOnlyTerminalPane';
-import ModelPickerPopover from '../components/ModelPickerPopover';
 import Tooltip from '../components/Tooltip';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, ApiError } from '../lib/apiFetch';
-import { getAllLayers } from '../api/direction';
-import type { DirectionLayer } from '../api/types';
+import { getAllLayers, listModels } from '../api/direction';
+import type { DirectionLayer, DirectionModel } from '../api/types';
 import { useNavigate } from 'react-router-dom';
 
 type TerminalMode = 'panel' | 'drawer';
@@ -60,6 +61,11 @@ interface TerminalHistoryRecord {
 
 interface DirectionLayersResponse {
   layers: Record<string, DirectionLayer>;
+}
+
+interface AgentConfigResponse {
+  agentType: 'claude' | 'opencode' | 'codex';
+  agentModel: string | null;
 }
 
 const LAYER_KEYS = ['l1', 'l2', 'l3', 'l4', 'l5'] as const;
@@ -116,7 +122,13 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [error, setError] = useState<string | null>(null);
   const [notInstalled, setNotInstalled] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
-  const [activeModel, setActiveModel] = useState('Select model');
+  const [agentType, setAgentType] = useState<'claude' | 'opencode' | 'codex'>('claude');
+  const [defaultModel, setDefaultModel] = useState('Select model');
+  const [availableModels, setAvailableModels] = useState<DirectionModel[]>([]);
+  const [modelPopoverOpen, setModelPopoverOpen] = useState(false);
+  const [modelQuery, setModelQuery] = useState('');
+  const [sessionModels, setSessionModels] = useState<Record<string, string>>({});
+  const [restartingSession, setRestartingSession] = useState(false);
   const [layers, setLayers] = useState<Record<string, DirectionLayer>>({});
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -143,6 +155,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const historyDrawerRef = useRef<HTMLDivElement>(null);
+  const modelPopoverRef = useRef<HTMLDivElement>(null);
   const initialSessionRequestedRef = useRef(false);
   const sessionsRef = useRef<TerminalSessionRecord[]>([]);
   const nextLabelNumRef = useRef(1);
@@ -159,6 +172,19 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     () => historySessions.find((session) => session.sessionId === selectedHistorySessionId) ?? null,
     [historySessions, selectedHistorySessionId],
   );
+
+  const activeSessionModel = activeSessionId ? sessionModels[activeSessionId] : undefined;
+  const displayedModel = activeSessionModel ?? defaultModel;
+
+  const filteredModels = useMemo(() => {
+    const query = modelQuery.trim().toLowerCase();
+    if (!query) return availableModels;
+    return availableModels.filter((model) =>
+      model.id.toLowerCase().includes(query) ||
+      model.provider.toLowerCase().includes(query) ||
+      model.name.toLowerCase().includes(query)
+    );
+  }, [availableModels, modelQuery]);
 
   useEffect(() => {
     sessionsRef.current = sessions;
@@ -184,7 +210,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         const raw = layers[key]?.contentYaml?.trim() ?? '';
         return raw ? { key, label: `L${index + 1}`, summary: summarizeLayer(raw) } : null;
       })
-      .filter((entry): entry is { key: string; label: string; summary: string } => entry !== null);
+      .filter((entry): entry is { key: typeof LAYER_KEYS[number]; label: string; summary: string } => entry !== null);
   }, [layers]);
 
   const directionTooltip = useMemo(() => {
@@ -198,6 +224,20 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       setLayers(res.layers ?? {});
     } catch {
       setLayers({});
+    }
+  }, []);
+
+  const loadModelState = useCallback(async (nextWorkspaceId: string) => {
+    try {
+      const [configRes, modelsRes] = await Promise.all([
+        apiFetch<AgentConfigResponse>('/api/config'),
+        listModels(),
+      ]);
+      setAgentType(configRes.agentType);
+      setDefaultModel(configRes.agentModel ?? modelsRes.models[0]?.id ?? 'Select model');
+      setAvailableModels(modelsRes.models ?? []);
+    } catch {
+      setAvailableModels([]);
     }
   }, []);
 
@@ -216,7 +256,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     }
   }, []);
 
-  const createSession = useCallback(async (targetWorkspaceId: string, activate = true) => {
+  const createSession = useCallback(async (targetWorkspaceId: string, activate = true, model?: string) => {
     setCreating(true);
     setError(null);
     setNotInstalled(false);
@@ -229,6 +269,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
           workspaceId: targetWorkspaceId,
           rows: mode === 'drawer' ? 20 : 28,
           cols: 120,
+          ...(model ? { model } : {}),
         }),
       });
 
@@ -247,6 +288,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       };
 
       setSessions((prev) => [...prev, nextSession]);
+      if (model) {
+        setSessionModels((prev) => ({ ...prev, [res.sessionId]: model }));
+      }
       if (activate) {
         setActiveSessionId(res.sessionId);
       }
@@ -264,7 +308,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   useEffect(() => {
     if (!workspaceId) return;
     loadDirections(workspaceId);
-  }, [workspaceId, loadDirections]);
+    void loadModelState(workspaceId);
+  }, [workspaceId, loadDirections, loadModelState]);
 
   useEffect(() => {
     if (!workspaceId || initialSessionRequestedRef.current) return;
@@ -278,6 +323,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       if (workspaceMenuRef.current && !workspaceMenuRef.current.contains(target)) {
         setWorkspaceMenuOpen(false);
       }
+      if (modelPopoverRef.current && !modelPopoverRef.current.contains(target)) {
+        setModelPopoverOpen(false);
+      }
       if (historyOpen && historyDrawerRef.current && !historyDrawerRef.current.contains(target)) {
         setHistoryOpen(false);
       }
@@ -286,6 +334,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     const handleKeyDown = (event: KeyboardEvent) => {
       if (event.key === 'Escape') {
         setWorkspaceMenuOpen(false);
+        setModelPopoverOpen(false);
         setHistoryOpen(false);
       }
     };
@@ -328,6 +377,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     setActiveSessionId(null);
     setHistorySessions([]);
     setSelectedHistorySessionId(null);
+    setSessionModels({});
     initialSessionRequestedRef.current = false;
     nextLabelNumRef.current = 1;
     setWorkspaceMenuOpen(false);
@@ -338,8 +388,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
   const handleNewSession = useCallback(async () => {
     if (!workspaceId) return;
-    await createSession(workspaceId, true);
-  }, [workspaceId, createSession]);
+    await createSession(workspaceId, true, activeSessionModel);
+  }, [workspaceId, createSession, activeSessionModel]);
 
   useEffect(() => {
     const handleTerminalNewSession = () => {
@@ -416,7 +466,31 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
       return filtered;
     });
+    setSessionModels((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
   }, [activeSessionId]);
+
+  const handleModelSelect = useCallback((model: string) => {
+    if (!activeSessionId) return;
+    setSessionModels((prev) => ({ ...prev, [activeSessionId]: model }));
+    setModelPopoverOpen(false);
+    setModelQuery('');
+  }, [activeSessionId]);
+
+  const handleRestartWithModel = useCallback(async () => {
+    if (!workspaceId || !activeSessionId) return;
+    const model = sessionModels[activeSessionId] ?? defaultModel;
+    setRestartingSession(true);
+    try {
+      await handleCloseSession(activeSessionId);
+      await createSession(workspaceId, true, model);
+    } finally {
+      setRestartingSession(false);
+    }
+  }, [workspaceId, activeSessionId, sessionModels, defaultModel, handleCloseSession, createSession]);
 
   const handleClearHistory = useCallback(async () => {
     if (!workspaceId) return;
@@ -485,7 +559,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
               onClick={() => setWorkspaceMenuOpen((prev) => !prev)}
               className="inline-flex max-w-[180px] items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5"
             >
-              <span className="truncate">{selectedWorkspace?.label ?? 'Select workspace'}</span>
+              <span className="truncate">{selectedWorkspace?.name ?? 'Select workspace'}</span>
               <ChevronDown size={12} />
             </button>
             {workspaceMenuOpen && (
@@ -499,7 +573,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
                       onClick={() => { void handleWorkspaceSelect(workspace.id); }}
                       className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-[11px] ${active ? 'bg-accent/10 text-[var(--text)]' : 'text-muted hover:bg-accent/5 hover:text-[var(--text)]'}`}
                     >
-                      <span className="truncate">{workspace.label}</span>
+                      <span className="truncate">{workspace.name}</span>
                     </button>
                   );
                 })}
@@ -507,12 +581,65 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             )}
           </div>
 
-          <ModelPickerPopover
-            workspaceId={workspaceId ?? undefined}
-            value={activeModel}
-            onChange={setActiveModel}
-            compact
-          />
+          {agentType === 'opencode' && (
+            <div ref={modelPopoverRef} className="relative">
+              <button
+                type="button"
+                onClick={() => setModelPopoverOpen((prev) => !prev)}
+                className="inline-flex max-w-[220px] items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5"
+              >
+                <span className="truncate">{displayedModel}</span>
+                <ChevronDown size={12} />
+              </button>
+              {activeSession && (
+                <div className="mt-1 text-right text-[10px] italic text-muted/70">Takes effect on new session</div>
+              )}
+              {activeSession && activeSessionModel && (
+                <div className="mt-1 flex justify-end">
+                  <button
+                    type="button"
+                    onClick={() => { void handleRestartWithModel(); }}
+                    disabled={restartingSession}
+                    className="rounded border border-border px-2 py-0.5 text-[11px] text-muted hover:text-[var(--text)] disabled:cursor-not-allowed disabled:opacity-50"
+                  >
+                    {restartingSession ? 'Restarting...' : 'Restart with this model'}
+                  </button>
+                </div>
+              )}
+              {modelPopoverOpen && (
+                <div className="absolute top-[44px] right-2 z-50 w-64 rounded-lg border border-border bg-panel p-2 shadow-lg">
+                  <div className="mb-2 text-[11px] font-medium text-muted">Session model</div>
+                  <div className="relative mb-2">
+                    <Search size={12} className="pointer-events-none absolute left-2 top-1.5 text-muted" />
+                    <input
+                      value={modelQuery}
+                      onChange={(e) => setModelQuery(e.target.value)}
+                      placeholder="Filter models..."
+                      className="w-full rounded border border-border bg-transparent py-1 pr-2 pl-6 text-[11px] text-[var(--text)] outline-none placeholder:text-muted"
+                    />
+                  </div>
+                  <div className="max-h-48 overflow-y-auto">
+                    {filteredModels.map((model) => {
+                      const providerPrefix = model.id.includes('/') ? model.id.split('/')[0] : model.provider;
+                      const selected = model.id === displayedModel;
+                      return (
+                        <button
+                          key={model.id}
+                          type="button"
+                          onClick={() => handleModelSelect(model.id)}
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-accent/5"
+                        >
+                          <span className="rounded border border-border px-1.5 py-0.5 text-[10px] text-muted">{providerPrefix}</span>
+                          <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--text)]">{model.name}</span>
+                          {selected && <Check size={12} className="shrink-0 text-accent" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="flex shrink-0 items-center gap-0.5 rounded border border-border">
             <Tooltip content="Decrease font size">

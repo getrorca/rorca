@@ -14,6 +14,7 @@ import { getDecryptedProviderKey } from '../lib/vault';
 import { injectDirectionStack } from '../lib/terminal-context-injector';
 import { registerTerminalContextCleanup, runTerminalContextCleanup } from '../lib/terminal-context-cleanup';
 import { detectOpenCode } from '../lib/opencode-detector';
+import { getActiveAgentType } from './config';
 
 const router = Router();
 
@@ -99,6 +100,7 @@ const createSessionSchema = z.object({
   workspaceId: z.string().min(1, 'workspaceId is required'),
   rows: z.number().int().positive().default(24),
   cols: z.number().int().positive().default(80),
+  model: z.string().min(1).optional(),
 });
 
 const resizeSessionSchema = z.object({
@@ -142,6 +144,9 @@ const historyQuerySchema = z.object({
  *                 type: integer
  *                 description: Terminal width in columns
  *                 default: 80
+ *               model:
+ *                 type: string
+ *                 description: Optional OpenCode model override for this terminal session only
  *     responses:
  *       201:
  *         description: PTY session created successfully
@@ -179,6 +184,11 @@ router.post('/sessions', async (req: Request, res: Response) => {
   try {
     const body = validateBody(createSessionSchema, req.body);
 
+    const agentType = getActiveAgentType();
+    if (body.model && agentType !== 'opencode') {
+      throw new ValidationError('Session model override is only supported for OpenCode sessions');
+    }
+
     // OCT-015: Check if OpenCode is installed before creating session
     const opencodeStatus = detectOpenCode();
     if (!opencodeStatus.opencodeInstalled) {
@@ -205,7 +215,23 @@ router.post('/sessions', async (req: Request, res: Response) => {
       `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
       [body.workspaceId]
     );
-    const activeModel = workspaceEnv.RORCA_MODEL ?? l3Pref?.preferred_model ?? process.env.RORCA_MODEL ?? '';
+    const defaultModel = workspaceEnv.RORCA_MODEL ?? l3Pref?.preferred_model ?? process.env.RORCA_MODEL ?? '';
+
+    let activeModel = defaultModel;
+    if (body.model) {
+      const supportedModels = await fetch(`http://localhost:${process.env.PORT || '3030'}/api/direction/models`)
+        .then(async response => {
+          if (!response.ok) throw new Error(`Failed to fetch models: ${response.status}`);
+          const data = await response.json() as { models?: Array<{ id: string }> };
+          return new Set((data.models ?? []).map(model => model.id));
+        });
+
+      if (!supportedModels.has(body.model)) {
+        throw new ValidationError('Invalid session model', { model: 'Unsupported model' });
+      }
+
+      activeModel = body.model;
+    }
 
     // Resolve active vault provider key for the model, surfacing failures clearly
     const vaultProvider = activeModel ? resolveVaultProvider(activeModel) : null;
