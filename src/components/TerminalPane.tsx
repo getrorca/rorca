@@ -17,6 +17,8 @@ export interface TerminalPaneProps {
   onExit?: (exitCode: number) => void;
   onSessionLost?: () => void;
   onInput?: (data: string) => void;
+  onTitleChange?: (title: string) => void;
+  onBell?: () => void;
   className?: string;
   fontSize?: number;
 }
@@ -181,7 +183,7 @@ function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): IL
   };
 }
 
-export default function TerminalPane({ sessionId, wsToken, visible = true, onExit, onSessionLost, onInput, className, fontSize = 13 }: TerminalPaneProps) {
+export default function TerminalPane({ sessionId, wsToken, visible = true, onExit, onSessionLost, onInput, onTitleChange, onBell, className, fontSize = 13 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -202,7 +204,7 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
   const showRendererBadge = tab === 'developer';
   const currentTheme = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
   const bannerWrittenRef = useRef(false);
-  const { onData, onBanner, onShellEvent, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId, wsToken);
+  const { title, onData, onBanner, onShellEvent, onBell: onBellEvent, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId, wsToken);
 
   const writeCommandBadge = useCallback((exitCode: number, durationMs: number) => {
     const terminal = terminalRef.current;
@@ -587,6 +589,18 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
 
     return unsubscribe;
   }, [onSessionExit, onExit]);
+
+  useEffect(() => {
+    onTitleChange?.(title);
+  }, [title, onTitleChange]);
+
+  useEffect(() => {
+    const unsubscribe = onBellEvent(() => {
+      onBell?.();
+    });
+
+    return unsubscribe;
+  }, [onBellEvent, onBell]);
 
   return (
     <div className={`relative w-full h-full ${className ?? ''}`}>
