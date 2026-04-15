@@ -11,6 +11,7 @@ import '@xterm/xterm/css/xterm.css';
 export interface TerminalPaneProps {
   sessionId: string;
   onExit?: (exitCode: number) => void;
+  onSessionLost?: () => void;
   className?: string;
 }
 
@@ -79,7 +80,7 @@ const TERMINAL_THEME_LIGHT: ITheme = {
 
 // ─── Component ────────────────────────────────────────────────────────────────
 
-export default function TerminalPane({ sessionId, onExit, className }: TerminalPaneProps) {
+export default function TerminalPane({ sessionId, onExit, onSessionLost, className }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -89,7 +90,7 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
 
   const currentTheme = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
 
-  const { onData, sendInput, sendResize, reconnecting, onExit: onSessionExit } = useTerminalSession(sessionId);
+  const { onData, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId);
 
   // ─── Terminal initialization ──────────────────────────────────────────────────
 
@@ -259,6 +260,23 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
           <div className="flex items-center gap-2 text-sm text-white">
             <div className="w-3 h-3 border-2 border-white/20 border-t-white rounded-full animate-spin" />
             <span>Reconnecting...</span>
+          </div>
+        </div>
+      )}
+
+      {connectionLost && (
+        <div className="absolute inset-0 flex items-center justify-center bg-black/70">
+          <div className="flex max-w-sm flex-col items-center gap-4 px-6 text-center">
+            <p className="text-sm font-medium text-white">
+              Backend connection lost. Terminal session ended.
+            </p>
+            <button
+              type="button"
+              onClick={() => onSessionLost?.()}
+              className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-black transition hover:opacity-90"
+            >
+              Start New Session
+            </button>
           </div>
         </div>
       )}
