@@ -9,7 +9,7 @@ import { logger } from './logger';
 
 export interface PtySession {
   sessionId: string;
-  workspaceId: number;
+  workspaceId: string;
   ptyProcess: IPty;
   createdAt: Date;
   lastActivityAt: Date;
@@ -38,7 +38,7 @@ const CLAUDE_ENV_VARS = [
  * Returns the unique session ID.
  */
 export async function createSession(
-  workspaceId: number,
+  workspaceId: string,
   cwd: string,
   env: Record<string, string>,
   rows: number,
@@ -144,6 +144,22 @@ export function getSession(sessionId: string): PtySession | undefined {
  */
 export function activeSessions(): PtySession[] {
   return Array.from(sessions.values());
+}
+
+export function killSessionsForWorkspace(workspaceId: string): void {
+  const sessionIds = activeSessions()
+    .filter((session) => session.workspaceId === workspaceId)
+    .map((session) => session.sessionId);
+
+  for (const sessionId of sessionIds) {
+    try {
+      killSession(sessionId);
+    } catch (error) {
+      logger.warn(
+        `[pty-manager] Failed to kill session ${sessionId} for workspace ${workspaceId}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
 }
 
 /**

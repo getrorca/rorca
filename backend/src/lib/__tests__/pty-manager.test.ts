@@ -31,7 +31,7 @@ describe('pty-manager', () => {
       });
 
       await expect(
-        ptyManager.createSession(1, '/tmp', {}, 24, 80)
+        ptyManager.createSession('1', '/tmp', {}, 24, 80)
       ).rejects.toThrow('opencode binary not found');
     });
 
@@ -43,7 +43,7 @@ describe('pty-manager', () => {
         opencodeBinPath: '/usr/local/bin/opencode',
       });
 
-      const sessionId = await ptyManager.createSession(1, '/workspace', {}, 30, 120);
+      const sessionId = await ptyManager.createSession('1', '/workspace', {}, 30, 120);
 
       expect(sessionId).toBeTruthy();
       expect(nodePty.spawn).toHaveBeenCalledWith(
@@ -76,7 +76,7 @@ describe('pty-manager', () => {
         opencodeBinPath: '/usr/local/bin/opencode',
       });
 
-      const sessionId = await ptyManager.createSession(1, '/tmp', {}, 24, 80);
+      const sessionId = await ptyManager.createSession('1', '/tmp', {}, 24, 80);
       ptyManager.resizeSession(sessionId, 40, 100);
 
       expect(mockResize).toHaveBeenCalledWith(100, 40); // cols, rows
@@ -100,7 +100,7 @@ describe('pty-manager', () => {
         opencodeBinPath: '/usr/local/bin/opencode',
       });
 
-      const sessionId = await ptyManager.createSession(1, '/tmp', {}, 24, 80);
+      const sessionId = await ptyManager.createSession('1', '/tmp', {}, 24, 80);
       expect(ptyManager.getSession(sessionId)).toBeDefined();
 
       ptyManager.killSession(sessionId);
@@ -126,13 +126,48 @@ describe('pty-manager', () => {
         opencodeBinPath: '/usr/local/bin/opencode',
       });
 
-      const sessionId1 = await ptyManager.createSession(1, '/tmp', {}, 24, 80);
-      const sessionId2 = await ptyManager.createSession(2, '/tmp', {}, 24, 80);
+      const sessionId1 = await ptyManager.createSession('1', '/tmp', {}, 24, 80);
+      const sessionId2 = await ptyManager.createSession('2', '/tmp', {}, 24, 80);
 
       const active = ptyManager.activeSessions();
       expect(active).toHaveLength(2);
       expect(active.map((s) => s.sessionId)).toContain(sessionId1);
       expect(active.map((s) => s.sessionId)).toContain(sessionId2);
     });
+  });
+});
+
+describe('pty-manager killSessionsForWorkspace helper', () => {
+  it('kills only matching workspace sessions', async () => {
+    const nodePty = require('node-pty');
+    nodePty.spawn.mockReturnValue({
+      onData: jest.fn(),
+      onExit: jest.fn(),
+      resize: jest.fn(),
+      kill: jest.fn(),
+    });
+
+    (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
+      opencodeInstalled: true,
+      opencodeVersion: '0.1.0',
+      opencodeBinPath: '/usr/local/bin/opencode',
+    });
+
+    const existing = ptyManager.activeSessions();
+    existing.forEach((session) => ptyManager.killSession(session.sessionId));
+
+    const sessionId1 = await ptyManager.createSession('ws-a', '/tmp', {}, 24, 80);
+    const sessionId2 = await ptyManager.createSession('ws-b', '/tmp', {}, 24, 80);
+    const sessionId3 = await ptyManager.createSession('ws-a', '/tmp', {}, 24, 80);
+
+    expect(ptyManager.activeSessions()).toHaveLength(3);
+
+    ptyManager.killSessionsForWorkspace('ws-a');
+
+    const remaining = ptyManager.activeSessions();
+    expect(remaining).toHaveLength(1);
+    expect(remaining[0].sessionId).toBe(sessionId2);
+    expect(remaining.find((session) => session.sessionId === sessionId1)).toBeUndefined();
+    expect(remaining.find((session) => session.sessionId === sessionId3)).toBeUndefined();
   });
 });

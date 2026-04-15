@@ -104,10 +104,8 @@ router.post('/sessions', async (req: Request, res: Response) => {
     } as Record<string, string>;
 
     // Create PTY session
-    // NOTE: pty-manager expects workspaceId as number but DB uses TEXT id
-    // Cast to any to bypass type check - this will be fixed in OCT-001
     const sessionId = await ptyManager.createSession(
-      body.workspaceId as any,
+      body.workspaceId,
       workspace.path,
       mergedEnv,
       body.rows,
@@ -228,6 +226,47 @@ router.get('/sessions', async (_req: Request, res: Response) => {
     res.json({ sessions });
   } catch (err) {
     handleRouteError(_req, res, err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/terminal/health:
+ *   get:
+ *     tags: [Terminal]
+ *     summary: Get terminal subsystem health
+ *     operationId: getTerminalHealth
+ *     description: Returns aggregate terminal session and output chunk counts for dashboards.
+ *     responses:
+ *       200:
+ *         description: Terminal health metrics
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 activeSessions:
+ *                   type: integer
+ *                 totalChunks:
+ *                   type: integer
+ *       500:
+ *         description: Internal server error
+ */
+router.get('/health', async (req: Request, res: Response) => {
+  try {
+    const activeSessionsRow = await queryOne<{ count: string }>(
+      "SELECT COUNT(*)::text AS count FROM terminal_sessions WHERE status = 'active'"
+    );
+    const totalChunksRow = await queryOne<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM terminal_output_chunks'
+    );
+
+    res.json({
+      activeSessions: Number(activeSessionsRow?.count ?? '0'),
+      totalChunks: Number(totalChunksRow?.count ?? '0'),
+    });
+  } catch (err) {
+    handleRouteError(req, res, err);
   }
 });
 
