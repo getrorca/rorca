@@ -14,6 +14,7 @@ export interface TerminalPaneProps {
   sessionId: string;
   onExit?: (exitCode: number) => void;
   onSessionLost?: () => void;
+  onInput?: (data: string) => void;
   className?: string;
 }
 
@@ -174,7 +175,7 @@ function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): IL
   };
 }
 
-export default function TerminalPane({ sessionId, onExit, onSessionLost, className }: TerminalPaneProps) {
+export default function TerminalPane({ sessionId, onExit, onSessionLost, onInput, className }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -325,6 +326,7 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
     resizeObserverRef.current = observer;
 
     const inputDisposable = terminal.onData((data) => {
+      onInput?.(data);
       sendInput(data);
     });
     disposables.push(inputDisposable);
@@ -349,7 +351,7 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       fileLinkProviderDisposableRef.current = null;
       setRendererType('canvas');
     };
-  }, [closeSearch, currentTheme, sessionId, sendInput, sendResize, sessionCwd]);
+  }, [closeSearch, currentTheme, sessionId, sendInput, sendResize, sessionCwd, onInput]);
 
   useEffect(() => {
     if (terminalRef.current) {
