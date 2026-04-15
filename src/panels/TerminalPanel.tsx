@@ -101,6 +101,14 @@ function isNotInstalledError(error: unknown): boolean {
   return error instanceof ApiError && error.status === 422 && error.code === 'OPENCODE_NOT_INSTALLED';
 }
 
+function getNotInstalledHint(error: unknown): string {
+  if (error instanceof ApiError && typeof error.details.hint === 'string') {
+    return error.details.hint;
+  }
+
+  return 'Install OpenCode with: npm install -g opencode';
+}
+
 function formatDuration(createdAt: string, exitedAt: string | null): string {
   const start = new Date(createdAt).getTime();
   const end = exitedAt ? new Date(exitedAt).getTime() : Date.now();
@@ -184,6 +192,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [creating, setCreating] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [notInstalled, setNotInstalled] = useState(false);
+  const [notInstalledHint, setNotInstalledHint] = useState('Install OpenCode with: npm install -g opencode');
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [activeModel, setActiveModel] = useState('Select model');
   const [layers, setLayers] = useState<Record<string, DirectionLayer>>({});
@@ -322,6 +331,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     setCreating(true);
     setError(null);
     setNotInstalled(false);
+    setNotInstalledHint('Install OpenCode with: npm install -g opencode');
 
     try {
       const res = await apiFetch<TerminalSessionResponse>('/api/terminal/sessions', {
@@ -365,6 +375,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       }
     } catch (err) {
       if (isNotInstalledError(err)) {
+        setNotInstalledHint(getNotInstalledHint(err));
         setNotInstalled(true);
       } else {
         setError('Failed to start session — is OpenCode installed?');
@@ -392,6 +403,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     setSelectedHistorySessionId(null);
     setError(null);
     setNotInstalled(false);
+    setNotInstalledHint('Install OpenCode with: npm install -g opencode');
 
     const restoreWorkspaceSessions = async () => {
       const storedSessions = workspaceSessionsRef.current[workspaceId];
@@ -927,15 +939,15 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         {notInstalled && (
           <div className="absolute inset-0 z-10 flex items-center justify-center px-4">
             <div className="flex max-w-md flex-col items-center text-center">
-              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-surface-200">
+              <div className="mb-4 flex items-center justify-center">
                 <TerminalSquare size={48} className="text-muted opacity-50" />
               </div>
               <h3 className="mb-2 text-base font-medium text-[var(--text)]">OpenCode not installed</h3>
               <p className="mb-4 text-[13px] text-muted">
                 The terminal requires OpenCode CLI. Install it to use the interactive terminal.
               </p>
-              <div className="mb-4 w-full rounded bg-surface-200 px-3 py-2 font-mono text-sm text-[var(--text)]">
-                npm install -g opencode
+              <div className="mb-4 w-full rounded bg-panel px-3 py-2 font-mono text-sm text-[var(--text)] border border-border">
+                {notInstalledHint.replace(/^Install OpenCode with:\s*/, '')}
               </div>
               <button
                 type="button"
