@@ -2,6 +2,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
   ChevronDown,
+  CircleX,
   Maximize2,
   Minimize2,
   Plus,
@@ -26,7 +27,9 @@ interface TerminalSessionRecord {
   workspaceId: string;
   cwd: string;
   createdAt: string;
-  exited?: boolean;
+  label: string;
+  autoLabeled: boolean;
+  status: 'active' | 'exited' | 'killed';
 }
 
 interface TerminalSessionResponse {
@@ -41,6 +44,8 @@ interface DirectionLayersResponse {
 }
 
 const LAYER_KEYS = ['l1', 'l2', 'l3', 'l4', 'l5'] as const;
+const MAX_SESSIONS = 5;
+const SHORT_COMMAND_REGEX = /^(ls|pwd|cd|cat|echo|git|npm|node)$/;
 
 function getBasename(input: string): string {
   const normalized = input.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -71,6 +76,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const initialSessionRequestedRef = useRef(false);
   const sessionsRef = useRef<TerminalSessionRecord[]>([]);
+  const nextLabelNumRef = useRef(1);
 
   const headerHeightClass = mode === 'panel' ? 'h-10' : 'h-9';
   const headerTextClass = mode === 'panel' ? 'text-[12px]' : 'text-[11px]';
@@ -108,6 +114,10 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, []);
 
   const createSession = useCallback(async (targetWorkspaceId: string, activate = true) => {
+    if (sessionsRef.current.length >= MAX_SESSIONS) {
+      return;
+    }
+
     setCreating(true);
     setError(null);
     setNotInstalled(false);
@@ -128,8 +138,12 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         workspaceId: res.workspaceId,
         cwd: res.cwd,
         createdAt: res.createdAt,
-        exited: false,
+        label: `OpenCode ${nextLabelNumRef.current}`,
+        autoLabeled: false,
+        status: 'active',
       };
+
+      nextLabelNumRef.current += 1;
 
       setSessions((prev) => [...prev, nextSession]);
       if (activate) {
@@ -206,20 +220,72 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, [workspaceId, setWorkspaceId, loadDirections, createSession]);
 
   const handleNewSession = useCallback(async () => {
-    if (!workspaceId) return;
+    if (!workspaceId || sessions.length >= MAX_SESSIONS) return;
     await createSession(workspaceId, true);
-  }, [workspaceId, createSession]);
+  }, [workspaceId, sessions.length, createSession]);
 
   const handleSessionExit = useCallback((sessionId: string) => {
     setSessions((prev) => prev.map((session) => (
-      session.sessionId === sessionId ? { ...session, exited: true } : session
+      session.sessionId === sessionId ? { ...session, status: 'exited' } : session
     )));
   }, []);
 
+  const handleSessionInput = useCallback((sessionId: string, data: string) => {
+    setSessions((prev) => prev.map((session) => {
+      if (session.sessionId !== sessionId || session.autoLabeled) {
+        return session;
+      }
+
+      const normalized = data.replace(/[\r\n]+/g, '').trimEnd();
+      const trimmed = normalized.trim();
+      const isShortCommand = trimmed.length < 4 || SHORT_COMMAND_REGEX.test(trimmed);
+
+      if (!trimmed && normalized.length === 0) {
+        return session;
+      }
+
+      const label = isShortCommand
+        ? getBasename(session.cwd) || session.label
+        : trimmed.slice(0, 40).trimEnd();
+
+      if (!label) {
+        return session;
+      }
+
+      return {
+        ...session,
+        label,
+        autoLabeled: true,
+      };
+    }));
+  }, []);
+
+  const handleCloseSession = useCallback(async (sessionId: string) => {
+    const snapshot = sessionsRef.current;
+    const closingIndex = snapshot.findIndex((session) => session.sessionId === sessionId);
+    if (closingIndex === -1) return;
+
+    await apiFetch(`/api/terminal/sessions/${encodeURIComponent(sessionId)}`, {
+      method: 'DELETE',
+      silent: true,
+    }).catch(() => undefined);
+
+    const remaining = snapshot.filter((session) => session.sessionId !== sessionId);
+    setSessions(() => remaining);
+
+    if (activeSessionId === sessionId) {
+      const previous = remaining[closingIndex - 1];
+      const next = remaining[closingIndex];
+      setActiveSessionId(previous?.sessionId ?? next?.sessionId ?? null);
+    }
+  }, [activeSessionId]);
+
   const workspaceLabel = selectedWorkspace?.name ?? 'No workspace';
   const cwdLabel = activeSession?.cwd ? getBasename(activeSession.cwd) : (selectedWorkspace?.git_path ? getBasename(selectedWorkspace.git_path) : 'workspace');
-  const isActive = Boolean(activeSession && !activeSession.exited && !creating && !error && !notInstalled);
+  const isActive = Boolean(activeSession && activeSession.status === 'active' && !creating && !error && !notInstalled);
   const showOverlay = creating || (!activeSessionId && !error && !notInstalled);
+  const newSessionDisabled = !workspaceId || creating || sessions.length >= MAX_SESSIONS;
+  const newSessionTitle = sessions.length >= MAX_SESSIONS ? 'Max 5 sessions' : 'New Session';
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--panel)]">
@@ -285,7 +351,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
           <button
             type="button"
             onClick={() => { void handleNewSession(); }}
-            disabled={!workspaceId || creating}
+            disabled={newSessionDisabled}
+            title={newSessionTitle}
             className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-50"
           >
             <Plus size={12} />
@@ -326,31 +393,48 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
       {sessions.length > 1 && (
         <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-border px-3 py-2">
-          {sessions.map((session, index) => {
+          {sessions.map((session) => {
             const isCurrent = session.sessionId === activeSessionId;
             return (
-              <button
+              <div
                 key={session.sessionId}
-                type="button"
-                onClick={() => setActiveSessionId(session.sessionId)}
-                className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors ${isCurrent ? 'border-accent bg-accent/10 text-[var(--text)]' : 'border-border text-muted hover:border-accent/30 hover:bg-accent/5 hover:text-[var(--text)]'}`}
+                className={`group inline-flex shrink-0 items-center gap-1.5 rounded-full px-2.5 py-1 text-[11px] transition-colors ${isCurrent ? 'bg-surface-200 text-[var(--text)]' : 'bg-transparent text-muted hover:bg-surface-100'}`}
               >
-                <span>Session {index + 1}</span>
-                <span className={`h-1.5 w-1.5 rounded-full ${session.exited ? 'bg-muted/50' : 'bg-emerald-400'}`} />
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveSessionId(session.sessionId)}
+                  title={session.label}
+                  className="inline-flex min-w-0 items-center gap-1.5"
+                >
+                  <span className={`h-1.5 w-1.5 rounded-full ${session.status === 'active' ? 'bg-emerald-400' : 'bg-muted/50'}`} />
+                  <span className="max-w-[120px] truncate">{session.label}</span>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => { void handleCloseSession(session.sessionId); }}
+                  className="opacity-0 transition-opacity group-hover:opacity-100"
+                  aria-label={`Close ${session.label}`}
+                >
+                  <CircleX size={12} />
+                </button>
+              </div>
             );
           })}
         </div>
       )}
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        {(activeSessionId && !error && !notInstalled) ? (
-          <TerminalPane
-            sessionId={activeSessionId}
-            className="h-full"
-            onExit={() => handleSessionExit(activeSessionId)}
-          />
-        ) : (
+        {(sessions.length > 0 && !error && !notInstalled) ? sessions.map((session) => (
+          <div key={session.sessionId} className={session.sessionId === activeSessionId ? 'h-full' : 'hidden h-full'}>
+            <TerminalPane
+              sessionId={session.sessionId}
+              className="h-full"
+              isActive={session.sessionId === activeSessionId}
+              onInput={(data) => handleSessionInput(session.sessionId, data)}
+              onExit={() => handleSessionExit(session.sessionId)}
+            />
+          </div>
+        )) : (
           <div className="h-full w-full bg-[var(--terminal-bg)]" />
         )}
 

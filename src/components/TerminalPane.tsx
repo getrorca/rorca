@@ -1,4 +1,3 @@
-```typescript
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import type { ITheme, IBufferRange, ILink, ILinkProvider } from '@xterm/xterm';
@@ -10,16 +9,14 @@ import { useTerminalSession } from '../hooks/useTerminalSession';
 import { useTheme } from '../contexts/ThemeContext';
 import '@xterm/xterm/css/xterm.css';
 
-// ─── Props ────────────────────────────────────────────────────────────────────
-
 export interface TerminalPaneProps {
   sessionId: string;
   onExit?: (exitCode: number) => void;
   onSessionLost?: () => void;
+  onInput?: (data: string) => void;
+  isActive?: boolean;
   className?: string;
 }
-
-// ─── Constants ────────────────────────────────────────────────────────────────
 
 const TERMINAL_OPTIONS = {
   fontFamily: 'JetBrains Mono, Fira Code, Monaco, monospace',
@@ -43,8 +40,6 @@ const SEARCH_DECORATIONS = {
 
 const ABSOLUTE_PATH_REGEX = /(?:file:\/\/)?(\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\.[A-Za-z]{2,6})/g;
 const RELATIVE_PATH_REGEX = /(?<![A-Za-z0-9._/-])([A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\.[A-Za-z]{2,6})(?![A-Za-z0-9._-])/g;
-
-// ─── Theme colors ─────────────────────────────────────────────────────────────
 
 const TERMINAL_THEME_DARK: ITheme = {
   background: '#0d1117',
@@ -101,11 +96,7 @@ function getLineText(terminal: Terminal, bufferLineNumber: number): string {
 
 function resolveLinkPath(rawPath: string, cwd: string | undefined): string {
   const normalizedPath = rawPath.startsWith('file://') ? rawPath.replace(/^file:\/\//, '') : rawPath;
-
-  if (normalizedPath.startsWith('/')) {
-    return normalizedPath;
-  }
-
+  if (normalizedPath.startsWith('/')) return normalizedPath;
   const base = cwd?.trim() || '';
   if (!base) return normalizedPath;
   const trimmedBase = base.endsWith('/') ? base.slice(0, -1) : base;
@@ -114,7 +105,7 @@ function resolveLinkPath(rawPath: string, cwd: string | undefined): string {
 
 function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): ILinkProvider {
   return {
-    provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void): void {
+    provideLinks(bufferLineNumber, callback) {
       const text = getLineText(terminal, bufferLineNumber);
       if (!text) {
         callback(undefined);
@@ -134,7 +125,6 @@ function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): IL
           const startColumn = match.index + 1;
           const endColumn = startColumn + fullMatch.length;
           const dedupeKey = `${startColumn}:${fullMatch}`;
-
           if (seen.has(dedupeKey)) continue;
           seen.add(dedupeKey);
 
@@ -147,17 +137,8 @@ function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): IL
             range,
             text: fullMatch,
             activate: () => {
-              const absolutePath = resolveLinkPath(capturedPath, cwd);
-              window.dispatchEvent(new CustomEvent('rorca:open-file', {
-                detail: {
-                  path: absolutePath,
-                  workspacePath: cwd,
-                },
-              }));
-            },
-            decorations: {
-              underline: true,
-              pointerCursor: true,
+              const targetPath = resolveLinkPath(capturedPath, cwd);
+              window.open(`file://${targetPath}`, '_blank', 'noopener');
             },
           });
         }
@@ -168,9 +149,14 @@ function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): IL
   };
 }
 
-// ─── Component ────────────────────────────────────────────────────────────────
-
-export default function TerminalPane({ sessionId, onExit, onSessionLost, className }: TerminalPaneProps) {
+export default function TerminalPane({
+  sessionId,
+  onExit,
+  onSessionLost,
+  onInput,
+  isActive = true,
+  className,
+}: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -186,7 +172,6 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
   const { resolved } = useTheme();
 
   const currentTheme = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
-
   const { onData, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId);
 
   const closeSearch = useCallback(() => {
@@ -206,66 +191,33 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       return;
     }
 
-    const found =
-      direction === 'previous'
-        ? searchAddon.findPrevious(query, {
-            regex: false,
-            wholeWord: false,
-            caseSensitive: false,
-            incremental: true,
-            decorations: SEARCH_DECORATIONS,
-          })
-        : searchAddon.findNext(query, {
-            regex: false,
-            wholeWord: false,
-            caseSensitive: false,
-            incremental: true,
-            decorations: SEARCH_DECORATIONS,
-          });
+    const found = direction === 'previous'
+      ? searchAddon.findPrevious(query, { regex: false, wholeWord: false, caseSensitive: false, incremental: true, decorations: SEARCH_DECORATIONS })
+      : searchAddon.findNext(query, { regex: false, wholeWord: false, caseSensitive: false, incremental: true, decorations: SEARCH_DECORATIONS });
 
     setSearchStatus(found ? 'found' : 'not-found');
   }, []);
-
-  // ─── Terminal initialization ──────────────────────────────────────────────────
 
   useEffect(() => {
     const container = containerRef.current;
     if (!container) return;
 
-    const terminal = new Terminal({
-      ...TERMINAL_OPTIONS,
-      theme: currentTheme,
-    });
-
+    const terminal = new Terminal({ ...TERMINAL_OPTIONS, theme: currentTheme });
     const fitAddon = new FitAddon();
-    terminal.loadAddon(fitAddon);
-
     const searchAddon = new SearchAddon();
-    terminal.loadAddon(searchAddon);
-
     const webLinksAddon = new WebLinksAddon((event, uri) => {
       event.preventDefault();
       window.open(uri, '_blank', 'noopener');
     });
+
+    terminal.loadAddon(fitAddon);
+    terminal.loadAddon(searchAddon);
     terminal.loadAddon(webLinksAddon);
-
     terminal.registerLinkProvider(createFileLinkProvider(terminal, sessionCwd));
-
     container.style.backgroundColor = currentTheme.background ?? '';
-
-    // Mount terminal to DOM
     terminal.open(container);
-
-    // Guard against null container before calling fit
-    if (!containerRef.current) {
-      terminal.dispose();
-      fitAddon.dispose();
-      return;
-    }
-
     fitAddon.fit();
 
-    // Store refs
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
     searchAddonRef.current = searchAddon;
@@ -273,41 +225,33 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
     terminal.attachCustomKeyEventHandler((event) => {
       const key = event.key.toLowerCase();
       const isFindShortcut = (event.metaKey || event.ctrlKey) && key === 'f';
-
       if (isFindShortcut) {
         setIsSearchOpen(true);
         return false;
       }
-
       if (event.key === 'Escape' && isSearchOpenRef.current) {
         closeSearch();
         return false;
       }
-
       return true;
     });
 
-    // Setup resize observer
     const observer = new ResizeObserver(() => {
-      if (fitAddon && terminal) {
-        fitAddon.fit();
-        sendResize(terminal.cols, terminal.rows);
-      }
+      fitAddon.fit();
+      sendResize(terminal.cols, terminal.rows);
     });
     observer.observe(container);
     resizeObserverRef.current = observer;
 
-    // Wire terminal input to session
     const inputDisposable = terminal.onData((data) => {
+      onInput?.(data);
       sendInput(data);
     });
 
-    // Send initial size after terminal is ready
-    setTimeout(() => {
+    window.setTimeout(() => {
       sendResize(terminal.cols, terminal.rows);
     }, 50);
 
-    // Cleanup on unmount
     return () => {
       inputDisposable.dispose();
       observer.disconnect();
@@ -319,17 +263,22 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       searchAddonRef.current = null;
       resizeObserverRef.current = null;
     };
-  }, [closeSearch, currentTheme, sessionId, sendInput, sendResize, sessionCwd]);
+  }, [closeSearch, currentTheme, onInput, sendInput, sendResize, sessionCwd]);
 
   useEffect(() => {
-    if (terminalRef.current) {
-      terminalRef.current.options.theme = currentTheme;
-    }
-
-    if (containerRef.current) {
-      containerRef.current.style.backgroundColor = currentTheme.background ?? '';
-    }
+    if (terminalRef.current) terminalRef.current.options.theme = currentTheme;
+    if (containerRef.current) containerRef.current.style.backgroundColor = currentTheme.background ?? '';
   }, [currentTheme]);
+
+  useEffect(() => {
+    if (isActive) {
+      window.setTimeout(() => {
+        fitAddonRef.current?.fit();
+        const terminal = terminalRef.current;
+        if (terminal) sendResize(terminal.cols, terminal.rows);
+      }, 0);
+    }
+  }, [isActive, sendResize]);
 
   useEffect(() => {
     if (!isSearchOpen) return;
@@ -343,22 +292,13 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       setSearchStatus('idle');
       return;
     }
-
     setSearchStatus('searching');
-    const timeoutId = window.setTimeout(() => {
-      runSearch('next', searchQuery);
-    }, 150);
-
-    return () => {
-      window.clearTimeout(timeoutId);
-    };
+    const timeoutId = window.setTimeout(() => runSearch('next', searchQuery), 150);
+    return () => window.clearTimeout(timeoutId);
   }, [isSearchOpen, runSearch, searchQuery]);
-
-  // ─── Scrollback replay ────────────────────────────────────────────────────────
 
   useEffect(() => {
     if (scrollbackFetched) return;
-
     const abortController = new AbortController();
 
     const fetchScrollback = async () => {
@@ -368,31 +308,23 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
         const lastSequenceRaw = window.sessionStorage.getItem(`rorca:terminal:lastSeq:${sessionId}`);
         const lastSequence = lastSequenceRaw ? Math.max(0, parseInt(lastSequenceRaw, 10) || 0) : 0;
         const url = `${protocol}//${host}/api/terminal/sessions/${encodeURIComponent(sessionId)}/scrollback?since=${lastSequence}`;
-
         const response = await fetch(url, { signal: abortController.signal });
         if (!response.ok) {
-          // If scrollback endpoint returns error, it's likely a new session with no history
-          // This is not an error case — just skip replay
           setScrollbackFetched(true);
           return;
         }
-
         const data = await response.json();
         const chunks = data.chunks as Array<{ sequence: number; data: string }>;
         const cwd = typeof data.cwd === 'string' ? data.cwd : undefined;
         setSessionCwd(cwd);
-
-        // Replay chunks in order
         if (terminalRef.current && chunks.length > 0) {
           for (const chunk of chunks) {
             terminalRef.current.write(chunk.data);
             window.sessionStorage.setItem(`rorca:terminal:lastSeq:${sessionId}`, String(chunk.sequence));
           }
         }
-
         setScrollbackFetched(true);
       } catch (err) {
-        // Fetch aborted or network error — ignore
         if (!(err instanceof Error && err.name === 'AbortError')) {
           console.error('[TerminalPane] Failed to fetch scrollback:', err);
         }
@@ -400,29 +332,17 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       }
     };
 
-    fetchScrollback();
-
-    return () => {
-      abortController.abort();
-    };
-  }, [sessionId, scrollbackFetched]);
-
-  // ─── WebSocket data subscription ──────────────────────────────────────────────
+    void fetchScrollback();
+    return () => abortController.abort();
+  }, [scrollbackFetched, sessionId]);
 
   useEffect(() => {
-    // Only start subscribing to live data after scrollback is fetched
     if (!scrollbackFetched) return;
-
     const unsubscribe = onData((data) => {
-      if (terminalRef.current) {
-        terminalRef.current.write(data);
-      }
+      terminalRef.current?.write(data);
     });
-
     return unsubscribe;
   }, [onData, scrollbackFetched]);
-
-  // ─── Exit handler ─────────────────────────────────────────────────────────────
 
   useEffect(() => {
     const unsubscribe = onSessionExit((exitCode) => {
@@ -432,17 +352,13 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
           : `\r\n\x1b[38;5;243m[Process exited with code ${exitCode}]\x1b[0m\r\n`;
         terminalRef.current.write(message);
       }
-
       onExit?.(exitCode);
     });
-
     return unsubscribe;
-  }, [onSessionExit, onExit]);
-
-  // ─── Render ───────────────────────────────────────────────────────────────────
+  }, [onExit, onSessionExit]);
 
   return (
-    <div className={`relative w-full h-full ${className ?? ''}`}>
+    <div className={`relative h-full w-full ${className ?? ''}`}>
       <div
         className={[
           'absolute top-0 inset-x-0 z-10 h-8 border-b border-border bg-surface-200/90 backdrop-blur-sm',
@@ -460,7 +376,6 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
               closeSearch();
               return;
             }
-
             if (event.key === 'Enter') {
               event.preventDefault();
               runSearch(event.shiftKey ? 'previous' : 'next', searchQuery);
@@ -470,49 +385,26 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
           autoFocus
           className="h-6 flex-1 rounded-md border border-border bg-surface px-2 text-[12px] font-mono text-foreground outline-none ring-0 placeholder:text-muted"
         />
-        <button
-          type="button"
-          onClick={() => runSearch('previous', searchQuery)}
-          className="inline-flex h-6 w-6 items-center justify-center rounded border border-border bg-surface text-muted transition-colors hover:text-foreground"
-          aria-label="Previous match"
-        >
+        <button type="button" onClick={() => runSearch('previous', searchQuery)} className="inline-flex h-6 w-6 items-center justify-center rounded border border-border bg-surface text-muted transition-colors hover:text-foreground" aria-label="Previous match">
           <ChevronUp size={16} />
         </button>
-        <button
-          type="button"
-          onClick={() => runSearch('next', searchQuery)}
-          className="inline-flex h-6 w-6 items-center justify-center rounded border border-border bg-surface text-muted transition-colors hover:text-foreground"
-          aria-label="Next match"
-        >
+        <button type="button" onClick={() => runSearch('next', searchQuery)} className="inline-flex h-6 w-6 items-center justify-center rounded border border-border bg-surface text-muted transition-colors hover:text-foreground" aria-label="Next match">
           <ChevronDown size={16} />
         </button>
         <div className="min-w-[72px] text-center text-[11px] text-muted">
-          {searchStatus === 'searching'
-            ? 'Searching...'
-            : searchStatus === 'found'
-              ? 'Match found'
-              : searchStatus === 'not-found'
-                ? 'No matches'
-                : 'Find'}
+          {searchStatus === 'searching' ? 'Searching...' : searchStatus === 'found' ? 'Match found' : searchStatus === 'not-found' ? 'No matches' : 'Find'}
         </div>
-        <button
-          type="button"
-          onClick={closeSearch}
-          className="inline-flex h-6 w-6 items-center justify-center rounded border border-border bg-surface text-muted transition-colors hover:text-foreground"
-          aria-label="Close search"
-        >
+        <button type="button" onClick={closeSearch} className="inline-flex h-6 w-6 items-center justify-center rounded border border-border bg-surface text-muted transition-colors hover:text-foreground" aria-label="Close search">
           <X size={16} />
         </button>
       </div>
 
-      {/* Terminal container */}
-      <div ref={containerRef} className="w-full h-full" style={{ backgroundColor: currentTheme.background }} />
+      <div ref={containerRef} className="h-full w-full" style={{ backgroundColor: currentTheme.background }} />
 
-      {/* Reconnecting overlay */}
       {reconnecting && (
-        <div className="absolute inset-0 bg-black/60 flex items-center justify-center">
+        <div className="absolute inset-0 flex items-center justify-center bg-black/60">
           <div className="flex items-center gap-2 text-sm text-white">
-            <div className="w-3 h-3 border-2 border-white/20 border-t-white rounded-full animate-spin" />
+            <div className="h-3 w-3 animate-spin rounded-full border-2 border-white/20 border-t-white" />
             <span>Reconnecting...</span>
           </div>
         </div>
@@ -521,14 +413,8 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       {connectionLost && (
         <div className="absolute inset-0 flex items-center justify-center bg-black/70">
           <div className="flex max-w-sm flex-col items-center gap-4 px-6 text-center">
-            <p className="text-sm font-medium text-white">
-              Backend connection lost. Terminal session ended.
-            </p>
-            <button
-              type="button"
-              onClick={() => onSessionLost?.()}
-              className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-black transition hover:opacity-90"
-            >
+            <p className="text-sm font-medium text-white">Backend connection lost. Terminal session ended.</p>
+            <button type="button" onClick={() => onSessionLost?.()} className="rounded-md bg-accent px-4 py-2 text-sm font-medium text-black transition hover:opacity-90">
               Start New Session
             </button>
           </div>
@@ -537,4 +423,3 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
     </div>
   );
 }
-```
