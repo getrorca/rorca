@@ -213,7 +213,9 @@ router.post('/sessions', async (req: Request, res: Response) => {
     if (vaultProvider) {
       const apiKey = await getDecryptedProviderKey(body.workspaceId, vaultProvider);
       if (!apiKey) {
-        throw new Error(`Failed to resolve active vault API key for provider '${vaultProvider}' and workspace '${body.workspaceId}'`);
+        throw new UnprocessableError(
+          `Failed to resolve active vault API key for provider '${vaultProvider}' and workspace '${body.workspaceId}'`
+        );
       }
       const apiKeyEnvVar = providerEnvVarName(vaultProvider);
       if (apiKeyEnvVar) {
