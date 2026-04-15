@@ -1,3 +1,4 @@
+```typescript
 // ─── OpenCode PTY Session Manager ───────────────────────────────────────────
 // OCT-001: Manages persistent PTY sessions for OpenCode terminal UI.
 // Each session is an isolated opencode process with its own workspace context.
@@ -26,7 +27,7 @@ try {
 
 export interface PtySession {
   sessionId: string;
-  workspaceId: number;
+  workspaceId: string;
   ptyProcess: any; // IPty when available, null otherwise
   createdAt: Date;
   lastActivityAt: Date;
@@ -55,7 +56,7 @@ const CLAUDE_ENV_VARS = [
  * Returns the unique session ID.
  */
 export async function createSession(
-  workspaceId: number,
+  workspaceId: string,
   cwd: string,
   env: Record<string, string>,
   rows: number,
@@ -171,6 +172,22 @@ export function activeSessions(): PtySession[] {
   return Array.from(sessions.values());
 }
 
+export function killSessionsForWorkspace(workspaceId: string): void {
+  const sessionIds = activeSessions()
+    .filter((session) => session.workspaceId === workspaceId)
+    .map((session) => session.sessionId);
+
+  for (const sessionId of sessionIds) {
+    try {
+      killSession(sessionId);
+    } catch (error) {
+      logger.warn(
+        `[pty-manager] Failed to kill session ${sessionId} for workspace ${workspaceId}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+}
+
 /**
  * Background cleanup: kill sessions idle for more than 30 minutes.
  */
@@ -199,3 +216,4 @@ setInterval(cleanupIdleSessions, CLEANUP_INTERVAL_MS);
 logger.info(
   `[pty-manager] Initialized with ${IDLE_TIMEOUT_MS / 1000}s idle timeout, cleanup every ${CLEANUP_INTERVAL_MS / 1000}s`
 );
+```
