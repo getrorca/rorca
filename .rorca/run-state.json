@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T18:35:23.023Z",
+  "lastUpdatedAt": "2026-04-15T18:32:42.191Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -83,14 +83,14 @@
       "elapsedMs": 164115
     },
     {
-      "storyId": "OCT-017",
-      "title": "Backend session cleanup on workspace delete",
+      "storyId": "OCT-018",
+      "title": "E2E smoke test — terminal session creates, connects, receives output",
       "status": "passed",
-      "startedAt": "2026-04-15T18:30:31.383Z",
-      "finishedAt": "2026-04-15T18:35:23.023Z",
+      "startedAt": "2026-04-15T18:30:30.822Z",
+      "finishedAt": "2026-04-15T18:32:42.191Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 291640
+      "elapsedMs": 131369
     }
   ],
   "failedStories": [],
