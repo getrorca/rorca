@@ -11,7 +11,8 @@
     "test": "node --max-old-space-size=8192 node_modules/.bin/jest",
     "mcp": "npx tsx src/mcp/server.ts",
     "lint": "npx eslint src/",
-    "worker": "npx tsx src/worker-supervisor.ts"
+    "worker": "npx tsx src/worker-supervisor.ts",
+    "postinstall": "node -e \"try{require('node-pty')}catch(e){console.warn('⚠️  node-pty native module not built. Run: npm rebuild node-pty')}\""
   },
   "dependencies": {
     "@anthropic-ai/sdk": "^0.78.0",
