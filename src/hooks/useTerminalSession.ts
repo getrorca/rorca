@@ -1,3 +1,4 @@
+```typescript
 import { useRef, useEffect, useState } from 'react';
 
 // ─── Message Types ────────────────────────────────────────────────────────────
@@ -13,7 +14,7 @@ type OutboundMessage =
   | TerminalPingMessage
   | TerminalCloseMessage;
 
-type TerminalOutputMessage = { type: 'output'; data: string };
+type TerminalOutputMessage = { type: 'output'; data: string; sequence: number };
 type TerminalExitMessage = { type: 'exit'; exitCode: number };
 
 type InboundMessage = TerminalOutputMessage | TerminalExitMessage;
@@ -36,6 +37,8 @@ const RECONNECT_DELAY_MS = 1000;
 const MAX_RECONNECT_ATTEMPTS = 5;
 const PING_INTERVAL_MS = 30000;
 
+const getLastSequenceStorageKey = (sessionId: string) => `rorca:terminal:lastSeq:${sessionId}`;
+
 // ─── Hook ─────────────────────────────────────────────────────────────────────
 
 export function useTerminalSession(sessionId: string | null): UseTerminalSessionReturn {
@@ -51,6 +54,25 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
   const reconnectTimerRef = useRef<number | null>(null);
   const pingIntervalRef = useRef<number | null>(null);
   const manualCloseRef = useRef(false);
+  const lastReceivedSequenceRef = useRef(0);
+
+  const getLastReceivedSequence = (sid: string): number => {
+    const stored = window.sessionStorage.getItem(getLastSequenceStorageKey(sid));
+    if (stored !== null) {
+      const parsed = parseInt(stored, 10);
+      if (!Number.isNaN(parsed) && parsed >= 0) {
+        lastReceivedSequenceRef.current = parsed;
+        return parsed;
+      }
+    }
+
+    return lastReceivedSequenceRef.current;
+  };
+
+  const setLastReceivedSequence = (sid: string, sequence: number) => {
+    lastReceivedSequenceRef.current = sequence;
+    window.sessionStorage.setItem(getLastSequenceStorageKey(sid), String(sequence));
+  };
 
   // ─── WebSocket URL construction ─────────────────────────────────────────────
 
@@ -99,6 +121,7 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
     }
 
     setConnectionLost(false);
+    lastReceivedSequenceRef.current = getLastReceivedSequence(sessionId);
 
     let currentWs: WebSocket | null = null;
 
@@ -136,6 +159,11 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
           const message = JSON.parse(event.data) as InboundMessage;
 
           if (message.type === 'output') {
+            if (message.sequence <= lastReceivedSequenceRef.current) {
+              return;
+            }
+
+            setLastReceivedSequence(sessionId, message.sequence);
             dataHandlersRef.current.forEach((handler) => {
               handler(message.data);
             });
@@ -227,3 +255,4 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
     connectionLost,
   };
 }
+```
