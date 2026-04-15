@@ -1,6 +1,6 @@
 // @refresh reset
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
-import { Terminal as TerminalIcon, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight, Sparkles, Files, Cpu, MailWarning, Clock, Check, GitMerge, GitPullRequest, Zap } from 'lucide-react';
+import { ScrollText, List, GitBranch, ArrowLeftRight, FolderGit2, GitCommitHorizontal, RefreshCw, Loader2, Pause, Play, Square, Send, AlertTriangle, Layers, DollarSign, Smartphone, XCircle, ExternalLink, RotateCcw, X, Wrench, ChevronRight, Sparkles, Files, Cpu, MailWarning, Clock, Check, GitMerge, GitPullRequest, Zap } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import { useIsMobile } from '../hooks/useIsMobile';
@@ -92,8 +92,8 @@ interface CommitEntry {
 
 type RunViewTab = 'terminal' | 'stories' | 'graph' | 'skills' | 'finops' | 'compare' | 'worktrees' | 'commits';
 
-const TABS: { id: RunViewTab; label: string; icon: typeof TerminalIcon }[] = [
-  { id: 'terminal', label: 'Terminal', icon: TerminalIcon },
+const TABS: { id: RunViewTab; label: string; icon: typeof ScrollText }[] = [
+  { id: 'terminal', label: 'Execution Trace', icon: ScrollText },
   { id: 'stories', label: 'Stories', icon: List },
   { id: 'graph', label: 'Graph', icon: GitBranch },
   { id: 'skills', label: 'Skills', icon: Wrench },
@@ -1477,7 +1477,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                 onClick={() => handleTabChange('terminal')}
                 className="mt-2 px-3 py-1.5 text-xs font-medium rounded border border-border text-muted hover:text-[var(--text)] hover:bg-bg transition-colors"
               >
-                Switch to Terminal
+                Switch to Execution Trace
               </button>
             </div>
           );
