@@ -4,6 +4,7 @@ import { ToastContainer, type ToastType, type ToastAction, type Toast } from '..
 interface ShowOptions {
   action?: ToastAction;
   persistent?: boolean;
+  durationMs?: number;
 }
 
 interface ToastContextValue {
@@ -34,6 +35,7 @@ export function ToastProvider({ children }: { children: ReactNode }) {
       type,
       action: options?.action,
       persistent: options?.persistent,
+      durationMs: options?.durationMs,
     };
     setToasts((prev) => [...prev, toast]);
   }, []);
