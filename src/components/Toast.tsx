@@ -14,6 +14,7 @@ export interface Toast {
   type: ToastType;
   action?: ToastAction;
   persistent?: boolean;
+  durationMs?: number;
 }
 
 const TOAST_CONFIG: Record<ToastType, {
@@ -57,7 +58,7 @@ function ToastItem({ toast, onDismiss }: { toast: Toast; onDismiss: (id: number)
   };
 
   useEffect(() => {
-    const ms = toast.persistent ? 0 : config.autoDismissMs;
+    const ms = toast.persistent ? 0 : (toast.durationMs ?? config.autoDismissMs);
     if (ms > 0) {
       timerRef.current = setTimeout(dismiss, ms);
     }
