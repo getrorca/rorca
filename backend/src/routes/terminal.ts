@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
+import { randomUUID } from 'crypto';
 import { execute, query, queryOne } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { getWorkspaceEnvVars } from './env-vars';
@@ -15,6 +16,42 @@ import { registerTerminalContextCleanup, runTerminalContextCleanup } from '../li
 import { detectOpenCode } from '../lib/opencode-detector';
 
 const router = Router();
+
+// OCT-021: Short-lived WebSocket connection tokens (60s TTL)
+// Maps wsToken -> sessionId to prevent sessionId enumeration
+const wsTokenMap = new Map<string, { sessionId: string; expiresAt: number }>();
+const WS_TOKEN_TTL_MS = 60_000; // 60 seconds
+
+function generateWsToken(sessionId: string): string {
+  const token = randomUUID();
+  const expiresAt = Date.now() + WS_TOKEN_TTL_MS;
+  wsTokenMap.set(token, { sessionId, expiresAt });
+  return token;
+}
+
+export function validateWsToken(token: string): string | null {
+  const entry = wsTokenMap.get(token);
+  if (!entry) {
+    return null;
+  }
+  if (Date.now() > entry.expiresAt) {
+    wsTokenMap.delete(token);
+    return null;
+  }
+  // One-time use: delete after validation
+  wsTokenMap.delete(token);
+  return entry.sessionId;
+}
+
+// Cleanup expired tokens every 30 seconds
+setInterval(() => {
+  const now = Date.now();
+  for (const [token, entry] of wsTokenMap.entries()) {
+    if (now > entry.expiresAt) {
+      wsTokenMap.delete(token);
+    }
+  }
+}, 30_000);
 
 async function emitTerminalContextInjectedEvent(sessionId: string, workspaceId: string, workspacePath: string): Promise<void> {
   const port = process.env.PORT || '3030';
@@ -116,6 +153,9 @@ const historyQuerySchema = z.object({
  *                 sessionId:
  *                   type: string
  *                   description: Unique session identifier (UUID)
+ *                 wsToken:
+ *                   type: string
+ *                   description: Short-lived WebSocket connection token (60s TTL)
  *                 workspaceId:
  *                   type: string
  *                 cwd:
@@ -237,8 +277,12 @@ router.post('/sessions', async (req: Request, res: Response) => {
       },
     });
 
+    // OCT-021: Generate short-lived WebSocket connection token
+    const wsToken = generateWsToken(sessionId);
+
     res.status(201).json({
       sessionId,
+      wsToken,
       workspaceId: body.workspaceId,
       cwd: workspace.path,
       rows: body.rows,
