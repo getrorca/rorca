@@ -53,6 +53,7 @@ const SettingsPanel = lazy(() => import('./panels/SettingsPanel'));
 const RunViewPanel = lazy(() => import('./panels/RunViewPanel'));
 const SpecReviewPanel = lazy(() => import('./panels/SpecReviewPanel'));
 const MarketplacePanel = lazy(() => import('./panels/MarketplacePanel'));
+const TerminalPanel = lazy(() => import('./panels/TerminalPanel'));
 
 // SettingsTab type — imported from SettingsPanel module
 type SettingsTab = import('./panels/SettingsPanel').SettingsTab;
@@ -194,6 +195,7 @@ function GlobalErrorWiring() {
 const PANEL_LABELS: Record<PanelId, string> = {
   specs: 'Specs',
   runs: 'Runs',
+  terminal: 'OpenCode',
   analytics: 'Analytics',
   direction: 'Direction',
   settings: 'Settings',
@@ -229,6 +231,8 @@ function AppRoutes() {
         <Route path="specs" element={<PanelRoute panel="specs" />} />
         {/* Runs — pipeline queue + run view */}
         <Route path="runs" element={<PanelRoute panel="runs" />} />
+        {/* Terminal — OpenCode interactive PTY, fullscreen panel mode */}
+        <Route path="terminal" element={<PanelRoute panel="terminal" />} />
         {/* Direction — tabbed: Direction + Team + Memory + Rules */}
         <Route path="direction" element={<PanelRoute panel="direction" />} />
         {/* Analytics — unified panel (ULT-005) */}
@@ -290,6 +294,8 @@ function getPanelSkeleton(panel: PanelId) {
       return <SettingsFormSkeleton />;
     case 'marketplace':
       return <BoardSkeleton />;
+    case 'terminal':
+      return <div className="flex-1 bg-[#0d1117]" />;
     default: return <BoardSkeleton />;
   }
 }
@@ -350,6 +356,9 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
 
     case 'marketplace':
       return <MarketplacePanel onNavigate={onNavigate} />;
+
+    case 'terminal':
+      return <TerminalPanel mode="panel" />;
 
     default: return null;
   }
