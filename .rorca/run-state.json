@@ -1,8 +1,8 @@
 {
   "specId": "rorca-opencode-terminal",
-  "runId": 20260316000185,
-  "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T19:52:28.429Z",
+  "runId": 20260316000188,
+  "startedAt": "2026-04-15T20:17:53.148Z",
+  "lastUpdatedAt": "2026-04-15T20:17:53.148Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -23,20 +23,9 @@
       "elapsedMs": 341460
     }
   ],
-  "failedStories": [
-    {
-      "storyId": "OCT-015",
-      "title": "OpenCode not installed — graceful error state in terminal panel",
-      "status": "failed",
-      "startedAt": "2026-04-15T19:39:32.942Z",
-      "finishedAt": "2026-04-15T19:42:38.804Z",
-      "agentType": "claude",
-      "failReason": "timeout",
-      "elapsedMs": 185862
-    }
-  ],
+  "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
-  "resumedFromStory": null
+  "resumedFromStory": "OCT-030"
 }
