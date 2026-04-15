@@ -16,6 +16,7 @@ import ReadOnlyTerminalPane from '../components/ReadOnlyTerminalPane';
 import ModelPickerPopover from '../components/ModelPickerPopover';
 import Tooltip from '../components/Tooltip';
 import { useWorkspace } from '../contexts/WorkspaceContext';
+import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch, ApiError } from '../lib/apiFetch';
 import { getAllLayers } from '../api/direction';
 import type { DirectionLayer } from '../api/types';
@@ -69,6 +70,8 @@ const MIN_FONT_SIZE = 10;
 const MAX_FONT_SIZE = 20;
 const DEFAULT_FONT_SIZE = 13;
 const FONT_SIZE_STORAGE_KEY = 'rorca:terminal:fontSize';
+const SESSIONS_STORAGE_KEY = 'rorca:terminal:sessions';
+const MAX_PERSISTED_SESSIONS = 5;
 
 function getBasename(input: string): string {
   const normalized = input.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -106,9 +109,61 @@ function getStatusBadgeClass(status: TerminalHistoryRecord['status']): string {
   return 'border-border bg-surface-200 text-muted';
 }
 
+interface PersistedSession {
+  sessionId: string;
+  workspaceId: string;
+  label: string;
+  createdAt: string;
+}
+
+function loadPersistedSessions(): PersistedSession[] {
+  try {
+    const stored = localStorage.getItem(SESSIONS_STORAGE_KEY);
+    if (!stored) return [];
+    const parsed = JSON.parse(stored);
+    return Array.isArray(parsed) ? parsed : [];
+  } catch {
+    return [];
+  }
+}
+
+function savePersistedSession(session: PersistedSession, currentWorkspaceId: string): void {
+  try {
+    const all = loadPersistedSessions();
+    // Add new session
+    all.push(session);
+
+    // Filter to current workspace and keep only the 5 most recent
+    const forWorkspace = all
+      .filter((s) => s.workspaceId === currentWorkspaceId)
+      .sort((a, b) => new Date(b.createdAt).getTime() - new Date(a.createdAt).getTime())
+      .slice(0, MAX_PERSISTED_SESSIONS);
+
+    // Keep all sessions from other workspaces
+    const otherWorkspaces = all.filter((s) => s.workspaceId !== currentWorkspaceId);
+
+    // Merge and save
+    const updated = [...otherWorkspaces, ...forWorkspace];
+    localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify(updated));
+  } catch {
+    // Ignore localStorage errors
+  }
+}
+
+function removePersistedSession(sessionId: string): void {
+  try {
+    const all = loadPersistedSessions();
+    const filtered = all.filter((s) => s.sessionId !== sessionId);
+    localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify(filtered));
+  } catch {
+    // Ignore localStorage errors
+  }
+}
+
 export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPanelProps) {
   const { workspaceId, selectedWorkspace, workspaces, setWorkspaceId } = useWorkspace();
   const navigate = useNavigate();
+  const toast = useGlobalToast();
 
   const [sessions, setSessions] = useState<TerminalSessionRecord[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -246,6 +301,17 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         status: 'active',
       };
 
+      // Persist to localStorage
+      savePersistedSession(
+        {
+          sessionId: res.sessionId,
+          workspaceId: res.workspaceId,
+          label: `OpenCode ${labelNum}`,
+          createdAt: res.createdAt,
+        },
+        targetWorkspaceId
+      );
+
       setSessions((prev) => [...prev, nextSession]);
       if (activate) {
         setActiveSessionId(res.sessionId);
@@ -269,8 +335,61 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   useEffect(() => {
     if (!workspaceId || initialSessionRequestedRef.current) return;
     initialSessionRequestedRef.current = true;
-    void createSession(workspaceId, true);
-  }, [workspaceId, createSession]);
+
+    // Check localStorage for existing sessions to reattach
+    const attemptReattach = async () => {
+      const persisted = loadPersistedSessions().filter((s) => s.workspaceId === workspaceId);
+
+      if (persisted.length === 0) {
+        // No persisted sessions, create new
+        await createSession(workspaceId, true);
+        return;
+      }
+
+      // Check liveness of each persisted session
+      let reattached = false;
+      const stillAlive: PersistedSession[] = [];
+
+      for (const session of persisted) {
+        try {
+          const res = await apiFetch<TerminalSessionResponse>(
+            `/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`
+          );
+
+          // Session is still alive, reattach
+          const reattachedSession: TerminalSessionRecord = {
+            sessionId: res.sessionId,
+            wsToken: res.wsToken,
+            workspaceId: res.workspaceId,
+            cwd: res.cwd,
+            createdAt: res.createdAt,
+            label: session.label,
+            autoLabeled: true, // Keep existing label
+            status: 'active',
+          };
+
+          setSessions((prev) => [...prev, reattachedSession]);
+          if (!reattached) {
+            setActiveSessionId(res.sessionId);
+            reattached = true;
+            toast.info('Reconnected to existing session');
+          }
+
+          stillAlive.push(session);
+        } catch {
+          // Session is dead, remove from localStorage
+          removePersistedSession(session.sessionId);
+        }
+      }
+
+      // If no sessions survived, create a new one
+      if (!reattached) {
+        await createSession(workspaceId, true);
+      }
+    };
+
+    void attemptReattach();
+  }, [workspaceId, createSession, toast]);
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
@@ -399,6 +518,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     } catch {
       // Ignore deletion errors
     }
+
+    // Remove from localStorage
+    removePersistedSession(sessionId);
 
     // Remove from local state
     setSessions((prev) => {
