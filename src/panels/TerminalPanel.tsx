@@ -67,6 +67,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [activeModel, setActiveModel] = useState('Select model');
   const [layers, setLayers] = useState<Record<string, DirectionLayer>>({});
+  const [isFullscreen, setIsFullscreen] = useState(false);
 
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const initialSessionRequestedRef = useRef(false);
@@ -83,6 +84,20 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   useEffect(() => {
     sessionsRef.current = sessions;
   }, [sessions]);
+
+  useEffect(() => {
+    if (mode !== 'drawer' || !isFullscreen) return;
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        event.preventDefault();
+        setIsFullscreen(false);
+      }
+    };
+
+    window.addEventListener('keydown', handleKeyDown);
+    return () => window.removeEventListener('keydown', handleKeyDown);
+  }, [mode, isFullscreen]);
 
   const directionEntries = useMemo(() => {
     return LAYER_KEYS
@@ -222,7 +237,10 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const showOverlay = creating || (!activeSessionId && !error && !notInstalled);
 
   return (
-    <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--panel)]">
+    <div className={[
+      'flex min-h-0 flex-col overflow-hidden bg-[var(--panel)]',
+      mode === 'drawer' && isFullscreen ? 'fixed inset-0 z-50 h-screen' : 'h-full',
+    ].join(' ')}>
       <div className={`flex shrink-0 items-center justify-between border-b border-border px-3 ${headerHeightClass}`}>
         <div className="min-w-0 flex items-center gap-2.5">
           <Bot size={14} className="shrink-0 text-accent" />
@@ -304,11 +322,18 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
               </button>
               <button
                 type="button"
-                onClick={onExpand}
+                onClick={() => {
+                  if (isFullscreen) {
+                    setIsFullscreen(false);
+                    return;
+                  }
+                  setIsFullscreen(true);
+                  onExpand?.();
+                }}
                 className="inline-flex shrink-0 items-center rounded border border-border p-1 text-muted hover:border-accent/40 hover:bg-accent/5 hover:text-[var(--text)]"
-                aria-label="Expand terminal drawer"
+                aria-label={isFullscreen ? 'Minimize terminal overlay' : 'Expand terminal drawer'}
               >
-                <Maximize2 size={14} />
+                {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
               </button>
             </>
           ) : (
