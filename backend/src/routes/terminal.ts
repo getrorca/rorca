@@ -1,0 +1,301 @@
+import { Router, Request, Response } from 'express';
+import { z } from 'zod';
+import { queryOne } from '../db/index';
+import { validateBody } from '../lib/validate';
+import { getWorkspaceEnvVars } from './env-vars';
+import * as ptyManager from '../lib/pty-manager';
+import { NotFoundError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
+import { logger } from '../lib/logger';
+
+const router = Router();
+
+// ─── Validation Schemas ─────────────────────────────────────────────────────
+
+const createSessionSchema = z.object({
+  workspaceId: z.string().min(1, 'workspaceId is required'),
+  rows: z.number().int().positive().default(24),
+  cols: z.number().int().positive().default(80),
+});
+
+const resizeSessionSchema = z.object({
+  rows: z.number().int().positive(),
+  cols: z.number().int().positive(),
+});
+
+// ─── Routes ─────────────────────────────────────────────────────────────────
+
+/**
+ * @swagger
+ * /api/terminal/sessions:
+ *   post:
+ *     tags: [Terminal]
+ *     summary: Create a new PTY session
+ *     operationId: createTerminalSession
+ *     description: |
+ *       Spawns a new OpenCode PTY session for the specified workspace.
+ *       The session is isolated with workspace-specific environment variables.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *                 description: ID of the workspace to attach the session to
+ *               rows:
+ *                 type: integer
+ *                 description: Terminal height in rows
+ *                 default: 24
+ *               cols:
+ *                 type: integer
+ *                 description: Terminal width in columns
+ *                 default: 80
+ *     responses:
+ *       201:
+ *         description: PTY session created successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 sessionId:
+ *                   type: string
+ *                   description: Unique session identifier (UUID)
+ *                 workspaceId:
+ *                   type: string
+ *                 cwd:
+ *                   type: string
+ *                   description: Working directory (workspace path)
+ *                 rows:
+ *                   type: integer
+ *                 cols:
+ *                   type: integer
+ *                 createdAt:
+ *                   type: string
+ *                   format: date-time
+ *       404:
+ *         description: Workspace not found
+ *       500:
+ *         description: Failed to create session (opencode binary not found)
+ */
+router.post('/sessions', async (req: Request, res: Response) => {
+  try {
+    const body = validateBody(createSessionSchema, req.body);
+
+    // Look up workspace
+    const workspace = await queryOne<{ id: string; path: string }>(
+      'SELECT id, path FROM workspaces WHERE id = $1',
+      [body.workspaceId]
+    );
+
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    // Get workspace env vars and merge with process.env (workspace vars override)
+    const workspaceEnv = await getWorkspaceEnvVars(body.workspaceId);
+    const mergedEnv = {
+      ...process.env,
+      ...workspaceEnv,
+    } as Record<string, string>;
+
+    // Create PTY session
+    // NOTE: pty-manager expects workspaceId as number but DB uses TEXT id
+    // Cast to any to bypass type check - this will be fixed in OCT-001
+    const sessionId = await ptyManager.createSession(
+      body.workspaceId as any,
+      workspace.path,
+      mergedEnv,
+      body.rows,
+      body.cols
+    );
+
+    logger.info(
+      `[terminal] Created session ${sessionId} for workspace ${body.workspaceId} (${workspace.path})`
+    );
+
+    res.status(201).json({
+      sessionId,
+      workspaceId: body.workspaceId,
+      cwd: workspace.path,
+      rows: body.rows,
+      cols: body.cols,
+      createdAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/terminal/sessions/{sessionId}:
+ *   delete:
+ *     tags: [Terminal]
+ *     summary: Kill a PTY session
+ *     operationId: killTerminalSession
+ *     description: |
+ *       Terminates the PTY process and removes the session from the active sessions map.
+ *       Returns 404 if the session does not exist.
+ *     parameters:
+ *       - in: path
+ *         name: sessionId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Session ID (UUID)
+ *     responses:
+ *       204:
+ *         description: Session killed successfully
+ *       404:
+ *         description: Session not found
+ */
+router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.params;
+
+    const session = ptyManager.getSession(sessionId);
+    if (!session) {
+      throw new NotFoundError('Session not found');
+    }
+
+    ptyManager.killSession(sessionId);
+    logger.info(`[terminal] Killed session ${sessionId}`);
+
+    res.status(204).send();
+  } catch (err) {
+    handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/terminal/sessions:
+ *   get:
+ *     tags: [Terminal]
+ *     summary: List active PTY sessions
+ *     operationId: listTerminalSessions
+ *     description: |
+ *       Returns all currently active PTY sessions across all workspaces.
+ *     responses:
+ *       200:
+ *         description: List of active sessions
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 sessions:
+ *                   type: array
+ *                   items:
+ *                     type: object
+ *                     properties:
+ *                       sessionId:
+ *                         type: string
+ *                       workspaceId:
+ *                         type: number
+ *                       cwd:
+ *                         type: string
+ *                       rows:
+ *                         type: integer
+ *                       cols:
+ *                         type: integer
+ *                       createdAt:
+ *                         type: string
+ *                         format: date-time
+ *                       lastActivityAt:
+ *                         type: string
+ *                         format: date-time
+ */
+router.get('/sessions', async (_req: Request, res: Response) => {
+  try {
+    const activeSessions = ptyManager.activeSessions();
+
+    const sessions = activeSessions.map((s) => ({
+      sessionId: s.sessionId,
+      workspaceId: s.workspaceId,
+      cwd: s.cwd,
+      rows: s.rows,
+      cols: s.cols,
+      createdAt: s.createdAt.toISOString(),
+      lastActivityAt: s.lastActivityAt.toISOString(),
+    }));
+
+    res.json({ sessions });
+  } catch (err) {
+    handleRouteError(_req, res, err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/terminal/sessions/{sessionId}/resize:
+ *   patch:
+ *     tags: [Terminal]
+ *     summary: Resize a PTY session
+ *     operationId: resizeTerminalSession
+ *     description: |
+ *       Updates the terminal dimensions (rows × cols) for an active session.
+ *       The PTY process is notified of the resize via node-pty's resize() method.
+ *     parameters:
+ *       - in: path
+ *         name: sessionId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Session ID (UUID)
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [rows, cols]
+ *             properties:
+ *               rows:
+ *                 type: integer
+ *                 description: New terminal height in rows
+ *               cols:
+ *                 type: integer
+ *                 description: New terminal width in columns
+ *     responses:
+ *       200:
+ *         description: Session resized successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 ok:
+ *                   type: boolean
+ *       404:
+ *         description: Session not found
+ */
+router.patch('/sessions/:sessionId/resize', async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.params;
+    const body = validateBody(resizeSessionSchema, req.body);
+
+    // resizeSession throws if session not found
+    try {
+      ptyManager.resizeSession(sessionId, body.rows, body.cols);
+    } catch (err: any) {
+      if (err.message?.includes('not found')) {
+        throw new NotFoundError('Session not found');
+      }
+      throw err;
+    }
+
+    logger.debug(`[terminal] Resized session ${sessionId} to ${body.cols}x${body.rows}`);
+
+    res.json({ ok: true });
+  } catch (err) {
+    handleRouteError(req, res, err);
+  }
+});
+
+export default router;
