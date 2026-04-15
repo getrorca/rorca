@@ -12,6 +12,7 @@ import '@xterm/xterm/css/xterm.css';
 
 export interface TerminalPaneProps {
   sessionId: string;
+  wsToken: string | null; // OCT-021: Short-lived WebSocket connection token
   onExit?: (exitCode: number) => void;
   onSessionLost?: () => void;
   onInput?: (data: string) => void;
@@ -178,7 +179,7 @@ function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): IL
   };
 }
 
-export default function TerminalPane({ sessionId, onExit, onSessionLost, onInput, className, fontSize = 13 }: TerminalPaneProps) {
+export default function TerminalPane({ sessionId, wsToken, onExit, onSessionLost, onInput, className, fontSize = 13 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -198,7 +199,7 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, onInput
 
   const showRendererBadge = tab === 'developer';
   const currentTheme = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
-  const { onData, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId);
+  const { onData, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId, wsToken);
 
   const closeSearch = useCallback(() => {
     setIsSearchOpen(false);

@@ -31,6 +31,7 @@ interface TerminalPanelProps {
 
 interface TerminalSessionRecord {
   sessionId: string;
+  wsToken: string; // OCT-021: Short-lived WebSocket connection token
   workspaceId: string;
   cwd: string;
   createdAt: string;
@@ -41,6 +42,7 @@ interface TerminalSessionRecord {
 
 interface TerminalSessionResponse {
   sessionId: string;
+  wsToken: string; // OCT-021: Short-lived WebSocket connection token
   workspaceId: string;
   cwd: string;
   createdAt: string;
@@ -235,6 +237,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
       const nextSession: TerminalSessionRecord = {
         sessionId: res.sessionId,
+        wsToken: res.wsToken,
         workspaceId: res.workspaceId,
         cwd: res.cwd,
         createdAt: res.createdAt,
@@ -648,6 +651,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         {(activeSessionId && !error && !notInstalled && !selectedHistorySession) ? (
           <TerminalPane
             sessionId={activeSessionId}
+            wsToken={sessions.find((s) => s.sessionId === activeSessionId)?.wsToken ?? null}
             className="h-full"
             fontSize={fontSize}
             onExit={() => handleSessionExit(activeSessionId)}
