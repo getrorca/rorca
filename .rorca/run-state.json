@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T08:20:47.854Z",
+  "lastUpdatedAt": "2026-04-15T08:19:42.028Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -65,13 +65,13 @@
       "elapsedMs": 16863
     },
     {
-      "storyId": "OCT-004",
-      "title": "DB migration for terminal session persistence",
+      "storyId": "OCT-006",
+      "title": "Frontend WebSocket hook — useTerminalSession",
       "status": "passed",
-      "startedAt": "2026-04-15T08:18:22.932Z",
-      "finishedAt": "2026-04-15T08:20:47.854Z",
+      "startedAt": "2026-04-15T08:18:22.751Z",
+      "finishedAt": "2026-04-15T08:19:42.028Z",
       "agentType": "claude",
-      "elapsedMs": 144922
+      "elapsedMs": 79277
     }
   ],
   "failedStories": [],
