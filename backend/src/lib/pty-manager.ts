@@ -9,6 +9,7 @@ import { detectOpenCode } from './opencode-detector';
 import { execute, queryOne, transaction } from '../db/index';
 import { logger } from './logger';
 import { TooManyRequestsError } from './errors';
+import { runTerminalContextCleanup } from './terminal-context-cleanup';
 
 // OCT-024: Graceful degradation when node-pty native module is not built
 let ptySpawn: typeof import('node-pty').spawn | null = null;
@@ -296,6 +297,7 @@ export async function createSession(
     if (!current || current.shutdownNotified) return;
 
     try {
+      await runTerminalContextCleanup(sessionId);
       await flushSession(sessionId);
       await execute(
         `UPDATE terminal_sessions
@@ -346,7 +348,11 @@ export function killSession(sessionId: string): void {
   }
 
   session.shutdownNotified = true;
-  void flushBufferedChunks(session)
+  void runTerminalContextCleanup(sessionId)
+    .catch((err) => {
+      logger.warn({ err, sessionId }, '[pty-manager] Failed terminal context cleanup on kill');
+    })
+    .then(() => flushBufferedChunks(session))
     .then(() =>
       execute(
         `UPDATE terminal_sessions
