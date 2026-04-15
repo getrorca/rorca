@@ -1,11 +1,10 @@
-```typescript
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
 import { execute, query, queryOne } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { getWorkspaceEnvVars } from './env-vars';
 import * as ptyManager from '../lib/pty-manager';
-import { NotFoundError, ServiceUnavailableError, ValidationError, TooManyRequestsError } from '../lib/errors';
+import { NotFoundError, ServiceUnavailableError, ValidationError, TooManyRequestsError, UnprocessableError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { broadcastAll } from '../lib/sse-hub';
@@ -13,6 +12,7 @@ import { resolveVaultProvider } from '../lib/llm-client';
 import { getDecryptedProviderKey } from '../lib/vault';
 import { injectDirectionStack } from '../lib/terminal-context-injector';
 import { registerTerminalContextCleanup, runTerminalContextCleanup } from '../lib/terminal-context-cleanup';
+import { detectOpenCode } from '../lib/opencode-detector';
 
 const router = Router();
 
@@ -130,12 +130,24 @@ const historyQuerySchema = z.object({
  *                   format: date-time
  *       404:
  *         description: Workspace not found
+ *       422:
+ *         description: OpenCode binary not found
  *       503:
  *         description: node-pty native module not available
  */
 router.post('/sessions', async (req: Request, res: Response) => {
   try {
     const body = validateBody(createSessionSchema, req.body);
+
+    // OCT-015: Check if OpenCode is installed before creating session
+    const opencodeStatus = detectOpenCode();
+    if (!opencodeStatus.opencodeInstalled) {
+      throw new UnprocessableError(
+        'OpenCode binary not found',
+        'OPENCODE_NOT_INSTALLED',
+        { hint: 'Install OpenCode with: npm install -g opencode' }
+      );
+    }
 
     // Look up workspace
     const workspace = await queryOne<{ id: string; path: string }>(
@@ -604,4 +616,3 @@ router.patch('/sessions/:sessionId/resize', async (req: Request, res: Response) 
 });
 
 export default router;
-```
