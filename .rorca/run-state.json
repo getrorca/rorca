@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T08:19:42.028Z",
+  "lastUpdatedAt": "2026-04-15T08:22:32.161Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -76,7 +76,7 @@
   ],
   "failedStories": [],
   "skippedStories": [],
-  "currentStory": null,
+  "currentStory": "OCT-007",
   "decisions": [],
   "resumedFromStory": null
 }
