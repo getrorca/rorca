@@ -11,8 +11,30 @@ import { logger } from '../lib/logger';
 import { broadcastAll } from '../lib/sse-hub';
 import { resolveVaultProvider } from '../lib/llm-client';
 import { getDecryptedProviderKey } from '../lib/vault';
+import { injectDirectionStack } from '../lib/terminal-context-injector';
+import { registerTerminalContextCleanup, runTerminalContextCleanup } from '../lib/terminal-context-cleanup';
 
 const router = Router();
+
+async function emitTerminalContextInjectedEvent(sessionId: string, workspaceId: string, workspacePath: string): Promise<void> {
+  const port = process.env.PORT || '3030';
+  try {
+    await fetch(`http://localhost:${port}/api/wal`, {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        event_type: 'terminal_context_injected',
+        workspace_id: workspaceId,
+        spec_id: null,
+        payload: { sessionId, workspacePath },
+      }),
+    });
+  } catch (error) {
+    logger.warn(
+      `[terminal] Failed to emit terminal_context_injected WAL event for session ${sessionId}: ${error instanceof Error ? error.message : String(error)}`
+    );
+  }
+}
 
 const CLAUDE_NESTED_SESSION_ENV_VARS = [
   'CLAUDECODE',
@@ -155,6 +177,8 @@ router.post('/sessions', async (req: Request, res: Response) => {
       delete mergedEnv[key];
     }
 
+    const { cleanup } = await injectDirectionStack(body.workspaceId, workspace.path, activeModel);
+
     // Create PTY session — throws { code, message } if node-pty not available
     let sessionId: string;
     try {
@@ -165,7 +189,9 @@ router.post('/sessions', async (req: Request, res: Response) => {
         body.rows,
         body.cols
       );
+      registerTerminalContextCleanup(sessionId, cleanup);
     } catch (err: any) {
+      await cleanup();
       if (err.code === 'PTY_NOT_AVAILABLE') {
         // OCT-024: Return 503 with hint when node-pty is not built
         throw new ServiceUnavailableError(err.message);
@@ -182,6 +208,8 @@ router.post('/sessions', async (req: Request, res: Response) => {
     logger.info(
       `[terminal] Created session ${sessionId} for workspace ${body.workspaceId} (${workspace.path})`
     );
+
+    await emitTerminalContextInjectedEvent(sessionId, body.workspaceId, workspace.path);
 
     broadcastAll({
       type: 'terminal_session_started',
@@ -241,6 +269,7 @@ router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
       throw new NotFoundError('Session not found');
     }
 
+    await runTerminalContextCleanup(sessionId);
     ptyManager.killSession(sessionId);
     logger.info(`[terminal] Killed session ${sessionId}`);
 
