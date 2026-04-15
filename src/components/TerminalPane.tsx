@@ -178,7 +178,9 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       try {
         const protocol = window.location.protocol === 'https:' ? 'https:' : 'http:';
         const host = import.meta.env.DEV ? 'localhost:3030' : window.location.host;
-        const url = `${protocol}//${host}/api/terminal/sessions/${encodeURIComponent(sessionId)}/scrollback`;
+        const lastSequenceRaw = window.sessionStorage.getItem(`rorca:terminal:lastSeq:${sessionId}`);
+        const lastSequence = lastSequenceRaw ? Math.max(0, parseInt(lastSequenceRaw, 10) || 0) : 0;
+        const url = `${protocol}//${host}/api/terminal/sessions/${encodeURIComponent(sessionId)}/scrollback?since=${lastSequence}`;
 
         const response = await fetch(url, { signal: abortController.signal });
         if (!response.ok) {
@@ -195,6 +197,7 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
         if (terminalRef.current && chunks.length > 0) {
           for (const chunk of chunks) {
             terminalRef.current.write(chunk.data);
+            window.sessionStorage.setItem(`rorca:terminal:lastSeq:${sessionId}`, String(chunk.sequence));
           }
         }
 

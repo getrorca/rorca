@@ -29,8 +29,9 @@ try {
 
 export interface PtySession {
   sessionId: string;
-  workspaceId: string;
+  workspaceId: number;
   ptyProcess: any; // IPty when available, null otherwise
+  outputSequence: number;
   createdAt: Date;
   lastActivityAt: Date;
   cwd: string;
@@ -137,8 +138,9 @@ export async function createSession(
 
   const session: PtySession = {
     sessionId,
-    workspaceId,
+    workspaceId: Number(workspaceId),
     ptyProcess,
+    outputSequence: 0,
     createdAt: new Date(),
     lastActivityAt: new Date(),
     cwd,
@@ -259,7 +261,7 @@ export function activeSessions(): PtySession[] {
 
 export function killSessionsForWorkspace(workspaceId: string): void {
   const sessionIds = activeSessions()
-    .filter((session) => session.workspaceId === workspaceId)
+    .filter((session) => session.workspaceId === Number(workspaceId))
     .map((session) => session.sessionId);
 
   for (const sessionId of sessionIds) {
