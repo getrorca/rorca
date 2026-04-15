@@ -1,9 +1,10 @@
 ```typescript
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
-import type { ITheme } from '@xterm/xterm';
+import type { ITheme, IBufferRange, ILink, ILinkProvider } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
 import { SearchAddon } from '@xterm/addon-search';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import { ChevronDown, ChevronUp, X } from 'lucide-react';
 import { useTerminalSession } from '../hooks/useTerminalSession';
 import { useTheme } from '../contexts/ThemeContext';
@@ -39,6 +40,9 @@ const SEARCH_DECORATIONS = {
   activeMatchBorder: '#79c0ff',
   activeMatchColorOverviewRuler: '#79c0ff',
 };
+
+const ABSOLUTE_PATH_REGEX = /(?:file:\/\/)?(\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\.[A-Za-z]{2,6})/g;
+const RELATIVE_PATH_REGEX = /(?<![A-Za-z0-9._/-])([A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\.[A-Za-z]{2,6})(?![A-Za-z0-9._-])/g;
 
 // ─── Theme colors ─────────────────────────────────────────────────────────────
 
@@ -90,6 +94,80 @@ const TERMINAL_THEME_LIGHT: ITheme = {
   brightWhite: '#8c959f',
 };
 
+function getLineText(terminal: Terminal, bufferLineNumber: number): string {
+  const line = terminal.buffer.active.getLine(bufferLineNumber - 1);
+  return line?.translateToString(true) ?? '';
+}
+
+function resolveLinkPath(rawPath: string, cwd: string | undefined): string {
+  const normalizedPath = rawPath.startsWith('file://') ? rawPath.replace(/^file:\/\//, '') : rawPath;
+
+  if (normalizedPath.startsWith('/')) {
+    return normalizedPath;
+  }
+
+  const base = cwd?.trim() || '';
+  if (!base) return normalizedPath;
+  const trimmedBase = base.endsWith('/') ? base.slice(0, -1) : base;
+  return `${trimmedBase}/${normalizedPath}`;
+}
+
+function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): ILinkProvider {
+  return {
+    provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void): void {
+      const text = getLineText(terminal, bufferLineNumber);
+      if (!text) {
+        callback(undefined);
+        return;
+      }
+
+      const matches: ILink[] = [];
+      const seen = new Set<string>();
+      const regexes = [ABSOLUTE_PATH_REGEX, RELATIVE_PATH_REGEX];
+
+      for (const regex of regexes) {
+        regex.lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = regex.exec(text)) !== null) {
+          const fullMatch = match[0];
+          const capturedPath = match[1] ?? fullMatch;
+          const startColumn = match.index + 1;
+          const endColumn = startColumn + fullMatch.length;
+          const dedupeKey = `${startColumn}:${fullMatch}`;
+
+          if (seen.has(dedupeKey)) continue;
+          seen.add(dedupeKey);
+
+          const range: IBufferRange = {
+            start: { x: startColumn, y: bufferLineNumber },
+            end: { x: endColumn, y: bufferLineNumber },
+          };
+
+          matches.push({
+            range,
+            text: fullMatch,
+            activate: () => {
+              const absolutePath = resolveLinkPath(capturedPath, cwd);
+              window.dispatchEvent(new CustomEvent('rorca:open-file', {
+                detail: {
+                  path: absolutePath,
+                  workspacePath: cwd,
+                },
+              }));
+            },
+            decorations: {
+              underline: true,
+              pointerCursor: true,
+            },
+          });
+        }
+      }
+
+      callback(matches.length > 0 ? matches : undefined);
+    },
+  };
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function TerminalPane({ sessionId, onExit, onSessionLost, className }: TerminalPaneProps) {
@@ -104,6 +182,7 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
   const [searchQuery, setSearchQuery] = useState('');
   const [searchStatus, setSearchStatus] = useState<'idle' | 'searching' | 'found' | 'not-found'>('idle');
   const isSearchOpenRef = useRef(false);
+  const [sessionCwd, setSessionCwd] = useState<string | undefined>(undefined);
   const { resolved } = useTheme();
 
   const currentTheme = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
@@ -158,12 +237,19 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       theme: currentTheme,
     });
 
-    // Create fit addon
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
 
     const searchAddon = new SearchAddon();
     terminal.loadAddon(searchAddon);
+
+    const webLinksAddon = new WebLinksAddon((event, uri) => {
+      event.preventDefault();
+      window.open(uri, '_blank', 'noopener');
+    });
+    terminal.loadAddon(webLinksAddon);
+
+    terminal.registerLinkProvider(createFileLinkProvider(terminal, sessionCwd));
 
     container.style.backgroundColor = currentTheme.background ?? '';
 
@@ -233,7 +319,7 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
       searchAddonRef.current = null;
       resizeObserverRef.current = null;
     };
-  }, [closeSearch, currentTheme, sessionId, sendInput, sendResize]);
+  }, [closeSearch, currentTheme, sessionId, sendInput, sendResize, sessionCwd]);
 
   useEffect(() => {
     if (terminalRef.current) {
@@ -293,6 +379,8 @@ export default function TerminalPane({ sessionId, onExit, onSessionLost, classNa
 
         const data = await response.json();
         const chunks = data.chunks as Array<{ sequence: number; data: string }>;
+        const cwd = typeof data.cwd === 'string' ? data.cwd : undefined;
+        setSessionCwd(cwd);
 
         // Replay chunks in order
         if (terminalRef.current && chunks.length > 0) {
