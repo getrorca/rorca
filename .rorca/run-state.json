@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T08:22:04.733Z",
+  "lastUpdatedAt": "2026-04-15T08:20:47.854Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -65,13 +65,13 @@
       "elapsedMs": 16863
     },
     {
-      "storyId": "OCT-001",
-      "title": "Backend PTY session manager — spawn, resize, kill",
+      "storyId": "OCT-004",
+      "title": "DB migration for terminal session persistence",
       "status": "passed",
-      "startedAt": "2026-04-15T08:18:22.704Z",
-      "finishedAt": "2026-04-15T08:22:04.733Z",
+      "startedAt": "2026-04-15T08:18:22.932Z",
+      "finishedAt": "2026-04-15T08:20:47.854Z",
       "agentType": "claude",
-      "elapsedMs": 222029
+      "elapsedMs": 144922
     }
   ],
   "failedStories": [],
