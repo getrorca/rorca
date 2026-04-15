@@ -7,10 +7,12 @@ import {
   Minimize2,
   Plus,
   Trash2,
+  X,
 } from 'lucide-react';
 import TerminalPane from '../components/TerminalPane';
 import ReadOnlyTerminalPane from '../components/ReadOnlyTerminalPane';
 import ModelPickerPopover from '../components/ModelPickerPopover';
+import Tooltip from '../components/Tooltip';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, ApiError } from '../lib/apiFetch';
 import { getAllLayers } from '../api/direction';
@@ -29,7 +31,9 @@ interface TerminalSessionRecord {
   workspaceId: string;
   cwd: string;
   createdAt: string;
-  exited?: boolean;
+  label: string;
+  autoLabeled: boolean;
+  status: 'active' | 'exited' | 'killed';
 }
 
 interface TerminalSessionResponse {
@@ -54,6 +58,8 @@ interface DirectionLayersResponse {
 }
 
 const LAYER_KEYS = ['l1', 'l2', 'l3', 'l4', 'l5'] as const;
+const MAX_SESSIONS = 5;
+const SHORT_BASH_COMMANDS = /^(ls|pwd|cd|cat|echo|git|npm|node|vim|vi|nano|clear|exit)$/;
 
 function getBasename(input: string): string {
   const normalized = input.replace(/\\/g, '/').replace(/\/+$/, '');
@@ -113,6 +119,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const historyDrawerRef = useRef<HTMLDivElement>(null);
   const initialSessionRequestedRef = useRef(false);
   const sessionsRef = useRef<TerminalSessionRecord[]>([]);
+  const nextLabelNumRef = useRef(1);
 
   const headerHeightClass = mode === 'panel' ? 'h-10' : 'h-9';
   const headerTextClass = mode === 'panel' ? 'text-[12px]' : 'text-[11px]';
@@ -199,12 +206,17 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         }),
       });
 
+      const labelNum = nextLabelNumRef.current;
+      nextLabelNumRef.current += 1;
+
       const nextSession: TerminalSessionRecord = {
         sessionId: res.sessionId,
         workspaceId: res.workspaceId,
         cwd: res.cwd,
         createdAt: res.createdAt,
-        exited: false,
+        label: `OpenCode ${labelNum}`,
+        autoLabeled: false,
+        status: 'active',
       };
 
       setSessions((prev) => [...prev, nextSession]);
@@ -290,6 +302,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     setHistorySessions([]);
     setSelectedHistorySessionId(null);
     initialSessionRequestedRef.current = false;
+    nextLabelNumRef.current = 1;
     setWorkspaceMenuOpen(false);
     setWorkspaceId(nextWorkspaceId);
     await loadDirections(nextWorkspaceId);
@@ -312,9 +325,71 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
   const handleSessionExit = useCallback((sessionId: string) => {
     setSessions((prev) => prev.map((session) => (
-      session.sessionId === sessionId ? { ...session, exited: true } : session
+      session.sessionId === sessionId ? { ...session, status: 'exited' } : session
     )));
   }, []);
+
+  const handleSessionInput = useCallback((sessionId: string, data: string) => {
+    setSessions((prev) => prev.map((session) => {
+      if (session.sessionId !== sessionId || session.autoLabeled) {
+        return session;
+      }
+
+      const trimmed = data.trim();
+
+      // Skip empty or very short inputs (just Enter, single char, etc.)
+      if (trimmed.length <= 3) {
+        return session;
+      }
+
+      let newLabel: string;
+
+      // Check if it's a short bash command
+      const firstWord = trimmed.split(/\s+/)[0] ?? '';
+      if (SHORT_BASH_COMMANDS.test(firstWord)) {
+        // Use cwd basename as label
+        const basename = getBasename(session.cwd);
+        newLabel = basename;
+      } else {
+        // Use the input text, truncated to 40 chars
+        newLabel = trimmed.slice(0, 40).trim();
+      }
+
+      return {
+        ...session,
+        label: newLabel,
+        autoLabeled: true,
+      };
+    }));
+  }, []);
+
+  const handleCloseSession = useCallback(async (sessionId: string) => {
+    // Delete from backend
+    try {
+      await apiFetch(`/api/terminal/sessions/${encodeURIComponent(sessionId)}`, {
+        method: 'DELETE',
+      });
+    } catch {
+      // Ignore deletion errors
+    }
+
+    // Remove from local state
+    setSessions((prev) => {
+      const filtered = prev.filter((s) => s.sessionId !== sessionId);
+
+      // If we're closing the active session, activate another one
+      if (sessionId === activeSessionId && filtered.length > 0) {
+        const closedIndex = prev.findIndex((s) => s.sessionId === sessionId);
+        // Try to activate the previous tab, or next if no previous
+        const targetIndex = closedIndex > 0 ? closedIndex - 1 : 0;
+        setActiveSessionId(filtered[targetIndex]?.sessionId ?? null);
+      } else if (filtered.length === 0) {
+        setActiveSessionId(null);
+      }
+
+      return filtered;
+    });
+  }, [activeSessionId]);
 
   const handleClearHistory = useCallback(async () => {
     if (!workspaceId) return;
@@ -402,15 +477,17 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             <span>History</span>
           </button>
 
-          <button
-            type="button"
-            onClick={() => { void handleNewSession(); }}
-            disabled={!workspaceId || creating}
-            className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-50"
-          >
-            <Plus size={12} />
-            <span>New Session</span>
-          </button>
+          <Tooltip content="Max 5 sessions" disabled={sessions.length < MAX_SESSIONS}>
+            <button
+              type="button"
+              onClick={() => { void handleNewSession(); }}
+              disabled={!workspaceId || creating || sessions.length >= MAX_SESSIONS}
+              className="inline-flex shrink-0 items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <Plus size={12} />
+              <span>New Session</span>
+            </button>
+          </Tooltip>
 
           {mode === 'drawer' ? (
             <>
@@ -453,18 +530,36 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
       {sessions.length > 1 && (
         <div className="flex shrink-0 items-center gap-1.5 overflow-x-auto border-b border-border px-3 py-2">
-          {sessions.map((session, index) => {
+          {sessions.map((session) => {
             const isCurrent = session.sessionId === activeSessionId;
+            const statusDotClass = session.status === 'active' ? 'bg-emerald-400' : 'bg-muted/50';
+
             return (
-              <button
+              <div
                 key={session.sessionId}
-                type="button"
-                onClick={() => setActiveSessionId(session.sessionId)}
-                className={`inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors ${isCurrent ? 'border-accent bg-accent/10 text-[var(--text)]' : 'border-border text-muted hover:border-accent/30 hover:bg-accent/5 hover:text-[var(--text)]'}`}
+                className={`group inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors ${isCurrent ? 'border-accent bg-surface-200 text-[var(--text)]' : 'border-border bg-transparent text-muted hover:border-accent/30 hover:bg-surface-100 hover:text-[var(--text)]'}`}
               >
-                <span>Session {index + 1}</span>
-                <span className={`h-1.5 w-1.5 rounded-full ${session.exited ? 'bg-muted/50' : 'bg-emerald-400'}`} />
-              </button>
+                <button
+                  type="button"
+                  onClick={() => setActiveSessionId(session.sessionId)}
+                  className="flex items-center gap-1.5"
+                  title={session.label}
+                >
+                  <span className="max-w-[120px] truncate">{session.label}</span>
+                  <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass}`} />
+                </button>
+                <button
+                  type="button"
+                  onClick={(e) => {
+                    e.stopPropagation();
+                    void handleCloseSession(session.sessionId);
+                  }}
+                  className="ml-0.5 opacity-0 transition-opacity group-hover:opacity-100"
+                  aria-label="Close session"
+                >
+                  <X size={12} className="text-muted hover:text-[var(--text)]" />
+                </button>
+              </div>
             );
           })}
         </div>
@@ -476,6 +571,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             sessionId={activeSessionId}
             className="h-full"
             onExit={() => handleSessionExit(activeSessionId)}
+            onInput={(data) => handleSessionInput(activeSessionId, data)}
           />
         ) : selectedHistorySession ? (
           <div className="flex h-full min-h-0 flex-col">
