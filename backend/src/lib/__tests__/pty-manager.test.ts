@@ -70,13 +70,13 @@ describe('pty-manager', () => {
       });
 
       await expect(
-        ptyManager.createSession('1', '/tmp', {}, 24, 80)
+        ptyManager.createSession('', 'Workspace', '', {}, 24, 80)
       ).rejects.toThrow('opencode binary not found');
     });
 
     it('should spawn opencode with correct PTY dimensions and cwd', async () => {
       const nodePty = require('node-pty');
-      const sessionId = await ptyManager.createSession('1', '/workspace', {}, 30, 120);
+      const sessionId = await ptyManager.createSession('', 'Workspace', '', {}, 30, 120);
 
       expect(sessionId).toBeTruthy();
       expect(nodePty.spawn).toHaveBeenCalledWith(
@@ -97,7 +97,7 @@ describe('pty-manager', () => {
 
     it('injects shell integration env var for bash/zsh sessions', async () => {
       const nodePty = require('node-pty');
-      await ptyManager.createSession('1', '/workspace', { SHELL: '/bin/bash' }, 30, 120);
+      await ptyManager.createSession('', 'Workspace', '', { SHELL: '/bin/bash' }, 30, 120);
 
       expect(nodePty.spawn).toHaveBeenCalledWith(
         expect.any(String),
@@ -113,7 +113,7 @@ describe('pty-manager', () => {
 
   describe('processSessionOutput', () => {
     it('strips OSC 133 sequences and emits command_end shell events', async () => {
-      const sessionId = await ptyManager.createSession('1', '/tmp', { SHELL: '/bin/bash' }, 24, 80);
+      const sessionId = await ptyManager.createSession('', 'Workspace', '', { SHELL: '/bin/bash' }, 24, 80);
 
       let parsed = ptyManager.processSessionOutput(sessionId, 'echo hi\u001b]133;B\u0007hello');
       expect(parsed.cleanData).toBe('echo hihello');
@@ -126,7 +126,7 @@ describe('pty-manager', () => {
     });
 
     it('buffers partial OSC 133 sequences across chunks', async () => {
-      const sessionId = await ptyManager.createSession('1', '/tmp', { SHELL: '/bin/zsh' }, 24, 80);
+      const sessionId = await ptyManager.createSession('', 'Workspace', '', { SHELL: '/bin/zsh' }, 24, 80);
 
       const first = ptyManager.processSessionOutput(sessionId, 'abc\u001b]133;D;');
       expect(first.cleanData).toBe('abc');
@@ -162,7 +162,7 @@ describe('pty-manager', () => {
       });
       mockTransaction.mockImplementation(async (fn: (client: any) => Promise<any>) => fn({ query: mockClientQuery }));
 
-      const sessionId = await ptyManager.createSession(1 as any, '/tmp', {}, 24, 80);
+      const sessionId = await ptyManager.createSession( as any, 'Workspace', '', {}, 24, 80);
       onDataHandler?.('abc');
       onDataHandler?.('def');
 
@@ -200,7 +200,7 @@ describe('pty-manager', () => {
       });
       mockTransaction.mockImplementation(async (fn: (client: any) => Promise<any>) => fn({ query: mockClientQuery }));
 
-      const sessionId = await ptyManager.createSession(1 as any, '/tmp', {}, 24, 80);
+      const sessionId = await ptyManager.createSession( as any, 'Workspace', '', {}, 24, 80);
       onDataHandler?.('x');
 
       await ptyManager.flushSession(sessionId);
@@ -221,7 +221,7 @@ describe('pty-manager', () => {
         await ptyManager.createSession(i + 1, '/workspace', {}, 24, 80);
       }
 
-      await expect(ptyManager.createSession(999, '/workspace', {}, 24, 80)).rejects.toMatchObject({
+      await expect(ptyManager.createSession(, 'Workspace', '', {}, 24, 80)).rejects.toMatchObject({
         statusCode: 429,
         message: 'Maximum terminal sessions reached',
       });
@@ -230,7 +230,7 @@ describe('pty-manager', () => {
 
   describe('resizeSession', () => {
     it('should call pty resize with correct arguments', async () => {
-      const sessionId = await ptyManager.createSession('1', '/tmp', {}, 24, 80);
+      const sessionId = await ptyManager.createSession('', 'Workspace', '', {}, 24, 80);
       const session = ptyManager.getSession(sessionId);
       const mockResize = session?.ptyProcess.resize as jest.Mock;
 
@@ -242,7 +242,7 @@ describe('pty-manager', () => {
 
   describe('killSession', () => {
     it('should kill PTY and remove session', async () => {
-      const sessionId = await ptyManager.createSession('1', '/tmp', {}, 24, 80);
+      const sessionId = await ptyManager.createSession('', 'Workspace', '', {}, 24, 80);
       const session = ptyManager.getSession(sessionId);
       const mockKill = session?.ptyProcess.kill as jest.Mock;
 
@@ -257,8 +257,8 @@ describe('pty-manager', () => {
 
   describe('activeSessions', () => {
     it('should return all active sessions', async () => {
-      const sessionId1 = await ptyManager.createSession('1', '/tmp', {}, 24, 80);
-      const sessionId2 = await ptyManager.createSession('2', '/tmp', {}, 24, 80);
+      const sessionId1 = await ptyManager.createSession('', 'Workspace', '', {}, 24, 80);
+      const sessionId2 = await ptyManager.createSession('', 'Workspace', '', {}, 24, 80);
 
       const active = ptyManager.activeSessions();
       expect(active).toHaveLength(2);
@@ -269,7 +269,7 @@ describe('pty-manager', () => {
 
   describe('shutdownAll', () => {
     it('flushes chunks, marks killed, notifies sockets, and kills PTYs', async () => {
-      const sessionId = await ptyManager.createSession('ws-1', '/workspace', {}, 24, 80);
+      const sessionId = await ptyManager.createSession('', 'Workspace', '', {}, 24, 80);
       const session = ptyManager.getSession(sessionId)!;
 
       const dataHandler = (session.ptyProcess.onData as jest.Mock).mock.calls[0][0];
@@ -319,9 +319,9 @@ describe('pty-manager killSessionsForWorkspace helper', () => {
   });
 
   it('kills only matching workspace sessions', async () => {
-    const sessionId1 = await ptyManager.createSession('ws-a', '/tmp', {}, 24, 80);
-    const sessionId2 = await ptyManager.createSession('ws-b', '/tmp', {}, 24, 80);
-    const sessionId3 = await ptyManager.createSession('ws-a', '/tmp', {}, 24, 80);
+    const sessionId1 = await ptyManager.createSession('', 'Workspace', '', {}, 24, 80);
+    const sessionId2 = await ptyManager.createSession('', 'Workspace', '', {}, 24, 80);
+    const sessionId3 = await ptyManager.createSession('', 'Workspace', '', {}, 24, 80);
 
     expect(ptyManager.activeSessions()).toHaveLength(3);
 
