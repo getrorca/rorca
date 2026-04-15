@@ -1,10 +1,10 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { queryOne } from '../db/index';
+import { query, queryOne } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { getWorkspaceEnvVars } from './env-vars';
 import * as ptyManager from '../lib/pty-manager';
-import { NotFoundError } from '../lib/errors';
+import { NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 
@@ -228,6 +228,66 @@ router.get('/sessions', async (_req: Request, res: Response) => {
     res.json({ sessions });
   } catch (err) {
     handleRouteError(_req, res, err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/terminal/sessions/{sessionId}/scrollback:
+ *   get:
+ *     tags: [Terminal]
+ *     summary: Get terminal scrollback chunks
+ *     operationId: getTerminalSessionScrollback
+ *     description: |
+ *       Returns persisted terminal output chunks for a session in ascending sequence order.
+ *       Use the optional `since` query parameter to fetch only chunks after a known sequence cursor.
+ *     parameters:
+ *       - in: path
+ *         name: sessionId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Session ID (UUID)
+ *       - in: query
+ *         name: since
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           minimum: 0
+ *           default: 0
+ *         description: Return only chunks with sequence greater than this value
+ *     responses:
+ *       200:
+ *         description: Scrollback chunks in sequence order
+ *       400:
+ *         description: Invalid since parameter
+ */
+router.get('/sessions/:sessionId/scrollback', async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.params;
+    const sinceRaw = req.query.since;
+
+    let since = 0;
+    if (sinceRaw !== undefined) {
+      const parsed = parseInt(String(sinceRaw), 10);
+      if (Number.isNaN(parsed) || parsed < 0) {
+        throw new ValidationError('since must be a non-negative integer');
+      }
+      since = parsed;
+    }
+
+    const chunks = await query<{ sequence: number; data: string }>(
+      `SELECT sequence, data
+         FROM terminal_output_chunks
+        WHERE session_id = $1 AND sequence > $2
+        ORDER BY sequence ASC
+        LIMIT 5000`,
+      [sessionId, since]
+    );
+
+    res.json({ chunks });
+  } catch (err) {
+    handleRouteError(req, res, err);
   }
 });
 

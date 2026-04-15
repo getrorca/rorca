@@ -235,3 +235,50 @@ describe('PATCH /api/terminal/sessions/:sessionId/resize', () => {
     expect(res.body.error).toContain('Session not found');
   });
 });
+
+describe('GET /api/terminal/sessions/:sessionId/scrollback', () => {
+  const sessionId = '11111111-1111-1111-1111-111111111111';
+
+  beforeEach(async () => {
+    await execute(
+      `INSERT INTO terminal_sessions (session_id, workspace_id, cwd, rows, cols, status)
+       VALUES ($1, $2, $3, 24, 80, 'active')
+       ON CONFLICT (session_id) DO NOTHING`,
+      [sessionId, WORKSPACE_ID, tmpDir]
+    );
+
+    await execute('DELETE FROM terminal_output_chunks WHERE session_id = $1', [sessionId]);
+    await execute(
+      `INSERT INTO terminal_output_chunks (session_id, sequence, data)
+       VALUES ($1, 1, 'a'), ($1, 2, 'b'), ($1, 3, 'c')`,
+      [sessionId]
+    );
+  });
+
+  test('returns all chunks by default', async () => {
+    const res = await request(app)
+      .get(`/api/terminal/sessions/${sessionId}/scrollback`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.chunks.map((chunk: { sequence: number }) => chunk.sequence)).toEqual([1, 2, 3]);
+  });
+
+  test('returns only chunks after since cursor', async () => {
+    const res = await request(app)
+      .get(`/api/terminal/sessions/${sessionId}/scrollback?since=2`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.chunks).toEqual([{ sequence: 3, data: 'c' }]);
+  });
+
+  test('returns 400 for invalid since parameter', async () => {
+    const res = await request(app)
+      .get(`/api/terminal/sessions/${sessionId}/scrollback?since=-1`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('since must be a non-negative integer');
+  });
+});
