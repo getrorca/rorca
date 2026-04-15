@@ -595,6 +595,13 @@ if (process.env.NODE_ENV !== 'test') {
     // Handle incoming messages from client
     ws.on('message', (rawMessage: Buffer | string) => {
       try {
+        if (ptyManager.isInputTooLarge(rawMessage)) {
+          if (ws.readyState === WebSocket.OPEN) {
+            ws.send(JSON.stringify({ type: 'error', message: 'Input too large' }));
+          }
+          return;
+        }
+
         const message = JSON.parse(rawMessage.toString());
 
         switch (message.type) {
