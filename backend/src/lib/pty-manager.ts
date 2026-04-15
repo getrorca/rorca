@@ -10,6 +10,7 @@ import { execute, queryOne, transaction } from '../db/index';
 import { logger } from './logger';
 import { TooManyRequestsError } from './errors';
 import { runTerminalContextCleanup } from './terminal-context-cleanup';
+import { prepareShellIntegration, parseOsc133, type ShellEvent } from './shell-integration';
 
 // OCT-024: Graceful degradation when node-pty native module is not built
 let ptySpawn: typeof import('node-pty').spawn | null = null;
@@ -47,6 +48,9 @@ export interface PtySession {
   totalOutputBytes: number;
   sockets: Set<WebSocket>;
   shutdownNotified: boolean;
+  // OCT-030: Shell integration timing
+  commandStartTime: number | null;
+  shellIntegrationCleanup: (() => void) | null;
 }
 
 const sessions = new Map<string, PtySession>();
@@ -241,17 +245,29 @@ export async function createSession(
   const cleanEnv = { ...env };
   CLAUDE_ENV_VARS.forEach((key) => delete cleanEnv[key]);
 
+  // OCT-030: Prepare shell integration env vars and RC file overrides
+  const { env: shellEnv, cleanupFn: shellCleanup } = prepareShellIntegration(cleanEnv);
+
   const existingMax = await queryOne<{ max_seq: number | null }>(
     'SELECT MAX(sequence) AS max_seq FROM terminal_output_chunks WHERE session_id = $1',
     [sessionId]
   );
 
-  const ptyProcess = ptySpawn(status.opencodeBinPath, [], {
+  // OCT-030: Detect shell and pass --rcfile for bash
+  const shellPath = shellEnv.SHELL || process.env.SHELL || '/bin/bash';
+  const shellName = shellPath.split('/').pop() || 'bash';
+  const spawnArgs: string[] = [];
+
+  if (shellName.includes('bash') && shellEnv.RORCA_SHELL_RCFILE) {
+    spawnArgs.push('--rcfile', shellEnv.RORCA_SHELL_RCFILE);
+  }
+
+  const ptyProcess = ptySpawn(shellPath, spawnArgs, {
     name: 'xterm-256color',
     rows,
     cols,
     cwd,
-    env: cleanEnv,
+    env: shellEnv,
   });
 
   const session: PtySession = {
@@ -272,6 +288,9 @@ export async function createSession(
     totalOutputBytes: 0,
     sockets: new Set<WebSocket>(),
     shutdownNotified: false,
+    // OCT-030: Shell integration timing
+    commandStartTime: null,
+    shellIntegrationCleanup: shellCleanup,
   };
 
   await execute(
@@ -285,9 +304,43 @@ export async function createSession(
   // Update lastActivityAt on every data event to reset idle timer
   ptyProcess.onData((data: string) => {
     const s = sessions.get(sessionId);
-    if (s) {
-      s.lastActivityAt = new Date();
-      bufferOutputChunk(s, data);
+    if (!s) return;
+
+    s.lastActivityAt = new Date();
+
+    // OCT-030: Parse OSC 133 sequences and emit shell events to WebSocket clients
+    const { stripped, events } = parseOsc133(data);
+
+    // Buffer the stripped output (OSC sequences removed)
+    bufferOutputChunk(s, stripped);
+
+    // Process shell events and broadcast to connected sockets
+    for (const event of events) {
+      if (event.type === 'output_start' || event.type === 'prompt_end') {
+        // Command started — record timestamp
+        s.commandStartTime = Date.now();
+      } else if (event.type === 'command_end' && typeof event.exitCode === 'number') {
+        // Command ended — compute duration and emit shell event
+        const durationMs = s.commandStartTime !== null ? Date.now() - s.commandStartTime : 0;
+        s.commandStartTime = null;
+
+        const shellEventPayload = JSON.stringify({
+          type: 'shell_event',
+          event: 'command_end',
+          exitCode: event.exitCode,
+          durationMs,
+        });
+
+        s.sockets.forEach((socket) => {
+          try {
+            if (socket.readyState === WebSocket.OPEN) {
+              socket.send(shellEventPayload);
+            }
+          } catch (err) {
+            logger.warn({ err, sessionId }, '[pty-manager] Failed to send shell_event to socket');
+          }
+        });
+      }
     }
   });
 
@@ -308,6 +361,8 @@ export async function createSession(
       emitTerminalSessionEnded(session, exitCode ?? null);
       notifySocketsExit(current, exitCode ?? 0);
       closeSockets(current);
+      // OCT-030: Clean up shell integration temp files
+      current.shellIntegrationCleanup?.();
     } catch (err) {
       logger.error({ err, sessionId }, '[pty-manager] Failed to flush session on exit');
     } finally {
@@ -370,6 +425,8 @@ export function killSession(sessionId: string): void {
       } catch {}
       notifySocketsExit(session, -1);
       closeSockets(session);
+      // OCT-030: Clean up shell integration temp files
+      session.shellIntegrationCleanup?.();
       sessions.delete(sessionId);
     });
 
@@ -438,6 +495,8 @@ async function shutdownSession(session: PtySession): Promise<void> {
   } catch (err) {
     logger.warn({ err, sessionId: session.sessionId }, '[pty-manager] Failed to kill PTY during shutdown');
   }
+  // OCT-030: Clean up shell integration temp files
+  session.shellIntegrationCleanup?.();
   sessions.delete(session.sessionId);
 }
 
