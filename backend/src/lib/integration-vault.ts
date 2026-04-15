@@ -228,3 +228,11 @@ export async function markTokenValidated(
     WHERE workspace_id = $1 AND provider = $2 AND token_type = $3 AND revoked_at IS NULL
   `, [workspaceId, provider, tokenType]);
 }
+
+export async function getDecryptedProviderKey(
+  workspaceId: string,
+  provider: string,
+): Promise<string | null> {
+  const token = await getOAuthToken(workspaceId, provider as IntegrationProvider, 'api_key');
+  return token?.token ?? null;
+}
