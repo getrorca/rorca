@@ -142,14 +142,16 @@ export default function TerminalDrawer() {
         aria-label="Open OpenCode terminal"
       >
         <Bot size={12} className="text-accent" />
-        <span className="text-[11px] font-medium text-[var(--text)]">OpenCode</span>
         {sessionCount === 0 ? (
-          <span className="text-[11px] text-muted">· Click to start</span>
+          <span className="text-[11px] font-medium text-[var(--text)]">OpenCode · Click to start</span>
         ) : (
+          <span className="text-[11px] font-medium text-[var(--text)]">OpenCode</span>
+        )}
+        {sessionCount !== 0 ? (
           <span className="rounded-full bg-surface-200 px-2 py-0.5 text-[9px] text-muted">
             {sessionCount} {sessionCount === 1 ? 'session' : 'sessions'}
           </span>
-        )}
+        ) : null}
         <span className="ml-auto">
           <ChevronUp size={12} className="text-muted" />
         </span>

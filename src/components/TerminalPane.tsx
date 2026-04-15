@@ -1,4 +1,3 @@
-```typescript
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import type { IDisposable, ITheme, IBufferRange, ILink, ILinkProvider } from '@xterm/xterm';
@@ -202,7 +201,8 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
 
   const showRendererBadge = tab === 'developer';
   const currentTheme = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
-  const { onData, onShellEvent, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId, wsToken);
+  const bannerWrittenRef = useRef(false);
+  const { onData, onBanner, onShellEvent, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId, wsToken);
 
   const writeCommandBadge = useCallback((exitCode: number, durationMs: number) => {
     const terminal = terminalRef.current;
@@ -527,6 +527,31 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
   }, [sessionId, scrollbackFetched]);
 
   useEffect(() => {
+    bannerWrittenRef.current = false;
+  }, [sessionId]);
+
+  useEffect(() => {
+    const unsubscribe = onBanner((event) => {
+      const terminal = terminalRef.current;
+      if (!terminal || bannerWrittenRef.current) {
+        return;
+      }
+
+      bannerWrittenRef.current = true;
+      terminal.writeln('');
+      terminal.writeln('\x1b[2m  ──────────────────────────────────────\x1b[0m');
+      terminal.writeln('  \x1b[36m\x1b[1mOpenCode\x1b[0m \x1b[2mAI Terminal\x1b[0m');
+      terminal.writeln(`  \x1b[2mWorkspace:\x1b[0m ${event.workspaceLabel}`);
+      terminal.writeln(`  \x1b[2mModel:\x1b[0m    ${event.model}`);
+      terminal.writeln(`  \x1b[2mDirectory:\x1b[0m ${event.cwd}`);
+      terminal.writeln('\x1b[2m  ──────────────────────────────────────\x1b[0m');
+      terminal.writeln('');
+    });
+
+    return unsubscribe;
+  }, [onBanner]);
+
+  useEffect(() => {
     if (!scrollbackFetched) return;
 
     const unsubscribe = onData((data) => {
@@ -679,4 +704,3 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
     </div>
   );
 }
-```
