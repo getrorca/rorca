@@ -293,7 +293,7 @@ rorca/
 | `run_output_chunks` | DB-backed terminal output streaming — `(run_id, sequence, data)`, monotonically increasing, survives restarts, enables late-join SSE replay |
 | `worker_heartbeat` | Worker liveness — `(worker_id, pid, hostname, started_at, last_seen)`, updated every 30s; stale if `last_seen` > 90s ago |
 
-**WAL event types**: `generate`, `spec_approved`, `spec_rejected`, `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `worktree_created`, `worktree_merged`, `run_blocked` (HITL pause), `context_file_changed` (CIE file watcher), `story_escalated` (CIE model escalation), `skill_installed` (skill added), `skill_removed` (skill deleted), `skill_matched` (LLM skill-to-spec matching)
+**WAL event types**: `generate`, `spec_approved`, `spec_rejected`, `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `worktree_created`, `worktree_merged`, `run_blocked` (HITL pause), `context_file_changed` (CIE file watcher), `story_escalated` (CIE model escalation), `skill_installed` (skill added), `skill_removed` (skill deleted), `skill_matched` (LLM skill-to-spec matching), `terminal_session_started`, `terminal_session_ended`
 
 PostgreSQL enforces FK constraints natively. Connection pooling (max 20, 30s idle timeout) is configured in `backend/src/db/index.ts`.
 
