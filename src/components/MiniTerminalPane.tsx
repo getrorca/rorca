@@ -294,6 +294,9 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
     <div className="flex flex-col border border-[var(--border)] rounded-lg overflow-hidden bg-[var(--bg)] h-full">
       {/* ─── Header ─────────────────────────────────────────────────────── */}
       <div className="shrink-0 px-2 py-1.5 border-b border-[var(--border)] bg-[var(--surface)] flex items-center gap-2 min-h-[32px]">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--text-muted)] shrink-0">
+          Story Trace
+        </span>
         {/* Story ID badge */}
         <span className="px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded bg-[var(--accent)]/15 text-[var(--accent)] shrink-0">
           {storyId}
