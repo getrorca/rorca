@@ -3,12 +3,13 @@
 Spec: rorca-ci-autofix
 Run ID: 20260316000171
 Started: 2026-04-14T05:27:51.531Z
-Last Updated: 2026-04-14T06:17:29.635Z
+Last Updated: 2026-04-15T08:19:42.028Z
 
-## Completed Stories (6)
+## Completed Stories (7)
 - CAF-001: Universal CI failure parser — extract structured errors from any GitHub check_run — DONE (claude, claude-opus-4-6, 1360s)
 - CAF-002: Direction-stack-aware fix spec generator with universal verification — DONE (claude, claude-opus-4-6, 466s)
 - CAF-003: Database migration + configurable workspace CI autofix settings — DONE (claude, claude-opus-4-6, 291s)
 - CAF-004: CI Autofix settings UI — enable toggle, check pattern editor, and run history — DONE (claude, claude-opus-4-6, 2s)
 - CAF-005: Post-fix commit status and autofix run lifecycle completion — DONE (claude, claude-opus-4-6, 761s)
 - CAF-006: Autofix push-back — commit and push fixes to the source branch — DONE (claude, claude-opus-4-6, 17s)
+- OCT-006: Frontend WebSocket hook — useTerminalSession — DONE (claude, 79s)
