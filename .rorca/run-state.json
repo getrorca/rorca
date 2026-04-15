@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T20:20:55.454Z",
+  "lastUpdatedAt": "2026-04-15T20:36:17.024Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -31,6 +31,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 160465
+    },
+    {
+      "storyId": "OCT-035",
+      "title": "Workspace switch — session scope and tab state on workspace change",
+      "status": "passed",
+      "startedAt": "2026-04-15T20:33:52.401Z",
+      "finishedAt": "2026-04-15T20:36:17.024Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 144623
     }
   ],
   "failedStories": [
