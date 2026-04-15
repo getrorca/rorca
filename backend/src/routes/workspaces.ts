@@ -25,6 +25,7 @@ import { requirePlan } from '../lib/require-plan';
 import { inferDomain } from '../lib/domain-inference';
 import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import * as ptyManager from '../lib/pty-manager';
 
 const router = Router();
 
@@ -2417,11 +2418,15 @@ router.get('/:id/context-health', async (req, res, next) => {
 // DELETE /api/workspaces/:id
 router.delete('/:id', async (req, res, next) => {
   try {
-    await execute('DELETE FROM workspaces WHERE id = $1', [req.params.id]);
+    const workspaceId = req.params.id;
+
+    await execute('DELETE FROM workspaces WHERE id = $1', [workspaceId]);
+
+    ptyManager.killSessionsForWorkspace(workspaceId);
 
     await execute(
       "INSERT INTO wal_events (event_type, workspace_id) VALUES ('workspace_delete', $1)",
-      [req.params.id]
+      [workspaceId]
     );
 
     res.status(204).send();
