@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T08:24:41.616Z",
+  "lastUpdatedAt": "2026-04-15T08:26:33.131Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -74,13 +74,13 @@
       "elapsedMs": 79277
     },
     {
-      "storyId": "OCT-002",
-      "title": "Backend WebSocket server for PTY I/O duplex",
+      "storyId": "OCT-003",
+      "title": "REST endpoints for terminal session lifecycle",
       "status": "passed",
-      "startedAt": "2026-04-15T08:22:33.908Z",
-      "finishedAt": "2026-04-15T08:24:41.616Z",
+      "startedAt": "2026-04-15T08:22:32.917Z",
+      "finishedAt": "2026-04-15T08:26:33.131Z",
       "agentType": "claude",
-      "elapsedMs": 127708
+      "elapsedMs": 240214
     }
   ],
   "failedStories": [],
