@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { queryOne } from '../db/index';
+import { execute, queryOne } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { getWorkspaceEnvVars } from './env-vars';
 import * as ptyManager from '../lib/pty-manager';
@@ -112,6 +112,12 @@ router.post('/sessions', async (req: Request, res: Response) => {
       mergedEnv,
       body.rows,
       body.cols
+    );
+
+    await execute(
+      `INSERT INTO terminal_sessions (session_id, workspace_id, cwd, rows, cols, status)
+       VALUES ($1, $2, $3, $4, $5, 'active')`,
+      [sessionId, body.workspaceId, workspace.path, body.rows, body.cols]
     );
 
     logger.info(
