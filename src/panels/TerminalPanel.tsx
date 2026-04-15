@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
+  Check,
   ChevronDown,
   Clock3,
   Maximize2,
@@ -12,13 +13,12 @@ import {
 } from 'lucide-react';
 import TerminalPane from '../components/TerminalPane';
 import ReadOnlyTerminalPane from '../components/ReadOnlyTerminalPane';
-import ModelPickerPopover from '../components/ModelPickerPopover';
 import Tooltip from '../components/Tooltip';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useGlobalToast } from '../contexts/ToastContext';
 import { apiFetch, ApiError } from '../lib/apiFetch';
-import { getAllLayers } from '../api/direction';
-import type { DirectionLayer } from '../api/types';
+import { getAllLayers, listModels } from '../api/direction';
+import type { DirectionLayer, DirectionModel } from '../api/types';
 import { useNavigate } from 'react-router-dom';
 
 type TerminalMode = 'panel' | 'drawer';
@@ -46,6 +46,14 @@ interface TerminalSessionResponse {
   workspaceId: string;
   cwd: string;
   createdAt: string;
+}
+
+interface HealthResponse {
+  engines?: {
+    claude?: { installed: boolean };
+    opencode?: { installed: boolean; version?: string };
+    codex?: { installed: boolean; version?: string };
+  };
 }
 
 interface TerminalHistoryRecord {
@@ -123,6 +131,16 @@ function getStatusBadgeClass(status: TerminalHistoryRecord['status']): string {
   return 'border-border bg-surface-200 text-muted';
 }
 
+function splitModelParts(modelId: string): { provider: string; name: string } {
+  const slashIndex = modelId.indexOf('/');
+  if (slashIndex === -1) {
+    const dashIndex = modelId.indexOf('-');
+    if (dashIndex === -1) return { provider: 'model', name: modelId };
+    return { provider: modelId.slice(0, dashIndex), name: modelId.slice(dashIndex + 1) };
+  }
+  return { provider: modelId.slice(0, slashIndex), name: modelId.slice(slashIndex + 1) };
+}
+
 interface PersistedSession {
   sessionId: string;
   workspaceId: string;
@@ -186,6 +204,11 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [notInstalled, setNotInstalled] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [activeModel, setActiveModel] = useState('Select model');
+  const [sessionModels, setSessionModels] = useState<Record<string, string>>({});
+  const [availableModels, setAvailableModels] = useState<DirectionModel[]>([]);
+  const [modelQuery, setModelQuery] = useState('');
+  const [modelPopoverOpen, setModelPopoverOpen] = useState(false);
+  const [engineType, setEngineType] = useState<'claude' | 'opencode' | 'codex'>('opencode');
   const [layers, setLayers] = useState<Record<string, DirectionLayer>>({});
   const [isFullscreen, setIsFullscreen] = useState(false);
   const [historyOpen, setHistoryOpen] = useState(false);
@@ -213,6 +236,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
   const historyDrawerRef = useRef<HTMLDivElement>(null);
+  const modelPopoverRef = useRef<HTMLDivElement>(null);
+  const modelButtonRef = useRef<HTMLButtonElement>(null);
   const sessionsRef = useRef<TerminalSessionRecord[]>([]);
   const workspaceSessionsRef = useRef<Record<string, TerminalSessionRecord[]>>({});
   const activeWorkspaceIdRef = useRef<string | null>(workspaceId);
@@ -231,6 +256,17 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     () => historySessions.find((session) => session.sessionId === selectedHistorySessionId) ?? null,
     [historySessions, selectedHistorySessionId],
   );
+
+  const selectedSessionModel = activeSessionId ? sessionModels[activeSessionId] : null;
+  const displayedModel = selectedSessionModel ?? activeModel;
+  const filteredModels = useMemo(() => {
+    const query = modelQuery.trim().toLowerCase();
+    if (!query) return availableModels;
+    return availableModels.filter((model) => {
+      const haystack = `${model.id} ${model.name} ${model.provider}`.toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [availableModels, modelQuery]);
 
   useEffect(() => {
     sessionsRef.current = sessions;
@@ -318,7 +354,24 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     }
   }, []);
 
-  const createSession = useCallback(async (targetWorkspaceId: string, activate = true) => {
+  const loadModelPickerData = useCallback(async (targetWorkspaceId: string) => {
+    try {
+      const [healthRes, modelsRes] = await Promise.all([
+        apiFetch<HealthResponse>('/api/health', { silent: true }),
+        listModels({ signal: undefined }),
+      ]);
+      const nextEngineType = healthRes.engines?.opencode?.installed ? 'opencode' : healthRes.engines?.codex?.installed ? 'codex' : 'claude';
+      setEngineType(nextEngineType);
+      setAvailableModels(modelsRes.models ?? []);
+      if (targetWorkspaceId && !activeSessionId && modelsRes.models?.length) {
+        setActiveModel((current) => current === 'Select model' ? modelsRes.models[0].id : current);
+      }
+    } catch {
+      setAvailableModels([]);
+    }
+  }, [activeSessionId]);
+
+  const createSession = useCallback(async (targetWorkspaceId: string, activate = true, modelOverride?: string) => {
     setCreating(true);
     setError(null);
     setNotInstalled(false);
@@ -331,6 +384,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
           workspaceId: targetWorkspaceId,
           rows: mode === 'drawer' ? 20 : 28,
           cols: 120,
+          ...(modelOverride ? { model: modelOverride } : {}),
         }),
       });
 
@@ -360,6 +414,10 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       );
 
       syncWorkspaceSessions((prev) => [...prev, nextSession]);
+      if (modelOverride) {
+        setSessionModels((prev) => ({ ...prev, [res.sessionId]: modelOverride }));
+        setActiveModel(modelOverride);
+      }
       if (activate) {
         setActiveSessionId(res.sessionId);
       }
@@ -377,7 +435,33 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   useEffect(() => {
     if (!workspaceId) return;
     loadDirections(workspaceId);
+    void loadModelPickerData(workspaceId);
   }, [workspaceId, loadDirections]);
+
+  useEffect(() => {
+    if (!modelPopoverOpen) return;
+
+    const handlePointerDown = (event: MouseEvent) => {
+      const target = event.target as Node;
+      if (modelPopoverRef.current?.contains(target) || modelButtonRef.current?.contains(target)) {
+        return;
+      }
+      setModelPopoverOpen(false);
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setModelPopoverOpen(false);
+      }
+    };
+
+    document.addEventListener('mousedown', handlePointerDown);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('mousedown', handlePointerDown);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [modelPopoverOpen]);
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -572,6 +656,11 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
     // Remove from localStorage
     removePersistedSession(sessionId);
+    setSessionModels((prev) => {
+      const next = { ...prev };
+      delete next[sessionId];
+      return next;
+    });
 
     // Remove from local state
     syncWorkspaceSessions((prev) => {
@@ -590,6 +679,21 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       return filtered;
     });
   }, [activeSessionId, syncWorkspaceSessions]);
+
+  const handleSelectSessionModel = useCallback((model: string) => {
+    if (!activeSessionId) return;
+    setSessionModels((prev) => ({ ...prev, [activeSessionId]: model }));
+    setActiveModel(model);
+    setModelPopoverOpen(false);
+    setModelQuery('');
+  }, [activeSessionId]);
+
+  const handleRestartWithModel = useCallback(async () => {
+    if (!workspaceId || !activeSessionId) return;
+    const model = sessionModels[activeSessionId] ?? activeModel;
+    await handleCloseSession(activeSessionId);
+    await createSession(workspaceId, true, model);
+  }, [workspaceId, activeSessionId, sessionModels, activeModel, handleCloseSession, createSession]);
 
   useEffect(() => {
     const validWorkspaceIds = new Set(workspaces.map((workspace) => workspace.id));
@@ -720,12 +824,64 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             </Tooltip>
           )}
 
-          <ModelPickerPopover
-            engine="opencode"
-            workspaceId={workspaceId ?? undefined}
-            value={activeModel}
-            onChange={setActiveModel}
-          />
+          {engineType === 'opencode' && (
+            <div className="relative shrink-0">
+              <button
+                ref={modelButtonRef}
+                type="button"
+                onClick={() => setModelPopoverOpen((prev) => !prev)}
+                className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5"
+              >
+                <Bot size={12} />
+                <span className="max-w-[180px] truncate">{displayedModel}</span>
+                <ChevronDown size={12} className="text-muted" />
+              </button>
+              {activeSession && selectedSessionModel && (
+                <div className="mt-1 text-[10px] italic text-muted/70">Takes effect on new session</div>
+              )}
+              {activeSession && selectedSessionModel && (
+                <button
+                  type="button"
+                  onClick={() => { void handleRestartWithModel(); }}
+                  className="mt-1 inline-flex items-center rounded border border-border px-2 py-0.5 text-[11px] text-muted hover:text-[var(--text)]"
+                >
+                  Restart with this model
+                </button>
+              )}
+              {modelPopoverOpen && (
+                <div
+                  ref={modelPopoverRef}
+                  className="absolute right-2 top-[44px] z-50 w-64 rounded-lg border border-border bg-panel p-2 shadow-lg"
+                >
+                  <div className="mb-2 text-[11px] font-medium text-muted">Session model</div>
+                  <input
+                    value={modelQuery}
+                    onChange={(event) => setModelQuery(event.target.value)}
+                    placeholder="Filter models..."
+                    className="mb-2 w-full rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] outline-none"
+                  />
+                  <div className="max-h-48 overflow-y-auto">
+                    {filteredModels.map((model) => {
+                      const { provider, name } = splitModelParts(model.id);
+                      const isSelected = displayedModel === model.id;
+                      return (
+                        <button
+                          key={model.id}
+                          type="button"
+                          onClick={() => handleSelectSessionModel(model.id)}
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-accent/5"
+                        >
+                          <span className="rounded bg-surface-200 px-1.5 py-0.5 text-[10px] text-muted">{provider}</span>
+                          <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--text)]">{name}</span>
+                          {isSelected && <Check size={12} className="text-[var(--text)]" />}
+                        </button>
+                      );
+                    })}
+                  </div>
+                </div>
+              )}
+            </div>
+          )}
 
           <div className="flex shrink-0 items-center gap-0.5 rounded border border-border">
             <Tooltip content="Decrease font size">
