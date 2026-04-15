@@ -5,18 +5,28 @@ import * as ptyManager from '../pty-manager';
 import * as opencodeDetector from '../opencode-detector';
 
 jest.mock('../opencode-detector');
+
+const mockPtys: Array<Record<string, jest.Mock>> = [];
+
 jest.mock('node-pty', () => ({
-  spawn: jest.fn(() => ({
-    onData: jest.fn(),
-    onExit: jest.fn(),
-    resize: jest.fn(),
-    kill: jest.fn(),
-  })),
+  spawn: jest.fn(() => {
+    const pty = {
+      onData: jest.fn(),
+      onExit: jest.fn(),
+      resize: jest.fn(),
+      kill: jest.fn(),
+      pause: jest.fn(),
+      resume: jest.fn(),
+    };
+    mockPtys.push(pty);
+    return pty;
+  }),
 }));
 
 describe('pty-manager', () => {
   beforeEach(() => {
     jest.clearAllMocks();
+    mockPtys.length = 0;
     // Clean up all active sessions before each test
     const sessions = ptyManager.activeSessions();
     sessions.forEach((s) => ptyManager.killSession(s.sessionId));
@@ -56,6 +66,24 @@ describe('pty-manager', () => {
           cwd: '/workspace',
         })
       );
+    });
+
+    it('should enforce the maximum session limit', async () => {
+      (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
+        opencodeInstalled: true,
+        opencodeVersion: '0.1.0',
+        opencodeBinPath: '/usr/local/bin/opencode',
+      });
+
+      const existingSessions = ptyManager.activeSessions();
+      for (let i = existingSessions.length; i < 20; i += 1) {
+        await ptyManager.createSession(i + 1, '/workspace', {}, 24, 80);
+      }
+
+      await expect(ptyManager.createSession(999, '/workspace', {}, 24, 80)).rejects.toMatchObject({
+        statusCode: 429,
+        message: 'Maximum terminal sessions reached',
+      });
     });
   });
 
@@ -133,6 +161,16 @@ describe('pty-manager', () => {
       expect(active).toHaveLength(2);
       expect(active.map((s) => s.sessionId)).toContain(sessionId1);
       expect(active.map((s) => s.sessionId)).toContain(sessionId2);
+    });
+  });
+
+  describe('input size cap', () => {
+    it('should reject websocket payloads larger than 1MB', () => {
+      const overLimit = Buffer.alloc(1_048_577, 'a');
+      const withinLimit = Buffer.alloc(1_048_576, 'a');
+
+      expect(ptyManager.isInputTooLarge(overLimit)).toBe(true);
+      expect(ptyManager.isInputTooLarge(withinLimit)).toBe(false);
     });
   });
 });
