@@ -7,6 +7,9 @@ dist
 .DS_Store
 *.log
 
+# OCT-024: node-pty native prebuilds (platform-specific, rebuilt on install)
+backend/node_modules/node-pty/prebuilds/
+
 # Rorca run-tracking files (parallel-safe)
 progress.txt
 .rorca/run-state.json

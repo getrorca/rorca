@@ -1,9 +1,10 @@
 import { useState, useEffect, useRef, useCallback, useMemo, useDeferredValue } from 'react';
-import { Search, ArrowRight, Clock, Command, Hammer, Trash2, Menu } from 'lucide-react';
+import { Search, ArrowRight, Clock, Command, Hammer, Trash2, Menu, Bot, Plus } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { NAV_ITEMS, type PanelId } from './Sidebar';
 import { useFocusTrap } from '../hooks/useFocusTrap';
+import { useTerminalDrawer } from '../contexts/TerminalDrawerContext';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -13,6 +14,9 @@ interface CommandItem {
   category: 'panel' | 'spec' | 'run' | 'action';
   description?: string;
   shortcut?: string;
+  keywords?: string[];
+  group?: string;
+  icon?: typeof Search;
   action: () => void;
 }
 
@@ -144,6 +148,7 @@ function clearRecent() {
 /* ─── Component ───────────────────────────────────────────────────── */
 
 export default function CommandPalette({ onNavigate, onClose, activePanel, activeRunId, onSendToForge }: CommandPaletteProps) {
+  const { open, toggle } = useTerminalDrawer();
   const [query, setQuery] = useState('');
   const deferredQuery = useDeferredValue(query);
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -258,6 +263,47 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       action: () => { window.dispatchEvent(new Event('rorca:toggle-drawer')); onClose(); },
     });
     items.push({
+      id: 'terminal-toggle',
+      label: 'Toggle OpenCode Terminal',
+      category: 'action',
+      description: 'Open or close the terminal drawer',
+      shortcut: 'Cmd+J',
+      icon: Bot,
+      keywords: ['terminal', 'opencode', 'shell', 'ai', 'chat', 'tty'],
+      group: 'Terminal',
+      action: () => { toggle(); onClose(); },
+    });
+    items.push({
+      id: 'terminal-open',
+      label: 'Open OpenCode Terminal',
+      category: 'action',
+      description: 'Open the terminal drawer',
+      icon: Bot,
+      keywords: ['terminal', 'opencode', 'open'],
+      group: 'Terminal',
+      action: () => { open(); onClose(); },
+    });
+    items.push({
+      id: 'terminal-new-session',
+      label: 'New OpenCode Session',
+      category: 'action',
+      description: 'Start another terminal session',
+      icon: Plus,
+      keywords: ['terminal', 'new', 'session', 'opencode'],
+      group: 'Terminal',
+      action: () => { window.dispatchEvent(new CustomEvent('rorca:terminal-new-session')); onClose(); },
+    });
+    items.push({
+      id: 'action:open-execution-trace',
+      label: 'Open Execution Trace',
+      category: 'action',
+      description: 'View run logs for the selected run',
+      icon: Search,
+      keywords: ['execution trace', 'run logs', 'pipeline output', 'stdout', 'stderr'],
+      group: 'Runs',
+      action: () => { onNavigate('runs'); onClose(); },
+    });
+    items.push({
       id: 'action:new-spec',
       label: 'New Spec',
       category: 'action',
@@ -342,7 +388,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
     });
 
     return items;
-  }, [specs, archiveSpecs, runs, onNavigate, onClose, workspaceId]);
+  }, [specs, archiveSpecs, runs, onNavigate, onClose, workspaceId, toggle]);
 
   // Determine context key for boosting
   const contextKey = activeRunId != null ? 'run-view' : activePanel;
@@ -378,10 +424,13 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
         const labelMatch = fuzzyMatch(deferredQuery, item.label);
         const descMatch = item.description ? fuzzyMatch(deferredQuery, item.description) : { match: false, score: 0 };
         const idMatch = fuzzyMatch(deferredQuery, item.id);
-        let bestScore = Math.max(labelMatch.score, descMatch.score * 0.7, idMatch.score * 0.5);
+        const keywordMatch = item.keywords
+          ? Math.max(...item.keywords.map((keyword) => fuzzyMatch(deferredQuery, keyword).score), 0)
+          : 0;
+        let bestScore = Math.max(labelMatch.score, descMatch.score * 0.7, idMatch.score * 0.5, keywordMatch * 0.8);
         // Context boost: +30 for items relevant to current screen
         if (boostIds.includes(item.id)) bestScore += 30;
-        return { item, match: labelMatch.match || descMatch.match || idMatch.match, score: bestScore };
+        return { item, match: labelMatch.match || descMatch.match || idMatch.match || keywordMatch > 0, score: bestScore };
       })
       .filter((r) => r.match)
       .sort((a, b) => b.score - a.score)

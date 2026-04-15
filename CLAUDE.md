@@ -293,7 +293,7 @@ rorca/
 | `run_output_chunks` | DB-backed terminal output streaming — `(run_id, sequence, data)`, monotonically increasing, survives restarts, enables late-join SSE replay |
 | `worker_heartbeat` | Worker liveness — `(worker_id, pid, hostname, started_at, last_seen)`, updated every 30s; stale if `last_seen` > 90s ago |
 
-**WAL event types**: `generate`, `spec_approved`, `spec_rejected`, `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `worktree_created`, `worktree_merged`, `run_blocked` (HITL pause), `context_file_changed` (CIE file watcher), `story_escalated` (CIE model escalation), `skill_installed` (skill added), `skill_removed` (skill deleted), `skill_matched` (LLM skill-to-spec matching)
+**WAL event types**: `generate`, `spec_approved`, `spec_rejected`, `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `worktree_created`, `worktree_merged`, `run_blocked` (HITL pause), `context_file_changed` (CIE file watcher), `story_escalated` (CIE model escalation), `skill_installed` (skill added), `skill_removed` (skill deleted), `skill_matched` (LLM skill-to-spec matching), `terminal_session_started`, `terminal_session_ended`
 
 PostgreSQL enforces FK constraints natively. Connection pooling (max 20, 30s idle timeout) is configured in `backend/src/db/index.ts`.
 
@@ -517,6 +517,45 @@ The health check (`computeHealthReport`) and workspace setup look for files at t
 - `AGENTS.md` must exist at `<workspace>/AGENTS.md` (subdirectory AGENTS.md files don't satisfy this check)
 - `MEMORY.md` must exist at `<workspace>/MEMORY.md` (NOT at `<workspace>/.rorca/MEMORY.md`)
 - `.rorca/config.json` must exist at `<workspace>/.rorca/config.json`
+
+### node-pty Native Module — Terminal Feature Dependency (CRITICAL)
+`node-pty` is a native N-API module required for the OpenCode terminal feature (OCT-001–OCT-004). It requires compiled binaries per platform.
+
+**Graceful degradation**: `pty-manager.ts` wraps the `require('node-pty')` in a try/catch at module load. If the import fails:
+- `PTY_AVAILABLE` flag is set to `false`
+- `POST /api/terminal/sessions` returns `503 Service Unavailable` with error code `PTY_NOT_AVAILABLE`
+- Response includes hint: `"cd backend && npm rebuild node-pty"`
+- Backend starts successfully (terminal feature disabled, all other routes work)
+
+**Installation**:
+```bash
+cd backend && npm install  # Triggers postinstall probe
+npm rebuild node-pty       # Rebuild if probe fails
+```
+
+**Distribution constraint**: `node-pty` **cannot** be bundled with `bun build --compile` (DIST-001–DIST-010). Native N-API modules require a real `node_modules/` directory on disk. The terminal feature is **server-only** and requires either:
+- Users run `npm rebuild node-pty` after install (documented in install script)
+- Future Electron/Tauri packaging handles native modules automatically
+
+**Prebuild binaries**: `node-pty` v1.1.0+ ships prebuilt binaries for common platforms (macOS arm64/x64, Linux x64/arm64, Windows x64). The `backend/node_modules/node-pty/prebuilds/` directory is excluded from git (platform-specific, rebuilt on install).
+
+**Testing**: Backend starts even when node-pty is not built. Create a PTY session to verify — should return 503 if module unavailable, 201 if working.
+
+### WebSocket Security Model (OCT-021)
+The `/ws/terminal` WebSocket endpoint is hardened against cross-origin attacks. With Rorca's auth bypassed, an unauthenticated WebSocket would be a remote code execution vector accessible from any local webpage via DNS rebinding.
+
+**Security layers**:
+1. **Origin validation** — `verifyClient` callback rejects connections from disallowed origins. Allowed: `http://localhost:5210`, `http://127.0.0.1:5210`, `http://localhost:3030`, `http://127.0.0.1:3030`. Rejected: any other origin with 403 Forbidden.
+2. **Short-lived connection tokens** — `POST /api/terminal/sessions` returns `wsToken` (UUID, 60s TTL). WebSocket URL is `/ws/terminal?wsToken=<token>` (NOT `?sessionId=<id>`). Server validates token, maps to sessionId, then deletes (one-time use). Prevents sessionId enumeration.
+3. **Secure binding** — HTTP server binds to `127.0.0.1` by default (local-only). `RORCA_BIND_HOST` env var can override (e.g., `0.0.0.0` for Docker/cloud). Production deployments should keep `127.0.0.1` and use nginx/Cloudflare for TLS termination.
+4. **Security headers** — WebSocket upgrade response includes `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`.
+
+**Token lifecycle**:
+- Generated: `POST /api/terminal/sessions` → `{ sessionId, wsToken, ... }`
+- Validated: WebSocket client connects with `?wsToken=<token>` → server looks up sessionId from token map, deletes token (one-time use)
+- Expired: Tokens older than 60s are rejected; background cleanup runs every 30s
+
+**Why this matters**: Without these guards, a malicious webpage at `http://evil.local:8080` could open a WebSocket to `ws://localhost:3030/ws/terminal?sessionId=<guessed-uuid>` and execute arbitrary commands in the user's terminal. Origin validation blocks this. Connection tokens prevent sessionId brute-force.
 
 ### ContextRoutingSettings — Visual Config Editor
 `src/components/ContextRoutingSettings.tsx` (1318 lines) is the UI for `.rorca/config.json` editing. Key behaviors:

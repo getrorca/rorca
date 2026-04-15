@@ -1,71 +1,80 @@
 {
-  "specId": "rorca-ci-autofix",
-  "runId": 20260316000171,
-  "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-14T06:17:29.635Z",
+  "specId": "rorca-opencode-terminal",
+  "runId": 20260316000185,
+  "startedAt": "2026-04-15T19:33:43.854Z",
+  "lastUpdatedAt": "2026-04-15T21:18:16.957Z",
   "completedStories": [
     {
-      "storyId": "CAF-001",
-      "title": "Universal CI failure parser — extract structured errors from any GitHub check_run",
+      "storyId": "OCT-016",
+      "title": "Terminal panel — copy/paste, font sizing, fullscreen toggle",
       "status": "passed",
-      "startedAt": "2026-04-14T05:27:52.746Z",
-      "finishedAt": "2026-04-14T05:50:33.127Z",
+      "startedAt": "2026-04-15T19:42:58.823Z",
+      "finishedAt": "2026-04-15T19:46:31.066Z",
       "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 1360381
+      "elapsedMs": 212243
     },
     {
-      "storyId": "CAF-002",
-      "title": "Direction-stack-aware fix spec generator with universal verification",
+      "storyId": "OCT-021",
+      "title": "WebSocket security — Origin validation, localhost binding, session token",
       "status": "passed",
-      "startedAt": "2026-04-14T05:50:50.040Z",
-      "finishedAt": "2026-04-14T05:58:35.606Z",
+      "startedAt": "2026-04-15T19:46:46.968Z",
+      "finishedAt": "2026-04-15T19:52:28.428Z",
       "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 465566
+      "elapsedMs": 341460
     },
     {
-      "storyId": "CAF-003",
-      "title": "Database migration + configurable workspace CI autofix settings",
+      "storyId": "OCT-036",
+      "title": "Embedded terminal drawer — Cmd+J toggle, persistent bottom panel, drag-resize, fullscreen, mobile FAB",
       "status": "passed",
-      "startedAt": "2026-04-14T05:58:51.025Z",
-      "finishedAt": "2026-04-14T06:03:41.692Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 290667
+      "startedAt": "2026-04-15T20:18:14.988Z",
+      "finishedAt": "2026-04-15T20:20:55.453Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 160465
     },
     {
-      "storyId": "CAF-004",
-      "title": "CI Autofix settings UI — enable toggle, check pattern editor, and run history",
+      "storyId": "OCT-041",
+      "title": "Run View taxonomy fix — rename pipeline output to 'Execution Trace' to eliminate terminal confusion",
       "status": "passed",
-      "startedAt": "2026-04-14T06:03:58.519Z",
-      "finishedAt": "2026-04-14T06:04:00.222Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 1703
+      "startedAt": "2026-04-15T20:33:52.280Z",
+      "finishedAt": "2026-04-15T20:35:14.925Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 82645
     },
     {
-      "storyId": "CAF-005",
-      "title": "Post-fix commit status and autofix run lifecycle completion",
+      "storyId": "OCT-037",
+      "title": "Per-session model picker — change model without affecting global config",
       "status": "passed",
-      "startedAt": "2026-04-14T06:04:15.791Z",
-      "finishedAt": "2026-04-14T06:16:57.177Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 761386
+      "startedAt": "2026-04-15T21:10:35.431Z",
+      "finishedAt": "2026-04-15T21:14:15.167Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 219736
     },
     {
-      "storyId": "CAF-006",
-      "title": "Autofix push-back — commit and push fixes to the source branch",
+      "storyId": "OCT-033",
+      "title": "API key pre-validation before session spawn",
       "status": "passed",
-      "startedAt": "2026-04-14T06:17:12.772Z",
-      "finishedAt": "2026-04-14T06:17:29.635Z",
-      "agentType": "claude",
-      "model": "claude-opus-4-6",
-      "elapsedMs": 16863
+      "startedAt": "2026-04-15T21:14:56.017Z",
+      "finishedAt": "2026-04-15T21:18:16.957Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 200940
     }
   ],
-  "failedStories": [],
+  "failedStories": [
+    {
+      "storyId": "OCT-015",
+      "title": "OpenCode not installed — graceful error state in terminal panel",
+      "status": "failed",
+      "startedAt": "2026-04-15T19:39:32.942Z",
+      "finishedAt": "2026-04-15T19:42:38.804Z",
+      "agentType": "claude",
+      "failReason": "timeout",
+      "elapsedMs": 185862
+    }
+  ],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
