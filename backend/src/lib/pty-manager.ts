@@ -5,6 +5,7 @@
 
 import { randomUUID } from 'crypto';
 import { detectOpenCode } from './opencode-detector';
+import { execute, transaction } from '../db/index';
 import { logger } from './logger';
 import { TooManyRequestsError } from './errors';
 
@@ -35,13 +36,13 @@ export interface PtySession {
   cwd: string;
   rows: number;
   cols: number;
-  totalOutputBytes: number;
+  nextSequence: number;
+  pendingChunks: string[];
+  pendingBytes: number;
+  isFlushing: boolean;
   dbWriteDisabled: boolean;
-  outputBytesLastSecond: number;
-  consecutiveOverLimitSeconds: number;
-  outputRateResetInterval?: NodeJS.Timeout;
-  throttleResumeTimeout?: NodeJS.Timeout;
-  throttleActive: boolean;
+  outputLimitSentinelInserted: boolean;
+  totalOutputBytes: number;
 }
 
 // In-memory session map — sessions are lost on backend restart
@@ -50,12 +51,13 @@ const sessions = new Map<string, PtySession>();
 // Idle timeout configuration
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const FLUSH_INTERVAL_MS = 100;
+const MAX_BUFFERED_CHUNKS = 50;
 const MAX_SESSIONS = parseInt(process.env.TERMINAL_MAX_SESSIONS || '20', 10);
-const MAX_SESSION_OUTPUT_BYTES = 52_428_800;
+const MAX_SESSION_OUTPUT_BYTES = 100 * 1024 * 1024;
 const MAX_INPUT_MESSAGE_BYTES = 1_048_576;
-const OUTPUT_RATE_LIMIT_BYTES_PER_SECOND = 1_048_576;
-const OUTPUT_RATE_LIMIT_CONSECUTIVE_SECONDS = 3;
-const OUTPUT_THROTTLE_PAUSE_MS = 500;
+const OUTPUT_LIMIT_SENTINEL =
+  '\r\n[Output limit reached — streaming continues but history is truncated]\r\n';
 
 // Claude env vars to strip (prevents nested agent spawning confusion)
 const CLAUDE_ENV_VARS = [
@@ -142,46 +144,20 @@ export async function createSession(
     cwd,
     rows,
     cols,
-    totalOutputBytes: 0,
+    nextSequence: 1,
+    pendingChunks: [],
+    pendingBytes: 0,
+    isFlushing: false,
     dbWriteDisabled: false,
-    outputBytesLastSecond: 0,
-    consecutiveOverLimitSeconds: 0,
-    throttleActive: false,
+    outputLimitSentinelInserted: false,
+    totalOutputBytes: 0,
   };
 
-  session.outputRateResetInterval = setInterval(() => {
-    const current = sessions.get(sessionId);
-    if (!current) {
-      return;
-    }
-
-    if (current.outputBytesLastSecond > OUTPUT_RATE_LIMIT_BYTES_PER_SECOND) {
-      current.consecutiveOverLimitSeconds += 1;
-
-      if (
-        current.consecutiveOverLimitSeconds >= OUTPUT_RATE_LIMIT_CONSECUTIVE_SECONDS &&
-        !current.throttleActive
-      ) {
-        current.throttleActive = true;
-        logger.warn(
-          `[pty-manager] Throttling PTY session ${sessionId}: output exceeded ${OUTPUT_RATE_LIMIT_BYTES_PER_SECOND} bytes/sec for ${OUTPUT_RATE_LIMIT_CONSECUTIVE_SECONDS} consecutive seconds`
-        );
-        current.ptyProcess.pause();
-        current.throttleResumeTimeout = setTimeout(() => {
-          const resumed = sessions.get(sessionId);
-          if (!resumed) {
-            return;
-          }
-          resumed.ptyProcess.resume();
-          resumed.throttleActive = false;
-        }, OUTPUT_THROTTLE_PAUSE_MS);
-      }
-    } else {
-      current.consecutiveOverLimitSeconds = 0;
-    }
-
-    current.outputBytesLastSecond = 0;
-  }, 1000);
+  await execute(
+    `INSERT INTO terminal_sessions (session_id, workspace_id, cwd, rows, cols, status, total_output_bytes)
+     VALUES ($1, $2, $3, $4, $5, 'active', 0)`,
+    [sessionId, workspaceId, cwd, rows, cols]
+  );
 
   sessions.set(sessionId, session);
 
@@ -190,30 +166,27 @@ export async function createSession(
     const s = sessions.get(sessionId);
     if (s) {
       s.lastActivityAt = new Date();
-      const outputBytes = Buffer.byteLength(data);
-      s.totalOutputBytes += outputBytes;
-      s.outputBytesLastSecond += outputBytes;
-
-      if (!s.dbWriteDisabled && s.totalOutputBytes > MAX_SESSION_OUTPUT_BYTES) {
-        s.dbWriteDisabled = true;
-        logger.warn(
-          `[pty-manager] Disabling DB writes for session ${sessionId}: total output exceeded ${MAX_SESSION_OUTPUT_BYTES} bytes`
-        );
-      }
+      bufferOutputChunk(s, data);
     }
   });
 
   // Clean up session when process exits
-  ptyProcess.onExit(({ exitCode }) => {
-    emitTerminalSessionEnded(session, exitCode ?? null);
-    if (session.outputRateResetInterval) {
-      clearInterval(session.outputRateResetInterval);
+  ptyProcess.onExit(async ({ exitCode }: { exitCode: number }) => {
+    try {
+      await flushSession(sessionId);
+      await execute(
+        `UPDATE terminal_sessions
+         SET status = 'exited', exit_code = $2, exited_at = NOW(), last_activity_at = NOW()
+         WHERE session_id = $1`,
+        [sessionId, exitCode]
+      );
+      emitTerminalSessionEnded(session, exitCode ?? null);
+    } catch (err) {
+      logger.error({ err, sessionId }, '[pty-manager] Failed to flush session on exit');
+    } finally {
+      sessions.delete(sessionId);
+      logger.info(`[pty-manager] Session ${sessionId} exited and removed`);
     }
-    if (session.throttleResumeTimeout) {
-      clearTimeout(session.throttleResumeTimeout);
-    }
-    sessions.delete(sessionId);
-    logger.info(`[pty-manager] Session ${sessionId} exited and removed`);
   });
 
   logger.info(
@@ -250,15 +223,22 @@ export function killSession(sessionId: string): void {
     return;
   }
 
-  if (session.outputRateResetInterval) {
-    clearInterval(session.outputRateResetInterval);
-  }
-  if (session.throttleResumeTimeout) {
-    clearTimeout(session.throttleResumeTimeout);
-  }
-
   session.ptyProcess.kill();
-  sessions.delete(sessionId);
+  void flushBufferedChunks(session)
+    .then(() =>
+      execute(
+        `UPDATE terminal_sessions
+         SET status = 'killed', exited_at = COALESCE(exited_at, NOW()), last_activity_at = NOW()
+         WHERE session_id = $1`,
+        [sessionId]
+      )
+    )
+    .catch((err) => {
+      logger.error({ err, sessionId }, '[pty-manager] Failed to flush session on kill');
+    })
+    .finally(() => {
+      sessions.delete(sessionId);
+    });
 
   logger.info(`[pty-manager] Killed session ${sessionId}`);
 }
@@ -323,8 +303,107 @@ function cleanupIdleSessions(): void {
   }
 }
 
+function bufferOutputChunk(session: PtySession, data: string): void {
+  if (session.dbWriteDisabled) {
+    return;
+  }
+
+  session.pendingChunks.push(data);
+  session.pendingBytes += Buffer.byteLength(data, 'utf8');
+
+  if (session.pendingChunks.length >= MAX_BUFFERED_CHUNKS) {
+    void flushSession(session.sessionId);
+  }
+}
+
+async function flushAllSessions(): Promise<void> {
+  await Promise.all(Array.from(sessions.keys()).map((sessionId) => flushSession(sessionId)));
+}
+
+export async function flushSession(sessionId: string): Promise<void> {
+  const session = sessions.get(sessionId);
+  if (!session || session.dbWriteDisabled) {
+    return;
+  }
+
+  await flushBufferedChunks(session);
+}
+
+async function flushBufferedChunks(session: PtySession): Promise<void> {
+  if (session.isFlushing || session.pendingChunks.length === 0) {
+    return;
+  }
+
+  session.isFlushing = true;
+
+  const chunks = [...session.pendingChunks];
+  const bytes = session.pendingBytes;
+  const startSequence = session.nextSequence;
+
+  session.pendingChunks = [];
+  session.pendingBytes = 0;
+  session.nextSequence += chunks.length;
+
+  try {
+    await transaction(async (client) => {
+      const valuesSql: string[] = [];
+      const params: Array<string | number> = [];
+
+      chunks.forEach((chunk, index) => {
+        const paramOffset = index * 3;
+        valuesSql.push(`($${paramOffset + 1}, $${paramOffset + 2}, $${paramOffset + 3})`);
+        params.push(session.sessionId, startSequence + index, chunk);
+      });
+
+      await client.query(
+        `INSERT INTO terminal_output_chunks (session_id, sequence, data)
+         VALUES ${valuesSql.join(', ')}`,
+        params
+      );
+
+      const updateResult = await client.query<{ total_output_bytes: string }>(
+        `UPDATE terminal_sessions
+         SET total_output_bytes = total_output_bytes + $2,
+             last_activity_at = NOW()
+         WHERE session_id = $1
+         RETURNING total_output_bytes`,
+        [session.sessionId, bytes]
+      );
+
+      const updatedTotal = Number(updateResult.rows[0]?.total_output_bytes ?? session.totalOutputBytes + bytes);
+      session.totalOutputBytes = updatedTotal;
+
+      if (updatedTotal > MAX_SESSION_OUTPUT_BYTES) {
+        session.dbWriteDisabled = true;
+
+        if (!session.outputLimitSentinelInserted) {
+          await client.query(
+            `INSERT INTO terminal_output_chunks (session_id, sequence, data)
+             VALUES ($1, $2, $3)`,
+            [session.sessionId, session.nextSequence, OUTPUT_LIMIT_SENTINEL]
+          );
+          session.nextSequence += 1;
+          session.outputLimitSentinelInserted = true;
+        }
+      }
+    });
+  } catch (err) {
+    session.pendingChunks = [...chunks, ...session.pendingChunks];
+    session.pendingBytes += bytes;
+    session.nextSequence = startSequence;
+    throw err;
+  } finally {
+    session.isFlushing = false;
+  }
+}
+
 // Start idle session cleanup interval
 setInterval(cleanupIdleSessions, CLEANUP_INTERVAL_MS);
+setInterval(() => {
+  void flushAllSessions().catch((err) => {
+    logger.error({ err }, '[pty-manager] Failed periodic terminal output flush');
+  });
+}, FLUSH_INTERVAL_MS);
 
 logger.info(
   `[pty-manager] Initialized with ${IDLE_TIMEOUT_MS / 1000}s idle timeout, cleanup every ${CLEANUP_INTERVAL_MS / 1000}s`

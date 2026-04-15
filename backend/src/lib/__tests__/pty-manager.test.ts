@@ -3,8 +3,24 @@
 
 import * as ptyManager from '../pty-manager';
 import * as opencodeDetector from '../opencode-detector';
+import * as db from '../../db/index';
 
 jest.mock('../opencode-detector');
+jest.mock('../../db/index', () => ({
+  execute: jest.fn().mockResolvedValue({ rowCount: 1 }),
+  queryOne: jest.fn(),
+  transaction: jest.fn(async (fn: (client: any) => Promise<any>) => {
+    const client = {
+      query: jest.fn(async (sql: string) => {
+        if (sql.includes('RETURNING total_output_bytes')) {
+          return { rows: [{ total_output_bytes: '0' }] };
+        }
+        return { rows: [] };
+      }),
+    };
+    return fn(client);
+  }),
+}));
 
 const mockPtys: Array<Record<string, jest.Mock>> = [];
 
@@ -24,6 +40,9 @@ jest.mock('node-pty', () => ({
 }));
 
 describe('pty-manager', () => {
+  const mockExecute = db.execute as jest.Mock;
+  const mockTransaction = db.transaction as jest.Mock;
+
   beforeEach(() => {
     jest.clearAllMocks();
     mockPtys.length = 0;
@@ -65,6 +84,95 @@ describe('pty-manager', () => {
           cols: 120,
           cwd: '/workspace',
         })
+      );
+      expect(mockExecute).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO terminal_sessions'),
+        [sessionId, 1, '/workspace', 30, 120]
+      );
+    });
+  });
+
+  describe('flushSession', () => {
+    it('should batch buffered chunks into one multi-row insert', async () => {
+      const nodePty = require('node-pty');
+      let onDataHandler: ((data: string) => void) | undefined;
+
+      nodePty.spawn.mockReturnValue({
+        onData: jest.fn((handler: (data: string) => void) => {
+          onDataHandler = handler;
+        }),
+        onExit: jest.fn(),
+        resize: jest.fn(),
+        kill: jest.fn(),
+      });
+
+      const mockClientQuery = jest.fn(async (sql: string) => {
+        if (sql.includes('RETURNING total_output_bytes')) {
+          return { rows: [{ total_output_bytes: '6' }] };
+        }
+        return { rows: [] };
+      });
+      mockTransaction.mockImplementation(async (fn: (client: any) => Promise<any>) => fn({ query: mockClientQuery }));
+
+      (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
+        opencodeInstalled: true,
+        opencodeVersion: '0.1.0',
+        opencodeBinPath: '/usr/local/bin/opencode',
+      });
+
+      const sessionId = await ptyManager.createSession(1 as any, '/tmp', {}, 24, 80);
+      onDataHandler?.('abc');
+      onDataHandler?.('def');
+
+      await ptyManager.flushSession(sessionId);
+
+      expect(mockClientQuery).toHaveBeenCalledWith(
+        expect.stringContaining('INSERT INTO terminal_output_chunks'),
+        [sessionId, 1, 'abc', sessionId, 2, 'def']
+      );
+      expect(mockClientQuery).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE terminal_sessions'),
+        [sessionId, 6]
+      );
+    });
+
+    it('should disable DB writes and insert sentinel after crossing 100MB', async () => {
+      const nodePty = require('node-pty');
+      let onDataHandler: ((data: string) => void) | undefined;
+
+      nodePty.spawn.mockReturnValue({
+        onData: jest.fn((handler: (data: string) => void) => {
+          onDataHandler = handler;
+        }),
+        onExit: jest.fn(),
+        resize: jest.fn(),
+        kill: jest.fn(),
+      });
+
+      const mockClientQuery = jest.fn(async (sql: string) => {
+        if (sql.includes('RETURNING total_output_bytes')) {
+          return { rows: [{ total_output_bytes: String(100 * 1024 * 1024 + 1) }] };
+        }
+        return { rows: [] };
+      });
+      mockTransaction.mockImplementation(async (fn: (client: any) => Promise<any>) => fn({ query: mockClientQuery }));
+
+      (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
+        opencodeInstalled: true,
+        opencodeVersion: '0.1.0',
+        opencodeBinPath: '/usr/local/bin/opencode',
+      });
+
+      const sessionId = await ptyManager.createSession(1 as any, '/tmp', {}, 24, 80);
+      onDataHandler?.('x');
+
+      await ptyManager.flushSession(sessionId);
+
+      const session = ptyManager.getSession(sessionId);
+      expect(session?.dbWriteDisabled).toBe(true);
+      expect(mockClientQuery).toHaveBeenCalledWith(
+        expect.stringContaining('VALUES ($1, $2, $3)'),
+        [sessionId, 2, '\r\n[Output limit reached — streaming continues but history is truncated]\r\n']
       );
     });
 
