@@ -96,6 +96,47 @@ test('POST /api/terminal/sessions returns 201 with a UUID sessionId', async () =
   createdSessionId = res.body.sessionId;
 });
 
+test('POST /api/terminal/sessions passes model override in PTY env', async () => {
+  const sessionId = '550e8400-e29b-41d4-a716-446655440010';
+  (ptyManager.createSession as jest.Mock).mockResolvedValue(sessionId);
+  (ptyManager.getSession as jest.Mock).mockReturnValue({
+    sessionId,
+    workspaceId: WORKSPACE_ID,
+    cwd: tmpDir,
+    rows: 24,
+    cols: 80,
+    createdAt: new Date('2026-04-14T10:00:00.000Z'),
+    lastActivityAt: new Date('2026-04-14T10:00:00.000Z'),
+  });
+
+  const res = await request(app)
+    .post('/api/terminal/sessions')
+    .send({ workspaceId: WORKSPACE_ID, rows: 24, cols: 80, model: 'claude-sonnet-4-6' });
+
+  expect(res.status).toBe(201);
+  expect(ptyManager.createSession).toHaveBeenCalledWith(
+    WORKSPACE_ID,
+    tmpDir,
+    expect.objectContaining({
+      OPENCODE_MODEL: 'claude-sonnet-4-6',
+      RORCA_MODEL: 'claude-sonnet-4-6',
+    }),
+    24,
+    80,
+  );
+
+  createdSessionId = res.body.sessionId;
+});
+
+test('POST /api/terminal/sessions rejects unsupported model override', async () => {
+  const res = await request(app)
+    .post('/api/terminal/sessions')
+    .send({ workspaceId: WORKSPACE_ID, rows: 24, cols: 80, model: 'not-a-real-model' });
+
+  expect(res.status).toBe(400);
+  expect(res.body.error).toContain('Unsupported model');
+});
+
 const openCodeStatus = detectOpenCode();
 
 (openCodeStatus.opencodeBinPath ? test.skip : test)('opencode not available in CI', async () => {

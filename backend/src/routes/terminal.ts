@@ -9,7 +9,7 @@ import { NotFoundError, ServiceUnavailableError, ValidationError, TooManyRequest
 import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { broadcastAll } from '../lib/sse-hub';
-import { resolveVaultProvider } from '../lib/llm-client';
+import { isValidModel, resolveVaultProvider } from '../lib/llm-client';
 import { getDecryptedProviderKey } from '../lib/vault';
 
 const router = Router();
@@ -40,6 +40,7 @@ const createSessionSchema = z.object({
   workspaceId: z.string().min(1, 'workspaceId is required'),
   rows: z.number().int().positive().default(24),
   cols: z.number().int().positive().default(80),
+  model: z.string().min(1).optional(),
 });
 
 const resizeSessionSchema = z.object({
@@ -78,6 +79,9 @@ const resizeSessionSchema = z.object({
  *                 type: integer
  *                 description: Terminal width in columns
  *                 default: 80
+ *               model:
+ *                 type: string
+ *                 description: Optional per-session model override for this PTY spawn only
  *     responses:
  *       201:
  *         description: PTY session created successfully
@@ -126,7 +130,11 @@ router.post('/sessions', async (req: Request, res: Response) => {
       `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
       [body.workspaceId]
     );
-    const activeModel = workspaceEnv.RORCA_MODEL ?? l3Pref?.preferred_model ?? process.env.RORCA_MODEL ?? '';
+    if (body.model && !isValidModel(body.model)) {
+      throw new ValidationError(`Unsupported model: ${body.model}`);
+    }
+
+    const activeModel = body.model ?? workspaceEnv.RORCA_MODEL ?? l3Pref?.preferred_model ?? process.env.RORCA_MODEL ?? '';
 
     // Resolve active vault provider key for the model, surfacing failures clearly
     const vaultProvider = activeModel ? resolveVaultProvider(activeModel) : null;
@@ -146,6 +154,7 @@ router.post('/sessions', async (req: Request, res: Response) => {
     const mergedEnv = {
       ...process.env,
       RORCA_WORKSPACE_ID: body.workspaceId,
+      RORCA_MODEL: activeModel,
       OPENCODE_MODEL: activeModel,
       ...workspaceEnv,
       ...vaultEnv,

@@ -1,17 +1,17 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   Bot,
+  Check,
   ChevronDown,
   Maximize2,
   Minimize2,
   Plus,
 } from 'lucide-react';
 import TerminalPane from '../components/TerminalPane';
-import ModelPickerPopover from '../components/ModelPickerPopover';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, ApiError } from '../lib/apiFetch';
-import { getAllLayers } from '../api/direction';
-import type { DirectionLayer } from '../api/types';
+import { getAllLayers, listModels } from '../api/direction';
+import type { DirectionLayer, DirectionModel } from '../api/types';
 
 type TerminalMode = 'panel' | 'drawer';
 
@@ -40,6 +40,10 @@ interface DirectionLayersResponse {
   layers: Record<string, DirectionLayer>;
 }
 
+interface ModelsResponse {
+  models: DirectionModel[];
+}
+
 const LAYER_KEYS = ['l1', 'l2', 'l3', 'l4', 'l5'] as const;
 
 function getBasename(input: string): string {
@@ -66,9 +70,15 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [notInstalled, setNotInstalled] = useState(false);
   const [workspaceMenuOpen, setWorkspaceMenuOpen] = useState(false);
   const [activeModel, setActiveModel] = useState('Select model');
+  const [sessionModels, setSessionModels] = useState<Record<string, string>>({});
+  const [modelPopoverOpen, setModelPopoverOpen] = useState(false);
+  const [modelFilter, setModelFilter] = useState('');
+  const [availableModels, setAvailableModels] = useState<DirectionModel[]>([]);
+  const [loadingModels, setLoadingModels] = useState(false);
   const [layers, setLayers] = useState<Record<string, DirectionLayer>>({});
 
   const workspaceMenuRef = useRef<HTMLDivElement>(null);
+  const modelPopoverRef = useRef<HTMLDivElement>(null);
   const initialSessionRequestedRef = useRef(false);
   const sessionsRef = useRef<TerminalSessionRecord[]>([]);
 
@@ -79,6 +89,20 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     () => sessions.find((session) => session.sessionId === activeSessionId) ?? null,
     [sessions, activeSessionId],
   );
+
+  const selectedSessionModel = useMemo(() => {
+    if (!activeSessionId) return null;
+    return sessionModels[activeSessionId] ?? null;
+  }, [activeSessionId, sessionModels]);
+
+  const filteredModels = useMemo(() => {
+    const query = modelFilter.trim().toLowerCase();
+    if (!query) return availableModels;
+    return availableModels.filter((model) => {
+      const haystack = `${model.provider} ${model.name} ${model.id}`.toLowerCase();
+      return haystack.includes(query);
+    });
+  }, [availableModels, modelFilter]);
 
   useEffect(() => {
     sessionsRef.current = sessions;
@@ -107,7 +131,19 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     }
   }, []);
 
-  const createSession = useCallback(async (targetWorkspaceId: string, activate = true) => {
+  const loadModels = useCallback(async () => {
+    setLoadingModels(true);
+    try {
+      const res = await listModels() as ModelsResponse;
+      setAvailableModels(res.models ?? []);
+    } catch {
+      setAvailableModels([]);
+    } finally {
+      setLoadingModels(false);
+    }
+  }, []);
+
+  const createSession = useCallback(async (targetWorkspaceId: string, activate = true, model?: string | null) => {
     setCreating(true);
     setError(null);
     setNotInstalled(false);
@@ -120,6 +156,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
           workspaceId: targetWorkspaceId,
           rows: mode === 'drawer' ? 20 : 28,
           cols: 100,
+          ...(model ? { model } : {}),
         }),
       });
 
@@ -132,6 +169,10 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       };
 
       setSessions((prev) => [...prev, nextSession]);
+      if (model) {
+        setSessionModels((prev) => ({ ...prev, [res.sessionId]: model }));
+        setActiveModel(model);
+      }
       if (activate) {
         setActiveSessionId(res.sessionId);
       }
@@ -152,6 +193,10 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, [workspaceId, loadDirections]);
 
   useEffect(() => {
+    void loadModels();
+  }, [loadModels]);
+
+  useEffect(() => {
     if (!workspaceId || initialSessionRequestedRef.current) return;
     initialSessionRequestedRef.current = true;
     void createSession(workspaceId, true);
@@ -162,14 +207,28 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       if (!workspaceMenuRef.current?.contains(event.target as Node)) {
         setWorkspaceMenuOpen(false);
       }
+      if (!modelPopoverRef.current?.contains(event.target as Node)) {
+        setModelPopoverOpen(false);
+      }
     };
 
-    if (workspaceMenuOpen) {
+    const onKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        setWorkspaceMenuOpen(false);
+        setModelPopoverOpen(false);
+      }
+    };
+
+    if (workspaceMenuOpen || modelPopoverOpen) {
       document.addEventListener('mousedown', onMouseDown);
+      document.addEventListener('keydown', onKeyDown);
     }
 
-    return () => document.removeEventListener('mousedown', onMouseDown);
-  }, [workspaceMenuOpen]);
+    return () => {
+      document.removeEventListener('mousedown', onMouseDown);
+      document.removeEventListener('keydown', onKeyDown);
+    };
+  }, [workspaceMenuOpen, modelPopoverOpen]);
 
   useEffect(() => {
     return () => {
@@ -207,8 +266,28 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
   const handleNewSession = useCallback(async () => {
     if (!workspaceId) return;
-    await createSession(workspaceId, true);
-  }, [workspaceId, createSession]);
+    await createSession(workspaceId, true, selectedSessionModel);
+  }, [workspaceId, createSession, selectedSessionModel]);
+
+  const handleModelSelect = useCallback((model: string) => {
+    if (!activeSessionId) return;
+    setSessionModels((prev) => ({ ...prev, [activeSessionId]: model }));
+    setActiveModel(model);
+    setModelPopoverOpen(false);
+    setModelFilter('');
+  }, [activeSessionId]);
+
+  const handleRestartWithModel = useCallback(async () => {
+    if (!workspaceId || !activeSessionId) return;
+    const model = sessionModels[activeSessionId] ?? null;
+    await apiFetch(`/api/terminal/sessions/${encodeURIComponent(activeSessionId)}`, {
+      method: 'DELETE',
+      silent: true,
+    }).catch(() => undefined);
+    setSessions((prev) => prev.filter((session) => session.sessionId !== activeSessionId));
+    setActiveSessionId(null);
+    await createSession(workspaceId, true, model);
+  }, [workspaceId, activeSessionId, sessionModels, createSession]);
 
   const handleSessionExit = useCallback((sessionId: string) => {
     setSessions((prev) => prev.map((session) => (
@@ -220,6 +299,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const cwdLabel = activeSession?.cwd ? getBasename(activeSession.cwd) : (selectedWorkspace?.git_path ? getBasename(selectedWorkspace.git_path) : 'workspace');
   const isActive = Boolean(activeSession && !activeSession.exited && !creating && !error && !notInstalled);
   const showOverlay = creating || (!activeSessionId && !error && !notInstalled);
+  const displayedModel = selectedSessionModel ?? activeModel;
 
   return (
     <div className="flex h-full min-h-0 flex-col overflow-hidden bg-[var(--panel)]">
@@ -266,13 +346,63 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             )}
           </div>
 
-          <div className="shrink-0">
-            <ModelPickerPopover
-              engine="opencode"
-              value={activeModel}
-              onChange={setActiveModel}
-              workspaceId={workspaceId ?? undefined}
-            />
+          <div ref={modelPopoverRef} className="relative shrink-0">
+            <button
+              type="button"
+              onClick={() => setModelPopoverOpen((open) => !open)}
+              className="inline-flex items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5"
+              aria-label="Select session model"
+            >
+              <span className="rounded bg-accent/10 px-1.5 py-0.5 text-[10px] text-muted">Model</span>
+              <span className="max-w-[180px] truncate">{displayedModel}</span>
+              <ChevronDown size={12} className={`transition-transform ${modelPopoverOpen ? 'rotate-180' : ''}`} />
+            </button>
+            {activeSession && !activeSession.exited && selectedSessionModel && (
+              <div className="mt-1 flex items-center justify-end gap-2">
+                <span className="text-[10px] italic text-muted/70">Takes effect on new session</span>
+                <button
+                  type="button"
+                  onClick={() => { void handleRestartWithModel(); }}
+                  className="rounded border border-border px-2 py-0.5 text-[11px] text-muted hover:text-[var(--text)]"
+                >
+                  Restart with this model
+                </button>
+              </div>
+            )}
+            {modelPopoverOpen && (
+              <div className="absolute right-2 top-[44px] z-50 w-64 rounded-lg border border-border bg-[var(--panel)] p-2 shadow-lg">
+                <div className="mb-2 text-[11px] font-medium text-muted">Session model</div>
+                <input
+                  value={modelFilter}
+                  onChange={(event) => setModelFilter(event.target.value)}
+                  placeholder="Filter models..."
+                  className="mb-2 w-full rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] outline-none placeholder:text-muted"
+                />
+                <div className="max-h-48 overflow-y-auto">
+                  {loadingModels ? (
+                    <div className="px-2 py-2 text-[11px] text-muted">Loading models…</div>
+                  ) : filteredModels.length === 0 ? (
+                    <div className="px-2 py-2 text-[11px] text-muted">No models found</div>
+                  ) : (
+                    filteredModels.map((model) => {
+                      const selected = displayedModel === model.id;
+                      return (
+                        <button
+                          key={model.id}
+                          type="button"
+                          onClick={() => handleModelSelect(model.id)}
+                          className="flex w-full items-center gap-2 rounded px-2 py-1.5 text-left hover:bg-accent/5"
+                        >
+                          <span className="rounded bg-[var(--panel-2)] px-1.5 py-0.5 text-[10px] text-muted">{model.provider}</span>
+                          <span className="min-w-0 flex-1 truncate text-[12px] text-[var(--text)]">{model.name}</span>
+                          {selected && <Check size={14} className="shrink-0 text-accent" />}
+                        </button>
+                      );
+                    })
+                  )}
+                </div>
+              </div>
+            )}
           </div>
 
           <div className="shrink-0" title={directionTooltip}>

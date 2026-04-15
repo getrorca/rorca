@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T18:35:54.440Z",
+  "lastUpdatedAt": "2026-04-15T19:06:10.151Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -91,6 +91,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 170861
+    },
+    {
+      "storyId": "OCT-037",
+      "title": "Per-session model picker — change model without affecting global config",
+      "status": "passed",
+      "startedAt": "2026-04-15T19:01:43.202Z",
+      "finishedAt": "2026-04-15T19:06:10.150Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 266948
     }
   ],
   "failedStories": [],

@@ -54,23 +54,17 @@ Context: SM-001 failed with reason='typecheck' despite potentially working at ru
 Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incremental approach of establishing shared utilities before complex features reduces integration risk.
 > Source: SM-003
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-> Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
+> Rule: Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
 
-Context: PR-051 creates plan_quotas table + requirePlan middleware. This centralizes enforcement logic and makes quota changes (free → paid tier) declarative. Route handlers stay clean.
-> Source: PR-051
+Context: To change limits: UPDATE rate_limits table then call invalidateRateLimitCache() or restart backend. Skipped in NODE_ENV=test unless RATE_LIMIT_ENABLED=true. Implemented in rate-limiter.ts.
+> Source: PR-NEW-1
 
 ## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
 > Rule: PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
 
 Context: PR-049 and PR-050 (SQLite optimization + benchmarks) were superseded by the rorca-postgres-migration spec. This teaches us that production-grade DB decisions should be made upfront, not incrementally optimized from dev-grade solutions.
 > Source: rorca-postgres-migration
-
-## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
-> Rule: Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
-
-Context: To change limits: UPDATE rate_limits table then call invalidateRateLimitCache() or restart backend. Skipped in NODE_ENV=test unless RATE_LIMIT_ENABLED=true. Implemented in rate-limiter.ts.
-> Source: PR-NEW-1
 
 ## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
 > Rule: Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
@@ -101,6 +95,12 @@ Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tab
 
 Context: PR-052 implements upgrade prompts + feature badges. This creates a progressive disclosure UX where users discover features organically rather than via docs. Version gate prevents showing unavailable features.
 > Source: PR-052
+
+## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+> Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+
+Context: PR-051 creates plan_quotas table + requirePlan middleware. This centralizes enforcement logic and makes quota changes (free → paid tier) declarative. Route handlers stay clean.
+> Source: PR-051
 
 ## 2026-03-10 [Gotcha] pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
 > Rule: pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
@@ -3224,3 +3224,15 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-15 [Architecture] node-pty graceful degradation — try/catch at module load, not import time: When integrating native N-API modules like node-pty, wrap require() in a try/catch at module load (not dynamic import()). Set a module-scoped PTY_AVAILABLE boolean. Check this flag before calling native module functions and throw structured errors ({ code, message }) that routes can catch and convert to 503 Service Unavailable. This allows the server to start successfully even when the native module is not built, with the feature gracefully disabled.
 > Rule: node-pty graceful degradation — try/catch at module load, not import time: When integrating native N-API modules like node-pty, wrap require() in a try/catch at module load (not dynamic import()). Set a module-scoped PTY_AVAILABLE boolean. Check this flag before calling native module functions and throw structured errors ({ code, message }) that routes can catch and convert to 503 Service Unavailable. This allows the server to start successfully even when the native module is not built, with the feature gracefully disabled.
+
+## 2026-04-15 [Pattern] Terminal session route preflights OpenCode availability: Before creating an interactive terminal PTY session, check `detectOpenCode()` in `backend/src/routes/terminal.ts` and return a 422 `OPENCODE_NOT_INSTALLED` error with an install hint when the binary is missing.
+> Rule: Terminal session route preflights OpenCode availability: Before creating an interactive terminal PTY session, check `detectOpenCode()` in `backend/src/routes/terminal.ts` and return a 422 `OPENCODE_NOT_INSTALLED` error with an install hint when the binary is missing.
+
+## 2026-04-15 [Architecture] Terminal drawer is the sole OpenCode entry point: Use `TerminalDrawerContext` plus the always-mounted `TerminalDrawer` in `App.tsx` for terminal access; do not add sidebar navigation items for OpenCode terminal access.
+> Rule: Terminal drawer is the sole OpenCode entry point: Use `TerminalDrawerContext` plus the always-mounted `TerminalDrawer` in `App.tsx` for terminal access; do not add sidebar navigation items for OpenCode terminal access.
+
+## 2026-04-15 [Pattern] OpenCode PTY direction injection mirrors Codex marker restoration: For OpenCode PTY sessions, write synthesized direction context to `.opencode/AGENTS.md` between Rorca markers and restore/delete it via an idempotent per-session cleanup hook on both explicit delete and PTY exit.
+> Rule: OpenCode PTY direction injection mirrors Codex marker restoration: For OpenCode PTY sessions, write synthesized direction context to `.opencode/AGENTS.md` between Rorca markers and restore/delete it via an idempotent per-session cleanup hook on both explicit delete and PTY exit.
+
+## 2026-04-15 [Pattern] Terminal PTY sessions support per-session model override: When spawning OpenCode terminal sessions, accept an optional validated `model` in POST /api/terminal/sessions and inject it into that PTY env only via `OPENCODE_MODEL`/`RORCA_MODEL`; never mutate global provider settings.
+> Rule: Terminal PTY sessions support per-session model override: When spawning OpenCode terminal sessions, accept an optional validated `model` in POST /api/terminal/sessions and inject it into that PTY env only via `OPENCODE_MODEL`/`RORCA_MODEL`; never mutate global provider settings.
