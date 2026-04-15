@@ -15,8 +15,20 @@ type OutboundMessage =
 
 type TerminalOutputMessage = { type: 'output'; data: string; sequence: number };
 type TerminalExitMessage = { type: 'exit'; exitCode: number };
+type TerminalShellEventMessage = {
+  type: 'shell_event';
+  event: 'command_end';
+  exitCode: number;
+  durationMs: number;
+};
 
-type InboundMessage = TerminalOutputMessage | TerminalExitMessage;
+type InboundMessage = TerminalOutputMessage | TerminalExitMessage | TerminalShellEventMessage;
+
+export interface TerminalShellEvent {
+  event: 'command_end';
+  exitCode: number;
+  durationMs: number;
+}
 
 // ─── Return Type ──────────────────────────────────────────────────────────────
 
@@ -25,6 +37,7 @@ export interface UseTerminalSessionReturn {
   sendResize: (cols: number, rows: number) => void;
   onData: (handler: (data: string) => void) => () => void;
   onExit: (handler: (exitCode: number) => void) => () => void;
+  onShellEvent: (handler: (event: TerminalShellEvent) => void) => () => void;
   connected: boolean;
   reconnecting: boolean;
   connectionLost: boolean;
@@ -48,6 +61,7 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
   const wsRef = useRef<WebSocket | null>(null);
   const dataHandlersRef = useRef<Set<(data: string) => void>>(new Set());
   const exitHandlersRef = useRef<Set<(exitCode: number) => void>>(new Set());
+  const shellEventHandlersRef = useRef<Set<(event: TerminalShellEvent) => void>>(new Set());
 
   const reconnectCountRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -108,6 +122,11 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
   const onExit = (handler: (exitCode: number) => void): (() => void) => {
     exitHandlersRef.current.add(handler);
     return () => { exitHandlersRef.current.delete(handler); };
+  };
+
+  const onShellEvent = (handler: (event: TerminalShellEvent) => void): (() => void) => {
+    shellEventHandlersRef.current.add(handler);
+    return () => { shellEventHandlersRef.current.delete(handler); };
   };
 
   // ─── WebSocket lifecycle ────────────────────────────────────────────────────
@@ -171,6 +190,14 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
           } else if (message.type === 'exit') {
             exitHandlersRef.current.forEach((handler) => {
               handler(message.exitCode);
+            });
+          } else if (message.type === 'shell_event') {
+            shellEventHandlersRef.current.forEach((handler) => {
+              handler({
+                event: message.event,
+                exitCode: message.exitCode,
+                durationMs: message.durationMs,
+              });
             });
           }
         } catch (err) {
@@ -251,6 +278,7 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
     sendResize,
     onData,
     onExit,
+    onShellEvent,
     connected,
     reconnecting,
     connectionLost,

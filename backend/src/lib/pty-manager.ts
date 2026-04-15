@@ -4,6 +4,9 @@
 // Each session is an isolated opencode process with its own workspace context.
 
 import { randomUUID } from 'crypto';
+import fs from 'fs/promises';
+import os from 'os';
+import path from 'path';
 import { WebSocket } from 'ws';
 import { detectOpenCode } from './opencode-detector';
 import { execute, queryOne, transaction } from '../db/index';
@@ -47,6 +50,17 @@ export interface PtySession {
   totalOutputBytes: number;
   sockets: Set<WebSocket>;
   shutdownNotified: boolean;
+  shellIntegrationTempDir?: string;
+  osc133Buffer: string;
+  activeCommandStartedAt?: number;
+  shellIntegrationEnabled: boolean;
+}
+
+export interface ShellEventMessage {
+  type: 'shell_event';
+  event: 'command_end';
+  exitCode: number;
+  durationMs: number;
 }
 
 const sessions = new Map<string, PtySession>();
@@ -70,6 +84,108 @@ const CLAUDE_ENV_VARS = [
   'CLAUDE_AGENT_SDK_VERSION',
   'CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING',
 ];
+
+function getShellType(shellPath: string | undefined): 'bash' | 'zsh' | null {
+  if (!shellPath) return null;
+  const base = path.basename(shellPath).toLowerCase();
+  if (base.includes('bash')) return 'bash';
+  if (base.includes('zsh')) return 'zsh';
+  return null;
+}
+
+async function createShellIntegrationTemp(shellPath: string | undefined): Promise<{
+  shellArgs: string[];
+  envPatch: Record<string, string>;
+  tempDir?: string;
+  enabled: boolean;
+}> {
+  const shellType = getShellType(shellPath);
+  if (!shellType) {
+    logger.debug({ shellPath }, '[pty-manager] Skipping shell integration for unsupported shell');
+    return { shellArgs: [], envPatch: {}, enabled: false };
+  }
+
+  const tempDir = await fs.mkdtemp(path.join(os.tmpdir(), 'rorca-shell-'));
+  const integrationPath = path.join(tempDir, 'rorca-shell-integration.sh');
+  const bashRcPath = path.join(tempDir, '.bashrc');
+  const zshRcPath = path.join(tempDir, '.zshrc');
+  const homeDir = process.env.HOME || os.homedir();
+
+  const integrationScript = `export RORCA_SHELL_INTEGRATION=1
+__rorca_prompt_start() { printf '\\033]133;A\\007'; }
+__rorca_prompt_end() { printf '\\033]133;B\\007'; }
+__rorca_output_start() { printf '\\033]133;C\\007'; }
+__rorca_command_end() { local exit_code="$?"; printf '\\033]133;D;%s\\007' "$exit_code"; }
+`;
+
+  await fs.writeFile(integrationPath, integrationScript, 'utf8');
+
+  if (shellType === 'bash') {
+    const userRc = process.env.BASH_ENV || path.join(homeDir, '.bashrc');
+    const bashRc = `source '${integrationPath}'\nif [ -f '${userRc}' ]; then source '${userRc}'; fi\nPROMPT_COMMAND="__rorca_output_start; __rorca_command_end${'${PROMPT_COMMAND:+; }'}${PROMPT_COMMAND}"\nPS1="\\[\\033]133;A\\007\\]${'${PS1:-\\u@\\h:\\w\\$ }'}\\[\\033]133;B\\007\\]"\n`;
+    await fs.writeFile(bashRcPath, bashRc, 'utf8');
+    return {
+      shellArgs: ['--rcfile', bashRcPath, '-i'],
+      envPatch: { RORCA_SHELL_INTEGRATION: '1' },
+      tempDir,
+      enabled: true,
+    };
+  }
+
+  const userRc = process.env.ZDOTDIR ? path.join(process.env.ZDOTDIR, '.zshrc') : path.join(homeDir, '.zshrc');
+  const zshRc = `source '${integrationPath}'\nif [ -f '${userRc}' ]; then source '${userRc}'; fi\nprecmd_functions+=(__rorca_prompt_start __rorca_command_end)\npreexec_functions+=(__rorca_prompt_end __rorca_output_start)\n`;
+  await fs.writeFile(zshRcPath, zshRc, 'utf8');
+  return {
+    shellArgs: ['-i'],
+    envPatch: { RORCA_SHELL_INTEGRATION: '1', ZDOTDIR: tempDir },
+    tempDir,
+    enabled: true,
+  };
+}
+
+function parseOsc133Chunk(session: PtySession, chunk: string): { cleanData: string; shellEvents: ShellEventMessage[] } {
+  const shellEvents: ShellEventMessage[] = [];
+  let data = session.osc133Buffer + chunk;
+  session.osc133Buffer = '';
+  let cleanData = '';
+  let index = 0;
+
+  while (index < data.length) {
+    const start = data.indexOf('\u001b]133;', index);
+    if (start === -1) {
+      cleanData += data.slice(index);
+      break;
+    }
+
+    cleanData += data.slice(index, start);
+    const terminator = data.indexOf('\u0007', start);
+    if (terminator === -1) {
+      session.osc133Buffer = data.slice(start);
+      break;
+    }
+
+    const payload = data.slice(start + 6, terminator);
+    if (payload === 'A') {
+      // prompt start
+    } else if (payload === 'B' || payload === 'C') {
+      session.activeCommandStartedAt = Date.now();
+    } else if (payload.startsWith('D;')) {
+      const exitCode = Number.parseInt(payload.slice(2), 10);
+      const startedAt = session.activeCommandStartedAt ?? Date.now();
+      shellEvents.push({
+        type: 'shell_event',
+        event: 'command_end',
+        exitCode: Number.isNaN(exitCode) ? 1 : exitCode,
+        durationMs: Math.max(0, Date.now() - startedAt),
+      });
+      session.activeCommandStartedAt = undefined;
+    }
+
+    index = terminator + 1;
+  }
+
+  return { cleanData, shellEvents };
+}
 
 function emitTerminalSessionEnded(session: PtySession, exitCode: number | null): void {
   const port = process.env.PORT || '3030';
@@ -240,18 +356,22 @@ export async function createSession(
   const sessionId = randomUUID();
   const cleanEnv = { ...env };
   CLAUDE_ENV_VARS.forEach((key) => delete cleanEnv[key]);
+  const shellPath = cleanEnv.SHELL || process.env.SHELL;
+  const { shellArgs, envPatch, tempDir, enabled } = await createShellIntegrationTemp(shellPath);
 
   const existingMax = await queryOne<{ max_seq: number | null }>(
     'SELECT MAX(sequence) AS max_seq FROM terminal_output_chunks WHERE session_id = $1',
     [sessionId]
   );
 
-  const ptyProcess = ptySpawn(status.opencodeBinPath, [], {
+  const spawnCommand = shellPath || status.opencodeBinPath;
+  const spawnArgs = enabled ? shellArgs : [];
+  const ptyProcess = ptySpawn(spawnCommand, spawnArgs, {
     name: 'xterm-256color',
     rows,
     cols,
     cwd,
-    env: cleanEnv,
+    env: { ...cleanEnv, ...envPatch },
   });
 
   const session: PtySession = {
@@ -272,6 +392,9 @@ export async function createSession(
     totalOutputBytes: 0,
     sockets: new Set<WebSocket>(),
     shutdownNotified: false,
+    shellIntegrationTempDir: tempDir,
+    osc133Buffer: '',
+    shellIntegrationEnabled: enabled,
   };
 
   await execute(
@@ -311,6 +434,9 @@ export async function createSession(
     } catch (err) {
       logger.error({ err, sessionId }, '[pty-manager] Failed to flush session on exit');
     } finally {
+      if (current.shellIntegrationTempDir) {
+        await fs.rm(current.shellIntegrationTempDir, { recursive: true, force: true }).catch(() => undefined);
+      }
       sessions.delete(sessionId);
       logger.info(`[pty-manager] Session ${sessionId} exited and removed`);
     }
@@ -378,6 +504,14 @@ export function killSession(sessionId: string): void {
 
 export function getSession(sessionId: string): PtySession | undefined {
   return sessions.get(sessionId);
+}
+
+export function processSessionOutput(sessionId: string, chunk: string): { cleanData: string; shellEvents: ShellEventMessage[] } {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    return { cleanData: chunk, shellEvents: [] };
+  }
+  return parseOsc133Chunk(session, chunk);
 }
 
 export function activeSessions(): PtySession[] {
@@ -487,4 +621,3 @@ setInterval(() => {
 logger.info(
   `[pty-manager] Initialized with ${IDLE_TIMEOUT_MS / 1000}s idle timeout, cleanup every ${CLEANUP_INTERVAL_MS / 1000}s`
 );
-

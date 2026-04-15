@@ -199,7 +199,19 @@ export default function TerminalPane({ sessionId, wsToken, onExit, onSessionLost
 
   const showRendererBadge = tab === 'developer';
   const currentTheme = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
-  const { onData, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId, wsToken);
+  const { onData, onShellEvent, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId, wsToken);
+
+  const writeCommandBadge = useCallback((exitCode: number, durationMs: number) => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+
+    const durationLabel = durationMs >= 1000 ? `${(durationMs / 1000).toFixed(1)}s` : `${durationMs}ms`;
+    const badge = exitCode === 0 ? `✓ ${durationLabel}` : `✗ ${exitCode}`;
+    const color = exitCode === 0 ? '\x1b[32m' : '\x1b[31m';
+    const visibleLength = badge.length;
+    const col = Math.max(1, terminal.cols - visibleLength + 1);
+    terminal.write(`\x1b[s\x1b[${col}G${color}${badge}\x1b[0m\x1b[u`);
+  }, []);
 
   const closeSearch = useCallback(() => {
     setIsSearchOpen(false);
@@ -511,6 +523,16 @@ export default function TerminalPane({ sessionId, wsToken, onExit, onSessionLost
 
     return unsubscribe;
   }, [onData, scrollbackFetched]);
+
+  useEffect(() => {
+    const unsubscribe = onShellEvent((event) => {
+      if (event.event === 'command_end') {
+        writeCommandBadge(event.exitCode, event.durationMs);
+      }
+    });
+
+    return unsubscribe;
+  }, [onShellEvent, writeCommandBadge]);
 
   useEffect(() => {
     const unsubscribe = onSessionExit((exitCode) => {
