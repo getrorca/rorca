@@ -15,6 +15,12 @@ type OutboundMessage =
 
 type TerminalOutputMessage = { type: 'output'; data: string; sequence: number };
 type TerminalExitMessage = { type: 'exit'; exitCode: number };
+type TerminalBannerMessage = {
+  type: 'banner';
+  workspaceLabel: string;
+  model: string;
+  cwd: string;
+};
 type TerminalShellEventMessage = {
   type: 'shell_event';
   event: 'command_end';
@@ -22,12 +28,18 @@ type TerminalShellEventMessage = {
   durationMs: number;
 };
 
-type InboundMessage = TerminalOutputMessage | TerminalExitMessage | TerminalShellEventMessage;
+type InboundMessage = TerminalOutputMessage | TerminalExitMessage | TerminalBannerMessage | TerminalShellEventMessage;
 
 export interface TerminalShellEvent {
   event: 'command_end';
   exitCode: number;
   durationMs: number;
+}
+
+export interface TerminalBannerEvent {
+  workspaceLabel: string;
+  model: string;
+  cwd: string;
 }
 
 // ─── Return Type ──────────────────────────────────────────────────────────────
@@ -37,6 +49,7 @@ export interface UseTerminalSessionReturn {
   sendResize: (cols: number, rows: number) => void;
   onData: (handler: (data: string) => void) => () => void;
   onExit: (handler: (exitCode: number) => void) => () => void;
+  onBanner: (handler: (event: TerminalBannerEvent) => void) => () => void;
   onShellEvent: (handler: (event: TerminalShellEvent) => void) => () => void;
   connected: boolean;
   reconnecting: boolean;
@@ -61,6 +74,7 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
   const wsRef = useRef<WebSocket | null>(null);
   const dataHandlersRef = useRef<Set<(data: string) => void>>(new Set());
   const exitHandlersRef = useRef<Set<(exitCode: number) => void>>(new Set());
+  const bannerHandlersRef = useRef<Set<(event: TerminalBannerEvent) => void>>(new Set());
   const shellEventHandlersRef = useRef<Set<(event: TerminalShellEvent) => void>>(new Set());
 
   const reconnectCountRef = useRef(0);
@@ -129,6 +143,11 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
     return () => { shellEventHandlersRef.current.delete(handler); };
   };
 
+  const onBanner = (handler: (event: TerminalBannerEvent) => void): (() => void) => {
+    bannerHandlersRef.current.add(handler);
+    return () => { bannerHandlersRef.current.delete(handler); };
+  };
+
   // ─── WebSocket lifecycle ────────────────────────────────────────────────────
 
   useEffect(() => {
@@ -190,6 +209,14 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
           } else if (message.type === 'exit') {
             exitHandlersRef.current.forEach((handler) => {
               handler(message.exitCode);
+            });
+          } else if (message.type === 'banner') {
+            bannerHandlersRef.current.forEach((handler) => {
+              handler({
+                workspaceLabel: message.workspaceLabel,
+                model: message.model,
+                cwd: message.cwd,
+              });
             });
           } else if (message.type === 'shell_event') {
             shellEventHandlersRef.current.forEach((handler) => {
@@ -278,6 +305,7 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
     sendResize,
     onData,
     onExit,
+    onBanner,
     onShellEvent,
     connected,
     reconnecting,
