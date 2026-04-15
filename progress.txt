@@ -3,7 +3,7 @@
 Spec: rorca-ci-autofix
 Run ID: 20260316000171
 Started: 2026-04-14T05:27:51.531Z
-Last Updated: 2026-04-15T18:34:13.249Z
+Last Updated: 2026-04-15T18:32:34.901Z
 
 ## Completed Stories (9)
 - CAF-001: Universal CI failure parser — extract structured errors from any GitHub check_run — DONE (claude, claude-opus-4-6, 1360s)
@@ -14,4 +14,4 @@ Last Updated: 2026-04-15T18:34:13.249Z
 - CAF-006: Autofix push-back — commit and push fixes to the source branch — DONE (claude, claude-opus-4-6, 17s)
 - OCT-006: Frontend WebSocket hook — useTerminalSession — DONE (claude, 79s)
 - OCT-007: Frontend terminal component — TerminalPane with xterm.js PTY integration — DONE (claude, 164s)
-- OCT-009: TerminalPanel — unified panel component with interactive header, optimistic loading, and drawer/full modes — DONE (codex, gpt-5.4, 207s)
+- OCT-011: Theme sync — xterm.js colors track Rorca dark/light theme — DONE (codex, gpt-5.4, 124s)

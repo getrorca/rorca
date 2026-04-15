@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T18:34:13.249Z",
+  "lastUpdatedAt": "2026-04-15T18:32:34.901Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -83,14 +83,14 @@
       "elapsedMs": 164115
     },
     {
-      "storyId": "OCT-009",
-      "title": "TerminalPanel — unified panel component with interactive header, optimistic loading, and drawer/full modes",
+      "storyId": "OCT-011",
+      "title": "Theme sync — xterm.js colors track Rorca dark/light theme",
       "status": "passed",
-      "startedAt": "2026-04-15T18:30:46.017Z",
-      "finishedAt": "2026-04-15T18:34:13.249Z",
+      "startedAt": "2026-04-15T18:30:30.404Z",
+      "finishedAt": "2026-04-15T18:32:34.901Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 207232
+      "elapsedMs": 124497
     }
   ],
   "failedStories": [],
