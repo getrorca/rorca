@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T20:20:00.373Z",
+  "lastUpdatedAt": "2026-04-15T20:21:42.873Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -23,14 +23,14 @@
       "elapsedMs": 341460
     },
     {
-      "storyId": "OCT-021",
-      "title": "WebSocket security — Origin validation, localhost binding, session token",
+      "storyId": "OCT-030",
+      "title": "OSC 133 shell integration — prompt markers and command timing",
       "status": "passed",
-      "startedAt": "2026-04-15T20:18:16.865Z",
-      "finishedAt": "2026-04-15T20:20:00.372Z",
+      "startedAt": "2026-04-15T20:18:14.931Z",
+      "finishedAt": "2026-04-15T20:21:42.873Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 103507
+      "elapsedMs": 207942
     }
   ],
   "failedStories": [
