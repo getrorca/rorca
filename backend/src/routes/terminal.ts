@@ -10,7 +10,7 @@ import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { broadcastAll } from '../lib/sse-hub';
 import { resolveVaultProvider } from '../lib/llm-client';
-import { getDecryptedProviderKey } from '../lib/vault';
+import { getDecryptedProviderKey } from '../lib/integration-vault';
 import { injectDirectionStack } from '../lib/terminal-context-injector';
 import { registerTerminalContextCleanup, runTerminalContextCleanup } from '../lib/terminal-context-cleanup';
 import { detectOpenCode } from '../lib/opencode-detector';
@@ -301,6 +301,46 @@ router.post('/sessions', async (req: Request, res: Response) => {
 /**
  * @swagger
  * /api/terminal/sessions/{sessionId}:
+ *   get:
+ *     tags: [Terminal]
+ *     summary: Get a PTY session by ID
+ *     operationId: getTerminalSession
+ *     description: |
+ *       Returns session details if the session is still active.
+ *       Used for reattachment after page reload (OCT-026).
+ *     parameters:
+ *       - in: path
+ *         name: sessionId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Session ID (UUID)
+ *     responses:
+ *       200:
+ *         description: Session details
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 sessionId:
+ *                   type: string
+ *                 wsToken:
+ *                   type: string
+ *                   description: Fresh WebSocket connection token (60s TTL)
+ *                 workspaceId:
+ *                   type: string
+ *                 cwd:
+ *                   type: string
+ *                 rows:
+ *                   type: integer
+ *                 cols:
+ *                   type: integer
+ *                 createdAt:
+ *                   type: string
+ *                   format: date-time
+ *       404:
+ *         description: Session not found
  *   delete:
  *     tags: [Terminal]
  *     summary: Kill a PTY session
@@ -321,6 +361,32 @@ router.post('/sessions', async (req: Request, res: Response) => {
  *       404:
  *         description: Session not found
  */
+router.get('/sessions/:sessionId', async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.params;
+
+    const session = ptyManager.getSession(sessionId);
+    if (!session) {
+      throw new NotFoundError('Session not found');
+    }
+
+    // Generate fresh WebSocket connection token for reattachment
+    const wsToken = generateWsToken(sessionId);
+
+    res.json({
+      sessionId: session.sessionId,
+      wsToken,
+      workspaceId: session.workspaceId,
+      cwd: session.cwd,
+      rows: session.rows,
+      cols: session.cols,
+      createdAt: session.createdAt.toISOString(),
+    });
+  } catch (err) {
+    handleRouteError(req, res, err);
+  }
+});
+
 router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
   try {
     const { sessionId } = req.params;

@@ -199,7 +199,7 @@ export default function TerminalPane({ sessionId, wsToken, onExit, onSessionLost
 
   const showRendererBadge = tab === 'developer';
   const currentTheme = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
-  const { onData, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId, wsToken);
+  const { onData, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit, onShellEvent } = useTerminalSession(sessionId, wsToken);
 
   const closeSearch = useCallback(() => {
     setIsSearchOpen(false);

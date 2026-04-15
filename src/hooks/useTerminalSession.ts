@@ -15,8 +15,14 @@ type OutboundMessage =
 
 type TerminalOutputMessage = { type: 'output'; data: string; sequence: number };
 type TerminalExitMessage = { type: 'exit'; exitCode: number };
+type TerminalShellEventMessage = {
+  type: 'shell_event';
+  event: 'command_end';
+  exitCode: number;
+  durationMs: number;
+};
 
-type InboundMessage = TerminalOutputMessage | TerminalExitMessage;
+type InboundMessage = TerminalOutputMessage | TerminalExitMessage | TerminalShellEventMessage;
 
 // ─── Return Type ──────────────────────────────────────────────────────────────
 
@@ -25,6 +31,7 @@ export interface UseTerminalSessionReturn {
   sendResize: (cols: number, rows: number) => void;
   onData: (handler: (data: string) => void) => () => void;
   onExit: (handler: (exitCode: number) => void) => () => void;
+  onShellEvent: (handler: (exitCode: number, durationMs: number) => void) => () => void;
   connected: boolean;
   reconnecting: boolean;
   connectionLost: boolean;
@@ -48,6 +55,7 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
   const wsRef = useRef<WebSocket | null>(null);
   const dataHandlersRef = useRef<Set<(data: string) => void>>(new Set());
   const exitHandlersRef = useRef<Set<(exitCode: number) => void>>(new Set());
+  const shellEventHandlersRef = useRef<Set<(exitCode: number, durationMs: number) => void>>(new Set());
 
   const reconnectCountRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -108,6 +116,11 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
   const onExit = (handler: (exitCode: number) => void): (() => void) => {
     exitHandlersRef.current.add(handler);
     return () => { exitHandlersRef.current.delete(handler); };
+  };
+
+  const onShellEvent = (handler: (exitCode: number, durationMs: number) => void): (() => void) => {
+    shellEventHandlersRef.current.add(handler);
+    return () => { shellEventHandlersRef.current.delete(handler); };
   };
 
   // ─── WebSocket lifecycle ────────────────────────────────────────────────────
@@ -172,6 +185,13 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
             exitHandlersRef.current.forEach((handler) => {
               handler(message.exitCode);
             });
+          } else if (message.type === 'shell_event') {
+            // OCT-030: Handle shell integration events
+            if (message.event === 'command_end') {
+              shellEventHandlersRef.current.forEach((handler) => {
+                handler(message.exitCode, message.durationMs);
+              });
+            }
           }
         } catch (err) {
           console.error('[useTerminalSession] Failed to parse message:', err);
@@ -251,6 +271,7 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
     sendResize,
     onData,
     onExit,
+    onShellEvent,
     connected,
     reconnecting,
     connectionLost,
