@@ -301,6 +301,15 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     await createSession(workspaceId, true);
   }, [workspaceId, createSession]);
 
+  useEffect(() => {
+    const handleTerminalNewSession = () => {
+      void handleNewSession();
+    };
+
+    window.addEventListener('rorca:terminal-new-session', handleTerminalNewSession);
+    return () => window.removeEventListener('rorca:terminal-new-session', handleTerminalNewSession);
+  }, [handleNewSession]);
+
   const handleSessionExit = useCallback((sessionId: string) => {
     setSessions((prev) => prev.map((session) => (
       session.sessionId === sessionId ? { ...session, exited: true } : session
