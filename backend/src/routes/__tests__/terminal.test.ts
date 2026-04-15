@@ -59,7 +59,7 @@ afterAll(async () => {
   fs.rmSync(tmpDir, { recursive: true, force: true });
 });
 
-test('POST /api/terminal/sessions returns 201 with a UUID sessionId', async () => {
+test('POST /api/terminal/sessions returns 201 with sessionId and wsToken', async () => {
   const sessionId = '550e8400-e29b-41d4-a716-446655440000';
   (ptyManager.createSession as jest.Mock).mockResolvedValue(sessionId);
   (ptyManager.getSession as jest.Mock).mockReturnValue({
@@ -89,6 +89,9 @@ test('POST /api/terminal/sessions returns 201 with a UUID sessionId', async () =
 
   expect(res.status).toBe(201);
   expect(res.body.sessionId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
+  );
+  expect(res.body.wsToken).toMatch(
     /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i
   );
 
