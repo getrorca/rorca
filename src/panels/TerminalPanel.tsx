@@ -9,7 +9,6 @@ import {
   Trash2,
   X,
   TerminalSquare,
-  Type,
 } from 'lucide-react';
 import TerminalPane from '../components/TerminalPane';
 import ReadOnlyTerminalPane from '../components/ReadOnlyTerminalPane';
@@ -179,12 +178,13 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, [mode, isFullscreen]);
 
   const directionEntries = useMemo(() => {
-    return LAYER_KEYS
-      .map((key, index) => {
-        const raw = layers[key]?.contentYaml?.trim() ?? '';
-        return raw ? { key, label: `L${index + 1}`, summary: summarizeLayer(raw) } : null;
-      })
-      .filter((entry): entry is { key: string; label: string; summary: string } => entry !== null);
+    return LAYER_KEYS.reduce<Array<{ key: typeof LAYER_KEYS[number]; label: string; summary: string }>>((entries, key, index) => {
+      const raw = layers[key]?.contentYaml?.trim() ?? '';
+      if (raw) {
+        entries.push({ key, label: `L${index + 1}`, summary: summarizeLayer(raw) });
+      }
+      return entries;
+    }, []);
   }, [layers]);
 
   const directionTooltip = useMemo(() => {
@@ -485,7 +485,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
               onClick={() => setWorkspaceMenuOpen((prev) => !prev)}
               className="inline-flex max-w-[180px] items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5"
             >
-              <span className="truncate">{selectedWorkspace?.label ?? 'Select workspace'}</span>
+              <span className="truncate">{selectedWorkspace?.name ?? 'Select workspace'}</span>
               <ChevronDown size={12} />
             </button>
             {workspaceMenuOpen && (
@@ -499,7 +499,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
                       onClick={() => { void handleWorkspaceSelect(workspace.id); }}
                       className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-[11px] ${active ? 'bg-accent/10 text-[var(--text)]' : 'text-muted hover:bg-accent/5 hover:text-[var(--text)]'}`}
                     >
-                      <span className="truncate">{workspace.label}</span>
+                      <span className="truncate">{workspace.name}</span>
                     </button>
                   );
                 })}
@@ -508,10 +508,10 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
           </div>
 
           <ModelPickerPopover
+            engine="opencode"
             workspaceId={workspaceId ?? undefined}
             value={activeModel}
             onChange={setActiveModel}
-            compact
           />
 
           <div className="flex shrink-0 items-center gap-0.5 rounded border border-border">
@@ -520,20 +520,20 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
                 type="button"
                 onClick={() => handleFontSizeChange(-1)}
                 disabled={fontSize <= MIN_FONT_SIZE}
-                className="inline-flex h-7 w-7 items-center justify-center text-[var(--text)] hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-40"
+                className="inline-flex h-7 min-w-8 items-center justify-center px-2 text-[11px] font-medium text-[var(--text)] hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-40"
                 aria-label="Decrease font size"
               >
-                <Type size={11} />
+                A-
               </button>
             </Tooltip>
             <Tooltip content="Reset font size">
               <button
                 type="button"
                 onClick={handleFontSizeReset}
-                className="inline-flex h-7 w-7 items-center justify-center border-x border-border text-[var(--text)] hover:bg-accent/5"
+                className="inline-flex h-7 min-w-8 items-center justify-center border-x border-border px-2 text-[11px] font-medium text-[var(--text)] hover:bg-accent/5"
                 aria-label="Reset font size"
               >
-                <Type size={13} />
+                A
               </button>
             </Tooltip>
             <Tooltip content="Increase font size">
@@ -541,10 +541,10 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
                 type="button"
                 onClick={() => handleFontSizeChange(1)}
                 disabled={fontSize >= MAX_FONT_SIZE}
-                className="inline-flex h-7 w-7 items-center justify-center text-[var(--text)] hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-40"
+                className="inline-flex h-7 min-w-8 items-center justify-center px-2 text-[11px] font-medium text-[var(--text)] hover:bg-accent/5 disabled:cursor-not-allowed disabled:opacity-40"
                 aria-label="Increase font size"
               >
-                <Type size={16} />
+                A+
               </button>
             </Tooltip>
           </div>
@@ -571,32 +571,31 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             </button>
           </Tooltip>
 
+          <button
+            type="button"
+            onClick={() => {
+              if (isFullscreen) {
+                setIsFullscreen(false);
+                return;
+              }
+              setIsFullscreen(true);
+              onExpand?.();
+            }}
+            className="inline-flex shrink-0 items-center rounded border border-border p-1 text-muted hover:border-accent/40 hover:bg-accent/5 hover:text-[var(--text)]"
+            aria-label={isFullscreen ? 'Exit fullscreen terminal' : 'Enter fullscreen terminal'}
+          >
+            {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
+          </button>
+
           {mode === 'drawer' ? (
-            <>
-              <button
-                type="button"
-                onClick={onCollapse}
-                className="inline-flex shrink-0 items-center rounded border border-border p-1 text-muted hover:border-accent/40 hover:bg-accent/5 hover:text-[var(--text)]"
-                aria-label="Collapse terminal drawer"
-              >
-                <ChevronDown size={14} />
-              </button>
-              <button
-                type="button"
-                onClick={() => {
-                  if (isFullscreen) {
-                    setIsFullscreen(false);
-                    return;
-                  }
-                  setIsFullscreen(true);
-                  onExpand?.();
-                }}
-                className="inline-flex shrink-0 items-center rounded border border-border p-1 text-muted hover:border-accent/40 hover:bg-accent/5 hover:text-[var(--text)]"
-                aria-label={isFullscreen ? 'Minimize terminal overlay' : 'Expand terminal drawer'}
-              >
-                {isFullscreen ? <Minimize2 size={16} /> : <Maximize2 size={16} />}
-              </button>
-            </>
+            <button
+              type="button"
+              onClick={onCollapse}
+              className="inline-flex shrink-0 items-center rounded border border-border p-1 text-muted hover:border-accent/40 hover:bg-accent/5 hover:text-[var(--text)]"
+              aria-label="Collapse terminal drawer"
+            >
+              <ChevronDown size={14} />
+            </button>
           ) : (
             <button
               type="button"
