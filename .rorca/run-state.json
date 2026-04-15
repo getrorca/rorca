@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T20:35:14.925Z",
+  "lastUpdatedAt": "2026-04-15T21:12:07.394Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -41,6 +41,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 82645
+    },
+    {
+      "storyId": "OCT-026",
+      "title": "Reattach active session on page reload — localStorage session persistence",
+      "status": "passed",
+      "startedAt": "2026-04-15T21:10:35.885Z",
+      "finishedAt": "2026-04-15T21:12:07.394Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 91509
     }
   ],
   "failedStories": [

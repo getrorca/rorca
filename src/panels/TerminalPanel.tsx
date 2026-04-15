@@ -135,7 +135,15 @@ function loadPersistedSessions(): PersistedSession[] {
     const stored = localStorage.getItem(SESSIONS_STORAGE_KEY);
     if (!stored) return [];
     const parsed = JSON.parse(stored);
-    return Array.isArray(parsed) ? parsed : [];
+    if (!Array.isArray(parsed)) return [];
+    return parsed.filter((session): session is PersistedSession => {
+      return session
+        && typeof session === 'object'
+        && typeof session.sessionId === 'string'
+        && typeof session.workspaceId === 'string'
+        && typeof session.label === 'string'
+        && typeof session.createdAt === 'string';
+    });
   } catch {
     return [];
   }
@@ -143,8 +151,7 @@ function loadPersistedSessions(): PersistedSession[] {
 
 function savePersistedSession(session: PersistedSession, currentWorkspaceId: string): void {
   try {
-    const all = loadPersistedSessions();
-    // Add new session
+    const all = loadPersistedSessions().filter((stored) => stored.sessionId !== session.sessionId);
     all.push(session);
 
     // Filter to current workspace and keep only the 5 most recent
@@ -168,6 +175,16 @@ function removePersistedSession(sessionId: string): void {
   try {
     const all = loadPersistedSessions();
     const filtered = all.filter((s) => s.sessionId !== sessionId);
+    localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify(filtered));
+  } catch {
+    // Ignore localStorage errors
+  }
+}
+
+function prunePersistedSessions(predicate: (session: PersistedSession) => boolean): void {
+  try {
+    const all = loadPersistedSessions();
+    const filtered = all.filter(predicate);
     localStorage.setItem(SESSIONS_STORAGE_KEY, JSON.stringify(filtered));
   } catch {
     // Ignore localStorage errors
@@ -218,6 +235,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const activeWorkspaceIdRef = useRef<string | null>(workspaceId);
   const nextLabelNumRef = useRef(1);
   const [backgroundSessionsVersion, setBackgroundSessionsVersion] = useState(0);
+  const restoreRequestIdRef = useRef(0);
 
   const headerHeightClass = mode === 'panel' ? 'h-10' : 'h-9';
   const headerTextClass = mode === 'panel' ? 'text-[12px]' : 'text-[11px]';
@@ -393,9 +411,12 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     setError(null);
     setNotInstalled(false);
 
+    const requestId = ++restoreRequestIdRef.current;
+
     const restoreWorkspaceSessions = async () => {
       const storedSessions = workspaceSessionsRef.current[workspaceId];
       if (storedSessions && storedSessions.length > 0) {
+        if (requestId !== restoreRequestIdRef.current) return;
         setSessions(storedSessions);
         setActiveSessionId((current) => current && storedSessions.some((session) => session.sessionId === current)
           ? current
@@ -407,6 +428,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
       const persisted = loadPersistedSessions().filter((session) => session.workspaceId === workspaceId);
       if (persisted.length === 0) {
+        if (requestId !== restoreRequestIdRef.current) return;
         setSessions([]);
         setActiveSessionId(null);
         nextLabelNumRef.current = 1;
@@ -438,15 +460,17 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       }
 
       if (restoredSessions.length > 0) {
+        if (requestId !== restoreRequestIdRef.current) return;
         workspaceSessionsRef.current[workspaceId] = restoredSessions;
         setSessions(restoredSessions);
         setActiveSessionId(restoredSessions[0]?.sessionId ?? null);
         nextLabelNumRef.current = restoredSessions.length + 1;
         bumpBackgroundSessionsVersion();
-        toast.info('Reconnected to existing session');
+        toast.info('Reconnected to existing session', { durationMs: 2000 });
         return;
       }
 
+      if (requestId !== restoreRequestIdRef.current) return;
       setSessions([]);
       setActiveSessionId(null);
       nextLabelNumRef.current = 1;
@@ -491,6 +515,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   useEffect(() => {
     return () => {
       sessionsRef.current.forEach((session) => {
+        removePersistedSession(session.sessionId);
         void apiFetch(`/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`, {
           method: 'DELETE',
         }).catch(() => undefined);
@@ -521,6 +546,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, [handleNewSession]);
 
   const handleSessionExit = useCallback((sessionId: string) => {
+    removePersistedSession(sessionId);
     syncWorkspaceSessions((prev) => prev.map((session) => (
       session.sessionId === sessionId ? { ...session, status: 'exited' } : session
     )));
@@ -605,6 +631,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     if (changed) {
       bumpBackgroundSessionsVersion();
     }
+
+    prunePersistedSessions((session) => validWorkspaceIds.has(session.workspaceId));
   }, [workspaces, bumpBackgroundSessionsVersion]);
 
   const handleClearHistory = useCallback(async () => {
