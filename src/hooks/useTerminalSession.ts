@@ -24,6 +24,12 @@ type TerminalShellEventMessage = {
 
 type InboundMessage = TerminalOutputMessage | TerminalExitMessage | TerminalShellEventMessage;
 
+export interface TerminalShellEvent {
+  event: 'command_end';
+  exitCode: number;
+  durationMs: number;
+}
+
 // ─── Return Type ──────────────────────────────────────────────────────────────
 
 export interface UseTerminalSessionReturn {
@@ -31,7 +37,7 @@ export interface UseTerminalSessionReturn {
   sendResize: (cols: number, rows: number) => void;
   onData: (handler: (data: string) => void) => () => void;
   onExit: (handler: (exitCode: number) => void) => () => void;
-  onShellEvent: (handler: (exitCode: number, durationMs: number) => void) => () => void;
+  onShellEvent: (handler: (event: TerminalShellEvent) => void) => () => void;
   connected: boolean;
   reconnecting: boolean;
   connectionLost: boolean;
@@ -55,7 +61,7 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
   const wsRef = useRef<WebSocket | null>(null);
   const dataHandlersRef = useRef<Set<(data: string) => void>>(new Set());
   const exitHandlersRef = useRef<Set<(exitCode: number) => void>>(new Set());
-  const shellEventHandlersRef = useRef<Set<(exitCode: number, durationMs: number) => void>>(new Set());
+  const shellEventHandlersRef = useRef<Set<(event: TerminalShellEvent) => void>>(new Set());
 
   const reconnectCountRef = useRef(0);
   const reconnectTimerRef = useRef<number | null>(null);
@@ -118,7 +124,7 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
     return () => { exitHandlersRef.current.delete(handler); };
   };
 
-  const onShellEvent = (handler: (exitCode: number, durationMs: number) => void): (() => void) => {
+  const onShellEvent = (handler: (event: TerminalShellEvent) => void): (() => void) => {
     shellEventHandlersRef.current.add(handler);
     return () => { shellEventHandlersRef.current.delete(handler); };
   };
@@ -186,12 +192,13 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
               handler(message.exitCode);
             });
           } else if (message.type === 'shell_event') {
-            // OCT-030: Handle shell integration events
-            if (message.event === 'command_end') {
-              shellEventHandlersRef.current.forEach((handler) => {
-                handler(message.exitCode, message.durationMs);
+            shellEventHandlersRef.current.forEach((handler) => {
+              handler({
+                event: message.event,
+                exitCode: message.exitCode,
+                durationMs: message.durationMs,
               });
-            }
+            });
           }
         } catch (err) {
           console.error('[useTerminalSession] Failed to parse message:', err);

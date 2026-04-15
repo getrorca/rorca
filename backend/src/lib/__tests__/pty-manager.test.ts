@@ -94,6 +94,49 @@ describe('pty-manager', () => {
         expect.arrayContaining([sessionId, '1', '/workspace', 30, 120])
       );
     });
+
+    it('injects shell integration env var for bash/zsh sessions', async () => {
+      const nodePty = require('node-pty');
+      await ptyManager.createSession('1', '/workspace', { SHELL: '/bin/bash' }, 30, 120);
+
+      expect(nodePty.spawn).toHaveBeenCalledWith(
+        expect.any(String),
+        expect.any(Array),
+        expect.objectContaining({
+          env: expect.objectContaining({
+            RORCA_SHELL_INTEGRATION: '1',
+          }),
+        })
+      );
+    });
+  });
+
+  describe('processSessionOutput', () => {
+    it('strips OSC 133 sequences and emits command_end shell events', async () => {
+      const sessionId = await ptyManager.createSession('1', '/tmp', { SHELL: '/bin/bash' }, 24, 80);
+
+      let parsed = ptyManager.processSessionOutput(sessionId, 'echo hi\u001b]133;B\u0007hello');
+      expect(parsed.cleanData).toBe('echo hihello');
+      expect(parsed.shellEvents).toHaveLength(0);
+
+      parsed = ptyManager.processSessionOutput(sessionId, '\u001b]133;D;0\u0007');
+      expect(parsed.cleanData).toBe('');
+      expect(parsed.shellEvents).toHaveLength(1);
+      expect(parsed.shellEvents[0]).toMatchObject({ type: 'shell_event', event: 'command_end', exitCode: 0 });
+    });
+
+    it('buffers partial OSC 133 sequences across chunks', async () => {
+      const sessionId = await ptyManager.createSession('1', '/tmp', { SHELL: '/bin/zsh' }, 24, 80);
+
+      const first = ptyManager.processSessionOutput(sessionId, 'abc\u001b]133;D;');
+      expect(first.cleanData).toBe('abc');
+      expect(first.shellEvents).toHaveLength(0);
+
+      const second = ptyManager.processSessionOutput(sessionId, '7\u0007');
+      expect(second.cleanData).toBe('');
+      expect(second.shellEvents).toHaveLength(1);
+      expect(second.shellEvents[0]).toMatchObject({ exitCode: 7 });
+    });
   });
 
   describe('flushSession', () => {
