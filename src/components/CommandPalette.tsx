@@ -294,6 +294,16 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       action: () => { window.dispatchEvent(new CustomEvent('rorca:terminal-new-session')); onClose(); },
     });
     items.push({
+      id: 'action:open-execution-trace',
+      label: 'Open Execution Trace',
+      category: 'action',
+      description: 'View run logs for the selected run',
+      icon: Search,
+      keywords: ['execution trace', 'run logs', 'pipeline output', 'stdout', 'stderr'],
+      group: 'Runs',
+      action: () => { onNavigate('runs'); onClose(); },
+    });
+    items.push({
       id: 'action:new-spec',
       label: 'New Spec',
       category: 'action',
