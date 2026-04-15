@@ -2,6 +2,7 @@ import { useState, useEffect, useCallback, useRef, memo } from 'react';
 import { useDebounce } from '../../hooks/useDebounce';
 import {
   Clock,
+  TerminalSquare,
   FileText,
   CheckCircle2,
   XCircle,
@@ -108,7 +109,7 @@ const SPEC_EVENTS = [
 ];
 const RUN_EVENTS = [
   'run_started', 'run_finished', 'run_failed', 'run_paused', 'run_resumed',
-  'story_started', 'story_skipped',
+  'story_started', 'story_skipped', 'terminal_session_started', 'terminal_session_ended',
 ];
 const AUTH_EVENTS = [
   'user_registered', 'team_created', 'team_invite_sent', 'team_invite_accepted',
@@ -165,6 +166,9 @@ function activityIcon(type: string) {
       return <Flag size={14} className="text-emerald-400" />;
     case 'run_failed':
       return <Flag size={14} className="text-red-400" />;
+    case 'terminal_session_started':
+    case 'terminal_session_ended':
+      return <TerminalSquare size={14} className="text-cyan-400" />;
     case 'comment_added':
     case 'story_comment_added':
       return <MessageSquare size={14} className="text-purple-400" />;
