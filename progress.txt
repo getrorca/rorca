@@ -3,14 +3,14 @@
 Spec: rorca-opencode-terminal
 Run ID: 20260316000185
 Started: 2026-04-15T19:33:43.854Z
-Last Updated: 2026-04-15T21:14:22.278Z
+Last Updated: 2026-04-15T21:14:15.167Z
 
 ## Completed Stories (5)
 - OCT-016: Terminal panel — copy/paste, font sizing, fullscreen toggle — DONE (claude, 212s)
 - OCT-021: WebSocket security — Origin validation, localhost binding, session token — DONE (claude, 341s)
 - OCT-036: Embedded terminal drawer — Cmd+J toggle, persistent bottom panel, drag-resize, fullscreen, mobile FAB — DONE (codex, gpt-5.4, 160s)
 - OCT-041: Run View taxonomy fix — rename pipeline output to 'Execution Trace' to eliminate terminal confusion — DONE (codex, gpt-5.4, 83s)
-- OCT-031: PTY title sync — dynamic tab labels from OSC 0/2 — DONE (codex, gpt-5.4, 227s)
+- OCT-037: Per-session model picker — change model without affecting global config — DONE (codex, gpt-5.4, 220s)
 
 ## Failed Stories (1)
 - OCT-015: OpenCode not installed — graceful error state in terminal panel — FAILED (timeout)
