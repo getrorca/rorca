@@ -36,6 +36,7 @@ interface TerminalSessionRecord {
   cwd: string;
   createdAt: string;
   label: string;
+  title: string;
   autoLabeled: boolean;
   status: 'active' | 'exited' | 'killed';
 }
@@ -71,11 +72,25 @@ const DEFAULT_FONT_SIZE = 13;
 const FONT_SIZE_STORAGE_KEY = 'rorca:terminal:fontSize';
 const SESSIONS_STORAGE_KEY = 'rorca:terminal:sessions';
 const MAX_PERSISTED_SESSIONS = 5;
+const SHELL_DEFAULT_TITLE_REGEX = /^(?:\/?(?:Users|home|tmp|var|private)(?:\/[^\s]+)*|~(?:\/[^\s]+)*|\.?\.?|[A-Za-z]:\\[^\s]*)$/;
+const SHELL_NAME_REGEX = /^(?:ba|z|fi|tc|c|k|pw)d?sh$/i;
 
 function getBasename(input: string): string {
   const normalized = input.replace(/\\/g, '/').replace(/\/+$/, '');
   const parts = normalized.split('/').filter(Boolean);
   return parts[parts.length - 1] ?? input;
+}
+
+function getFallbackTerminalLabel(index: number): string {
+  return `Terminal ${index + 1}`;
+}
+
+function getSessionTabLabel(title: string, fallbackIndex: number): string {
+  const trimmed = title.trim();
+  if (!trimmed || SHELL_DEFAULT_TITLE_REGEX.test(trimmed) || SHELL_NAME_REGEX.test(trimmed)) {
+    return getFallbackTerminalLabel(fallbackIndex);
+  }
+  return trimmed;
 }
 
 function summarizeLayer(content: string): string {
@@ -178,6 +193,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [historyClearing, setHistoryClearing] = useState(false);
   const [historySessions, setHistorySessions] = useState<TerminalHistoryRecord[]>([]);
   const [selectedHistorySessionId, setSelectedHistorySessionId] = useState<string | null>(null);
+  const [flashingSessionIds, setFlashingSessionIds] = useState<string[]>([]);
 
   // Font size state with localStorage persistence
   const [fontSize, setFontSize] = useState(() => {
@@ -200,6 +216,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const initialSessionRequestedRef = useRef(false);
   const sessionsRef = useRef<TerminalSessionRecord[]>([]);
   const nextLabelNumRef = useRef(1);
+  const bellTimeoutsRef = useRef<Map<string, number>>(new Map());
 
   const headerHeightClass = mode === 'panel' ? 'h-10' : 'h-9';
   const headerTextClass = mode === 'panel' ? 'text-[12px]' : 'text-[11px]';
@@ -297,6 +314,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         cwd: res.cwd,
         createdAt: res.createdAt,
         label: `OpenCode ${labelNum}`,
+        title: 'Terminal',
         autoLabeled: false,
         status: 'active',
       };
@@ -364,6 +382,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             cwd: res.cwd,
             createdAt: res.createdAt,
             label: session.label,
+            title: 'Terminal',
             autoLabeled: true, // Keep existing label
             status: 'active',
           };
@@ -424,6 +443,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
 
   useEffect(() => {
     return () => {
+      bellTimeoutsRef.current.forEach((timeoutId) => window.clearTimeout(timeoutId));
+      bellTimeoutsRef.current.clear();
       sessionsRef.current.forEach((session) => {
         void apiFetch(`/api/terminal/sessions/${encodeURIComponent(session.sessionId)}`, {
           method: 'DELETE',
@@ -507,6 +528,28 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         autoLabeled: true,
       };
     }));
+  }, []);
+
+  const handleSessionTitleChange = useCallback((sessionId: string, title: string) => {
+    setSessions((prev) => prev.map((session) => (
+      session.sessionId === sessionId ? { ...session, title } : session
+    )));
+  }, []);
+
+  const handleSessionBell = useCallback((sessionId: string) => {
+    setFlashingSessionIds((prev) => (prev.includes(sessionId) ? prev : [...prev, sessionId]));
+
+    const existingTimeout = bellTimeoutsRef.current.get(sessionId);
+    if (existingTimeout !== undefined) {
+      window.clearTimeout(existingTimeout);
+    }
+
+    const timeoutId = window.setTimeout(() => {
+      setFlashingSessionIds((prev) => prev.filter((id) => id !== sessionId));
+      bellTimeoutsRef.current.delete(sessionId);
+    }, 300);
+
+    bellTimeoutsRef.current.set(sessionId, timeoutId);
   }, []);
 
   const handleCloseSession = useCallback(async (sessionId: string) => {
@@ -736,19 +779,22 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
           {sessions.map((session) => {
             const isCurrent = session.sessionId === activeSessionId;
             const statusDotClass = session.status === 'active' ? 'bg-emerald-400' : 'bg-muted/50';
+            const sessionIndex = sessions.findIndex((item) => item.sessionId === session.sessionId);
+            const tabLabel = getSessionTabLabel(session.title, sessionIndex >= 0 ? sessionIndex : 0);
+            const isFlashing = flashingSessionIds.includes(session.sessionId);
 
             return (
               <div
                 key={session.sessionId}
-                className={`group inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors ${isCurrent ? 'border-accent bg-surface-200 text-[var(--text)]' : 'border-border bg-transparent text-muted hover:border-accent/30 hover:bg-surface-100 hover:text-[var(--text)]'}`}
+                className={`group inline-flex shrink-0 items-center gap-1.5 rounded-full border px-2.5 py-1 text-[11px] transition-colors ${isFlashing ? 'bg-amber-400/30' : ''} ${isCurrent ? 'border-accent bg-surface-200 text-[var(--text)]' : 'border-border bg-transparent text-muted hover:border-accent/30 hover:bg-surface-100 hover:text-[var(--text)]'}`}
               >
                 <button
                   type="button"
                   onClick={() => setActiveSessionId(session.sessionId)}
                   className="flex items-center gap-1.5"
-                  title={session.label}
+                  title={tabLabel}
                 >
-                  <span className="max-w-[120px] truncate">{session.label}</span>
+                  <span className="max-w-[120px] truncate transition-colors">{tabLabel}</span>
                   <span className={`h-1.5 w-1.5 rounded-full ${statusDotClass}`} />
                 </button>
                 <button
@@ -788,6 +834,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
                     fontSize={fontSize}
                     onExit={() => handleSessionExit(session.sessionId)}
                     onInput={(data) => handleSessionInput(session.sessionId, data)}
+                    onTitleChange={(title) => handleSessionTitleChange(session.sessionId, title)}
+                    onBell={() => handleSessionBell(session.sessionId)}
                   />
                 </div>
               );

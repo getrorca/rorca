@@ -1,4 +1,3 @@
-```typescript
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import type { IDisposable, ITheme, IBufferRange, ILink, ILinkProvider } from '@xterm/xterm';
@@ -18,6 +17,8 @@ export interface TerminalPaneProps {
   onExit?: (exitCode: number) => void;
   onSessionLost?: () => void;
   onInput?: (data: string) => void;
+  onTitleChange?: (title: string) => void;
+  onBell?: () => void;
   className?: string;
   fontSize?: number;
 }
@@ -182,7 +183,7 @@ function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): IL
   };
 }
 
-export default function TerminalPane({ sessionId, wsToken, visible = true, onExit, onSessionLost, onInput, className, fontSize = 13 }: TerminalPaneProps) {
+export default function TerminalPane({ sessionId, wsToken, visible = true, onExit, onSessionLost, onInput, onTitleChange, onBell, className, fontSize = 13 }: TerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -202,7 +203,7 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
 
   const showRendererBadge = tab === 'developer';
   const currentTheme = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
-  const { onData, onShellEvent, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit } = useTerminalSession(sessionId, wsToken);
+  const { onData, onShellEvent, onBell: subscribeBell, sendInput, sendResize, reconnecting, connectionLost, onExit: onSessionExit, title } = useTerminalSession(sessionId, wsToken);
 
   const writeCommandBadge = useCallback((exitCode: number, durationMs: number) => {
     const terminal = terminalRef.current;
@@ -539,6 +540,18 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
   }, [onData, scrollbackFetched]);
 
   useEffect(() => {
+    onTitleChange?.(title);
+  }, [onTitleChange, title]);
+
+  useEffect(() => {
+    const unsubscribe = subscribeBell(() => {
+      onBell?.();
+    });
+
+    return unsubscribe;
+  }, [onBell, subscribeBell]);
+
+  useEffect(() => {
     const unsubscribe = onShellEvent((event) => {
       if (event.event === 'command_end') {
         writeCommandBadge(event.exitCode, event.durationMs);
@@ -679,4 +692,3 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
     </div>
   );
 }
-```
