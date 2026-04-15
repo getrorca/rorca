@@ -1,6 +1,8 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
+import type { IBufferRange, ILink, ILinkProvider } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { WebLinksAddon } from '@xterm/addon-web-links';
 import { useTerminalSession } from '../hooks/useTerminalSession';
 import '@xterm/xterm/css/xterm.css';
 
@@ -24,6 +26,9 @@ const TERMINAL_OPTIONS = {
   cursorStyle: 'block' as const,
   convertEol: true,
 };
+
+const ABSOLUTE_PATH_REGEX = /(?:file:\/\/)?(\/[A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\.[A-Za-z]{2,6})/g;
+const RELATIVE_PATH_REGEX = /(?<![A-Za-z0-9._/-])([A-Za-z0-9._-]+(?:\/[A-Za-z0-9._-]+)*\.[A-Za-z]{2,6})(?![A-Za-z0-9._-])/g;
 
 // ─── Theme colors ─────────────────────────────────────────────────────────────
 
@@ -86,6 +91,80 @@ function buildTerminalTheme(): TerminalTheme {
   };
 }
 
+function getLineText(terminal: Terminal, bufferLineNumber: number): string {
+  const line = terminal.buffer.active.getLine(bufferLineNumber - 1);
+  return line?.translateToString(true) ?? '';
+}
+
+function resolveLinkPath(rawPath: string, cwd: string | undefined): string {
+  const normalizedPath = rawPath.startsWith('file://') ? rawPath.replace(/^file:\/\//, '') : rawPath;
+
+  if (normalizedPath.startsWith('/')) {
+    return normalizedPath;
+  }
+
+  const base = cwd?.trim() || '';
+  if (!base) return normalizedPath;
+  const trimmedBase = base.endsWith('/') ? base.slice(0, -1) : base;
+  return `${trimmedBase}/${normalizedPath}`;
+}
+
+function createFileLinkProvider(terminal: Terminal, cwd: string | undefined): ILinkProvider {
+  return {
+    provideLinks(bufferLineNumber: number, callback: (links: ILink[] | undefined) => void): void {
+      const text = getLineText(terminal, bufferLineNumber);
+      if (!text) {
+        callback(undefined);
+        return;
+      }
+
+      const matches: ILink[] = [];
+      const seen = new Set<string>();
+      const regexes = [ABSOLUTE_PATH_REGEX, RELATIVE_PATH_REGEX];
+
+      for (const regex of regexes) {
+        regex.lastIndex = 0;
+        let match: RegExpExecArray | null;
+        while ((match = regex.exec(text)) !== null) {
+          const fullMatch = match[0];
+          const capturedPath = match[1] ?? fullMatch;
+          const startColumn = match.index + 1;
+          const endColumn = startColumn + fullMatch.length;
+          const dedupeKey = `${startColumn}:${fullMatch}`;
+
+          if (seen.has(dedupeKey)) continue;
+          seen.add(dedupeKey);
+
+          const range: IBufferRange = {
+            start: { x: startColumn, y: bufferLineNumber },
+            end: { x: endColumn, y: bufferLineNumber },
+          };
+
+          matches.push({
+            range,
+            text: fullMatch,
+            activate: () => {
+              const absolutePath = resolveLinkPath(capturedPath, cwd);
+              window.dispatchEvent(new CustomEvent('rorca:open-file', {
+                detail: {
+                  path: absolutePath,
+                  workspacePath: cwd,
+                },
+              }));
+            },
+            decorations: {
+              underline: true,
+              pointerCursor: true,
+            },
+          });
+        }
+      }
+
+      callback(matches.length > 0 ? matches : undefined);
+    },
+  };
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function TerminalPane({ sessionId, onExit, className }: TerminalPaneProps) {
@@ -94,6 +173,7 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
   const fitAddonRef = useRef<FitAddon | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
   const [scrollbackFetched, setScrollbackFetched] = useState(false);
+  const [sessionCwd, setSessionCwd] = useState<string | undefined>(undefined);
 
   const { onData, sendInput, sendResize, reconnecting, onExit: onSessionExit } = useTerminalSession(sessionId);
 
@@ -110,9 +190,16 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
       theme,
     });
 
-    // Create fit addon
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
+
+    const webLinksAddon = new WebLinksAddon((event, uri) => {
+      event.preventDefault();
+      window.open(uri, '_blank', 'noopener');
+    });
+    terminal.loadAddon(webLinksAddon);
+
+    terminal.registerLinkProvider(createFileLinkProvider(terminal, sessionCwd));
 
     // Mount terminal to DOM
     terminal.open(container);
@@ -160,7 +247,7 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
       fitAddonRef.current = null;
       resizeObserverRef.current = null;
     };
-  }, [sessionId, sendInput, sendResize]); // Include sessionId + callbacks in deps
+  }, [sessionId, sendInput, sendResize, sessionCwd]);
 
   // ─── Scrollback replay ────────────────────────────────────────────────────────
 
@@ -185,6 +272,8 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
 
         const data = await response.json();
         const chunks = data.chunks as Array<{ sequence: number; data: string }>;
+        const cwd = typeof data.cwd === 'string' ? data.cwd : undefined;
+        setSessionCwd(cwd);
 
         // Replay chunks in order
         if (terminalRef.current && chunks.length > 0) {
