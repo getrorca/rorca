@@ -4,8 +4,9 @@
 // Each session is an isolated opencode process with its own workspace context.
 
 import { randomUUID } from 'crypto';
+import { WebSocket } from 'ws';
 import { detectOpenCode } from './opencode-detector';
-import { execute, transaction } from '../db/index';
+import { execute, queryOne, transaction } from '../db/index';
 import { logger } from './logger';
 import { TooManyRequestsError } from './errors';
 
@@ -31,7 +32,6 @@ export interface PtySession {
   sessionId: string;
   workspaceId: number;
   ptyProcess: any; // IPty when available, null otherwise
-  outputSequence: number;
   createdAt: Date;
   lastActivityAt: Date;
   cwd: string;
@@ -44,9 +44,10 @@ export interface PtySession {
   dbWriteDisabled: boolean;
   outputLimitSentinelInserted: boolean;
   totalOutputBytes: number;
+  sockets: Set<WebSocket>;
+  shutdownNotified: boolean;
 }
 
-// In-memory session map — sessions are lost on backend restart
 const sessions = new Map<string, PtySession>();
 
 // Idle timeout configuration
@@ -57,6 +58,7 @@ const MAX_BUFFERED_CHUNKS = 50;
 const MAX_SESSIONS = parseInt(process.env.TERMINAL_MAX_SESSIONS || '20', 10);
 const MAX_SESSION_OUTPUT_BYTES = 100 * 1024 * 1024;
 const MAX_INPUT_MESSAGE_BYTES = 1_048_576;
+const SHUTDOWN_TIMEOUT_MS = 5_000;
 const OUTPUT_LIMIT_SENTINEL =
   '\r\n[Output limit reached — streaming continues but history is truncated]\r\n';
 
@@ -90,245 +92,6 @@ function emitTerminalSessionEnded(session: PtySession, exitCode: number | null):
       `[pty-manager] Failed to emit terminal_session_ended WAL event for session ${session.sessionId}: ${error instanceof Error ? error.message : String(error)}`
     );
   });
-}
-
-/**
- * Spawn a new OpenCode PTY session.
- * Returns the unique session ID.
- */
-export async function createSession(
-  workspaceId: string,
-  cwd: string,
-  env: Record<string, string>,
-  rows: number,
-  cols: number
-): Promise<string> {
-  // OCT-024: Check if node-pty is available before proceeding
-  if (!PTY_AVAILABLE || !ptySpawn) {
-    throw {
-      code: 'PTY_NOT_AVAILABLE',
-      message: 'node-pty native module not loaded. Run: cd backend && npm rebuild node-pty',
-    };
-  }
-
-  if (activeSessions().length >= MAX_SESSIONS) {
-    throw new TooManyRequestsError('Maximum terminal sessions reached');
-  }
-
-  const status = detectOpenCode();
-
-  if (!status.opencodeInstalled || !status.opencodeBinPath) {
-    throw new Error('opencode binary not found — install via: npm i -g opencode-ai');
-  }
-
-  const sessionId = randomUUID();
-
-  // Strip Claude env vars from environment
-  const cleanEnv = { ...env };
-  CLAUDE_ENV_VARS.forEach((key) => delete cleanEnv[key]);
-
-  // Spawn opencode process with PTY
-  const ptyProcess = ptySpawn(status.opencodeBinPath, [], {
-    name: 'xterm-256color',
-    rows,
-    cols,
-    cwd,
-    env: cleanEnv,
-  });
-
-  const session: PtySession = {
-    sessionId,
-    workspaceId: Number(workspaceId),
-    ptyProcess,
-    outputSequence: 0,
-    createdAt: new Date(),
-    lastActivityAt: new Date(),
-    cwd,
-    rows,
-    cols,
-    nextSequence: 1,
-    pendingChunks: [],
-    pendingBytes: 0,
-    isFlushing: false,
-    dbWriteDisabled: false,
-    outputLimitSentinelInserted: false,
-    totalOutputBytes: 0,
-  };
-
-  await execute(
-    `INSERT INTO terminal_sessions (session_id, workspace_id, cwd, rows, cols, status, total_output_bytes)
-     VALUES ($1, $2, $3, $4, $5, 'active', 0)`,
-    [sessionId, workspaceId, cwd, rows, cols]
-  );
-
-  sessions.set(sessionId, session);
-
-  // Update lastActivityAt on every data event to reset idle timer
-  ptyProcess.onData((data: string) => {
-    const s = sessions.get(sessionId);
-    if (s) {
-      s.lastActivityAt = new Date();
-      bufferOutputChunk(s, data);
-    }
-  });
-
-  // Clean up session when process exits
-  ptyProcess.onExit(async ({ exitCode }: { exitCode: number }) => {
-    try {
-      await flushSession(sessionId);
-      await execute(
-        `UPDATE terminal_sessions
-         SET status = 'exited', exit_code = $2, exited_at = NOW(), last_activity_at = NOW()
-         WHERE session_id = $1`,
-        [sessionId, exitCode]
-      );
-      emitTerminalSessionEnded(session, exitCode ?? null);
-    } catch (err) {
-      logger.error({ err, sessionId }, '[pty-manager] Failed to flush session on exit');
-    } finally {
-      sessions.delete(sessionId);
-      logger.info(`[pty-manager] Session ${sessionId} exited and removed`);
-    }
-  });
-
-  logger.info(
-    `[pty-manager] Created session ${sessionId} for workspace ${workspaceId} at ${cwd}`
-  );
-
-  return sessionId;
-}
-
-/**
- * Resize an existing PTY session.
- */
-export function resizeSession(sessionId: string, rows: number, cols: number): void {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    throw new Error(`Session ${sessionId} not found`);
-  }
-
-  // node-pty resize signature: resize(cols, rows) — columns first!
-  session.ptyProcess.resize(cols, rows);
-  session.rows = rows;
-  session.cols = cols;
-
-  logger.debug(`[pty-manager] Resized session ${sessionId} to ${cols}x${rows}`);
-}
-
-/**
- * Kill a PTY session and remove it from the map.
- */
-export function killSession(sessionId: string): void {
-  const session = sessions.get(sessionId);
-  if (!session) {
-    logger.warn(`[pty-manager] Attempted to kill non-existent session ${sessionId}`);
-    return;
-  }
-
-  session.ptyProcess.kill();
-  void flushBufferedChunks(session)
-    .then(() =>
-      execute(
-        `UPDATE terminal_sessions
-         SET status = 'killed', exited_at = COALESCE(exited_at, NOW()), last_activity_at = NOW()
-         WHERE session_id = $1`,
-        [sessionId]
-      )
-    )
-    .catch((err) => {
-      logger.error({ err, sessionId }, '[pty-manager] Failed to flush session on kill');
-    })
-    .finally(() => {
-      sessions.delete(sessionId);
-    });
-
-  logger.info(`[pty-manager] Killed session ${sessionId}`);
-}
-
-/**
- * Get a session by ID.
- */
-export function getSession(sessionId: string): PtySession | undefined {
-  return sessions.get(sessionId);
-}
-
-/**
- * Return all active sessions.
- */
-export function activeSessions(): PtySession[] {
-  return Array.from(sessions.values());
-}
-
-export function killSessionsForWorkspace(workspaceId: string): void {
-  const sessionIds = activeSessions()
-    .filter((session) => session.workspaceId === Number(workspaceId))
-    .map((session) => session.sessionId);
-
-  for (const sessionId of sessionIds) {
-    try {
-      killSession(sessionId);
-    } catch (error) {
-      logger.warn(
-        `[pty-manager] Failed to kill session ${sessionId} for workspace ${workspaceId}: ${error instanceof Error ? error.message : String(error)}`
-      );
-    }
-  }
-}
-
-export function isSessionDbWriteDisabled(sessionId: string): boolean {
-  return sessions.get(sessionId)?.dbWriteDisabled ?? false;
-}
-
-export function isInputTooLarge(rawMessage: Buffer | string): boolean {
-  return Buffer.byteLength(rawMessage) > MAX_INPUT_MESSAGE_BYTES;
-}
-
-/**
- * Background cleanup: kill sessions idle for more than 30 minutes.
- */
-function cleanupIdleSessions(): void {
-  const now = Date.now();
-  const staleSessionIds: string[] = [];
-
-  for (const [sessionId, session] of sessions.entries()) {
-    const idleMs = now - session.lastActivityAt.getTime();
-    if (idleMs > IDLE_TIMEOUT_MS) {
-      staleSessionIds.push(sessionId);
-    }
-  }
-
-  if (staleSessionIds.length > 0) {
-    logger.info(
-      `[pty-manager] Cleaning up ${staleSessionIds.length} idle sessions: ${staleSessionIds.join(', ')}`
-    );
-    staleSessionIds.forEach((id) => killSession(id));
-  }
-}
-
-function bufferOutputChunk(session: PtySession, data: string): void {
-  if (session.dbWriteDisabled) {
-    return;
-  }
-
-  session.pendingChunks.push(data);
-  session.pendingBytes += Buffer.byteLength(data, 'utf8');
-
-  if (session.pendingChunks.length >= MAX_BUFFERED_CHUNKS) {
-    void flushSession(session.sessionId);
-  }
-}
-
-async function flushAllSessions(): Promise<void> {
-  await Promise.all(Array.from(sessions.keys()).map((sessionId) => flushSession(sessionId)));
-}
-
-export async function flushSession(sessionId: string): Promise<void> {
-  const session = sessions.get(sessionId);
-  if (!session || session.dbWriteDisabled) {
-    return;
-  }
-
-  await flushBufferedChunks(session);
 }
 
 async function flushBufferedChunks(session: PtySession): Promise<void> {
@@ -396,6 +159,314 @@ async function flushBufferedChunks(session: PtySession): Promise<void> {
     throw err;
   } finally {
     session.isFlushing = false;
+  }
+}
+
+function bufferOutputChunk(session: PtySession, data: string): void {
+  if (session.dbWriteDisabled) {
+    return;
+  }
+
+  session.pendingChunks.push(data);
+  session.pendingBytes += Buffer.byteLength(data, 'utf8');
+
+  if (session.pendingChunks.length >= MAX_BUFFERED_CHUNKS) {
+    void flushSession(session.sessionId);
+  }
+}
+
+export async function flushSession(sessionId: string): Promise<void> {
+  const session = sessions.get(sessionId);
+  if (!session || session.dbWriteDisabled) {
+    return;
+  }
+
+  await flushBufferedChunks(session);
+}
+
+async function flushAllSessions(): Promise<void> {
+  await Promise.all(Array.from(sessions.keys()).map((sessionId) => flushSession(sessionId)));
+}
+
+function notifySocketsExit(session: PtySession, exitCode: number): void {
+  const payload = JSON.stringify({ type: 'exit', exitCode });
+  session.sockets.forEach((socket) => {
+    try {
+      if (socket.readyState === WebSocket.OPEN) {
+        socket.send(payload);
+      }
+    } catch (err) {
+      logger.warn({ err, sessionId: session.sessionId }, '[pty-manager] Failed to notify socket of exit');
+    }
+  });
+}
+
+function closeSockets(session: PtySession): void {
+  session.sockets.forEach((socket) => {
+    try {
+      socket.close();
+    } catch (err) {
+      logger.warn({ err, sessionId: session.sessionId }, '[pty-manager] Failed to close socket');
+    }
+  });
+  session.sockets.clear();
+}
+
+export async function createSession(
+  workspaceId: string,
+  cwd: string,
+  env: Record<string, string>,
+  rows: number,
+  cols: number
+): Promise<string> {
+  // OCT-024: Check if node-pty is available before proceeding
+  if (!PTY_AVAILABLE || !ptySpawn) {
+    throw {
+      code: 'PTY_NOT_AVAILABLE',
+      message: 'node-pty native module not loaded. Run: cd backend && npm rebuild node-pty',
+    };
+  }
+
+  if (activeSessions().length >= MAX_SESSIONS) {
+    throw new TooManyRequestsError('Maximum terminal sessions reached');
+  }
+
+  const status = detectOpenCode();
+  if (!status.opencodeInstalled || !status.opencodeBinPath) {
+    throw new Error('opencode binary not found — install via: npm i -g opencode-ai');
+  }
+
+  const sessionId = randomUUID();
+  const cleanEnv = { ...env };
+  CLAUDE_ENV_VARS.forEach((key) => delete cleanEnv[key]);
+
+  const existingMax = await queryOne<{ max_seq: number | null }>(
+    'SELECT MAX(sequence) AS max_seq FROM terminal_output_chunks WHERE session_id = $1',
+    [sessionId]
+  );
+
+  const ptyProcess = ptySpawn(status.opencodeBinPath, [], {
+    name: 'xterm-256color',
+    rows,
+    cols,
+    cwd,
+    env: cleanEnv,
+  });
+
+  const session: PtySession = {
+    sessionId,
+    workspaceId: Number(workspaceId),
+    ptyProcess,
+    createdAt: new Date(),
+    lastActivityAt: new Date(),
+    cwd,
+    rows,
+    cols,
+    nextSequence: (existingMax?.max_seq ?? 0) + 1,
+    pendingChunks: [],
+    pendingBytes: 0,
+    isFlushing: false,
+    dbWriteDisabled: false,
+    outputLimitSentinelInserted: false,
+    totalOutputBytes: 0,
+    sockets: new Set<WebSocket>(),
+    shutdownNotified: false,
+  };
+
+  await execute(
+    `INSERT INTO terminal_sessions (session_id, workspace_id, cwd, rows, cols, status, total_output_bytes)
+     VALUES ($1, $2, $3, $4, $5, 'active', 0)`,
+    [sessionId, workspaceId, cwd, rows, cols]
+  );
+
+  sessions.set(sessionId, session);
+
+  // Update lastActivityAt on every data event to reset idle timer
+  ptyProcess.onData((data: string) => {
+    const s = sessions.get(sessionId);
+    if (s) {
+      s.lastActivityAt = new Date();
+      bufferOutputChunk(s, data);
+    }
+  });
+
+  // Clean up session when process exits
+  ptyProcess.onExit(async ({ exitCode }: { exitCode: number }) => {
+    const current = sessions.get(sessionId);
+    if (!current || current.shutdownNotified) return;
+
+    try {
+      await flushSession(sessionId);
+      await execute(
+        `UPDATE terminal_sessions
+         SET status = 'exited', exit_code = $2, exited_at = NOW(), last_activity_at = NOW()
+         WHERE session_id = $1`,
+        [sessionId, exitCode]
+      );
+      emitTerminalSessionEnded(session, exitCode ?? null);
+      notifySocketsExit(current, exitCode ?? 0);
+      closeSockets(current);
+    } catch (err) {
+      logger.error({ err, sessionId }, '[pty-manager] Failed to flush session on exit');
+    } finally {
+      sessions.delete(sessionId);
+      logger.info(`[pty-manager] Session ${sessionId} exited and removed`);
+    }
+  });
+
+  logger.info(`[pty-manager] Created session ${sessionId} for workspace ${workspaceId} at ${cwd}`);
+  return sessionId;
+}
+
+export function resizeSession(sessionId: string, rows: number, cols: number): void {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    throw new Error(`Session ${sessionId} not found`);
+  }
+
+  session.ptyProcess.resize(cols, rows);
+  session.rows = rows;
+  session.cols = cols;
+
+  void execute(
+    'UPDATE terminal_sessions SET rows = $2, cols = $3, last_activity_at = NOW() WHERE session_id = $1',
+    [sessionId, rows, cols]
+  ).catch((err) => {
+    logger.warn({ err, sessionId }, '[pty-manager] Failed to persist terminal resize');
+  });
+
+  logger.debug(`[pty-manager] Resized session ${sessionId} to ${cols}x${rows}`);
+}
+
+export function killSession(sessionId: string): void {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    logger.warn(`[pty-manager] Attempted to kill non-existent session ${sessionId}`);
+    return;
+  }
+
+  session.shutdownNotified = true;
+  void flushBufferedChunks(session)
+    .then(() =>
+      execute(
+        `UPDATE terminal_sessions
+         SET status = 'killed', exited_at = COALESCE(exited_at, NOW()), last_activity_at = NOW()
+         WHERE session_id = $1`,
+        [sessionId]
+      )
+    )
+    .catch((err) => {
+      logger.error({ err, sessionId }, '[pty-manager] Failed to flush session on kill');
+    })
+    .finally(() => {
+      try {
+        session.ptyProcess.kill();
+      } catch {}
+      notifySocketsExit(session, -1);
+      closeSockets(session);
+      sessions.delete(sessionId);
+    });
+
+  logger.info(`[pty-manager] Killed session ${sessionId}`);
+}
+
+export function getSession(sessionId: string): PtySession | undefined {
+  return sessions.get(sessionId);
+}
+
+export function activeSessions(): PtySession[] {
+  return Array.from(sessions.values());
+}
+
+export function killSessionsForWorkspace(workspaceId: string): void {
+  const sessionIds = activeSessions()
+    .filter((session) => session.workspaceId === Number(workspaceId))
+    .map((session) => session.sessionId);
+
+  for (const sessionId of sessionIds) {
+    try {
+      killSession(sessionId);
+    } catch (error) {
+      logger.warn(
+        `[pty-manager] Failed to kill session ${sessionId} for workspace ${workspaceId}: ${error instanceof Error ? error.message : String(error)}`
+      );
+    }
+  }
+}
+
+export function isSessionDbWriteDisabled(sessionId: string): boolean {
+  return sessions.get(sessionId)?.dbWriteDisabled ?? false;
+}
+
+export function isInputTooLarge(rawMessage: Buffer | string): boolean {
+  return Buffer.byteLength(rawMessage) > MAX_INPUT_MESSAGE_BYTES;
+}
+
+export function attachSocket(sessionId: string, socket: WebSocket): void {
+  const session = sessions.get(sessionId);
+  if (!session) {
+    throw new Error(`Session ${sessionId} not found`);
+  }
+  session.sockets.add(socket);
+}
+
+export function detachSocket(sessionId: string, socket: WebSocket): void {
+  const session = sessions.get(sessionId);
+  if (!session) return;
+  session.sockets.delete(socket);
+}
+
+async function shutdownSession(session: PtySession): Promise<void> {
+  session.shutdownNotified = true;
+  await flushSession(session.sessionId);
+  await execute(
+    `UPDATE terminal_sessions
+     SET status = 'killed', exit_code = -1, exited_at = NOW(), last_activity_at = NOW()
+     WHERE session_id = $1`,
+    [session.sessionId]
+  );
+  notifySocketsExit(session, -1);
+  closeSockets(session);
+  try {
+    session.ptyProcess.kill();
+  } catch (err) {
+    logger.warn({ err, sessionId: session.sessionId }, '[pty-manager] Failed to kill PTY during shutdown');
+  }
+  sessions.delete(session.sessionId);
+}
+
+export async function shutdownAll(): Promise<void> {
+  const active = Array.from(sessions.values());
+  if (active.length === 0) return;
+
+  logger.info({ count: active.length }, '[pty-manager] shutdownAll — shutting down active PTY sessions');
+
+  const shutdownWork = Promise.allSettled(active.map((session) => shutdownSession(session))).then(() => undefined);
+  const timeout = new Promise<void>((resolve) => {
+    setTimeout(() => {
+      Array.from(sessions.values()).forEach((session) => {
+        try {
+          session.ptyProcess.kill();
+        } catch {}
+        closeSockets(session);
+        sessions.delete(session.sessionId);
+      });
+      resolve();
+    }, SHUTDOWN_TIMEOUT_MS);
+  });
+
+  await Promise.race([shutdownWork, timeout]);
+}
+
+function cleanupIdleSessions(): void {
+  const now = Date.now();
+  const staleSessionIds = Array.from(sessions.entries())
+    .filter(([, session]) => now - session.lastActivityAt.getTime() > IDLE_TIMEOUT_MS)
+    .map(([sessionId]) => sessionId);
+
+  if (staleSessionIds.length > 0) {
+    logger.info(`[pty-manager] Cleaning up ${staleSessionIds.length} idle sessions: ${staleSessionIds.join(', ')}`);
+    staleSessionIds.forEach((id) => killSession(id));
   }
 }
 

@@ -568,6 +568,7 @@ if (process.env.NODE_ENV !== 'test') {
     }
 
     logger.info(`[ws] Client connected to session ${sessionId}`);
+    ptyManager.attachSocket(sessionId, ws);
 
     // Subscribe to PTY output
     const dataListener = session.ptyProcess.onData((data: string) => {
@@ -635,21 +636,45 @@ if (process.env.NODE_ENV !== 'test') {
     // Handle WebSocket errors
     ws.on('error', (err) => {
       logger.error({ err, sessionId }, '[ws] WebSocket error');
-      // Clean up listeners but do NOT kill PTY session
       dataListener.dispose();
       exitListener.dispose();
+      ptyManager.detachSocket(sessionId, ws);
     });
 
     // Handle WebSocket close
     ws.on('close', () => {
       logger.info(`[ws] Client disconnected from session ${sessionId}`);
-      // Clean up listeners but do NOT kill PTY session (persists for reconnect)
       dataListener.dispose();
       exitListener.dispose();
+      ptyManager.detachSocket(sessionId, ws);
     });
   });
 
   logger.info('[ws] WebSocket server mounted at /ws/terminal');
+
+  let shuttingDown = false;
+  const shutdown = async (signal: 'SIGTERM' | 'SIGINT') => {
+    if (shuttingDown) {
+      return;
+    }
+
+    shuttingDown = true;
+    logger.info({ signal }, '[server] Graceful shutdown started');
+
+    try {
+      await ptyManager.shutdownAll();
+    } catch (err) {
+      logger.error({ err, signal }, '[server] PTY shutdown failed during graceful shutdown');
+    }
+
+    httpServer.close(() => {
+      logger.info({ signal }, '[server] HTTP server closed');
+      process.exit(0);
+    });
+  };
+
+  process.on('SIGTERM', () => { void shutdown('SIGTERM'); });
+  process.on('SIGINT', () => { void shutdown('SIGINT'); });
 }
 
 export default app;

@@ -1,14 +1,13 @@
-// ─── PTY Manager Tests ──────────────────────────────────────────────────────
-// OCT-001: Verify PTY session lifecycle and error handling
-
 import * as ptyManager from '../pty-manager';
 import * as opencodeDetector from '../opencode-detector';
-import * as db from '../../db/index';
+import * as db from '../../db';
+
+const mockPtys: Array<Record<string, jest.Mock>> = [];
 
 jest.mock('../opencode-detector');
-jest.mock('../../db/index', () => ({
+jest.mock('../../db', () => ({
   execute: jest.fn().mockResolvedValue({ rowCount: 1 }),
-  queryOne: jest.fn(),
+  queryOne: jest.fn().mockResolvedValue(undefined),
   transaction: jest.fn(async (fn: (client: any) => Promise<any>) => {
     const client = {
       query: jest.fn(async (sql: string) => {
@@ -22,7 +21,11 @@ jest.mock('../../db/index', () => ({
   }),
 }));
 
-const mockPtys: Array<Record<string, jest.Mock>> = [];
+jest.mock('ws', () => ({
+  WebSocket: {
+    OPEN: 1,
+  },
+}));
 
 jest.mock('node-pty', () => ({
   spawn: jest.fn(() => {
@@ -33,6 +36,7 @@ jest.mock('node-pty', () => ({
       kill: jest.fn(),
       pause: jest.fn(),
       resume: jest.fn(),
+      write: jest.fn(),
     };
     mockPtys.push(pty);
     return pty;
@@ -43,12 +47,18 @@ describe('pty-manager', () => {
   const mockExecute = db.execute as jest.Mock;
   const mockTransaction = db.transaction as jest.Mock;
 
-  beforeEach(() => {
+  beforeEach(async () => {
     jest.clearAllMocks();
     mockPtys.length = 0;
-    // Clean up all active sessions before each test
-    const sessions = ptyManager.activeSessions();
-    sessions.forEach((s) => ptyManager.killSession(s.sessionId));
+    for (const session of ptyManager.activeSessions()) {
+      await ptyManager.shutdownAll();
+      break;
+    }
+    (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
+      opencodeInstalled: true,
+      opencodeVersion: '0.1.0',
+      opencodeBinPath: '/usr/local/bin/opencode',
+    });
   });
 
   describe('createSession', () => {
@@ -66,12 +76,6 @@ describe('pty-manager', () => {
 
     it('should spawn opencode with correct PTY dimensions and cwd', async () => {
       const nodePty = require('node-pty');
-      (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
-        opencodeInstalled: true,
-        opencodeVersion: '0.1.0',
-        opencodeBinPath: '/usr/local/bin/opencode',
-      });
-
       const sessionId = await ptyManager.createSession('1', '/workspace', {}, 30, 120);
 
       expect(sessionId).toBeTruthy();
@@ -87,7 +91,7 @@ describe('pty-manager', () => {
       );
       expect(mockExecute).toHaveBeenCalledWith(
         expect.stringContaining('INSERT INTO terminal_sessions'),
-        [sessionId, 1, '/workspace', 30, 120]
+        expect.arrayContaining([sessionId, '1', '/workspace', 30, 120])
       );
     });
   });
@@ -104,6 +108,7 @@ describe('pty-manager', () => {
         onExit: jest.fn(),
         resize: jest.fn(),
         kill: jest.fn(),
+        write: jest.fn(),
       });
 
       const mockClientQuery = jest.fn(async (sql: string) => {
@@ -113,12 +118,6 @@ describe('pty-manager', () => {
         return { rows: [] };
       });
       mockTransaction.mockImplementation(async (fn: (client: any) => Promise<any>) => fn({ query: mockClientQuery }));
-
-      (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
-        opencodeInstalled: true,
-        opencodeVersion: '0.1.0',
-        opencodeBinPath: '/usr/local/bin/opencode',
-      });
 
       const sessionId = await ptyManager.createSession(1 as any, '/tmp', {}, 24, 80);
       onDataHandler?.('abc');
@@ -147,6 +146,7 @@ describe('pty-manager', () => {
         onExit: jest.fn(),
         resize: jest.fn(),
         kill: jest.fn(),
+        write: jest.fn(),
       });
 
       const mockClientQuery = jest.fn(async (sql: string) => {
@@ -156,12 +156,6 @@ describe('pty-manager', () => {
         return { rows: [] };
       });
       mockTransaction.mockImplementation(async (fn: (client: any) => Promise<any>) => fn({ query: mockClientQuery }));
-
-      (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
-        opencodeInstalled: true,
-        opencodeVersion: '0.1.0',
-        opencodeBinPath: '/usr/local/bin/opencode',
-      });
 
       const sessionId = await ptyManager.createSession(1 as any, '/tmp', {}, 24, 80);
       onDataHandler?.('x');
@@ -175,14 +169,10 @@ describe('pty-manager', () => {
         [sessionId, 2, '\r\n[Output limit reached — streaming continues but history is truncated]\r\n']
       );
     });
+  });
 
+  describe('session limits', () => {
     it('should enforce the maximum session limit', async () => {
-      (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
-        opencodeInstalled: true,
-        opencodeVersion: '0.1.0',
-        opencodeBinPath: '/usr/local/bin/opencode',
-      });
-
       const existingSessions = ptyManager.activeSessions();
       for (let i = existingSessions.length; i < 20; i += 1) {
         await ptyManager.createSession(i + 1, '/workspace', {}, 24, 80);
@@ -196,47 +186,23 @@ describe('pty-manager', () => {
   });
 
   describe('resizeSession', () => {
-    it('should call ptyProcess.resize without throwing', async () => {
-      const nodePty = require('node-pty');
-      const mockResize = jest.fn();
-      nodePty.spawn.mockReturnValue({
-        onData: jest.fn(),
-        onExit: jest.fn(),
-        resize: mockResize,
-        kill: jest.fn(),
-      });
-
-      (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
-        opencodeInstalled: true,
-        opencodeVersion: '0.1.0',
-        opencodeBinPath: '/usr/local/bin/opencode',
-      });
-
+    it('should call pty resize with correct arguments', async () => {
       const sessionId = await ptyManager.createSession('1', '/tmp', {}, 24, 80);
+      const session = ptyManager.getSession(sessionId);
+      const mockResize = session?.ptyProcess.resize as jest.Mock;
+
       ptyManager.resizeSession(sessionId, 40, 100);
 
-      expect(mockResize).toHaveBeenCalledWith(100, 40); // cols, rows
+      expect(mockResize).toHaveBeenCalledWith(100, 40);
     });
   });
 
   describe('killSession', () => {
-    it('should terminate process and remove session from map', async () => {
-      const nodePty = require('node-pty');
-      const mockKill = jest.fn();
-      nodePty.spawn.mockReturnValue({
-        onData: jest.fn(),
-        onExit: jest.fn(),
-        resize: jest.fn(),
-        kill: mockKill,
-      });
-
-      (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
-        opencodeInstalled: true,
-        opencodeVersion: '0.1.0',
-        opencodeBinPath: '/usr/local/bin/opencode',
-      });
-
+    it('should kill PTY and remove session', async () => {
       const sessionId = await ptyManager.createSession('1', '/tmp', {}, 24, 80);
+      const session = ptyManager.getSession(sessionId);
+      const mockKill = session?.ptyProcess.kill as jest.Mock;
+
       expect(ptyManager.getSession(sessionId)).toBeDefined();
 
       ptyManager.killSession(sessionId);
@@ -248,20 +214,6 @@ describe('pty-manager', () => {
 
   describe('activeSessions', () => {
     it('should return all active sessions', async () => {
-      const nodePty = require('node-pty');
-      nodePty.spawn.mockReturnValue({
-        onData: jest.fn(),
-        onExit: jest.fn(),
-        resize: jest.fn(),
-        kill: jest.fn(),
-      });
-
-      (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
-        opencodeInstalled: true,
-        opencodeVersion: '0.1.0',
-        opencodeBinPath: '/usr/local/bin/opencode',
-      });
-
       const sessionId1 = await ptyManager.createSession('1', '/tmp', {}, 24, 80);
       const sessionId2 = await ptyManager.createSession('2', '/tmp', {}, 24, 80);
 
@@ -269,6 +221,34 @@ describe('pty-manager', () => {
       expect(active).toHaveLength(2);
       expect(active.map((s) => s.sessionId)).toContain(sessionId1);
       expect(active.map((s) => s.sessionId)).toContain(sessionId2);
+    });
+  });
+
+  describe('shutdownAll', () => {
+    it('flushes chunks, marks killed, notifies sockets, and kills PTYs', async () => {
+      const sessionId = await ptyManager.createSession('ws-1', '/workspace', {}, 24, 80);
+      const session = ptyManager.getSession(sessionId)!;
+
+      const dataHandler = (session.ptyProcess.onData as jest.Mock).mock.calls[0][0];
+      dataHandler('hello');
+
+      const socket = {
+        readyState: 1,
+        send: jest.fn(),
+        close: jest.fn(),
+      };
+      ptyManager.attachSocket(sessionId, socket as any);
+
+      await ptyManager.shutdownAll();
+
+      expect(mockExecute).toHaveBeenCalledWith(
+        expect.stringContaining('UPDATE terminal_sessions'),
+        [sessionId, 'killed', -1]
+      );
+      expect(socket.send).toHaveBeenCalledWith(JSON.stringify({ type: 'exit', exitCode: -1 }));
+      expect(socket.close).toHaveBeenCalled();
+      expect(session.ptyProcess.kill).toHaveBeenCalled();
+      expect(ptyManager.getSession(sessionId)).toBeUndefined();
     });
   });
 
@@ -284,24 +264,18 @@ describe('pty-manager', () => {
 });
 
 describe('pty-manager killSessionsForWorkspace helper', () => {
-  it('kills only matching workspace sessions', async () => {
-    const nodePty = require('node-pty');
-    nodePty.spawn.mockReturnValue({
-      onData: jest.fn(),
-      onExit: jest.fn(),
-      resize: jest.fn(),
-      kill: jest.fn(),
-    });
-
+  beforeEach(() => {
+    jest.clearAllMocks();
     (opencodeDetector.detectOpenCode as jest.Mock).mockReturnValue({
       opencodeInstalled: true,
       opencodeVersion: '0.1.0',
       opencodeBinPath: '/usr/local/bin/opencode',
     });
-
     const existing = ptyManager.activeSessions();
     existing.forEach((session) => ptyManager.killSession(session.sessionId));
+  });
 
+  it('kills only matching workspace sessions', async () => {
     const sessionId1 = await ptyManager.createSession('ws-a', '/tmp', {}, 24, 80);
     const sessionId2 = await ptyManager.createSession('ws-b', '/tmp', {}, 24, 80);
     const sessionId3 = await ptyManager.createSession('ws-a', '/tmp', {}, 24, 80);
