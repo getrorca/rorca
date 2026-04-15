@@ -456,9 +456,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, [workspaceId, setWorkspaceId, loadDirections, createSession]);
 
   const handleNewSession = useCallback(async () => {
-    if (!workspaceId) return;
+    if (!workspaceId || sessions.length >= MAX_SESSIONS) return;
     await createSession(workspaceId, true);
-  }, [workspaceId, createSession]);
+  }, [workspaceId, createSession, sessions.length]);
 
   useEffect(() => {
     const handleTerminalNewSession = () => {
@@ -770,15 +770,30 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       )}
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        {(activeSessionId && !error && !notInstalled && !selectedHistorySession) ? (
-          <TerminalPane
-            sessionId={activeSessionId}
-            wsToken={sessions.find((s) => s.sessionId === activeSessionId)?.wsToken ?? null}
-            className="h-full"
-            fontSize={fontSize}
-            onExit={() => handleSessionExit(activeSessionId)}
-            onInput={(data) => handleSessionInput(activeSessionId, data)}
-          />
+        {(sessions.length > 0 && !error && !notInstalled && !selectedHistorySession) ? (
+          <div className="h-full w-full">
+            {sessions.map((session) => {
+              const isActive = session.sessionId === activeSessionId;
+
+              return (
+                <div
+                  key={session.sessionId}
+                  className="h-full w-full"
+                  style={{ display: isActive ? 'block' : 'none' }}
+                >
+                  <TerminalPane
+                    sessionId={session.sessionId}
+                    wsToken={session.wsToken}
+                    visible={isActive}
+                    className="h-full"
+                    fontSize={fontSize}
+                    onExit={() => handleSessionExit(session.sessionId)}
+                    onInput={(data) => handleSessionInput(session.sessionId, data)}
+                  />
+                </div>
+              );
+            })}
+          </div>
         ) : selectedHistorySession ? (
           <div className="flex h-full min-h-0 flex-col">
             <ReadOnlyTerminalPane
