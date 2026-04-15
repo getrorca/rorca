@@ -14,6 +14,7 @@ import { getDecryptedProviderKey } from '../lib/integration-vault';
 import { injectDirectionStack } from '../lib/terminal-context-injector';
 import { registerTerminalContextCleanup, runTerminalContextCleanup } from '../lib/terminal-context-cleanup';
 import { detectOpenCode } from '../lib/opencode-detector';
+import { validateProviderKey } from '../lib/key-validator';
 
 const router = Router();
 
@@ -91,6 +92,18 @@ function providerEnvVarName(vaultProvider: string): string | null {
     default:
       return null;
   }
+}
+
+function terminalValidationProvider(activeModel: string, vaultProvider: string | null): string | null {
+  if (activeModel.startsWith('ollama/')) {
+    return 'ollama';
+  }
+  if (vaultProvider === 'openai-compat') {
+    if (activeModel.startsWith('openai/')) return 'openai';
+    if (activeModel.startsWith('ollama/')) return 'ollama';
+    return 'openai';
+  }
+  return vaultProvider;
 }
 
 // ─── Validation Schemas ─────────────────────────────────────────────────────
@@ -181,9 +194,9 @@ const historyQuerySchema = z.object({
  *       503:
  *         description: node-pty native module not available
  */
-router.post('/sessions', async (req: Request, res: Response) => {
+router.post('/sessions', validateBody(createSessionSchema), async (req: Request, res: Response) => {
   try {
-    const body = validateBody(createSessionSchema, req.body);
+    const body = createSessionSchema.parse(req.body);
 
     // OCT-015: Check if OpenCode is installed before creating session
     const opencodeStatus = detectOpenCode();
@@ -219,12 +232,33 @@ router.post('/sessions', async (req: Request, res: Response) => {
 
     // Resolve active vault provider key for the model, surfacing failures clearly
     const vaultProvider = activeModel ? resolveVaultProvider(activeModel) : null;
+    const validationProvider = activeModel ? terminalValidationProvider(activeModel, vaultProvider) : null;
     const vaultEnv: Record<string, string> = {};
-    if (vaultProvider) {
+    if (validationProvider === 'ollama') {
+      const validation = await validateProviderKey('ollama', '');
+      if (!validation.valid) {
+        throw new UnprocessableError(
+          'Invalid API key for ollama',
+          'INVALID_API_KEY',
+          { provider: 'ollama', hint: 'Check your API key in Settings → Providers' }
+        );
+      }
+    } else if (vaultProvider) {
       const apiKey = await getDecryptedProviderKey(body.workspaceId, vaultProvider);
       if (!apiKey) {
         throw new UnprocessableError(
           `Failed to resolve active vault API key for provider '${vaultProvider}' and workspace '${body.workspaceId}'`
+        );
+      }
+      const validation = await validateProviderKey(validationProvider ?? vaultProvider, apiKey);
+      if (!validation.valid) {
+        throw new UnprocessableError(
+          `Invalid API key for ${validationProvider ?? vaultProvider}`,
+          'INVALID_API_KEY',
+          {
+            provider: validationProvider ?? vaultProvider,
+            hint: 'Check your API key in Settings → Providers',
+          }
         );
       }
       const apiKeyEnvVar = providerEnvVarName(vaultProvider);
