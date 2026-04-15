@@ -1,5 +1,4 @@
 import { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
-import { Bot } from 'lucide-react';
 import { Routes, Route, Navigate, Outlet, useLocation, useNavigate as useRouterNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -26,6 +25,7 @@ import {
   SettingsFormSkeleton,
 } from './components/skeletons';
 import SlideOver from './components/SlideOver';
+import TerminalDrawer from './components/TerminalDrawer';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
 import { usePipelineRuns } from './hooks/usePipelineRuns';
 import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
@@ -392,8 +392,8 @@ function AppLayout() {
   const [forgeBrief, setForgeBrief] = useState<string | null>(null);
   const [queueCount, setQueueCount] = useState(0);
   const [pendingSpecsCount, setPendingSpecsCount] = useState(0);
-  const breakpoint = useBreakpoint();
-  const { isOpen: isTerminalDrawerOpen, toggle: toggleTerminalDrawer } = useTerminalDrawer();
+  useBreakpoint();
+  const { toggle: toggleTerminalDrawer } = useTerminalDrawer();
   // Derive activeRunId from URL path /runs/:runId
   const runMatch = location.pathname.match(/^\/runs\/(\d+)/);
   const activeRunId = runMatch ? Number(runMatch[1]) : null;
@@ -584,16 +584,7 @@ function AppLayout() {
             <KeyboardShortcutsPanel onClose={() => setShowShortcutsOverlay(false)} />
           </Suspense>
         )}
-        {breakpoint === 'mobile' && !isTerminalDrawerOpen && (
-          <button
-            type="button"
-            className="fixed bottom-4 right-4 z-50 flex h-14 w-14 items-center justify-center rounded-full bg-accent text-white shadow-lg"
-            onClick={toggleTerminalDrawer}
-            aria-label="Toggle OpenCode terminal"
-          >
-            <Bot size={24} />
-          </button>
-        )}
+        <TerminalDrawer />
       </Shell>
     </AppContentContext.Provider>
   );
