@@ -1,4 +1,4 @@
-```typescript
+
 // ─── OpenCode PTY Session Manager ───────────────────────────────────────────
 // OCT-001: Manages persistent PTY sessions for OpenCode terminal UI.
 // Each session is an isolated opencode process with its own workspace context.
@@ -487,4 +487,4 @@ setInterval(() => {
 logger.info(
   `[pty-manager] Initialized with ${IDLE_TIMEOUT_MS / 1000}s idle timeout, cleanup every ${CLEANUP_INTERVAL_MS / 1000}s`
 );
-```
+
