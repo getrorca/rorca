@@ -6,6 +6,12 @@
 Context: Confusing these causes file-not-found errors in pipeline trigger and archive panel.
 > Source: v2-platform
 
+## 2026-02-27 [Architecture] Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
+> Rule: Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
+
+Context: L1-L2 are global engineering/domain principles. L3+ are per-workspace. L4/L5 come from spec brief and story annotations.
+> Source: CIE-003
+
 ## 2026-02-27 [Convention] chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
 > Rule: chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
 
@@ -18,29 +24,17 @@ Context: The return type was changed from string to ChatResult in US-003 (model 
 Context: Changes to backend code are not picked up automatically. Forgetting to restart causes stale behavior.
 > Source: v2-platform
 
-## 2026-02-27 [Architecture] Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
-> Rule: Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
-
-Context: L1-L2 are global engineering/domain principles. L3+ are per-workspace. L4/L5 come from spec brief and story annotations.
-> Source: CIE-003
-
-## 2026-02-28 [Architecture] Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
-> Rule: Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
-
-Context: Machine-readable, human-editable. Categories: Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha.
-> Source: CIE-005
-
 ## 2026-02-28 [Architecture] Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
 > Rule: Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
 
 Context: .rorca/config.json routing section defines globals, scopes, and tags. micromatch handles glob matching.
 > Source: CIE-004
 
-## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
-> Rule: Marketplace UI components follow extract-then-enhance pattern: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
+## 2026-02-28 [Architecture] Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
+> Rule: Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
 
-Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incremental approach of establishing shared utilities before complex features reduces integration risk.
-> Source: SM-003
+Context: Machine-readable, human-editable. Categories: Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha.
+> Source: CIE-005
 
 ## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
 > Rule: Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
@@ -54,29 +48,11 @@ Context: SM-001 failed in wave 0, causing SM-002, SM-004, and SM-006 to skip des
 Context: SM-001 failed with reason='typecheck' despite potentially working at runtime. The execution engine enforces strict type safety as a quality gate. Always verify both frontend and backend type checks before committing.
 > Source: SM-001
 
-## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
-> Rule: Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
+## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
+> Rule: Marketplace UI components follow extract-then-enhance pattern: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
 
-Context: PR-003 establishes Docker Compose as the canonical self-hosted deployment method. This supersedes manual npm install flows and ensures consistent environments across installations.
-> Source: PR-003
-
-## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
-> Rule: Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
-
-Context: Implemented via workspace-echolocation.ts echolocate() function. Penalties apply: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit. This structured breakdown enables actionable remediation.
-> Source: CIE workspace health
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
-> Source: PR-QUEUE-1
-
-## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-> Rule: Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-
-Context: PR-052 implements upgrade prompts + feature badges. This creates a progressive disclosure UX where users discover features organically rather than via docs. Version gate prevents showing unavailable features.
-> Source: PR-052
+Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incremental approach of establishing shared utilities before complex features reduces integration risk.
+> Source: SM-003
 
 ## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
 > Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
@@ -102,16 +78,40 @@ Context: To change limits: UPDATE rate_limits table then call invalidateRateLimi
 Context: The production-ready spec shows these are interdependent: rate limiting without CORS leaves attack vectors open; health checks without secrets management can't validate encrypted data access.
 > Source: rorca-production-ready
 
-## 2026-03-10 [Convention] PostgreSQL Migration Pattern: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
-> Rule: PostgreSQL Migration Pattern: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
+## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
+> Rule: Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
 
-Context: Supersedes the old SQLite pragma table_info workaround. PostgreSQL supports `ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, etc.
-> Source: rorca-postgres-migration PG-011
+Context: PR-003 establishes Docker Compose as the canonical self-hosted deployment method. This supersedes manual npm install flows and ensures consistent environments across installations.
+> Source: PR-003
+
+## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
+> Rule: Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
+
+Context: Implemented via workspace-echolocation.ts echolocate() function. Penalties apply: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit. This structured breakdown enables actionable remediation.
+> Source: CIE workspace health
+
+## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+
+Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
+> Source: PR-QUEUE-1
+
+## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
+> Rule: Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
+
+Context: PR-052 implements upgrade prompts + feature badges. This creates a progressive disclosure UX where users discover features organically rather than via docs. Version gate prevents showing unavailable features.
+> Source: PR-052
 
 ## 2026-03-10 [Gotcha] pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
 > Rule: pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
 
 Context: Missing `await` returns a Promise instead of data. PostgreSQL uses numbered placeholders, not positional `?`.
+> Source: rorca-postgres-migration PG-011
+
+## 2026-03-10 [Convention] PostgreSQL Migration Pattern: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
+> Rule: PostgreSQL Migration Pattern: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
+
+Context: Supersedes the old SQLite pragma table_info workaround. PostgreSQL supports `ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, etc.
 > Source: rorca-postgres-migration PG-011
 
 ## 2026-03-10 [Run Synthesis] DIST spec executes in strict dependency order: DIST-001–005 must complete before DIST-006 (installer verification) can run. 7 stories skipped because DIST-001 failed; DIST-006 inherited the failure chain and couldn't verify non-existent binaries. Future runs need: (1) explicit skip-on-blockers logic in execution-engine.ts, (2) WAL event to distinguish 'skipped due to parent failure' from 'skipped due to timeout', (3) resume capability that re-runs blockers only.
@@ -3221,3 +3221,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-14 [Gotcha] ChromeMCP per-story log spam removed: "Chrome DevTools tools active for story X" printed for every story in journey specs, cluttering the terminal. Removed — only the "unavailable" warning prints when Chrome is not running. One-time "Chrome ready" and "Proxy ready" on init are kept.
 > Rule: ChromeMCP per-story log spam removed: "Chrome DevTools tools active for story X" printed for every story in journey specs, cluttering the terminal. Removed — only the "unavailable" warning prints when Chrome is not running. One-time "Chrome ready" and "Proxy ready" on init are kept.
+
+## 2026-04-15 [Architecture] node-pty graceful degradation — try/catch at module load, not import time: When integrating native N-API modules like node-pty, wrap require() in a try/catch at module load (not dynamic import()). Set a module-scoped PTY_AVAILABLE boolean. Check this flag before calling native module functions and throw structured errors ({ code, message }) that routes can catch and convert to 503 Service Unavailable. This allows the server to start successfully even when the native module is not built, with the feature gracefully disabled.
+> Rule: node-pty graceful degradation — try/catch at module load, not import time: When integrating native N-API modules like node-pty, wrap require() in a try/catch at module load (not dynamic import()). Set a module-scoped PTY_AVAILABLE boolean. Check this flag before calling native module functions and throw structured errors ({ code, message }) that routes can catch and convert to 503 Service Unavailable. This allows the server to start successfully even when the native module is not built, with the feature gracefully disabled.
