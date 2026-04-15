@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T18:32:34.901Z",
+  "lastUpdatedAt": "2026-04-15T18:33:28.070Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -83,14 +83,14 @@
       "elapsedMs": 164115
     },
     {
-      "storyId": "OCT-011",
-      "title": "Theme sync — xterm.js colors track Rorca dark/light theme",
+      "storyId": "OCT-014",
+      "title": "Session reconnect on backend restart — optimistic reconnect flow",
       "status": "passed",
-      "startedAt": "2026-04-15T18:30:30.404Z",
-      "finishedAt": "2026-04-15T18:32:34.901Z",
+      "startedAt": "2026-04-15T18:30:44.781Z",
+      "finishedAt": "2026-04-15T18:33:28.070Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 124497
+      "elapsedMs": 163289
     }
   ],
   "failedStories": [],
