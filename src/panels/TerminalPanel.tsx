@@ -184,7 +184,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         const raw = layers[key]?.contentYaml?.trim() ?? '';
         return raw ? { key, label: `L${index + 1}`, summary: summarizeLayer(raw) } : null;
       })
-      .filter((entry): entry is { key: string; label: string; summary: string } => entry !== null);
+      .filter((entry): entry is NonNullable<typeof entry> => entry !== null);
   }, [layers]);
 
   const directionTooltip = useMemo(() => {
@@ -252,6 +252,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       }
     } catch (err) {
       if (isNotInstalledError(err)) {
+        setSessions([]);
+        setActiveSessionId(null);
+        setSelectedHistorySessionId(null);
         setNotInstalled(true);
       } else {
         setError('Failed to start session — is OpenCode installed?');
@@ -485,7 +488,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
               onClick={() => setWorkspaceMenuOpen((prev) => !prev)}
               className="inline-flex max-w-[180px] items-center gap-1 rounded border border-border px-2 py-1 text-[11px] text-[var(--text)] hover:border-accent/40 hover:bg-accent/5"
             >
-              <span className="truncate">{selectedWorkspace?.label ?? 'Select workspace'}</span>
+              <span className="truncate">{selectedWorkspace?.name ?? 'Select workspace'}</span>
               <ChevronDown size={12} />
             </button>
             {workspaceMenuOpen && (
@@ -499,7 +502,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
                       onClick={() => { void handleWorkspaceSelect(workspace.id); }}
                       className={`flex w-full items-center justify-between rounded px-2 py-1.5 text-left text-[11px] ${active ? 'bg-accent/10 text-[var(--text)]' : 'text-muted hover:bg-accent/5 hover:text-[var(--text)]'}`}
                     >
-                      <span className="truncate">{workspace.label}</span>
+                      <span className="truncate">{workspace.name}</span>
                     </button>
                   );
                 })}
@@ -508,10 +511,10 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
           </div>
 
           <ModelPickerPopover
+            engine="opencode"
             workspaceId={workspaceId ?? undefined}
             value={activeModel}
             onChange={setActiveModel}
-            compact
           />
 
           <div className="flex shrink-0 items-center gap-0.5 rounded border border-border">
@@ -648,7 +651,27 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       )}
 
       <div className="relative min-h-0 flex-1 overflow-hidden">
-        {(activeSessionId && !error && !notInstalled && !selectedHistorySession) ? (
+        {notInstalled ? (
+          <div className="flex h-full items-center justify-center px-4">
+            <div className="flex max-w-md flex-col items-center text-center">
+              <TerminalSquare size={48} className="mb-4 text-muted/50" />
+              <h3 className="mb-2 text-base font-medium text-[var(--text)]">OpenCode not installed</h3>
+              <p className="mb-4 text-[13px] text-muted">
+                The terminal requires OpenCode CLI. Install it to use the interactive terminal.
+              </p>
+              <div className="mb-4 w-full rounded bg-surface-200 px-3 py-2 font-mono text-sm text-[var(--text)]">
+                npm install -g opencode
+              </div>
+              <button
+                type="button"
+                onClick={() => navigate('/settings/providers')}
+                className="rounded border border-accent bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"
+              >
+                Open Settings → Providers
+              </button>
+            </div>
+          </div>
+        ) : (activeSessionId && !error && !selectedHistorySession) ? (
           <TerminalPane
             sessionId={activeSessionId}
             wsToken={sessions.find((s) => s.sessionId === activeSessionId)?.wsToken ?? null}
@@ -692,30 +715,6 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
                 className="rounded border border-border px-2 py-1 text-xs hover:border-accent/40 hover:bg-accent/5"
               >
                 Retry
-              </button>
-            </div>
-          </div>
-        )}
-
-        {notInstalled && (
-          <div className="absolute inset-0 z-10 flex items-center justify-center px-4">
-            <div className="flex max-w-md flex-col items-center text-center">
-              <div className="mb-4 flex h-12 w-12 items-center justify-center rounded-full bg-surface-200">
-                <TerminalSquare size={48} className="text-muted opacity-50" />
-              </div>
-              <h3 className="mb-2 text-base font-medium text-[var(--text)]">OpenCode not installed</h3>
-              <p className="mb-4 text-[13px] text-muted">
-                The terminal requires OpenCode CLI. Install it to use the interactive terminal.
-              </p>
-              <div className="mb-4 w-full rounded bg-surface-200 px-3 py-2 font-mono text-sm text-[var(--text)]">
-                npm install -g opencode
-              </div>
-              <button
-                type="button"
-                onClick={() => navigate('/settings/providers')}
-                className="rounded border border-accent bg-accent px-4 py-2 text-sm font-medium text-white hover:bg-accent-hover"
-              >
-                Open Settings → Providers
               </button>
             </div>
           </div>
