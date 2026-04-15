@@ -101,6 +101,7 @@ import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 import terminalRouter from './routes/terminal';
+import { consumeTerminalWsToken } from './routes/terminal';
 import { initBoss } from './lib/pg-boss';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as ptyManager from './lib/pty-manager';
@@ -113,6 +114,7 @@ if (agentType === 'opencode') {
 
 const app = express();
 const PORT = process.env.PORT || 3030;
+const BIND_HOST = process.env.RORCA_BIND_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
 
 // Disable ETags on API responses — prevents browsers from caching 404s and replaying
 // stale error responses after backend state changes (workspace renames, schema fixes, etc.).
@@ -514,8 +516,8 @@ if (process.env.NODE_ENV !== 'test') {
     }
   })();
 
-  const httpServer = app.listen(PORT, () => {
-    logger.info(`Rorca backend listening on port ${PORT}`);
+  const httpServer = app.listen(PORT, BIND_HOST, () => {
+    logger.info(`Rorca backend listening on ${BIND_HOST}:${PORT}`);
     // OC-015: Clean up orphan runs (stale status='running' from crashed backend)
     cleanupOrphanRuns();
     startScheduler();
@@ -540,15 +542,36 @@ if (process.env.NODE_ENV !== 'test') {
   });
 
   // OCT-002: WebSocket server for PTY I/O
-  const wss = new WebSocketServer({ server: httpServer, path: '/ws/terminal' });
+  // Security model: local dev binds to loopback by default, WebSocket upgrades enforce
+  // an allowlisted Origin, and clients must present a short-lived one-time `wsToken`
+  // minted by `POST /api/terminal/sessions` so raw `sessionId` values are never enough.
+  const wss = new WebSocketServer({
+    server: httpServer,
+    path: '/ws/terminal',
+    verifyClient: ({ origin }, done) => {
+      const allowedOrigins = ['http://localhost:5210', 'http://127.0.0.1:5210', 'http://localhost:3030'];
+      if (!origin || allowedOrigins.includes(origin)) {
+        done(true);
+      } else {
+        logger.warn('WebSocket: rejected connection from origin', { origin });
+        done(false, 403, 'Forbidden');
+      }
+    },
+  });
+
+  wss.on('headers', (headers) => {
+    headers.push('X-Content-Type-Options: nosniff');
+    headers.push('X-Frame-Options: DENY');
+  });
 
   wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
-    // Extract sessionId from query string
+    // Resolve one-time token to the underlying session ID.
     const url = new URL(req.url || '', `http://${req.headers.host}`);
-    const sessionId = url.searchParams.get('sessionId');
+    const wsToken = url.searchParams.get('wsToken');
+    const sessionId = wsToken ? consumeTerminalWsToken(wsToken) : null;
 
-    if (!sessionId) {
-      ws.send(JSON.stringify({ type: 'error', message: 'Missing sessionId parameter' }));
+    if (!wsToken || !sessionId) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Missing, invalid, or expired wsToken' }));
       ws.close();
       return;
     }

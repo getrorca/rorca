@@ -1,4 +1,5 @@
 import { Router, Request, Response } from 'express';
+import { randomUUID } from 'crypto';
 import { z } from 'zod';
 import { queryOne } from '../db/index';
 import { validateBody } from '../lib/validate';
@@ -9,6 +10,44 @@ import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 
 const router = Router();
+
+const WS_TOKEN_TTL_MS = 60_000;
+const wsSessionTokens = new Map<string, { sessionId: string; expiresAt: number }>();
+
+function pruneExpiredWsTokens(now = Date.now()): void {
+  for (const [token, record] of wsSessionTokens.entries()) {
+    if (record.expiresAt <= now) {
+      wsSessionTokens.delete(token);
+    }
+  }
+}
+
+export function issueTerminalWsToken(sessionId: string): string {
+  pruneExpiredWsTokens();
+  const wsToken = randomUUID();
+  wsSessionTokens.set(wsToken, {
+    sessionId,
+    expiresAt: Date.now() + WS_TOKEN_TTL_MS,
+  });
+  return wsToken;
+}
+
+export function consumeTerminalWsToken(wsToken: string): string | null {
+  pruneExpiredWsTokens();
+  const record = wsSessionTokens.get(wsToken);
+  if (!record || record.expiresAt <= Date.now()) {
+    if (record) {
+      wsSessionTokens.delete(wsToken);
+    }
+    return null;
+  }
+  wsSessionTokens.delete(wsToken);
+  return record.sessionId;
+}
+
+export function __resetTerminalWsTokensForTests(): void {
+  wsSessionTokens.clear();
+}
 
 // ─── Validation Schemas ─────────────────────────────────────────────────────
 
@@ -65,6 +104,9 @@ const resizeSessionSchema = z.object({
  *                 sessionId:
  *                   type: string
  *                   description: Unique session identifier (UUID)
+ *                 wsToken:
+ *                   type: string
+ *                   description: Short-lived WebSocket connection token (60s TTL)
  *                 workspaceId:
  *                   type: string
  *                 cwd:
@@ -113,6 +155,7 @@ router.post('/sessions', async (req: Request, res: Response) => {
       body.rows,
       body.cols
     );
+    const wsToken = issueTerminalWsToken(sessionId);
 
     logger.info(
       `[terminal] Created session ${sessionId} for workspace ${body.workspaceId} (${workspace.path})`
@@ -120,11 +163,63 @@ router.post('/sessions', async (req: Request, res: Response) => {
 
     res.status(201).json({
       sessionId,
+      wsToken,
       workspaceId: body.workspaceId,
       cwd: workspace.path,
       rows: body.rows,
       cols: body.cols,
       createdAt: new Date().toISOString(),
+    });
+  } catch (err) {
+    handleRouteError(req, res, err);
+  }
+});
+
+/**
+ * @swagger
+ * /api/terminal/sessions/{sessionId}/ws-token:
+ *   post:
+ *     tags: [Terminal]
+ *     summary: Mint a short-lived WebSocket token
+ *     operationId: createTerminalWsToken
+ *     description: |
+ *       Issues a one-time WebSocket token for an existing PTY session.
+ *       The token expires after 60 seconds and is consumed on first successful use.
+ *     parameters:
+ *       - in: path
+ *         name: sessionId
+ *         required: true
+ *         schema:
+ *           type: string
+ *         description: Session ID (UUID)
+ *     responses:
+ *       200:
+ *         description: WebSocket token minted successfully
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 wsToken:
+ *                   type: string
+ *                   description: Short-lived one-time WebSocket token
+ *                 expiresInMs:
+ *                   type: integer
+ *                   description: Token TTL in milliseconds
+ *       404:
+ *         description: Session not found
+ */
+router.post('/sessions/:sessionId/ws-token', async (req: Request, res: Response) => {
+  try {
+    const { sessionId } = req.params;
+    const session = ptyManager.getSession(sessionId);
+    if (!session) {
+      throw new NotFoundError('Session not found');
+    }
+
+    res.json({
+      wsToken: issueTerminalWsToken(sessionId),
+      expiresInMs: WS_TOKEN_TTL_MS,
     });
   } catch (err) {
     handleRouteError(req, res, err);

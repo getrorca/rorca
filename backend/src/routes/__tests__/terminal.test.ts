@@ -6,6 +6,7 @@ import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { execute } from '../../db/index';
 import * as ptyManager from '../../lib/pty-manager';
+import { consumeTerminalWsToken, __resetTerminalWsTokensForTests } from '../terminal';
 
 // Mock pty-manager before imports
 jest.mock('../../lib/pty-manager', () => ({
@@ -55,6 +56,7 @@ beforeEach(async () => {
 });
 
 afterEach(async () => {
+  __resetTerminalWsTokensForTests();
   try {
     const { closePool } = require('../../db/index');
     await closePool();
@@ -77,6 +79,7 @@ describe('POST /api/terminal/sessions', () => {
 
     expect(res.status).toBe(201);
     expect(res.body.sessionId).toBe(mockSessionId);
+    expect(typeof res.body.wsToken).toBe('string');
     expect(res.body.workspaceId).toBe(WORKSPACE_ID);
     expect(res.body.cwd).toBe(tmpDir);
     expect(res.body.rows).toBe(24);
@@ -84,12 +87,15 @@ describe('POST /api/terminal/sessions', () => {
     expect(res.body.createdAt).toBeDefined();
 
     expect(ptyManager.createSession).toHaveBeenCalledWith(
-      parseInt(WORKSPACE_ID.split('-')[2], 10), // workspaceId as number
+      WORKSPACE_ID,
       tmpDir,
       expect.any(Object), // env
       24,
       80
     );
+
+    expect(consumeTerminalWsToken(res.body.wsToken)).toBe(mockSessionId);
+    expect(consumeTerminalWsToken(res.body.wsToken)).toBeNull();
   });
 
   test('returns 404 when workspace does not exist', async () => {
@@ -114,6 +120,46 @@ describe('POST /api/terminal/sessions', () => {
     expect(res.status).toBe(201);
     expect(res.body.rows).toBe(24);
     expect(res.body.cols).toBe(80);
+  });
+});
+
+describe('POST /api/terminal/sessions/:sessionId/ws-token', () => {
+  test('mints a one-time wsToken for an existing session', async () => {
+    (ptyManager.getSession as jest.Mock).mockReturnValue({ sessionId: 'session-123' });
+
+    const res = await request(app)
+      .post('/api/terminal/sessions/session-123/ws-token')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(typeof res.body.wsToken).toBe('string');
+    expect(res.body.expiresInMs).toBe(60000);
+    expect(consumeTerminalWsToken(res.body.wsToken)).toBe('session-123');
+  });
+
+  test('returns 404 when minting for a missing session', async () => {
+    (ptyManager.getSession as jest.Mock).mockReturnValue(undefined);
+
+    const res = await request(app)
+      .post('/api/terminal/sessions/missing/ws-token')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(404);
+    expect(res.body.error).toContain('Session not found');
+  });
+});
+
+describe('terminal ws token TTL', () => {
+  test('expires tokens after 60 seconds', () => {
+    jest.useFakeTimers();
+    try {
+      const { issueTerminalWsToken } = require('../terminal');
+      const token = issueTerminalWsToken('session-expiring');
+      jest.advanceTimersByTime(60001);
+      expect(consumeTerminalWsToken(token)).toBeNull();
+    } finally {
+      jest.useRealTimers();
+    }
   });
 });
 

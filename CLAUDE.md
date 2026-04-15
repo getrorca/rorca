@@ -445,6 +445,12 @@ const absSpecPath = path.join(workspace.path, specPath);
 - Buffer is in-memory — lost on backend restart (old runs show "run not found or already completed")
 - Cleanup: buffer auto-deleted 30 min after process exit
 
+### Terminal WebSocket Guards
+- `/ws/terminal` now rejects cross-origin upgrades unless the `Origin` is allowlisted (`localhost:5210`, `127.0.0.1:5210`, `localhost:3030`) to reduce local DNS-rebinding and drive-by webpage risk while auth is intentionally bypassed.
+- Terminal WebSocket clients no longer connect with raw `sessionId`; `POST /api/terminal/sessions` returns a short-lived one-time `wsToken` (60s TTL) and reconnects mint a fresh token via `POST /api/terminal/sessions/:sessionId/ws-token`.
+- In local development, the backend binds to `127.0.0.1` by default via `RORCA_BIND_HOST` (set `0.0.0.0` explicitly for Docker/cloud exposure).
+- Upgrade responses add `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY` as extra hardening headers.
+
 ### Stale Pipeline Runs
 Runs marked `status='running'` survive backend restarts but their processes are dead. On startup (or at diagnosis time):
 ```sql

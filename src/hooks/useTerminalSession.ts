@@ -1,4 +1,5 @@
 import { useRef, useEffect, useState } from 'react';
+import { apiFetch } from '../lib/apiFetch';
 
 // ─── Message Types ────────────────────────────────────────────────────────────
 
@@ -52,10 +53,10 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
 
   // ─── WebSocket URL construction ─────────────────────────────────────────────
 
-  const getWebSocketUrl = (sid: string): string => {
+  const getWebSocketUrl = (wsToken: string): string => {
     const protocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
     const host = import.meta.env.DEV ? 'localhost:3030' : window.location.host;
-    return `${protocol}//${host}/ws/terminal?sessionId=${encodeURIComponent(sid)}`;
+    return `${protocol}//${host}/ws/terminal?wsToken=${encodeURIComponent(wsToken)}`;
   };
 
   // ─── Send helpers ───────────────────────────────────────────────────────────
@@ -97,7 +98,7 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
 
     let currentWs: WebSocket | null = null;
 
-    const connect = () => {
+    const connect = async () => {
       // Clean up any existing connection
       if (currentWs) {
         currentWs.onopen = null;
@@ -107,7 +108,10 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
         currentWs.close();
       }
 
-      const ws = new WebSocket(getWebSocketUrl(sessionId));
+      const tokenResponse = await apiFetch<{ wsToken: string }>(`/api/terminal/sessions/${encodeURIComponent(sessionId)}/ws-token`, {
+        method: 'POST',
+      });
+      const ws = new WebSocket(getWebSocketUrl(tokenResponse.wsToken));
       currentWs = ws;
       wsRef.current = ws;
 
@@ -158,7 +162,7 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
           reconnectCountRef.current++;
 
           reconnectTimerRef.current = window.setTimeout(() => {
-            connect();
+            void connect();
           }, RECONNECT_DELAY_MS);
         } else if (reconnectCountRef.current >= MAX_RECONNECT_ATTEMPTS) {
           setReconnecting(false);
@@ -173,7 +177,7 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
 
     // Reset manual close flag and start connection
     manualCloseRef.current = false;
-    connect();
+    void connect();
 
     // Cleanup on unmount or sessionId change
     return () => {
