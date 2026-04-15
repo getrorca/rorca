@@ -137,6 +137,7 @@ export default function ResizableSidebar({ children, className = '' }: Resizable
             className={`relative shrink-0 h-full flex ${className}`}
             style={{
                 width: effectiveWidth,
+                ['--sidebar-width' as string]: `${effectiveWidth}px`,
                 transition: isDragging ? 'none' : 'width 200ms cubic-bezier(0.16, 1, 0.3, 1)',
             }}
         >

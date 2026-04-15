@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T20:21:42.873Z",
+  "lastUpdatedAt": "2026-04-15T20:20:55.454Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -23,14 +23,14 @@
       "elapsedMs": 341460
     },
     {
-      "storyId": "OCT-030",
-      "title": "OSC 133 shell integration — prompt markers and command timing",
+      "storyId": "OCT-036",
+      "title": "Embedded terminal drawer — Cmd+J toggle, persistent bottom panel, drag-resize, fullscreen, mobile FAB",
       "status": "passed",
-      "startedAt": "2026-04-15T20:18:14.931Z",
-      "finishedAt": "2026-04-15T20:21:42.873Z",
+      "startedAt": "2026-04-15T20:18:14.988Z",
+      "finishedAt": "2026-04-15T20:20:55.453Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 207942
+      "elapsedMs": 160465
     }
   ],
   "failedStories": [
