@@ -6,6 +6,7 @@ import { spawn as ptySpawn, IPty } from 'node-pty';
 import { randomUUID } from 'crypto';
 import { detectOpenCode } from './opencode-detector';
 import { logger } from './logger';
+import { TooManyRequestsError } from './errors';
 
 export interface PtySession {
   sessionId: string;
@@ -16,6 +17,13 @@ export interface PtySession {
   cwd: string;
   rows: number;
   cols: number;
+  totalOutputBytes: number;
+  dbWriteDisabled: boolean;
+  outputBytesLastSecond: number;
+  consecutiveOverLimitSeconds: number;
+  outputRateResetInterval?: NodeJS.Timeout;
+  throttleResumeTimeout?: NodeJS.Timeout;
+  throttleActive: boolean;
 }
 
 // In-memory session map — sessions are lost on backend restart
@@ -24,6 +32,12 @@ const sessions = new Map<string, PtySession>();
 // Idle timeout configuration
 const IDLE_TIMEOUT_MS = 30 * 60 * 1000; // 30 minutes
 const CLEANUP_INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+const MAX_SESSIONS = parseInt(process.env.TERMINAL_MAX_SESSIONS || '20', 10);
+const MAX_SESSION_OUTPUT_BYTES = 52_428_800;
+const MAX_INPUT_MESSAGE_BYTES = 1_048_576;
+const OUTPUT_RATE_LIMIT_BYTES_PER_SECOND = 1_048_576;
+const OUTPUT_RATE_LIMIT_CONSECUTIVE_SECONDS = 3;
+const OUTPUT_THROTTLE_PAUSE_MS = 500;
 
 // Claude env vars to strip (prevents nested agent spawning confusion)
 const CLAUDE_ENV_VARS = [
@@ -44,6 +58,10 @@ export async function createSession(
   rows: number,
   cols: number
 ): Promise<string> {
+  if (activeSessions().length >= MAX_SESSIONS) {
+    throw new TooManyRequestsError('Maximum terminal sessions reached');
+  }
+
   const status = detectOpenCode();
 
   if (!status.opencodeInstalled || !status.opencodeBinPath) {
@@ -74,20 +92,75 @@ export async function createSession(
     cwd,
     rows,
     cols,
+    totalOutputBytes: 0,
+    dbWriteDisabled: false,
+    outputBytesLastSecond: 0,
+    consecutiveOverLimitSeconds: 0,
+    throttleActive: false,
   };
+
+  session.outputRateResetInterval = setInterval(() => {
+    const current = sessions.get(sessionId);
+    if (!current) {
+      return;
+    }
+
+    if (current.outputBytesLastSecond > OUTPUT_RATE_LIMIT_BYTES_PER_SECOND) {
+      current.consecutiveOverLimitSeconds += 1;
+
+      if (
+        current.consecutiveOverLimitSeconds >= OUTPUT_RATE_LIMIT_CONSECUTIVE_SECONDS &&
+        !current.throttleActive
+      ) {
+        current.throttleActive = true;
+        logger.warn(
+          `[pty-manager] Throttling PTY session ${sessionId}: output exceeded ${OUTPUT_RATE_LIMIT_BYTES_PER_SECOND} bytes/sec for ${OUTPUT_RATE_LIMIT_CONSECUTIVE_SECONDS} consecutive seconds`
+        );
+        current.ptyProcess.pause();
+        current.throttleResumeTimeout = setTimeout(() => {
+          const resumed = sessions.get(sessionId);
+          if (!resumed) {
+            return;
+          }
+          resumed.ptyProcess.resume();
+          resumed.throttleActive = false;
+        }, OUTPUT_THROTTLE_PAUSE_MS);
+      }
+    } else {
+      current.consecutiveOverLimitSeconds = 0;
+    }
+
+    current.outputBytesLastSecond = 0;
+  }, 1000);
 
   sessions.set(sessionId, session);
 
   // Update lastActivityAt on every data event to reset idle timer
-  ptyProcess.onData(() => {
+  ptyProcess.onData((data: string) => {
     const s = sessions.get(sessionId);
     if (s) {
       s.lastActivityAt = new Date();
+      const outputBytes = Buffer.byteLength(data);
+      s.totalOutputBytes += outputBytes;
+      s.outputBytesLastSecond += outputBytes;
+
+      if (!s.dbWriteDisabled && s.totalOutputBytes > MAX_SESSION_OUTPUT_BYTES) {
+        s.dbWriteDisabled = true;
+        logger.warn(
+          `[pty-manager] Disabling DB writes for session ${sessionId}: total output exceeded ${MAX_SESSION_OUTPUT_BYTES} bytes`
+        );
+      }
     }
   });
 
   // Clean up session when process exits
   ptyProcess.onExit(() => {
+    if (session.outputRateResetInterval) {
+      clearInterval(session.outputRateResetInterval);
+    }
+    if (session.throttleResumeTimeout) {
+      clearTimeout(session.throttleResumeTimeout);
+    }
     sessions.delete(sessionId);
     logger.info(`[pty-manager] Session ${sessionId} exited and removed`);
   });
@@ -126,6 +199,13 @@ export function killSession(sessionId: string): void {
     return;
   }
 
+  if (session.outputRateResetInterval) {
+    clearInterval(session.outputRateResetInterval);
+  }
+  if (session.throttleResumeTimeout) {
+    clearTimeout(session.throttleResumeTimeout);
+  }
+
   session.ptyProcess.kill();
   sessions.delete(sessionId);
 
@@ -144,6 +224,14 @@ export function getSession(sessionId: string): PtySession | undefined {
  */
 export function activeSessions(): PtySession[] {
   return Array.from(sessions.values());
+}
+
+export function isSessionDbWriteDisabled(sessionId: string): boolean {
+  return sessions.get(sessionId)?.dbWriteDisabled ?? false;
+}
+
+export function isInputTooLarge(rawMessage: Buffer | string): boolean {
+  return Buffer.byteLength(rawMessage) > MAX_INPUT_MESSAGE_BYTES;
 }
 
 /**
