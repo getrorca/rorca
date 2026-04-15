@@ -40,21 +40,59 @@ const STEP_CONFIG: Record<SemanticStep['type'], { icon: typeof FileText; color: 
 
 // ─── Theme colors ────────────────────────────────────────────────────────────
 
-const darkTheme = {
-  background: '#0d0d0d',
-  foreground: '#d4d4d4',
+const TERMINAL_THEME_DARK = {
+  background: '#0d1117',
+  foreground: '#e6edf3',
+  cursor: '#58a6ff',
+  cursorAccent: '#0d1117',
+  selection: 'rgba(38,79,120,0.5)',
+  black: '#484f58',
+  red: '#ff7b72',
+  green: '#3fb950',
+  yellow: '#d29922',
+  blue: '#58a6ff',
+  magenta: '#bc8cff',
+  cyan: '#39c5cf',
+  white: '#b1bac4',
+  brightBlack: '#6e7681',
+  brightRed: '#ffa198',
+  brightGreen: '#56d364',
+  brightYellow: '#e3b341',
+  brightBlue: '#79c0ff',
+  brightMagenta: '#d2a8ff',
+  brightCyan: '#56d4dd',
+  brightWhite: '#f0f6fc',
 };
 
-const lightTheme = {
-  background: '#f5f5f5',
-  foreground: '#1e1e1e',
+const TERMINAL_THEME_LIGHT = {
+  background: '#ffffff',
+  foreground: '#24292f',
+  cursor: '#0969da',
+  cursorAccent: '#ffffff',
+  selection: 'rgba(9,105,218,0.1)',
+  black: '#24292f',
+  red: '#cf222e',
+  green: '#116329',
+  yellow: '#9a6700',
+  blue: '#0969da',
+  magenta: '#8250df',
+  cyan: '#1b7c83',
+  white: '#6e7781',
+  brightBlack: '#57606a',
+  brightRed: '#a40e26',
+  brightGreen: '#1a7f37',
+  brightYellow: '#7d4e00',
+  brightBlue: '#218bff',
+  brightMagenta: '#a475f9',
+  brightCyan: '#3192aa',
+  brightWhite: '#8c959f',
 };
 
 // ─── ANSI converter singleton ────────────────────────────────────────────────
 
 const ansiConverter = new AnsiToHtml({
-  fg: '#d4d4d4',
-  bg: '#0d0d0d',
+  fg: TERMINAL_THEME_DARK.foreground,
+  bg: TERMINAL_THEME_DARK.background,
   escapeXML: true,
   newline: true,
 });
@@ -122,7 +160,7 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
     setStreamDone(false);
 
     const converter = resolved === 'light'
-      ? new AnsiToHtml({ fg: lightTheme.foreground, bg: lightTheme.background, escapeXML: true, newline: true })
+      ? new AnsiToHtml({ fg: TERMINAL_THEME_LIGHT.foreground, bg: TERMINAL_THEME_LIGHT.background, escapeXML: true, newline: true })
       : ansiConverter;
 
     let receivedData = false;
@@ -250,12 +288,15 @@ export default function MiniTerminalPane({ runId, storyId, storyTitle, status }:
   }, []);
 
   const statusBanner = status === 'passed' || status === 'failed';
-  const themeColors = resolved === 'light' ? lightTheme : darkTheme;
+  const themeColors = resolved === 'light' ? TERMINAL_THEME_LIGHT : TERMINAL_THEME_DARK;
 
   return (
     <div className="flex flex-col border border-[var(--border)] rounded-lg overflow-hidden bg-[var(--bg)] h-full">
       {/* ─── Header ─────────────────────────────────────────────────────── */}
       <div className="shrink-0 px-2 py-1.5 border-b border-[var(--border)] bg-[var(--surface)] flex items-center gap-2 min-h-[32px]">
+        <span className="text-[10px] font-semibold uppercase tracking-wide text-[var(--text-muted)] shrink-0">
+          Story Trace
+        </span>
         {/* Story ID badge */}
         <span className="px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded bg-[var(--accent)]/15 text-[var(--accent)] shrink-0">
           {storyId}

@@ -38,10 +38,19 @@ function mapActivityType(eventType: string): string {
     review_approved: 'spec_approved',
     review_changes_requested: 'spec_rejected',
     story_comment_added: 'comment_added',
+    terminal_session_started: 'terminal_session_started',
+    terminal_session_ended: 'terminal_session_ended',
     team_invite_accepted: 'member_joined',
     user_registered: 'member_joined',
   };
   return mapping[eventType] || eventType;
+}
+
+function formatDuration(durationMs: number): string {
+  const totalSeconds = Math.max(0, Math.floor(durationMs / 1000));
+  const minutes = Math.floor(totalSeconds / 60);
+  const seconds = totalSeconds % 60;
+  return `Duration: ${minutes}m ${seconds}s`;
 }
 
 /** Generate human-readable description from a WAL event */
@@ -83,6 +92,12 @@ function describeEvent(event: WalEventRow, displayName: string): string {
       return `${actor} edited story "${storyLabel}" in "${specLabel}"`;
     case 'story_comment_added':
       return `${actor} commented on story "${storyLabel}"`;
+    case 'terminal_session_started':
+      return 'Terminal session started';
+    case 'terminal_session_ended': {
+      const durationMs = typeof payload.durationMs === 'number' ? payload.durationMs : 0;
+      return `Terminal session ended${durationMs > 0 ? ` • ${formatDuration(durationMs)}` : ''}`;
+    }
     case 'review_requested':
       return `${actor} requested review for "${specLabel}"`;
     case 'review_approved':
@@ -139,6 +154,7 @@ const ACTIVITY_EVENT_TYPES = [
   'run_started', 'run_finished', 'run_failed', 'run_paused', 'run_resumed',
   'story_passed', 'story_failed', 'story_edited',
   'story_comment_added',
+  'terminal_session_started', 'terminal_session_ended',
   'review_requested', 'review_approved', 'review_changes_requested',
   'direction_update',
   'team_created', 'team_invite_sent', 'team_invite_accepted',
