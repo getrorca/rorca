@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T08:30:15.699Z",
+  "lastUpdatedAt": "2026-04-15T18:35:20.481Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -81,6 +81,16 @@
       "finishedAt": "2026-04-15T08:30:15.698Z",
       "agentType": "claude",
       "elapsedMs": 164115
+    },
+    {
+      "storyId": "OCT-028",
+      "title": "xterm.js WebLinksAddon — clickable URLs and file paths",
+      "status": "passed",
+      "startedAt": "2026-04-15T18:33:06.064Z",
+      "finishedAt": "2026-04-15T18:35:20.480Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 134416
     }
   ],
   "failedStories": [],
