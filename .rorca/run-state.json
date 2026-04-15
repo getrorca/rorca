@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T18:32:45.497Z",
+  "lastUpdatedAt": "2026-04-15T18:32:48.193Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -83,14 +83,14 @@
       "elapsedMs": 164115
     },
     {
-      "storyId": "OCT-020",
-      "title": "WAL event emission for terminal session lifecycle",
+      "storyId": "OCT-022",
+      "title": "Backend session limit enforcement and resource caps",
       "status": "passed",
-      "startedAt": "2026-04-15T18:30:30.217Z",
-      "finishedAt": "2026-04-15T18:32:45.497Z",
+      "startedAt": "2026-04-15T18:30:31.557Z",
+      "finishedAt": "2026-04-15T18:32:48.193Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 135280
+      "elapsedMs": 136636
     }
   ],
   "failedStories": [],
