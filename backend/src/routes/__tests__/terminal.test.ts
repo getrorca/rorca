@@ -14,6 +14,7 @@ import { getDecryptedProviderKey } from '../../lib/vault';
 jest.mock('../../lib/pty-manager', () => ({
   createSession: jest.fn(),
   killSession: jest.fn(),
+  killSessionsForWorkspace: jest.fn(),
   getSession: jest.fn(),
   activeSessions: jest.fn(),
   resizeSession: jest.fn(),
@@ -330,6 +331,35 @@ describe('GET /api/terminal/sessions', () => {
 });
 
 // ─── PATCH /api/terminal/sessions/:sessionId/resize ─────────────────────────
+
+describe('GET /api/terminal/health', () => {
+  test('returns active session and chunk counts', async () => {
+    await execute(
+      `INSERT INTO terminal_sessions (session_id, workspace_id, cwd, status)
+       VALUES ($1, $2, $3, 'active'), ($4, $2, $3, 'ended')`,
+      ['11111111-1111-4111-8111-111111111111', WORKSPACE_ID, tmpDir, '22222222-2222-4222-8222-222222222222']
+    );
+
+    await execute(
+      `INSERT INTO terminal_output_chunks (session_id, sequence, data)
+       VALUES ($1, 1, $2), ($1, 2, $3), ($4, 1, $5)`,
+      [
+        '11111111-1111-4111-8111-111111111111',
+        'chunk-1',
+        'chunk-2',
+        '22222222-2222-4222-8222-222222222222',
+        'chunk-3',
+      ]
+    );
+
+    const res = await request(app)
+      .get('/api/terminal/health')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ activeSessions: 1, totalChunks: 3 });
+  });
+});
 
 describe('PATCH /api/terminal/sessions/:sessionId/resize', () => {
   test('resizes session and returns 200', async () => {

@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T18:33:28.070Z",
+  "lastUpdatedAt": "2026-04-15T18:35:23.023Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -83,14 +83,14 @@
       "elapsedMs": 164115
     },
     {
-      "storyId": "OCT-014",
-      "title": "Session reconnect on backend restart — optimistic reconnect flow",
+      "storyId": "OCT-017",
+      "title": "Backend session cleanup on workspace delete",
       "status": "passed",
-      "startedAt": "2026-04-15T18:30:44.781Z",
-      "finishedAt": "2026-04-15T18:33:28.070Z",
+      "startedAt": "2026-04-15T18:30:31.383Z",
+      "finishedAt": "2026-04-15T18:35:23.023Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 163289
+      "elapsedMs": 291640
     }
   ],
   "failedStories": [],
