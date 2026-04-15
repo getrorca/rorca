@@ -541,6 +541,22 @@ npm rebuild node-pty       # Rebuild if probe fails
 
 **Testing**: Backend starts even when node-pty is not built. Create a PTY session to verify — should return 503 if module unavailable, 201 if working.
 
+### WebSocket Security Model (OCT-021)
+The `/ws/terminal` WebSocket endpoint is hardened against cross-origin attacks. With Rorca's auth bypassed, an unauthenticated WebSocket would be a remote code execution vector accessible from any local webpage via DNS rebinding.
+
+**Security layers**:
+1. **Origin validation** — `verifyClient` callback rejects connections from disallowed origins. Allowed: `http://localhost:5210`, `http://127.0.0.1:5210`, `http://localhost:3030`, `http://127.0.0.1:3030`. Rejected: any other origin with 403 Forbidden.
+2. **Short-lived connection tokens** — `POST /api/terminal/sessions` returns `wsToken` (UUID, 60s TTL). WebSocket URL is `/ws/terminal?wsToken=<token>` (NOT `?sessionId=<id>`). Server validates token, maps to sessionId, then deletes (one-time use). Prevents sessionId enumeration.
+3. **Secure binding** — HTTP server binds to `127.0.0.1` by default (local-only). `RORCA_BIND_HOST` env var can override (e.g., `0.0.0.0` for Docker/cloud). Production deployments should keep `127.0.0.1` and use nginx/Cloudflare for TLS termination.
+4. **Security headers** — WebSocket upgrade response includes `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`.
+
+**Token lifecycle**:
+- Generated: `POST /api/terminal/sessions` → `{ sessionId, wsToken, ... }`
+- Validated: WebSocket client connects with `?wsToken=<token>` → server looks up sessionId from token map, deletes token (one-time use)
+- Expired: Tokens older than 60s are rejected; background cleanup runs every 30s
+
+**Why this matters**: Without these guards, a malicious webpage at `http://evil.local:8080` could open a WebSocket to `ws://localhost:3030/ws/terminal?sessionId=<guessed-uuid>` and execute arbitrary commands in the user's terminal. Origin validation blocks this. Connection tokens prevent sessionId brute-force.
+
 ### ContextRoutingSettings — Visual Config Editor
 `src/components/ContextRoutingSettings.tsx` (1318 lines) is the UI for `.rorca/config.json` editing. Key behaviors:
 - Has `viewMode: 'visual' | 'json'` — visual editor with directory tree picker, or raw JSON with inline validation
