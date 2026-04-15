@@ -1,6 +1,8 @@
 import { useEffect, useRef, useCallback, useState } from 'react';
 import { Terminal } from '@xterm/xterm';
 import { FitAddon } from '@xterm/addon-fit';
+import { SearchAddon } from '@xterm/addon-search';
+import { ChevronDown, ChevronUp, X } from 'lucide-react';
 import { useTerminalSession } from '../hooks/useTerminalSession';
 import '@xterm/xterm/css/xterm.css';
 
@@ -23,6 +25,15 @@ const TERMINAL_OPTIONS = {
   cursorBlink: true,
   cursorStyle: 'block' as const,
   convertEol: true,
+};
+
+const SEARCH_DECORATIONS = {
+  matchBackground: '#264f78',
+  matchBorder: '#58a6ff',
+  matchOverviewRuler: '#58a6ff',
+  activeMatchBackground: '#1f6feb',
+  activeMatchBorder: '#79c0ff',
+  activeMatchColorOverviewRuler: '#79c0ff',
 };
 
 // ─── Theme colors ─────────────────────────────────────────────────────────────
@@ -92,10 +103,53 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
+  const searchAddonRef = useRef<SearchAddon | null>(null);
   const resizeObserverRef = useRef<ResizeObserver | null>(null);
+  const searchInputRef = useRef<HTMLInputElement>(null);
   const [scrollbackFetched, setScrollbackFetched] = useState(false);
+  const [isSearchOpen, setIsSearchOpen] = useState(false);
+  const [searchQuery, setSearchQuery] = useState('');
+  const [searchStatus, setSearchStatus] = useState<'idle' | 'searching' | 'found' | 'not-found'>('idle');
+  const isSearchOpenRef = useRef(false);
 
   const { onData, sendInput, sendResize, reconnecting, onExit: onSessionExit } = useTerminalSession(sessionId);
+
+  const closeSearch = useCallback(() => {
+    setIsSearchOpen(false);
+    setSearchStatus('idle');
+    terminalRef.current?.focus();
+  }, []);
+
+  useEffect(() => {
+    isSearchOpenRef.current = isSearchOpen;
+  }, [isSearchOpen]);
+
+  const runSearch = useCallback((direction: 'next' | 'previous', query: string) => {
+    const searchAddon = searchAddonRef.current;
+    if (!searchAddon || !query.trim()) {
+      setSearchStatus('idle');
+      return;
+    }
+
+    const found =
+      direction === 'previous'
+        ? searchAddon.findPrevious(query, {
+            regex: false,
+            wholeWord: false,
+            caseSensitive: false,
+            incremental: true,
+            decorations: SEARCH_DECORATIONS,
+          })
+        : searchAddon.findNext(query, {
+            regex: false,
+            wholeWord: false,
+            caseSensitive: false,
+            incremental: true,
+            decorations: SEARCH_DECORATIONS,
+          });
+
+    setSearchStatus(found ? 'found' : 'not-found');
+  }, []);
 
   // ─── Terminal initialization ──────────────────────────────────────────────────
 
@@ -114,6 +168,9 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
 
+    const searchAddon = new SearchAddon();
+    terminal.loadAddon(searchAddon);
+
     // Mount terminal to DOM
     terminal.open(container);
 
@@ -129,6 +186,24 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
     // Store refs
     terminalRef.current = terminal;
     fitAddonRef.current = fitAddon;
+    searchAddonRef.current = searchAddon;
+
+    terminal.attachCustomKeyEventHandler((event) => {
+      const key = event.key.toLowerCase();
+      const isFindShortcut = (event.metaKey || event.ctrlKey) && key === 'f';
+
+      if (isFindShortcut) {
+        setIsSearchOpen(true);
+        return false;
+      }
+
+      if (event.key === 'Escape' && isSearchOpenRef.current) {
+        closeSearch();
+        return false;
+      }
+
+      return true;
+    });
 
     // Setup resize observer
     const observer = new ResizeObserver(() => {
@@ -155,12 +230,37 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
       inputDisposable.dispose();
       observer.disconnect();
       fitAddon.dispose();
+      searchAddon.dispose();
       terminal.dispose();
       terminalRef.current = null;
       fitAddonRef.current = null;
+      searchAddonRef.current = null;
       resizeObserverRef.current = null;
     };
-  }, [sessionId, sendInput, sendResize]); // Include sessionId + callbacks in deps
+  }, [closeSearch, sessionId, sendInput, sendResize]);
+
+  useEffect(() => {
+    if (!isSearchOpen) return;
+    searchInputRef.current?.focus();
+    searchInputRef.current?.select();
+  }, [isSearchOpen]);
+
+  useEffect(() => {
+    if (!isSearchOpen) return;
+    if (!searchQuery.trim()) {
+      setSearchStatus('idle');
+      return;
+    }
+
+    setSearchStatus('searching');
+    const timeoutId = window.setTimeout(() => {
+      runSearch('next', searchQuery);
+    }, 150);
+
+    return () => {
+      window.clearTimeout(timeoutId);
+    };
+  }, [isSearchOpen, runSearch, searchQuery]);
 
   // ─── Scrollback replay ────────────────────────────────────────────────────────
 
@@ -246,6 +346,68 @@ export default function TerminalPane({ sessionId, onExit, className }: TerminalP
 
   return (
     <div className={`relative w-full h-full ${className ?? ''}`}>
+      <div
+        className={[
+          'absolute top-0 inset-x-0 z-10 h-8 border-b border-border bg-surface-200/90 backdrop-blur-sm',
+          'flex items-center gap-1 px-2 transition-transform duration-200 ease-out',
+          isSearchOpen ? 'translate-y-0' : '-translate-y-full pointer-events-none',
+        ].join(' ')}
+      >
+        <input
+          ref={searchInputRef}
+          value={searchQuery}
+          onChange={(event) => setSearchQuery(event.target.value)}
+          onKeyDown={(event) => {
+            if (event.key === 'Escape') {
+              event.preventDefault();
+              closeSearch();
+              return;
+            }
+
+            if (event.key === 'Enter') {
+              event.preventDefault();
+              runSearch(event.shiftKey ? 'previous' : 'next', searchQuery);
+            }
+          }}
+          placeholder="Find in terminal..."
+          autoFocus
+          className="h-6 flex-1 rounded-md border border-border bg-surface px-2 text-[12px] font-mono text-foreground outline-none ring-0 placeholder:text-muted"
+        />
+        <button
+          type="button"
+          onClick={() => runSearch('previous', searchQuery)}
+          className="inline-flex h-6 w-6 items-center justify-center rounded border border-border bg-surface text-muted transition-colors hover:text-foreground"
+          aria-label="Previous match"
+        >
+          <ChevronUp size={16} />
+        </button>
+        <button
+          type="button"
+          onClick={() => runSearch('next', searchQuery)}
+          className="inline-flex h-6 w-6 items-center justify-center rounded border border-border bg-surface text-muted transition-colors hover:text-foreground"
+          aria-label="Next match"
+        >
+          <ChevronDown size={16} />
+        </button>
+        <div className="min-w-[72px] text-center text-[11px] text-muted">
+          {searchStatus === 'searching'
+            ? 'Searching...'
+            : searchStatus === 'found'
+              ? 'Match found'
+              : searchStatus === 'not-found'
+                ? 'No matches'
+                : 'Find'}
+        </div>
+        <button
+          type="button"
+          onClick={closeSearch}
+          className="inline-flex h-6 w-6 items-center justify-center rounded border border-border bg-surface text-muted transition-colors hover:text-foreground"
+          aria-label="Close search"
+        >
+          <X size={16} />
+        </button>
+      </div>
+
       {/* Terminal container */}
       <div ref={containerRef} className="w-full h-full" />
 
