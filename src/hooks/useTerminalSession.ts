@@ -1,4 +1,3 @@
-```typescript
 import { useRef, useEffect, useState } from 'react';
 
 // ─── Message Types ────────────────────────────────────────────────────────────
@@ -255,4 +254,3 @@ export function useTerminalSession(sessionId: string | null): UseTerminalSession
     connectionLost,
   };
 }
-```
