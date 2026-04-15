@@ -3233,3 +3233,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-15 [Pattern] OpenCode PTY direction injection mirrors Codex marker restoration: For OpenCode PTY sessions, write synthesized direction context to `.opencode/AGENTS.md` between Rorca markers and restore/delete it via an idempotent per-session cleanup hook on both explicit delete and PTY exit.
 > Rule: OpenCode PTY direction injection mirrors Codex marker restoration: For OpenCode PTY sessions, write synthesized direction context to `.opencode/AGENTS.md` between Rorca markers and restore/delete it via an idempotent per-session cleanup hook on both explicit delete and PTY exit.
+
+## 2026-04-15 [Pattern] Terminal PTY sessions support per-session model override: When spawning OpenCode terminal sessions, accept an optional validated `model` in POST /api/terminal/sessions and inject it into that PTY env only via `OPENCODE_MODEL`/`RORCA_MODEL`; never mutate global provider settings.
+> Rule: Terminal PTY sessions support per-session model override: When spawning OpenCode terminal sessions, accept an optional validated `model` in POST /api/terminal/sessions and inject it into that PTY env only via `OPENCODE_MODEL`/`RORCA_MODEL`; never mutate global provider settings.

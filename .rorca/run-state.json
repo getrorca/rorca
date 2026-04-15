@@ -2,7 +2,7 @@
   "specId": "rorca-ci-autofix",
   "runId": 20260316000171,
   "startedAt": "2026-04-14T05:27:51.531Z",
-  "lastUpdatedAt": "2026-04-15T19:05:33.560Z",
+  "lastUpdatedAt": "2026-04-15T19:10:04.722Z",
   "completedStories": [
     {
       "storyId": "CAF-001",
@@ -101,6 +101,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 261107
+    },
+    {
+      "storyId": "OCT-013",
+      "title": "Command palette integration — 'Toggle OpenCode Terminal' action",
+      "status": "passed",
+      "startedAt": "2026-04-15T19:08:47.341Z",
+      "finishedAt": "2026-04-15T19:10:04.721Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 77380
     }
   ],
   "failedStories": [],
