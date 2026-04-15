@@ -3,7 +3,7 @@
 Spec: rorca-ci-autofix
 Run ID: 20260316000171
 Started: 2026-04-14T05:27:51.531Z
-Last Updated: 2026-04-15T19:05:56.685Z
+Last Updated: 2026-04-15T19:05:33.560Z
 
 ## Completed Stories (10)
 - CAF-001: Universal CI failure parser — extract structured errors from any GitHub check_run — DONE (claude, claude-opus-4-6, 1360s)
@@ -15,4 +15,4 @@ Last Updated: 2026-04-15T19:05:56.685Z
 - OCT-006: Frontend WebSocket hook — useTerminalSession — DONE (claude, 79s)
 - OCT-007: Frontend terminal component — TerminalPane with xterm.js PTY integration — DONE (claude, 164s)
 - OCT-034: Graceful backend shutdown — drain PTY sessions on SIGTERM — DONE (codex, gpt-5.4, 171s)
-- OCT-032: Session history view — browse past terminal sessions with transcripts — DONE (codex, gpt-5.4, 283s)
+- OCT-038: Direction stack injection into OpenCode session via .opencode config — DONE (codex, gpt-5.4, 261s)
