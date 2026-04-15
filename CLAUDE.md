@@ -518,6 +518,29 @@ The health check (`computeHealthReport`) and workspace setup look for files at t
 - `MEMORY.md` must exist at `<workspace>/MEMORY.md` (NOT at `<workspace>/.rorca/MEMORY.md`)
 - `.rorca/config.json` must exist at `<workspace>/.rorca/config.json`
 
+### node-pty Native Module — Terminal Feature Dependency (CRITICAL)
+`node-pty` is a native N-API module required for the OpenCode terminal feature (OCT-001–OCT-004). It requires compiled binaries per platform.
+
+**Graceful degradation**: `pty-manager.ts` wraps the `require('node-pty')` in a try/catch at module load. If the import fails:
+- `PTY_AVAILABLE` flag is set to `false`
+- `POST /api/terminal/sessions` returns `503 Service Unavailable` with error code `PTY_NOT_AVAILABLE`
+- Response includes hint: `"cd backend && npm rebuild node-pty"`
+- Backend starts successfully (terminal feature disabled, all other routes work)
+
+**Installation**:
+```bash
+cd backend && npm install  # Triggers postinstall probe
+npm rebuild node-pty       # Rebuild if probe fails
+```
+
+**Distribution constraint**: `node-pty` **cannot** be bundled with `bun build --compile` (DIST-001–DIST-010). Native N-API modules require a real `node_modules/` directory on disk. The terminal feature is **server-only** and requires either:
+- Users run `npm rebuild node-pty` after install (documented in install script)
+- Future Electron/Tauri packaging handles native modules automatically
+
+**Prebuild binaries**: `node-pty` v1.1.0+ ships prebuilt binaries for common platforms (macOS arm64/x64, Linux x64/arm64, Windows x64). The `backend/node_modules/node-pty/prebuilds/` directory is excluded from git (platform-specific, rebuilt on install).
+
+**Testing**: Backend starts even when node-pty is not built. Create a PTY session to verify — should return 503 if module unavailable, 201 if working.
+
 ### ContextRoutingSettings — Visual Config Editor
 `src/components/ContextRoutingSettings.tsx` (1318 lines) is the UI for `.rorca/config.json` editing. Key behaviors:
 - Has `viewMode: 'visual' | 'json'` — visual editor with directory tree picker, or raw JSON with inline validation
