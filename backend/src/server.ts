@@ -101,6 +101,9 @@ import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 import { initBoss } from './lib/pg-boss';
+import { WebSocketServer, WebSocket } from 'ws';
+import * as ptyManager from './lib/pty-manager';
+import http from 'http';
 
 // OC-002: Fail-fast if RORCA_AGENT=opencode but binary is missing
 if (agentType === 'opencode') {
@@ -509,7 +512,7 @@ if (process.env.NODE_ENV !== 'test') {
     }
   })();
 
-  app.listen(PORT, () => {
+  const httpServer = app.listen(PORT, () => {
     logger.info(`Rorca backend listening on port ${PORT}`);
     // OC-015: Clean up orphan runs (stale status='running' from crashed backend)
     cleanupOrphanRuns();
@@ -533,6 +536,104 @@ if (process.env.NODE_ENV !== 'test') {
       else logger.info({ id: (row as any).id }, '[StartupCheck] Workspace query OK — search_path verified');
     }).catch(err => logger.error({ err }, '[StartupCheck] Workspace query FAILED — search_path may be wrong'));
   });
+
+  // OCT-002: WebSocket server for PTY I/O
+  const wss = new WebSocketServer({ server: httpServer, path: '/ws/terminal' });
+
+  wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
+    // Extract sessionId from query string
+    const url = new URL(req.url || '', `http://${req.headers.host}`);
+    const sessionId = url.searchParams.get('sessionId');
+
+    if (!sessionId) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Missing sessionId parameter' }));
+      ws.close();
+      return;
+    }
+
+    // Look up the session
+    const session = ptyManager.getSession(sessionId);
+    if (!session) {
+      ws.send(JSON.stringify({ type: 'error', message: 'Session not found' }));
+      ws.close();
+      return;
+    }
+
+    logger.info(`[ws] Client connected to session ${sessionId}`);
+
+    // Subscribe to PTY output
+    const dataListener = session.ptyProcess.onData((data: string) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: 'output', data }));
+        } catch (err) {
+          logger.error({ err, sessionId }, '[ws] Failed to send PTY output to client');
+        }
+      }
+    });
+
+    // Subscribe to PTY exit
+    const exitListener = session.ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
+      if (ws.readyState === WebSocket.OPEN) {
+        try {
+          ws.send(JSON.stringify({ type: 'exit', exitCode }));
+          ws.close();
+        } catch (err) {
+          logger.error({ err, sessionId }, '[ws] Failed to send exit message to client');
+        }
+      }
+    });
+
+    // Handle incoming messages from client
+    ws.on('message', (rawMessage: Buffer | string) => {
+      try {
+        const message = JSON.parse(rawMessage.toString());
+
+        switch (message.type) {
+          case 'input':
+            if (typeof message.data === 'string') {
+              session.ptyProcess.write(message.data);
+            }
+            break;
+
+          case 'resize':
+            if (typeof message.rows === 'number' && typeof message.cols === 'number') {
+              ptyManager.resizeSession(sessionId, message.rows, message.cols);
+            }
+            break;
+
+          case 'ping':
+            if (ws.readyState === WebSocket.OPEN) {
+              ws.send(JSON.stringify({ type: 'pong' }));
+            }
+            break;
+
+          default:
+            logger.warn({ type: message.type, sessionId }, '[ws] Unknown message type');
+        }
+      } catch (err) {
+        logger.warn({ err, sessionId }, '[ws] Failed to parse incoming message — ignoring');
+      }
+    });
+
+    // Handle WebSocket errors
+    ws.on('error', (err) => {
+      logger.error({ err, sessionId }, '[ws] WebSocket error');
+      // Clean up listeners but do NOT kill PTY session
+      dataListener.dispose();
+      exitListener.dispose();
+    });
+
+    // Handle WebSocket close
+    ws.on('close', () => {
+      logger.info(`[ws] Client disconnected from session ${sessionId}`);
+      // Clean up listeners but do NOT kill PTY session (persists for reconnect)
+      dataListener.dispose();
+      exitListener.dispose();
+    });
+  });
+
+  logger.info('[ws] WebSocket server mounted at /ws/terminal');
 }
 
 export default app;
