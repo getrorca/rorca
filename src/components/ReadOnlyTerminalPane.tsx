@@ -8,6 +8,7 @@ import '@xterm/xterm/css/xterm.css';
 interface ReadOnlyTerminalPaneProps {
   sessionId: string;
   className?: string;
+  fontSize?: number;
 }
 
 const TERMINAL_OPTIONS = {
@@ -36,7 +37,7 @@ const TERMINAL_THEME_LIGHT = {
   selectionBackground: '#cce5ff',
 };
 
-export default function ReadOnlyTerminalPane({ sessionId, className }: ReadOnlyTerminalPaneProps) {
+export default function ReadOnlyTerminalPane({ sessionId, className, fontSize = 13 }: ReadOnlyTerminalPaneProps) {
   const containerRef = useRef<HTMLDivElement>(null);
   const terminalRef = useRef<Terminal | null>(null);
   const fitAddonRef = useRef<FitAddon | null>(null);
@@ -49,7 +50,7 @@ export default function ReadOnlyTerminalPane({ sessionId, className }: ReadOnlyT
     const container = containerRef.current;
     if (!container) return;
 
-    const terminal = new Terminal({ ...TERMINAL_OPTIONS, theme: currentTheme });
+    const terminal = new Terminal({ ...TERMINAL_OPTIONS, fontSize, theme: currentTheme });
     const fitAddon = new FitAddon();
     terminal.loadAddon(fitAddon);
     terminal.open(container);
@@ -70,13 +71,24 @@ export default function ReadOnlyTerminalPane({ sessionId, className }: ReadOnlyT
       fitAddonRef.current = null;
       terminalRef.current = null;
     };
+  }, [currentTheme, fontSize]);
+
+  useEffect(() => {
+    const terminal = terminalRef.current;
+    if (!terminal) return;
+    terminal.options.theme = currentTheme;
   }, [currentTheme]);
 
   useEffect(() => {
-    if (terminalRef.current) {
-      terminalRef.current.options.theme = currentTheme;
-    }
-  }, [currentTheme]);
+    const terminal = terminalRef.current;
+    const fitAddon = fitAddonRef.current;
+    if (!terminal || !fitAddon) return;
+
+    terminal.options.fontSize = fontSize;
+    requestAnimationFrame(() => {
+      fitAddon.fit();
+    });
+  }, [fontSize]);
 
   useEffect(() => {
     let cancelled = false;

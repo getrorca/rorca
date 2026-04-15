@@ -112,8 +112,8 @@ export class ConflictError extends AppError {
 export class UnprocessableError extends AppError {
   readonly statusCode = 422 as const;
 
-  constructor(message: string, details?: Record<string, unknown>) {
-    super(message, 'UNPROCESSABLE', details);
+  constructor(message: string, code?: string, details?: Record<string, unknown>) {
+    super(message, code ?? 'UNPROCESSABLE', details);
   }
 }
 

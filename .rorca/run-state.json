@@ -2,11 +2,32 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T19:33:43.923Z",
-  "completedStories": [],
-  "failedStories": [],
+  "lastUpdatedAt": "2026-04-15T19:46:31.066Z",
+  "completedStories": [
+    {
+      "storyId": "OCT-016",
+      "title": "Terminal panel — copy/paste, font sizing, fullscreen toggle",
+      "status": "passed",
+      "startedAt": "2026-04-15T19:42:58.823Z",
+      "finishedAt": "2026-04-15T19:46:31.066Z",
+      "agentType": "claude",
+      "elapsedMs": 212243
+    }
+  ],
+  "failedStories": [
+    {
+      "storyId": "OCT-015",
+      "title": "OpenCode not installed — graceful error state in terminal panel",
+      "status": "failed",
+      "startedAt": "2026-04-15T19:39:32.942Z",
+      "finishedAt": "2026-04-15T19:42:38.804Z",
+      "agentType": "claude",
+      "failReason": "timeout",
+      "elapsedMs": 185862
+    }
+  ],
   "skippedStories": [],
-  "currentStory": "OCT-012",
+  "currentStory": null,
   "decisions": [],
   "resumedFromStory": null
 }
