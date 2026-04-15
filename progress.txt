@@ -3,12 +3,12 @@
 Spec: rorca-opencode-terminal
 Run ID: 20260316000185
 Started: 2026-04-15T19:33:43.854Z
-Last Updated: 2026-04-15T20:20:17.743Z
+Last Updated: 2026-04-15T20:20:33.711Z
 
 ## Completed Stories (3)
 - OCT-016: Terminal panel — copy/paste, font sizing, fullscreen toggle — DONE (claude, 212s)
 - OCT-021: WebSocket security — Origin validation, localhost binding, session token — DONE (claude, 341s)
-- OCT-012: Multiple terminal sessions — tab management UI with async auto-rename — DONE (codex, gpt-5.4, 121s)
+- OCT-016: Terminal panel — copy/paste, font sizing, fullscreen toggle — DONE (codex, gpt-5.4, 139s)
 
 ## Failed Stories (1)
 - OCT-015: OpenCode not installed — graceful error state in terminal panel — FAILED (timeout)
