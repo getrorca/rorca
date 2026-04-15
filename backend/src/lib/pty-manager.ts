@@ -11,6 +11,7 @@ export interface PtySession {
   sessionId: string;
   workspaceId: number;
   ptyProcess: IPty;
+  outputSequence: number;
   createdAt: Date;
   lastActivityAt: Date;
   cwd: string;
@@ -69,6 +70,7 @@ export async function createSession(
     sessionId,
     workspaceId,
     ptyProcess,
+    outputSequence: 0,
     createdAt: new Date(),
     lastActivityAt: new Date(),
     cwd,
