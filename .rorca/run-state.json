@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T21:12:07.394Z",
+  "lastUpdatedAt": "2026-04-15T21:14:22.278Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -43,14 +43,14 @@
       "elapsedMs": 82645
     },
     {
-      "storyId": "OCT-026",
-      "title": "Reattach active session on page reload — localStorage session persistence",
+      "storyId": "OCT-031",
+      "title": "PTY title sync — dynamic tab labels from OSC 0/2",
       "status": "passed",
-      "startedAt": "2026-04-15T21:10:35.885Z",
-      "finishedAt": "2026-04-15T21:12:07.394Z",
+      "startedAt": "2026-04-15T21:10:35.664Z",
+      "finishedAt": "2026-04-15T21:14:22.278Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 91509
+      "elapsedMs": 226614
     }
   ],
   "failedStories": [

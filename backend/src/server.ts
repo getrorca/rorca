@@ -106,6 +106,29 @@ import { WebSocketServer, WebSocket } from 'ws';
 import * as ptyManager from './lib/pty-manager';
 import http from 'http';
 
+const OSC_TITLE_REGEX = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
+const OSC_SEQUENCE_REGEX = /\x1b\][02];[^\x07\x1b]*(?:\x07|\x1b\\)/g;
+
+function extractOscTitles(data: string): string[] {
+  const titles: string[] = [];
+  for (const match of data.matchAll(OSC_TITLE_REGEX)) {
+    const title = match[1]?.trim();
+    if (typeof title === 'string') {
+      titles.push(title);
+    }
+  }
+  return titles;
+}
+
+function hasBellOutsideOsc(data: string): boolean {
+  if (!data.includes('\x07')) {
+    return false;
+  }
+
+  const withoutOsc = data.replace(OSC_SEQUENCE_REGEX, '');
+  return withoutOsc.includes('\x07');
+}
+
 // OC-002: Fail-fast if RORCA_AGENT=opencode but binary is missing
 if (agentType === 'opencode') {
   requireOpenCode();
@@ -617,9 +640,17 @@ if (process.env.NODE_ENV !== 'test') {
     const dataListener = session.ptyProcess.onData((data: string) => {
       if (ws.readyState === WebSocket.OPEN) {
         try {
+          const titles = extractOscTitles(data);
+          const shouldEmitBell = hasBellOutsideOsc(data);
           const { cleanData, shellEvents } = ptyManager.processSessionOutput(sessionId, data);
           session.outputSequence += 1;
           ws.send(JSON.stringify({ type: 'output', data: cleanData, sequence: session.outputSequence }));
+          for (const title of titles) {
+            ws.send(JSON.stringify({ type: 'title_change', title }));
+          }
+          if (shouldEmitBell) {
+            ws.send(JSON.stringify({ type: 'bell' }));
+          }
           for (const shellEvent of shellEvents) {
             ws.send(JSON.stringify(shellEvent));
           }
