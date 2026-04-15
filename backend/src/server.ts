@@ -100,6 +100,7 @@ import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
+import terminalRouter from './routes/terminal';
 import { initBoss } from './lib/pg-boss';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as ptyManager from './lib/pty-manager';
@@ -406,6 +407,7 @@ app.use('/api/search', searchRouter);
 app.use('/api/recall', recallRouter);
 app.use('/api/graph', graphRouter);
 app.use('/api/workflow-router', workflowRouterRouter);
+app.use('/api/terminal', terminalRouter);
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);
