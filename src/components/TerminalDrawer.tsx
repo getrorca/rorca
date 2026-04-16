@@ -35,7 +35,6 @@ export default function TerminalDrawer() {
   } = useTerminalDrawer();
   const [sessionCount, setSessionCount] = useState(0);
   const drawerRef = useRef<HTMLDivElement>(null);
-  const frameRef = useRef<number | null>(null);
   const latestHeightRef = useRef(height);
 
   useEffect(() => {
@@ -94,27 +93,24 @@ export default function TerminalDrawer() {
 
     event.preventDefault();
     document.body.style.userSelect = 'none';
+    document.body.style.cursor = 'ns-resize';
 
     const handleMouseMove = (moveEvent: MouseEvent) => {
-      if (frameRef.current !== null) {
-        return;
+      const nextHeight = Math.min(
+        Math.max(MIN_HEIGHT, window.innerHeight - moveEvent.clientY),
+        Math.floor(window.innerHeight * 0.8),
+      );
+      latestHeightRef.current = nextHeight;
+      // Apply directly to DOM for smooth drag — no React re-render
+      if (drawerRef.current) {
+        drawerRef.current.style.height = `${nextHeight}px`;
       }
-
-      frameRef.current = window.requestAnimationFrame(() => {
-        frameRef.current = null;
-        latestHeightRef.current = Math.min(
-          Math.max(MIN_HEIGHT, window.innerHeight - moveEvent.clientY),
-          Math.floor(window.innerHeight * 0.8),
-        );
-      });
     };
 
     const handleMouseUp = () => {
-      if (frameRef.current !== null) {
-        window.cancelAnimationFrame(frameRef.current);
-        frameRef.current = null;
-      }
       document.body.style.userSelect = '';
+      document.body.style.cursor = '';
+      // Commit final height to React state (persists to localStorage)
       setHeight(latestHeightRef.current);
       document.removeEventListener('mousemove', handleMouseMove);
       document.removeEventListener('mouseup', handleMouseUp);
