@@ -643,8 +643,8 @@ if (process.env.NODE_ENV !== 'test') {
           const titles = extractOscTitles(data);
           const shouldEmitBell = hasBellOutsideOsc(data);
           const { cleanData, shellEvents } = ptyManager.processSessionOutput(sessionId, data);
-          session.outputSequence += 1;
-          ws.send(JSON.stringify({ type: 'output', data: cleanData, sequence: session.outputSequence }));
+          session.nextSequence += 1;
+          ws.send(JSON.stringify({ type: 'output', data: cleanData, sequence: session.nextSequence }));
           for (const title of titles) {
             ws.send(JSON.stringify({ type: 'title_change', title }));
           }
