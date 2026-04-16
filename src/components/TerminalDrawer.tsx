@@ -124,9 +124,6 @@ export default function TerminalDrawer() {
     document.addEventListener('mouseup', handleMouseUp);
   };
 
-  // Don't render anything (handle bar or drawer) when full-screen terminal panel is active
-  if (isTerminalPanel) return null;
-
   if (!isOpen) {
     if (showMobileFab) {
       return (
