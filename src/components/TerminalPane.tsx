@@ -198,6 +198,8 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
   const [rendererType, setRendererType] = useState<RendererType>('canvas');
   const isSearchOpenRef = useRef(false);
   const [sessionCwd, setSessionCwd] = useState<string | undefined>(undefined);
+  const onInputRef = useRef(onInput);
+  onInputRef.current = onInput;
   const { resolved } = useTheme();
   const { tab } = useParams<{ tab?: string }>();
 
@@ -383,7 +385,7 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
     resizeObserverRef.current = observer;
 
     const inputDisposable = terminal.onData((data) => {
-      onInput?.(data);
+      onInputRef.current?.(data);
       sendInput(data);
     });
     disposables.push(inputDisposable);
@@ -408,7 +410,8 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
       fileLinkProviderDisposableRef.current = null;
       setRendererType('canvas');
     };
-  }, [closeSearch, currentTheme, sessionId, sendInput, sendResize, sessionCwd, onInput, fontSize]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [closeSearch, currentTheme, sessionId, sendInput, sendResize, sessionCwd, fontSize]);
 
   useEffect(() => {
     if (terminalRef.current) {
