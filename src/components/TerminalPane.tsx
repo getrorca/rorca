@@ -420,7 +420,7 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
       setRendererType('canvas');
     };
   // eslint-disable-next-line react-hooks/exhaustive-deps
-  }, [closeSearch, currentTheme, sessionId, sendInput, sendResize, sessionCwd, fontSize]);
+  }, [sessionId, fontSize]);
 
   useEffect(() => {
     if (terminalRef.current) {
