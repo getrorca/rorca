@@ -292,6 +292,7 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
 
     container.style.backgroundColor = currentTheme.background ?? '';
     terminal.open(container);
+    terminal.focus();
 
     if (!containerRef.current) {
       terminal.dispose();
@@ -452,6 +453,7 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
     requestAnimationFrame(() => {
       fitAddon.fit();
       sendResize(terminal.cols, terminal.rows);
+      terminal.focus();
     });
   }, [visible, sendResize]);
 
@@ -695,6 +697,7 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
       <div
         ref={containerRef}
         className="w-full h-full"
+        onClick={() => terminalRef.current?.focus()}
         style={{
           backgroundColor: currentTheme.background,
           display: visible ? 'block' : 'none',
