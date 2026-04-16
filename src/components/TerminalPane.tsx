@@ -567,8 +567,6 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
   }, [onBanner]);
 
   useEffect(() => {
-    if (!scrollbackFetched) return;
-
     const unsubscribe = onData((data) => {
       if (terminalRef.current) {
         terminalRef.current.write(data);
@@ -576,7 +574,7 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
     });
 
     return unsubscribe;
-  }, [onData, scrollbackFetched]);
+  }, [onData]);
 
   useEffect(() => {
     const unsubscribe = onShellEvent((event) => {
