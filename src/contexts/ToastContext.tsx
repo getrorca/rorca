@@ -1,4 +1,4 @@
-import { createContext, useContext, useCallback, useRef, useState, type ReactNode } from 'react';
+import { createContext, useCallback, useContext, useMemo, useRef, useState, type ReactNode } from 'react';
 import { ToastContainer, type ToastType, type ToastAction, type Toast } from '../components/Toast';
 
 interface ShowOptions {
@@ -49,8 +49,10 @@ export function ToastProvider({ children }: { children: ReactNode }) {
   const warning = useCallback((message: string, options?: ShowOptions) => show(message, 'warning', options), [show]);
   const info = useCallback((message: string, options?: ShowOptions) => show(message, 'info', options), [show]);
 
+  const ctxValue = useMemo(() => ({ show, success, error, warning, info }), [show, success, error, warning, info]);
+
   return (
-    <ToastContext.Provider value={{ show, success, error, warning, info }}>
+    <ToastContext.Provider value={ctxValue}>
       {children}
       <ToastContainer toasts={toasts} onDismiss={dismiss} />
     </ToastContext.Provider>
