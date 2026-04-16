@@ -39,8 +39,9 @@ export function validateWsToken(token: string): string | null {
     wsTokenMap.delete(token);
     return null;
   }
-  // One-time use: delete after validation
-  wsTokenMap.delete(token);
+  // Allow reuse within TTL — React StrictMode double-mounts effects in dev,
+  // consuming the token on first connect then failing on second. Token still
+  // expires after 60s and cleanup interval removes it.
   return entry.sessionId;
 }
 
