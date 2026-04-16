@@ -13,8 +13,8 @@ interface TerminalHistorySession {
 
 const MIN_HEIGHT = 120;
 
-function getSidebarOffset(breakpoint: ReturnType<typeof useBreakpoint>): string {
-  return breakpoint === 'desktop' ? 'var(--sidebar-width, 220px)' : '0px';
+function getSidebarOffset(_breakpoint: ReturnType<typeof useBreakpoint>): string {
+  return '0px';
 }
 
 export default function TerminalDrawer() {
