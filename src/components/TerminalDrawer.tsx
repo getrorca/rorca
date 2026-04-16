@@ -124,6 +124,11 @@ export default function TerminalDrawer() {
     document.addEventListener('mouseup', handleMouseUp);
   };
 
+  // Hide drawer entirely when the full-screen terminal panel is active —
+  // both would share the same PTY sessions, causing mirrored output.
+  const isTerminalRoute = location.pathname === '/terminal';
+  if (isTerminalRoute) return null;
+
   if (!isOpen) {
     if (showMobileFab) {
       return (
