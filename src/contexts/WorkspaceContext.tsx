@@ -69,17 +69,17 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     [workspaces, workspaceId],
   );
 
-  const setWorkspaceId = (id: string) => {
+  const setWorkspaceId = useCallback((id: string) => {
     // sessionStorage = per-tab (primary), localStorage = fallback for brand-new tabs
     sessionStorage.setItem(SS_KEY, id);
     localStorage.setItem(LS_KEY, id);
     setWorkspaceIdRaw(id);
-  };
+  }, []);
 
-  const addWorkspace = (ws: Workspace) => {
+  const addWorkspace = useCallback((ws: Workspace) => {
     setWorkspaces((prev) => [ws, ...prev]);
     setWorkspaceId(ws.id);
-  };
+  }, [setWorkspaceId]);
 
   const refreshWorkspaces = useCallback(async () => {
     const res = await apiFetch<{ items: WorkspaceRow[]; total: number; hasMore: boolean; cursor?: string }>('/api/workspaces');
@@ -180,13 +180,16 @@ export function WorkspaceProvider({ children }: { children: ReactNode }) {
     return () => window.removeEventListener('online', handleOnline);
   }, [refreshWorkspaces, refreshActiveRuns, fetchSettings]);
 
+  const ctxValue = useMemo(() => ({
+    workspaceId, setWorkspaceId, workspaces, workspacesLoading, selectedWorkspace,
+    addWorkspace, refreshWorkspaces,
+    activeRuns, refreshActiveRuns,
+    settings, updateSettings,
+  }), [workspaceId, setWorkspaceId, workspaces, workspacesLoading, selectedWorkspace,
+    addWorkspace, refreshWorkspaces, activeRuns, refreshActiveRuns, settings, updateSettings]);
+
   return (
-    <WorkspaceCtx.Provider value={{
-      workspaceId, setWorkspaceId, workspaces, workspacesLoading, selectedWorkspace,
-      addWorkspace, refreshWorkspaces,
-      activeRuns, refreshActiveRuns,
-      settings, updateSettings,
-    }}>
+    <WorkspaceCtx.Provider value={ctxValue}>
       {children}
     </WorkspaceCtx.Provider>
   );
