@@ -306,7 +306,8 @@ router.post('/sessions', validateBody(createSessionSchema), async (req: Request,
 
     await execute(
       `INSERT INTO terminal_sessions (session_id, workspace_id, cwd, rows, cols, status)
-       VALUES ($1, $2, $3, $4, $5, 'active')`,
+       VALUES ($1, $2, $3, $4, $5, 'active')
+       ON CONFLICT (session_id) DO NOTHING`,
       [sessionId, body.workspaceId, workspace.path, body.rows, body.cols]
     );
 

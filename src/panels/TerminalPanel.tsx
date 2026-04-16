@@ -300,6 +300,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const bellTimeoutsRef = useRef<Record<string, number>>({});
   const [backgroundSessionsVersion, setBackgroundSessionsVersion] = useState(0);
   const restoreRequestIdRef = useRef(0);
+  const creatingRef = useRef(false);
 
   const headerHeightClass = mode === 'panel' ? 'h-10' : 'h-9';
   const headerTextClass = mode === 'panel' ? 'text-[12px]' : 'text-[11px]';
@@ -429,6 +430,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   }, [activeSessionId]);
 
   const createSession = useCallback(async (targetWorkspaceId: string, activate = true, modelOverride?: string) => {
+    if (creatingRef.current) return;
+    creatingRef.current = true;
     setCreating(true);
     setError(null);
     setNotInstalled(false);
@@ -492,6 +495,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         setError('Failed to start session — is OpenCode installed?');
       }
     } finally {
+      creatingRef.current = false;
       setCreating(false);
     }
   }, [mode, syncWorkspaceSessions]);
