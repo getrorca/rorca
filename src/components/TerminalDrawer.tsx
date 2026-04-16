@@ -1,4 +1,5 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import { Bot, ChevronUp } from 'lucide-react';
 import TerminalPanel from '../panels/TerminalPanel';
 import { useBreakpoint } from '../hooks/useBreakpoint';
@@ -17,6 +18,10 @@ function getSidebarOffset(breakpoint: ReturnType<typeof useBreakpoint>): string 
 }
 
 export default function TerminalDrawer() {
+  const location = useLocation();
+  // Don't render the drawer when the full-screen terminal panel is active
+  const isTerminalPanel = location.pathname === '/terminal';
+
   const breakpoint = useBreakpoint();
   const { workspaceId } = useWorkspace();
   const {
@@ -158,6 +163,8 @@ export default function TerminalDrawer() {
       </button>
     );
   }
+
+  if (isTerminalPanel) return null;
 
   return (
     <div
