@@ -200,6 +200,14 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
   const [sessionCwd, setSessionCwd] = useState<string | undefined>(undefined);
   const onInputRef = useRef(onInput);
   onInputRef.current = onInput;
+  const onExitRef = useRef(onExit);
+  onExitRef.current = onExit;
+  const onTitleChangeRef = useRef(onTitleChange);
+  onTitleChangeRef.current = onTitleChange;
+  const onBellRef = useRef(onBell);
+  onBellRef.current = onBell;
+  const onSessionLostRef = useRef(onSessionLost);
+  onSessionLostRef.current = onSessionLost;
   const { resolved } = useTheme();
   const { tab } = useParams<{ tab?: string }>();
 
@@ -587,23 +595,23 @@ export default function TerminalPane({ sessionId, wsToken, visible = true, onExi
         terminalRef.current.write(message);
       }
 
-      onExit?.(exitCode);
+      onExitRef.current?.(exitCode);
     });
 
     return unsubscribe;
-  }, [onSessionExit, onExit]);
+  }, [onSessionExit]);
 
   useEffect(() => {
-    onTitleChange?.(title);
-  }, [title, onTitleChange]);
+    onTitleChangeRef.current?.(title);
+  }, [title]);
 
   useEffect(() => {
     const unsubscribe = onBellEvent(() => {
-      onBell?.();
+      onBellRef.current?.();
     });
 
     return unsubscribe;
-  }, [onBellEvent, onBell]);
+  }, [onBellEvent]);
 
   return (
     <div className={`relative w-full h-full ${className ?? ''}`}>
