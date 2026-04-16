@@ -250,6 +250,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const { workspaceId, selectedWorkspace, workspaces, setWorkspaceId } = useWorkspace();
   const navigate = useNavigate();
   const toast = useGlobalToast();
+  const toastRef = useRef(toast);
+  toastRef.current = toast;
 
   const [sessions, setSessions] = useState<TerminalSessionRecord[]>([]);
   const [activeSessionId, setActiveSessionId] = useState<string | null>(null);
@@ -608,7 +610,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         setActiveSessionId(restoredSessions[0]?.sessionId ?? null);
         nextLabelNumRef.current = restoredSessions.length + 1;
         bumpBackgroundSessionsVersion();
-        toast.info('Reconnected to existing session', { durationMs: 2000 });
+        toastRef.current.info('Reconnected to existing session', { durationMs: 2000 });
         return;
       }
 
@@ -621,7 +623,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     };
 
     void restoreWorkspaceSessions();
-  }, [workspaceId, createSession, persistWorkspaceSessions, toast, bumpBackgroundSessionsVersion]);
+  }, [workspaceId, createSession, persistWorkspaceSessions, bumpBackgroundSessionsVersion]);
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
