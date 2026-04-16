@@ -342,7 +342,7 @@ router.post('/sessions', validateBody(createSessionSchema), async (req: Request,
       res.status(429).json({ error: 'SESSION_LIMIT_REACHED' });
       return;
     }
-    handleRouteError(req, res, err);
+    handleRouteError(res, err);
   }
 });
 
@@ -431,7 +431,7 @@ router.get('/sessions/:sessionId', async (req: Request, res: Response) => {
       createdAt: session.createdAt.toISOString(),
     });
   } catch (err) {
-    handleRouteError(req, res, err);
+    handleRouteError(res, err);
   }
 });
 
@@ -450,7 +450,7 @@ router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
 
     res.status(204).send();
   } catch (err) {
-    handleRouteError(req, res, err);
+    handleRouteError(res, err);
   }
 });
 
@@ -509,7 +509,7 @@ router.get('/sessions', async (_req: Request, res: Response) => {
 
     res.json({ sessions });
   } catch (err) {
-    handleRouteError(_req, res, err);
+    handleRouteError(res, err);
   }
 });
 
@@ -584,7 +584,7 @@ router.get('/sessions/history', async (req: Request, res: Response) => {
       })),
     });
   } catch (err) {
-    handleRouteError(req, res, err);
+    handleRouteError(res, err);
   }
 });
 
@@ -601,7 +601,7 @@ router.delete('/sessions/history', async (req: Request, res: Response) => {
 
     res.json({ deleted: result.rowCount });
   } catch (err) {
-    handleRouteError(req, res, err);
+    handleRouteError(res, err);
   }
 });
 
@@ -642,7 +642,7 @@ router.get('/health', async (req: Request, res: Response) => {
       totalChunks: Number(totalChunksRow?.count ?? '0'),
     });
   } catch (err) {
-    handleRouteError(req, res, err);
+    handleRouteError(res, err);
   }
 });
 
@@ -702,7 +702,7 @@ router.get('/sessions/:sessionId/scrollback', async (req: Request, res: Response
 
     res.json({ chunks });
   } catch (err) {
-    handleRouteError(req, res, err);
+    handleRouteError(res, err);
   }
 });
 
@@ -769,7 +769,7 @@ router.patch('/sessions/:sessionId/resize', async (req: Request, res: Response) 
 
     res.json({ ok: true });
   } catch (err) {
-    handleRouteError(req, res, err);
+    handleRouteError(res, err);
   }
 });
 
