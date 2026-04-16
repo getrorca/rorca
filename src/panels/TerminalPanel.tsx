@@ -304,6 +304,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [backgroundSessionsVersion, setBackgroundSessionsVersion] = useState(0);
   const restoreRequestIdRef = useRef(0);
   const creatingRef = useRef(false);
+  const createSessionRef = useRef<(workspaceId: string, activate?: boolean) => Promise<void>>();
+  const persistWorkspaceSessionsRef = useRef<(targetWorkspaceId: string | null, nextSessions: TerminalSessionRecord[]) => void>();
+  const bumpBackgroundSessionsVersionRef = useRef<() => void>();
 
   const headerHeightClass = mode === 'panel' ? 'h-10' : 'h-9';
   const headerTextClass = mode === 'panel' ? 'text-[12px]' : 'text-[11px]';
@@ -506,6 +509,11 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     }
   }, [mode, syncWorkspaceSessions]);
 
+  // Keep refs in sync for use in effects with minimal deps
+  createSessionRef.current = createSession;
+  persistWorkspaceSessionsRef.current = persistWorkspaceSessions;
+  bumpBackgroundSessionsVersionRef.current = bumpBackgroundSessionsVersion;
+
   useEffect(() => {
     if (!workspaceId) return;
     loadDirections(workspaceId);
@@ -564,7 +572,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
           ? current
           : storedSessions[0]?.sessionId ?? null);
         nextLabelNumRef.current = storedSessions.length + 1;
-        bumpBackgroundSessionsVersion();
+        bumpBackgroundSessionsVersionRef.current?.();
         return;
       }
 
@@ -574,8 +582,8 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         setSessions([]);
         setActiveSessionId(null);
         nextLabelNumRef.current = 1;
-        persistWorkspaceSessions(workspaceId, []);
-        await createSession(workspaceId, true);
+        persistWorkspaceSessionsRef.current?.(workspaceId, []);
+        await createSessionRef.current?.(workspaceId, true);
         return;
       }
 
@@ -609,7 +617,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         setSessions(restoredSessions);
         setActiveSessionId(restoredSessions[0]?.sessionId ?? null);
         nextLabelNumRef.current = restoredSessions.length + 1;
-        bumpBackgroundSessionsVersion();
+        bumpBackgroundSessionsVersionRef.current?.();
         toastRef.current.info('Reconnected to existing session', { durationMs: 2000 });
         return;
       }
@@ -618,12 +626,13 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       setSessions([]);
       setActiveSessionId(null);
       nextLabelNumRef.current = 1;
-      persistWorkspaceSessions(workspaceId, []);
-      await createSession(workspaceId, true);
+      persistWorkspaceSessionsRef.current?.(workspaceId, []);
+      await createSessionRef.current?.(workspaceId, true);
     };
 
     void restoreWorkspaceSessions();
-  }, [workspaceId, createSession, persistWorkspaceSessions, bumpBackgroundSessionsVersion]);
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [workspaceId]);
 
   useEffect(() => {
     const handlePointerDown = (event: MouseEvent) => {
