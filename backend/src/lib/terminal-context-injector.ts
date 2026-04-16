@@ -67,8 +67,9 @@ export async function injectDirectionStack(
     `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
   );
 
-  const wsRow = await queryOne<{ domain: string | null }>('SELECT domain FROM workspaces WHERE id = $1', [workspaceId]);
-  const domain = wsRow?.domain;
+  const wsRow = await queryOne<{ domains: string | null }>('SELECT domains FROM workspaces WHERE id = $1', [workspaceId]);
+  const domainsRaw = wsRow?.domains;
+  const domain = domainsRaw ? (JSON.parse(domainsRaw) as string[])[0] ?? null : null;
 
   const l2Row = domain
     ? await queryOne<{ content_yaml: string }>(

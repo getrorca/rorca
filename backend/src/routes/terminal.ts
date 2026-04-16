@@ -348,6 +348,98 @@ router.post('/sessions', validateBody(createSessionSchema), async (req: Request,
 
 /**
  * @swagger
+ * /api/terminal/sessions/history:
+ *   get:
+ *     tags: [Terminal]
+ *     summary: List terminal session history
+ *     operationId: listTerminalSessionHistory
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema:
+ *           type: string
+ *       - in: query
+ *         name: limit
+ *         required: false
+ *         schema:
+ *           type: integer
+ *           minimum: 1
+ *           maximum: 100
+ *           default: 20
+ *     responses:
+ *       200:
+ *         description: Recent terminal sessions for a workspace
+ *   delete:
+ *     tags: [Terminal]
+ *     summary: Clear terminal session history
+ *     operationId: clearTerminalSessionHistory
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Number of deleted sessions
+ */
+router.get('/sessions/history', async (req: Request, res: Response) => {
+  try {
+    const { workspaceId, limit } = historyQuerySchema.parse(req.query);
+
+    const sessions = await query<{
+      session_id: string;
+      cwd: string;
+      status: string;
+      exit_code: number | null;
+      created_at: string;
+      exited_at: string | null;
+      total_output_bytes: number | null;
+    }>(
+      `SELECT session_id, cwd, status, exit_code, created_at, exited_at, total_output_bytes
+         FROM terminal_sessions
+        WHERE workspace_id = $1
+        ORDER BY created_at DESC
+        LIMIT $2`,
+      [workspaceId, limit]
+    );
+
+    res.json({
+      sessions: sessions.map((session) => ({
+        sessionId: session.session_id,
+        cwd: session.cwd,
+        status: session.status,
+        exitCode: session.exit_code,
+        createdAt: session.created_at,
+        exitedAt: session.exited_at,
+        totalOutputBytes: Number(session.total_output_bytes ?? 0),
+      })),
+    });
+  } catch (err) {
+    handleRouteError(res, err);
+  }
+});
+
+router.delete('/sessions/history', async (req: Request, res: Response) => {
+  try {
+    const { workspaceId } = historyQuerySchema.pick({ workspaceId: true }).parse(req.query);
+
+    const result = await execute(
+      `DELETE FROM terminal_sessions
+        WHERE workspace_id = $1
+          AND status != 'active'`,
+      [workspaceId]
+    );
+
+    res.json({ deleted: result.rowCount });
+  } catch (err) {
+    handleRouteError(res, err);
+  }
+});
+
+/**
+ * @swagger
  * /api/terminal/sessions/{sessionId}:
  *   get:
  *     tags: [Terminal]
@@ -508,98 +600,6 @@ router.get('/sessions', async (_req: Request, res: Response) => {
     }));
 
     res.json({ sessions });
-  } catch (err) {
-    handleRouteError(res, err);
-  }
-});
-
-/**
- * @swagger
- * /api/terminal/sessions/history:
- *   get:
- *     tags: [Terminal]
- *     summary: List terminal session history
- *     operationId: listTerminalSessionHistory
- *     parameters:
- *       - in: query
- *         name: workspaceId
- *         required: true
- *         schema:
- *           type: string
- *       - in: query
- *         name: limit
- *         required: false
- *         schema:
- *           type: integer
- *           minimum: 1
- *           maximum: 100
- *           default: 20
- *     responses:
- *       200:
- *         description: Recent terminal sessions for a workspace
- *   delete:
- *     tags: [Terminal]
- *     summary: Clear terminal session history
- *     operationId: clearTerminalSessionHistory
- *     parameters:
- *       - in: query
- *         name: workspaceId
- *         required: true
- *         schema:
- *           type: string
- *     responses:
- *       200:
- *         description: Number of deleted sessions
- */
-router.get('/sessions/history', async (req: Request, res: Response) => {
-  try {
-    const { workspaceId, limit } = historyQuerySchema.parse(req.query);
-
-    const sessions = await query<{
-      session_id: string;
-      cwd: string;
-      status: string;
-      exit_code: number | null;
-      created_at: string;
-      exited_at: string | null;
-      total_output_bytes: number | null;
-    }>(
-      `SELECT session_id, cwd, status, exit_code, created_at, exited_at, total_output_bytes
-         FROM terminal_sessions
-        WHERE workspace_id = $1
-        ORDER BY created_at DESC
-        LIMIT $2`,
-      [workspaceId, limit]
-    );
-
-    res.json({
-      sessions: sessions.map((session) => ({
-        sessionId: session.session_id,
-        cwd: session.cwd,
-        status: session.status,
-        exitCode: session.exit_code,
-        createdAt: session.created_at,
-        exitedAt: session.exited_at,
-        totalOutputBytes: Number(session.total_output_bytes ?? 0),
-      })),
-    });
-  } catch (err) {
-    handleRouteError(res, err);
-  }
-});
-
-router.delete('/sessions/history', async (req: Request, res: Response) => {
-  try {
-    const { workspaceId } = historyQuerySchema.pick({ workspaceId: true }).parse(req.query);
-
-    const result = await execute(
-      `DELETE FROM terminal_sessions
-        WHERE workspace_id = $1
-          AND status != 'active'`,
-      [workspaceId]
-    );
-
-    res.json({ deleted: result.rowCount });
   } catch (err) {
     handleRouteError(res, err);
   }
