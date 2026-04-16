@@ -1,4 +1,4 @@
-import { useRef, useEffect, useState } from 'react';
+import { useRef, useEffect, useState, useCallback } from 'react';
 
 // ─── Message Types ────────────────────────────────────────────────────────────
 
@@ -124,46 +124,46 @@ export function useTerminalSession(sessionId: string | null, wsToken: string | n
 
   // ─── Send helpers ───────────────────────────────────────────────────────────
 
-  const send = (message: OutboundMessage) => {
+  const send = useCallback((message: OutboundMessage) => {
     if (wsRef.current?.readyState === WebSocket.OPEN) {
       wsRef.current.send(JSON.stringify(message));
     }
-  };
+  }, []);
 
-  const sendInput = (data: string) => {
+  const sendInput = useCallback((data: string) => {
     send({ type: 'input', data });
-  };
+  }, [send]);
 
-  const sendResize = (cols: number, rows: number) => {
+  const sendResize = useCallback((cols: number, rows: number) => {
     send({ type: 'resize', cols, rows });
-  };
+  }, [send]);
 
   // ─── Subscriber management ──────────────────────────────────────────────────
 
-  const onData = (handler: (data: string) => void): (() => void) => {
+  const onData = useCallback((handler: (data: string) => void): (() => void) => {
     dataHandlersRef.current.add(handler);
     return () => { dataHandlersRef.current.delete(handler); };
-  };
+  }, []);
 
-  const onExit = (handler: (exitCode: number) => void): (() => void) => {
+  const onExit = useCallback((handler: (exitCode: number) => void): (() => void) => {
     exitHandlersRef.current.add(handler);
     return () => { exitHandlersRef.current.delete(handler); };
-  };
+  }, []);
 
-  const onShellEvent = (handler: (event: TerminalShellEvent) => void): (() => void) => {
+  const onShellEvent = useCallback((handler: (event: TerminalShellEvent) => void): (() => void) => {
     shellEventHandlersRef.current.add(handler);
     return () => { shellEventHandlersRef.current.delete(handler); };
-  };
+  }, []);
 
-  const onBanner = (handler: (event: TerminalBannerEvent) => void): (() => void) => {
+  const onBanner = useCallback((handler: (event: TerminalBannerEvent) => void): (() => void) => {
     bannerHandlersRef.current.add(handler);
     return () => { bannerHandlersRef.current.delete(handler); };
-  };
+  }, []);
 
-  const onBell = (handler: () => void): (() => void) => {
+  const onBell = useCallback((handler: () => void): (() => void) => {
     bellHandlersRef.current.add(handler);
     return () => { bellHandlersRef.current.delete(handler); };
-  };
+  }, []);
 
   // ─── WebSocket lifecycle ────────────────────────────────────────────────────
 
