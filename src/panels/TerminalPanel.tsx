@@ -1,3 +1,4 @@
+// @refresh reset
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
 import {
   AlertTriangle,
@@ -412,6 +413,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
     }
   }, []);
 
+  const activeSessionIdRef = useRef<string | null>(null);
+  activeSessionIdRef.current = activeSessionId;
+
   const loadModelPickerData = useCallback(async (targetWorkspaceId: string) => {
     try {
       const [healthRes, modelsRes] = await Promise.all([
@@ -421,13 +425,13 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       const nextEngineType = healthRes.engines?.opencode?.installed ? 'opencode' : healthRes.engines?.codex?.installed ? 'codex' : 'claude';
       setEngineType(nextEngineType);
       setAvailableModels(modelsRes.models ?? []);
-      if (targetWorkspaceId && !activeSessionId && modelsRes.models?.length) {
+      if (targetWorkspaceId && !activeSessionIdRef.current && modelsRes.models?.length) {
         setActiveModel((current) => current === 'Select model' ? modelsRes.models[0].id : current);
       }
     } catch {
       setAvailableModels([]);
     }
-  }, [activeSessionId]);
+  }, []);
 
   const createSession = useCallback(async (targetWorkspaceId: string, activate = true, modelOverride?: string) => {
     if (creatingRef.current) return;
