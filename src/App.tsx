@@ -195,7 +195,7 @@ function GlobalErrorWiring() {
 const PANEL_LABELS: Record<PanelId, string> = {
   specs: 'Specs',
   runs: 'Runs',
-  terminal: 'OpenCode',
+  terminal: 'Terminal',
   analytics: 'Analytics',
   direction: 'Direction',
   settings: 'Settings',
@@ -358,7 +358,9 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
       return <MarketplacePanel onNavigate={onNavigate} />;
 
     case 'terminal':
-      return <TerminalPanel mode="panel" />;
+      // TerminalPanel is always-mounted in AppLayout to preserve PTY session state.
+      // Nothing to render here — the always-mounted instance handles display.
+      return null;
 
     default: return null;
   }
@@ -567,7 +569,14 @@ function AppLayout() {
           window.dispatchEvent(new CustomEvent('rorca:open-wizard'));
         }} />
         {/* Router-driven panel content */}
-        <Outlet />
+        {/* Terminal panel is always mounted to preserve PTY session state across navigation.
+            Visibility is controlled via CSS — hidden when not on /terminal route. */}
+        <div className={location.pathname === '/terminal' ? 'contents' : 'hidden'}>
+          <Suspense fallback={<div className="flex-1 bg-[#0d1117]" />}>
+            <TerminalPanel mode="panel" />
+          </Suspense>
+        </div>
+        {location.pathname !== '/terminal' && <Outlet />}
 
         {/* Slide-over Overlays */}
         <SlideOver isOpen={reviewSpecId !== null} onClose={navigateBackFromRun} hideHeader={true}>

@@ -100,17 +100,12 @@ interface UserStory {
   suggestedSkills?: Array<{ name: string; relevance: number; reason: string }>;
   /**
    * Per-story browser MCP override (@playwright/mcp — fresh isolated browser).
-   * true  = inject browser tools for this story.
-   * false = opt out even if spec.browserMcp is true.
-   * undefined = inherit from spec.browserMcp (defaults to false).
+   * true = force on, false = force off, undefined = inherit spec-level or auto-detect.
    */
   browserMcp?: boolean;
   /**
-   * Per-story Chrome DevTools MCP override (chrome-devtools-mcp — attaches to
-   * the user's already-running, already-authenticated Chrome via CDP on port 9222).
-   * true  = inject Chrome DevTools tools for this story.
-   * false = opt out even if spec.chromeMcp is true.
-   * undefined = inherit from spec.chromeMcp (defaults to false).
+   * Per-story Chrome DevTools MCP override (chrome-devtools-mcp — live Chrome via CDP).
+   * true = force on, false = force off, undefined = inherit spec-level or auto-detect.
    */
   chromeMcp?: boolean;
 }
@@ -125,16 +120,16 @@ interface SpecJson {
   /** Optional default reasoning config for all stories in this spec. */
   reasoning?: { enabled: boolean; effort?: string };
   /**
-   * When true, all stories in this spec receive @playwright/mcp browser tools
-   * (fresh isolated headless browser, no existing session).
-   * Story-level browserMcp overrides this value (true or false).
+   * Opt-in/out for @playwright/mcp browser tools (fresh isolated headless browser).
+   * true = always inject, false = never inject, undefined = auto-detect from
+   * story content (playwright tool names) and playbook path.
    */
   browserMcp?: boolean;
   /**
-   * When true, all stories receive chrome-devtools-mcp tools that attach to the
-   * user's already-running Chrome instance (requires Chrome launched with
-   * --remote-debugging-port=9222). Gives access to the live authenticated session.
-   * Story-level chromeMcp overrides this value.
+   * Opt-in/out for chrome-devtools-mcp tools (attaches to user's live Chrome via CDP).
+   * true = always inject, false = never inject, undefined = auto-detect from
+   * spec mode ("journey"), playbook path (user-journey/chrome/e2e), and story
+   * content (take_snapshot, take_screenshot, list_console_messages, etc.).
    */
   chromeMcp?: boolean;
 }
@@ -168,16 +163,80 @@ interface EngineConfig {
   effortLevel?: 'low' | 'medium' | 'high' | 'max';
 }
 
+// ─── Browser MCP Auto-Detection ─────────────────────────────────────────────
+// When chromeMcp / browserMcp are not explicitly set on the spec or story,
+// infer from content signals so users don't have to remember to set a flag.
+
+/** Chrome DevTools MCP tool names that appear in story descriptions. */
+// Keep only unambiguous CDP-specific tool names — generic words like "click",
+// "press_key", "wait_for", "upload_file", "navigate_page" are too broad and
+// false-positive on any UI-focused spec description.
+const CHROME_MCP_SIGNALS = [
+  'take_snapshot', 'take_screenshot', 'list_console_messages',
+  'list_network_requests', 'chrome-devtools', 'chrome_devtools',
+  'mcp__chrome',
+];
+
+/** Playwright MCP tool names that appear in story descriptions. */
+const PLAYWRIGHT_MCP_SIGNALS = [
+  'browser_navigate', 'browser_snapshot', 'browser_click',
+  'browser_type', 'browser_console_messages', 'browser_network_requests',
+  'playwright',
+];
+
+/** Playbook paths that imply Chrome DevTools MCP. */
+const CHROME_PLAYBOOK_SIGNALS = ['user-journey', 'chrome', 'e2e', 'journey'];
+
+/**
+ * Check if a story's text content contains any of the given signal keywords.
+ * Searches title, description, and acceptance criteria.
+ */
+function storyTextContainsSignal(story: UserStory, signals: string[]): boolean {
+  const text = [
+    story.title ?? '',
+    story.description ?? '',
+    ...(story.acceptanceCriteria ?? []),
+  ].join(' ').toLowerCase();
+  return signals.some(s => text.includes(s.toLowerCase()));
+}
+
+/**
+ * Spec-level content detection: check mode, playbook, and description for
+ * signals that this spec needs browser tools.
+ */
+function specImpliesChromeMcp(spec: SpecJson): boolean {
+  // Journey mode specs always test against the live app
+  if (spec.mode === 'journey') return true;
+  // Playbook path contains a chrome/journey signal
+  if (spec.playbook && CHROME_PLAYBOOK_SIGNALS.some(s => spec.playbook!.toLowerCase().includes(s))) return true;
+  return false;
+}
+
+function specImpliesPlaywrightMcp(spec: SpecJson): boolean {
+  if (spec.playbook && spec.playbook.toLowerCase().includes('playwright')) return true;
+  return false;
+}
+
 /** Returns true if this story should receive @playwright/mcp browser tools. */
 function storyWantsBrowserMcp(story: UserStory, spec: SpecJson): boolean {
+  // Explicit flags always win
   if (story.browserMcp !== undefined) return story.browserMcp;
-  return spec.browserMcp ?? false;
+  if (spec.browserMcp !== undefined) return spec.browserMcp;
+  // Auto-detect from content
+  if (specImpliesPlaywrightMcp(spec)) return true;
+  if (storyTextContainsSignal(story, PLAYWRIGHT_MCP_SIGNALS)) return true;
+  return false;
 }
 
 /** Returns true if this story should receive chrome-devtools-mcp tools. */
 function storyWantsChromeMcp(story: UserStory, spec: SpecJson): boolean {
+  // Explicit flags always win
   if (story.chromeMcp !== undefined) return story.chromeMcp;
-  return spec.chromeMcp ?? false;
+  if (spec.chromeMcp !== undefined) return spec.chromeMcp;
+  // Auto-detect from content
+  if (specImpliesChromeMcp(spec)) return true;
+  if (storyTextContainsSignal(story, CHROME_MCP_SIGNALS)) return true;
+  return false;
 }
 
 // ─── Per-Story Agent Resolution ──────────────────────────────────────────────
@@ -235,6 +294,9 @@ const CHROME_MCP_PORT = 4041;
 const CHROME_MCP_URL = `http://localhost:${CHROME_MCP_PORT}/mcp`;
 let _chromeMcpProxyPid: number | null = null;
 let _chromeMcpReady = false;
+// Resolved chrome-devtools-mcp binary info for writing stdio MCP configs.
+let _chromeMcpCmd: string | null = null;
+let _chromeMcpArgs: string[] = [];
 
 const MAX_RETRIES = 3;
 const MAX_RATE_LIMIT_RETRIES = 4;
@@ -274,7 +336,16 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
  * Returns the server URL on success, null on failure (caller handles gracefully — never throws).
  */
 async function ensurePlaywrightMcpServer(): Promise<string | null> {
-  if (_playwrightMcpReady) return PLAYWRIGHT_MCP_URL;
+  // Health-check: if we think the server is ready, verify it's still alive.
+  if (_playwrightMcpReady) {
+    try {
+      const probe = await fetch(PLAYWRIGHT_MCP_URL, { signal: AbortSignal.timeout(2000) });
+      if (probe.status < 500) return PLAYWRIGHT_MCP_URL;
+    } catch { /* server died — fall through to restart */ }
+    process.stdout.write(`[BrowserMCP] Playwright MCP server died — restarting...\n`);
+    _playwrightMcpReady = false;
+    _playwrightMcpServerPid = null;
+  }
 
   // Check if port is already occupied (e.g. another story in a parallel run already started it)
   try {
@@ -338,9 +409,23 @@ async function ensurePlaywrightMcpServer(): Promise<string | null> {
  * Returns the server URL on success, null on failure (never throws).
  */
 async function ensureChromeDevToolsMcpServer(): Promise<string | null> {
-  if (_chromeMcpReady) return CHROME_MCP_URL;
+  // Health-check: if we think the server is ready, verify it's still alive.
+  // Processes can die between stories — reset state and restart if needed.
+  if (_chromeMcpReady) {
+    try {
+      const probe = await fetch(CHROME_MCP_URL, { signal: AbortSignal.timeout(2000) });
+      if (probe.status < 500) return CHROME_MCP_URL;
+    } catch { /* server died — fall through to restart */ }
+    process.stdout.write(`[ChromeMCP] Proxy server died — restarting...\n`);
+    _chromeMcpReady = false;
+    _chromeMcpProxyPid = null;
+    // Close stale HTTP server reference if it exists.
+    const staleServer = (global as Record<string, unknown>).__rorcaChromeMcpHttpServer as
+      { close: (cb?: () => void) => void } | undefined;
+    if (staleServer) { try { staleServer.close(); } catch { /* already dead */ } }
+  }
 
-  // Check if port is already occupied (another story already started it)
+  // Check if port is already occupied (another process started it)
   try {
     const probe = await fetch(CHROME_MCP_URL, { signal: AbortSignal.timeout(1000) });
     if (probe.status < 500) {
@@ -434,11 +519,14 @@ async function ensureChromeDevToolsMcpServer(): Promise<string | null> {
   process.stdout.write(`[ChromeMCP] Chrome ready at ${browserUrl} — ${chromeVersion}\n`);
 
   // Resolve chrome-devtools-mcp binary — prefer local node_modules over global npx.
+  // Store in module-level vars so spawnClaude can write stdio MCP configs.
   const localBin = path.join(path.dirname(require.resolve('chrome-devtools-mcp/package.json')), 'build/src/bin/chrome-devtools-mcp.js');
   const chromeMcpCmd = fs.existsSync(localBin) ? process.execPath : 'node';
   const chromeMcpArgs = fs.existsSync(localBin)
     ? [localBin, `--browser-url=${browserUrl}`, '--no-usage-statistics', '--no-performance-crux']
     : [require.resolve('chrome-devtools-mcp/build/src/bin/chrome-devtools-mcp.js'), `--browser-url=${browserUrl}`, '--no-usage-statistics', '--no-performance-crux'];
+  _chromeMcpCmd = chromeMcpCmd;
+  _chromeMcpArgs = chromeMcpArgs;
 
   try {
     // Lazy-load MCP SDK to avoid importing at module level (keeps startup fast when not needed).
@@ -571,7 +659,8 @@ function readLogTail(logPath: string, maxBytes: number = 8000): string {
   }
 }
 
-function detectMode(spec: SpecJson): 'impl' | 'qa' {
+function detectMode(spec: SpecJson): 'impl' | 'qa' | 'journey' {
+  if (spec.mode === 'journey') return 'journey';
   if (spec.mode === 'qa') return 'qa';
   if (spec.phases) return 'qa';
   return 'impl';
@@ -810,7 +899,7 @@ function extractPredictedPaths(story: UserStory): string[] {
 
 function buildPrompt(
   story: UserStory,
-  mode: 'impl' | 'qa',
+  mode: 'impl' | 'qa' | 'journey',
   cwd: string,
   playbook?: string,
   agentType?: AgentType,
@@ -1055,16 +1144,42 @@ function spawnClaude(
     const env = buildCleanEnv();
     const startTime = Date.now();
 
+    // Claude CLI --mcp-config requires stdio command/args format — NOT { type: 'http', url }.
+    // Passing HTTP URLs causes claude to silently exit 0 with no output.
+    // We write proper stdio configs for known MCP servers (chrome-devtools, playwright).
+    // Unknown HTTP-only servers are skipped (claude cannot connect to them via --mcp-config).
     let mcpConfigPath: string | null = null;
     if (mcpServers && Object.keys(mcpServers).length > 0) {
       const mcpConfig: Record<string, unknown> = { mcpServers: {} };
+      let hasStdioServers = false;
+
       for (const [name, url] of Object.entries(mcpServers)) {
-        (mcpConfig.mcpServers as Record<string, unknown>)[name] = { type: 'http', url };
+        if (name === 'chrome-devtools' && _chromeMcpCmd) {
+          // chrome-devtools-mcp: use resolved binary path for stdio transport
+          (mcpConfig.mcpServers as Record<string, unknown>)[name] = {
+            command: _chromeMcpCmd,
+            args: _chromeMcpArgs,
+          };
+          hasStdioServers = true;
+        } else if (name === 'playwright') {
+          // Playwright MCP: spawn directly as stdio process
+          (mcpConfig.mcpServers as Record<string, unknown>)[name] = {
+            command: 'npx',
+            args: ['@playwright/mcp@latest'],
+          };
+          hasStdioServers = true;
+        }
+        // Other HTTP-only servers cannot be injected via --mcp-config — skip silently.
+        // They may be available via the user's ~/.claude/ desktop config.
       }
-      mcpConfigPath = path.join(os.tmpdir(), `rorca-browser-mcp-${Date.now()}.json`);
-      fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
+
+      if (hasStdioServers) {
+        mcpConfigPath = path.join(os.tmpdir(), `rorca-claude-mcp-${Date.now()}.json`);
+        fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
+      }
     }
 
+    // Pipe prompt via stdin — positional args silently fail for large prompts (>~32KB).
     const args = [
       '--dangerously-skip-permissions',
       '--print',
@@ -1077,15 +1192,18 @@ function spawnClaude(
       ...(thinkingBudget && thinkingBudget > 0 ? ['--thinking-budget', String(thinkingBudget)] : []),
       ...(effortLevel ? ['--effort', effortLevel] : []),
       ...(mcpConfigPath ? ['--mcp-config', mcpConfigPath] : []),
-      prompt,
     ];
 
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
     const child = spawn(CLAUDE_BIN, args, {
       cwd,
       env,
-      stdio: ['ignore', 'pipe', 'pipe'],
+      stdio: ['pipe', 'pipe', 'pipe'],
     });
+
+    // Write prompt to stdin and close — claude reads from stdin when no positional arg is given.
+    child.stdin?.write(prompt);
+    child.stdin?.end();
 
     const idleMinutes = Math.round(LLM_IDLE_TIMEOUT_MS / 60_000);
     let watchdogFired = false;
@@ -1849,10 +1967,10 @@ function gitCommitStory(
   cwd: string,
   storyId: string,
   storyTitle: string,
-  mode: 'impl' | 'qa',
+  mode: 'impl' | 'qa' | 'journey',
 ): void {
   const env = buildCleanEnv();
-  const prefix = mode === 'qa' ? 'test' : 'feat';
+  const prefix = mode === 'qa' ? 'test' : mode === 'journey' ? 'journey' : 'feat';
 
   try {
     execSync('git add -A', { cwd, env, stdio: 'pipe' });
@@ -1954,6 +2072,24 @@ function createStoryWorktree(
           fs.symlinkSync(src, dst, 'dir');
         } catch {
           // Non-fatal — agent can still run npm install if needed
+        }
+      }
+    }
+
+    // Copy .env files — gitignored so never present in worktrees, but required
+    // for database connections, API keys, and other runtime config.
+    const envFilesToCopy = ['.env', 'backend/.env'];
+    for (const rel of envFilesToCopy) {
+      const src = path.join(workspaceCwd, rel);
+      const dst = path.join(worktreePath, rel);
+      if (fs.existsSync(src) && !fs.existsSync(dst)) {
+        try {
+          const dstDir = path.dirname(dst);
+          if (!fs.existsSync(dstDir)) fs.mkdirSync(dstDir, { recursive: true });
+          fs.copyFileSync(src, dst);
+          logger.info(`  [worktree] Copied ${rel} to story worktree`);
+        } catch {
+          // Non-fatal — story may still work if env vars come from process env
         }
       }
     }
@@ -2603,7 +2739,7 @@ async function runAdversarialReview(
 async function executeStory(
   story: UserStory,
   config: EngineConfig,
-  mode: 'impl' | 'qa',
+  mode: 'impl' | 'qa' | 'journey',
   playbook: string | undefined,
   logDir: string,
   workspaceId: string | null,
@@ -2786,9 +2922,7 @@ async function executeStory(
   let chromeMcpUrl: string | null = null;
   if (wantsChrome) {
     chromeMcpUrl = await ensureChromeDevToolsMcpServer();
-    if (chromeMcpUrl) {
-      process.stdout.write(`[ChromeMCP] Chrome DevTools tools active for story ${story.id}\n`);
-    } else {
+    if (!chromeMcpUrl) {
       process.stdout.write(`[ChromeMCP] Chrome DevTools unavailable for story ${story.id} — continuing without (Chrome may not be running with --remote-debugging-port)\n`);
     }
   }
@@ -3064,15 +3198,16 @@ async function executeStory(
       }
 
       // Gate passed — verify agent produced meaningful code changes (not just metadata)
+      // Journey mode stories browse the live app and produce no file edits — skip this gate entirely.
       try {
-        const porcelain = execSync('git status --porcelain', { cwd: effectiveCwd, encoding: 'utf8' }).trim();
+        const porcelain = mode === 'journey' ? '' : execSync('git status --porcelain', { cwd: effectiveCwd, encoding: 'utf8' }).trim();
         const METADATA_PREFIXES = ['forge/specs/', 'progress', '.rorca/', '.claude/', '.opencode/', '.playwright-mcp/'];
         const meaningfulChanges = porcelain.split('\n').filter(line => {
           if (!line.trim()) return false;
           const file = line.substring(3); // strip git status prefix
           return !METADATA_PREFIXES.some(p => file.startsWith(p));
         });
-        if (meaningfulChanges.length === 0) {
+        if (mode !== 'journey' && meaningfulChanges.length === 0) {
           logger.warn(`${story.id}: Agent exited 0 but produced no code changes — treating as failure`);
           if (workspaceId) {
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
@@ -3466,7 +3601,7 @@ async function main(): Promise<void> {
   const playbook = spec.playbook;
   const stories = getStories(spec);
 
-  const modeLabel = mode === 'qa' ? 'QA Testing' : 'Implementation';
+  const modeLabel = mode === 'qa' ? 'QA Testing' : mode === 'journey' ? 'Journey' : 'Implementation';
   const progress = getProgress(stories);
 
   // ── Scan per-story agent assignments ────────────────────────────────
@@ -3686,7 +3821,7 @@ async function main(): Promise<void> {
 
 async function runParallel(
   config: EngineConfig,
-  mode: 'impl' | 'qa',
+  mode: 'impl' | 'qa' | 'journey',
   playbook: string | undefined,
   logDir: string,
   workspaceId: string | null,

@@ -1468,6 +1468,25 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           await git.raw(['worktree', 'add', '-b', branchName, worktreePath, 'HEAD']);
         }
 
+        // Copy .env files — gitignored so never present in worktrees, but required
+        // for database connections, API keys, and other runtime config.
+        const envFilesToCopy = ['.env', 'backend/.env'];
+        for (const rel of envFilesToCopy) {
+          const src = path.join(workspace.path, rel);
+          const dst = path.join(worktreePath, rel);
+          if (fs.existsSync(src) && !fs.existsSync(dst)) {
+            try {
+              // Ensure parent directory exists (e.g. backend/)
+              const dstDir = path.dirname(dst);
+              if (!fs.existsSync(dstDir)) fs.mkdirSync(dstDir, { recursive: true });
+              fs.copyFileSync(src, dst);
+              logger.info(`  [worktree] Copied ${rel} to worktree`);
+            } catch (envErr: unknown) {
+              logger.warn(`  [worktree] Failed to copy ${rel}: ${(envErr as Error).message}`);
+            }
+          }
+        }
+
         // Add run-tracking files to .gitignore so they don't create noise in commits
         const worktreeGitignore = path.join(worktreePath, '.gitignore');
         const trackingPatterns = '\n# Rorca run-tracking files (parallel-safe)\nprogress.txt\n.rorca/run-state.json\n.rorca/memory/health-log.json\n';
