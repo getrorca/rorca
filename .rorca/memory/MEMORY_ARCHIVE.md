@@ -677,3 +677,98 @@
 > Rule: Spec JSON files can have agentOverride field set by the SpecModelControlBar. If agentOverride is 'opencode' but the model is a Claude model (claude-sonnet-4-6), the run routes through OpenCode → OpenRouter → API credits instead of Claude CLI subscription. The auto-detection fix in pipeline.ts only prevents auto-switching, NOT explicit overrides. Always check spec JSON for stale agentOverride values before running specs with Claude models.
 > Context:  
 > Source:  
+## 2026-04-06 [Gotcha] Disk full from orphaned worktree node_modules
+> Rule: Worktrees created by wave-parallel runs each get their own node_modules (500MB+ frontend, 275MB+ backend). With 70+ prunable worktrees, this consumed 27GB+. Symptoms: ENOSPC errors, backend crashes, pg-boss can't write jobs. Fix: periodically run 'git worktree prune' and delete node_modules from inactive worktrees. Active worktrees can be identified with 'ps aux | grep execution-engine'.
+> Context:  
+> Source:  
+
+## 2026-04-06 [Bug Fix] Pending migrations not tracked — manual psql apply skips schema_migrations row
+> Rule: If migrations are applied manually via psql (outside pg-index.ts runner), the schema_migrations tracking row is never inserted. Backend reports status: degraded with N pending migrations. Fix: apply the SQL file via psql, then INSERT INTO rorca.schema_migrations (version, filename) VALUES (...) manually. Always apply migrations through the runner to avoid this.
+> Context: Fixed 4 pending migrations (20260403170000–20260404000001) that were applied but untracked. Backend went from degraded to ok.
+> Source:  
+
+## 2026-04-07 [Bug Fix] Codex CLI invocation changed — --approval-mode no longer valid
+> Rule: Codex CLI no longer accepts `--approval-mode auto-edit` as a top-level flag. Correct non-interactive invocation is `codex exec --dangerously-bypass-approvals-and-sandbox`. Model passed via `-m <model>`. Prompt via stdin (codex exec reads stdin when no prompt arg given).
+> Context: execution-engine.ts spawnCodex() was failing with "unexpected argument '--approval-mode' found". Fixed by switching to `codex exec --dangerously-bypass-approvals-and-sandbox` subcommand pattern.
+> Source:  
+
+## 2026-04-07 [Bug Fix] API server must be restarted for new routes to register — tsx does not hot-reload
+> Rule: The Express API server (src/server.ts) runs under plain `tsx` — NOT `tsx watch`. It does NOT auto-restart on file changes. New routes added to route files (e.g. config.ts) will return 404 until the server process is killed and restarted. Kill with `lsof -ti:3030 | xargs kill -9` then restart. The worker (src/worker.ts) has the same behavior.
+> Context: Added GET /api/config/codex-models route but got 404 — server PID 42585 had been running since Monday 2AM and had not picked up the new route. Required manual kill + restart.
+> Source:  
+
+## 2026-04-07 [Bug Fix] OpenCode JSON blobs in terminals — two separate data paths require two fixes
+> Rule: OpenCode `--format json` outputs newline-delimited JSON events. Two completely separate paths feed terminal output: (1) Main terminal: execution-engine.ts spawnOpenCode() writes to process.stdout → run_output_chunks → SSE. Fix: filter step_finish/step_start/tool_result before writing to process.stdout (logStream still gets raw). (2) Wave parallel sub-terminals: MiniTerminalPane.tsx reads from /stories/:storyId/log SSE. Fix: add line-by-line JSON filtering in the SSE chunk event handler. Fixing only one path leaves the other showing blobs.
+> Context: Session 2026-04-06/07. Also filter stderr — Claude CLI writes diagnostic JSON metrics to stderr; skip valid JSON lines, only forward genuine errors.
+> Source:  
+
+## 2026-04-07 [Decision] Model escalation/cascade system fully removed — simplified to story→spec→env resolution
+> Rule: The entire model escalation/cascading system (ModelRoutingSection, ThresholdSlider, RouterMode, TaskType, OrchestrationState, capMismatchMode, story_escalated WAL events, EscalationEntry in FinOps) was removed in sessions 2026-04-06/07. Canonical model resolution is now: story.model → spec.model → RORCA_MODEL env. No DB cascades, no complexity scorer tiers, no automatic model swapping. Reason: caused surprise OpenRouter charges (Qwen free → Claude Opus swap without user awareness).
+> Context: UI remnants removed from: ProviderSettingsTab.tsx (ModelRoutingSection + ThresholdSlider ~370 lines), FinOpsTab.tsx (EscalationEntry, savings banner, escalation log), UnifiedActivitySection.tsx (story_escalated event), TriggerPopover.tsx (capMismatchMode, isBlocked logic).
+> Source:  
+
+## 2026-04-14 [Bug Fix] Specs with all passes=true blocked re-runs — forceRerun feature added
+> Rule: When all stories in a spec had passes=true, the pipeline skipped them all and no new run could be triggered. This was a major blocker — user couldn't re-run completed specs. Fix: added forceRerun param to POST /api/pipeline/trigger (pipeline.ts PipelineTriggerSchema) which resets all passes=true to false in the spec JSON before executing. SpecDetailSlideOver.tsx shows a "Re-run from scratch" button (RotateCcw icon) when allPassed=true. Committed as fc773cc on main.
+> Context:  
+> Source:  
+
+## 2026-04-14 [Bug Fix] CI TypeScript errors that pass locally but fail in GitHub Actions
+> Rule: Three classes of TS errors slip through local dev but fail CI: (1) unused declared components left in JSX after removing their usage, (2) wrong re-export names in index.ts (e.g. `export type { Bank }` when the actual export is `BankInstitution`), (3) test mock type annotations too narrow (missing optional fields). CI runs `npx tsc --noEmit` from scratch with no incremental cache — local TS Language Server uses cached .tsbuildinfo and misses these. Always run `npx tsc --noEmit` from repo root before pushing.
+> Context: Cashflow-App CI gate failed after merging feat/qa-bank-sync-continuous-e2e. Three errors: ProviderBadge unused, export type { Bank } nonexistent, ConnectionStatusCard test mock missing cooldown_active field. Fixed in commit 10808dc5.
+> Source:  
+
+## 2026-04-14 [Decision] Execution mode UI: segmented control instead of dual toggles
+> Rule: Sequential vs Wave Parallel is a mode choice, not an on/off toggle. Use a segmented control (same pattern as Effort Low/Medium/High) — both options always visible, active = filled teal, inactive = outlined. Wave Parallel pill is disabled with "no parallel stories" label when spec has no independent stories. Wave breakdown (Wave 0/1/2 + story IDs) renders below the control when Wave Parallel is selected. Story count line renders below when Sequential is selected.
+> Context: Original UI had two separate toggles (Wave Parallel + Sequential) which was confusing — looked like Sequential was "off" with no indication Wave Parallel existed. Fixed 2026-04-14 in TriggerPopover.tsx.
+> Source:  
+## 2026-04-14 [Decision] REASONING section removed from TriggerPopover — duplicate of Thinking
+> Rule: The collapsible REASONING section in TriggerPopover (with "Enable reasoning for this run" checkbox + effort buttons) was redundant with the THINKING section (Effort segmented control + Extended thinking toggle). Removed REASONING entirely. ThinkingControls.tsx is the single place for thinking/reasoning controls. Also removed "Haiku only — not available" label from ThinkingControls header — not useful to show a disabled state label for a model tier users aren't on.
+> Context: User flagged redundancy 2026-04-14. Both sections controlled the same underlying capability with different UI.
+> Source:  
+
+## 2026-04-14 [Bug Fix] Vite stale module cache causes SyntaxError on case-variant filenames
+> Rule: On macOS (case-insensitive filesystem), Vite can cache a module under two different case variants (e.g. `ArAgingWidget.tsx` vs `ARAgingWidget.tsx`) from a previous HMR cycle. This produces `SyntaxError: Module does not provide export named X` even though the code and imports are correct. Fix: restart the Vite dev server (`lsof -ti:5173 | xargs kill -9 && npm run dev`). No code changes needed.
+> Context: Happened on Cashflow-App localhost:5173 after merging bank-sync branch. ArAgingWidget vs ARAgingWidget casing conflict in Vite module cache. 2026-04-14.
+> Source:  
+
+## 2026-04-14 [Bug Fix] MCP auto-generated tools 30s timeout kills LLM-powered endpoints silently
+> Rule: Auto-generated MCP HTTP tools in `backend/src/lib/mcp-http.ts` have a 30-second default timeout. Only paths in the `SLOW_PATHS` array get 5 minutes. LLM-powered endpoints like `/enrich`, `/match-skills`, `/suggest-skills`, `/add-stories`, `/knowledge-graph` were missing from this list — MCP calls timed out silently while the backend kept processing and completed successfully. The MCP client (Claude Code) reported "Tool timed out" but the operation actually finished with full results (e.g. 21 CAG hits). Fix: add all LLM-powered path fragments to SLOW_PATHS. When adding new LLM-powered API routes, remember to add them to SLOW_PATHS or they'll timeout at 30s via MCP.
+> Context: Discovered 2026-04-14 when `mcp__rorca__rorca_specs_by_id_enrich` timed out but UI "Enrich with Context" button succeeded — both call the same backend endpoint, but MCP had 30s timeout vs UI's longer HTTP timeout. Fixed in mcp-http.ts line 272.
+> Source:  
+
+## 2026-04-14 [Gotcha] Two MCP tool paths for the same API: hand-written (stdio) vs auto-generated (HTTP)
+> Rule: Rorca has TWO sets of MCP tools: (1) hand-written tools in `backend/src/mcp/server.ts` (24 tools, stdio transport, use `timedFetch` with 5-min default) and (2) auto-generated tools in `backend/src/lib/mcp-http.ts` (397+ tools from OpenAPI spec, HTTP transport on /mcp, use 30s default timeout). The auto-generated tools are named `rorca_{operation}` (e.g. `rorca_specs_by_id_enrich`) while hand-written ones use shorter names (e.g. `rorca_enrich_spec`). When debugging MCP issues, check WHICH tool was called — they have different timeouts and error handling.
+> Context: Root cause of enrich timeout discrepancy between MCP and UI, 2026-04-14.
+> Source:  
+
+## 2026-04-14 [Bug Fix] spawnClaude: prompt must be piped via stdin, not positional arg
+> Rule: execution-engine.ts spawnClaude() was passing the prompt as a positional CLI argument to `claude --print`. Large prompts (>~32KB, typical for context-routed stories) silently fail — claude exits 0 with zero output and empty log files. Stories appear to "pass" instantly with 0 tokens. Fix: pipe prompt via stdin (stdio: ['pipe', 'pipe', 'pipe'], child.stdin.write(prompt), child.stdin.end()). Never pass prompts as positional args to claude CLI.
+> Context: Root cause of qa-accrual-missing-flows stories passing instantly with 0 tokens across runs 174-178. Discovered 2026-04-14. The 49KB prompt (8511 tokens of routed context + story + direction stack) exceeded the silent truncation threshold for CLI positional args.
+> Source:  
+## 2026-04-14 [Bug Fix] spawnClaude --mcp-config: HTTP URLs cause silent exit 0
+> Rule: Claude CLI --mcp-config only supports stdio command/args format ({"command":"node","args":[...]}). Passing HTTP URLs ({"type":"http","url":"http://localhost:4041/mcp"}) causes claude to silently exit 0 with zero output. Fix: write stdio command/args format for known MCP servers (chrome-devtools, playwright). OpenCode uses {"type":"remote","url":...} in opencode.json (native HTTP support). Codex uses `codex mcp add --url` (native HTTP support). Only Claude CLI has this limitation.
+> Context: The chrome-devtools-mcp binary path is stored in _chromeMcpCmd/_chromeMcpArgs module-level vars, resolved once by ensureChromeDevToolsMcpServer(), reused by spawnClaude() for writing stdio MCP configs.
+> Source:  
+
+## 2026-04-14 [Bug Fix] MCP server health-check: ensure functions must verify liveness every call
+> Rule: ensureChromeDevToolsMcpServer() and ensurePlaywrightMcpServer() cached _chromeMcpReady/_playwrightMcpReady as true after first successful start, but never re-verified. If the MCP server process died between stories, subsequent stories got a stale URL pointing to a dead server. Fix: on every call when _ready=true, probe the HTTP endpoint. If probe fails, reset state and restart the server.
+> Context:  
+> Source:  
+
+## 2026-04-14 [Gotcha] Journey mode bypass: "no code changes" gate must skip for mode=journey
+> Rule: execution-engine.ts has a "no code changes" gate (git status --porcelain check) that treats exit-0-with-no-file-edits as failure. Journey mode specs browse the live app via Chrome DevTools MCP — they exit 0 with no file modifications by design. The gate must check `mode === 'journey'` and skip entirely.
+> Context:  
+> Source:  
+## 2026-04-14 [Gotcha] ChromeMCP per-story log spam removed
+> Rule: "Chrome DevTools tools active for story X" printed for every story in journey specs, cluttering the terminal. Removed — only the "unavailable" warning prints when Chrome is not running. One-time "Chrome ready" and "Proxy ready" on init are kept.
+> Context:  
+> Source:  
+## 2026-04-15 [Pattern] Terminal session route preflights OpenCode availability
+> Rule: Before creating an interactive terminal PTY session, check `detectOpenCode()` in `backend/src/routes/terminal.ts` and return a 422 `OPENCODE_NOT_INSTALLED` error with an install hint when the binary is missing.
+> Context: This lets the frontend render a clear empty state instead of attempting terminal setup and showing a broken terminal surface.
+> Source: OCT-015
+
+## 2026-04-15 [Pattern] OpenCode PTY direction injection mirrors Codex marker restoration
+> Rule: For OpenCode PTY sessions, write synthesized direction context to `.opencode/AGENTS.md` between Rorca markers and restore/delete it via an idempotent per-session cleanup hook on both explicit delete and PTY exit.
+> Context: This keeps terminal sessions context-aware without permanently mutating workspace files or clobbering user-owned OpenCode config.
+> Source: OCT-038

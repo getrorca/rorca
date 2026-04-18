@@ -19,7 +19,7 @@
         "Unit test `backend/src/lib/ci-autofix/__tests__/error-parser.test.ts` covers: each of the 10 parsers with realistic sample output, deduplication, empty text returns empty array"
       ],
       "dependsOn": [],
-      "passes": false,
+      "passes": true,
       "suggestedSkills": [
         {
           "name": "security-scan",
@@ -41,7 +41,8 @@
           "relevance": 5,
           "reason": "The error-parser registry must cover gaps across multiple CI tool output formats — gap-analysis skill helps ensure the built-in parsers have comprehensive coverage"
         }
-      ]
+      ],
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CAF-002",
@@ -66,7 +67,7 @@
       "dependsOn": [
         "CAF-001"
       ],
-      "passes": false,
+      "passes": true,
       "suggestedSkills": [
         {
           "name": "workflow-orchestrator",
@@ -88,7 +89,8 @@
           "relevance": 7,
           "reason": "Generating fix specs that are language-agnostic and direction-stack-aware requires the exhaustive spec skill to ensure acceptance criteria per annotation are properly formed"
         }
-      ]
+      ],
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CAF-003",
@@ -111,7 +113,7 @@
         "Migration is idempotent — uses `IF NOT EXISTS` on table and columns"
       ],
       "dependsOn": [],
-      "passes": false,
+      "passes": true,
       "suggestedSkills": [
         {
           "name": "database-optimization",
@@ -133,7 +135,8 @@
           "relevance": 5,
           "reason": "New workspace config columns and API endpoints need security review — JSONB column injection, UUID casting from route params, and unauthenticated access risks"
         }
-      ]
+      ],
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CAF-004",
@@ -155,7 +158,7 @@
       "dependsOn": [
         "CAF-003"
       ],
-      "passes": false,
+      "passes": true,
       "suggestedSkills": [
         {
           "name": "react-review",
@@ -172,7 +175,8 @@
           "relevance": 7,
           "reason": "Status badges (triggered/completed/failed/skipped) and agent badges (Claude/OpenCode/Codex) must use existing Tailwind token patterns from the design system — consistency with RunsPanel.tsx is required"
         }
-      ]
+      ],
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CAF-005",
@@ -194,7 +198,7 @@
         "CAF-002",
         "CAF-003"
       ],
-      "passes": false,
+      "passes": true,
       "suggestedSkills": [
         {
           "name": "logging-fundamentals",
@@ -216,7 +220,8 @@
           "relevance": 5,
           "reason": "GitHub token decryption and commit status posting involve sensitive OAuth token handling — security review ensures tokens are not logged and decryption errors are handled safely"
         }
-      ]
+      ],
+      "notes": "Completed by Rorca engine"
     },
     {
       "id": "CAF-006",
@@ -236,7 +241,7 @@
       "dependsOn": [
         "CAF-005"
       ],
-      "passes": false,
+      "passes": true,
       "suggestedSkills": [
         {
           "name": "security-scan",
@@ -258,7 +263,8 @@
           "relevance": 5,
           "reason": "Story makes assumptions about worktree vs non-worktree branching and cherry-pick behavior — assumption busting helps surface edge cases like detached HEAD state, diverged branches, or missing remote refs"
         }
-      ]
+      ],
+      "notes": "Completed by Rorca engine"
     }
   ],
   "model": "claude-opus-4-6",

@@ -1,5 +1,6 @@
 // @refresh reset
 import { useCallback, useEffect, useMemo, useRef, useState } from 'react';
+import { useLocation } from 'react-router-dom';
 import {
   AlertTriangle,
   Bot,
@@ -249,6 +250,8 @@ function prunePersistedSessions(predicate: (session: PersistedSession) => boolea
 export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPanelProps) {
   const { workspaceId, selectedWorkspace, workspaces, setWorkspaceId } = useWorkspace();
   const navigate = useNavigate();
+  const location = useLocation();
+  const isActiveRoute = mode === 'drawer' || location.pathname === '/terminal';
   const toast = useGlobalToast();
   const toastRef = useRef(toast);
   toastRef.current = toast;
@@ -307,6 +310,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const createSessionRef = useRef<(workspaceId: string, activate?: boolean) => Promise<void>>();
   const persistWorkspaceSessionsRef = useRef<(targetWorkspaceId: string | null, nextSessions: TerminalSessionRecord[]) => void>();
   const bumpBackgroundSessionsVersionRef = useRef<() => void>();
+  const isActiveRouteRef = useRef(false);
 
   const headerHeightClass = mode === 'panel' ? 'h-10' : 'h-9';
   const headerTextClass = mode === 'panel' ? 'text-[12px]' : 'text-[11px]';
@@ -513,6 +517,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   createSessionRef.current = createSession;
   persistWorkspaceSessionsRef.current = persistWorkspaceSessions;
   bumpBackgroundSessionsVersionRef.current = bumpBackgroundSessionsVersion;
+  isActiveRouteRef.current = isActiveRoute;
 
   useEffect(() => {
     if (!workspaceId) return;
@@ -583,7 +588,11 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
         setActiveSessionId(null);
         nextLabelNumRef.current = 1;
         persistWorkspaceSessionsRef.current?.(workspaceId, []);
-        await createSessionRef.current?.(workspaceId, true);
+        // Only auto-create when the terminal panel is actually visible — avoids
+        // firing session creation while browsing Specs/Runs/etc.
+        if (isActiveRouteRef.current) {
+          await createSessionRef.current?.(workspaceId, true);
+        }
         return;
       }
 
@@ -627,7 +636,10 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
       setActiveSessionId(null);
       nextLabelNumRef.current = 1;
       persistWorkspaceSessionsRef.current?.(workspaceId, []);
-      await createSessionRef.current?.(workspaceId, true);
+      // Only auto-create when the terminal panel is actually visible
+      if (isActiveRoute) {
+        await createSessionRef.current?.(workspaceId, true);
+      }
     };
 
     void restoreWorkspaceSessions();
@@ -895,7 +907,7 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
             <Bot size={14} />
           </div>
           <div className="min-w-0">
-            <div className={`font-medium text-[var(--text)] ${headerTextClass}`}>OpenCode</div>
+            <div className={`font-medium text-[var(--text)] ${headerTextClass}`}>Terminal</div>
             <div className="text-[10px] text-muted">
               {activeSession ? (
                 <div className="inline-flex items-center gap-1.5">
