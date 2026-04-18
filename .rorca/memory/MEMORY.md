@@ -175,24 +175,9 @@
 > Context: RunTerminal also has formatStreamJsonForDisplay() which filters on the frontend, but MiniTerminalPane had no equivalent — it just ran everything through the ANSI converter directly.
 > Source:  
 
-## 2026-04-06 [Gotcha] Disk full from orphaned worktree node_modules
-> Rule: Worktrees created by wave-parallel runs each get their own node_modules (500MB+ frontend, 275MB+ backend). With 70+ prunable worktrees, this consumed 27GB+. Symptoms: ENOSPC errors, backend crashes, pg-boss can't write jobs. Fix: periodically run 'git worktree prune' and delete node_modules from inactive worktrees. Active worktrees can be identified with 'ps aux | grep execution-engine'.
-> Context:  
-> Source:  
-
 ## 2026-04-06 [Convention] Agent routing rule — Claude models must stay on Claude CLI
 > Rule: When resolving agent type in pipeline.ts: (1) Explicit agentOverride from request or spec JSON takes priority. (2) Auto-detection only switches to OpenCode for non-Claude provider prefixes (openrouter/, openai/, google/, ollama/, github/, bedrock/, vertex/). (3) anthropic/claude-* models must NEVER auto-switch to OpenCode — they use Claude CLI subscription. (4) Bare provider/model strings (e.g. z-ai/glm-5) get openrouter/ prefix added when running on OpenCode.
 > Context:  
-> Source:  
-
-## 2026-04-06 [Bug Fix] Pending migrations not tracked — manual psql apply skips schema_migrations row
-> Rule: If migrations are applied manually via psql (outside pg-index.ts runner), the schema_migrations tracking row is never inserted. Backend reports status: degraded with N pending migrations. Fix: apply the SQL file via psql, then INSERT INTO rorca.schema_migrations (version, filename) VALUES (...) manually. Always apply migrations through the runner to avoid this.
-> Context: Fixed 4 pending migrations (20260403170000–20260404000001) that were applied but untracked. Backend went from degraded to ok.
-> Source:  
-
-## 2026-04-07 [Bug Fix] Codex CLI invocation changed — --approval-mode no longer valid
-> Rule: Codex CLI no longer accepts `--approval-mode auto-edit` as a top-level flag. Correct non-interactive invocation is `codex exec --dangerously-bypass-approvals-and-sandbox`. Model passed via `-m <model>`. Prompt via stdin (codex exec reads stdin when no prompt arg given).
-> Context: execution-engine.ts spawnCodex() was failing with "unexpected argument '--approval-mode' found". Fixed by switching to `codex exec --dangerously-bypass-approvals-and-sandbox` subcommand pattern.
 > Source:  
 
 ## 2026-04-07 [Architecture] Codex model selection — reads from ~/.codex/models_cache.json
@@ -200,22 +185,112 @@
 > Context: Initial implementation hardcoded o3/o4-mini/gpt-4o/gpt-4.1 — wrong. Real models from Codex 0.118.0 cache: gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.2-codex, gpt-5.2, gpt-5.1-codex-max, gpt-5.1-codex-mini. All support reasoning levels low/medium/high/xhigh.
 > Source:  
 
-## 2026-04-07 [Bug Fix] API server must be restarted for new routes to register — tsx does not hot-reload
-> Rule: The Express API server (src/server.ts) runs under plain `tsx` — NOT `tsx watch`. It does NOT auto-restart on file changes. New routes added to route files (e.g. config.ts) will return 404 until the server process is killed and restarted. Kill with `lsof -ti:3030 | xargs kill -9` then restart. The worker (src/worker.ts) has the same behavior.
-> Context: Added GET /api/config/codex-models route but got 404 — server PID 42585 had been running since Monday 2AM and had not picked up the new route. Required manual kill + restart.
-> Source:  
-
-## 2026-04-07 [Bug Fix] OpenCode JSON blobs in terminals — two separate data paths require two fixes
-> Rule: OpenCode `--format json` outputs newline-delimited JSON events. Two completely separate paths feed terminal output: (1) Main terminal: execution-engine.ts spawnOpenCode() writes to process.stdout → run_output_chunks → SSE. Fix: filter step_finish/step_start/tool_result before writing to process.stdout (logStream still gets raw). (2) Wave parallel sub-terminals: MiniTerminalPane.tsx reads from /stories/:storyId/log SSE. Fix: add line-by-line JSON filtering in the SSE chunk event handler. Fixing only one path leaves the other showing blobs.
-> Context: Session 2026-04-06/07. Also filter stderr — Claude CLI writes diagnostic JSON metrics to stderr; skip valid JSON lines, only forward genuine errors.
-> Source:  
-
-## 2026-04-07 [Decision] Model escalation/cascade system fully removed — simplified to story→spec→env resolution
-> Rule: The entire model escalation/cascading system (ModelRoutingSection, ThresholdSlider, RouterMode, TaskType, OrchestrationState, capMismatchMode, story_escalated WAL events, EscalationEntry in FinOps) was removed in sessions 2026-04-06/07. Canonical model resolution is now: story.model → spec.model → RORCA_MODEL env. No DB cascades, no complexity scorer tiers, no automatic model swapping. Reason: caused surprise OpenRouter charges (Qwen free → Claude Opus swap without user awareness).
-> Context: UI remnants removed from: ProviderSettingsTab.tsx (ModelRoutingSection + ThresholdSlider ~370 lines), FinOpsTab.tsx (EscalationEntry, savings banner, escalation log), UnifiedActivitySection.tsx (story_escalated event), TriggerPopover.tsx (capMismatchMode, isBlocked logic).
-> Source:  
-
 ## 2026-04-07 [Architecture] EngineSelector greyed pills = inactive state, not disabled — all three are always clickable
 > Rule: EngineSelector (Claude Sub / OpenCode API / Codex Sub) uses text-[var(--text-muted)] for inactive pills which appears grey. This is intentional inactive styling — all buttons are always clickable regardless of availability dot color. The availability dot (green/grey) reflects whether the binary is installed, but does NOT disable the button. ModelPickerPopover shows opacity-50 cursor-not-allowed only when engine===codex AND no model selection supported (now removed — Codex supports full GPT model selection).
 > Context: User asked why Codex appeared greyed out. Was normal inactive state. Separately identified that ModelPickerPopover was incorrectly disabled for Codex — fixed by adding full model selection support.
 > Source:  
+
+## 2026-04-14 [Architecture] rorca-ci-autofix spec — 5-story CI feedback loop
+> Rule: New spec `rorca-ci-autofix` (CAF-001–005) approved and ready to run. Implements: (1) CAF-001 — `check_run` webhook handler parsing CI failure annotations into WAL event `ci_check_failed`; (2) CAF-002 — fix-orchestrator subscribes to WAL, generates single-story fix spec, enqueues pipeline run, max 2 attempts per SHA guard; (3) CAF-003 — `ci_autofix_runs` migration table + `ci_autofix_enabled` boolean on workspaces (opt-in, default false) + GET/PATCH `/api/workspaces/:id/ci-autofix` endpoints; (4) CAF-004 — Settings > GitHub tab UI: enable toggle + run history table; (5) CAF-005 — post GitHub commit status back on run completion. Uses `onGithubEvent()` registry + `subscribe()` from sse-hub. Only fires on check runs named `CI Gate*`.
+> Context: Generated 2026-04-14 using exhaustive-specification skill. Model: claude-opus-4-6. No existing spec covered GitHub CI integration — rorca-integrations only had Linear/Vercel/Slack.
+> Source:  
+
+## 2026-04-15 [Architecture] node-pty graceful degradation — try/catch at module load, not import time
+> Rule: When integrating native N-API modules like node-pty, wrap require() in a try/catch at module load (not dynamic import()). Set a module-scoped PTY_AVAILABLE boolean. Check this flag before calling native module functions and throw structured errors ({ code, message }) that routes can catch and convert to 503 Service Unavailable. This allows the server to start successfully even when the native module is not built, with the feature gracefully disabled.
+> Context: Native modules like node-pty require platform-specific compiled binaries and cannot be bundled with bun build --compile. The terminal feature is server-only and requires users to run npm rebuild node-pty after install. Graceful degradation ensures the entire backend doesn't crash when the native module is missing.
+> Source: OCT-024
+
+## 2026-04-15 [Architecture] Terminal drawer is the sole OpenCode entry point
+> Rule: Use `TerminalDrawerContext` plus the always-mounted `TerminalDrawer` in `App.tsx` for terminal access; do not add sidebar navigation items for OpenCode terminal access.
+> Context: Keeps navigation at six items while preserving terminal sessions across route changes and supporting desktop handle/FAB access patterns.
+> Source: OCT-036
+
+## 2026-04-15 [Pattern] Terminal PTY sessions support per-session model override
+> Rule: When spawning OpenCode terminal sessions, accept an optional validated `model` in POST /api/terminal/sessions and inject it into that PTY env only via `OPENCODE_MODEL`/`RORCA_MODEL`; never mutate global provider settings.
+> Context: Lets users experiment per terminal session without affecting pipeline runs or workspace-wide defaults.
+> Source: OCT-037
+
+## 2026-04-15 [Architecture] OpenCode terminal access is drawer-only
+> Rule: Expose the OpenCode terminal exclusively through the global TerminalDrawer overlay, not a sidebar nav item, with desktop handle bar and mobile FAB entry points.
+> Context: Keeps primary navigation at six items while preserving persistent terminal sessions across route changes.
+> Source: OCT-036
+
+## 2026-04-15 [Pattern] Terminal sessions support env-scoped model override
+> Rule: Pass an optional `model` to `POST /api/terminal/sessions` and inject it only into the spawned PTY env (`OPENCODE_MODEL` and session-local `RORCA_MODEL`) without mutating workspace or global settings.
+> Context: Lets terminal sessions choose a different OpenCode model than pipeline runs or provider settings while preserving the canonical global model resolution chain.
+> Source: OCT-037
+
+## 2026-04-15 [Pattern] Terminal install polling uses refs for timers
+> Rule: When polling for external CLI installation in React, store interval IDs and elapsed counters in useRef, clear them on success, workspace changes, and unmount, and sequence any success flash before retrying the original action.
+> Context: Avoids stale closure bugs and prevents orphaned polling loops in TerminalPanel's OpenCode auto-retry flow.
+> Source: OCT-040
+
+## 2026-04-16 [Bug Fix] Terminal WebSocket output dropped — session.outputSequence vs nextSequence
+> Rule: server.ts used `session.outputSequence` but PtySession interface defines `nextSequence`. undefined += 1 → NaN → JSON null → frontend sequence check (null <= 0 === true) silently dropped every WebSocket output message. Keystrokes were sent to PTY but echoes never reached xterm. Fix: use session.nextSequence in server.ts WebSocket onData handler.
+> Context: Root cause of "typing works only after refresh" bug. Scrollback REST endpoint worked (showed text on refresh) but live WebSocket output was completely silent.
+> Source: OCT-001
+
+## 2026-04-16 [Bug Fix] Terminal wsToken one-time-use breaks React StrictMode
+> Rule: WebSocket connection tokens were deleted on first validation (one-time use). React StrictMode double-mounts effects: first mount consumes token, cleanup closes connection, second mount rejected. Fix: keep token in map until TTL expiry (60s) instead of deleting on first use. File: backend/src/routes/terminal.ts validateWsToken().
+> Context: Combined with the outputSequence bug, this was a secondary cause of no live output. Even after fixing sequences, StrictMode would still kill the WebSocket on second mount.
+> Source: OCT-021
+
+## 2026-04-16 [Bug Fix] Terminal workspaces.domain vs domains column mismatch
+> Rule: terminal-context-injector.ts queried `SELECT domain FROM workspaces` but the column is `domains` (JSONB array, not singular text). Fix: query `domains`, JSON.parse, extract first element for L2 direction layer lookup.
+> Context:  
+> Source: OCT-001
+
+## 2026-04-16 [Bug Fix] Terminal route ordering — /sessions/history shadowed by /sessions/:sessionId
+> Rule: Express matched GET /sessions/history as sessionId="history" because the :sessionId route was registered before the /history route. Fix: move /sessions/history routes before /sessions/:sessionId in terminal.ts.
+> Context:  
+> Source: OCT-001
+
+## 2026-04-16 [Bug Fix] Terminal node-pty spawn-helper missing execute permission
+> Rule: node-pty prebuilds/darwin-arm64/spawn-helper installed without +x permission → posix_spawnp failed, crashing the backend. Fix: chmod +x spawn-helper. npm rebuild node-pty also fixes this. Check after every npm install.
+> Context:  
+> Source: OCT-001
+
+## 2026-04-16 [Bug Fix] Terminal infinite re-render loops — useTerminalSession unstable returns
+> Rule: useTerminalSession hook returned plain functions (sendInput, sendResize, onData, etc.) — new refs every render. These were in TerminalPane's main useEffect deps → terminal torn down and recreated every render. Fix: wrap all returned functions in useCallback. Also: TerminalPanel callback props (onExit, onInput, onTitleChange, onBell) were inline arrows — captured via refs instead.
+> Context: Multiple layers of unstable references: useTerminalSession functions, TerminalPanel inline arrow props, WorkspaceContext/ToastContext unmemoized values, loadModelPickerData activeSessionId dep. All fixed with useCallback + refs.
+> Source: OCT-001
+
+## 2026-04-16 [Bug Fix] WorkspaceContext and ToastContext provider values not memoized
+> Rule: Both contexts created inline value objects without useMemo, causing all consumers to re-render on every provider render. WorkspaceContext.setWorkspaceId was also a plain function (not useCallback). Fix: useMemo on both context values, useCallback on setWorkspaceId and addWorkspace.
+> Context: This was a pre-existing issue affecting all context consumers, not just the terminal. The terminal exposed it because of the many useEffect hooks with context-derived deps.
+> Source: OCT-001
+
+## 2026-04-16 [Decision] Terminal drawer hidden on /terminal route to prevent session mirroring
+> Rule: TerminalDrawer returns null when location.pathname === '/terminal'. Both the panel and drawer share the same localStorage-persisted sessions, so rendering both simultaneously causes mirrored PTY output. The drawer (with handle bar) is available on all other routes.
+> Context:  
+> Source: OCT-001
+
+## 2026-04-16 [Decision] Terminal drawer spans full viewport width (no sidebar offset)
+> Rule: TerminalDrawer getSidebarOffset() returns '0px' for all breakpoints. Previously offset by sidebar width on desktop, leaving a gap. User requested it align with the content grid left edge.
+> Context:  
+> Source: OCT-001
+
+## 2026-04-16 [Bug Fix] TerminalPanel always-mounted to preserve PTY sessions across navigation
+> Rule: TerminalPanel is now always-mounted in AppLayout (outside the Outlet) to keep PTY sessions alive when navigating to Specs/Runs/etc. Visibility is CSS-only: `className={location.pathname === '/terminal' ? 'contents' : 'hidden'}`. The ActivePanel case 'terminal' returns null. Auto-session creation is gated on isActiveRouteRef.current so it only fires when actually on /terminal — prevents 422 errors when browsing other panels with a workspace that has no vault key.
+> Context: Before this fix, navigating away from /terminal unmounted TerminalPanel entirely (React Router route unmount), destroying all in-memory PTY session state. On return, it would remount fresh and try to auto-create a new session.
+> Source:  
+
+## 2026-04-16 [Bug Fix] qa-accrual-missing-flows worktree spec was stale (10 stories vs 17 in main)
+> Rule: The worktree at Cashflow-App-feat-qa-accrual-missing-flows had an old 10-story spec (AMF-001–010, all passes=False). The main repo had 17 stories (AMF-000–016) with 12 already passing. Engine read the spec from workspacePath (main), but the run's previously_passed skip logic also read from main — however the WAL had no record of AMF-013/014/015 because the worktree spec didn't contain them, causing state_reconciliation failure. Fixed by copying main spec into worktree and committing. Run 192 still failed due to stale worker (Tuesday night PID 17483 running alongside fresh concurrently worker from same day).
+> Context: Remaining failing stories: AMF-002, AMF-003, AMF-013, AMF-014, AMF-015. Pattern: worktree spec diverges from main when stories are added to main after the worktree was created. Always sync worktree spec before re-running.
+> Source:  
+
+## 2026-04-16 [Gotcha] Multiple stale server/worker processes cause silent job failures
+> Rule: When npm run dev is started multiple times (e.g. once manually, once via mprocs), you get duplicate server and worker processes on the same ports. The stale worker (old PID, old code) can claim pg-boss jobs before the fresh worker does. Runs appear to start (status=running) but the engine never spawns (pid=NULL, last_heartbeat=NULL) and state reconciliation marks them failed in ~30s. Always kill ALL node processes before starting: `lsof -ti:3030 | xargs kill -9; lsof -ti:5210 | xargs kill -9; ps aux | grep -E "(server|worker)\.ts" | grep -v grep | awk '{print $2}' | xargs kill -9`
+> Context: Observed 2026-04-16: worker PID 17483 from Tuesday night still running alongside fresh worker from 1:17PM same day. The Tuesday worker had worker_id f5f831e1 in heartbeat table and was claiming jobs with stale code.
+> Source:  
+
+## 2026-04-16 [Decision] StoryCard Linear-style status treatment — dot icon + dimming, no colored ID or DONE badge
+> Rule: Story cards now follow Linear's UX pattern: (1) story ID is always muted gray — never colored by status; (2) status dot left of title: Circle=not done, CheckCircle2=done (muted), MinusCircle=deferred; (3) done rows dim to opacity-50 + border-border/50 + title goes text-muted; (4) DONE text badge removed entirely. Done stories recede visually, unfinished stories demand attention.
+> Context: Previous design: teal ID = not done, green DONE badge = done. This highlighted completed work and buried unfinished work — inverse of useful signal. 2026-04-16.
+> Source:  
+
+## 2026-04-16 [Bug Fix] Vite worktree process persists on port 5173 after killing main processes
+> Rule: When a spec run creates a worktree (e.g. Cashflow-App-feat-qa-accrual-missing-flows), that worktree's Vite dev server may still be running independently. Killing the main Cashflow-App processes does not kill the worktree's Vite. Result: new mprocs Vite bumps to 5174, old browser tab on 5173 still works. Find with: `lsof -ti:5173 | xargs ps -p` then kill the worktree Vite PID separately.
+> Context: Observed 2026-04-16: PID 31425 was node running vite from Cashflow-App-feat-qa-accrual-missing-flows/node_modules/.bin/vite --port 5173.
+> Source: 

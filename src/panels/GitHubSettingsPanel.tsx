@@ -650,7 +650,7 @@ export default function GitHubSettingsPanel() {
               {status.webhookId ? (
                 <div className="mt-3 flex items-center gap-2 text-xs text-muted">
                   <Webhook size={14} />
-                  Events: push, pull_request, issues
+                  Events: push, pull_request, issues, check_run
                 </div>
               ) : (
                 <div className="mt-3 flex items-center gap-2 text-xs text-amber-400 bg-amber-500/10 border border-amber-500/30 rounded px-2.5 py-1.5">
@@ -710,7 +710,7 @@ export default function GitHubSettingsPanel() {
         ) : (
           <div className="rounded-lg border border-border bg-panel p-4 space-y-3">
             <p className="text-sm text-muted">
-              Connect a GitHub repository to receive push, pull_request, and issue events via webhook.
+              Connect a GitHub repository to receive push, pull_request, issue, and check_run events via webhook.
             </p>
 
             <div className="grid grid-cols-1 sm:grid-cols-2 gap-3">
@@ -1038,6 +1038,9 @@ export default function GitHubSettingsPanel() {
         )}
       </section>
 
+      {/* ── CI Autofix ───────────────────────────────────────────────────────── */}
+      <CiAutofixSection workspaceId={workspaceId} />
+
       {/* ─── Section 6: PR Template ───────────────────────────────────── */}
       <section className="border-t border-border pt-6 pb-6">
         <div className="flex items-center justify-between mb-3">
@@ -1206,8 +1209,6 @@ export default function GitHubSettingsPanel() {
         </section>
       )}
 
-      {/* ── CI Autofix ───────────────────────────────────────────────────────── */}
-      <CiAutofixSection workspaceId={workspaceId} />
     </div>
   );
 }
@@ -1273,6 +1274,7 @@ function CiAutofixSection({ workspaceId }: { workspaceId: string | null }) {
   const [maxRetries, setMaxRetries] = useState(2);
   const [newPattern, setNewPattern] = useState('');
   const [dirty, setDirty] = useState(false);
+  const [saved, setSaved] = useState(false);
 
   const load = useCallback(async () => {
     if (!workspaceId) return;
@@ -1295,7 +1297,7 @@ function CiAutofixSection({ workspaceId }: { workspaceId: string | null }) {
   useEffect(() => { load(); }, [load]);
 
   const save = async () => {
-    if (!workspaceId) return;
+    if (!workspaceId || saving) return;
     setSaving(true);
     setError(null);
     try {
@@ -1303,7 +1305,9 @@ function CiAutofixSection({ workspaceId }: { workspaceId: string | null }) {
         method: 'PATCH',
         body: JSON.stringify({ enabled, checkPatterns: patterns.length > 0 ? patterns : null, maxRetries }),
       });
-      await load();
+      setDirty(false);
+      setSaved(true);
+      setTimeout(() => setSaved(false), 2000);
     } catch (e) {
       setError(e instanceof Error ? e.message : 'Failed to save');
     } finally {
@@ -1406,12 +1410,13 @@ function CiAutofixSection({ workspaceId }: { workspaceId: string | null }) {
             </div>
 
             {/* Save */}
+            {saved && <p className="text-xs text-green-400">Saved</p>}
             {dirty && (
               <div className="flex items-center gap-3">
                 <button type="button" onClick={save} disabled={saving}
                   className="flex items-center gap-2 px-4 py-2 rounded-lg bg-accent text-white text-sm font-medium hover:bg-accent/90 disabled:opacity-60 transition-colors">
                   {saving && <RefreshCw size={13} className="animate-spin" />}
-                  {saving ? 'Saving…' : 'Save changes'}
+                  {saving ? 'Saving…' : 'Save'}
                 </button>
                 <button type="button" onClick={() => { if (config) { setEnabled(config.enabled); setPatterns(config.checkPatterns ?? ['*']); setMaxRetries(config.maxRetries); setDirty(false); } }}
                   className="text-sm text-muted hover:text-[var(--text)] transition-colors">Cancel</button>

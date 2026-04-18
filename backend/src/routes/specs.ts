@@ -2320,6 +2320,28 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       { stories: parsed.stories as unknown[] },
       (contextSummary ?? {}) as Record<string, unknown>,
     ).catch(() => { /* non-blocking — errors logged internally */ });
+
+    // 18. Fire-and-forget: enrich stories with CAG/RAG context, then match skills.
+    // Runs after response is sent so callers (MCP, UI) get instant feedback.
+    // Enrich runs first (adds context to story descriptions), then match-skills
+    // (assigns suggestedSkills arrays). Both write back to the spec JSON on disk.
+    setImmediate(() => {
+      const apiBase = `http://127.0.0.1:${process.env.PORT || 3030}`;
+      const headers = { 'Content-Type': 'application/json' };
+      const body = JSON.stringify({ workspaceId });
+      fetch(`${apiBase}/api/specs/${slug}/enrich`, { method: 'POST', headers, body })
+        .then(r => {
+          if (!r.ok) logger.warn(`[post-generate] enrich failed: ${r.status}`);
+          else logger.info(`[post-generate] enrich complete for ${slug}`);
+          // Match skills after enrich finishes (needs enriched descriptions for better matching)
+          return fetch(`${apiBase}/api/specs/${slug}/match-skills`, { method: 'POST', headers, body });
+        })
+        .then(r => {
+          if (!r.ok) logger.warn(`[post-generate] match-skills failed: ${r.status}`);
+          else logger.info(`[post-generate] match-skills complete for ${slug}`);
+        })
+        .catch(err => logger.warn({ err }, `[post-generate] enrich/match-skills error for ${slug}`));
+    });
   } catch (error: any) {
     // Let AppErrors (NotFoundError, ValidationError, etc.) propagate to the global error handler
     // so they return their correct HTTP status codes instead of always returning 500.
