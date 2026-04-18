@@ -3,8 +3,6 @@ services:
     build:
       context: docker/postgres
       dockerfile: Dockerfile
-    ports:
-      - "5433:5432"
     environment:
       POSTGRES_USER: rorca
       POSTGRES_PASSWORD: rorca
@@ -22,23 +20,49 @@ services:
     build:
       context: .
       dockerfile: Dockerfile
-    ports:
-      - "3030:3030"
     environment:
       DATABASE_URL: postgres://rorca:rorca@db:5432/rorca
       RORCA_SERVE_STATIC: "1"
       NODE_ENV: production
-      # Execution engine — set in .env
       RORCA_AGENT: ${RORCA_AGENT:-claude}
       RORCA_MODEL: ${RORCA_MODEL:-}
-      # API keys — set in .env
       ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
       OPENAI_API_KEY: ${OPENAI_API_KEY:-}
       OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
       GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
-      # Spec generation provider
       SPEC_PROVIDER: ${SPEC_PROVIDER:-claude}
-      # Optional overrides
+      JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
+      AUTH_REQUIRED: ${AUTH_REQUIRED:-true}
+    env_file:
+      - path: .env
+        required: false
+    depends_on:
+      db:
+        condition: service_healthy
+    restart: unless-stopped
+    labels:
+      - traefik.enable=true
+      - traefik.http.routers.rorca.rule=Host(`${COOLIFY_FQDN}`)
+      - traefik.http.routers.rorca.entrypoints=https
+      - traefik.http.routers.rorca.tls=true
+      - traefik.http.routers.rorca.tls.certresolver=letsencrypt
+      - traefik.http.services.rorca.loadbalancer.server.port=3030
+
+  worker:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    command: node backend/dist/worker.js
+    environment:
+      DATABASE_URL: postgres://rorca:rorca@db:5432/rorca
+      NODE_ENV: production
+      RORCA_AGENT: ${RORCA_AGENT:-claude}
+      RORCA_MODEL: ${RORCA_MODEL:-}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
+      OPENAI_API_KEY: ${OPENAI_API_KEY:-}
+      OPENROUTER_API_KEY: ${OPENROUTER_API_KEY:-}
+      GOOGLE_API_KEY: ${GOOGLE_API_KEY:-}
+      SPEC_PROVIDER: ${SPEC_PROVIDER:-claude}
       JWT_SECRET: ${JWT_SECRET:-change-me-in-production}
     env_file:
       - path: .env
@@ -47,6 +71,12 @@ services:
       db:
         condition: service_healthy
     restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pgrep -f 'worker.js' > /dev/null"]
+      interval: 30s
+      timeout: 5s
+      start_period: 15s
+      retries: 3
 
 volumes:
   rorca_pgdata:
