@@ -313,11 +313,21 @@ server.registerTool(
         }),
       }, 600_000); // 10 min — Opus with 20+ stories can take 90s+
       if (!res.ok) return httpError('rorca_generate_spec', res);
-      const spec = await res.json() as { model?: string; usage?: { inputTokens?: number; outputTokens?: number } };
+      const spec = await res.json() as { slug?: string; id?: string; title?: string; model?: string; usage?: { inputTokens?: number; outputTokens?: number } };
+
+      // Enrich + match-skills run automatically in the backend after generate completes.
+      // No need to chain them here — backend fires them via setImmediate post-response.
       return {
         content: [{
           type: 'text' as const,
-          text: JSON.stringify({ ok: true, title, model: spec.model ?? 'unknown', tokens: { in: spec.usage?.inputTokens ?? 0, out: spec.usage?.outputTokens ?? 0 }, spec }, null, 2),
+          text: JSON.stringify({
+            ok: true,
+            title,
+            specId: spec.slug ?? spec.id ?? title,
+            model: spec.model ?? 'unknown',
+            tokens: { in: spec.usage?.inputTokens ?? 0, out: spec.usage?.outputTokens ?? 0 },
+            note: 'Enrich + skill matching running in background. Skills tab will populate within ~2 min.',
+          }, null, 2),
         }],
       };
     });

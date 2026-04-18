@@ -1,5 +1,5 @@
 import React, { useState, useEffect } from 'react';
-import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit, GitBranch, ClipboardCopy, Check, MessageSquare, Sparkles, X, CheckCheck, Loader2 } from 'lucide-react';
+import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Circle, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit, GitBranch, ClipboardCopy, Check, MessageSquare, Sparkles, X, CheckCheck, Loader2 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { AssigneeDropdown } from './AssigneeDropdown';
 import type { Assignee } from './AssigneeDropdown';
@@ -229,7 +229,7 @@ export function StoryCard({
 
   return (
     <div className={`border rounded bg-panel transition-opacity ${
-      selected ? 'border-accent ring-1 ring-accent/30' : isDeferred ? 'border-border/50 opacity-50' : isNotReady ? 'border-warning/40' : 'border-border'
+      selected ? 'border-accent ring-1 ring-accent/30' : isDeferred ? 'border-border/50 opacity-50' : isDone ? 'border-border/50 opacity-50' : isNotReady ? 'border-warning/40' : 'border-border'
     }`}>
       <div className="px-3 py-2.5">
         <div className="flex items-start gap-2">
@@ -241,13 +241,7 @@ export function StoryCard({
               className="shrink-0 mt-1 w-3.5 h-3.5 rounded border-border accent-accent cursor-pointer"
             />
           )}
-          <span className={`shrink-0 px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded mt-0.5 ${
-            isDone
-              ? 'bg-success/15 text-success'
-              : isDeferred
-              ? 'bg-muted/15 text-muted'
-              : 'bg-accent/15 text-accent'
-          }`}>
+          <span className="shrink-0 px-1.5 py-0.5 text-[10px] font-mono font-semibold rounded mt-0.5 bg-muted/15 text-muted">
             {story.id}
           </span>
           {story.complexity != null && (
@@ -270,17 +264,18 @@ export function StoryCard({
           )}
           <div className="min-w-0 flex-1">
             <div className="flex items-center gap-2">
+              {isDone ? (
+                <CheckCircle2 size={14} className="shrink-0 text-muted/60" />
+              ) : isDeferred ? (
+                <MinusCircle size={14} className="shrink-0 text-muted/40" />
+              ) : (
+                <Circle size={14} className="shrink-0 text-muted/40" />
+              )}
               <span className={`text-sm font-semibold truncate ${
-                isDeferred ? 'text-muted line-through' : 'text-text'
+                isDeferred ? 'text-muted line-through' : isDone ? 'text-muted' : 'text-text'
               }`}>
                 {story.title}
               </span>
-              {isDone && (
-                <span className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-success/15 text-success">
-                  <CheckCircle2 size={9} />
-                  DONE
-                </span>
-              )}
               {modified && (
                 <span className="shrink-0 inline-flex items-center gap-0.5 px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">
                   <Pencil size={9} />

@@ -37,7 +37,7 @@ interface NavSection {
 const SIDEBAR_ITEMS: NavItem[] = [
   { id: 'specs',       label: 'Specs',       icon: Layers },
   { id: 'runs',        label: 'Runs',        icon: PlayCircle },
-  { id: 'terminal',    label: 'OpenCode',    icon: Bot },
+  { id: 'terminal',    label: 'Terminal',    icon: Bot },
   { id: 'marketplace', label: 'Marketplace', icon: Package },
   { id: 'analytics',   label: 'Analytics',   icon: BarChart3 },
   { id: 'direction',   label: 'Direction',   icon: Compass },
@@ -65,9 +65,9 @@ export const NAV_SECTIONS: NavSection[] = [
   },
   {
     id: 'terminal',
-    label: 'OpenCode',
+    label: 'Terminal',
     items: [
-      { id: 'terminal', label: 'OpenCode', icon: Bot },
+      { id: 'terminal', label: 'Terminal', icon: Bot },
     ],
   },
   {
