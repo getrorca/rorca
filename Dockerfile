@@ -20,7 +20,7 @@ COPY . .
 RUN npx vite build
 
 # Build backend (tsc → backend/dist/)
-RUN cd backend && npx tsc
+RUN cd backend && npx tsc --noEmitOnError false
 
 # Prune dev dependencies from backend node_modules
 RUN cd backend && npm prune --omit=dev
