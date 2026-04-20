@@ -13,7 +13,9 @@
 
 export const DEFAULT_PR_TEMPLATE = `## Summary
 
-{{spec.brief}}
+{{run.diffSummary}}
+
+> **Spec brief:** {{spec.brief}}
 
 ## Stories
 
@@ -74,6 +76,7 @@ export interface PrTemplateData {
     agentType: string;
     model: string;
     diffStats: string;
+    diffSummary: string;
   };
 }
 
@@ -110,6 +113,7 @@ export function renderPrTemplate(
     'run.agentType': String(data.run.agentType),
     'run.model': String(data.run.model),
     'run.diffStats': String(data.run.diffStats),
+    'run.diffSummary': String(data.run.diffSummary),
   };
 
   // Replace only exact {{key}} matches where key is known — leave others as-is
@@ -141,5 +145,6 @@ export const SAMPLE_PR_TEMPLATE_DATA: PrTemplateData = {
     agentType: 'claude',
     model: 'claude-opus-4-6',
     diffStats: '12 files changed, 487 insertions(+), 23 deletions(-)',
+    diffSummary: '- Added GitHub OAuth integration with encrypted token storage\n- Created auto-PR creation flow in `github-pr-creator.ts`\n- Added PR template renderer with Handlebars-style substitution\n- Implementation note: used `fetch` directly instead of Octokit (lighter dependency)',
   },
 };
