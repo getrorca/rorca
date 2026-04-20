@@ -952,6 +952,7 @@ export function WsPipelineSection({ workspaceId, showToast }: WsSectionProps) {
   const [autoWorktree, setAutoWorktree] = useState(true);
   const [storyTimeout, setStoryTimeout] = useState(45);
   const [maxRetries, setMaxRetries] = useState(0);
+  const [mergeStrategy, setMergeStrategy] = useState<'direct' | 'pr' | 'draft-pr' | 'branch-only'>('direct');
 
   // Worker-level concurrency settings
   const [queueMaxConcurrent, setQueueMaxConcurrent] = useState(1);
@@ -961,11 +962,12 @@ export function WsPipelineSection({ workspaceId, showToast }: WsSectionProps) {
 
   useEffect(() => {
     // Fetch workspace pipeline config
-    apiFetch<{ config: { autoWorktree: boolean; storyTimeoutMin: number; maxRetries: number } }>(`/api/workspaces/${workspaceId}/pipeline-config`)
+    apiFetch<{ config: { autoWorktree: boolean; storyTimeoutMin: number; maxRetries: number; mergeStrategy?: string } }>(`/api/workspaces/${workspaceId}/pipeline-config`)
       .then(data => {
         setAutoWorktree(data.config.autoWorktree ?? true);
         setStoryTimeout(data.config.storyTimeoutMin ?? 45);
         setMaxRetries(data.config.maxRetries ?? 0);
+        if (data.config.mergeStrategy) setMergeStrategy(data.config.mergeStrategy as any);
       })
       .catch(() => { /* Use defaults */ })
       .finally(() => setLoading(false));
@@ -986,7 +988,7 @@ export function WsPipelineSection({ workspaceId, showToast }: WsSectionProps) {
       await apiFetch(`/api/workspaces/${workspaceId}/pipeline-config`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ autoWorktree, storyTimeoutMin: storyTimeout, maxRetries }),
+        body: JSON.stringify({ autoWorktree, storyTimeoutMin: storyTimeout, maxRetries, mergeStrategy }),
       });
       setSaved(true);
       showToast('Pipeline configuration saved');
@@ -1067,6 +1069,27 @@ export function WsPipelineSection({ workspaceId, showToast }: WsSectionProps) {
               className="w-32 px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
             />
             <p className="text-xs text-muted mt-1">Number of retry attempts for failed stories (0 = no retries)</p>
+          </div>
+
+          <div className="border-t border-border pt-5">
+            <label htmlFor="pipeline-merge-strategy" className="block text-xs text-muted mb-1">Merge Strategy</label>
+            <select
+              id="pipeline-merge-strategy"
+              value={mergeStrategy}
+              onChange={e => setMergeStrategy(e.target.value as any)}
+              className="w-full px-3 py-2 text-sm bg-bg border border-border rounded focus:border-accent outline-none"
+            >
+              <option value="direct">Direct merge to main + push</option>
+              <option value="pr">Create Pull Request (CI-gated)</option>
+              <option value="draft-pr">Create Draft Pull Request</option>
+              <option value="branch-only">Push branch only (manual control)</option>
+            </select>
+            <p className="text-xs text-muted mt-1">
+              {mergeStrategy === 'direct' && 'Maximum velocity — merges worktree to main and pushes immediately after all stories pass'}
+              {mergeStrategy === 'pr' && 'CI-gated — pushes branch and creates a PR for review and CI checks before merge'}
+              {mergeStrategy === 'draft-pr' && 'Review-first — creates a draft PR so you can review AI output before marking ready'}
+              {mergeStrategy === 'branch-only' && 'Manual control — pushes branch to remote but takes no further action'}
+            </p>
           </div>
 
           <div className="border-t border-border pt-5">

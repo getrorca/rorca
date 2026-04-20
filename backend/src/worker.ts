@@ -932,46 +932,161 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             source: 'worker',
           });
 
-          // Auto-merge worktree into main after run completes (US-004 + US-005)
+          // ── Post-run merge strategy routing ─────────────────────────────────
+          // Resolve effective merge strategy from payload (set by pipeline trigger).
+          const effectiveMergeStrategy = payload.mergeStrategy ?? 'direct';
           let allSpecStoriesPassed = false;
-          if (status === 'done' && payload.autoMerge && worktreePath && payload.branchName) {
+
+          if (status === 'done' && worktreePath && payload.branchName) {
             try {
               const absSpecPath = path.join(workspacePath, specPath);
               const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
               const stories: Array<{ passes?: boolean; excluded?: boolean }> = specJson.userStories ?? [];
               allSpecStoriesPassed = stories.length > 0 && stories.every(s => s.passes === true || s.excluded === true);
               if (!allSpecStoriesPassed) {
-                logger.info({ runId, specPath }, '[worker] Skipping auto-merge — spec not fully complete (not all stories passed)');
+                logger.info({ runId, specPath }, '[worker] Skipping post-run routing — spec not fully complete (not all stories passed)');
               }
             } catch (specErr: any) {
-              logger.warn({ runId, err: specErr?.message }, '[worker] Could not read spec JSON for merge check — skipping merge');
-            }
-          }
-          if (status === 'done' && payload.autoMerge && worktreePath && payload.branchName && allSpecStoriesPassed) {
-            try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
-            const mergeLog = (msg: string) => logger.info({ runId }, msg);
-            try {
-              await autoMergeAfterRun(
-                workspacePath,
-                worktreePath,
-                payload.branchName,
-                workspaceId,
-                runId,
-                mergeLog,
-              );
-            } catch (mergeErr: any) {
-              logger.error({ err: mergeErr, runId }, '[worker] autoMergeAfterRun threw unexpectedly');
+              logger.warn({ runId, err: specErr?.message }, '[worker] Could not read spec JSON for merge check — skipping');
             }
           }
 
-          // US-034: Finalize draft PR on run completion.
-          if (payload.branchName) {
+          if (status === 'done' && worktreePath && payload.branchName && allSpecStoriesPassed) {
+            const mergeLog = (msg: string) => logger.info({ runId }, msg);
+
+            switch (effectiveMergeStrategy) {
+              case 'direct': {
+                // Merge worktree branch into main + push to remote
+                try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                try {
+                  await autoMergeAfterRun(
+                    workspacePath,
+                    worktreePath,
+                    payload.branchName,
+                    workspaceId,
+                    runId,
+                    mergeLog,
+                  );
+                  // Push main to remote after successful merge
+                  const mergeStatus = await queryOne<{ merge_status: string }>('SELECT merge_status FROM pipeline_runs WHERE id = $1', [runId]);
+                  if (mergeStatus?.merge_status === 'merged') {
+                    try {
+                      const git = simpleGit(workspacePath);
+                      await git.push('origin', 'HEAD');
+                      mergeLog('[merge-strategy:direct] Pushed main to remote');
+                    } catch (pushErr: any) {
+                      mergeLog(`[merge-strategy:direct] Push failed (non-fatal): ${pushErr.message}`);
+                    }
+                  }
+                } catch (mergeErr: any) {
+                  logger.error({ err: mergeErr, runId }, '[worker] autoMergeAfterRun threw unexpectedly');
+                }
+                break;
+              }
+
+              case 'pr': {
+                // Push branch (already pushed per-story, but ensure) + create PR
+                try { await execute(`UPDATE pipeline_runs SET merge_status = 'pr_created' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                try {
+                  const git = simpleGit(worktreePath);
+                  await git.push('origin', payload.branchName, ['--set-upstream']);
+                  mergeLog(`[merge-strategy:pr] Branch pushed: ${payload.branchName}`);
+                } catch (pushErr: any) {
+                  mergeLog(`[merge-strategy:pr] Branch push failed: ${pushErr.message}`);
+                }
+                try {
+                  await createOrUpdateAutoPr({
+                    runId,
+                    workspaceId,
+                    branchName: payload.branchName,
+                    workspacePath,
+                  });
+                  mergeLog('[merge-strategy:pr] PR created');
+                } catch (prErr: any) {
+                  // Fallback: try gh CLI if GitHub API integration isn't configured
+                  try {
+                    const specSlug = path.basename(specPath, '.json');
+                    execSync(
+                      `gh pr create --title "feat: ${specSlug}" --body "Automated spec execution via Rorca.\n\nRun #${runId} completed — all stories passed." --base main`,
+                      { cwd: worktreePath, stdio: 'pipe', timeout: 30_000 },
+                    );
+                    mergeLog('[merge-strategy:pr] PR created via gh CLI fallback');
+                  } catch (ghErr: any) {
+                    mergeLog(`[merge-strategy:pr] PR creation failed (gh CLI fallback also failed): ${ghErr.message}`);
+                    // Graceful degradation to branch-only
+                    mergeLog('[merge-strategy:pr] Falling back to branch-only — branch is on remote for manual PR creation');
+                  }
+                }
+                break;
+              }
+
+              case 'draft-pr': {
+                // Push branch + create draft PR
+                try { await execute(`UPDATE pipeline_runs SET merge_status = 'pr_created' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                try {
+                  const git = simpleGit(worktreePath);
+                  await git.push('origin', payload.branchName, ['--set-upstream']);
+                  mergeLog(`[merge-strategy:draft-pr] Branch pushed: ${payload.branchName}`);
+                } catch (pushErr: any) {
+                  mergeLog(`[merge-strategy:draft-pr] Branch push failed: ${pushErr.message}`);
+                }
+                try {
+                  // Read spec for title and story count
+                  let draftSpecTitle = path.basename(specPath, '.json');
+                  let draftTotalStories = 0;
+                  try {
+                    const draftSpec = JSON.parse(fs.readFileSync(path.join(workspacePath, specPath), 'utf-8'));
+                    draftSpecTitle = draftSpec.title ?? draftSpecTitle;
+                    draftTotalStories = (draftSpec.userStories ?? []).length;
+                  } catch { /* use defaults */ }
+                  await createDraftPr({
+                    runId,
+                    workspaceId,
+                    branchName: payload.branchName,
+                    workspacePath,
+                    specTitle: draftSpecTitle,
+                    totalStories: draftTotalStories,
+                  });
+                  mergeLog('[merge-strategy:draft-pr] Draft PR created');
+                } catch (prErr: any) {
+                  // Fallback: try gh CLI
+                  try {
+                    const specSlug = path.basename(specPath, '.json');
+                    execSync(
+                      `gh pr create --draft --title "WIP: ${specSlug}" --body "Draft PR for review.\n\nRun #${runId} completed — all stories passed." --base main`,
+                      { cwd: worktreePath, stdio: 'pipe', timeout: 30_000 },
+                    );
+                    mergeLog('[merge-strategy:draft-pr] Draft PR created via gh CLI fallback');
+                  } catch (ghErr: any) {
+                    mergeLog(`[merge-strategy:draft-pr] Draft PR creation failed: ${ghErr.message}`);
+                    mergeLog('[merge-strategy:draft-pr] Falling back to branch-only — branch is on remote for manual PR creation');
+                  }
+                }
+                break;
+              }
+
+              case 'branch-only': {
+                // Just ensure branch is on remote — no PR, no merge
+                try { await execute(`UPDATE pipeline_runs SET merge_status = 'branch_pushed' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                try {
+                  const git = simpleGit(worktreePath);
+                  await git.push('origin', payload.branchName, ['--set-upstream']);
+                  mergeLog(`[merge-strategy:branch-only] Branch pushed: ${payload.branchName}. No PR created — awaiting manual action.`);
+                } catch (pushErr: any) {
+                  mergeLog(`[merge-strategy:branch-only] Push failed: ${pushErr.message}`);
+                }
+                break;
+              }
+            }
+          }
+
+          // US-034: Finalize existing draft PR on run completion (for runs that started with a draft PR).
+          if (payload.branchName && effectiveMergeStrategy === 'direct') {
             try {
               const prRow = await queryOne<{ pr_number: number | null }>(
                 'SELECT pr_number FROM pipeline_runs WHERE id = $1',
                 [runId],
               );
-
               if (prRow?.pr_number) {
                 await finalizeDraftPr({
                   runId,
@@ -980,16 +1095,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                   workspacePath,
                   status,
                 });
-              } else if (status === 'done') {
-                await createOrUpdateAutoPr({
-                  runId,
-                  workspaceId,
-                  branchName: payload.branchName,
-                  workspacePath,
-                });
               }
             } catch (prErr: any) {
-              logger.error({ err: prErr, runId }, '[worker] Draft PR finalization/auto-PR threw unexpectedly');
+              logger.error({ err: prErr, runId }, '[worker] Draft PR finalization threw unexpectedly');
             }
           }
 

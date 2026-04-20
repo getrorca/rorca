@@ -1028,6 +1028,7 @@ const PipelineTriggerSchema = z.object({
   workspaceId: z.union([z.string().min(1), z.number()]),
   autoWorktree: z.boolean().optional(),
   autoMerge: z.boolean().optional(),
+  mergeStrategy: z.enum(['direct', 'pr', 'draft-pr', 'branch-only']).optional(),
   dryRun: z.boolean().optional(),
   triggerType: z.enum(['manual', 'scheduled']).optional(),
   forceSequential: z.boolean().optional(),
@@ -1046,7 +1047,7 @@ const PipelineTriggerSchema = z.object({
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, forceRerun } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, forceRerun } = req.body;
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1506,6 +1507,31 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
     // Enforce constraint: auto_merge is only true when autoWorktree is true
     const computedAutoMerge = needsWorktree && (autoMerge !== false);
+
+    // Resolve merge strategy: request param > spec JSON > workspace config > 'direct'
+    let resolvedMergeStrategy: 'direct' | 'pr' | 'draft-pr' | 'branch-only' = 'direct';
+    if (mergeStrategy) {
+      resolvedMergeStrategy = mergeStrategy;
+    } else {
+      // Try spec JSON
+      try {
+        const specJsonMs = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
+        if (specJsonMs.mergeStrategy) {
+          resolvedMergeStrategy = specJsonMs.mergeStrategy;
+        }
+      } catch { /* non-fatal — spec read may have already been done above */ }
+      // Fall back to workspace pipeline_config
+      if (resolvedMergeStrategy === 'direct') {
+        try {
+          const wsRow = await queryOne<{ pipeline_config: string }>('SELECT pipeline_config FROM workspaces WHERE id = $1', [workspaceId]);
+          const pipelineConf = JSON.parse(wsRow?.pipeline_config || '{}');
+          if (pipelineConf.mergeStrategy) {
+            resolvedMergeStrategy = pipelineConf.mergeStrategy;
+          }
+        } catch { /* non-fatal */ }
+      }
+    }
+
     // US-002: Track trigger source — 'queue' when promoted from run queue, 'run_now' for direct triggers
     const triggeredVia = queuedRunId ? 'queue' : 'run_now';
     let runId: number;
@@ -1685,6 +1711,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       branchName: branchName ?? null,
       autoWorktree: needsWorktree,
       autoMerge: computedAutoMerge,
+      mergeStrategy: resolvedMergeStrategy,
       envOverrides,
       ...(startFromStoryId ? { startFromStoryId } : {}),
       triggeredVia,

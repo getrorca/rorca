@@ -803,6 +803,7 @@ router.get('/:id/pipeline-config', async (req, res, next) => {
         maxRetries: config.maxRetries ?? 0,
         defaultParallelism: row.default_parallelism ?? 1,
         includeGraph: config.includeGraph ?? false,
+        mergeStrategy: config.mergeStrategy ?? 'direct',
       },
     });
   } catch (err) {
@@ -857,12 +858,13 @@ router.put('/:id/pipeline-config', async (req, res, next) => {
       return;
     }
     const existing = JSON.parse(row.pipeline_config || '{}');
-    const { autoWorktree, storyTimeoutMin, maxRetries, defaultParallelism, includeGraph } = req.body;
+    const { autoWorktree, storyTimeoutMin, maxRetries, defaultParallelism, includeGraph, mergeStrategy } = req.body;
     const merged = {
       autoWorktree: autoWorktree !== undefined ? autoWorktree : existing.autoWorktree,
       storyTimeoutMin: storyTimeoutMin !== undefined ? storyTimeoutMin : existing.storyTimeoutMin,
       maxRetries: maxRetries !== undefined ? maxRetries : existing.maxRetries,
       includeGraph: includeGraph !== undefined ? includeGraph : existing.includeGraph,
+      mergeStrategy: mergeStrategy !== undefined ? mergeStrategy : existing.mergeStrategy,
     };
     const config = JSON.stringify(merged);
     if (defaultParallelism !== undefined) {

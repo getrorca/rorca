@@ -18,6 +18,16 @@ import { z } from 'zod';
  * Payload for the `pipeline:run` pg-boss queue.
  * Sent by POST /api/pipeline/trigger, consumed by worker handlePipelineRun.
  */
+/**
+ * Merge strategy for worktree runs — controls what happens after all stories pass.
+ *   - direct:      merge to main + push (maximum velocity, default)
+ *   - pr:          push branch + create PR (CI-gated)
+ *   - draft-pr:    push branch + create Draft PR (review-first)
+ *   - branch-only: push branch to remote, no PR, no merge (manual control)
+ */
+export const MergeStrategyEnum = z.enum(['direct', 'pr', 'draft-pr', 'branch-only']);
+export type MergeStrategy = z.infer<typeof MergeStrategyEnum>;
+
 export const PipelineRunJobPayload = z.object({
   runId: z.coerce.number().int().positive(),
   specPath: z.string().min(1),
@@ -28,6 +38,7 @@ export const PipelineRunJobPayload = z.object({
   branchName: z.string().nullable(),
   autoWorktree: z.boolean().optional().default(false),
   autoMerge: z.boolean().optional().default(false),
+  mergeStrategy: MergeStrategyEnum.optional().default('direct'),
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
   startFromStoryId: z.string().optional(),
   triggeredVia: z.enum(['queue', 'run_now']).default('run_now'),

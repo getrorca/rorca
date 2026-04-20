@@ -115,6 +115,15 @@ interface SpecJson {
   mode?: string;
   playbook?: string;
   model?: string;
+  /**
+   * Merge strategy for worktree runs — controls what happens after all stories pass.
+   *   - direct:      merge to main + push (maximum velocity, default)
+   *   - pr:          push branch + create PR (CI-gated)
+   *   - draft-pr:    push branch + create Draft PR (review-first)
+   *   - branch-only: push branch to remote, no PR, no merge (manual control)
+   * If unset, falls back to workspace pipeline_config.mergeStrategy, then 'direct'.
+   */
+  mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
   userStories?: UserStory[];
   phases?: Array<{ stories: UserStory[] }>;
   /** Optional default reasoning config for all stories in this spec. */
