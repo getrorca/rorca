@@ -162,6 +162,7 @@ function TokenBar({ global, scoped, tagged, budget }: { global: number; scoped: 
 export interface TriggerOptions {
   forceSequential?: boolean;
   autoMerge?: boolean;
+  mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
   includeGraph?: boolean;
   effortLevel?: EffortLevel;
   thinkingEnabled?: boolean;
@@ -216,6 +217,7 @@ export default function TriggerPopover({
 }: TriggerPopoverProps) {
   const [autoWorktree, setAutoWorktree] = useState(false);
   const [autoMerge, setAutoMerge] = useState(true);
+  const [mergeStrategy, setMergeStrategy] = useState<'direct' | 'pr' | 'draft-pr' | 'branch-only'>('direct');
   const [agentConfig, setAgentConfig] = useState<AgentConfigSummary | null>(null);
   const [capWarnings, setCapWarnings] = useState<CapabilityWarning[]>([]);
   const [orchestration, setOrchestration] = useState<OrchestrationPreview | null>(null);
@@ -259,9 +261,13 @@ export default function TriggerPopover({
   // Fetch persisted pipeline-config on mount (includeGraph preference)
   useEffect(() => {
     if (!workspaceId) return;
-    apiFetch<{ config: { includeGraph?: boolean } }>(`/api/workspaces/${workspaceId}/pipeline-config`)
+    apiFetch<{ config: { includeGraph?: boolean; mergeStrategy?: string } }>(`/api/workspaces/${workspaceId}/pipeline-config`)
       .then((data) => {
         setIncludeGraph(data.config.includeGraph ?? false);
+        if (data.config.mergeStrategy) {
+          setMergeStrategy(data.config.mergeStrategy as any);
+          setAutoMerge(data.config.mergeStrategy === 'direct');
+        }
       })
       .catch(() => {});
   }, [workspaceId]);
@@ -826,21 +832,33 @@ export default function TriggerPopover({
           </div>
         </label>
 
-        {/* Auto-merge — nested under worktrees */}
+        {/* Merge Strategy — nested under worktrees */}
         {(autoWorktree || (isWaveParallel && !forceSequential)) && (
-          <label className="flex items-center gap-3 cursor-pointer ml-11 py-1">
-            <div className="relative flex items-center justify-center">
-              <input
-                type="checkbox"
-                checked={autoMerge}
-                onChange={(e) => setAutoMerge(e.target.checked)}
-                className="peer sr-only"
-              />
-              <div className="w-8 h-[18px] rounded-full bg-[var(--border)] peer-checked:bg-emerald-500 transition-colors" />
-              <div className="absolute left-0.5 top-0.5 w-3.5 h-3.5 rounded-full bg-white shadow-sm transition-transform peer-checked:translate-x-[14px]" />
-            </div>
-            <span className="text-xs text-[var(--text)]">Auto-merge to main when all stories pass</span>
-          </label>
+          <div className="ml-11 py-1.5">
+            <label htmlFor="trigger-merge-strategy" className="text-[11px] text-muted mb-1.5 block font-medium">Completion action</label>
+            <select
+              id="trigger-merge-strategy"
+              value={mergeStrategy}
+              onChange={e => {
+                const val = e.target.value as any;
+                setMergeStrategy(val);
+                setAutoMerge(val === 'direct');
+              }}
+              className="w-full px-2.5 py-1.5 text-xs bg-[var(--bg-secondary,var(--bg))] border border-border rounded-md focus:border-accent outline-none text-[var(--text)] appearance-none cursor-pointer"
+              style={{ backgroundImage: `url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 24 24' fill='none' stroke='%23888' stroke-width='2' stroke-linecap='round' stroke-linejoin='round'%3E%3Cpolyline points='6 9 12 15 18 9'%3E%3C/polyline%3E%3C/svg%3E")`, backgroundRepeat: 'no-repeat', backgroundPosition: 'right 8px center', paddingRight: '28px' }}
+            >
+              <option value="direct">Merge directly to main</option>
+              <option value="pr">Open Pull Request</option>
+              <option value="draft-pr">Open Draft PR</option>
+              <option value="branch-only">Leave on branch</option>
+            </select>
+            <p className="text-[10px] text-muted mt-1 leading-tight">
+              {mergeStrategy === 'direct' && 'Fastest \u2014 merges worktree and pushes main immediately'}
+              {mergeStrategy === 'pr' && 'Recommended \u2014 creates a PR for CI checks and review'}
+              {mergeStrategy === 'draft-pr' && 'Review later \u2014 creates a draft PR for async review'}
+              {mergeStrategy === 'branch-only' && 'Manual control \u2014 pushes branch, you decide what\u2019s next'}
+            </p>
+          </div>
         )}
 
         {/* Divider */}
@@ -914,6 +932,7 @@ export default function TriggerPopover({
             onTrigger(effectiveWorktree, {
               forceSequential: forceSequential || undefined,
               autoMerge: effectiveWorktree ? autoMerge : undefined,
+              mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
               includeGraph: includeGraph || undefined,
               effortLevel: thinkingApplies ? effortLevel : undefined,
               thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
@@ -942,6 +961,7 @@ export default function TriggerPopover({
               onAddToQueue(effectiveWorktree, {
                 forceSequential: forceSequential || undefined,
                 autoMerge: effectiveWorktree ? autoMerge : undefined,
+                mergeStrategy: effectiveWorktree ? mergeStrategy : undefined,
                 includeGraph: includeGraph || undefined,
                 effortLevel: thinkingApplies ? effortLevel : undefined,
                 thinkingEnabled: thinkingApplies ? thinkingEnabled : undefined,
