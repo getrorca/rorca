@@ -25,6 +25,7 @@ import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
 import { loadRorcaConfig } from './rorca-config';
 import { renderPrTemplate, PrTemplateData } from './github/pr-template';
+import { chatComplete } from './llm-client';
 
 // ─── Types ─────────────────────────────────────────────────────────────────
 
@@ -150,8 +151,11 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
       // Non-fatal — fall back to default template
     }
 
-    // Get diff stats from git
+    // Get diff stats and synthesized diff summary from git
     const diffStats = getGitDiffStats(opts.workspacePath, branchName, targetBranch);
+    const diffSummary = await synthesizeDiffSummary(
+      opts.workspacePath, branchName, targetBranch, summary.specBrief,
+    );
 
     const total = summary.passed + summary.failed + summary.skipped;
     const templateData: PrTemplateData = {
@@ -173,6 +177,7 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
         agentType: summary.agentType,
         model: summary.agentModel,
         diffStats,
+        diffSummary: diffSummary || summary.specBrief,
       },
     };
     const prBody = renderPrTemplate(customTemplate, templateData);
@@ -416,6 +421,59 @@ function getGitDiffStats(workspacePath: string, branchName: string, targetBranch
     // Non-fatal
   }
   return 'Diff stats unavailable';
+}
+
+/**
+ * Synthesize a truthful PR summary from the actual git diff using an LLM.
+ * Returns a concise markdown summary describing what was actually built,
+ * not what the spec planned. Falls back to a generic message on failure.
+ */
+async function synthesizeDiffSummary(
+  workspacePath: string,
+  branchName: string,
+  targetBranch: string,
+  specBrief: string,
+): Promise<string> {
+  try {
+    const result = spawnSync(
+      'git',
+      ['diff', `${targetBranch}...${branchName}`],
+      { cwd: workspacePath, encoding: 'utf8', timeout: 30_000, maxBuffer: 1024 * 1024 * 2 },
+    );
+    if (result.status !== 0 || !result.stdout?.trim()) {
+      return '';
+    }
+
+    // Truncate large diffs to ~50k chars (~12k tokens) to stay within context limits
+    const diff = result.stdout.length > 50_000
+      ? result.stdout.slice(0, 50_000) + '\n\n... (diff truncated)'
+      : result.stdout;
+
+    const prompt = `You are a technical writer reviewing a completed code change. Below is the original spec brief and the actual git diff.
+
+Your job: Write a concise summary (3-8 bullet points) of what was ACTUALLY implemented based on the diff. Focus on what changed, not what was planned. If the implementation deviates from the spec brief, note that as "Implementation note: ..."
+
+Do NOT repeat the spec brief verbatim. Do NOT add test plans or action items. Just describe the reality of the code changes.
+
+## Original Spec Brief
+${specBrief || '(no brief provided)'}
+
+## Git Diff
+\`\`\`diff
+${diff}
+\`\`\`
+
+Respond with ONLY the bullet-point summary in markdown. No preamble.`;
+
+    const llmResult = await chatComplete([{ role: 'user', content: prompt }]);
+    const summary = llmResult.text?.trim();
+    if (summary && summary.length > 10) {
+      return summary;
+    }
+  } catch (err) {
+    logger.warn({ err }, '[auto-pr] Diff summary synthesis failed (non-fatal)');
+  }
+  return '';
 }
 
 async function storeResult(runId: number, prNumber: number | null, errorMsg: string | null): Promise<void> {
