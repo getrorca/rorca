@@ -937,12 +937,20 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           const effectiveMergeStrategy = payload.mergeStrategy ?? 'direct';
           let allSpecStoriesPassed = false;
 
-          if (status === 'done' && worktreePath && payload.branchName) {
+          // Check spec JSON for story completion — regardless of exit code.
+          // The engine may exit non-zero (timeout, signal) while all stories
+          // actually passed across multiple incremental runs on the same worktree.
+          if (worktreePath && payload.branchName) {
             try {
               const absSpecPath = path.join(workspacePath, specPath);
               const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
               const stories: Array<{ passes?: boolean; excluded?: boolean }> = specJson.userStories ?? [];
               allSpecStoriesPassed = stories.length > 0 && stories.every(s => s.passes === true || s.excluded === true);
+              if (allSpecStoriesPassed && status !== 'done') {
+                logger.info({ runId, specPath }, '[worker] All stories passed in spec JSON despite exit status=%s — promoting to done', status);
+                try { await execute(`UPDATE pipeline_runs SET status = 'done' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                status = 'done';
+              }
               if (!allSpecStoriesPassed) {
                 logger.info({ runId, specPath }, '[worker] Skipping post-run routing — spec not fully complete (not all stories passed)');
               }
@@ -951,7 +959,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             }
           }
 
-          if (status === 'done' && worktreePath && payload.branchName && allSpecStoriesPassed) {
+          if (worktreePath && payload.branchName && allSpecStoriesPassed) {
             const mergeLog = (msg: string) => logger.info({ runId }, msg);
 
             switch (effectiveMergeStrategy) {
