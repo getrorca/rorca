@@ -3419,3 +3419,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Decision] Supabase CLI config stays separate from app schema migrations: Use `supabase/config.toml` and `supabase/migrations/` only for Supabase-managed local services; keep Rorca app schema migrations in `backend/src/db/pg-migrations/` under the existing `pg-index.ts` runner.
 > Rule: Supabase CLI config stays separate from app schema migrations: Use `supabase/config.toml` and `supabase/migrations/` only for Supabase-managed local services; keep Rorca app schema migrations in `backend/src/db/pg-migrations/` under the existing `pg-index.ts` runner.
+
+## 2026-04-22 [Bug Fix] Workspace creation must seed workspace_members owner row: When creating a workspace through an RLS-scoped route, insert the workspace_members owner membership in the same withUserClient() transaction as the workspace row so get_user_workspace_ids(auth.uid()) immediately returns the new workspace.
+> Rule: Workspace creation must seed workspace_members owner row: When creating a workspace through an RLS-scoped route, insert the workspace_members owner membership in the same withUserClient() transaction as the workspace row so get_user_workspace_ids(auth.uid()) immediately returns the new workspace.

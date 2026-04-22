@@ -2,7 +2,7 @@
   "specId": "rorca-supabase-auth-rls",
   "runId": 20260316000221,
   "startedAt": "2026-04-22T06:19:01.676Z",
-  "lastUpdatedAt": "2026-04-22T06:33:28.282Z",
+  "lastUpdatedAt": "2026-04-22T06:35:36.168Z",
   "completedStories": [
     {
       "storyId": "MU-015",
@@ -53,6 +53,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 82918
+    },
+    {
+      "storyId": "MU-028",
+      "title": "Create workspace_members table and auto-enroll workspace creator as owner",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:33:44.571Z",
+      "finishedAt": "2026-04-22T06:35:36.168Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 111597
     }
   ],
   "failedStories": [],
