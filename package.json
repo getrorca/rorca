@@ -20,7 +20,8 @@
     "start": "node cli.js start",
     "postinstall": "cd backend && npm install --production --ignore-scripts 2>/dev/null || true",
     "prepublishOnly": "npm run build",
-    "test:e2e:first-run": "npx tsx test/e2e/first-run.test.ts"
+    "test:e2e:first-run": "npx tsx test/e2e/first-run.test.ts",
+    "auth:test": "npx playwright test tests/auth.spec.ts"
   },
   "keywords": [
     "ai",
