@@ -38,6 +38,7 @@ const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
 const AuthCallbackPage = lazy(() => import('./pages/auth/AuthCallbackPage'));
 const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
 const RegisterPage = lazy(() => import('./pages/auth/RegisterPage'));
+const InviteAcceptPage = lazy(() => import('./pages/InviteAcceptPage'));
 const ForgotPasswordPage = lazy(() => import('./pages/auth/ForgotPasswordPage'));
 const ResetPasswordPage = lazy(() => import('./pages/auth/ResetPasswordPage'));
 const OnboardingWizard = lazy(() => import('./components/OnboardingWizard'));
@@ -231,11 +232,9 @@ function AppRoutes() {
       <Route
         path="/invites/:token"
         element={
-          <PublicOnlyRoute>
-            <Suspense fallback={<BoardSkeleton />}>
-              <RegisterPage />
-            </Suspense>
-          </PublicOnlyRoute>
+          <Suspense fallback={<BoardSkeleton />}>
+            <InviteAcceptPage />
+          </Suspense>
         }
       />
       <Route element={<RequireAuth><AppLayout /></RequireAuth>}>
