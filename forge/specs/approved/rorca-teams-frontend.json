@@ -1,0 +1,470 @@
+{
+  "id": "rorca-teams-frontend",
+  "title": "rorca-teams-frontend",
+  "userStories": [
+    {
+      "id": "TF-001",
+      "title": "Add TypeScript interfaces for Teams, TeamMember, TeamInvite, WorkspaceAccess",
+      "description": "Define and export TypeScript interfaces Team, TeamMember, TeamInvite, and WorkspaceAccess in src/lib/types.ts to provide type safety across all team-related frontend components.",
+      "acceptanceCriteria": [
+        "Team interface includes: id (number), name (string), slug (string), createdAt (string), memberCount (number), myRole ('owner'|'admin'|'editor'|'viewer')",
+        "TeamMember interface includes: id (number), userId (number), teamId (number), role ('owner'|'admin'|'editor'|'viewer'), email (string), name (string), lastActiveAt (string|null)",
+        "TeamInvite interface includes: id (number), teamId (number), email (string), role ('admin'|'editor'|'viewer'), expiresAt (string), createdAt (string)",
+        "WorkspaceAccess interface includes: teamId (number), teamName (string), teamSlug (string), permission ('read'|'write'|'admin')",
+        "All interfaces exported from src/lib/types.ts and frontend type check passes with npx tsc --noEmit"
+      ],
+      "dependsOn": [],
+      "complexity": 1,
+      "passes": false
+    },
+    {
+      "id": "TF-002",
+      "title": "Add workspace_access CRUD endpoints to backend routes",
+      "description": "Implement GET /api/workspaces/:id/access, POST /api/workspaces/:id/access, DELETE /api/workspaces/:id/access/:teamId, and PATCH /api/workspaces/:id/access/:teamId in a new backend/src/routes/workspace-access.ts file and mount it in server.ts.",
+      "acceptanceCriteria": [
+        "GET /api/workspaces/:id/access returns array of {teamId, teamName, teamSlug, permission} for all teams with access to the workspace",
+        "POST /api/workspaces/:id/access accepts {teamId, permission} body, inserts into workspace_access table, returns 201 with the created access record",
+        "DELETE /api/workspaces/:id/access/:teamId removes the row from workspace_access and returns 204",
+        "PATCH /api/workspaces/:id/access/:teamId accepts {permission} body, updates workspace_access.permission, returns the updated record",
+        "All endpoints use AppError subclasses for errors and have JSDoc @swagger annotations; route is mounted at /api/workspaces in server.ts"
+      ],
+      "dependsOn": [
+        "TF-001"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-003",
+      "title": "Add nodemailer integration and SMTP configuration to backend",
+      "description": "Install nodemailer and @types/nodemailer in backend/package.json, create backend/src/lib/mailer.ts with a sendMail wrapper that reads SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS, SMTP_FROM from environment variables, and export a typed sendInviteEmail function.",
+      "acceptanceCriteria": [
+        "nodemailer and @types/nodemailer present in backend/package.json dependencies",
+        "backend/src/lib/mailer.ts exports createTransport using SMTP_HOST, SMTP_PORT, SMTP_USER, SMTP_PASS env vars with sensible defaults (port 587)",
+        "sendInviteEmail(to: string, teamName: string, inviterName: string, role: string, acceptUrl: string) function sends HTML email with team name, inviter, role, and accept link",
+        "If SMTP_HOST is not set, sendInviteEmail logs a warning and skips send without throwing (graceful degradation)",
+        "Backend type check passes with npx tsc --noEmit after changes"
+      ],
+      "dependsOn": [],
+      "complexity": 2,
+      "passes": false
+    },
+    {
+      "id": "TF-004",
+      "title": "Wire invite email sending into POST /api/teams/:id/invites route",
+      "description": "Update the existing POST /api/teams/:id/invites route to call sendInviteEmail after successfully creating an invite record, constructing the accept URL from FRONTEND_URL env var (defaulting to http://localhost:5210).",
+      "acceptanceCriteria": [
+        "After invite row is inserted, sendInviteEmail is called with the invitee email, team name, inviter display name, role, and accept URL /invite/:token",
+        "Accept URL is constructed as ${FRONTEND_URL}/invite/${token} where FRONTEND_URL defaults to http://localhost:5210",
+        "Email send failure is caught and logged but does NOT fail the HTTP request — invite row is always created",
+        "If SMTP is not configured, the response still returns 201 with the created invite",
+        "Backend type check passes"
+      ],
+      "dependsOn": [
+        "TF-003"
+      ],
+      "complexity": 2,
+      "passes": false
+    },
+    {
+      "id": "TF-005",
+      "title": "Add 'teams' to SettingsTab type and register Teams tab in SettingsPanel",
+      "description": "Add 'teams' to the SettingsTab union type in SettingsPanel.tsx, add the Teams nav item to the settings sidebar items array, and add the tab panel placeholder so routing works before the tab content is built.",
+      "acceptanceCriteria": [
+        "SettingsTab type in SettingsPanel.tsx includes 'teams' as a valid value",
+        "Teams nav item appears in the settings sidebar with a Users icon and 'Teams' label",
+        "Navigating to /settings/teams renders the Teams tab panel area without errors",
+        "Active tab highlight correctly shows 'teams' when on that route",
+        "Frontend type check passes with npx tsc --noEmit"
+      ],
+      "dependsOn": [
+        "TF-001"
+      ],
+      "complexity": 2,
+      "passes": false
+    },
+    {
+      "id": "TF-006",
+      "title": "Build My Teams list component with role badge and member count",
+      "description": "Implement the My Teams list in the Teams tab that fetches GET /api/teams, renders each team with its name, slug, the user's role badge (color-coded: owner=purple, admin=blue, editor=green, viewer=grey), and member count. Empty state shows 'No teams yet — create one below.'",
+      "acceptanceCriteria": [
+        "Teams list fetches GET /api/teams via apiFetch on mount and on focus",
+        "Each team card shows: team name (bold), @slug (muted), role badge with role-specific color, and member count (e.g. '3 members')",
+        "Loading state shows skeleton cards (2 rows)",
+        "Empty state shows 'No teams yet — create one below.' message with a create icon",
+        "Clicking a team card expands the team detail view inline (accordion pattern) without page navigation",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-005",
+        "TF-001"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-007",
+      "title": "Build Create Team form with slug auto-generation and uniqueness validation",
+      "description": "Implement the Create Team form below the teams list in the Teams tab. Name field auto-generates a slug (lowercase, hyphens), slug is editable, both fields validate on blur. Submit calls POST /api/teams and refreshes the list on success.",
+      "acceptanceCriteria": [
+        "Name input auto-populates slug field by lowercasing and replacing spaces/special chars with hyphens as user types",
+        "Slug field is editable independently after auto-population",
+        "On blur of slug field, calls GET /api/teams?slug=:slug to check uniqueness; shows inline error 'Slug already taken' if conflict",
+        "Submit button is disabled while loading or while validation errors exist",
+        "On success (201), team appears at top of the list and form resets; on error shows toast via ToastContext",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-006"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-008",
+      "title": "Build team member list with role badges and last active timestamp",
+      "description": "Implement the member list section inside the team detail accordion. Fetches GET /api/teams/:id/members, renders each member with name, email, role badge, and last active time (time-ago format). Owner member is visually distinguished.",
+      "acceptanceCriteria": [
+        "Member list fetches GET /api/teams/:id/members via apiFetch when accordion opens",
+        "Each row shows: avatar initials circle, name, email (muted), role badge (same color coding as TF-006), last active (time-ago or 'Never')",
+        "Owner member has a crown icon next to their role badge",
+        "Loading state shows 3 skeleton rows",
+        "Empty state (no members other than self) shows 'Only you are a member' message",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-006",
+        "TF-001"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-009",
+      "title": "Build invite form inside team detail view",
+      "description": "Implement the invite form within the team detail accordion: email text input, role selector (admin|editor|viewer), and Send Invite button. Calls POST /api/teams/:id/invites. Visible only to admin and owner roles.",
+      "acceptanceCriteria": [
+        "Invite form is rendered only when myRole is 'owner' or 'admin' (hidden for editor/viewer)",
+        "Email input validates format on blur; shows inline error for invalid email",
+        "Role selector renders as a dropdown with options: Admin, Editor, Viewer (default: Editor)",
+        "Submit calls POST /api/teams/:id/invites with {email, role}; on success shows toast 'Invite sent to email@example.com'",
+        "On API error (e.g. 409 already member), shows toast with the error message",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-008"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-010",
+      "title": "Build pending invites list with revoke button",
+      "description": "Implement the pending invites section in the team detail accordion. Fetches GET /api/teams/:id/invites (pending only), lists each invite with email, role badge, expiry date, and a Revoke button. Visible only to admins/owners.",
+      "acceptanceCriteria": [
+        "Pending invites section is hidden for editor/viewer roles",
+        "Fetches GET /api/teams/:id/invites on accordion open and after each send/revoke action",
+        "Each row shows: email, role badge, 'Expires: <date>' (formatted as MMM D, YYYY)",
+        "Revoke button calls DELETE /api/teams/:id/invites/:inviteId; on success removes the row with a fade-out animation",
+        "Empty state shows 'No pending invites' when list is empty",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-009"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-011",
+      "title": "Add role update dropdown per member (admin-only)",
+      "description": "Add an inline role change dropdown to each member row in the member list. Visible only to admins/owners. Calls PATCH /api/teams/:id/members/:userId. Cannot change the owner's role.",
+      "acceptanceCriteria": [
+        "Role dropdown is rendered only when myRole is 'owner' or 'admin'",
+        "Owner member row has no role dropdown (role is displayed as static badge)",
+        "Selecting a new role from the dropdown immediately calls PATCH /api/teams/:id/members/:userId with {role}; shows loading spinner on the row during the request",
+        "On success, role badge updates inline without re-fetching the full list",
+        "On error, reverts to previous role and shows error toast",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-008"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-012",
+      "title": "Add Remove Member button (admin-only, cannot remove owner)",
+      "description": "Add a Remove button to each non-owner member row, visible only to admins/owners. Shows a confirmation dialog before calling DELETE /api/teams/:id/members/:userId. Refreshes member list on success.",
+      "acceptanceCriteria": [
+        "Remove button is visible on non-owner rows only when myRole is 'owner' or 'admin'",
+        "Clicking Remove opens an inline confirmation: 'Remove [name] from [team name]?' with Confirm and Cancel buttons",
+        "On confirm, calls DELETE /api/teams/:id/members/:userId; on success removes the row with animation and shows toast 'Member removed'",
+        "Owner row has no Remove button regardless of viewer role",
+        "On API error, shows error toast and keeps the row",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-011"
+      ],
+      "complexity": 2,
+      "passes": false
+    },
+    {
+      "id": "TF-013",
+      "title": "Add inline team name edit (admin-only)",
+      "description": "Add an inline edit capability to the team name in the team detail accordion header. Admin/owner can click the name to edit it in-place, press Enter or blur to save via PATCH /api/teams/:id.",
+      "acceptanceCriteria": [
+        "Team name in accordion header shows a pencil icon on hover when myRole is 'owner' or 'admin'",
+        "Clicking the name or pencil icon converts it to an input field pre-filled with current name",
+        "Pressing Enter or blurring the input calls PATCH /api/teams/:id with {name}; updates name inline on success",
+        "Pressing Escape cancels edit and restores original name without API call",
+        "Input shows inline error if name is empty or exceeds 100 characters",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-008"
+      ],
+      "complexity": 2,
+      "passes": false
+    },
+    {
+      "id": "TF-014",
+      "title": "Add Leave Team button (non-owners) and Delete Team button (owner only)",
+      "description": "Add a Leave Team button visible to non-owner members and a Delete Team button visible only to owners, both at the bottom of the team detail accordion. Both require confirmation dialogs.",
+      "acceptanceCriteria": [
+        "Leave Team button is visible and enabled for members with role editor/viewer/admin (not owner)",
+        "Delete Team button is visible only to the team owner",
+        "Clicking Leave opens confirmation: 'Leave [team name]? You will lose access.' with Leave and Cancel; on confirm calls DELETE /api/teams/:id/members/:userId (self); on success removes team from list and shows toast",
+        "Clicking Delete opens confirmation: 'Delete [team name]? This cannot be undone.' with Delete (red) and Cancel; on confirm calls DELETE /api/teams/:id; on success removes team from list and shows toast",
+        "Both actions navigate away from the accordion and refresh the teams list",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-012",
+        "TF-013"
+      ],
+      "complexity": 2,
+      "passes": false
+    },
+    {
+      "id": "TF-015",
+      "title": "Build InviteAcceptancePage component and route /invite/:token",
+      "description": "Create src/pages/InviteAcceptancePage.tsx (or src/panels/InviteAcceptancePage.tsx) and register it as a route /invite/:token in src/App.tsx. On mount it calls GET /api/invites/:token and renders loading, error, unauthenticated, or ready-to-accept states.",
+      "acceptanceCriteria": [
+        "Route /invite/:token is registered in App.tsx and renders InviteAcceptancePage",
+        "On mount the page calls GET /api/invites/:token via apiFetch",
+        "Loading state shows a centered spinner with 'Loading invite...' text",
+        "If token is invalid or expired, shows error card: heading 'Invite not found or expired', body 'Contact your team admin for a new invite link', no action button",
+        "Page is accessible without auth (does not redirect to login automatically on load)",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-001"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-016",
+      "title": "Render invite details and handle unauthenticated accept flow",
+      "description": "In InviteAcceptancePage, render team name, inviter name, and role offered after a successful token fetch. When user is not authenticated, show team info plus a 'Sign in to accept' button that redirects to /login?returnTo=/invite/:token.",
+      "acceptanceCriteria": [
+        "On successful token fetch, page renders: 'You've been invited to join [Team Name]', 'Invited by [inviterName]', 'Role: [role badge]'",
+        "When user is not authenticated (no auth context / 401 from me endpoint), shows 'Sign in to accept this invite' button",
+        "'Sign in to accept' navigates to /login with query param returnTo=/invite/:token (URL encoded)",
+        "After login, user is redirected back to /invite/:token automatically",
+        "Authenticated user sees 'Accept Invite' button instead of 'Sign in to accept'",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-015"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-017",
+      "title": "Implement Accept Invite action and post-accept redirect",
+      "description": "Wire up the 'Accept Invite' button in InviteAcceptancePage for authenticated users. Calls POST /api/invites/:token/accept, shows loading state during request, then redirects to /specs on success.",
+      "acceptanceCriteria": [
+        "'Accept Invite' button is disabled and shows spinner during POST /api/invites/:token/accept request",
+        "On 200 success, navigates to /specs and shows toast 'Welcome to [team name]!'",
+        "On 409 (already a member), shows inline message 'You are already a member of this team' with a 'Go to Specs' link",
+        "On 410 or 404 (expired/invalid by the time accept is clicked), shows error state matching TF-015 invalid token UI",
+        "On other API errors, shows toast with error message and keeps button enabled for retry",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-016"
+      ],
+      "complexity": 2,
+      "passes": false
+    },
+    {
+      "id": "TF-018",
+      "title": "Build WorkspaceAccessPanel component showing teams with access to current workspace",
+      "description": "Create a WorkspaceAccessPanel component rendered in Settings > General tab (or as an 'Access' sub-section) that fetches GET /api/workspaces/:id/access and displays all teams with their permission level.",
+      "acceptanceCriteria": [
+        "WorkspaceAccessPanel fetches GET /api/workspaces/:id/access using the active workspace ID from WorkspaceContext",
+        "Each row shows: team name, team slug (muted), permission badge (read=grey, write=blue, admin=purple)",
+        "Loading state shows 2 skeleton rows",
+        "Empty state shows 'No teams have access to this workspace yet'",
+        "Panel section has heading 'Team Access' with an 'Add Team' button",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-002",
+        "TF-001"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-019",
+      "title": "Build Add Team Access modal with team selector and permission selector",
+      "description": "Implement the modal opened by the 'Add Team' button in WorkspaceAccessPanel. Fetches the user's teams (GET /api/teams), shows a searchable team selector and permission dropdown (read|write|admin), and calls POST /api/workspaces/:id/access on submit.",
+      "acceptanceCriteria": [
+        "'Add Team' button opens a modal dialog with heading 'Grant Team Access'",
+        "Modal contains a team selector (searchable dropdown) populated from GET /api/teams, filtered to exclude teams already in the access list",
+        "Permission selector has options Read, Write, Admin (default: Read) with brief descriptions: Read=view specs, Write=trigger runs, Admin=manage workspace",
+        "Submit button calls POST /api/workspaces/:id/access with {teamId, permission}; on success closes modal, adds row to list, shows toast",
+        "Teams already granted access are excluded from the team selector with a 'Already has access' note",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-018"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-020",
+      "title": "Add Update Permission dropdown and Remove Access button to WorkspaceAccessPanel",
+      "description": "Add inline permission update and remove access controls to each team row in WorkspaceAccessPanel. Permission change calls PATCH /api/workspaces/:id/access/:teamId; remove calls DELETE /api/workspaces/:id/access/:teamId.",
+      "acceptanceCriteria": [
+        "Each team row has a permission dropdown (read|write|admin) pre-selected to current value",
+        "Changing the dropdown value calls PATCH /api/workspaces/:id/access/:teamId with {permission}; shows inline loading spinner; updates badge on success",
+        "Each team row has a Remove button (trash icon)",
+        "Clicking Remove shows confirmation inline ('Remove [team name] access?'); on confirm calls DELETE endpoint; row fades out on success with toast",
+        "On API error for either action, shows error toast and reverts UI state",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-019"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-021",
+      "title": "Integrate WorkspaceAccessPanel into Settings > General tab",
+      "description": "Import and render WorkspaceAccessPanel inside the General settings tab in SettingsPanel.tsx, positioned below workspace details and above danger zone. Ensure workspace ID is correctly passed from WorkspaceContext.",
+      "acceptanceCriteria": [
+        "WorkspaceAccessPanel renders in the General settings tab without layout breakage",
+        "Active workspace ID is sourced from WorkspaceContext and passed correctly",
+        "Panel is conditionally hidden when no workspace is selected (workspace selector shows 'Select a workspace')",
+        "Section has a visible divider separating it from workspace details above",
+        "Full settings page renders without TypeScript or runtime errors",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-020",
+        "TF-005"
+      ],
+      "complexity": 2,
+      "passes": false
+    },
+    {
+      "id": "TF-022",
+      "title": "Complete Teams tab integration in SettingsPanel with all sub-components",
+      "description": "Wire all team sub-components (TF-006 through TF-014) into the Teams tab panel in SettingsPanel.tsx, ensuring the accordion expand/collapse, refresh triggers, and role-gated rendering all work cohesively as a single tab.",
+      "acceptanceCriteria": [
+        "Settings > Teams tab renders My Teams list, Create Team form, and team detail accordion in correct layout order",
+        "Expanding a team accordion fetches and renders member list, invite form, pending invites, and action buttons (leave/delete)",
+        "Creating a team, inviting a member, or removing a member each trigger a re-fetch of the relevant sub-list",
+        "Role-gated controls (invite form, revoke, role update, remove, delete) are hidden correctly for viewer and editor roles",
+        "No visible console errors on any team management action",
+        "Frontend type check passes"
+      ],
+      "dependsOn": [
+        "TF-014",
+        "TF-010",
+        "TF-013",
+        "TF-007"
+      ],
+      "complexity": 4,
+      "passes": false
+    },
+    {
+      "id": "TF-023",
+      "title": "Add backend GET /api/invites/:token endpoint to return invite details without auth",
+      "description": "Ensure GET /api/invites/:token returns full invite details (teamName, inviterName, role, expiresAt) without requiring authentication, so InviteAcceptancePage can render team info before the user signs in.",
+      "acceptanceCriteria": [
+        "GET /api/invites/:token does not require authentication (no authRequired middleware on this endpoint)",
+        "Response includes: teamId, teamName, inviterName, role, expiresAt, tokenStatus ('valid'|'expired'|'not_found')",
+        "If token is not found, returns 404 with AppError NotFoundError",
+        "If token is expired, returns 410 Gone with AppError message 'Invite has expired'",
+        "If token is valid, returns 200 with full invite details",
+        "Backend type check passes"
+      ],
+      "dependsOn": [],
+      "complexity": 2,
+      "passes": false
+    },
+    {
+      "id": "TF-024",
+      "title": "Write Jest integration tests for workspace_access endpoints",
+      "description": "Write backend integration tests in backend/src/routes/__tests__/workspace-access.test.ts covering all four workspace_access endpoints with happy paths and error cases.",
+      "acceptanceCriteria": [
+        "Test file exists at backend/src/routes/__tests__/workspace-access.test.ts",
+        "GET /api/workspaces/:id/access test: returns array of team access records for valid workspace",
+        "POST /api/workspaces/:id/access test: creates access record and returns 201; 409 on duplicate",
+        "DELETE /api/workspaces/:id/access/:teamId test: removes record and returns 204; 404 on missing",
+        "PATCH /api/workspaces/:id/access/:teamId test: updates permission and returns updated record; 404 on missing",
+        "All tests pass with cd backend && npx jest workspace-access"
+      ],
+      "dependsOn": [
+        "TF-002"
+      ],
+      "complexity": 3,
+      "passes": false
+    },
+    {
+      "id": "TF-025",
+      "title": "End-to-end Teams tab smoke test: create team, invite, accept, verify access",
+      "description": "Write a frontend Vitest or integration test (or manual test checklist in a test file) that exercises the full teams flow: create team → invite user → accept invite → verify team membership → grant workspace access. Ensures no regressions across the full feature.",
+      "acceptanceCriteria": [
+        "Test or checklist covers: POST /api/teams creates team; POST /api/teams/:id/invites creates invite; GET /api/invites/:token returns valid invite; POST /api/invites/:token/accept adds membership; GET /api/teams/:id/members includes new member",
+        "WorkspaceAccessPanel flow: POST /api/workspaces/:id/access grants access; GET /api/workspaces/:id/access returns the new entry; PATCH updates permission; DELETE removes access",
+        "All API calls use correct Content-Type and return expected status codes",
+        "Backend type check and frontend type check both pass after all TF-001 through TF-024 stories are applied",
+        "No TypeScript errors across src/lib/types.ts, InviteAcceptancePage, WorkspaceAccessPanel, and Teams tab components"
+      ],
+      "dependsOn": [
+        "TF-022",
+        "TF-021",
+        "TF-017",
+        "TF-024",
+        "TF-023"
+      ],
+      "complexity": 3,
+      "passes": false
+    }
+  ],
+  "mermaidDiagram": "graph TD\n  TF-001[\"Add TypeScript interfaces for Teams, Tea\"]\n  TF-002[\"Add workspace_access CRUD endpoints to b\"]\n  TF-003[\"Add nodemailer integration and SMTP conf\"]\n  TF-004[\"Wire invite email sending into POST /api\"]\n  TF-005[\"Add 'teams' to SettingsTab type and regi\"]\n  TF-006[\"Build My Teams list component with role \"]\n  TF-007[\"Build Create Team form with slug auto-ge\"]\n  TF-008[\"Build team member list with role badges \"]\n  TF-009[\"Build invite form inside team detail vie\"]\n  TF-010[\"Build pending invites list with revoke b\"]\n  TF-011[\"Add role update dropdown per member (adm\"]\n  TF-012[\"Add Remove Member button (admin-only, ca\"]\n  TF-013[\"Add inline team name edit (admin-only)\"]\n  TF-014[\"Add Leave Team button (non-owners) and D\"]\n  TF-015[\"Build InviteAcceptancePage component and\"]\n  TF-016[\"Render invite details and handle unauthe\"]\n  TF-017[\"Implement Accept Invite action and post-\"]\n  TF-018[\"Build WorkspaceAccessPanel component sho\"]\n  TF-019[\"Build Add Team Access modal with team se\"]\n  TF-020[\"Add Update Permission dropdown and Remov\"]\n  TF-021[\"Integrate WorkspaceAccessPanel into Sett\"]\n  TF-022[\"Complete Teams tab integration in Settin\"]\n  TF-023[\"Add backend GET /api/invites/:token endp\"]\n  TF-024[\"Write Jest integration tests for workspa\"]\n  TF-025[\"End-to-end Teams tab smoke test: create \"]\n  TF-001 --> TF-002\n  TF-003 --> TF-004\n  TF-001 --> TF-005\n  TF-005 --> TF-006\n  TF-001 --> TF-006\n  TF-006 --> TF-007\n  TF-006 --> TF-008\n  TF-001 --> TF-008\n  TF-008 --> TF-009\n  TF-009 --> TF-010\n  TF-008 --> TF-011\n  TF-011 --> TF-012\n  TF-008 --> TF-013\n  TF-012 --> TF-014\n  TF-013 --> TF-014\n  TF-001 --> TF-015\n  TF-015 --> TF-016\n  TF-016 --> TF-017\n  TF-002 --> TF-018\n  TF-001 --> TF-018\n  TF-018 --> TF-019\n  TF-019 --> TF-020\n  TF-020 --> TF-021\n  TF-005 --> TF-021\n  TF-014 --> TF-022\n  TF-010 --> TF-022\n  TF-013 --> TF-022\n  TF-007 --> TF-022\n  TF-002 --> TF-024\n  TF-022 --> TF-025\n  TF-021 --> TF-025\n  TF-017 --> TF-025\n  TF-024 --> TF-025\n  TF-023 --> TF-025",
+  "model": "claude-sonnet-4-6",
+  "generatedAt": "2026-04-22T06:45:36.329Z",
+  "source": "chunked-gen",
+  "epicOutline": [
+    {
+      "epic": "Teams Frontend",
+      "description": "Full teams frontend implementation including TypeScript types, Settings Teams tab with team management, invite acceptance page, workspace access panel, and backend gaps for workspace_access endpoints and email delivery",
+      "idStart": "TF-001",
+      "idEnd": "TF-025",
+      "storyCount": 25,
+      "dependsOnEpics": []
+    }
+  ]
+}

@@ -63,7 +63,8 @@ function dateRangeToISO(range: DateRange): { from: string; to: string } {
 export default function RoiCalculatorPanel() {
   const { workspaceId } = useWorkspace();
   const { user } = useAuth();
-  const isFreePlan = !user?.plan || user.plan === 'free';
+  const userPlan = user?.app_metadata?.plan as string | undefined;
+  const isFreePlan = !userPlan || userPlan === 'free';
   const [data, setData] = useState<ROIResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [dateRange, setDateRange] = useState<DateRange>('30d');

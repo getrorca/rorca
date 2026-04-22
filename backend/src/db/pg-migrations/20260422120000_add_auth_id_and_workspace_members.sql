@@ -92,4 +92,4 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION get_user_workspace_ids(UUID) OWNER TO postgres;
+ALTER FUNCTION get_user_workspace_ids(UUID) OWNER TO rorca;

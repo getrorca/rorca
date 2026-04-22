@@ -2531,27 +2531,17 @@ router.get('/runs', authRequired, async (req: Request, res: Response) => {
       return;
     }
 
-    const pagination = parsePaginationParams(req);
-    const result = await withUserClient(req, async (client) => {
-      const countResult = await client.query<{ total: number }>(
-        'SELECT COUNT(*)::int as total FROM pipeline_runs WHERE workspace_id = $1',
-        [workspaceId]
-      );
-      const offset = (pagination.page - 1) * pagination.pageSize;
-      const rowsResult = await client.query<PipelineRunRow>(
-        'SELECT * FROM pipeline_runs WHERE workspace_id = $1 ORDER BY id DESC LIMIT $2 OFFSET $3',
-        [workspaceId, pagination.pageSize, offset]
-      );
+    const { limit, offset } = parsePaginationParams(req);
+    const total = (await queryOne<{ total: number }>(
+      'SELECT COUNT(*)::int as total FROM pipeline_runs WHERE workspace_id = $1',
+      [workspaceId]
+    ))?.total ?? 0;
+    const items = await query<PipelineRunRow>(
+      'SELECT * FROM pipeline_runs WHERE workspace_id = $1 ORDER BY id DESC LIMIT $2 OFFSET $3',
+      [workspaceId, limit, offset]
+    );
 
-      return {
-        items: rowsResult.rows,
-        total: countResult.rows[0]?.total ?? 0,
-        page: pagination.page,
-        pageSize: pagination.pageSize,
-      };
-    });
-
-    res.json(result);
+    res.json({ items, total, limit, offset });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] List runs');
   }

@@ -12,7 +12,7 @@ export async function uploadAttachment(specId: string, file: File): Promise<Atta
   const formData = new FormData();
   formData.append('file', file);
 
-  const at = getAccessToken();
+  const at = await getAccessToken();
   const headers: Record<string, string> = {};
   if (at) {
     headers['Authorization'] = `Bearer ${at}`;

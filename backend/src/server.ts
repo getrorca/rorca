@@ -104,7 +104,6 @@ import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 import terminalRouter, { validateWsToken } from './routes/terminal';
-import { supabaseAdmin } from './lib/supabase';
 import { initBoss } from './lib/pg-boss';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as ptyManager from './lib/pty-manager';
@@ -349,8 +348,9 @@ if (process.env.RORCA_SERVE_STATIC === '1' && process.env.RORCA_STATIC_DIR) {
 if (process.env.AUTH_REQUIRED === 'true') {
   app.use(authRequired);
 } else {
-  // Local single-user mode: use JWT if provided, otherwise inject local admin.
-  // This allows tests that create real users and generate JWTs to work correctly.
+  // Local single-user mode: use JWT if provided and valid, otherwise inject local admin.
+  // Stale/invalid tokens are ignored (not rejected) so local dev doesn't break when
+  // the frontend has a leftover Supabase session from a previous run.
   app.use(async (req: any, _res: any, next: any) => {
     const authHeader = req.headers.authorization;
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
@@ -363,9 +363,8 @@ if (process.env.AUTH_REQUIRED === 'true') {
           return next();
         }
       } catch {
-        return _res.status(401).json({ error: 'Invalid token', code: 'AUTH_ERROR' });
+        // fall through to LOCAL_ADMIN
       }
-      return _res.status(401).json({ error: 'Invalid token', code: 'AUTH_ERROR' });
     }
     req.user = LOCAL_ADMIN;
     next();
@@ -609,7 +608,7 @@ if (process.env.NODE_ENV !== 'test') {
     }
   });
 
-  wss.on('connection', (ws: WebSocket, req: http.IncomingMessage) => {
+  wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
     // OCT-021: Extract and validate wsToken (short-lived connection token)
     const url = new URL(req.url || '', `http://${req.headers.host}`);
     const wsToken = url.searchParams.get('wsToken');

@@ -1,6 +1,6 @@
 {
   "title": "rorca-supabase-auth-rls",
-  "model": "claude-opus-4-6",
+  "model": "gpt-5.4",
   "generatedAt": "2026-04-21T00:00:00.000Z",
   "_notes": "Migrates Rorca from self-built JWT auth (disabled by default via LOCAL_ADMIN) to Supabase Auth with full PostgreSQL Row Level Security across all 30+ tables. AUTH_REQUIRED is currently intentionally disabled — this spec enables proper multi-user auth with per-row data isolation. Run after rorca-billing-launch. Worker/scheduler code uses service role key to bypass RLS for privileged operations.",
   "contextUsed": {
@@ -1156,5 +1156,6 @@
       ],
       "passes": false
     }
-  ]
+  ],
+  "agentOverride": "codex"
 }

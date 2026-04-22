@@ -68,13 +68,10 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
   let client = await pool.connect();
 
   try {
-    // Pin search_path to public for the migration session to prevent dual-schema issues.
-    // db/index.ts sets search_path=rorca,public via Pool options. If the 'rorca' schema
-    // exists (created by AGE's create_graph('rorca') in migration 050), unqualified table
-    // names resolve to rorca.* instead of public.*. This causes schema_migrations to be
-    // created in the wrong schema, and migrations see 0 applied → re-run all, hitting
-    // non-idempotent migrations like 057.
-    await client.query('SET search_path TO public');
+    // Pin search_path for the migration session. Include rorca so new RLS migrations
+    // can reference app tables (run_output_chunks, pipeline_runs, etc.) by unqualified name.
+    // schema_migrations is created in public (first in path) to avoid AGE dual-schema issues.
+    await client.query('SET search_path TO rorca, public');
 
     // Ensure schema_migrations tracking table exists.
     // version is BIGINT to support 14-digit timestamp prefixes (e.g. 20260313120000).

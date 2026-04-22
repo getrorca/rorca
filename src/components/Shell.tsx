@@ -168,7 +168,7 @@ export function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void
         aria-expanded={open}
       >
         <span className="w-7 h-7 sm:w-6 sm:h-6 rounded-full bg-accent/20 text-accent text-xs font-medium flex items-center justify-center">
-          {user.displayName.charAt(0).toUpperCase()}
+          {((user.user_metadata?.full_name as string | undefined) || user.email || '?').charAt(0).toUpperCase()}
         </span>
       </button>
 
@@ -177,7 +177,7 @@ export function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void
           <div className="fixed inset-0 z-40" onClick={() => setOpen(false)} />
           <div role="menu" aria-label="User menu" className="fixed right-3 top-14 sm:absolute sm:right-0 sm:top-auto sm:mt-1 w-48 bg-panel border border-border rounded shadow-lg z-50">
             <div className="px-3 py-2 border-b border-border">
-              <p className="text-sm text-[var(--text)] truncate">{user.displayName}</p>
+              <p className="text-sm text-[var(--text)] truncate">{(user.user_metadata?.full_name as string | undefined) || user.email}</p>
               <p className="text-xs text-muted truncate">{user.email}</p>
             </div>
             <button
@@ -232,7 +232,7 @@ const PLAN_COLORS: Record<string, string> = {
 export function PlanBadge() {
   const { user } = useAuth();
   const [showPricing, setShowPricing] = useState(false);
-  const plan = user?.plan || 'free';
+  const plan = ((user?.app_metadata?.plan as string | undefined) || 'free') as keyof typeof PLAN_COLORS;
   const colors = PLAN_COLORS[plan] || PLAN_COLORS.free;
 
   return (
