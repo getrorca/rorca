@@ -77,6 +77,22 @@ export const supabaseAdmin: SupabaseClient = new Proxy({} as SupabaseClient, {
   },
 });
 
+export function withUserClient(accessToken: string): SupabaseClient {
+  const { url, key } = getClientConfig('anon');
+
+  return createClient(url, key, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
+  });
+}
+
 const missingAtImport = [
   !readEnvVar('SUPABASE_URL') ? 'SUPABASE_URL' : null,
   !readEnvVar('SUPABASE_ANON_KEY') ? 'SUPABASE_ANON_KEY' : null,

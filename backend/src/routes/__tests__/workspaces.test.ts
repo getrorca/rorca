@@ -55,6 +55,23 @@ test('POST /api/workspaces with valid path returns 201', async () => {
   expect(res.body.workspace.created_at).toBeDefined();
 });
 
+test('POST /api/workspaces enrolls creator as owner member', async () => {
+  const res = await request(app)
+    .post('/api/workspaces')
+    .set('Authorization', `Bearer ${authToken}`)
+    .send(validWorkspace);
+
+  expect(res.status).toBe(201);
+
+  const memberships = await query<{ workspace_id: string; role: string }>(
+    'SELECT workspace_id, role FROM workspace_members WHERE workspace_id = $1',
+    ['ws-test-1']
+  );
+
+  expect(memberships).toHaveLength(1);
+  expect(memberships[0]).toEqual({ workspace_id: 'ws-test-1', role: 'owner' });
+});
+
 test('POST /api/workspaces with non-existent path returns 400', async () => {
   const res = await request(app)
     .post('/api/workspaces')
