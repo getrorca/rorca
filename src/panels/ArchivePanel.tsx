@@ -586,7 +586,8 @@ function SpecPreviewDrawer({
   const { workspaceId } = useWorkspace();
   const { user } = useAuth();
   const [showPricing, setShowPricing] = useState(false);
-  const isFreePlan = !user?.plan || user.plan === 'free';
+  const userPlan = user?.app_metadata?.plan as string | undefined;
+  const isFreePlan = !userPlan || userPlan === 'free';
   const [activeTab, setActiveTab] = useState<PreviewTab>('stories');
   const [runState, setRunState] = useState<RunState>('idle');
   const [runError, setRunError] = useState('');

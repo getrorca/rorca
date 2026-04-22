@@ -205,104 +205,14 @@
 > Context: Keeps navigation at six items while preserving terminal sessions across route changes and supporting desktop handle/FAB access patterns.
 > Source: OCT-036
 
-## 2026-04-15 [Pattern] Terminal PTY sessions support per-session model override
-> Rule: When spawning OpenCode terminal sessions, accept an optional validated `model` in POST /api/terminal/sessions and inject it into that PTY env only via `OPENCODE_MODEL`/`RORCA_MODEL`; never mutate global provider settings.
-> Context: Lets users experiment per terminal session without affecting pipeline runs or workspace-wide defaults.
-> Source: OCT-037
-
 ## 2026-04-15 [Architecture] OpenCode terminal access is drawer-only
 > Rule: Expose the OpenCode terminal exclusively through the global TerminalDrawer overlay, not a sidebar nav item, with desktop handle bar and mobile FAB entry points.
 > Context: Keeps primary navigation at six items while preserving persistent terminal sessions across route changes.
 > Source: OCT-036
 
-## 2026-04-15 [Pattern] Terminal sessions support env-scoped model override
-> Rule: Pass an optional `model` to `POST /api/terminal/sessions` and inject it only into the spawned PTY env (`OPENCODE_MODEL` and session-local `RORCA_MODEL`) without mutating workspace or global settings.
-> Context: Lets terminal sessions choose a different OpenCode model than pipeline runs or provider settings while preserving the canonical global model resolution chain.
-> Source: OCT-037
-
-## 2026-04-15 [Pattern] Terminal install polling uses refs for timers
-> Rule: When polling for external CLI installation in React, store interval IDs and elapsed counters in useRef, clear them on success, workspace changes, and unmount, and sequence any success flash before retrying the original action.
-> Context: Avoids stale closure bugs and prevents orphaned polling loops in TerminalPanel's OpenCode auto-retry flow.
-> Source: OCT-040
-
-## 2026-04-16 [Bug Fix] Terminal WebSocket output dropped — session.outputSequence vs nextSequence
-> Rule: server.ts used `session.outputSequence` but PtySession interface defines `nextSequence`. undefined += 1 → NaN → JSON null → frontend sequence check (null <= 0 === true) silently dropped every WebSocket output message. Keystrokes were sent to PTY but echoes never reached xterm. Fix: use session.nextSequence in server.ts WebSocket onData handler.
-> Context: Root cause of "typing works only after refresh" bug. Scrollback REST endpoint worked (showed text on refresh) but live WebSocket output was completely silent.
-> Source: OCT-001
-
-## 2026-04-16 [Bug Fix] Terminal wsToken one-time-use breaks React StrictMode
-> Rule: WebSocket connection tokens were deleted on first validation (one-time use). React StrictMode double-mounts effects: first mount consumes token, cleanup closes connection, second mount rejected. Fix: keep token in map until TTL expiry (60s) instead of deleting on first use. File: backend/src/routes/terminal.ts validateWsToken().
-> Context: Combined with the outputSequence bug, this was a secondary cause of no live output. Even after fixing sequences, StrictMode would still kill the WebSocket on second mount.
-> Source: OCT-021
-
-## 2026-04-16 [Bug Fix] Terminal workspaces.domain vs domains column mismatch
-> Rule: terminal-context-injector.ts queried `SELECT domain FROM workspaces` but the column is `domains` (JSONB array, not singular text). Fix: query `domains`, JSON.parse, extract first element for L2 direction layer lookup.
-> Context:  
-> Source: OCT-001
-
-## 2026-04-16 [Bug Fix] Terminal route ordering — /sessions/history shadowed by /sessions/:sessionId
-> Rule: Express matched GET /sessions/history as sessionId="history" because the :sessionId route was registered before the /history route. Fix: move /sessions/history routes before /sessions/:sessionId in terminal.ts.
-> Context:  
-> Source: OCT-001
-
-## 2026-04-16 [Bug Fix] Terminal node-pty spawn-helper missing execute permission
-> Rule: node-pty prebuilds/darwin-arm64/spawn-helper installed without +x permission → posix_spawnp failed, crashing the backend. Fix: chmod +x spawn-helper. npm rebuild node-pty also fixes this. Check after every npm install.
-> Context:  
-> Source: OCT-001
-
-## 2026-04-16 [Bug Fix] Terminal infinite re-render loops — useTerminalSession unstable returns
-> Rule: useTerminalSession hook returned plain functions (sendInput, sendResize, onData, etc.) — new refs every render. These were in TerminalPane's main useEffect deps → terminal torn down and recreated every render. Fix: wrap all returned functions in useCallback. Also: TerminalPanel callback props (onExit, onInput, onTitleChange, onBell) were inline arrows — captured via refs instead.
-> Context: Multiple layers of unstable references: useTerminalSession functions, TerminalPanel inline arrow props, WorkspaceContext/ToastContext unmemoized values, loadModelPickerData activeSessionId dep. All fixed with useCallback + refs.
-> Source: OCT-001
-
-## 2026-04-16 [Bug Fix] WorkspaceContext and ToastContext provider values not memoized
-> Rule: Both contexts created inline value objects without useMemo, causing all consumers to re-render on every provider render. WorkspaceContext.setWorkspaceId was also a plain function (not useCallback). Fix: useMemo on both context values, useCallback on setWorkspaceId and addWorkspace.
-> Context: This was a pre-existing issue affecting all context consumers, not just the terminal. The terminal exposed it because of the many useEffect hooks with context-derived deps.
-> Source: OCT-001
-
-## 2026-04-16 [Decision] Terminal drawer hidden on /terminal route to prevent session mirroring
-> Rule: TerminalDrawer returns null when location.pathname === '/terminal'. Both the panel and drawer share the same localStorage-persisted sessions, so rendering both simultaneously causes mirrored PTY output. The drawer (with handle bar) is available on all other routes.
-> Context:  
-> Source: OCT-001
-
-## 2026-04-16 [Decision] Terminal drawer spans full viewport width (no sidebar offset)
-> Rule: TerminalDrawer getSidebarOffset() returns '0px' for all breakpoints. Previously offset by sidebar width on desktop, leaving a gap. User requested it align with the content grid left edge.
-> Context:  
-> Source: OCT-001
-
-## 2026-04-16 [Bug Fix] TerminalPanel always-mounted to preserve PTY sessions across navigation
-> Rule: TerminalPanel is now always-mounted in AppLayout (outside the Outlet) to keep PTY sessions alive when navigating to Specs/Runs/etc. Visibility is CSS-only: `className={location.pathname === '/terminal' ? 'contents' : 'hidden'}`. The ActivePanel case 'terminal' returns null. Auto-session creation is gated on isActiveRouteRef.current so it only fires when actually on /terminal — prevents 422 errors when browsing other panels with a workspace that has no vault key.
-> Context: Before this fix, navigating away from /terminal unmounted TerminalPanel entirely (React Router route unmount), destroying all in-memory PTY session state. On return, it would remount fresh and try to auto-create a new session.
-> Source:  
-
-## 2026-04-16 [Bug Fix] qa-accrual-missing-flows worktree spec was stale (10 stories vs 17 in main)
-> Rule: The worktree at workspace-feat-qa-accrual-missing-flows had an old 10-story spec (AMF-001–010, all passes=False). The main repo had 17 stories (AMF-000–016) with 12 already passing. Engine read the spec from workspacePath (main), but the run's previously_passed skip logic also read from main — however the WAL had no record of AMF-013/014/015 because the worktree spec didn't contain them, causing state_reconciliation failure. Fixed by copying main spec into worktree and committing. Run 192 still failed due to stale worker (Tuesday night PID 17483 running alongside fresh concurrently worker from same day).
-> Context: Remaining failing stories: AMF-002, AMF-003, AMF-013, AMF-014, AMF-015. Pattern: worktree spec diverges from main when stories are added to main after the worktree was created. Always sync worktree spec before re-running.
-> Source:  
-
-## 2026-04-16 [Gotcha] Multiple stale server/worker processes cause silent job failures
-> Rule: When npm run dev is started multiple times (e.g. once manually, once via mprocs), you get duplicate server and worker processes on the same ports. The stale worker (old PID, old code) can claim pg-boss jobs before the fresh worker does. Runs appear to start (status=running) but the engine never spawns (pid=NULL, last_heartbeat=NULL) and state reconciliation marks them failed in ~30s. Always kill ALL node processes before starting: `lsof -ti:3030 | xargs kill -9; lsof -ti:5210 | xargs kill -9; ps aux | grep -E "(server|worker)\.ts" | grep -v grep | awk '{print $2}' | xargs kill -9`
-> Context: Observed 2026-04-16: worker PID 17483 from Tuesday night still running alongside fresh worker from 1:17PM same day. The Tuesday worker had worker_id f5f831e1 in heartbeat table and was claiming jobs with stale code.
-> Source:  
-
-## 2026-04-16 [Decision] StoryCard Linear-style status treatment — dot icon + dimming, no colored ID or DONE badge
-> Rule: Story cards now follow Linear's UX pattern: (1) story ID is always muted gray — never colored by status; (2) status dot left of title: Circle=not done, CheckCircle2=done (muted), MinusCircle=deferred; (3) done rows dim to opacity-50 + border-border/50 + title goes text-muted; (4) DONE text badge removed entirely. Done stories recede visually, unfinished stories demand attention.
-> Context: Previous design: teal ID = not done, green DONE badge = done. This highlighted completed work and buried unfinished work — inverse of useful signal. 2026-04-16.
-> Source:  
-
-## 2026-04-16 [Bug Fix] Vite worktree process persists on port 5173 after killing main processes
-> Rule: When a spec run creates a worktree (e.g. workspace-feat-qa-accrual-missing-flows), that worktree's Vite dev server may still be running independently. Killing the main workspace processes does not kill the worktree's Vite. Result: new mprocs Vite bumps to 5174, old browser tab on 5173 still works. Find with: `lsof -ti:5173 | xargs ps -p` then kill the worktree Vite PID separately.
-> Context: Observed 2026-04-16: PID 31425 was node running vite from workspace-feat-qa-accrual-missing-flows/node_modules/.bin/vite --port 5173.
-> Source:  
-
 ## 2026-04-21 [Architecture] Merge Strategy — 4-way post-run routing
 > Rule: Worktree runs support 4 merge strategies: direct (merge+push main), pr (push branch+create PR), draft-pr (push branch+create draft PR), branch-only (push branch, no PR/merge). Resolved from: per-run trigger override > spec JSON mergeStrategy field > workspace pipeline_config.mergeStrategy > 'direct' fallback. Implemented in worker.ts switch statement, pg-boss-schemas.ts MergeStrategyEnum, pipeline.ts trigger route, and TriggerPopover.tsx dropdown UI.
 > Context: Replaces the old binary autoMerge toggle. The dropdown in TriggerPopover loads the workspace default on mount. Settings > Pipeline has a persistent workspace-level dropdown. gh CLI fallback gracefully degrades pr/draft-pr to branch-only if GitHub API isn't configured.
-> Source:  
-
-## 2026-04-21 [Bug Fix] Worker spec completion check gated behind exit code
-> Rule: The worker's post-run merge/PR logic was gated on status === 'done', meaning if the engine exited non-zero (timeout, signal, crash) but all stories actually passed in the spec JSON, the merge strategy never fired. Fixed by reading spec JSON regardless of exit code. If allSpecStoriesPassed is true but status is 'failed', the run is promoted to 'done' in the DB and merge strategy proceeds. Ground truth is the spec file, not the exit code.
-> Context: Discovered via qa-reports-basis-toggle-journeys spec on workspace — 24/24 stories passed across 3 incremental runs on the same worktree, but all 3 runs were marked 'failed' in DB. Branch was never merged or PR'd because the gate blocked it. Commit b2c5388.
 > Source:  
 
 ## 2026-04-21 [Architecture] LLM-synthesized diff summary in auto-PR bodies
@@ -310,12 +220,22 @@
 > Context: Solves the "aspirational vs reality" problem — PR descriptions used to describe what was planned, not what was actually changed. The synthesis runs once after all stories pass, costs a few cents of LLM time, and produces a permanent truthful receipt of the code changes.
 > Source:  
 
-## 2026-04-21 [Decision] Merge strategy is spec-level declarative, not path-based
-> Rule: The merge strategy is a declarative property on the spec JSON (mergeStrategy field), workspace config, or per-run override. It is NOT based on analyzing file paths, migration detection, or risk scoring. Rorca remains a generic agnostic orchestration platform — it doesn't know or care what a "migration" is. The user or spec author declares the intent explicitly.
-> Context: User explicitly rejected path-based risk detection as domain leakage. The right architecture is: spec.mergeStrategy > workspace pipeline_config.mergeStrategy > 'direct'. No magic, no guessing.
-> Source:  
+## 2026-04-22 [Architecture] Supabase workspace RLS dependency chain
+> Rule: Create workspace_members and get_user_workspace_ids(auth_id) in the same migration that adds users.auth_id so workspace RLS policies never depend on objects created later.
+> Context: MU-010 workspace RLS calls get_user_workspace_ids() at runtime, so the join table and helper function must exist atomically before policies are enabled.
+> Source: MU-003
 
-## 2026-04-21 [Gotcha] Coolify auto-deploy via GitHub webhook
-> Rule: Rorca is deployed on Workspace VPS (141.94.33.224) via Coolify. GitHub webhook (Hook ID 606945335) fires on push to main, hits http://100.91.193.49:9876/deploy (Tailscale-only), runs /home/ubuntu/rorca-deploy.sh which does git pull + rsync + docker compose up --build. Service UUID: xbsf06ai9pfut49urigz0ezo. Rorca containers are accessible ONLY behind Tailscale (ports bound to 100.91.193.49). Deploy takes ~90 seconds.
-> Context: docker-compose.override.yml binds rorca port to Tailscale IP only. Webhook listener is a Python systemd service running on ubuntu user. Secret: rorca-deploy-secret-2026.
-> Source: 
+## 2026-04-22 [Convention] Supabase local dev docs must separate migration systems
+> Rule: When documenting local Supabase setup, explicitly note that `supabase db reset` only runs `supabase/migrations/` and does not apply app schema migrations from `backend/src/db/pg-migrations/`.
+> Context: Rorca uses pg-index.ts for application schema migrations while Supabase CLI manages its own local stack lifecycle and migration directory.
+> Source: MU-027
+
+## 2026-04-22 [Architecture] Team RLS needs direct workspace scoping
+> Rule: When applying workspace-based RLS to `teams`, add and backfill a direct `workspace_id` on `teams` instead of inferring scope indirectly through joins.
+> Context: The requested `teams SELECT` policy depends on `workspace_id IN get_user_workspace_ids(auth.uid())`; the legacy schema lacked that column, so the prerequisite schema change is required before correct Supabase RLS can be expressed.
+> Source: MU-013
+
+## 2026-04-22 [Architecture] Failure Registry replaces failedIds Set (CP-002)
+> Rule: execution-engine.ts uses `failureRegistry: Map<string, FailureRecord>` (from failure-registry.ts) instead of `failedIds: Set<string>`. Use `markFailed()`, `isFailed()`, `getFailureRecord()`, `removeFailure()` helpers. `computeBlockedStories()` accepts FailureRegistryMap and extracts keys via `failedIdSet()`. FailureRecord tracks: storyId, waveIndex, failedAt, reason, recoveryClass, recoveryAttempts, lastRecoveryAt, recoveryInFlight, conflictingFiles?, stderrTail?.
+> Context: CP-002 foundational data-structure change for cascade prevention. Every subsequent CP story builds on this registry. Removal from registry on recovery success is the mechanism for unblocking dependants.
+> Source: CP-002

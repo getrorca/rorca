@@ -1,4 +1,3 @@
-```typescript
 import { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import { Routes, Route, Navigate, Outlet, useLocation, useNavigate as useRouterNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
@@ -177,9 +176,7 @@ function AppRoutes() {
       return (
         <Suspense fallback={<BoardSkeleton />}>
           <PublicOnlyRoute>
-            <RegisterPage
-              onSwitchToLogin={() => navigate('/auth/login', { replace: true })}
-            />
+            <RegisterPage />
           </PublicOnlyRoute>
         </Suspense>
       );
@@ -188,22 +185,9 @@ function AppRoutes() {
     return (
       <Suspense fallback={<BoardSkeleton />}>
         <PublicOnlyRoute>
-          <LoginPage
-            onSwitchToRegister={() => navigate('/auth/register', { replace: true })}
-            onSwitchToForgotPassword={() => navigate('/auth/forgot-password', { replace: true })}
-          />
+          <LoginPage />
         </PublicOnlyRoute>
       </Suspense>
-    );
-  }
-
-  if (workspaces.length === 0) {
-    return (
-      <Shell>
-        <Suspense fallback={<BoardSkeleton />}>
-          <OnboardingWizard />
-        </Suspense>
-      </Shell>
     );
   }
 
@@ -423,7 +407,7 @@ function AppLayout() {
   const activeRunId = runMatch ? Number(runMatch[1]) : null;
 
   // Derive reviewSpecId from URL path /specs/:specId/review
-  const specMatch = location.pathname.match(/^\/specs\/([^/]+)\/review/);
+  const specMatch = location.pathname.match(/^\/specs\/([^\/]+)\/review/);
   const reviewSpecId = specMatch ? specMatch[1] : null;
 
   // CIE-009: Toast on external context file changes
@@ -433,8 +417,9 @@ function AppLayout() {
   useEffect(() => {
     if (!workspaceId) { setQueueCount(0); return; }
     const fetchCount = () => {
-      apiFetch<{ queueLength: number }>(`/api/run-queue/status?workspaceId=${workspaceId}`)
-        .then((data) => setQueueCount(data.queueLength))
+      const url = `/api/run-queue/status?workspaceId=${workspaceId}`;
+      apiFetch(url)
+        .then((data) => setQueueCount((data as Record<string, number>).queueLength))
         .catch(() => setQueueCount(0));
     };
     fetchCount();
@@ -446,8 +431,9 @@ function AppLayout() {
   useEffect(() => {
     if (!workspaceId) { setPendingSpecsCount(0); return; }
     const fetchPendingCount = () => {
-      apiFetch<{ items: unknown[]; total: number }>(`/api/specs?workspaceId=${workspaceId}&status=pending`)
-        .then((data) => setPendingSpecsCount(data.total))
+      const url = `/api/specs?workspaceId=${workspaceId}&status=pending`;
+      apiFetch(url)
+        .then((data) => setPendingSpecsCount((data as Record<string, number>).total))
         .catch(() => setPendingSpecsCount(0));
     };
     fetchPendingCount();
@@ -628,8 +614,12 @@ function App() {
         <ToastProvider>
           <TerminalDrawerProvider>
             <AuthProvider>
-              <GlobalErrorWiring />
-              <AppRoutes />
+              <WorkspaceProvider>
+                <NotificationProvider>
+                  <GlobalErrorWiring />
+                  <AppRoutes />
+                </NotificationProvider>
+              </WorkspaceProvider>
             </AuthProvider>
           </TerminalDrawerProvider>
         </ToastProvider>
@@ -639,4 +629,3 @@ function App() {
 }
 
 export default App;
-```

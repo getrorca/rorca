@@ -58,6 +58,14 @@ export async function authRequired(req: Request, res: Response, next: NextFuncti
     return;
   }
 
+  // Local single-user mode (AUTH_REQUIRED not set): upstream middleware already
+  // populated req.user (LOCAL_ADMIN or a validated Supabase user). Pass through.
+  if (process.env.AUTH_REQUIRED !== 'true') {
+    if (!req.user) req.user = LOCAL_ADMIN;
+    next();
+    return;
+  }
+
   if (!SUPABASE_AUTH_ENABLED) {
     req.user = LOCAL_ADMIN;
     next();

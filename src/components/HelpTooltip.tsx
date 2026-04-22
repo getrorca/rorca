@@ -122,14 +122,21 @@ export function HelpTooltip({ helpKey, size = 12, className = '' }: HelpTooltipP
       onMouseEnter={handleMouseEnter}
       onMouseLeave={handleMouseLeave}
     >
-      <button
+      <span
+        role="button"
+        tabIndex={0}
         onClick={handleClick}
-        className="text-[var(--text-muted)] hover:text-[var(--accent)] transition-colors opacity-50 hover:opacity-100"
+        onKeyDown={(e) => {
+          if (e.key === 'Enter' || e.key === ' ') {
+            e.preventDefault();
+            setOpen(!open);
+          }
+        }}
+        className="text-[var(--text-muted)] hover:text-[var(--accent)] transition-colors opacity-50 hover:opacity-100 cursor-help inline-flex items-center"
         aria-label={`Help: ${entry.title}`}
-        type="button"
       >
         <HelpCircle size={size} />
-      </button>
+      </span>
 
       {open && (
         <div

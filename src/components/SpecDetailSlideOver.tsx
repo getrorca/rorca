@@ -376,7 +376,8 @@ function SpecDetailContent({
   const { workspaceId } = useWorkspace();
   const { user } = useAuth();
   const toast = useGlobalToast();
-  const isFreePlan = !user?.plan || user.plan === 'free';
+  const userPlan = user?.app_metadata?.plan as string | undefined;
+  const isFreePlan = !userPlan || userPlan === 'free';
 
   // Summary + detail
   const [summary, setSummary] = useState<SpecSlideOverSummary | null>(initialSummary);
