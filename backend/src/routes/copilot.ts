@@ -10,8 +10,8 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { queryOne, execute } from '../db';
-import { encryptToken, decryptToken } from './auth';
-import type { AuthUser } from './auth';
+import { encryptToken, decryptToken } from '../lib/auth-utils';
+import type { AuthUser } from '../lib/auth-utils';
 import { AuthError, NotFoundError, ValidationError } from '../lib/errors';
 import { githubRateLimiter } from '../lib/github-rate-limiter';
 

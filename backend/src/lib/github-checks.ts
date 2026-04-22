@@ -1,7 +1,7 @@
 import * as fs from 'fs';
 import * as path from 'path';
 import { queryOne } from '../db/index';
-import { decryptToken } from '../routes/auth';
+import { decryptToken } from '../lib/auth-utils';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { logger } from './logger';
 import { githubRateLimiter } from './github-rate-limiter';
