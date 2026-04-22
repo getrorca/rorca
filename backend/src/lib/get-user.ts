@@ -1,6 +1,6 @@
 import { Request } from 'express';
 import { queryOne } from '../db/index';
-import type { AuthUser } from '../routes/auth';
+import type { AuthUser } from '../lib/auth-utils';
 
 /**
  * Auth is intentionally bypassed globally (single-user local tool).

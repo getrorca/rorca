@@ -1,7 +1,7 @@
 import { Router, Request, Response } from 'express';
 import Stripe from 'stripe';
 import { query, queryOne, execute, transaction } from '../db/index';
-import type { AuthUser } from './auth';
+import type { AuthUser } from '../lib/auth-utils';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError, UnprocessableError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
