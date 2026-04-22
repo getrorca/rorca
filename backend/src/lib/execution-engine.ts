@@ -59,6 +59,16 @@ import { autoSynthesizeMemory } from './auto-memory';
 import { writeMemoryMd } from './memory-projection';
 import { classifyFailure, FAILURE_REASONS, type FailureReason, type FailureClassification, type RecoveryClass } from './failure-classifier';
 import {
+  createFailureRegistry,
+  markFailed,
+  isFailed,
+  getFailureRecord,
+  removeFailure,
+  failedIdSet,
+  type FailureRecord,
+  type FailureRegistryMap,
+} from './failure-registry';
+import {
   initRunState,
   markStoryStarted as rsMarkStoryStarted,
   markStoryCompleted as rsMarkStoryCompleted,
@@ -3586,15 +3596,16 @@ async function runWithBoundedConcurrency<T>(
 
 function computeBlockedStories(
   allStories: UserStory[],
-  failedIds: Set<string>,
+  failureRegistry: FailureRegistryMap,
   alreadyProcessed: Set<string>,
 ): Map<string, string[]> {
   const blocked = new Map<string, string[]>();
+  const failed = failedIdSet(failureRegistry);
   const unprocessed = allStories.filter(s =>
-    !alreadyProcessed.has(s.id) && !failedIds.has(s.id) && !s.excluded && !s.skipped && !isPassed(s)
+    !alreadyProcessed.has(s.id) && !failed.has(s.id) && !s.excluded && !s.skipped && !isPassed(s)
   );
 
-  const allBlockedIds = new Set<string>(failedIds);
+  const allBlockedIds = new Set<string>(failed);
   let changed = true;
   while (changed) {
     changed = false;
@@ -3915,7 +3926,7 @@ async function runParallel(
   }
 
   const specSlug = path.basename(config.jsonPath, '.json').replace(/[^a-z0-9-]/gi, '-');
-  const failedIds = new Set<string>();
+  const failureRegistry = createFailureRegistry();
   const processedIds = new Set<string>();
   // Read spec once for browserMcp resolution (before wave loop)
   const specForBrowserMcp: SpecJson = JSON.parse(fs.readFileSync(config.jsonPath, 'utf8'));
@@ -3936,10 +3947,14 @@ async function runParallel(
       }
 
       const deps = original.dependsOn ?? [];
-      const blockers = deps.filter(dep => failedIds.has(dep));
+      const blockers = deps.filter(dep => isFailed(failureRegistry, dep));
       if (blockers.length > 0) {
         logger.info(`  ${original.id} BLOCKED by: ${blockers.join(', ')}`);
-        failedIds.add(original.id);
+        markFailed(failureRegistry, {
+          storyId: original.id, waveIndex: wave.index, failedAt: Date.now(),
+          reason: `blocked_by: ${blockers.join(', ')}`, recoveryClass: 'terminal',
+          recoveryAttempts: 0, lastRecoveryAt: null, recoveryInFlight: false,
+        });
         processedIds.add(original.id);
         markStorySkipped(config.jsonPath, original.id);
         rsMarkStorySkipped(config.cwd, {
@@ -3974,11 +3989,15 @@ async function runParallel(
       if (wt) {
         worktreeMap.set(story.id, wt);
       } else {
-        failedIds.add(story.id);
-        processedIds.add(story.id);
-        markStorySkipped(config.jsonPath, story.id);
         const wtFailReason: FailureReason = 'worktree_create_failed_transient';
         const wtClassification = classifyFailure(wtFailReason, 1, '');
+        markFailed(failureRegistry, {
+          storyId: story.id, waveIndex: wave.index, failedAt: Date.now(),
+          reason: wtFailReason, recoveryClass: wtClassification.recoveryClass,
+          recoveryAttempts: 0, lastRecoveryAt: null, recoveryInFlight: false,
+        });
+        processedIds.add(story.id);
+        markStorySkipped(config.jsonPath, story.id);
         rsMarkStoryFailed(config.cwd, {
           storyId: story.id, title: story.title, status: 'failed',
           startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
@@ -4015,7 +4034,11 @@ async function runParallel(
         processedIds.add(storyId);
         const wt = worktreeMap.get(storyId);
         if (result === 'failed') {
-          failedIds.add(storyId);
+          markFailed(failureRegistry, {
+            storyId, waveIndex: wave.index, failedAt: Date.now(),
+            reason: 'execution_failed', recoveryClass: 'transient',
+            recoveryAttempts: 0, lastRecoveryAt: null, recoveryInFlight: false,
+          });
           if (wt) failedInWave.push(wt);
         } else if (result === 'passed' && wt) {
           passedInWave.push(wt);
@@ -4033,7 +4056,11 @@ async function runParallel(
         const merged = mergeStoryWorktree(config.cwd, wt);
         if (!merged) {
           logger.error(`  [worktree] ${wt.storyId} passed but merge failed — marking as failed`);
-          failedIds.add(wt.storyId);
+          markFailed(failureRegistry, {
+            storyId: wt.storyId, waveIndex: wave.index, failedAt: Date.now(),
+            reason: 'merge_conflict', recoveryClass: 'transient',
+            recoveryAttempts: 0, lastRecoveryAt: null, recoveryInFlight: false,
+          });
           markStoryMergeFailed(config.jsonPath, wt.storyId);
           if (workspaceId) {
             const mergeClassification = classifyFailure('merge_conflict' as FailureReason, 1, '');
@@ -4069,13 +4096,18 @@ async function runParallel(
           }
           for (const wt of passedInWave) removeStoryWorktree(config.cwd, wt);
         } else {
-          // Some merges failed — add only the specific failed stories to failedIds
+          // Some merges failed — add only the specific failed stories to failureRegistry
           const failures = mergeResult.mergeFailures || (mergeResult.blocked ? [mergeResult.blocked] : []);
           const failedStoryIds = new Set(failures.map(f => f.storyId));
 
           for (const failure of failures) {
             logger.error(`  [merge] Wave ${wave.index} merge FAILED for ${failure.storyId}: ${failure.conflictingFiles.join(', ')}`);
-            failedIds.add(failure.storyId);
+            markFailed(failureRegistry, {
+              storyId: failure.storyId, waveIndex: wave.index, failedAt: Date.now(),
+              reason: 'merge_conflict', recoveryClass: 'transient',
+              recoveryAttempts: 0, lastRecoveryAt: null, recoveryInFlight: false,
+              conflictingFiles: failure.conflictingFiles,
+            });
             markStoryMergeFailed(config.jsonPath, failure.storyId);
 
             if (workspaceId) {
@@ -4105,12 +4137,16 @@ async function runParallel(
     for (const wt of failedInWave) removeStoryWorktree(config.cwd, wt);
 
     const allStories = getStories(JSON.parse(fs.readFileSync(config.jsonPath, 'utf8')));
-    const newlyBlocked = computeBlockedStories(allStories, failedIds, processedIds);
+    const newlyBlocked = computeBlockedStories(allStories, failureRegistry, processedIds);
 
     for (const [blockedId, blockers] of newlyBlocked) {
       if (!processedIds.has(blockedId)) {
         logger.info(`  ${blockedId} transitively BLOCKED by: ${blockers.join(', ')}`);
-        failedIds.add(blockedId);
+        markFailed(failureRegistry, {
+          storyId: blockedId, waveIndex: wave.index, failedAt: Date.now(),
+          reason: `blocked_by: ${blockers.join(', ')}`, recoveryClass: 'terminal',
+          recoveryAttempts: 0, lastRecoveryAt: null, recoveryInFlight: false,
+        });
         processedIds.add(blockedId);
         markStorySkipped(config.jsonPath, blockedId);
         rsMarkStorySkipped(config.cwd, {
@@ -4139,13 +4175,13 @@ async function runParallel(
   const finalProgress = getProgress(finalStories);
   logger.info('');
   logger.info(`All waves complete! ${finalProgress.passed}/${finalProgress.total} stories passed`);
-  if (failedIds.size > 0) {
-    logger.info(`Failed/blocked: ${[...failedIds].join(', ')}`);
+  if (failureRegistry.size > 0) {
+    logger.info(`Failed/blocked: ${[...failureRegistry.keys()].join(', ')}`);
   }
   // CIE-007: Archive run-state.json and write final progress.txt
   writeProgressTxt(config.cwd);
   archiveRunState(config.cwd, config.runId);
-  process.exit(failedIds.size > 0 ? 1 : 0);
+  process.exit(failureRegistry.size > 0 ? 1 : 0);
 }
 
 // ─── Workspace Resolver ─────────────────────────────────────────────────────

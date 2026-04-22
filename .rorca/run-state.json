@@ -2,8 +2,19 @@
   "specId": "rorca-cascade-prevention",
   "runId": 20260316000219,
   "startedAt": "2026-04-22T06:02:23.197Z",
-  "lastUpdatedAt": "2026-04-22T06:02:23.197Z",
-  "completedStories": [],
+  "lastUpdatedAt": "2026-04-22T06:37:11.297Z",
+  "completedStories": [
+    {
+      "storyId": "CP-002",
+      "title": "Replace `failedIds: Set<string>` with `failureRegistry: Map<storyId, FailureRecord>`",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:17:07.410Z",
+      "finishedAt": "2026-04-22T06:37:11.297Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 1203887
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
