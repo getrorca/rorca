@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T06:07:23.007Z",
+  "lastUpdatedAt": "2026-04-22T06:11:21.317Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -151,6 +151,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 147317
+    },
+    {
+      "storyId": "MU-023",
+      "title": "Build Team Management UI in Settings",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:07:29.371Z",
+      "finishedAt": "2026-04-22T06:11:21.317Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 231946
     }
   ],
   "failedStories": [
@@ -246,60 +256,6 @@
       "finishedAt": "2026-04-22T05:41:13.066Z",
       "agentType": "codex",
       "failReason": "blocked_by: MU-021, MU-022"
-    },
-    {
-      "storyId": "MU-022",
-      "title": "MU-022",
-      "status": "skipped",
-      "startedAt": "2026-04-22T06:07:20.945Z",
-      "finishedAt": "2026-04-22T06:07:20.945Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-021"
-    },
-    {
-      "storyId": "MU-025",
-      "title": "MU-025",
-      "status": "skipped",
-      "startedAt": "2026-04-22T06:07:20.952Z",
-      "finishedAt": "2026-04-22T06:07:20.952Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-014, MU-015, MU-021"
-    },
-    {
-      "storyId": "MU-029",
-      "title": "MU-029",
-      "status": "skipped",
-      "startedAt": "2026-04-22T06:07:20.956Z",
-      "finishedAt": "2026-04-22T06:07:20.956Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-021, MU-022"
-    },
-    {
-      "storyId": "MU-030",
-      "title": "MU-030",
-      "status": "skipped",
-      "startedAt": "2026-04-22T06:07:20.982Z",
-      "finishedAt": "2026-04-22T06:07:20.982Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-027"
-    },
-    {
-      "storyId": "MU-022",
-      "title": "Update key backend routes to use RLS-scoped queries",
-      "status": "skipped",
-      "startedAt": "2026-04-22T06:07:22.994Z",
-      "finishedAt": "2026-04-22T06:07:22.994Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-021"
-    },
-    {
-      "storyId": "MU-025",
-      "title": "Write RLS policy integration tests",
-      "status": "skipped",
-      "startedAt": "2026-04-22T06:07:23.006Z",
-      "finishedAt": "2026-04-22T06:07:23.006Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-014, MU-015, MU-021"
     }
   ],
   "currentStory": null,
