@@ -3329,3 +3329,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Pattern] Foundation RLS starts at workspaces SELECT gate: Enable RLS on `workspaces` first and define downstream visibility through `get_user_workspace_ids(auth.uid())`; other workspace-scoped tables can then safely chain access off workspace membership.
 > Rule: Foundation RLS starts at workspaces SELECT gate: Enable RLS on `workspaces` first and define downstream visibility through `get_user_workspace_ids(auth.uid())`; other workspace-scoped tables can then safely chain access off workspace membership.
+
+## 2026-04-22 [Gotcha] Pooled RLS claims must use SET plus RESET: When attaching JWT claims to a shared pg Pool client for PostgreSQL RLS, use session-level `SET request.jwt.claims = ...` and always `RESET request.jwt.claims` before `client.release()`; never rely on `SET LOCAL` in autocommit mode.
+> Rule: Pooled RLS claims must use SET plus RESET: When attaching JWT claims to a shared pg Pool client for PostgreSQL RLS, use session-level `SET request.jwt.claims = ...` and always `RESET request.jwt.claims` before `client.release()`; never rely on `SET LOCAL` in autocommit mode.
