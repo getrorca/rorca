@@ -2,7 +2,7 @@
   "specId": "rorca-supabase-auth-rls",
   "runId": 20260316000221,
   "startedAt": "2026-04-22T06:19:01.676Z",
-  "lastUpdatedAt": "2026-04-22T06:24:28.834Z",
+  "lastUpdatedAt": "2026-04-22T06:28:43.813Z",
   "completedStories": [
     {
       "storyId": "MU-015",
@@ -23,6 +23,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 178391
+    },
+    {
+      "storyId": "MU-022",
+      "title": "Update key backend routes to use RLS-scoped queries",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:24:45.430Z",
+      "finishedAt": "2026-04-22T06:28:43.812Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 238382
     }
   ],
   "failedStories": [],
