@@ -131,6 +131,11 @@ router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan(
           'INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4)',
           [id, label, path, JSON.stringify(domains)]
         );
+
+        await client.query(
+          'INSERT INTO workspace_members (workspace_id, user_auth_id, role) VALUES ($1, $2, $3)',
+          [id, req.user!.supabaseId, 'owner']
+        );
       });
     } catch (err: any) {
       if (err.code === '23505' || err.message?.includes('duplicate key value violates unique constraint')) {
