@@ -28,6 +28,11 @@ cd backend && npx jest --testPathPattern=<name>  # Single test file
 npx vitest run             # Run all frontend tests once
 npx vitest                 # Watch mode
 
+# Local Supabase CLI
+supabase start             # Start local Supabase stack (API 54321, DB 54322, Studio 54323)
+supabase stop              # Stop local Supabase stack
+supabase db reset          # Reset Supabase-managed schema from supabase/migrations/
+
 # Type check both (run from root)
 bash -c "cd /Users/dimitriteravanessian/rorca && npx tsc --noEmit; echo FRONTEND:\$?" && bash -c "cd /Users/dimitriteravanessian/rorca/backend && npx tsc --noEmit; echo BACKEND:\$?"
 
@@ -36,6 +41,43 @@ lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev
 
 # Self-hosting (register rorca/ as its own workspace)
 npm run self-register
+```
+
+## Local Supabase Development
+
+This repo is configured for local Supabase CLI development with these ports:
+
+- `API`: `http://127.0.0.1:54321`
+- `DB`: `127.0.0.1:54322`
+- `Studio`: `http://127.0.0.1:54323`
+
+Initialize once if the `supabase/` directory does not exist:
+
+```bash
+supabase init
+```
+
+Start and stop the local stack with:
+
+```bash
+supabase start
+supabase stop
+```
+
+Reset only the Supabase-managed local schema with:
+
+```bash
+supabase db reset
+```
+
+Warning: `supabase db reset` only runs `supabase/migrations/`. It does **not** run Rorca application schema migrations from `backend/src/db/pg-migrations/`.
+
+For app schema changes, use the backend migration path (`pg-index.ts` on backend startup, or the project's migrate command if present). Treat Supabase CLI migrations and Rorca backend migrations as separate systems with different purposes.
+
+For GitHub OAuth in local development, configure your GitHub OAuth app callback URL as:
+
+```text
+http://127.0.0.1:54321/auth/v1/callback
 ```
 
 ## Architecture

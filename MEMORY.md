@@ -6,12 +6,6 @@
 Context: Confusing these causes file-not-found errors in pipeline trigger and archive panel.
 > Source: v2-platform
 
-## 2026-02-27 [Convention] chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
-> Rule: chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
-
-Context: The return type was changed from string to ChatResult in US-003 (model selection). All callers must use .text.
-> Source: US-003
-
 ## 2026-02-27 [Architecture] Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
 > Rule: Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
 
@@ -24,17 +18,23 @@ Context: L1-L2 are global engineering/domain principles. L3+ are per-workspace. 
 Context: Changes to backend code are not picked up automatically. Forgetting to restart causes stale behavior.
 > Source: v2-platform
 
-## 2026-02-28 [Architecture] Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
-> Rule: Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
+## 2026-02-27 [Convention] chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
+> Rule: chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
 
-Context: .rorca/config.json routing section defines globals, scopes, and tags. micromatch handles glob matching.
-> Source: CIE-004
+Context: The return type was changed from string to ChatResult in US-003 (model selection). All callers must use .text.
+> Source: US-003
 
 ## 2026-02-28 [Architecture] Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
 > Rule: Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
 
 Context: Machine-readable, human-editable. Categories: Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha.
 > Source: CIE-005
+
+## 2026-02-28 [Architecture] Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
+> Rule: Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
+
+Context: .rorca/config.json routing section defines globals, scopes, and tags. micromatch handles glob matching.
+> Source: CIE-004
 
 ## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
 > Rule: Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
@@ -54,11 +54,11 @@ Context: SM-001 failed with reason='typecheck' despite potentially working at ru
 Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incremental approach of establishing shared utilities before complex features reduces integration risk.
 > Source: SM-003
 
-## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
-> Rule: Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
+## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
 
-Context: The production-ready spec shows these are interdependent: rate limiting without CORS leaves attack vectors open; health checks without secrets management can't validate encrypted data access.
-> Source: rorca-production-ready
+Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
+> Source: PR-QUEUE-1
 
 ## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
 > Rule: PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
@@ -72,6 +72,12 @@ Context: PR-049 and PR-050 (SQLite optimization + benchmarks) were superseded by
 Context: To change limits: UPDATE rate_limits table then call invalidateRateLimitCache() or restart backend. Skipped in NODE_ENV=test unless RATE_LIMIT_ENABLED=true. Implemented in rate-limiter.ts.
 > Source: PR-NEW-1
 
+## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
+> Rule: Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
+
+Context: The production-ready spec shows these are interdependent: rate limiting without CORS leaves attack vectors open; health checks without secrets management can't validate encrypted data access.
+> Source: rorca-production-ready
+
 ## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
 > Rule: Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
 
@@ -83,12 +89,6 @@ Context: PR-003 establishes Docker Compose as the canonical self-hosted deployme
 
 Context: Implemented via workspace-echolocation.ts echolocate() function. Penalties apply: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit. This structured breakdown enables actionable remediation.
 > Source: CIE workspace health
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
-> Source: PR-QUEUE-1
 
 ## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
 > Rule: Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
@@ -3359,3 +3359,18 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Decision] direction_layers RLS needs explicit admin helper for global writes: When a table mixes global rows (`workspace_id IS NULL`) and workspace-scoped rows, write policies must split those cases: workspace members can mutate scoped rows, but global rows require an explicit admin helper such as `is_admin(auth.uid())`.
 > Rule: direction_layers RLS needs explicit admin helper for global writes: When a table mixes global rows (`workspace_id IS NULL`) and workspace-scoped rows, write policies must split those cases: workspace members can mutate scoped rows, but global rows require an explicit admin helper such as `is_admin(auth.uid())`.
+
+## 2026-04-22 [Bug Fix] Workspace creation must seed workspace_members owner row: When creating a workspace under Supabase RLS, insert the workspace via a user-scoped client and immediately add a matching owner row in workspace_members for req.user.supabaseId.
+> Rule: Workspace creation must seed workspace_members owner row: When creating a workspace under Supabase RLS, insert the workspace via a user-scoped client and immediately add a matching owner row in workspace_members for req.user.supabaseId.
+
+## 2026-04-22 [Bug Fix] RLS request claims must use SET plus RESET: When projecting JWT claims into PostgreSQL for RLS on a pooled pg client, use session-level `SET request.jwt.claims = $1` and always `RESET request.jwt.claims` before releasing the client back to the pool.
+> Rule: RLS request claims must use SET plus RESET: When projecting JWT claims into PostgreSQL for RLS on a pooled pg client, use session-level `SET request.jwt.claims = $1` and always `RESET request.jwt.claims` before releasing the client back to the pool.
+
+## 2026-04-22 [Gotcha] Vault and GitHub RLS require workspace_id schema first: Do not add workspace-scoped RLS policies to `api_key_vault` or `github_connections` until each row has a non-null `workspace_id`; fail the migration loudly instead of creating false security.
+> Rule: Vault and GitHub RLS require workspace_id schema first: Do not add workspace-scoped RLS policies to `api_key_vault` or `github_connections` until each row has a non-null `workspace_id`; fail the migration loudly instead of creating false security.
+
+## 2026-04-22 [Decision] Legacy backend auth removed for Supabase cutover: When migrating fully to Supabase auth, delete server-managed auth endpoints and password storage together: drop refresh/reset/verification tables, drop users.password_hash, keep only GET /api/auth/me plus shared token-encryption helpers used by other routes.
+> Rule: Legacy backend auth removed for Supabase cutover: When migrating fully to Supabase auth, delete server-managed auth endpoints and password storage together: drop refresh/reset/verification tables, drop users.password_hash, keep only GET /api/auth/me plus shared token-encryption helpers used by other routes.
+
+## 2026-04-22 [Pattern] Supabase local dev uses dedicated CLI config: Keep local Supabase CLI ports and env examples aligned across supabase/config.toml, frontend .env.local.example, backend/.env.example, and developer docs, and document that Supabase CLI migrations are separate from backend pg-index migrations.
+> Rule: Supabase local dev uses dedicated CLI config: Keep local Supabase CLI ports and env examples aligned across supabase/config.toml, frontend .env.local.example, backend/.env.example, and developer docs, and document that Supabase CLI migrations are separate from backend pg-index migrations.

@@ -52,6 +52,7 @@ The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS 
 
 - **Node.js** 18 or later
 - **Git** (for workspace registration and git hydration)
+- **Supabase CLI** for local auth/database development (`brew install supabase/tap/supabase`)
 - **One of the following execution engines:**
   - **Claude Code CLI** installed and authenticated (`claude --version`) — uses your Pro/Max subscription, no API key
   - **OpenCode CLI** (`npm i -g opencode`, `opencode --version` >= 0.1.0) + an API key for your chosen provider
@@ -103,6 +104,34 @@ RORCA_MODEL=openai/gpt-4o    # or google/gemini-2.0-flash, ollama/llama3, etc.
 ```
 
 See the [Execution Engine](#execution-engine) section below for full provider setup, or use the in-app Setup Guide at **Settings > Model & Providers > Execution Engine**.
+
+### Configure local Supabase
+
+Rorca uses the Supabase CLI for local auth development. After installing the CLI, initialize and start the local stack:
+
+```bash
+supabase init
+supabase start
+```
+
+Local defaults in this repo:
+
+- `Supabase API`: `http://127.0.0.1:54321`
+- `Supabase Studio`: `http://127.0.0.1:54323`
+- `Supabase DB`: `127.0.0.1:54322`
+
+GitHub OAuth for local development should use this callback URL in your GitHub OAuth app:
+
+```text
+http://127.0.0.1:54321/auth/v1/callback
+```
+
+Supabase CLI migrations and Rorca app schema migrations are separate systems:
+
+- `supabase db reset` only runs migrations from `supabase/migrations/`
+- Rorca app schema migrations live in `backend/src/db/pg-migrations/` and run via `pg-index.ts` on backend startup
+
+Use both systems intentionally depending on what you are changing.
 
 ---
 
