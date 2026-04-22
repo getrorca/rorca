@@ -3314,3 +3314,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Bug Fix] Supabase auth fallback users must use UUID ids: When switching req.user.id to Supabase auth.users UUIDs, synthetic and fallback users must also use valid UUID-format ids and populate supabaseId to keep downstream consumers type-safe.
 > Rule: Supabase auth fallback users must use UUID ids: When switching req.user.id to Supabase auth.users UUIDs, synthetic and fallback users must also use valid UUID-format ids and populate supabaseId to keep downstream consumers type-safe.
+
+## 2026-04-22 [Decision] CSRF uses bootstrap endpoint with HttpOnly double-submit cookie: When auth is globally bypassed, issue CSRF tokens from `/api/auth/csrf-token`, store the cookie as HttpOnly, and have the frontend cache the returned token and retry one mutating request on `CSRF_INVALID`.
+> Rule: CSRF uses bootstrap endpoint with HttpOnly double-submit cookie: When auth is globally bypassed, issue CSRF tokens from `/api/auth/csrf-token`, store the cookie as HttpOnly, and have the frontend cache the returned token and retry one mutating request on `CSRF_INVALID`.
