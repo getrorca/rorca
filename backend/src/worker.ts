@@ -34,6 +34,10 @@ import {
 
 import simpleGit from 'simple-git';
 import { performMerge } from './lib/merge-handler';
+// Worker DB access intentionally uses the shared service-role pool helpers, not
+// withUserClient(). This process runs with RORCA_PROCESS_ROLE=worker and spawns
+// RORCA_PROCESS_ROLE=engine children to perform system-owned orchestration jobs,
+// so it must bypass per-request JWT RLS scoping.
 import { initDb, query, queryOne, execute, closePool } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
