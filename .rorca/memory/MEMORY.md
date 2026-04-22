@@ -293,4 +293,29 @@
 ## 2026-04-16 [Bug Fix] Vite worktree process persists on port 5173 after killing main processes
 > Rule: When a spec run creates a worktree (e.g. workspace-feat-qa-accrual-missing-flows), that worktree's Vite dev server may still be running independently. Killing the main workspace processes does not kill the worktree's Vite. Result: new mprocs Vite bumps to 5174, old browser tab on 5173 still works. Find with: `lsof -ti:5173 | xargs ps -p` then kill the worktree Vite PID separately.
 > Context: Observed 2026-04-16: PID 31425 was node running vite from workspace-feat-qa-accrual-missing-flows/node_modules/.bin/vite --port 5173.
+> Source:  
+
+## 2026-04-21 [Architecture] Merge Strategy — 4-way post-run routing
+> Rule: Worktree runs support 4 merge strategies: direct (merge+push main), pr (push branch+create PR), draft-pr (push branch+create draft PR), branch-only (push branch, no PR/merge). Resolved from: per-run trigger override > spec JSON mergeStrategy field > workspace pipeline_config.mergeStrategy > 'direct' fallback. Implemented in worker.ts switch statement, pg-boss-schemas.ts MergeStrategyEnum, pipeline.ts trigger route, and TriggerPopover.tsx dropdown UI.
+> Context: Replaces the old binary autoMerge toggle. The dropdown in TriggerPopover loads the workspace default on mount. Settings > Pipeline has a persistent workspace-level dropdown. gh CLI fallback gracefully degrades pr/draft-pr to branch-only if GitHub API isn't configured.
+> Source:  
+
+## 2026-04-21 [Bug Fix] Worker spec completion check gated behind exit code
+> Rule: The worker's post-run merge/PR logic was gated on status === 'done', meaning if the engine exited non-zero (timeout, signal, crash) but all stories actually passed in the spec JSON, the merge strategy never fired. Fixed by reading spec JSON regardless of exit code. If allSpecStoriesPassed is true but status is 'failed', the run is promoted to 'done' in the DB and merge strategy proceeds. Ground truth is the spec file, not the exit code.
+> Context: Discovered via qa-reports-basis-toggle-journeys spec on workspace — 24/24 stories passed across 3 incremental runs on the same worktree, but all 3 runs were marked 'failed' in DB. Branch was never merged or PR'd because the gate blocked it. Commit b2c5388.
+> Source:  
+
+## 2026-04-21 [Architecture] LLM-synthesized diff summary in auto-PR bodies
+> Rule: github-pr-creator.ts now runs git diff main...branch through chatComplete to generate a truthful bullet-point summary of what was actually built (not what the spec planned). The synthesized summary replaces spec.brief as the primary PR summary. Spec brief is shown as a blockquote for context. Diff is truncated to 50k chars for LLM context limits. Falls back to spec brief if synthesis fails. Template variable is {{run.diffSummary}}.
+> Context: Solves the "aspirational vs reality" problem — PR descriptions used to describe what was planned, not what was actually changed. The synthesis runs once after all stories pass, costs a few cents of LLM time, and produces a permanent truthful receipt of the code changes.
+> Source:  
+
+## 2026-04-21 [Decision] Merge strategy is spec-level declarative, not path-based
+> Rule: The merge strategy is a declarative property on the spec JSON (mergeStrategy field), workspace config, or per-run override. It is NOT based on analyzing file paths, migration detection, or risk scoring. Rorca remains a generic agnostic orchestration platform — it doesn't know or care what a "migration" is. The user or spec author declares the intent explicitly.
+> Context: User explicitly rejected path-based risk detection as domain leakage. The right architecture is: spec.mergeStrategy > workspace pipeline_config.mergeStrategy > 'direct'. No magic, no guessing.
+> Source:  
+
+## 2026-04-21 [Gotcha] Coolify auto-deploy via GitHub webhook
+> Rule: Rorca is deployed on Workspace VPS (141.94.33.224) via Coolify. GitHub webhook (Hook ID 606945335) fires on push to main, hits http://100.91.193.49:9876/deploy (Tailscale-only), runs /home/ubuntu/rorca-deploy.sh which does git pull + rsync + docker compose up --build. Service UUID: xbsf06ai9pfut49urigz0ezo. Rorca containers are accessible ONLY behind Tailscale (ports bound to 100.91.193.49). Deploy takes ~90 seconds.
+> Context: docker-compose.override.yml binds rorca port to Tailscale IP only. Webhook listener is a Python systemd service running on ubuntu user. Secret: rorca-deploy-secret-2026.
 > Source: 

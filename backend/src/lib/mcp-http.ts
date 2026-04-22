@@ -271,7 +271,7 @@ async function executeApiCall(
   // Long-running endpoints (spec generation, enrichment, hydration, embedding, skills matching) need extended timeouts
   const SLOW_PATHS = ['/api/specs/generate', '/api/specs/generate-batch', '/api/workspaces/', '/api/admin/embed-all', '/enrich', '/match-skills', '/suggest-skills', '/add-stories', '/knowledge-graph'];
   const isSlowPath = SLOW_PATHS.some(p => resolvedPath.startsWith(p));
-  const timeoutMs = isSlowPath ? 5 * 60 * 1000 : 30_000; // 5 min for slow, 30s default
+  const timeoutMs = isSlowPath ? 10 * 60 * 1000 : 30_000; // 10 min for slow (claude --print spec gen can take 5-8min), 30s default
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
