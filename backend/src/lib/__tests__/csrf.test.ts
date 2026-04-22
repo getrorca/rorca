@@ -1,5 +1,5 @@
 import { csrfProtection, generateCsrfToken, setCsrfCookie } from '../csrf';
-import { ForbiddenError } from '../errors';
+import { CsrfError } from '../errors';
 import type { Request, Response, NextFunction } from 'express';
 
 function mockReq(overrides: Partial<Request> = {}): Request {
@@ -39,7 +39,7 @@ describe('setCsrfCookie', () => {
     const res = mockRes();
     setCsrfCookie(res, 'test-token');
     expect(res.cookie).toHaveBeenCalledWith('_csrf', 'test-token', {
-      httpOnly: false,
+      httpOnly: true,
       sameSite: 'strict',
       secure: false,
       path: '/',
@@ -146,22 +146,20 @@ describe('csrfProtection middleware', () => {
     expect(next).toHaveBeenCalled();
   });
 
-  // ─── No _csrf cookie → pass through ───
-
-  test('POST without _csrf cookie passes through (user not logged in)', () => {
+  test('POST without _csrf cookie throws CsrfError', () => {
     const req = mockReq({
       method: 'POST',
       originalUrl: '/api/specs/generate',
       headers: {},
     });
     const res = mockRes();
-    csrfProtection(req, res, next);
-    expect(next).toHaveBeenCalled();
+    expect(() => csrfProtection(req, res, next)).toThrow(CsrfError);
+    expect(() => csrfProtection(req, res, next)).toThrow('Missing CSRF cookie');
   });
 
   // ─── Cookie present, header missing → 403 ───
 
-  test('POST with _csrf cookie but no X-CSRF-Token header → ForbiddenError', () => {
+  test('POST with _csrf cookie but no X-CSRF-Token header → CsrfError', () => {
     const token = generateCsrfToken();
     const req = mockReq({
       method: 'POST',
@@ -169,14 +167,14 @@ describe('csrfProtection middleware', () => {
       headers: { cookie: `_csrf=${token}` },
     });
     const res = mockRes();
-    expect(() => csrfProtection(req, res, next)).toThrow(ForbiddenError);
+    expect(() => csrfProtection(req, res, next)).toThrow(CsrfError);
     expect(() => csrfProtection(req, res, next)).toThrow('Missing CSRF token header');
     expect(next).not.toHaveBeenCalled();
   });
 
   // ─── Cookie present, header mismatched → 403 ───
 
-  test('POST with mismatched X-CSRF-Token → ForbiddenError', () => {
+  test('POST with mismatched X-CSRF-Token → CsrfError', () => {
     const token = generateCsrfToken();
     const req = mockReq({
       method: 'POST',
@@ -187,7 +185,7 @@ describe('csrfProtection middleware', () => {
       },
     });
     const res = mockRes();
-    expect(() => csrfProtection(req, res, next)).toThrow(ForbiddenError);
+    expect(() => csrfProtection(req, res, next)).toThrow(CsrfError);
     expect(() => csrfProtection(req, res, next)).toThrow('CSRF token mismatch');
   });
 

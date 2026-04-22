@@ -103,6 +103,7 @@ import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
 import terminalRouter, { validateWsToken } from './routes/terminal';
+import { supabaseAdmin } from './lib/supabase';
 import { initBoss } from './lib/pg-boss';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as ptyManager from './lib/pty-manager';
@@ -357,8 +358,9 @@ if (process.env.AUTH_REQUIRED === 'true') {
           return next();
         }
       } catch {
-        // Invalid Supabase token — fall through to local admin
+        return _res.status(401).json({ error: 'Invalid token', code: 'AUTH_ERROR' });
       }
+      return _res.status(401).json({ error: 'Invalid token', code: 'AUTH_ERROR' });
     }
     req.user = LOCAL_ADMIN;
     next();
@@ -613,7 +615,20 @@ if (process.env.NODE_ENV !== 'test') {
       return;
     }
 
-    const sessionId = validateWsToken(wsToken);
+    const authHeader = req.headers.authorization;
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+    let wsUserId: string | undefined;
+    if (token && process.env.SUPABASE_URL?.trim()) {
+      try {
+        const { data, error } = await supabaseAdmin.auth.getUser(token);
+        if (!error && data.user?.id) {
+          wsUserId = data.user.id;
+        }
+      } catch {
+      }
+    }
+
+    const sessionId = validateWsToken(wsToken, wsUserId);
     if (!sessionId) {
       ws.send(JSON.stringify({ type: 'error', message: 'Invalid or expired wsToken' }));
       ws.close();

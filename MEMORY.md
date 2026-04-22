@@ -12,17 +12,17 @@ Context: Confusing these causes file-not-found errors in pipeline trigger and ar
 Context: L1-L2 are global engineering/domain principles. L3+ are per-workspace. L4/L5 come from spec brief and story annotations.
 > Source: CIE-003
 
-## 2026-02-27 [Gotcha] Backend requires restart after changes: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
-> Rule: Backend requires restart after changes: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
-
-Context: Changes to backend code are not picked up automatically. Forgetting to restart causes stale behavior.
-> Source: v2-platform
-
 ## 2026-02-27 [Convention] chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
 > Rule: chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
 
 Context: The return type was changed from string to ChatResult in US-003 (model selection). All callers must use .text.
 > Source: US-003
+
+## 2026-02-27 [Gotcha] Backend requires restart after changes: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
+> Rule: Backend requires restart after changes: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
+
+Context: Changes to backend code are not picked up automatically. Forgetting to restart causes stale behavior.
+> Source: v2-platform
 
 ## 2026-02-28 [Architecture] Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
 > Rule: Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
@@ -36,16 +36,16 @@ Context: Machine-readable, human-editable. Categories: Architecture, Convention,
 Context: .rorca/config.json routing section defines globals, scopes, and tags. micromatch handles glob matching.
 > Source: CIE-004
 
-## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
-> Rule: Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
-
-Context: SM-001 failed in wave 0, causing SM-002, SM-004, and SM-006 to skip despite not being directly tested. This cascading failure pattern means early wave failures have exponential impact on run completion rate.
-> Source: SM-001
-
 ## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
 > Rule: TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
 
 Context: SM-001 failed with reason='typecheck' despite potentially working at runtime. The execution engine enforces strict type safety as a quality gate. Always verify both frontend and backend type checks before committing.
+> Source: SM-001
+
+## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
+> Rule: Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
+
+Context: SM-001 failed in wave 0, causing SM-002, SM-004, and SM-006 to skip despite not being directly tested. This cascading failure pattern means early wave failures have exponential impact on run completion rate.
 > Source: SM-001
 
 ## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
@@ -54,17 +54,29 @@ Context: SM-001 failed with reason='typecheck' despite potentially working at ru
 Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incremental approach of establishing shared utilities before complex features reduces integration risk.
 > Source: SM-003
 
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-> Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
+> Rule: Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
 
-Context: PR-051 creates plan_quotas table + requirePlan middleware. This centralizes enforcement logic and makes quota changes (free → paid tier) declarative. Route handlers stay clean.
-> Source: PR-051
+Context: PR-052 implements upgrade prompts + feature badges. This creates a progressive disclosure UX where users discover features organically rather than via docs. Version gate prevents showing unavailable features.
+> Source: PR-052
 
 ## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
 > Rule: PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
 
 Context: PR-049 and PR-050 (SQLite optimization + benchmarks) were superseded by the rorca-postgres-migration spec. This teaches us that production-grade DB decisions should be made upfront, not incrementally optimized from dev-grade solutions.
 > Source: rorca-postgres-migration
+
+## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+
+Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
+> Source: PR-QUEUE-1
+
+## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+> Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+
+Context: PR-051 creates plan_quotas table + requirePlan middleware. This centralizes enforcement logic and makes quota changes (free → paid tier) declarative. Route handlers stay clean.
+> Source: PR-051
 
 ## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
 > Rule: Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
@@ -89,18 +101,6 @@ Context: PR-003 establishes Docker Compose as the canonical self-hosted deployme
 
 Context: Implemented via workspace-echolocation.ts echolocate() function. Penalties apply: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit. This structured breakdown enables actionable remediation.
 > Source: CIE workspace health
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
-> Source: PR-QUEUE-1
-
-## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-> Rule: Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-
-Context: PR-052 implements upgrade prompts + feature badges. This creates a progressive disclosure UX where users discover features organically rather than via docs. Version gate prevents showing unavailable features.
-> Source: PR-052
 
 ## 2026-03-10 [Gotcha] pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
 > Rule: pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
@@ -3422,3 +3422,9 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Bug Fix] Workspace creation must seed workspace_members owner row: When creating a workspace through an RLS-scoped route, insert the workspace_members owner membership in the same withUserClient() transaction as the workspace row so get_user_workspace_ids(auth.uid()) immediately returns the new workspace.
 > Rule: Workspace creation must seed workspace_members owner row: When creating a workspace through an RLS-scoped route, insert the workspace_members owner membership in the same withUserClient() transaction as the workspace row so get_user_workspace_ids(auth.uid()) immediately returns the new workspace.
+
+## 2026-04-22 [Architecture] Failure Registry replaces failedIds Set (CP-002): execution-engine.ts uses `failureRegistry: Map<string, FailureRecord>` (from failure-registry.ts) instead of `failedIds: Set<string>`. Use `markFailed()`, `isFailed()`, `getFailureRecord()`, `removeFailure()` helpers. `computeBlockedStories()` accepts FailureRegistryMap and extracts keys via `failedIdSet()`. FailureRecord tracks: storyId, waveIndex, failedAt, reason, recoveryClass, recoveryAttempts, lastRecoveryAt, recoveryInFlight, conflictingFiles?, stderrTail?.
+> Rule: Failure Registry replaces failedIds Set (CP-002): execution-engine.ts uses `failureRegistry: Map<string, FailureRecord>` (from failure-registry.ts) instead of `failedIds: Set<string>`. Use `markFailed()`, `isFailed()`, `getFailureRecord()`, `removeFailure()` helpers. `computeBlockedStories()` accepts FailureRegistryMap and extracts keys via `failedIdSet()`. FailureRecord tracks: storyId, waveIndex, failedAt, reason, recoveryClass, recoveryAttempts, lastRecoveryAt, recoveryInFlight, conflictingFiles?, stderrTail?.
+
+## 2026-04-22 [Bug Fix] Invalid bearer tokens must not fall through to LOCAL_ADMIN: In local fallback auth mode, if an Authorization bearer token is present but Supabase rejects it, return `401 AUTH_ERROR` instead of silently injecting the local admin user.
+> Rule: Invalid bearer tokens must not fall through to LOCAL_ADMIN: In local fallback auth mode, if an Authorization bearer token is present but Supabase rejects it, return `401 AUTH_ERROR` instead of silently injecting the local admin user.
