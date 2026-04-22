@@ -3347,3 +3347,9 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Gotcha] RLS story brief can drift from live schema: Before writing Supabase RLS migrations, verify every target table and scoping column in the current migration set; if a table lacks the required workspace_id or join key, add the schema migration first instead of forcing an incorrect policy.
 > Rule: RLS story brief can drift from live schema: Before writing Supabase RLS migrations, verify every target table and scoping column in the current migration set; if a table lacks the required workspace_id or join key, add the schema migration first instead of forcing an incorrect policy.
+
+## 2026-04-22 [Gotcha] RLS policies may need auth-id join on legacy user tables: When enabling Supabase RLS on legacy tables keyed by users.id, map ownership via users.auth_id = auth.uid() instead of assuming a direct user_auth_id column exists.
+> Rule: RLS policies may need auth-id join on legacy user tables: When enabling Supabase RLS on legacy tables keyed by users.id, map ownership via users.auth_id = auth.uid() instead of assuming a direct user_auth_id column exists.
+
+## 2026-04-22 [Architecture] Team RLS needs direct workspace scoping: When applying workspace-based RLS to `teams`, add and backfill a direct `workspace_id` on `teams` instead of inferring scope indirectly through joins.
+> Rule: Team RLS needs direct workspace scoping: When applying workspace-based RLS to `teams`, add and backfill a direct `workspace_id` on `teams` instead of inferring scope indirectly through joins.
