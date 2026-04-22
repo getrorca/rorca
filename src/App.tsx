@@ -1,4 +1,3 @@
-```typescript
 import { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import { Routes, Route, Navigate, Outlet, useLocation, useNavigate as useRouterNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
@@ -8,6 +7,7 @@ import { ToastProvider, useGlobalToast } from './contexts/ToastContext';
 import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import { NotificationProvider } from './contexts/NotificationContext';
 import Shell from './components/Shell';
+import RequireAuth from './components/RequireAuth';
 import Sidebar, { type PanelId } from './components/Sidebar';
 import SettingsSidebar from './components/SettingsSidebar';
 import ResizableSidebar from './components/ResizableSidebar';
@@ -60,8 +60,6 @@ const TerminalPanel = lazy(() => import('./panels/TerminalPanel'));
 // SettingsTab type — imported from SettingsPanel module
 type SettingsTab = import('./panels/SettingsPanel').SettingsTab;
 
-type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
-
 function PublicOnlyRoute({ children }: { children: JSX.Element }) {
   const { isAuthenticated, isLoading } = useAuth();
 
@@ -74,102 +72,6 @@ function PublicOnlyRoute({ children }: { children: JSX.Element }) {
   }
 
   return children;
-}
-
-function AuthGate() {
-  const { isAuthenticated, isLoading } = useAuth();
-  const location = useLocation();
-  const navigate = useRouterNavigate();
-
-  // EQ-007: Public review page — rendered outside auth gate
-  const reviewMatch = location.pathname.match(/^\/review\/([a-f0-9-]+)$/i);
-  if (reviewMatch) {
-    return (
-      <Suspense fallback={<BoardSkeleton />}>
-        <PublicReviewPage token={reviewMatch[1]} />
-      </Suspense>
-    );
-  }
-
-  // GitHub OAuth callback — rendered outside auth gate and shell (no sidebar/nav)
-  if (location.pathname === '/auth/github/callback') {
-    return (
-      <Suspense fallback={<BoardSkeleton />}>
-        <GitHubCallbackPage />
-      </Suspense>
-    );
-  }
-
-  // Supabase auth callback
-  if (location.pathname === '/auth/callback') {
-    return (
-      <Suspense fallback={<BoardSkeleton />}>
-        <AuthCallbackPage />
-      </Suspense>
-    );
-  }
-
-  if (location.pathname === '/auth/forgot-password') {
-    return (
-      <Suspense fallback={<BoardSkeleton />}>
-        <ForgotPasswordPage />
-      </Suspense>
-    );
-  }
-
-  if (location.pathname === '/auth/reset-password') {
-    return (
-      <Suspense fallback={<BoardSkeleton />}>
-        <ResetPasswordPage />
-      </Suspense>
-    );
-  }
-
-  if (isLoading) {
-    return (
-      <NotificationProvider>
-        <WorkspaceProvider>
-          <Shell>
-            <BoardSkeleton />
-          </Shell>
-        </WorkspaceProvider>
-      </NotificationProvider>
-    );
-  }
-
-  // Show login page when user is not authenticated
-  if (!isAuthenticated) {
-    if (location.pathname === '/auth/register') {
-      return (
-        <Suspense fallback={<BoardSkeleton />}>
-          <PublicOnlyRoute>
-            <RegisterPage
-              onSwitchToLogin={() => navigate('/auth/login', { replace: true })}
-            />
-          </PublicOnlyRoute>
-        </Suspense>
-      );
-    }
-    // Default: login page
-    return (
-      <Suspense fallback={<BoardSkeleton />}>
-        <PublicOnlyRoute>
-          <LoginPage
-            onSwitchToRegister={() => navigate('/auth/register', { replace: true })}
-            onSwitchToForgotPassword={() => navigate('/auth/forgot-password', { replace: true })}
-          />
-        </PublicOnlyRoute>
-      </Suspense>
-    );
-  }
-
-  return (
-    <NotificationProvider>
-      <WorkspaceProvider>
-        <AppRoutes />
-      </WorkspaceProvider>
-    </NotificationProvider>
-  );
 }
 
 /** Subscribes to apiFetch error events and unhandled rejections, shows toasts */
@@ -239,14 +141,76 @@ function AppRoutes() {
   return (
     <Routes>
       <Route
-        path="/auth/login"
+        path="/review/:token"
         element={
           <Suspense fallback={<BoardSkeleton />}>
-            <LoginPage />
+            <PublicReviewPage />
           </Suspense>
         }
       />
-      <Route element={<AppLayout />}>
+      <Route
+        path="/auth/github/callback"
+        element={
+          <Suspense fallback={<BoardSkeleton />}>
+            <GitHubCallbackPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/auth/callback"
+        element={
+          <Suspense fallback={<BoardSkeleton />}>
+            <AuthCallbackPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/auth/login"
+        element={
+          <PublicOnlyRoute>
+            <Suspense fallback={<BoardSkeleton />}>
+              <LoginPage />
+            </Suspense>
+          </PublicOnlyRoute>
+        }
+      />
+      <Route
+        path="/auth/register"
+        element={
+          <PublicOnlyRoute>
+            <Suspense fallback={<BoardSkeleton />}>
+              <RegisterPage />
+            </Suspense>
+          </PublicOnlyRoute>
+        }
+      />
+      <Route
+        path="/auth/forgot-password"
+        element={
+          <Suspense fallback={<BoardSkeleton />}>
+            <ForgotPasswordPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/auth/reset-password"
+        element={
+          <Suspense fallback={<BoardSkeleton />}>
+            <ResetPasswordPage />
+          </Suspense>
+        }
+      />
+      <Route
+        path="/invites/:token"
+        element={
+          <PublicOnlyRoute>
+            <Suspense fallback={<BoardSkeleton />}>
+              <RegisterPage />
+            </Suspense>
+          </PublicOnlyRoute>
+        }
+      />
+      <Route element={<RequireAuth><AppLayout /></RequireAuth>}>
         {/* ULT-006: Index route → Specs */}
         <Route index element={<Navigate to="/specs" replace />} />
         {/* Specs — consolidated panel (Board | List | Marketplace tabs) */}
@@ -638,7 +602,11 @@ function App() {
           <TerminalDrawerProvider>
             <AuthProvider>
               <GlobalErrorWiring />
-              <AuthGate />
+              <NotificationProvider>
+                <WorkspaceProvider>
+                  <AppRoutes />
+                </WorkspaceProvider>
+              </NotificationProvider>
             </AuthProvider>
           </TerminalDrawerProvider>
         </ToastProvider>
@@ -648,4 +616,3 @@ function App() {
 }
 
 export default App;
-```

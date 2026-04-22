@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:07:44.485Z",
+  "lastUpdatedAt": "2026-04-22T05:16:15.226Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -91,6 +91,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 156800
+    },
+    {
+      "storyId": "MU-009",
+      "title": "Add RequireAuth guard protecting all app routes",
+      "status": "passed",
+      "startedAt": "2026-04-22T05:13:52.327Z",
+      "finishedAt": "2026-04-22T05:16:15.225Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 142898
     }
   ],
   "failedStories": [
