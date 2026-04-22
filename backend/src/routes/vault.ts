@@ -8,6 +8,7 @@ import type { ProviderType } from '../lib/llm-client';
 import { invalidateProviderCache } from '../lib/embedding-pipeline';
 import { AuthError, NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { supabaseAnon } from '../lib/supabase';
 
 const router = Router();
 
@@ -63,6 +64,7 @@ function maskKey(encrypted: string): string {
 
 interface VaultRow {
   id: string;
+  workspace_id: string;
   user_id: string;
   provider: string;
   encrypted_key: string;
@@ -76,6 +78,29 @@ interface VaultRow {
 export interface VaultKeyResult {
   key: string;
   baseUrl: string | null;
+}
+
+function getBearerToken(req: Request): string | null {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Bearer ')) {
+    return null;
+  }
+  return header.slice('Bearer '.length).trim() || null;
+}
+
+function withUserClient(req: Request) {
+  const accessToken = getBearerToken(req);
+  if (!accessToken) {
+    throw new AuthError('Missing bearer token');
+  }
+
+  return supabaseAnon.auth.setSession({ access_token: accessToken, refresh_token: '' })
+    .then(({ error }) => {
+      if (error) {
+        throw new AuthError(`Invalid Supabase session: ${error.message}`);
+      }
+      return supabaseAnon;
+    });
 }
 
 /**
@@ -119,7 +144,13 @@ router.post('/', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { throw new AuthError('No user found'); return; }
 
-  const { provider, key, label, base_url } = req.body;
+  const userClient = await withUserClient(req);
+
+  const { workspaceId, provider, key, label, base_url } = req.body;
+
+  if (!workspaceId || typeof workspaceId !== 'string') {
+    throw new ValidationError('workspaceId is required');
+  }
 
   if (!provider || typeof provider !== 'string') {
     throw new ValidationError('provider is required');
@@ -141,10 +172,21 @@ router.post('/', async (req: Request, res: Response) => {
   const safeLabel = typeof label === 'string' ? label.trim() : '';
   const safeBaseUrl = typeof base_url === 'string' && base_url.trim() ? base_url.trim() : null;
 
-  await execute(
-    'INSERT INTO api_key_vault (id, user_id, provider, encrypted_key, label, base_url) VALUES ($1, $2, $3, $4, $5, $6)',
-    [id, user.id, provider, encryptedKey, safeLabel, safeBaseUrl]
-  );
+  const { error } = await userClient
+    .from('api_key_vault')
+    .insert({
+      id,
+      workspace_id: workspaceId,
+      user_id: user.id,
+      provider,
+      encrypted_key: encryptedKey,
+      label: safeLabel,
+      base_url: safeBaseUrl,
+    });
+
+  if (error) {
+    throw new AuthError(error.message);
+  }
 
   // Invalidate embedding provider cache so auto-detection picks up the new key immediately
   invalidateProviderCache();
@@ -193,10 +235,24 @@ router.get('/', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { res.json({ keys: [] }); return; }
 
-  const rows = await query<VaultRow>(
-    'SELECT id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at FROM api_key_vault WHERE user_id = $1 ORDER BY created_at DESC',
-    [user.id]
-  );
+  const workspaceId = req.query.workspaceId;
+  if (!workspaceId || typeof workspaceId !== 'string') {
+    throw new ValidationError('workspaceId query param is required');
+  }
+
+  const userClient = await withUserClient(req);
+
+  const { data, error } = await userClient
+    .from('api_key_vault')
+    .select('id, workspace_id, user_id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at')
+    .eq('workspace_id', workspaceId)
+    .order('created_at', { ascending: false });
+
+  if (error) {
+    throw new AuthError(error.message);
+  }
+
+  const rows = (data ?? []) as VaultRow[];
 
   const keys = rows.map(row => ({
     id: row.id,
@@ -243,19 +299,41 @@ router.delete('/:id', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { throw new AuthError('No user found'); return; }
   const keyId = req.params.id;
+  const workspaceId = req.query.workspaceId;
 
-  // Verify ownership before deleting
-  const existing = await queryOne<VaultRow>(
-    'SELECT id, spend_total_usd FROM api_key_vault WHERE id = $1 AND user_id = $2',
-    [keyId, user.id]
-  );
+  if (!workspaceId || typeof workspaceId !== 'string') {
+    throw new ValidationError('workspaceId query param is required');
+  }
+
+  const userClient = await withUserClient(req);
+
+  const { data: existingRows, error: selectError } = await userClient
+    .from('api_key_vault')
+    .select('id, spend_total_usd')
+    .eq('id', keyId)
+    .eq('workspace_id', workspaceId)
+    .limit(1);
+
+  if (selectError) {
+    throw new AuthError(selectError.message);
+  }
+
+  const existing = existingRows?.[0] as Pick<VaultRow, 'id' | 'spend_total_usd'> | undefined;
 
   if (!existing) {
     throw new NotFoundError('Key not found');
     return;
   }
 
-  await execute('DELETE FROM api_key_vault WHERE id = $1 AND user_id = $2', [keyId, user.id]);
+  const { error: deleteError } = await userClient
+    .from('api_key_vault')
+    .delete()
+    .eq('id', keyId)
+    .eq('workspace_id', workspaceId);
+
+  if (deleteError) {
+    throw new AuthError(deleteError.message);
+  }
 
   // Invalidate embedding provider cache so auto-detection reflects the removed key
   invalidateProviderCache();
@@ -300,7 +378,12 @@ router.delete('/:id', async (req: Request, res: Response) => {
 router.post('/test', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { throw new AuthError('No user found'); return; }
-  const { provider } = req.body as { provider?: string };
+  const userClient = await withUserClient(req);
+  const { workspaceId, provider } = req.body as { workspaceId?: string; provider?: string };
+
+  if (!workspaceId || typeof workspaceId !== 'string') {
+    throw new ValidationError('workspaceId is required');
+  }
 
   if (!provider || typeof provider !== 'string') {
     throw new ValidationError('provider is required');
@@ -320,10 +403,19 @@ router.post('/test', async (req: Request, res: Response) => {
 
     if (provider !== 'claude-cli') {
       // Look up vault key for this user + provider
-      const row = await queryOne<Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'>>(
-        'SELECT id, encrypted_key, base_url FROM api_key_vault WHERE user_id = $1 AND provider = $2 ORDER BY created_at DESC LIMIT 1',
-        [user.id, provider]
-      );
+      const { data: rows, error: selectError } = await userClient
+        .from('api_key_vault')
+        .select('id, encrypted_key, base_url')
+        .eq('workspace_id', workspaceId)
+        .eq('provider', provider)
+        .order('created_at', { ascending: false })
+        .limit(1);
+
+      if (selectError) {
+        throw new AuthError(selectError.message);
+      }
+
+      const row = rows?.[0] as Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'> | undefined;
 
       if (!row) {
         throw new ValidationError(`No API key stored for provider "${provider}". Add a key first.`);
