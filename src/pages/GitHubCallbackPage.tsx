@@ -1,7 +1,6 @@
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { apiFetch, setTokens, clearTokens } from '../lib/apiFetch';
-import type { AuthUser } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
 
 /**
  * GitHub OAuth callback page.
@@ -61,16 +60,17 @@ export default function GitHubCallbackPage() {
       return;
     }
 
-    // Store tokens and validate session
-    setTokens(accessToken, refreshToken);
-    const returnTo = sessionStorage.getItem('github_oauth_return') || '/';
-    sessionStorage.removeItem('github_oauth_return');
-    apiFetch<{ user: AuthUser }>('/api/auth/me')
-      .then(() => {
+    void supabase.auth.setSession({ access_token: accessToken, refresh_token: refreshToken })
+      .then(({ error: sessionError }) => {
+        if (sessionError) {
+          throw sessionError;
+        }
+
+        const returnTo = sessionStorage.getItem('github_oauth_return') || '/';
+        sessionStorage.removeItem('github_oauth_return');
         navigate(returnTo, { replace: true });
       })
       .catch(() => {
-        clearTokens();
         setError('Session validation failed. Please try signing in again.');
       });
   }, [navigate]);

@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:02:28.914Z",
+  "lastUpdatedAt": "2026-04-22T05:04:33.989Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -73,14 +73,14 @@
       "elapsedMs": 108098
     },
     {
-      "storyId": "MU-002",
-      "title": "Replace custom JWT middleware with Supabase RS256 verification",
+      "storyId": "MU-004",
+      "title": "Replace AuthContext with Supabase session management",
       "status": "passed",
-      "startedAt": "2026-04-22T05:00:45.461Z",
-      "finishedAt": "2026-04-22T05:02:28.914Z",
+      "startedAt": "2026-04-22T05:00:45.210Z",
+      "finishedAt": "2026-04-22T05:04:33.989Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 103453
+      "elapsedMs": 228779
     }
   ],
   "failedStories": [
