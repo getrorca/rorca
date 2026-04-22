@@ -2,7 +2,7 @@
   "specId": "rorca-supabase-auth-rls",
   "runId": 20260316000221,
   "startedAt": "2026-04-22T06:19:01.676Z",
-  "lastUpdatedAt": "2026-04-22T06:28:43.813Z",
+  "lastUpdatedAt": "2026-04-22T06:31:47.824Z",
   "completedStories": [
     {
       "storyId": "MU-015",
@@ -33,6 +33,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 238382
+    },
+    {
+      "storyId": "MU-025",
+      "title": "Write RLS policy integration tests",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:29:00.320Z",
+      "finishedAt": "2026-04-22T06:31:47.824Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 167504
     }
   ],
   "failedStories": [],

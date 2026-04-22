@@ -3413,3 +3413,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Pattern] Route-level RLS must use withUserClient for workspace-scoped reads and inserts: When a backend route touches RLS-protected workspace-scoped tables, run the route DB access through withUserClient(req, fn) and keep all client queries inside that callback instead of mixing pool helpers.
 > Rule: Route-level RLS must use withUserClient for workspace-scoped reads and inserts: When a backend route touches RLS-protected workspace-scoped tables, run the route DB access through withUserClient(req, fn) and keep all client queries inside that callback instead of mixing pool helpers.
+
+## 2026-04-22 [Pattern] RLS integration tests must use Supabase user clients: When validating Supabase RLS, perform assertions through @supabase/supabase-js clients authenticated as real users; use the raw pg pool only for setup and teardown that intentionally bypass RLS.
+> Rule: RLS integration tests must use Supabase user clients: When validating Supabase RLS, perform assertions through @supabase/supabase-js clients authenticated as real users; use the raw pg pool only for setup and teardown that intentionally bypass RLS.
