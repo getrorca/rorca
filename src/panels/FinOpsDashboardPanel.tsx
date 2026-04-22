@@ -107,7 +107,8 @@ type DateRange = '30d' | '90d' | '180d' | '365d';
 export default function FinOpsDashboardPanel() {
   const { workspaceId } = useWorkspace();
   const { user } = useAuth();
-  const isFreePlan = !user?.plan || user.plan === 'free';
+  const userPlan = user?.app_metadata?.plan as string | undefined;
+  const isFreePlan = !userPlan || userPlan === 'free';
   const [data, setData] = useState<HistoricalData | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);

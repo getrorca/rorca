@@ -88,18 +88,10 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
 
-    const userClient = await withUserClient(req);
-    const { data, error } = await userClient
-      .from('workspace_github_webhooks')
-      .select('*')
-      .eq('workspace_id', workspaceId)
-      .limit(1);
-
-    if (error) {
-      throw new AuthError(error.message);
-    }
-
-    const row = data?.[0] as GithubWebhookRow | undefined;
+    const row = await queryOne<GithubWebhookRow>(
+      'SELECT * FROM workspace_github_webhooks WHERE workspace_id = $1 LIMIT 1',
+      [workspaceId]
+    );
 
     if (!row) {
       res.json({ connected: false });

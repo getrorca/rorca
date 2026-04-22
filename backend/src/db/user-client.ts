@@ -31,7 +31,7 @@ export async function getUserClient(req: Request): Promise<PoolClient> {
   const client = await pool.connect();
 
   try {
-    await client.query('SET request.jwt.claims = $1', [claims]);
+    await client.query(`SET LOCAL request.jwt.claims = '${claims.replace(/'/g, "''")}'`);
     return client;
   } catch (error) {
     try {

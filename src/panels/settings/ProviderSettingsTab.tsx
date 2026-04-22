@@ -1487,7 +1487,8 @@ function ProvidersSection() {
 
 function ExaSearchSection() {
   const { user } = useAuth();
-  const isFreePlan = !user?.plan || user.plan === 'free';
+  const userPlan = user?.app_metadata?.plan as string | undefined;
+  const isFreePlan = !userPlan || userPlan === 'free';
 
   return (
     <div className="border border-border rounded p-4 bg-bg">

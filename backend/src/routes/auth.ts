@@ -1,6 +1,8 @@
 import { Router, Request, Response } from 'express';
 import { generateCsrfToken, setCsrfCookie } from '../lib/csrf';
 import { authRequired } from '../lib/auth-utils';
+import { supabaseAdmin } from '../lib/supabase';
+import { sendVerificationEmail } from '../lib/email';
 
 const router = Router();
 
@@ -62,6 +64,61 @@ router.get('/csrf-token', (_req: Request, res: Response) => {
  */
 router.get('/me', authRequired, async (req: Request, res: Response) => {
   res.json({ user: req.user ?? null });
+});
+
+/**
+ * @swagger
+ * /api/auth/resend-verification:
+ *   post:
+ *     tags: [Auth]
+ *     summary: Resend email verification
+ *     operationId: resendVerification
+ *     security: []
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [email]
+ *             properties:
+ *               email:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Verification email sent
+ *       400:
+ *         description: Invalid request
+ */
+router.post('/resend-verification', async (req: Request, res: Response): Promise<void> => {
+  const { email } = req.body ?? {};
+
+  if (!email || typeof email !== 'string') {
+    res.status(400).json({ error: 'Email is required' });
+    return;
+  }
+
+  try {
+    // Generate a new email OTP link via Supabase Admin
+    // Use magiclink type — generates a one-time verification link without requiring a password
+    const { data, error } = await supabaseAdmin.auth.admin.generateLink({
+      type: 'magiclink',
+      email: email.trim(),
+    });
+
+    if (error || !data?.properties?.action_link) {
+      // Return 200 regardless to avoid email enumeration
+      res.json({ ok: true });
+      return;
+    }
+
+    await sendVerificationEmail(email.trim(), data.properties.action_link);
+    res.json({ ok: true });
+  } catch (err) {
+    console.error('[auth] resend-verification error:', err);
+    // Return 200 to avoid leaking whether the email exists
+    res.json({ ok: true });
+  }
 });
 
 export default router;

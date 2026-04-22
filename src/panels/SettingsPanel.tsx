@@ -58,9 +58,6 @@ const AccountSettingsTab = lazy(() =>
   import('./settings/AccountSettingsTab').then((m) => ({ default: m.AccountSettingsTab })),
 );
 
-const BillingSection = lazy(() =>
-  import('./settings/AccountSettingsTab').then((m) => ({ default: m.BillingSection })),
-);
 
 const UnifiedActivitySection = lazy(() =>
   import('./settings/UnifiedActivitySection').then((m) => ({ default: m.UnifiedActivitySection })),
@@ -70,9 +67,6 @@ const DeadLetterQueueSection = lazy(() =>
   import('./settings/DeadLetterQueueSection').then((m) => ({ default: m.DeadLetterQueueSection })),
 );
 
-const NotificationsSection = lazy(() =>
-  import('./settings/AccountSettingsTab').then((m) => ({ default: m.NotificationsSection })),
-);
 
 const ApiKeysSection = lazy(() =>
   import('./settings/ApiKeysSection'),
@@ -146,9 +140,9 @@ export default function SettingsPanel() {
           {activeTab === 'vercel' && <IntegrationPlaceholder name="Vercel" description="Auto-deploy on run completion, get preview URLs in Run View, and promote to production with one click." />}
           {/* Account group */}
           {activeTab === 'account' && <AccountSettingsTab />}
-          {activeTab === 'billing' && <BillingSection />}
+          {activeTab === 'billing' && <IntegrationPlaceholder name="Billing" description="Manage your subscription, invoices, and payment method. Coming soon." />}
           {activeTab === 'shortcuts' && <ShortcutsSettingsTab />}
-          {activeTab === 'notifications' && <NotificationsSection />}
+          {activeTab === 'notifications' && <IntegrationPlaceholder name="Notifications" description="Configure email, webhook, and in-app notification preferences. Coming soon." />}
           {/* System group */}
           {activeTab === 'system' && (
             <>
