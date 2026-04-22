@@ -8,6 +8,7 @@ import type { ProviderType } from '../lib/llm-client';
 import { invalidateProviderCache } from '../lib/embedding-pipeline';
 import { AuthError, NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { withUserClient } from '../lib/with-user-client';
 
 const router = Router();
 
@@ -64,6 +65,7 @@ function maskKey(encrypted: string): string {
 interface VaultRow {
   id: string;
   user_id: string;
+  workspace_id: string | null;
   provider: string;
   encrypted_key: string;
   label: string;
@@ -141,6 +143,33 @@ router.post('/', async (req: Request, res: Response) => {
   const safeLabel = typeof label === 'string' ? label.trim() : '';
   const safeBaseUrl = typeof base_url === 'string' && base_url.trim() ? base_url.trim() : null;
 
+  if (req.user?.supabaseId && typeof req.body.workspace_id === 'string' && req.body.workspace_id.trim()) {
+    const supabase = withUserClient(req);
+    const { error } = await supabase.from('api_key_vault').insert({
+      id,
+      user_id: user.id,
+      workspace_id: req.body.workspace_id.trim(),
+      provider,
+      encrypted_key: encryptedKey,
+      label: safeLabel,
+      base_url: safeBaseUrl,
+    });
+    if (error) {
+      throw new AuthError(error.message);
+    }
+
+    invalidateProviderCache();
+    res.status(201).json({
+      id,
+      provider,
+      label: safeLabel,
+      base_url: safeBaseUrl,
+      masked_key: key.length > 4 ? '****' + key.slice(-4) : '****',
+      created_at: new Date().toISOString(),
+    });
+    return;
+  }
+
   await execute(
     'INSERT INTO api_key_vault (id, user_id, provider, encrypted_key, label, base_url) VALUES ($1, $2, $3, $4, $5, $6)',
     [id, user.id, provider, encryptedKey, safeLabel, safeBaseUrl]
@@ -193,6 +222,31 @@ router.get('/', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { res.json({ keys: [] }); return; }
 
+  if (req.user?.supabaseId) {
+    const supabase = withUserClient(req);
+    const { data, error } = await supabase
+      .from('api_key_vault')
+      .select('id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at')
+      .order('created_at', { ascending: false });
+    if (error) {
+      throw new AuthError(error.message);
+    }
+
+    const keys = (data ?? []).map((row: any) => ({
+      id: row.id,
+      provider: row.provider,
+      label: row.label,
+      base_url: row.base_url,
+      masked_key: maskKey(row.encrypted_key),
+      spend_total_usd: row.spend_total_usd,
+      last_used_at: row.last_used_at,
+      created_at: row.created_at,
+    }));
+
+    res.json({ keys });
+    return;
+  }
+
   const rows = await query<VaultRow>(
     'SELECT id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at FROM api_key_vault WHERE user_id = $1 ORDER BY created_at DESC',
     [user.id]
@@ -243,6 +297,30 @@ router.delete('/:id', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { throw new AuthError('No user found'); return; }
   const keyId = req.params.id;
+
+  if (req.user?.supabaseId) {
+    const supabase = withUserClient(req);
+    const { data: existing, error: selectError } = await supabase
+      .from('api_key_vault')
+      .select('id, spend_total_usd')
+      .eq('id', keyId)
+      .maybeSingle();
+    if (selectError) {
+      throw new AuthError(selectError.message);
+    }
+    if (!existing) {
+      throw new NotFoundError('Key not found');
+    }
+
+    const { error: deleteError } = await supabase.from('api_key_vault').delete().eq('id', keyId);
+    if (deleteError) {
+      throw new AuthError(deleteError.message);
+    }
+
+    invalidateProviderCache();
+    res.json({ deleted: true, spend_total_usd: existing.spend_total_usd });
+    return;
+  }
 
   // Verify ownership before deleting
   const existing = await queryOne<VaultRow>(
