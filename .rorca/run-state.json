@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:07:44.485Z",
+  "lastUpdatedAt": "2026-04-22T05:18:48.044Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -91,6 +91,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 156800
+    },
+    {
+      "storyId": "MU-017",
+      "title": "Replace GitHub OAuth sign-in with Supabase GitHub provider",
+      "status": "passed",
+      "startedAt": "2026-04-22T05:13:51.897Z",
+      "finishedAt": "2026-04-22T05:18:48.044Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 296147
     }
   ],
   "failedStories": [

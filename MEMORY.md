@@ -3317,3 +3317,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Decision] CSRF uses bootstrap endpoint with HttpOnly double-submit cookie: When auth is globally bypassed, issue CSRF tokens from `/api/auth/csrf-token`, store the cookie as HttpOnly, and have the frontend cache the returned token and retry one mutating request on `CSRF_INVALID`.
 > Rule: CSRF uses bootstrap endpoint with HttpOnly double-submit cookie: When auth is globally bypassed, issue CSRF tokens from `/api/auth/csrf-token`, store the cookie as HttpOnly, and have the frontend cache the returned token and retry one mutating request on `CSRF_INVALID`.
+
+## 2026-04-22 [Decision] Legacy backend auth removed after Supabase cutover: After Supabase auth middleware owns session flows, delete legacy auth routes and password-hash storage together, and keep only /api/auth/me plus token-encryption helpers needed by other modules.
+> Rule: Legacy backend auth removed after Supabase cutover: After Supabase auth middleware owns session flows, delete legacy auth routes and password-hash storage together, and keep only /api/auth/me plus token-encryption helpers needed by other modules.
