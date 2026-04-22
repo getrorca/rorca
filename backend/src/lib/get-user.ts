@@ -7,7 +7,8 @@ import type { AuthUser } from '../routes/auth';
  * Fall back to the first registered user when req.user is undefined.
  */
 export async function getEffectiveUser(req: Request): Promise<AuthUser | null> {
-  const user = (req as Request & { user: AuthUser }).user;
-  if (user) return user;
+  if (req.user) {
+    return { id: req.user.id, email: req.user.email, supabaseId: req.user.supabaseId, role: req.user.role ?? 'admin', plan: req.user.plan };
+  }
   return (await queryOne<AuthUser>('SELECT id, email FROM users LIMIT 1', [])) ?? null;
 }
