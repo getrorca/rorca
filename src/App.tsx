@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
+import { useMemo, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import { Routes, Route, Navigate, Outlet, useLocation, useNavigate as useRouterNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -36,8 +36,8 @@ const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
 const GitHubCallbackPage = lazy(() => import('./pages/GitHubCallbackPage'));
 const LoginPage = lazy(() => import('./components/LoginPage'));
 const RegisterPage = lazy(() => import('./components/RegisterPage'));
-const ForgotPasswordPage = lazy(() => import('./components/ForgotPasswordPage'));
-const ResetPasswordPage = lazy(() => import('./components/ResetPasswordPage'));
+const ForgotPasswordPage = lazy(() => import('./pages/auth/ForgotPasswordPage'));
+const ResetPasswordPage = lazy(() => import('./pages/auth/ResetPasswordPage'));
 const OnboardingWizard = lazy(() => import('./components/OnboardingWizard'));
 const CommandPalette = lazy(() => import('./components/CommandPalette'));
 const KeyboardShortcutsPanel = lazy(() => import('./components/KeyboardShortcutsPanel'));
@@ -58,15 +58,10 @@ const TerminalPanel = lazy(() => import('./panels/TerminalPanel'));
 // SettingsTab type — imported from SettingsPanel module
 type SettingsTab = import('./panels/SettingsPanel').SettingsTab;
 
-type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
-
 function AuthGate() {
   const { isAuthenticated, isLoading } = useAuth();
   const location = useLocation();
-  const [authPage, setAuthPage] = useState<AuthPage>(() => {
-    if (location.pathname === '/reset-password') return 'reset-password';
-    return 'login';
-  });
+  const navigate = useRouterNavigate();
 
   // EQ-007: Public review page — rendered outside auth gate
   const reviewMatch = location.pathname.match(/^\/review\/([a-f0-9-]+)$/i);
@@ -87,6 +82,22 @@ function AuthGate() {
     );
   }
 
+  if (location.pathname === '/auth/forgot-password') {
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <ForgotPasswordPage />
+      </Suspense>
+    );
+  }
+
+  if (location.pathname === '/auth/reset-password') {
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <ResetPasswordPage />
+      </Suspense>
+    );
+  }
+
   if (isLoading) {
     return (
       <NotificationProvider>
@@ -99,41 +110,13 @@ function AuthGate() {
     );
   }
 
-  // Handle /reset-password route
-  if (authPage === 'reset-password') {
-    const params = new URLSearchParams(location.search);
-    const token = params.get('token') || '';
-    if (!token) {
-      return (
-        <Suspense fallback={<BoardSkeleton />}>
-          <ForgotPasswordPage onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }} />
-        </Suspense>
-      );
-    }
-    return (
-      <Suspense fallback={<BoardSkeleton />}>
-        <ResetPasswordPage
-          token={token}
-          onSwitchToLogin={() => { window.history.replaceState(null, '', '/'); setAuthPage('login'); }}
-        />
-      </Suspense>
-    );
-  }
-
   // Show login page when user is not authenticated
   if (!isAuthenticated) {
-    if (authPage === 'forgot-password') {
-      return (
-        <Suspense fallback={<BoardSkeleton />}>
-          <ForgotPasswordPage onSwitchToLogin={() => setAuthPage('login')} />
-        </Suspense>
-      );
-    }
-    if (authPage === 'register') {
+    if (location.pathname === '/auth/register') {
       return (
         <Suspense fallback={<BoardSkeleton />}>
           <RegisterPage
-            onSwitchToLogin={() => setAuthPage('login')}
+            onSwitchToLogin={() => navigate('/auth/login', { replace: true })}
           />
         </Suspense>
       );
@@ -142,8 +125,8 @@ function AuthGate() {
     return (
       <Suspense fallback={<BoardSkeleton />}>
         <LoginPage
-          onSwitchToRegister={() => setAuthPage('register')}
-          onSwitchToForgotPassword={() => setAuthPage('forgot-password')}
+          onSwitchToRegister={() => navigate('/auth/register', { replace: true })}
+          onSwitchToForgotPassword={() => navigate('/auth/forgot-password', { replace: true })}
         />
       </Suspense>
     );
