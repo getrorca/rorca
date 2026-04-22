@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import { query, queryOne, execute } from '../db/index';
 import type { PipelineHookRow } from '../lib/hook-runner';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
-import { encryptToken } from './auth';
+import { encryptToken } from '../lib/auth-utils';
 import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';

@@ -57,12 +57,11 @@ export function setupIntegrationTest(): IntegrationTestContext {
     await truncateAll(ctx.pool);
 
     // Re-seed default admin (many tests need auth)
-    const defaultHash = '$2b$10$BMXqmRMejhhifW5gs6Ju.eI.cxoG/k7iW5sGJ86Nb4WloLowY.qxy';
     await ctx.pool.query(`
-      INSERT INTO users (id, email, display_name, password_hash, role, plan, email_verified_at)
-      VALUES ('local-admin', 'admin@rorca.local', 'Admin', $1, 'admin', 'pro', NOW())
+      INSERT INTO users (id, email, display_name, role, plan, email_verified_at)
+      VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'admin', 'pro', NOW())
       ON CONFLICT (id) DO NOTHING
-    `, [defaultHash]);
+    `);
   });
 
   afterAll(async () => {

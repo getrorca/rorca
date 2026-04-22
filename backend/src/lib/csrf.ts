@@ -10,8 +10,6 @@ const EXEMPT_PREFIXES = [
   '/api/health',
   '/api/docs',
   '/api/auth/csrf-token',
-  '/api/auth/login',
-  '/api/auth/register',
   '/api/billing/webhook',
 ];
 
