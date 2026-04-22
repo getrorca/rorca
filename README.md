@@ -12,8 +12,6 @@ You give Rorca a brief: *"Add OAuth login with Google and GitHub."* It synthesiz
 
 The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS specificity, but for AI prompts) that makes every generated spec aware of your global engineering standards, domain conventions, and project specifics — without you having to repeat yourself every time.
 
----
-
 ## Architecture overview
 
 ```
@@ -51,10 +49,32 @@ The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS 
 ## Prerequisites
 
 - **Node.js** 18 or later
+- **PostgreSQL** 16
 - **Git** (for workspace registration and git hydration)
+- **Supabase CLI** for local auth/dev services: `brew install supabase/tap/supabase`
 - **One of the following execution engines:**
   - **Claude Code CLI** installed and authenticated (`claude --version`) — uses your Pro/Max subscription, no API key
   - **OpenCode CLI** (`npm i -g opencode`, `opencode --version` >= 0.1.0) + an API key for your chosen provider
+
+### Local Supabase development
+
+- Start local Supabase services with `supabase start`
+- Stop them with `supabase stop`
+- Reset Supabase-managed local state with `supabase db reset`
+- Frontend local URL is `http://127.0.0.1:54321`
+- Studio runs at `http://127.0.0.1:54323`
+- Local database listens on `127.0.0.1:54322`
+
+### GitHub OAuth for local Supabase Auth
+
+- In your GitHub OAuth app, configure the callback URL as `http://127.0.0.1:54321/auth/v1/callback`
+- Set `GITHUB_OAUTH_CLIENT_ID` and `GITHUB_OAUTH_CLIENT_SECRET` in your local env before enabling the GitHub provider in Supabase
+
+### Migration note
+
+- Supabase CLI migrations and Rorca app schema migrations are separate systems
+- `supabase db reset` only applies `supabase/migrations/`
+- Rorca application schema still lives in `backend/src/db/pg-migrations/` and is applied by the app migration runner (`pg-index.ts` at startup)
 
 ---
 

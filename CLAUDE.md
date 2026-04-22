@@ -24,6 +24,11 @@ cd backend && npm test     # Jest test suite
 cd backend && npx tsc --noEmit   # Backend type check
 cd backend && npx jest --testPathPattern=<name>  # Single test file
 
+# Supabase local development
+supabase start             # Start local Supabase services (API 54321, DB 54322, Studio 54323)
+supabase stop              # Stop local Supabase services
+supabase db reset          # Reset Supabase local state and run ONLY supabase/migrations/
+
 # Frontend tests (Vitest, not Jest)
 npx vitest run             # Run all frontend tests once
 npx vitest                 # Watch mode
@@ -37,6 +42,32 @@ lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev
 # Self-hosting (register rorca/ as its own workspace)
 npm run self-register
 ```
+
+## Local Supabase setup
+
+Rorca uses the Supabase CLI for local Auth/API development services.
+
+- Install the CLI with `brew install supabase/tap/supabase`
+- Initialize config with `supabase init` if the `supabase/` directory is missing
+- Start services with `supabase start`
+- Stop services with `supabase stop`
+- Reset local Supabase state with `supabase db reset`
+
+Local ports configured in `supabase/config.toml`:
+- API: `54321`
+- DB: `54322`
+- Studio: `54323`
+
+### GitHub OAuth in local dev
+
+- Configure your GitHub OAuth app callback URL as `http://127.0.0.1:54321/auth/v1/callback`
+- Set `GITHUB_OAUTH_CLIENT_ID` and `GITHUB_OAUTH_CLIENT_SECRET` in local env before enabling GitHub auth in Supabase
+
+### Important migration warning
+
+- `supabase db reset` only runs migrations in `supabase/migrations/`
+- It does **not** run Rorca application schema migrations in `backend/src/db/pg-migrations/`
+- Use the app migration runner (`pg-index.ts` on backend startup) for Rorca schema changes
 
 ## Architecture
 
