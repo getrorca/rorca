@@ -3,7 +3,7 @@
 Spec: rorca-opencode-terminal
 Run ID: 20260316000185
 Started: 2026-04-15T19:33:43.854Z
-Last Updated: 2026-04-22T05:06:13.736Z
+Last Updated: 2026-04-22T05:06:24.241Z
 
 ## Completed Stories (9)
 - OCT-016: Terminal panel — copy/paste, font sizing, fullscreen toggle — DONE (claude, 212s)
@@ -14,7 +14,7 @@ Last Updated: 2026-04-22T05:06:13.736Z
 - OCT-033: API key pre-validation before session spawn — DONE (codex, gpt-5.4, 201s)
 - MU-001: Install and configure Supabase SDK for frontend and backend — DONE (codex, gpt-5.4, 108s)
 - MU-004: Replace AuthContext with Supabase session management — DONE (codex, gpt-5.4, 229s)
-- MU-008: Build AuthCallback page for OAuth redirect handling — DONE (codex, gpt-5.4, 65s)
+- MU-018: Configure PKCE flow and secure token storage — DONE (codex, gpt-5.4, 76s)
 
 ## Failed Stories (1)
 - OCT-015: OpenCode not installed — graceful error state in terminal panel — FAILED (timeout)
