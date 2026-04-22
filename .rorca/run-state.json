@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:33:26.488Z",
+  "lastUpdatedAt": "2026-04-22T05:37:06.180Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -171,6 +171,42 @@
       "finishedAt": "2026-04-22T05:23:44.140Z",
       "agentType": "codex",
       "failReason": "blocked_by: MU-013"
+    },
+    {
+      "storyId": "MU-022",
+      "title": "MU-022",
+      "status": "skipped",
+      "startedAt": "2026-04-22T05:37:04.134Z",
+      "finishedAt": "2026-04-22T05:37:04.134Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: MU-021"
+    },
+    {
+      "storyId": "MU-025",
+      "title": "MU-025",
+      "status": "skipped",
+      "startedAt": "2026-04-22T05:37:04.156Z",
+      "finishedAt": "2026-04-22T05:37:04.156Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: MU-021"
+    },
+    {
+      "storyId": "MU-029",
+      "title": "MU-029",
+      "status": "skipped",
+      "startedAt": "2026-04-22T05:37:04.171Z",
+      "finishedAt": "2026-04-22T05:37:04.171Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: MU-021, MU-022"
+    },
+    {
+      "storyId": "MU-022",
+      "title": "Update key backend routes to use RLS-scoped queries",
+      "status": "skipped",
+      "startedAt": "2026-04-22T05:37:06.179Z",
+      "finishedAt": "2026-04-22T05:37:06.179Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: MU-021"
     }
   ],
   "currentStory": null,
