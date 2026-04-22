@@ -22,6 +22,12 @@ import { Pool, PoolClient, PoolConfig } from 'pg';
 import { logger } from '../lib/logger';
 import { runPgMigrations } from './pg-index';
 
+export interface UserScopedClient {
+  query<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<{ rows: T[]; rowCount: number }>;
+  queryOne<T = Record<string, unknown>>(sql: string, params?: unknown[]): Promise<T | undefined>;
+  execute(sql: string, params?: unknown[]): Promise<{ rowCount: number }>;
+}
+
 // ── Configuration ────────────────────────────────────────────────────────
 
 const SLOW_QUERY_THRESHOLD_MS = parseInt(process.env.SLOW_QUERY_THRESHOLD_MS || '500', 10);
@@ -336,6 +342,47 @@ export async function transaction<T>(
   }
 }
 
+export async function withUserClient<T>(
+  authUserId: string,
+  fn: (client: UserScopedClient) => Promise<T>,
+): Promise<T> {
+  await ensureMigrations();
+  const p = getPool();
+  const client = await p.connect();
+
+  const scopedClient: UserScopedClient = {
+    async query<U = Record<string, unknown>>(sql: string, params?: unknown[]) {
+      const result = await client.query(sql, params);
+      return {
+        rows: result.rows as U[],
+        rowCount: result.rowCount ?? 0,
+      };
+    },
+    async queryOne<U = Record<string, unknown>>(sql: string, params?: unknown[]) {
+      const result = await client.query(sql, params);
+      return (result.rows[0] as U) ?? undefined;
+    },
+    async execute(sql: string, params?: unknown[]) {
+      const result = await client.query(sql, params);
+      return { rowCount: result.rowCount ?? 0 };
+    },
+  };
+
+  try {
+    await client.query('BEGIN');
+    await client.query("SET LOCAL ROLE authenticated");
+    await client.query("SELECT set_config('request.jwt.claim.sub', $1, true)", [authUserId]);
+    const result = await fn(scopedClient);
+    await client.query('COMMIT');
+    return result;
+  } catch (err) {
+    await client.query('ROLLBACK');
+    throw err;
+  } finally {
+    client.release();
+  }
+}
+
 // ── Health Check ─────────────────────────────────────────────────────────
 
 export interface DbHealthResult {
@@ -489,4 +536,3 @@ process.on('SIGINT', () => {
     shutdown().catch(() => {});
   }
 });
-

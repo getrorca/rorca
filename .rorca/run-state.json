@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:53:52.826Z",
+  "lastUpdatedAt": "2026-04-22T06:04:01.779Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -141,6 +141,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 144313
+    },
+    {
+      "storyId": "MU-028",
+      "title": "Create workspace_members table and auto-enroll workspace creator as owner",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:01:38.272Z",
+      "finishedAt": "2026-04-22T06:04:01.779Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 143507
     }
   ],
   "failedStories": [

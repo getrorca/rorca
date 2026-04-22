@@ -53,6 +53,14 @@ test('POST /api/workspaces with valid path returns 201', async () => {
     domains: ['frontend', 'backend'],
   });
   expect(res.body.workspace.created_at).toBeDefined();
+
+  const memberships = await query<{ workspace_id: string; user_auth_id: string; role: string }>(
+    'SELECT workspace_id, user_auth_id, role FROM workspace_members WHERE workspace_id = $1',
+    ['ws-test-1']
+  );
+  expect(memberships).toHaveLength(1);
+  expect(memberships[0].workspace_id).toBe('ws-test-1');
+  expect(memberships[0].role).toBe('owner');
 });
 
 test('POST /api/workspaces with non-existent path returns 400', async () => {

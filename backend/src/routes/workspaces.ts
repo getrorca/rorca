@@ -2,7 +2,7 @@ import { Router } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
 import { z } from 'zod';
-import { query, queryOne, execute } from '../db/index';
+import { query, queryOne, execute, withUserClient } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { hydrateSchema } from '../lib/schema-hydrator';
 import {
@@ -117,6 +117,11 @@ const CreateWorkspaceSchema = z.object({
 router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'), async (req, res, next) => {
   try {
     const { id, label, path, domains } = req.body;
+    const user = req.user;
+
+    if (!user?.supabaseId) {
+      throw new ValidationError('Authenticated user with Supabase ID is required');
+    }
 
     if (!fs.existsSync(path)) {
       throw new ValidationError(`Path does not exist on filesystem: ${path}`);
@@ -124,10 +129,17 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
     }
 
     try {
-      await execute(
-        'INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4)',
-        [id, label, path, JSON.stringify(domains)]
-      );
+      await withUserClient(user.supabaseId, async (client) => {
+        await client.execute(
+          'INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4)',
+          [id, label, path, JSON.stringify(domains)]
+        );
+
+        await client.execute(
+          'INSERT INTO workspace_members (workspace_id, user_auth_id, role) VALUES ($1, $2, $3)',
+          [id, user.supabaseId, 'owner']
+        );
+      });
     } catch (err: any) {
       if (err.code === '23505' || err.message?.includes('duplicate key value violates unique constraint')) {
         throw new ConflictError(`Workspace '${id}' already exists`);
