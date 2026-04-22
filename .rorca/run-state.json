@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T06:04:04.999Z",
+  "lastUpdatedAt": "2026-04-22T06:11:21.317Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -151,6 +151,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 147317
+    },
+    {
+      "storyId": "MU-023",
+      "title": "Build Team Management UI in Settings",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:07:29.371Z",
+      "finishedAt": "2026-04-22T06:11:21.317Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 231946
     }
   ],
   "failedStories": [

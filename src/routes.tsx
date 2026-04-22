@@ -6,7 +6,7 @@ import type { SettingsTab } from './panels/SettingsPanel';
 /** Valid settings sub-tabs for URL validation */
 const VALID_SETTINGS_TABS: readonly SettingsTab[] = [
   // Workspace group
-  'general', 'env-vars', 'hooks', 'agents', 'context',
+  'general', 'env-vars', 'hooks', 'agents', 'context', 'team',
   // Execution group
   'providers', 'direction', 'pipeline',
   // Integrations group
