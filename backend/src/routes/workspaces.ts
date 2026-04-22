@@ -116,7 +116,7 @@ const CreateWorkspaceSchema = z.object({
   domains: z.array(z.string()),
 });
 
-router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'), async (req, res, next) => {
+router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan('workspaces'), async (req, res, next) => {
   try {
     const { id, label, path, domains } = req.body;
 
@@ -126,10 +126,12 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
     }
 
     try {
-      await execute(
-        'INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4)',
-        [id, label, path, JSON.stringify(domains)]
-      );
+      await withUserClient(req, async (client) => {
+        await client.query(
+          'INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4)',
+          [id, label, path, JSON.stringify(domains)]
+        );
+      });
     } catch (err: any) {
       if (err.code === '23505' || err.message?.includes('duplicate key value violates unique constraint')) {
         throw new ConflictError(`Workspace '${id}' already exists`);
