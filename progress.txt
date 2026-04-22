@@ -3,9 +3,9 @@
 Spec: rorca-opencode-terminal
 Run ID: 20260316000185
 Started: 2026-04-15T19:33:43.854Z
-Last Updated: 2026-04-22T05:07:44.485Z
+Last Updated: 2026-04-22T05:16:15.226Z
 
-## Completed Stories (9)
+## Completed Stories (10)
 - OCT-016: Terminal panel — copy/paste, font sizing, fullscreen toggle — DONE (claude, 212s)
 - OCT-021: WebSocket security — Origin validation, localhost binding, session token — DONE (claude, 341s)
 - OCT-036: Embedded terminal drawer — Cmd+J toggle, persistent bottom panel, drag-resize, fullscreen, mobile FAB — DONE (codex, gpt-5.4, 160s)
@@ -15,6 +15,7 @@ Last Updated: 2026-04-22T05:07:44.485Z
 - MU-001: Install and configure Supabase SDK for frontend and backend — DONE (codex, gpt-5.4, 108s)
 - MU-004: Replace AuthContext with Supabase session management — DONE (codex, gpt-5.4, 229s)
 - MU-019: Add security headers and CSRF protection — DONE (codex, gpt-5.4, 157s)
+- MU-009: Add RequireAuth guard protecting all app routes — DONE (codex, gpt-5.4, 143s)
 
 ## Failed Stories (1)
 - OCT-015: OpenCode not installed — graceful error state in terminal panel — FAILED (timeout)
