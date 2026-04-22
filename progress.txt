@@ -3,7 +3,8 @@
 Spec: rorca-supabase-auth-rls
 Run ID: 20260316000221
 Started: 2026-04-22T06:19:01.676Z
-Last Updated: 2026-04-22T06:21:14.212Z
+Last Updated: 2026-04-22T06:24:28.834Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - MU-015: Enable RLS on user_settings, billing, and notification tables — DONE (codex, gpt-5.4, 132s)
+- MU-021: Create getUserClient() for RLS-scoped DB queries in Express routes — DONE (codex, gpt-5.4, 178s)
