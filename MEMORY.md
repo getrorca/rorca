@@ -3389,3 +3389,12 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Decision] Legacy auth removal requires crypto helper extraction: When removing old auth routes, move any shared token-encryption helpers into a lib module before deleting route logic so GitHub/vault integrations keep working.
 > Rule: Legacy auth removal requires crypto helper extraction: When removing old auth routes, move any shared token-encryption helpers into a lib module before deleting route logic so GitHub/vault integrations keep working.
+
+## 2026-04-22 [Pattern] Local Supabase config stays separate from app migrations: Use `supabase/config.toml` only for local Supabase service orchestration and keep Rorca application schema migrations in `backend/src/db/pg-migrations/`; do not assume `supabase db reset` applies app schema changes.
+> Rule: Local Supabase config stays separate from app migrations: Use `supabase/config.toml` only for local Supabase service orchestration and keep Rorca application schema migrations in `backend/src/db/pg-migrations/`; do not assume `supabase db reset` applies app schema changes.
+
+## 2026-04-22 [Gotcha] RLS migrations must match legacy table names: When adding Supabase RLS to older Rorca tables, verify the live schema first: user settings are in `user_settings`, notification data is in `notifications` and `notification_preferences`, and billing is in `subscriptions`; bridge `auth.uid()` through `users.auth_id` when tables still store `user_id`.
+> Rule: RLS migrations must match legacy table names: When adding Supabase RLS to older Rorca tables, verify the live schema first: user settings are in `user_settings`, notification data is in `notifications` and `notification_preferences`, and billing is in `subscriptions`; bridge `auth.uid()` through `users.auth_id` when tables still store `user_id`.
+
+## 2026-04-22 [Bug Fix] Workspace creation must bootstrap workspace_members owner row: When workspaces are created under RLS, insert the workspace row and the creator's owner membership in the same user-scoped transaction so get_user_workspace_ids(auth.uid()) immediately includes the new workspace.
+> Rule: Workspace creation must bootstrap workspace_members owner row: When workspaces are created under RLS, insert the workspace row and the creator's owner membership in the same user-scoped transaction so get_user_workspace_ids(auth.uid()) immediately includes the new workspace.
