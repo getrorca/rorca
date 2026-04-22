@@ -6,11 +6,11 @@
 Context: L1-L2 are global engineering/domain principles. L3+ are per-workspace. L4/L5 come from spec brief and story annotations.
 > Source: CIE-003
 
-## 2026-02-27 [Convention] Spec ID vs specName: spec.id is the filename slug (use for API calls and path construction). spec.specName is the human-readable title (display only).
-> Rule: Spec ID vs specName: spec.id is the filename slug (use for API calls and path construction). spec.specName is the human-readable title (display only).
+## 2026-02-27 [Convention] chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
+> Rule: chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
 
-Context: Confusing these causes file-not-found errors in pipeline trigger and archive panel.
-> Source: v2-platform
+Context: The return type was changed from string to ChatResult in US-003 (model selection). All callers must use .text.
+> Source: US-003
 
 ## 2026-02-27 [Gotcha] Backend requires restart after changes: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
 > Rule: Backend requires restart after changes: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
@@ -18,11 +18,11 @@ Context: Confusing these causes file-not-found errors in pipeline trigger and ar
 Context: Changes to backend code are not picked up automatically. Forgetting to restart causes stale behavior.
 > Source: v2-platform
 
-## 2026-02-27 [Convention] chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
-> Rule: chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
+## 2026-02-27 [Convention] Spec ID vs specName: spec.id is the filename slug (use for API calls and path construction). spec.specName is the human-readable title (display only).
+> Rule: Spec ID vs specName: spec.id is the filename slug (use for API calls and path construction). spec.specName is the human-readable title (display only).
 
-Context: The return type was changed from string to ChatResult in US-003 (model selection). All callers must use .text.
-> Source: US-003
+Context: Confusing these causes file-not-found errors in pipeline trigger and archive panel.
+> Source: v2-platform
 
 ## 2026-02-28 [Architecture] Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
 > Rule: Episodic Memory is structured Markdown: MEMORY.md entries follow format: ## YYYY-MM-DD [Category] Title / > Rule: / > Context: / > Source: story-id
@@ -36,12 +36,6 @@ Context: Machine-readable, human-editable. Categories: Architecture, Convention,
 Context: .rorca/config.json routing section defines globals, scopes, and tags. micromatch handles glob matching.
 > Source: CIE-004
 
-## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
-> Rule: Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
-
-Context: SM-001 failed in wave 0, causing SM-002, SM-004, and SM-006 to skip despite not being directly tested. This cascading failure pattern means early wave failures have exponential impact on run completion rate.
-> Source: SM-001
-
 ## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
 > Rule: TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
 
@@ -53,6 +47,24 @@ Context: SM-001 failed with reason='typecheck' despite potentially working at ru
 
 Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incremental approach of establishing shared utilities before complex features reduces integration risk.
 > Source: SM-003
+
+## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
+> Rule: Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
+
+Context: SM-001 failed in wave 0, causing SM-002, SM-004, and SM-006 to skip despite not being directly tested. This cascading failure pattern means early wave failures have exponential impact on run completion rate.
+> Source: SM-001
+
+## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
+> Rule: Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
+
+Context: Implemented via workspace-echolocation.ts echolocate() function. Penalties apply: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit. This structured breakdown enables actionable remediation.
+> Source: CIE workspace health
+
+## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
+
+Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
+> Source: PR-QUEUE-1
 
 ## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
 > Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
@@ -84,34 +96,22 @@ Context: The production-ready spec shows these are interdependent: rate limiting
 Context: PR-003 establishes Docker Compose as the canonical self-hosted deployment method. This supersedes manual npm install flows and ensures consistent environments across installations.
 > Source: PR-003
 
-## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
-> Rule: Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
-
-Context: Implemented via workspace-echolocation.ts echolocate() function. Penalties apply: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit. This structured breakdown enables actionable remediation.
-> Source: CIE workspace health
-
-## 2026-03-08 [Pattern] Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-> Rule: Spec Queue Panel Uses Dual-Tab Architecture: Queue-style panels (review queue, run queue) use a dual-tab pattern: 'pending' + 'history' tabs with shared data fetching and SSE subscriptions
-
-Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
-> Source: PR-QUEUE-1
-
 ## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
 > Rule: Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
 
 Context: PR-052 implements upgrade prompts + feature badges. This creates a progressive disclosure UX where users discover features organically rather than via docs. Version gate prevents showing unavailable features.
 > Source: PR-052
 
-## 2026-03-10 [Gotcha] pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
-> Rule: pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
-
-Context: Missing `await` returns a Promise instead of data. PostgreSQL uses numbered placeholders, not positional `?`.
-> Source: rorca-postgres-migration PG-011
-
 ## 2026-03-10 [Convention] PostgreSQL Migration Pattern: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
 > Rule: PostgreSQL Migration Pattern: Migrations live in `backend/src/db/pg-migrations/` as numbered SQL files. Tracked via `schema_migrations` table (not filesystem). Use `IF NOT EXISTS` / `IF EXISTS` guards freely — PostgreSQL supports them natively.
 
 Context: Supersedes the old SQLite pragma table_info workaround. PostgreSQL supports `ADD COLUMN IF NOT EXISTS`, `CREATE INDEX IF NOT EXISTS`, etc.
+> Source: rorca-postgres-migration PG-011
+
+## 2026-03-10 [Gotcha] pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
+> Rule: pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
+
+Context: Missing `await` returns a Promise instead of data. PostgreSQL uses numbered placeholders, not positional `?`.
 > Source: rorca-postgres-migration PG-011
 
 ## 2026-03-10 [Run Synthesis] DIST spec executes in strict dependency order: DIST-001–005 must complete before DIST-006 (installer verification) can run. 7 stories skipped because DIST-001 failed; DIST-006 inherited the failure chain and couldn't verify non-existent binaries. Future runs need: (1) explicit skip-on-blockers logic in execution-engine.ts, (2) WAL event to distinguish 'skipped due to parent failure' from 'skipped due to timeout', (3) resume capability that re-runs blockers only.
@@ -3380,3 +3380,12 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Gotcha] Team RLS required schema backfill before policying: If a workspace-scoped RLS policy is required for teams, ensure `teams.workspace_id` exists and is backfilled from existing `workspace_access` rows before enabling policies.
 > Rule: Team RLS required schema backfill before policying: If a workspace-scoped RLS policy is required for teams, ensure `teams.workspace_id` exists and is backfilled from existing `workspace_access` rows before enabling policies.
+
+## 2026-04-22 [Bug Fix] Per-request Supabase clients must not reuse shared anon client session state: When enforcing RLS from Express routes, create a fresh Supabase client per request with the bearer token in global Authorization headers instead of mutating a shared singleton with setSession().
+> Rule: Per-request Supabase clients must not reuse shared anon client session state: When enforcing RLS from Express routes, create a fresh Supabase client per request with the bearer token in global Authorization headers instead of mutating a shared singleton with setSession().
+
+## 2026-04-22 [Bug Fix] RLS pool clients must RESET request.jwt.claims before release: When setting PostgreSQL JWT claims on a pooled client for RLS, use session-level `SET request.jwt.claims = ...`, then always `RESET request.jwt.claims` in a finally block before `client.release()`.
+> Rule: RLS pool clients must RESET request.jwt.claims before release: When setting PostgreSQL JWT claims on a pooled client for RLS, use session-level `SET request.jwt.claims = ...`, then always `RESET request.jwt.claims` in a finally block before `client.release()`.
+
+## 2026-04-22 [Decision] Legacy auth removal requires crypto helper extraction: When removing old auth routes, move any shared token-encryption helpers into a lib module before deleting route logic so GitHub/vault integrations keep working.
+> Rule: Legacy auth removal requires crypto helper extraction: When removing old auth routes, move any shared token-encryption helpers into a lib module before deleting route logic so GitHub/vault integrations keep working.
