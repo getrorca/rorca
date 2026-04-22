@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
 import RorcaLogo from './RorcaLogo';
 
 interface LoginPageProps {
@@ -8,8 +8,6 @@ interface LoginPageProps {
 }
 
 export default function LoginPage({ onSwitchToForgotPassword }: LoginPageProps) {
-  const { login } = useAuth();
-
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [error, setError] = useState('');
@@ -21,12 +19,17 @@ export default function LoginPage({ onSwitchToForgotPassword }: LoginPageProps) 
     setSubmitting(true);
 
     try {
-      await login(email, password);
+      const { error: signInError } = await supabase.auth.signInWithPassword({
+        email,
+        password,
+      });
+
+      if (signInError) {
+        throw signInError;
+      }
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Login failed';
-      // Parse backend error from "401 {"error":"..."}" format
-      const match = message.match(/"error":"([^"]+)"/);
-      setError(match ? match[1] : 'Invalid email or password');
+      setError(message || 'Invalid email or password');
     } finally {
       setSubmitting(false);
     }

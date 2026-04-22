@@ -10,7 +10,7 @@ interface WorkspaceSelectorProps {
 
 export default function WorkspaceSelector({ onNavigateSettings: _onNavigateSettings }: WorkspaceSelectorProps) {
     const { workspaceId, setWorkspaceId, workspaces, addWorkspace } = useWorkspace();
-    const { logout } = useAuth();
+    const { signOut } = useAuth();
     const [open, setOpen] = useState(false);
     const [showAddModal, setShowAddModal] = useState(false);
     const menuRef = useRef<HTMLDivElement>(null);
@@ -136,7 +136,7 @@ export default function WorkspaceSelector({ onNavigateSettings: _onNavigateSetti
                         {/* Log out */}
                         <div className="py-1.5">
                             <button
-                                onClick={() => { setOpen(false); logout(); }}
+                                onClick={() => { setOpen(false); void signOut(); }}
                                 className="w-full text-left px-3 py-2 text-[13px] text-muted hover:text-[var(--text)] hover:bg-[var(--surface-100)] transition-colors flex items-center gap-2.5"
                             >
                                 <LogOut size={14} className="text-muted/70" />
