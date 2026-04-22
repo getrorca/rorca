@@ -14,7 +14,7 @@ import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, g
 import { writeSpec } from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey, getOpenRouterPrefs } from './vault';
-import type { AuthUser } from './auth';
+import type { AuthUser } from '../lib/auth-middleware';
 import { getEffectiveUser } from '../lib/get-user';
 import { getPlanLimits, type PlanTier } from '../lib/plan-limits';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
@@ -8383,7 +8383,7 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
       return;
     }
 
-    const { decryptToken } = await import('./auth');
+    const { decryptToken } = await import('../lib/token-crypto');
     const githubToken = decryptToken(tokenRow.encrypted_token);
 
     // Find the spec on disk

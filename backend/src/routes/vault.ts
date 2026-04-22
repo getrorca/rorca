@@ -1,18 +1,14 @@
 import { Router, Request, Response } from 'express';
-import crypto from 'crypto';
 import { query, queryOne, execute } from '../db/index';
-import { JWT_SECRET } from './auth';
-import type { AuthUser } from './auth';
+import type { AuthUser } from '../lib/auth-middleware';
 import { chatComplete } from '../lib/llm-client';
 import type { ProviderType } from '../lib/llm-client';
 import { invalidateProviderCache } from '../lib/embedding-pipeline';
 import { AuthError, NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { encryptToken as encrypt, decryptToken as decrypt } from '../lib/token-crypto';
 
 const router = Router();
-
-// Derive a 32-byte AES-256 key from JWT_SECRET (same approach as auth.ts for GitHub tokens)
-const VAULT_KEY = crypto.createHash('sha256').update(JWT_SECRET).digest();
 
 // Auth is intentionally bypassed globally — fall back to the first registered user
 async function getEffectiveUser(req: Request): Promise<AuthUser | null> {
@@ -27,27 +23,6 @@ async function getEffectiveUser(req: Request): Promise<AuthUser | null> {
   }
   const fallback = await queryOne<{ id: string; email: string }>('SELECT id, email FROM users LIMIT 1');
   return fallback ? { ...fallback, supabaseId: fallback.id, role: 'admin' } : null;
-}
-
-// ─── Crypto helpers ─────────────────────────────────────────────────────────
-
-function encrypt(plaintext: string): string {
-  const iv = crypto.randomBytes(12);
-  const cipher = crypto.createCipheriv('aes-256-gcm', VAULT_KEY, iv);
-  const encrypted = Buffer.concat([cipher.update(plaintext, 'utf8'), cipher.final()]);
-  const authTag = cipher.getAuthTag();
-  // Store as iv:authTag:ciphertext (all hex)
-  return `${iv.toString('hex')}:${authTag.toString('hex')}:${encrypted.toString('hex')}`;
-}
-
-function decrypt(stored: string): string {
-  const [ivHex, authTagHex, ciphertextHex] = stored.split(':');
-  const iv = Buffer.from(ivHex, 'hex');
-  const authTag = Buffer.from(authTagHex, 'hex');
-  const ciphertext = Buffer.from(ciphertextHex, 'hex');
-  const decipher = crypto.createDecipheriv('aes-256-gcm', VAULT_KEY, iv);
-  decipher.setAuthTag(authTag);
-  return decipher.update(ciphertext) + decipher.final('utf8');
 }
 
 // ─── Helpers ────────────────────────────────────────────────────────────────

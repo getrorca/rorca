@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { query, queryOne, execute, transaction } from '../db/index';
 import { getEffectiveUser } from '../lib/get-user';
@@ -9,7 +8,7 @@ import { logger } from '../lib/logger';
 import { ValidationError, AuthError, ConflictError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { validateBody } from '../lib/validate';
-import { authRequired } from './auth';
+import { authRequired } from '../lib/auth-middleware';
 import { supabaseAdmin } from '../lib/supabase';
 
 const router = Router();
@@ -330,27 +329,24 @@ router.get('/workspace-members', async (req: Request, res: Response) => {
  *       Hard-deletes personal data (refresh_tokens, vault_keys, github_connections,
  *       notification_subscriptions, notification_history, billing, password_reset_tokens).
  *       Anonymizes operational records (pipeline_runs.triggered_by → 'deleted_user',
- *       story_comments.user_id → NULL). Requires password confirmation.
+ *       story_comments.user_id → NULL). Requires authenticated user context.
  *     requestBody:
  *       required: true
  *       content:
  *         application/json:
  *           schema:
  *             type: object
- *             required: [password]
+ *             required: []
  *             properties:
- *               password: { type: string }
+ *               confirm: { type: string, description: "Optional explicit confirmation string" }
  *     responses:
  *       200: { description: Account deleted }
- *       400: { description: Password confirmation required }
- *       401: { description: Incorrect password }
+ *       401: { description: Authentication required }
  *       409: { description: Active pipeline run prevents deletion }
  */
-const deleteBodySchema = z.object({ password: z.string().min(1, 'Password confirmation required') });
+const deleteBodySchema = z.object({ confirm: z.string().optional() });
 
 router.delete('/me', validateBody(deleteBodySchema), async (req: Request, res: Response) => {
-  const { password } = req.body as z.infer<typeof deleteBodySchema>;
-
   // Identify user — route-level auth since global auth is bypassed
   const effectiveUser = await getEffectiveUser(req);
   if (!effectiveUser) {
@@ -358,19 +354,12 @@ router.delete('/me', validateBody(deleteBodySchema), async (req: Request, res: R
   }
   const userId = effectiveUser.id;
 
-  // Fetch password hash
-  const user = await queryOne<{ id: string; email: string; password_hash: string }>(
-    'SELECT id, email, password_hash FROM users WHERE id = $1',
+  const user = await queryOne<{ id: string; email: string }>(
+    'SELECT id, email FROM users WHERE id = $1',
     [userId],
   );
   if (!user) {
     throw new AuthError('Authentication required');
-  }
-
-  // Verify password via bcrypt
-  const passwordValid = await bcrypt.compare(password, user.password_hash);
-  if (!passwordValid) {
-    throw new AuthError('Incorrect password');
   }
 
   // Block deletion if any pipeline run is active for user's workspaces
@@ -408,15 +397,12 @@ router.delete('/me', validateBody(deleteBodySchema), async (req: Request, res: R
     // Hard-delete personal data (child tables first, respecting FK order)
     // Most have ON DELETE CASCADE, but explicit deletion ensures completeness
     // and works even if FK cascades are changed later.
-    await client.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM api_key_vault WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM github_connections WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM notification_subscriptions WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM notification_history WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM subscriptions WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM user_settings WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM email_verification_tokens WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM integration_credentials WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM provider_defaults WHERE user_id = $1', [userId]);
 

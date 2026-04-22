@@ -3,7 +3,7 @@ import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
 import * as fs from 'fs';
 import * as path from 'path';
 import { queryOne, execute, transaction } from '../db/index';
-import { encryptToken, decryptToken } from './auth';
+import { encryptToken, decryptToken } from '../lib/token-crypto';
 import { logger } from '../lib/logger';
 import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';

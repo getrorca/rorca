@@ -3320,3 +3320,9 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Decision] Legacy backend auth removed after Supabase cutover: After Supabase auth middleware owns session flows, delete legacy auth routes and password-hash storage together, and keep only /api/auth/me plus token-encryption helpers needed by other modules.
 > Rule: Legacy backend auth removed after Supabase cutover: After Supabase auth middleware owns session flows, delete legacy auth routes and password-hash storage together, and keep only /api/auth/me plus token-encryption helpers needed by other modules.
+
+## 2026-04-22 [Architecture] Supabase workspace RLS dependency chain: Create workspace_members and get_user_workspace_ids(auth_id) in the same migration that adds users.auth_id so workspace RLS policies never depend on objects created later.
+> Rule: Supabase workspace RLS dependency chain: Create workspace_members and get_user_workspace_ids(auth_id) in the same migration that adds users.auth_id so workspace RLS policies never depend on objects created later.
+
+## 2026-04-22 [Convention] Supabase local dev docs must separate migration systems: When documenting local Supabase setup, explicitly note that `supabase db reset` only runs `supabase/migrations/` and does not apply app schema migrations from `backend/src/db/pg-migrations/`.
+> Rule: Supabase local dev docs must separate migration systems: When documenting local Supabase setup, explicitly note that `supabase db reset` only runs `supabase/migrations/` and does not apply app schema migrations from `backend/src/db/pg-migrations/`.

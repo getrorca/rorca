@@ -1,7 +1,7 @@
 import PgBoss from 'pg-boss';
 import { CronExpressionParser } from 'cron-parser';
 import { query, execute } from '../db/index';
-import { INTERNAL_SERVICE_TOKEN } from '../routes/auth';
+import { INTERNAL_SERVICE_TOKEN } from './auth-middleware';
 import { createBackup, pruneOldBackups } from './backup';
 import { logger } from './logger';
 
