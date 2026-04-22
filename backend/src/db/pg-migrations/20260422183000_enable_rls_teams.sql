@@ -40,7 +40,7 @@ AS $$
   );
 $$;
 
-ALTER FUNCTION is_workspace_team_admin(TEXT, UUID) OWNER TO postgres;
+ALTER FUNCTION is_workspace_team_admin(TEXT, UUID) OWNER TO rorca;
 
 ALTER TABLE teams ENABLE ROW LEVEL SECURITY;
 

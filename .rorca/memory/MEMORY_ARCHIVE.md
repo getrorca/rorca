@@ -772,3 +772,287 @@
 > Rule: For OpenCode PTY sessions, write synthesized direction context to `.opencode/AGENTS.md` between Rorca markers and restore/delete it via an idempotent per-session cleanup hook on both explicit delete and PTY exit.
 > Context: This keeps terminal sessions context-aware without permanently mutating workspace files or clobbering user-owned OpenCode config.
 > Source: OCT-038
+## 2026-04-15 [Pattern] Terminal PTY sessions support per-session model override
+> Rule: When spawning OpenCode terminal sessions, accept an optional validated `model` in POST /api/terminal/sessions and inject it into that PTY env only via `OPENCODE_MODEL`/`RORCA_MODEL`; never mutate global provider settings.
+> Context: Lets users experiment per terminal session without affecting pipeline runs or workspace-wide defaults.
+> Source: OCT-037
+
+## 2026-04-15 [Pattern] Terminal sessions support env-scoped model override
+> Rule: Pass an optional `model` to `POST /api/terminal/sessions` and inject it only into the spawned PTY env (`OPENCODE_MODEL` and session-local `RORCA_MODEL`) without mutating workspace or global settings.
+> Context: Lets terminal sessions choose a different OpenCode model than pipeline runs or provider settings while preserving the canonical global model resolution chain.
+> Source: OCT-037
+
+## 2026-04-15 [Pattern] Terminal install polling uses refs for timers
+> Rule: When polling for external CLI installation in React, store interval IDs and elapsed counters in useRef, clear them on success, workspace changes, and unmount, and sequence any success flash before retrying the original action.
+> Context: Avoids stale closure bugs and prevents orphaned polling loops in TerminalPanel's OpenCode auto-retry flow.
+> Source: OCT-040
+
+## 2026-04-16 [Bug Fix] Terminal WebSocket output dropped — session.outputSequence vs nextSequence
+> Rule: server.ts used `session.outputSequence` but PtySession interface defines `nextSequence`. undefined += 1 → NaN → JSON null → frontend sequence check (null <= 0 === true) silently dropped every WebSocket output message. Keystrokes were sent to PTY but echoes never reached xterm. Fix: use session.nextSequence in server.ts WebSocket onData handler.
+> Context: Root cause of "typing works only after refresh" bug. Scrollback REST endpoint worked (showed text on refresh) but live WebSocket output was completely silent.
+> Source: OCT-001
+
+## 2026-04-16 [Bug Fix] Terminal wsToken one-time-use breaks React StrictMode
+> Rule: WebSocket connection tokens were deleted on first validation (one-time use). React StrictMode double-mounts effects: first mount consumes token, cleanup closes connection, second mount rejected. Fix: keep token in map until TTL expiry (60s) instead of deleting on first use. File: backend/src/routes/terminal.ts validateWsToken().
+> Context: Combined with the outputSequence bug, this was a secondary cause of no live output. Even after fixing sequences, StrictMode would still kill the WebSocket on second mount.
+> Source: OCT-021
+
+## 2026-04-16 [Bug Fix] Terminal workspaces.domain vs domains column mismatch
+> Rule: terminal-context-injector.ts queried `SELECT domain FROM workspaces` but the column is `domains` (JSONB array, not singular text). Fix: query `domains`, JSON.parse, extract first element for L2 direction layer lookup.
+> Context:  
+> Source: OCT-001
+
+## 2026-04-16 [Bug Fix] Terminal route ordering — /sessions/history shadowed by /sessions/:sessionId
+> Rule: Express matched GET /sessions/history as sessionId="history" because the :sessionId route was registered before the /history route. Fix: move /sessions/history routes before /sessions/:sessionId in terminal.ts.
+> Context:  
+> Source: OCT-001
+
+## 2026-04-16 [Bug Fix] Terminal node-pty spawn-helper missing execute permission
+> Rule: node-pty prebuilds/darwin-arm64/spawn-helper installed without +x permission → posix_spawnp failed, crashing the backend. Fix: chmod +x spawn-helper. npm rebuild node-pty also fixes this. Check after every npm install.
+> Context:  
+> Source: OCT-001
+
+## 2026-04-16 [Bug Fix] Terminal infinite re-render loops — useTerminalSession unstable returns
+> Rule: useTerminalSession hook returned plain functions (sendInput, sendResize, onData, etc.) — new refs every render. These were in TerminalPane's main useEffect deps → terminal torn down and recreated every render. Fix: wrap all returned functions in useCallback. Also: TerminalPanel callback props (onExit, onInput, onTitleChange, onBell) were inline arrows — captured via refs instead.
+> Context: Multiple layers of unstable references: useTerminalSession functions, TerminalPanel inline arrow props, WorkspaceContext/ToastContext unmemoized values, loadModelPickerData activeSessionId dep. All fixed with useCallback + refs.
+> Source: OCT-001
+
+## 2026-04-16 [Bug Fix] WorkspaceContext and ToastContext provider values not memoized
+> Rule: Both contexts created inline value objects without useMemo, causing all consumers to re-render on every provider render. WorkspaceContext.setWorkspaceId was also a plain function (not useCallback). Fix: useMemo on both context values, useCallback on setWorkspaceId and addWorkspace.
+> Context: This was a pre-existing issue affecting all context consumers, not just the terminal. The terminal exposed it because of the many useEffect hooks with context-derived deps.
+> Source: OCT-001
+
+## 2026-04-16 [Decision] Terminal drawer hidden on /terminal route to prevent session mirroring
+> Rule: TerminalDrawer returns null when location.pathname === '/terminal'. Both the panel and drawer share the same localStorage-persisted sessions, so rendering both simultaneously causes mirrored PTY output. The drawer (with handle bar) is available on all other routes.
+> Context:  
+> Source: OCT-001
+
+## 2026-04-16 [Decision] Terminal drawer spans full viewport width (no sidebar offset)
+> Rule: TerminalDrawer getSidebarOffset() returns '0px' for all breakpoints. Previously offset by sidebar width on desktop, leaving a gap. User requested it align with the content grid left edge.
+> Context:  
+> Source: OCT-001
+
+## 2026-04-16 [Bug Fix] TerminalPanel always-mounted to preserve PTY sessions across navigation
+> Rule: TerminalPanel is now always-mounted in AppLayout (outside the Outlet) to keep PTY sessions alive when navigating to Specs/Runs/etc. Visibility is CSS-only: `className={location.pathname === '/terminal' ? 'contents' : 'hidden'}`. The ActivePanel case 'terminal' returns null. Auto-session creation is gated on isActiveRouteRef.current so it only fires when actually on /terminal — prevents 422 errors when browsing other panels with a workspace that has no vault key.
+> Context: Before this fix, navigating away from /terminal unmounted TerminalPanel entirely (React Router route unmount), destroying all in-memory PTY session state. On return, it would remount fresh and try to auto-create a new session.
+> Source:  
+
+## 2026-04-16 [Bug Fix] qa-accrual-missing-flows worktree spec was stale (10 stories vs 17 in main)
+> Rule: The worktree at workspace-feat-qa-accrual-missing-flows had an old 10-story spec (AMF-001–010, all passes=False). The main repo had 17 stories (AMF-000–016) with 12 already passing. Engine read the spec from workspacePath (main), but the run's previously_passed skip logic also read from main — however the WAL had no record of AMF-013/014/015 because the worktree spec didn't contain them, causing state_reconciliation failure. Fixed by copying main spec into worktree and committing. Run 192 still failed due to stale worker (Tuesday night PID 17483 running alongside fresh concurrently worker from same day).
+> Context: Remaining failing stories: AMF-002, AMF-003, AMF-013, AMF-014, AMF-015. Pattern: worktree spec diverges from main when stories are added to main after the worktree was created. Always sync worktree spec before re-running.
+> Source:  
+
+## 2026-04-16 [Gotcha] Multiple stale server/worker processes cause silent job failures
+> Rule: When npm run dev is started multiple times (e.g. once manually, once via mprocs), you get duplicate server and worker processes on the same ports. The stale worker (old PID, old code) can claim pg-boss jobs before the fresh worker does. Runs appear to start (status=running) but the engine never spawns (pid=NULL, last_heartbeat=NULL) and state reconciliation marks them failed in ~30s. Always kill ALL node processes before starting: `lsof -ti:3030 | xargs kill -9; lsof -ti:5210 | xargs kill -9; ps aux | grep -E "(server|worker)\.ts" | grep -v grep | awk '{print $2}' | xargs kill -9`
+> Context: Observed 2026-04-16: worker PID 17483 from Tuesday night still running alongside fresh worker from 1:17PM same day. The Tuesday worker had worker_id f5f831e1 in heartbeat table and was claiming jobs with stale code.
+> Source:  
+
+## 2026-04-16 [Decision] StoryCard Linear-style status treatment — dot icon + dimming, no colored ID or DONE badge
+> Rule: Story cards now follow Linear's UX pattern: (1) story ID is always muted gray — never colored by status; (2) status dot left of title: Circle=not done, CheckCircle2=done (muted), MinusCircle=deferred; (3) done rows dim to opacity-50 + border-border/50 + title goes text-muted; (4) DONE text badge removed entirely. Done stories recede visually, unfinished stories demand attention.
+> Context: Previous design: teal ID = not done, green DONE badge = done. This highlighted completed work and buried unfinished work — inverse of useful signal. 2026-04-16.
+> Source:  
+
+## 2026-04-16 [Bug Fix] Vite worktree process persists on port 5173 after killing main processes
+> Rule: When a spec run creates a worktree (e.g. workspace-feat-qa-accrual-missing-flows), that worktree's Vite dev server may still be running independently. Killing the main workspace processes does not kill the worktree's Vite. Result: new mprocs Vite bumps to 5174, old browser tab on 5173 still works. Find with: `lsof -ti:5173 | xargs ps -p` then kill the worktree Vite PID separately.
+> Context: Observed 2026-04-16: PID 31425 was node running vite from workspace-feat-qa-accrual-missing-flows/node_modules/.bin/vite --port 5173.
+> Source:  
+
+## 2026-04-21 [Bug Fix] Worker spec completion check gated behind exit code
+> Rule: The worker's post-run merge/PR logic was gated on status === 'done', meaning if the engine exited non-zero (timeout, signal, crash) but all stories actually passed in the spec JSON, the merge strategy never fired. Fixed by reading spec JSON regardless of exit code. If allSpecStoriesPassed is true but status is 'failed', the run is promoted to 'done' in the DB and merge strategy proceeds. Ground truth is the spec file, not the exit code.
+> Context: Discovered via qa-reports-basis-toggle-journeys spec on workspace — 24/24 stories passed across 3 incremental runs on the same worktree, but all 3 runs were marked 'failed' in DB. Branch was never merged or PR'd because the gate blocked it. Commit b2c5388.
+> Source:  
+
+## 2026-04-21 [Decision] Merge strategy is spec-level declarative, not path-based
+> Rule: The merge strategy is a declarative property on the spec JSON (mergeStrategy field), workspace config, or per-run override. It is NOT based on analyzing file paths, migration detection, or risk scoring. Rorca remains a generic agnostic orchestration platform — it doesn't know or care what a "migration" is. The user or spec author declares the intent explicitly.
+> Context: User explicitly rejected path-based risk detection as domain leakage. The right architecture is: spec.mergeStrategy > workspace pipeline_config.mergeStrategy > 'direct'. No magic, no guessing.
+> Source:  
+
+## 2026-04-21 [Gotcha] Coolify auto-deploy via GitHub webhook
+> Rule: Rorca is deployed on Workspace VPS (141.94.33.224) via Coolify. GitHub webhook (Hook ID 606945335) fires on push to main, hits http://100.91.193.49:9876/deploy (Tailscale-only), runs /home/ubuntu/rorca-deploy.sh which does git pull + rsync + docker compose up --build. Service UUID: xbsf06ai9pfut49urigz0ezo. Rorca containers are accessible ONLY behind Tailscale (ports bound to 100.91.193.49). Deploy takes ~90 seconds.
+> Context: docker-compose.override.yml binds rorca port to Tailscale IP only. Webhook listener is a Python systemd service running on ubuntu user. Secret: rorca-deploy-secret-2026.
+> Source:  
+
+## 2026-04-22 [Decision] Supabase CLI and app migrations stay separate
+> Rule: Use `supabase db reset` only for `supabase/migrations/`; keep Rorca app schema migrations in `backend/src/db/pg-migrations/` under the `pg-index.ts` runner.
+> Context: Avoids accidentally assuming Supabase CLI manages the application schema or that resetting Supabase will apply backend migrations.
+> Source: MU-027
+
+## 2026-04-22 [Pattern] Lazy Supabase backend clients keep local boot resilient
+> Rule: For optional third-party backends in Rorca, log a single warning at import time and defer client construction until first use so the backend can still boot without those env vars.
+> Context: Rorca runs primarily as a local tool with globally bypassed auth, so missing Supabase configuration must not block server startup.
+> Source: MU-001
+
+## 2026-04-22 [Gotcha] Supabase auth foreign keys must be conditional in local migrations
+> Rule: When adding foreign keys to `auth.users(id)` in PostgreSQL migrations, guard them with an `IF EXISTS` check on the `auth` schema so local non-Supabase databases can still run migrations cleanly.
+> Context: Rorca supports local PostgreSQL setups that may not have the Supabase-managed `auth` schema. Conditional FK creation keeps auth-linking migrations non-destructive and idempotent while preserving referential integrity on Supabase-backed deployments.
+> Source: MU-003
+
+## 2026-04-22 [Bug Fix] Supabase auth fallback users must use UUID ids
+> Rule: When switching req.user.id to Supabase auth.users UUIDs, synthetic and fallback users must also use valid UUID-format ids and populate supabaseId to keep downstream consumers type-safe.
+> Context: Rate limiting, route helpers, and auth-bypassed local mode all assume req.user.id is a stable string; mixing legacy non-UUID ids breaks consistency once Supabase-backed auth is introduced.
+> Source: MU-002
+
+## 2026-04-22 [Decision] CSRF uses bootstrap endpoint with HttpOnly double-submit cookie
+> Rule: When auth is globally bypassed, issue CSRF tokens from `/api/auth/csrf-token`, store the cookie as HttpOnly, and have the frontend cache the returned token and retry one mutating request on `CSRF_INVALID`.
+> Context: This preserves CSRF protection without server-side sessions and avoids reading the token from `document.cookie`.
+> Source: MU-019
+
+## 2026-04-22 [Decision] Legacy backend auth removed after Supabase cutover
+> Rule: After Supabase auth middleware owns session flows, delete legacy auth routes and password-hash storage together, and keep only /api/auth/me plus token-encryption helpers needed by other modules.
+> Context: Partial auth removal leaves dead Swagger paths, bcrypt dependencies, and schema drift between users and auth tables.
+> Source: MU-020
+## 2026-04-22 [Pattern] Foundation RLS starts at workspaces SELECT gate
+> Rule: Enable RLS on `workspaces` first and define downstream visibility through `get_user_workspace_ids(auth.uid())`; other workspace-scoped tables can then safely chain access off workspace membership.
+> Context: Workspace-scoped Supabase policies are easiest to reason about when `workspaces` is the canonical visibility boundary and the SECURITY DEFINER helper encapsulates membership lookup.
+> Source: MU-010
+
+## 2026-04-22 [Gotcha] Pooled RLS claims must use SET plus RESET
+> Rule: When attaching JWT claims to a shared pg Pool client for PostgreSQL RLS, use session-level `SET request.jwt.claims = ...` and always `RESET request.jwt.claims` before `client.release()`; never rely on `SET LOCAL` in autocommit mode.
+> Context: `SET LOCAL` evaporates immediately without an explicit transaction, while forgetting to RESET on a pooled connection can leak one user's claims into the next request and break data isolation.
+> Source: MU-021
+
+## 2026-04-22 [Bug Fix] Workspace creation must seed owner membership under RLS
+> Rule: When workspaces are protected by membership-based RLS, the create route must insert the workspace through a user-scoped Supabase client and immediately add a matching `workspace_members` owner row for `req.user.supabaseId` in the same authenticated flow.
+> Context: Without the membership row, `get_user_workspace_ids(auth.uid())` returns no workspaces and all workspace-scoped RLS policies hide the new workspace from its creator.
+> Source: MU-028
+
+## 2026-04-22 [Gotcha] Supabase RLS must follow actual legacy table names
+> Rule: When adding Supabase RLS to existing Rorca tables, verify the real table and column names in migrations first; legacy tables may still be named `notifications`, `notification_preferences`, and `subscriptions` with local `user_id` FKs, requiring policies to join through `users.auth_id` instead of comparing `auth.uid()` to a nonexistent `user_auth_id` column.
+> Context: The MU-015 acceptance text referenced `notification_subscriptions`, `notification_history`, and `billing`, but the live PostgreSQL schema currently uses legacy names and local user IDs.
+> Source: MU-015
+
+## 2026-04-22 [Gotcha] Team RLS scopes teams through workspace_access
+> Rule: When writing Supabase RLS for teams in this schema, scope `teams` visibility through `workspace_access` joined to `get_user_workspace_ids(auth.uid())` because `teams.workspace_id` does not exist yet.
+> Context: The legacy teams schema links teams to workspaces indirectly, so a direct `teams.workspace_id` policy would fail and drift from the live database model.
+> Source: MU-013
+
+## 2026-04-22 [Pattern] RLS on mixed-scope tables needs compound policies
+> Rule: When a table mixes global rows with workspace-scoped rows, write SELECT as `(workspace_id IS NULL) OR workspace_id IN get_user_workspace_ids(auth.uid())` and gate global writes behind an admin helper such as `is_admin(auth.uid())`.
+> Context: A workspace-only RLS policy on `direction_layers` would hide global L1/L2 rows from authenticated users and break direction synthesis.
+> Source: MU-012
+
+## 2026-04-22 [Gotcha] RLS story brief can drift from live schema
+> Rule: Before writing Supabase RLS migrations, verify every target table and scoping column in the current migration set; if a table lacks the required workspace_id or join key, add the schema migration first instead of forcing an incorrect policy.
+> Context: MU-016 requested RLS for spec_versions, story_comments, and agent_hook_invocations, but this branch's schema has no workspace_id on spec_versions, no run_id/workspace_id on story_comments, and no agent_hook_invocations table yet.
+> Source: MU-016
+## 2026-04-22 [Gotcha] RLS policies may need auth-id join on legacy user tables
+> Rule: When enabling Supabase RLS on legacy tables keyed by users.id, map ownership via users.auth_id = auth.uid() instead of assuming a direct user_auth_id column exists.
+> Context: Several existing tables still use user_id TEXT foreign keys to the local users table, so direct auth.uid() comparisons would fail or block valid rows.
+> Source: MU-015
+
+## 2026-04-22 [Decision] Supabase CLI config stays separate from app migrations
+> Rule: Use `supabase/config.toml` and `supabase/migrations/` only for Supabase-managed local services, while keeping Rorca app schema migrations in `backend/src/db/pg-migrations/` under the `pg-index.ts` runner.
+> Context: Avoids conflating Supabase local dev reset behavior with the backend's PostgreSQL migration system, which would otherwise lead to missing tables or false assumptions during setup.
+> Source: MU-027
+
+## 2026-04-22 [Decision] direction_layers RLS needs explicit admin helper for global writes
+> Rule: When a table mixes global rows (`workspace_id IS NULL`) and workspace-scoped rows, write policies must split those cases: workspace members can mutate scoped rows, but global rows require an explicit admin helper such as `is_admin(auth.uid())`.
+> Context: A single workspace-membership policy would either block all global mutations or accidentally allow non-admin users to change L1/L2 global direction layers.
+> Source: MU-012
+
+## 2026-04-22 [Bug Fix] Workspace creation must seed workspace_members owner row
+> Rule: When creating a workspace under Supabase RLS, insert the workspace via a user-scoped client and immediately add a matching owner row in workspace_members for req.user.supabaseId.
+> Context: Workspace-scoped RLS resolves membership through get_user_workspace_ids(auth.uid()); without the owner membership row, newly created workspaces disappear from all RLS-protected queries.
+> Source: MU-028
+
+## 2026-04-22 [Bug Fix] RLS request claims must use SET plus RESET
+> Rule: When projecting JWT claims into PostgreSQL for RLS on a pooled pg client, use session-level `SET request.jwt.claims = $1` and always `RESET request.jwt.claims` before releasing the client back to the pool.
+> Context: `SET LOCAL` is ineffective in autocommit mode and leaked session variables on pooled connections can expose one user's claims to the next borrower.
+> Source: MU-021
+
+## 2026-04-22 [Gotcha] Vault and GitHub RLS require workspace_id schema first
+> Rule: Do not add workspace-scoped RLS policies to `api_key_vault` or `github_connections` until each row has a non-null `workspace_id`; fail the migration loudly instead of creating false security.
+> Context: These legacy tables were user-scoped in the current branch, but the Supabase RLS model relies on `get_user_workspace_ids(auth.uid())` for workspace isolation.
+> Source: MU-014
+
+## 2026-04-22 [Decision] Legacy backend auth removed for Supabase cutover
+> Rule: When migrating fully to Supabase auth, delete server-managed auth endpoints and password storage together: drop refresh/reset/verification tables, drop users.password_hash, keep only GET /api/auth/me plus shared token-encryption helpers used by other routes.
+> Context: Prevents dead auth code from depending on removed schema and avoids mixed auth models after the Supabase JWT middleware rollout.
+> Source: MU-020
+## 2026-04-22 [Pattern] Supabase local dev uses dedicated CLI config
+> Rule: Keep local Supabase CLI ports and env examples aligned across supabase/config.toml, frontend .env.local.example, backend/.env.example, and developer docs, and document that Supabase CLI migrations are separate from backend pg-index migrations.
+> Context: Prevents auth callback mismatches, wrong local URLs, and confusion between Supabase-managed schema resets and Rorca application schema migrations.
+> Source: MU-027
+
+## 2026-04-22 [Bug Fix] Workspace RLS needs owner membership bootstrap
+> Rule: When creating a workspace under Supabase RLS, insert the corresponding `workspace_members` owner row in the same user-scoped transaction immediately after the `workspaces` insert.
+> Context: `get_user_workspace_ids()` reads from `workspace_members`, so a workspace row without a membership row becomes invisible to all workspace-scoped RLS policies, including the creator's own reads.
+> Source: MU-028
+
+## 2026-04-22 [Gotcha] Team RLS required schema backfill before policying
+> Rule: If a workspace-scoped RLS policy is required for teams, ensure `teams.workspace_id` exists and is backfilled from existing `workspace_access` rows before enabling policies.
+> Context: The story required workspace-scoped team visibility, but the current schema only related teams to workspaces indirectly via `workspace_access`.
+> Source: MU-013
+
+## 2026-04-22 [Bug Fix] Per-request Supabase clients must not reuse shared anon client session state
+> Rule: When enforcing RLS from Express routes, create a fresh Supabase client per request with the bearer token in global Authorization headers instead of mutating a shared singleton with setSession().
+> Context: A shared anon client can leak auth context across concurrent requests and cause incorrect RLS behavior on security-critical tables like vault keys.
+> Source: MU-014
+
+## 2026-04-22 [Bug Fix] RLS pool clients must RESET request.jwt.claims before release
+> Rule: When setting PostgreSQL JWT claims on a pooled client for RLS, use session-level `SET request.jwt.claims = ...`, then always `RESET request.jwt.claims` in a finally block before `client.release()`.
+> Context: `SET LOCAL` is ineffective in autocommit mode, and failing to RESET leaks one user's claims to the next borrower of the same pool connection.
+> Source: MU-021
+
+## 2026-04-22 [Decision] Legacy auth removal requires crypto helper extraction
+> Rule: When removing old auth routes, move any shared token-encryption helpers into a lib module before deleting route logic so GitHub/vault integrations keep working.
+> Context: The old auth router also owned decrypt/encrypt helpers used by GitHub and other integrations; removing routes without extracting helpers breaks unrelated features.
+> Source: MU-020
+## 2026-04-22 [Pattern] Local Supabase config stays separate from app migrations
+> Rule: Use `supabase/config.toml` only for local Supabase service orchestration and keep Rorca application schema migrations in `backend/src/db/pg-migrations/`; do not assume `supabase db reset` applies app schema changes.
+> Context: Rorca already has its own PostgreSQL migration runner (`pg-index.ts`). Mixing Supabase CLI migrations with app schema migrations causes local reset behavior to diverge from backend startup behavior.
+> Source: MU-027
+
+## 2026-04-22 [Gotcha] RLS migrations must match legacy table names
+> Rule: When adding Supabase RLS to older Rorca tables, verify the live schema first: user settings are in `user_settings`, notification data is in `notifications` and `notification_preferences`, and billing is in `subscriptions`; bridge `auth.uid()` through `users.auth_id` when tables still store `user_id`.
+> Context: The MU-015 brief used future-facing names like `notification_subscriptions`, `notification_history`, `billing`, and `user_auth_id`, but this branch still uses legacy table/column names. Writing policies against the brief alone would fail at migration time or protect the wrong tables.
+> Source: MU-015
+
+## 2026-04-22 [Bug Fix] Workspace creation must bootstrap workspace_members owner row
+> Rule: When workspaces are created under RLS, insert the workspace row and the creator's owner membership in the same user-scoped transaction so get_user_workspace_ids(auth.uid()) immediately includes the new workspace.
+> Context: workspace_members is the source of truth for workspace visibility. If the owner row is missing, all workspace-scoped RLS policies evaluate to zero rows for that user.
+> Source: MU-028
+
+## 2026-04-22 [Bug Fix] RLS claim scoping must use SET plus RESET
+> Rule: When borrowing a pg pool client for request-scoped RLS, use session-level `SET request.jwt.claims = ...` before queries and always `RESET request.jwt.claims` before releasing the client back to the pool.
+> Context: `SET LOCAL` is ineffective in autocommit mode and failing to reset claims leaks one user's auth context into the next pooled request, which is a severe data isolation vulnerability.
+> Source: MU-021
+
+## 2026-04-22 [Gotcha] MU-014 schema names differ from spec language
+> Rule: When implementing Supabase RLS for secrets in this repo, secure the live tables `api_key_vault` and `workspace_github_webhooks`; `vault_keys` is described in product docs, but the current backend schema still uses the legacy table names.
+> Context: Avoids patching non-existent tables and ensures the security fix lands on the actual secrets surfaces used by the app.
+> Source: MU-014
+## 2026-04-22 [Gotcha] RLS acceptance names may lag canonical table names
+> Rule: Before writing Supabase RLS migrations, verify the actual PostgreSQL table and column names in migrations rather than assuming spec terminology matches the schema exactly.
+> Context: This story asked for RLS on notification_subscriptions, notification_history, and billing, but the current schema uses notification_preferences, notifications, and subscriptions, with user linkage via users.auth_id rather than direct user_auth_id columns on those tables.
+> Source: MU-015
+
+## 2026-04-22 [Pattern] RLS request claims must reset before pool release
+> Rule: When setting PostgreSQL request.jwt.claims on a pooled client, use session-level SET and always RESET request.jwt.claims in finally before client.release() to prevent JWT claim leakage across requests.
+> Context: SET LOCAL is ineffective in pg autocommit mode, and leaked claims on reused pool connections create cross-user data isolation vulnerabilities worse than missing RLS.
+> Source: MU-021
+
+## 2026-04-22 [Pattern] Route-level RLS must use withUserClient for workspace-scoped reads and inserts
+> Rule: When a backend route touches RLS-protected workspace-scoped tables, run the route DB access through withUserClient(req, fn) and keep all client queries inside that callback instead of mixing pool helpers.
+> Context: Pool-level helpers bypass per-request JWT claims, so routes can silently defeat RLS even when table policies exist. The helper centralizes claim reset and client.release() to avoid leaked scoped sessions.
+> Source: MU-022
+
+## 2026-04-22 [Pattern] RLS integration tests must use Supabase user clients
+> Rule: When validating Supabase RLS, perform assertions through @supabase/supabase-js clients authenticated as real users; use the raw pg pool only for setup and teardown that intentionally bypass RLS.
+> Context: Direct Postgres connections run as the table owner/service context and can silently bypass RLS, producing false positives for cross-user isolation tests.
+> Source: MU-025
+
+## 2026-04-22 [Decision] Supabase CLI config stays separate from app schema migrations
+> Rule: Use `supabase/config.toml` and `supabase/migrations/` only for Supabase-managed local services; keep Rorca app schema migrations in `backend/src/db/pg-migrations/` under the existing `pg-index.ts` runner.
+> Context: Avoids conflating two migration systems during local auth setup and prevents developers from expecting `supabase db reset` to apply the app schema.
+> Source: MU-027
+
+## 2026-04-22 [Bug Fix] Workspace creation must seed workspace_members owner row
+> Rule: When creating a workspace through an RLS-scoped route, insert the workspace_members owner membership in the same withUserClient() transaction as the workspace row so get_user_workspace_ids(auth.uid()) immediately returns the new workspace.
+> Context: workspaces RLS depends on workspace_members as the membership source of truth; without the owner row, the creator loses visibility of the workspace they just created.
+> Source: MU-028
+
+## 2026-04-22 [Bug Fix] Invalid bearer tokens must not fall through to LOCAL_ADMIN
+> Rule: In local fallback auth mode, if an Authorization bearer token is present but Supabase rejects it, return `401 AUTH_ERROR` instead of silently injecting the local admin user.
+> Context: Falling back to local admin on invalid supplied tokens turns JWT manipulation into an auth bypass in mixed local/Supabase environments.
+> Source: MU-029

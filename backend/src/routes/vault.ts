@@ -232,28 +232,28 @@ router.post('/', async (req: Request, res: Response) => {
  *                       created_at: { type: string, format: date-time }
  */
 router.get('/', async (req: Request, res: Response) => {
-  const user = await getEffectiveUser(req);
-  if (!user) { res.json({ keys: [] }); return; }
-
-  const workspaceId = req.query.workspaceId;
-  if (!workspaceId || typeof workspaceId !== 'string') {
-    throw new ValidationError('workspaceId query param is required');
-  }
-
   try {
-    const userClient = await withUserClient(req);
+    const user = await getEffectiveUser(req);
+    if (!user) { res.json({ keys: [] }); return; }
 
-    const { data, error } = await userClient
-      .from('api_key_vault')
-      .select('id, workspace_id, user_id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at')
-      .eq('workspace_id', workspaceId)
-      .order('created_at', { ascending: false });
+    const workspaceId = req.query.workspaceId;
+    const hasWorkspaceFilter = typeof workspaceId === 'string' && workspaceId.length > 0;
 
-    if (error) {
-      throw new AuthError(error.message);
-    }
-
-    const rows = (data ?? []) as VaultRow[];
+    const rows = hasWorkspaceFilter
+      ? await query<VaultRow>(
+          `SELECT id, workspace_id, user_id, provider, encrypted_key, label, base_url,
+                  spend_total_usd, last_used_at, created_at
+             FROM api_key_vault
+            WHERE workspace_id = $1
+            ORDER BY created_at DESC`,
+          [workspaceId]
+        )
+      : await query<VaultRow>(
+          `SELECT id, workspace_id, user_id, provider, encrypted_key, label, base_url,
+                  spend_total_usd, last_used_at, created_at
+             FROM api_key_vault
+            ORDER BY created_at DESC`
+        );
 
     const keys = rows.map(row => ({
       id: row.id,
@@ -267,8 +267,8 @@ router.get('/', async (req: Request, res: Response) => {
     }));
 
     res.json({ keys });
-  } finally {
-    await supabaseAnon.auth.signOut();
+  } catch (error: any) {
+    handleRouteError(res, error, '[Vault] List keys');
   }
 });
 

@@ -30,7 +30,8 @@ export default function EmailVerificationBanner() {
   }, [user?.email]);
 
   // Don't show if user is verified, no user, or dismissed
-  if (!user || user.emailVerified || dismissed) return null;
+  const emailVerified = Boolean(user?.email_confirmed_at);
+  if (!user || emailVerified || dismissed) return null;
 
   return (
     <div className="bg-amber-500/10 border-b border-amber-500/30 px-4 py-2 flex items-center gap-3 text-sm">

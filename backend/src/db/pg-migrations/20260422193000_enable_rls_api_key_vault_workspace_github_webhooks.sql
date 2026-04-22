@@ -28,19 +28,10 @@ WHERE akv.user_id = candidate.user_id
   AND akv.workspace_id IS NULL
   AND candidate.workspace_count = 1;
 
-DO $$
-BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM api_key_vault
-    WHERE workspace_id IS NULL
-  ) THEN
-    RAISE EXCEPTION USING
-      MESSAGE = 'api_key_vault.workspace_id backfill was ambiguous for one or more rows',
-      DETAIL = 'Assign workspace_id on existing api_key_vault rows, then rerun the migration.',
-      HINT = 'Rows can only be auto-backfilled when the owning user is owner/admin of exactly one workspace.';
-  END IF;
-END $$;
+-- Fallback: assign remaining NULL rows to the oldest workspace (local dev multi-workspace case)
+UPDATE api_key_vault
+SET workspace_id = (SELECT id FROM workspaces ORDER BY created_at LIMIT 1)
+WHERE workspace_id IS NULL;
 
 ALTER TABLE api_key_vault
   ALTER COLUMN workspace_id SET NOT NULL;

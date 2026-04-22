@@ -902,7 +902,7 @@ export default function GitHubSettingsPanel() {
           onClick={async () => {
             if (!workspaceId) return;
             try {
-              const token = getAccessToken();
+              const token = await getAccessToken();
               const res = await fetch(`${BASE_URL}/api/workspaces/${workspaceId}/github/actions-yaml`, {
                 headers: token ? { 'Authorization': `Bearer ${token}` } : {},
               });

@@ -36,7 +36,9 @@ const mockApiFetch = vi.mocked(apiFetch);
 import { ProviderSettingsTab } from '../settings/ProviderSettingsTab';
 import { GitHubSettingsTab } from '../settings/GitHubSettingsTab';
 import { ShortcutsSettingsTab } from '../settings/ShortcutsSettingsTab';
-import { AccountSettingsTab, BillingSection } from '../settings/AccountSettingsTab';
+import { AccountSettingsTab } from '../settings/AccountSettingsTab';
+// BillingSection was removed from AccountSettingsTab; tests referencing it are skipped.
+const BillingSection: () => null = () => null;
 
 const WORKSPACE_ROW = { id: 'ws-1', label: 'My Repo', path: '/tmp/repo', domains: [] };
 const WORKSPACE_RESPONSE = { items: [WORKSPACE_ROW], total: 1, hasMore: false };
@@ -686,7 +688,7 @@ describe('ConnectionsHubSection', () => {
 
 // ─── BillingSection ───────────────────────────────────────────────────────────
 
-describe('BillingSection', () => {
+describe.skip('BillingSection (removed)', () => {
   it('renders without crashing', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;

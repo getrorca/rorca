@@ -50,6 +50,16 @@ async function getSupabaseAccessToken(): Promise<string | null> {
   return data.session?.access_token ?? null;
 }
 
+export async function getAccessToken(): Promise<string | null> {
+  return getSupabaseAccessToken();
+}
+
+// Legacy export: clears any residual CSRF state. Supabase session is cleared
+// via supabase.auth.signOut() by callers directly.
+export function clearTokens(): void {
+  csrfToken = null;
+}
+
 /** Routes excluded from 401 interception to prevent infinite refresh loops */
 const AUTH_BYPASS_PATHS = ['/api/auth/login', '/api/auth/refresh'];
 const CSRF_TOKEN_PATH = '/api/auth/csrf-token';
