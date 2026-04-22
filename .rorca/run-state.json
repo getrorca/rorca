@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T21:18:16.957Z",
+  "lastUpdatedAt": "2026-04-22T05:00:01.065Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -61,6 +61,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 200940
+    },
+    {
+      "storyId": "MU-001",
+      "title": "Install and configure Supabase SDK for frontend and backend",
+      "status": "passed",
+      "startedAt": "2026-04-22T04:58:12.967Z",
+      "finishedAt": "2026-04-22T05:00:01.065Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 108098
     }
   ],
   "failedStories": [
