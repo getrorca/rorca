@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:06:24.241Z",
+  "lastUpdatedAt": "2026-04-22T05:07:44.485Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -83,14 +83,14 @@
       "elapsedMs": 228779
     },
     {
-      "storyId": "MU-018",
-      "title": "Configure PKCE flow and secure token storage",
+      "storyId": "MU-019",
+      "title": "Add security headers and CSRF protection",
       "status": "passed",
-      "startedAt": "2026-04-22T05:05:08.089Z",
-      "finishedAt": "2026-04-22T05:06:24.241Z",
+      "startedAt": "2026-04-22T05:05:07.685Z",
+      "finishedAt": "2026-04-22T05:07:44.485Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 76152
+      "elapsedMs": 156800
     }
   ],
   "failedStories": [
