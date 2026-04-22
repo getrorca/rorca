@@ -35,6 +35,7 @@ import { TerminalDrawerProvider, useTerminalDrawer } from './contexts/TerminalDr
 // — Lazy-loaded pages (not part of initial bundle) —
 const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
 const GitHubCallbackPage = lazy(() => import('./pages/GitHubCallbackPage'));
+const AuthCallbackPage = lazy(() => import('./pages/auth/AuthCallbackPage'));
 const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
 const RegisterPage = lazy(() => import('./pages/auth/RegisterPage'));
 const ForgotPasswordPage = lazy(() => import('./pages/auth/ForgotPasswordPage'));
@@ -95,6 +96,15 @@ function AuthGate() {
     return (
       <Suspense fallback={<BoardSkeleton />}>
         <GitHubCallbackPage />
+      </Suspense>
+    );
+  }
+
+  // Supabase auth callback
+  if (location.pathname === '/auth/callback') {
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <AuthCallbackPage />
       </Suspense>
     );
   }
