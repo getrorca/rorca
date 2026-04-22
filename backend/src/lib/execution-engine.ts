@@ -57,6 +57,7 @@ import { getGraphContext, formatGraphContext } from './graph-context';
 import { logger } from './logger';
 import { autoSynthesizeMemory } from './auto-memory';
 import { writeMemoryMd } from './memory-projection';
+import { classifyFailure, FAILURE_REASONS, type FailureReason, type FailureClassification, type RecoveryClass } from './failure-classifier';
 import {
   initRunState,
   markStoryStarted as rsMarkStoryStarted,
@@ -1800,6 +1801,22 @@ function classifyOpenCodeError(result: AgentResult): ClassifiedError {
   };
 }
 
+// ─── OpenCodeErrorCategory → FailureReason mapping (CP-001) ────────────────
+
+function mapOpenCodeCategoryToFailureReason(category: OpenCodeErrorCategory): FailureReason {
+  switch (category) {
+    case 'not_installed': return 'agent_missing';
+    case 'api_key_invalid': return 'wrong_api_key';
+    case 'model_not_available': return 'model_not_found';
+    case 'rate_limited': return 'agent_rate_limit';
+    case 'server_crashed': return 'agent_socket_error';
+    case 'malformed_output': return 'agent_tool_transient';
+    case 'timeout': return 'agent_timeout';
+    case 'unknown': return 'unknown';
+    default: return 'unknown';
+  }
+}
+
 /** Extract provider name hint from error output */
 function extractProviderHint(stderr: string): string {
   if (stderr.includes('openai') || stderr.includes('OpenAI')) return '(OpenAI)';
@@ -3108,23 +3125,25 @@ async function executeStory(
         }
 
         logger.info(`${story.id} rate limited ${rateLimitAttempts} times — exhausted. Marking failed.`);
+        const rlClassification = classifyFailure('agent_rate_limit' as FailureReason, result.exitCode, result.stderrTail, { retriesExhausted: true });
         markStorySkipped(config.jsonPath, story.id);
         rsMarkStoryFailed(effectiveCwd, {
           storyId: story.id, title: story.title, status: 'failed',
           startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
           finishedAt: new Date().toISOString(), agentType: effectiveAgent,
-          failReason: 'rate_limit_exhausted', retries: rateLimitAttempts,
+          failReason: 'agent_rate_limit', retries: rateLimitAttempts,
         });
         writeProgressTxt(effectiveCwd);
 
         if (workspaceId) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
             run_id: config.runId, story_id: story.id,
-            reason: 'rate_limit_exhausted', attempts: rateLimitAttempts,
+            reason: 'agent_rate_limit' as FailureReason, recovery_class: rlClassification.recoveryClass,
+            attempts: rateLimitAttempts,
             log_file: storyLogFile,
             ...(graphHits != null ? { graph_hits: graphHits } : {}),
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', failureReason: 'agent_rate_limit' as FailureReason, recoveryClass: rlClassification.recoveryClass, logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
           // PG-020: Auto-synthesize memory from rate-limit-exhausted failure
           await autoSynthesizeMemory(
@@ -3183,13 +3202,17 @@ async function executeStory(
         }
 
         if (workspaceId) {
+          const gateExhausted = currentRetries >= MAX_RETRIES;
+          const gateFailureReason: FailureReason = gateExhausted ? 'gate_failure_after_max_retries' : 'agent_tool_transient';
+          const gateClassification = classifyFailure(gateFailureReason, result.exitCode, gate.output ?? '', { retriesExhausted: gateExhausted });
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId, story_id: story.id, reason: gate.reason,
+            run_id: config.runId, story_id: story.id, reason: gateFailureReason, recovery_class: gateClassification.recoveryClass,
+            gate_reason: gate.reason,
             ...(gate.reason === 'typecheck' ? { stderr: gate.output } : { summary: gate.output }),
             log_file: storyLogFile,
             ...(graphHits != null ? { graph_hits: graphHits } : {}),
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', failureReason: gateFailureReason, recoveryClass: gateClassification.recoveryClass, logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
         }
 
         if (currentRetries >= MAX_RETRIES) {
@@ -3218,17 +3241,21 @@ async function executeStory(
         });
         if (mode !== 'journey' && meaningfulChanges.length === 0) {
           logger.warn(`${story.id}: Agent exited 0 but produced no code changes — treating as failure`);
+          const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
+          retryCounts.set(story.id, noChangeRetries);
+          const noChangeExhausted = noChangeRetries >= MAX_RETRIES;
+          const noChangeClassification = classifyFailure('agent_tool_transient' as FailureReason, result.exitCode, '', { retriesExhausted: noChangeExhausted });
           if (workspaceId) {
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
-              run_id: config.runId, story_id: story.id, reason: 'no_code_changes',
+              run_id: config.runId, story_id: story.id,
+              reason: 'agent_tool_transient' as FailureReason, recovery_class: noChangeClassification.recoveryClass,
+              detail: 'no_code_changes',
               summary: 'Agent subprocess exited successfully but did not modify any code files.',
               log_file: storyLogFile,
             }, story.id);
-            await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+            await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', failureReason: 'agent_tool_transient' as FailureReason, recoveryClass: noChangeClassification.recoveryClass, logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
           }
-          const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
-          retryCounts.set(story.id, noChangeRetries);
-          if (noChangeRetries >= MAX_RETRIES) {
+          if (noChangeExhausted) {
             markStorySkipped(config.jsonPath, story.id);
             return 'failed';
           }
@@ -3401,25 +3428,27 @@ async function executeStory(
     if (result.exitCode === 124) {
       logger.info(`${story.id} timed out after ${timeoutMin}m (exit 124)`);
       logger.info(`   Log: ${storyLogFile}`);
+      const timeoutClassification = classifyFailure('agent_timeout' as FailureReason, result.exitCode, result.stderrTail);
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
         startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
         finishedAt: new Date().toISOString(), agentType: effectiveAgent,
-        failReason: 'timeout', elapsedMs: result.elapsedMs,
+        failReason: 'agent_timeout', elapsedMs: result.elapsedMs,
       });
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
-          reason: 'timeout', timeout_minutes: timeoutMin,
+          reason: 'agent_timeout' as FailureReason, recovery_class: timeoutClassification.recoveryClass,
+          timeout_minutes: timeoutMin,
           log_file: storyLogFile,
           input_tokens: tokenPayload.inputTokens,
           output_tokens: tokenPayload.outputTokens,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', failureReason: 'agent_timeout' as FailureReason, recoveryClass: timeoutClassification.recoveryClass, logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
         // PG-020: Auto-synthesize memory from timed-out story
         await autoSynthesizeMemory(
@@ -3435,28 +3464,33 @@ async function executeStory(
       ? classifyOpenCodeError(result)
       : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
 
+    // Map OpenCodeErrorCategory → FailureReason for the normalized enum
+    const normalizedReason = mapOpenCodeCategoryToFailureReason(classified.category);
+
     // Non-retryable errors (wrong API key, model not found, not installed) — fail immediately
     if (!classified.retryable) {
       logger.info(`${story.id} failed (non-retryable): ${classified.category} — ${classified.message}`);
       logger.info(`   Log: ${storyLogFile}`);
+      const terminalClassification = classifyFailure(normalizedReason, result.exitCode, result.stderrTail);
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
         startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
         finishedAt: new Date().toISOString(), agentType: effectiveAgent,
-        failReason: classified.category, elapsedMs: result.elapsedMs,
+        failReason: normalizedReason, elapsedMs: result.elapsedMs,
       });
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
-          reason: classified.category, error_message: classified.message,
+          reason: normalizedReason, recovery_class: terminalClassification.recoveryClass,
+          error_message: classified.message,
           agent_type: effectiveAgent, exit_code: result.exitCode,
           log_file: storyLogFile,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', failureReason: normalizedReason, recoveryClass: terminalClassification.recoveryClass, logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
         // PG-020: Auto-synthesize memory from non-retryable failure
         await autoSynthesizeMemory(
@@ -3475,12 +3509,14 @@ async function executeStory(
       logger.info(`${story.id} failed after ${MAX_RETRIES} attempts. Skipping.`);
       logger.info(`   Log: ${storyLogFile}`);
       logger.info(`   Error: ${classified.message}`);
+      // CP-001: Use the UNDERLYING reason (not 'max_retries') — context.retriesExhausted signals policy exhaustion
+      const maxRetryClassification = classifyFailure(normalizedReason, result.exitCode, result.stderrTail, { retriesExhausted: true });
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
         startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
         finishedAt: new Date().toISOString(), agentType: effectiveAgent,
-        failReason: 'max_retries', retries: currentRetries,
+        failReason: normalizedReason, retries: currentRetries,
         elapsedMs: result.elapsedMs,
       });
       writeProgressTxt(effectiveCwd);
@@ -3488,13 +3524,14 @@ async function executeStory(
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_failed', workspaceId, {
           run_id: config.runId, story_id: story.id,
-          reason: 'max_retries', attempts: currentRetries,
+          reason: normalizedReason, recovery_class: maxRetryClassification.recoveryClass,
+          attempts: currentRetries,
           error_category: classified.category, error_message: classified.message,
           agent_type: effectiveAgent,
           log_file: storyLogFile,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
-        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+        await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', failureReason: normalizedReason, recoveryClass: maxRetryClassification.recoveryClass, logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
         // PG-020: Auto-synthesize memory from max-retries failure
         await autoSynthesizeMemory(
@@ -3515,6 +3552,8 @@ async function executeStory(
 // ─── Exported helpers for pipeline.ts ────────────────────────────────────────
 
 export { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, createIdleWatchdog };
+export { FAILURE_REASONS, classifyFailure };
+export type { FailureReason, FailureClassification, RecoveryClass };
 export type { UserStory as EngineUserStory, RerouteInfo, IdleWatchdog };
 
 // ─── Bounded Concurrency ────────────────────────────────────────────────────
@@ -3912,9 +3951,10 @@ async function runParallel(
         if (workspaceId) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
             run_id: config.runId, story_id: original.id,
-            reason: 'blocked_by', blockedBy: blockers,
+            reason: 'blocked_by', recovery_class: 'terminal' as RecoveryClass,
+            blockedBy: blockers,
           }, original.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: original.id, status: 'skip', blockedBy: blockers });
+          await postStoryResult(config.port, { runId: config.runId, storyId: original.id, status: 'skip', recoveryClass: 'terminal' as RecoveryClass, blockedBy: blockers });
         }
         continue;
       }
@@ -3937,17 +3977,20 @@ async function runParallel(
         failedIds.add(story.id);
         processedIds.add(story.id);
         markStorySkipped(config.jsonPath, story.id);
+        const wtFailReason: FailureReason = 'worktree_create_failed_transient';
+        const wtClassification = classifyFailure(wtFailReason, 1, '');
         rsMarkStoryFailed(config.cwd, {
           storyId: story.id, title: story.title, status: 'failed',
           startedAt: new Date().toISOString(), finishedAt: new Date().toISOString(),
-          agentType: config.agentType, failReason: 'worktree_create_failed',
+          agentType: config.agentType, failReason: wtFailReason,
         });
 
         if (workspaceId) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
-            run_id: config.runId, story_id: story.id, reason: 'worktree_create_failed',
+            run_id: config.runId, story_id: story.id,
+            reason: wtFailReason, recovery_class: wtClassification.recoveryClass,
           }, story.id);
-          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail' });
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', failureReason: wtFailReason, recoveryClass: wtClassification.recoveryClass });
         }
       }
     }
@@ -3993,9 +4036,11 @@ async function runParallel(
           failedIds.add(wt.storyId);
           markStoryMergeFailed(config.jsonPath, wt.storyId);
           if (workspaceId) {
+            const mergeClassification = classifyFailure('merge_conflict' as FailureReason, 1, '');
             await emitWalEvent(config.port, 'story_failed', workspaceId, {
               run_id: config.runId, story_id: wt.storyId,
-              reason: 'merge_conflict', worktree_branch: wt.branchName,
+              reason: 'merge_conflict' as FailureReason, recovery_class: mergeClassification.recoveryClass,
+              worktree_branch: wt.branchName,
             }, wt.storyId);
           }
         } else {
@@ -4034,9 +4079,11 @@ async function runParallel(
             markStoryMergeFailed(config.jsonPath, failure.storyId);
 
             if (workspaceId) {
+              const waveMergeClassification = classifyFailure('merge_conflict' as FailureReason, 1, '');
               await emitWalEvent(config.port, 'story_failed', workspaceId, {
                 run_id: config.runId, story_id: failure.storyId,
-                reason: 'merge_conflict', conflictingFiles: failure.conflictingFiles,
+                reason: 'merge_conflict' as FailureReason, recovery_class: waveMergeClassification.recoveryClass,
+                conflictingFiles: failure.conflictingFiles,
                 wave: wave.index,
               }, failure.storyId);
             }
@@ -4075,9 +4122,10 @@ async function runParallel(
         if (workspaceId) {
           await emitWalEvent(config.port, 'story_failed', workspaceId, {
             run_id: config.runId, story_id: blockedId,
-            reason: 'blocked_by', blockedBy: blockers,
+            reason: 'blocked_by', recovery_class: 'terminal' as RecoveryClass,
+            blockedBy: blockers,
           }, blockedId);
-          await postStoryResult(config.port, { runId: config.runId, storyId: blockedId, status: 'skip', blockedBy: blockers });
+          await postStoryResult(config.port, { runId: config.runId, storyId: blockedId, status: 'skip', recoveryClass: 'terminal' as RecoveryClass, blockedBy: blockers });
         }
       }
     }
