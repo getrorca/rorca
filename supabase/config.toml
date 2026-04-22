@@ -1,0 +1,36 @@
+project_id = "rorca-local"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+# Supabase CLI migrations and seeds live under `supabase/migrations/` and
+# `supabase/seed.sql`. Rorca app schema migrations remain in
+# `backend/src/db/pg-migrations/` and are applied by `pg-index.ts` on backend
+# startup. These are separate systems with different purposes.
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:5210"
+additional_redirect_urls = [
+  "http://127.0.0.1:5210",
+  "http://localhost:5210",
+  "http://127.0.0.1:54321/auth/v1/callback",
+]
+
+[auth.external.github]
+enabled = false
+client_id = "env(SUPABASE_AUTH_GITHUB_CLIENT_ID)"
+secret = "env(SUPABASE_AUTH_GITHUB_SECRET)"

@@ -23,3 +23,5 @@ bin/.generated/
 build/
 rorca
 .rorca-results.jsonl
+supabase/.branches/
+supabase/.temp/

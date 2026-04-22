@@ -10,6 +10,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Start everything (recommended)
 npm run dev                # Frontend :5210 + Backend :3030 + pg-boss Worker concurrently
 
+# Local Supabase
+supabase start             # Start local Supabase stack (API :54321, DB :54322, Studio :54323)
+supabase stop              # Stop local Supabase stack
+supabase db reset          # Reset ONLY Supabase CLI-managed schema from supabase/migrations/
+
 # Frontend (root)
 npm run dev                # Vite dev server (:5210)
 npm run build              # TypeScript + Vite production build
@@ -642,6 +647,29 @@ Multiple workspaces can run simultaneously. Same-workspace parallel runs require
 - `spec.branchName` = git worktree branch (if run in worktree) = shown with `GitBranch` icon
 
 ## Environment
+
+## Local Supabase Development
+
+Rorca supports local Supabase for auth and related development flows.
+
+- Install the CLI with `brew install supabase/tap/supabase`
+- Start services with `supabase start`
+- Stop services with `supabase stop`
+- Reset the Supabase-managed local schema with `supabase db reset`
+- Frontend local URL is `http://127.0.0.1:54321`
+- Local Studio runs at `http://127.0.0.1:54323`
+- Local Postgres listens on `127.0.0.1:54322`
+
+GitHub OAuth for local development:
+
+- Configure your GitHub OAuth app callback URL as `http://127.0.0.1:54321/auth/v1/callback`
+- Put local GitHub provider credentials in the environment variables referenced by `supabase/config.toml`
+
+Important migration warning:
+
+- `supabase db reset` only applies Supabase CLI migrations from `supabase/migrations/`
+- It does NOT run Rorca app schema migrations from `backend/src/db/pg-migrations/`
+- For app schema migrations, use the backend migration flow (`pg-index.ts` on startup, or your normal app migration command such as `npm run migrate` if available in your environment)
 
 **Frontend** (`.env.local`, root): No required env vars — backend is always `http://localhost:3030`
 

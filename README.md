@@ -52,9 +52,12 @@ The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS 
 
 - **Node.js** 18 or later
 - **Git** (for workspace registration and git hydration)
+- **Supabase CLI** (`brew install supabase/tap/supabase`)
 - **One of the following execution engines:**
   - **Claude Code CLI** installed and authenticated (`claude --version`) — uses your Pro/Max subscription, no API key
   - **OpenCode CLI** (`npm i -g opencode`, `opencode --version` >= 0.1.0) + an API key for your chosen provider
+
+If you use GitHub OAuth with local Supabase Auth, configure `http://127.0.0.1:54321/auth/v1/callback` as a callback URL in your GitHub OAuth app.
 
 ---
 
