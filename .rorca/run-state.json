@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:00:01.065Z",
+  "lastUpdatedAt": "2026-04-22T05:01:55.151Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -71,6 +71,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 108098
+    },
+    {
+      "storyId": "MU-003",
+      "title": "Add auth_id column and get_user_workspace_ids() helper function",
+      "status": "passed",
+      "startedAt": "2026-04-22T05:00:47.505Z",
+      "finishedAt": "2026-04-22T05:01:55.151Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 67646
     }
   ],
   "failedStories": [
