@@ -27,7 +27,7 @@ jest.mock('../../logger', () => ({
   },
 }));
 
-jest.mock('../../../routes/auth', () => ({
+jest.mock('../../../lib/token-crypto', () => ({
   decryptToken: jest.fn(() => 'ghp_test_token_123'),
 }));
 
@@ -44,7 +44,7 @@ jest.mock('../../pg-boss', () => ({
 import { queryOne, query, execute } from '../../../db/index';
 import { broadcastAll } from '../../sse-hub';
 import { logger } from '../../logger';
-import { decryptToken } from '../../../routes/auth';
+import { decryptToken } from '../../../lib/token-crypto';
 import { handleRunFinished } from '../fix-orchestrator';
 import type { WalEvent } from '../../sse-hub';
 

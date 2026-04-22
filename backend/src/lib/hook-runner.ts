@@ -1,7 +1,7 @@
 import { execSync } from 'child_process';
 import { createHmac } from 'crypto';
 import { query } from '../db/index';
-import { decryptToken } from '../routes/auth';
+import { decryptToken } from './token-crypto';
 import { logger } from './logger';
 
 export interface PipelineHookRow {

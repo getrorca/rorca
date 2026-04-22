@@ -8383,7 +8383,7 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
       return;
     }
 
-    const { decryptToken } = await import('./auth');
+    const { decryptToken } = await import('../lib/token-crypto');
     const githubToken = decryptToken(tokenRow.encrypted_token);
 
     // Find the spec on disk

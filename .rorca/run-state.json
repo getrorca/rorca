@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:53:52.826Z",
+  "lastUpdatedAt": "2026-04-22T06:06:28.227Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -141,6 +141,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 144313
+    },
+    {
+      "storyId": "MU-020",
+      "title": "Remove legacy auth tables and self-built auth backend routes",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:01:37.063Z",
+      "finishedAt": "2026-04-22T06:06:28.226Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 291163
     }
   ],
   "failedStories": [

@@ -19,7 +19,7 @@ import { subscribe, broadcastAll, type WalEvent } from '../sse-hub';
 import { queryOne, query, execute } from '../../db/index';
 import { getBoss } from '../pg-boss';
 import { logger } from '../logger';
-import { decryptToken } from '../../routes/auth';
+import { decryptToken } from '../token-crypto';
 import { githubRateLimiter } from '../github-rate-limiter';
 import type { CiCheckFailure, CiAnnotation } from './webhook-handler';
 import type { AgentType } from '../config';

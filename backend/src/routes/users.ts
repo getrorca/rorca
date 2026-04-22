@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { query, queryOne, execute, transaction } from '../db/index';
 import { getEffectiveUser } from '../lib/get-user';
@@ -327,8 +326,7 @@ router.get('/workspace-members', async (req: Request, res: Response) => {
  *     summary: Permanently delete user account
  *     operationId: deleteMyAccount
  *     description: |
- *       Hard-deletes personal data (refresh_tokens, vault_keys, github_connections,
- *       notification_subscriptions, notification_history, billing, password_reset_tokens).
+ *       Hard-deletes personal data (vault keys, github connections, notifications, billing-related rows).
  *       Anonymizes operational records (pipeline_runs.triggered_by → 'deleted_user',
  *       story_comments.user_id → NULL). Requires password confirmation.
  *     requestBody:
@@ -348,85 +346,5 @@ router.get('/workspace-members', async (req: Request, res: Response) => {
  */
 const deleteBodySchema = z.object({ password: z.string().min(1, 'Password confirmation required') });
 
-router.delete('/me', validateBody(deleteBodySchema), async (req: Request, res: Response) => {
-  const { password } = req.body as z.infer<typeof deleteBodySchema>;
-
-  // Identify user — route-level auth since global auth is bypassed
-  const effectiveUser = await getEffectiveUser(req);
-  if (!effectiveUser) {
-    throw new AuthError('Authentication required');
-  }
-  const userId = effectiveUser.id;
-
-  // Fetch password hash
-  const user = await queryOne<{ id: string; email: string; password_hash: string }>(
-    'SELECT id, email, password_hash FROM users WHERE id = $1',
-    [userId],
-  );
-  if (!user) {
-    throw new AuthError('Authentication required');
-  }
-
-  // Verify password via bcrypt
-  const passwordValid = await bcrypt.compare(password, user.password_hash);
-  if (!passwordValid) {
-    throw new AuthError('Incorrect password');
-  }
-
-  // Block deletion if any pipeline run is active for user's workspaces
-  const activeRun = await queryOne<{ id: number }>(
-    `SELECT id FROM pipeline_runs
-     WHERE status = 'running'
-       AND workspace_id IN (SELECT id FROM workspaces WHERE owner_id = $1)
-     LIMIT 1`,
-    [userId],
-  );
-  if (activeRun) {
-    throw new ConflictError(
-      'Cannot delete account while a pipeline run is active. Cancel all running pipelines first.',
-    );
-  }
-
-  // Emit WAL event before deletion (audit trail)
-  await execute(
-    "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('account_deleted', '', $1)",
-    [JSON.stringify({ userId: user.id, email: user.email, deletedAt: new Date().toISOString() })],
-  );
-
-  await transaction(async (client) => {
-    // Anonymize operational records BEFORE user delete (avoids FK violations)
-    await client.query(
-      `UPDATE pipeline_runs SET triggered_by = 'deleted_user'
-       WHERE workspace_id IN (SELECT id FROM workspaces WHERE owner_id = $1)`,
-      [userId],
-    );
-    await client.query(
-      'UPDATE story_comments SET user_id = NULL WHERE user_id = $1',
-      [userId],
-    );
-
-    // Hard-delete personal data (child tables first, respecting FK order)
-    // Most have ON DELETE CASCADE, but explicit deletion ensures completeness
-    // and works even if FK cascades are changed later.
-    await client.query('DELETE FROM refresh_tokens WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM api_key_vault WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM github_connections WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM notification_subscriptions WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM notification_history WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM subscriptions WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM password_reset_tokens WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM user_settings WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM email_verification_tokens WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM integration_credentials WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM provider_defaults WHERE user_id = $1', [userId]);
-
-    // Delete the user row last — CASCADE handles any remaining FKs
-    await client.query('DELETE FROM users WHERE id = $1', [userId]);
-  });
-
-  logger.info(`[Users] Account deleted: ${user.email} (id: ${userId}). Personal data removed, operational records anonymized.`);
-
-  res.json({ message: 'Your account has been deleted.' });
-});
 
 export default router;
