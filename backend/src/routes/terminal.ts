@@ -15,28 +15,32 @@ import { injectDirectionStack } from '../lib/terminal-context-injector';
 import { registerTerminalContextCleanup, runTerminalContextCleanup } from '../lib/terminal-context-cleanup';
 import { detectOpenCode } from '../lib/opencode-detector';
 import { validateProviderKey } from '../lib/key-validator';
+import { withUserClient } from '../db/user-client';
 
 const router = Router();
 
 // OCT-021: Short-lived WebSocket connection tokens (60s TTL)
 // Maps wsToken -> sessionId to prevent sessionId enumeration
-const wsTokenMap = new Map<string, { sessionId: string; expiresAt: number }>();
+const wsTokenMap = new Map<string, { sessionId: string; userId: string; expiresAt: number }>();
 const WS_TOKEN_TTL_MS = 60_000; // 60 seconds
 
-function generateWsToken(sessionId: string): string {
+function generateWsToken(sessionId: string, userId: string): string {
   const token = randomUUID();
   const expiresAt = Date.now() + WS_TOKEN_TTL_MS;
-  wsTokenMap.set(token, { sessionId, expiresAt });
+  wsTokenMap.set(token, { sessionId, userId, expiresAt });
   return token;
 }
 
-export function validateWsToken(token: string): string | null {
+export function validateWsToken(token: string, userId?: string): string | null {
   const entry = wsTokenMap.get(token);
   if (!entry) {
     return null;
   }
   if (Date.now() > entry.expiresAt) {
     wsTokenMap.delete(token);
+    return null;
+  }
+  if (userId && entry.userId !== userId) {
     return null;
   }
   // Allow reuse within TTL — React StrictMode double-mounts effects in dev,
@@ -210,10 +214,13 @@ router.post('/sessions', validateBody(createSessionSchema), async (req: Request,
     }
 
     // Look up workspace
-    const workspace = await queryOne<{ id: string; path: string; label?: string }>(
-      'SELECT id, path, label FROM workspaces WHERE id = $1',
-      [body.workspaceId]
-    );
+    const workspace = await withUserClient(req, async (client) => {
+      const result = await client.query<{ id: string; path: string; label?: string }>(
+        'SELECT id, path, label FROM workspaces WHERE id = $1',
+        [body.workspaceId]
+      );
+      return result.rows[0];
+    });
 
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
@@ -328,7 +335,7 @@ router.post('/sessions', validateBody(createSessionSchema), async (req: Request,
     });
 
     // OCT-021: Generate short-lived WebSocket connection token
-    const wsToken = generateWsToken(sessionId);
+    const wsToken = generateWsToken(sessionId, req.user!.id);
 
     res.status(201).json({
       sessionId,
@@ -513,7 +520,7 @@ router.get('/sessions/:sessionId', async (req: Request, res: Response) => {
     }
 
     // Generate fresh WebSocket connection token for reattachment
-    const wsToken = generateWsToken(sessionId);
+    const wsToken = generateWsToken(sessionId, req.user!.id);
 
     res.json({
       sessionId: session.sessionId,

@@ -2,7 +2,7 @@
   "specId": "rorca-supabase-auth-rls",
   "runId": 20260316000221,
   "startedAt": "2026-04-22T06:19:01.676Z",
-  "lastUpdatedAt": "2026-04-22T06:35:36.168Z",
+  "lastUpdatedAt": "2026-04-22T06:41:02.811Z",
   "completedStories": [
     {
       "storyId": "MU-015",
@@ -63,6 +63,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 111597
+    },
+    {
+      "storyId": "MU-029",
+      "title": "Security audit: IDOR, RLS bypass, JWT manipulation, CSRF, XSS",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:35:52.513Z",
+      "finishedAt": "2026-04-22T06:41:02.810Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 310297
     }
   ],
   "failedStories": [],

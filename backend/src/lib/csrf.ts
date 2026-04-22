@@ -1,6 +1,6 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
-import { UnprocessableError } from './errors';
+import { CsrfError } from './errors';
 
 const STATE_CHANGING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
@@ -59,18 +59,18 @@ export function csrfProtection(req: Request, _res: Response, next: NextFunction)
   const cookieValue = parseCsrfCookie(req.headers.cookie || '');
 
   if (!cookieValue) {
-    throw new UnprocessableError('Missing CSRF cookie', 'CSRF_INVALID');
+    throw new CsrfError('Missing CSRF cookie');
   }
 
   const headerValue = req.headers['x-csrf-token'] as string | undefined;
 
   if (!headerValue) {
-    throw new UnprocessableError('Missing CSRF token header', 'CSRF_INVALID');
+    throw new CsrfError('Missing CSRF token header');
   }
 
   // Constant-time comparison to prevent timing attacks
   if (!timingSafeEqual(cookieValue, headerValue)) {
-    throw new UnprocessableError('CSRF token mismatch', 'CSRF_INVALID');
+    throw new CsrfError('CSRF token mismatch');
   }
 
   next();
