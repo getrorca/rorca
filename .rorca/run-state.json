@@ -2,7 +2,7 @@
   "specId": "rorca-supabase-auth-rls",
   "runId": 20260316000221,
   "startedAt": "2026-04-22T06:19:01.676Z",
-  "lastUpdatedAt": "2026-04-22T06:41:02.811Z",
+  "lastUpdatedAt": "2026-04-22T06:44:16.239Z",
   "completedStories": [
     {
       "storyId": "MU-015",
@@ -73,6 +73,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 310297
+    },
+    {
+      "storyId": "MU-030",
+      "title": "Write E2E Playwright tests for complete auth flow",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:41:19.877Z",
+      "finishedAt": "2026-04-22T06:44:16.239Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 176362
     }
   ],
   "failedStories": [],
