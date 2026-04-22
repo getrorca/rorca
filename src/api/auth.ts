@@ -38,7 +38,3 @@ export function logout(opts?: ApiOptions): Promise<{ message: string }> {
     signal: opts?.signal,
   });
 }
-
-export function getGitHubAuthUrl(opts?: ApiOptions): Promise<{ authUrl: string }> {
-  return apiFetch('/api/auth/github', { signal: opts?.signal });
-}

@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:16:15.226Z",
+  "lastUpdatedAt": "2026-04-22T05:18:48.044Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -93,14 +93,14 @@
       "elapsedMs": 156800
     },
     {
-      "storyId": "MU-009",
-      "title": "Add RequireAuth guard protecting all app routes",
+      "storyId": "MU-017",
+      "title": "Replace GitHub OAuth sign-in with Supabase GitHub provider",
       "status": "passed",
-      "startedAt": "2026-04-22T05:13:52.327Z",
-      "finishedAt": "2026-04-22T05:16:15.225Z",
+      "startedAt": "2026-04-22T05:13:51.897Z",
+      "finishedAt": "2026-04-22T05:18:48.044Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 142898
+      "elapsedMs": 296147
     }
   ],
   "failedStories": [

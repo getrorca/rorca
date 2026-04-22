@@ -1,3 +1,4 @@
+```typescript
 import { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import { Routes, Route, Navigate, Outlet, useLocation, useNavigate as useRouterNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
@@ -34,7 +35,6 @@ import { TerminalDrawerProvider, useTerminalDrawer } from './contexts/TerminalDr
 
 // — Lazy-loaded pages (not part of initial bundle) —
 const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
-const GitHubCallbackPage = lazy(() => import('./pages/GitHubCallbackPage'));
 const AuthCallbackPage = lazy(() => import('./pages/auth/AuthCallbackPage'));
 const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
 const RegisterPage = lazy(() => import('./pages/auth/RegisterPage'));
@@ -122,10 +122,78 @@ const PANEL_LABELS: Record<PanelId, string> = {
 
 /** Top-level route config — Shell layout wraps all panel routes */
 function AppRoutes() {
+  const { isAuthenticated, isLoading } = useAuth();
   const { workspaces, workspacesLoading } = useWorkspace();
+  const location = useLocation();
+  const navigate = useRouterNavigate();
 
-  if (workspacesLoading) {
-    return <Shell><BoardSkeleton /></Shell>;
+  // EQ-007: Public review page — rendered outside auth gate
+  const reviewMatch = location.pathname.match(/^\/review\/([a-f0-9-]+)$/i);
+  if (reviewMatch) {
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <PublicReviewPage token={reviewMatch[1]} />
+      </Suspense>
+    );
+  }
+
+  // Supabase auth callback
+  if (location.pathname === '/auth/callback') {
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <AuthCallbackPage />
+      </Suspense>
+    );
+  }
+
+  if (location.pathname === '/auth/forgot-password') {
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <ForgotPasswordPage />
+      </Suspense>
+    );
+  }
+
+  if (location.pathname === '/auth/reset-password') {
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <ResetPasswordPage />
+      </Suspense>
+    );
+  }
+
+  if (isLoading || workspacesLoading) {
+    return (
+      <Shell>
+        <BoardSkeleton />
+      </Shell>
+    );
+  }
+
+  // Show login page when user is not authenticated
+  if (!isAuthenticated) {
+    if (location.pathname === '/auth/register') {
+      return (
+        <Suspense fallback={<BoardSkeleton />}>
+          <PublicOnlyRoute>
+            <RegisterPage
+              onSwitchToLogin={() => navigate('/auth/login', { replace: true })}
+            />
+          </PublicOnlyRoute>
+        </Suspense>
+      );
+    }
+    // Default: login page
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <PublicOnlyRoute>
+          <LoginPage
+            onSwitchToRegister={() => navigate('/auth/register', { replace: true })}
+            onSwitchToForgotPassword={() => navigate('/auth/forgot-password', { replace: true })}
+          />
+        </PublicOnlyRoute>
+      </Suspense>
+    );
   }
 
   if (workspaces.length === 0) {
@@ -140,30 +208,6 @@ function AppRoutes() {
 
   return (
     <Routes>
-      <Route
-        path="/review/:token"
-        element={
-          <Suspense fallback={<BoardSkeleton />}>
-            <PublicReviewPage />
-          </Suspense>
-        }
-      />
-      <Route
-        path="/auth/github/callback"
-        element={
-          <Suspense fallback={<BoardSkeleton />}>
-            <GitHubCallbackPage />
-          </Suspense>
-        }
-      />
-      <Route
-        path="/auth/callback"
-        element={
-          <Suspense fallback={<BoardSkeleton />}>
-            <AuthCallbackPage />
-          </Suspense>
-        }
-      />
       <Route
         path="/auth/login"
         element={
@@ -182,22 +226,6 @@ function AppRoutes() {
               <RegisterPage />
             </Suspense>
           </PublicOnlyRoute>
-        }
-      />
-      <Route
-        path="/auth/forgot-password"
-        element={
-          <Suspense fallback={<BoardSkeleton />}>
-            <ForgotPasswordPage />
-          </Suspense>
-        }
-      />
-      <Route
-        path="/auth/reset-password"
-        element={
-          <Suspense fallback={<BoardSkeleton />}>
-            <ResetPasswordPage />
-          </Suspense>
         }
       />
       <Route
@@ -602,11 +630,7 @@ function App() {
           <TerminalDrawerProvider>
             <AuthProvider>
               <GlobalErrorWiring />
-              <NotificationProvider>
-                <WorkspaceProvider>
-                  <AppRoutes />
-                </WorkspaceProvider>
-              </NotificationProvider>
+              <AppRoutes />
             </AuthProvider>
           </TerminalDrawerProvider>
         </ToastProvider>
@@ -616,3 +640,4 @@ function App() {
 }
 
 export default App;
+```

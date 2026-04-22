@@ -195,7 +195,6 @@ function buildZodInputShape(
 const SKIP_PATHS = new Set([
   '/api/health',
   '/api/health/detailed',
-  '/api/auth/github/callback',
   '/api/auth/verify-email',
   '/api/pipeline/runs/{runId}/output',
   '/api/pipeline/stream',
