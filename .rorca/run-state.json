@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:33:26.488Z",
+  "lastUpdatedAt": "2026-04-22T05:40:02.283Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -121,6 +121,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 93503
+    },
+    {
+      "storyId": "MU-012",
+      "title": "Enable RLS on direction_layers and wal_events",
+      "status": "passed",
+      "startedAt": "2026-04-22T05:37:21.409Z",
+      "finishedAt": "2026-04-22T05:40:02.282Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 160873
     }
   ],
   "failedStories": [
