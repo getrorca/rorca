@@ -589,17 +589,8 @@ export default function GitHubSettingsPanel() {
         ) : (
           <div className="rounded-lg border border-border bg-panel p-4">
             <p className="text-sm text-muted mb-3">
-              No GitHub account connected. Use OAuth to connect your GitHub account.
+              No GitHub account connected. Workspace GitHub integration is configured separately from user sign-in.
             </p>
-            <a
-              href={`${BASE_URL}/api/auth/github`}
-              onClick={() => sessionStorage.setItem('github_oauth_return', '/settings/github')}
-              className="inline-flex items-center gap-1.5 px-4 py-2 text-sm rounded bg-surface-200 text-text hover:bg-border transition-colors"
-            >
-              <Github size={16} />
-              Connect with GitHub
-              <ExternalLink size={12} />
-            </a>
           </div>
         )}
       </section>
