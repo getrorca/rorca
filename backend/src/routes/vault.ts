@@ -16,9 +16,17 @@ const VAULT_KEY = crypto.createHash('sha256').update(JWT_SECRET).digest();
 
 // Auth is intentionally bypassed globally — fall back to the first registered user
 async function getEffectiveUser(req: Request): Promise<AuthUser | null> {
-  const user = (req as Request & { user: AuthUser }).user;
-  if (user) return user;
-  return (await queryOne<AuthUser>('SELECT id, email FROM users LIMIT 1')) ?? null;
+  if (req.user) {
+    return {
+      id: req.user.id,
+      email: req.user.email,
+      supabaseId: req.user.supabaseId,
+      role: req.user.role ?? 'admin',
+      plan: req.user.plan,
+    };
+  }
+  const fallback = await queryOne<{ id: string; email: string }>('SELECT id, email FROM users LIMIT 1');
+  return fallback ? { ...fallback, supabaseId: fallback.id, role: 'admin' } : null;
 }
 
 // ─── Crypto helpers ─────────────────────────────────────────────────────────
