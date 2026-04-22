@@ -89,6 +89,7 @@ import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
 import { createMcpRequestHandler } from './lib/mcp-http';
 import telemetryRouter from './routes/telemetry';
+import authE2ERouter from './routes/auth-e2e';
 import { logger } from './lib/logger';
 import pinoHttp from 'pino-http';
 import { startGraphPopulator } from './lib/graph-populator';
@@ -230,6 +231,10 @@ app.use(queryTimerMiddleware);
 
 // ─── Public routes (no auth required) ───
 app.use('/api/health', healthRouter);
+
+if (process.env.NODE_ENV === 'test') {
+  app.use('/api/test/auth', authE2ERouter);
+}
 app.use('/api/telemetry', telemetryRouter);
 
 app.get('/api/docs/openapi.json', (_req, res) => {
