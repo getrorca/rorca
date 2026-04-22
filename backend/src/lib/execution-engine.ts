@@ -54,6 +54,10 @@ import { PersonaRegistry } from './agent-personas';
 import { loadMonorepoApps, type MonorepoPackage } from './workspace-echolocation';
 import { loadAgentsMd, matchRole, buildRolePromptSection, detectViolations, getLastCommitFiles } from './agents-parser';
 import { getGraphContext, formatGraphContext } from './graph-context';
+// Execution-engine subprocesses are system-owned jobs spawned by the worker.
+// With RORCA_PROCESS_ROLE=engine they run under the application service role,
+// not a request-scoped end-user JWT context, so they intentionally bypass
+// withUserClient()/request.jwt.claims impersonation.
 import { logger } from './logger';
 import { autoSynthesizeMemory } from './auto-memory';
 import { writeMemoryMd } from './memory-projection';

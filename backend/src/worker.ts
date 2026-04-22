@@ -34,6 +34,9 @@ import {
 
 import simpleGit from 'simple-git';
 import { performMerge } from './lib/merge-handler';
+// Worker jobs run with the application service role, not an end-user JWT context.
+// They execute as the system on behalf of the platform (RORCA_PROCESS_ROLE=worker/engine),
+// so they intentionally use the shared pool/query helpers rather than withUserClient().
 import { initDb, query, queryOne, execute, closePool } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';

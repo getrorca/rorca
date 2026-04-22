@@ -38,6 +38,8 @@ import { logger } from '../lib/logger';
 import { getBoss } from '../lib/pg-boss';
 import { ConflictError, ForbiddenError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
+import { authRequired } from './auth';
+import { withUserClient } from '../db/user-client';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
 // Same pattern as execution-engine.ts — strips nested-session detection vars.
@@ -2521,7 +2523,7 @@ router.post('/runs', async (req: Request, res: Response) => {
  *                   type: array
  *                   items: { $ref: '#/components/schemas/PipelineRun' }
  */
-router.get('/runs', async (req: Request, res: Response) => {
+router.get('/runs', authRequired, async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
@@ -2530,14 +2532,22 @@ router.get('/runs', async (req: Request, res: Response) => {
     }
 
     const pagination = parsePaginationParams(req);
-    const result = await paginateQuery<PipelineRunRow>({
-      query: 'SELECT * FROM pipeline_runs WHERE workspace_id = $1',
-      countQuery: 'SELECT COUNT(*)::int as total FROM pipeline_runs WHERE workspace_id = $1',
-      params: [workspaceId],
-      pagination,
-      orderBy: 'id DESC',
-      cursorColumn: 'id',
-      cursorDirection: 'desc',
+    const result = await withUserClient(req, async (client) => {
+      const countResult = await client.query<{ total: number }>(
+        'SELECT COUNT(*)::int as total FROM pipeline_runs WHERE workspace_id = $1',
+        [workspaceId],
+      );
+      const offset = (pagination.page - 1) * pagination.pageSize;
+      const rowsResult = await client.query<PipelineRunRow>(
+        'SELECT * FROM pipeline_runs WHERE workspace_id = $1 ORDER BY id DESC LIMIT $2 OFFSET $3',
+        [workspaceId, pagination.pageSize, offset],
+      );
+      return {
+        items: rowsResult.rows,
+        total: countResult.rows[0]?.total ?? 0,
+        page: pagination.page,
+        pageSize: pagination.pageSize,
+      };
     });
 
     res.json(result);
