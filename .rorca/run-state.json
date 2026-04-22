@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T06:11:21.317Z",
+  "lastUpdatedAt": "2026-04-22T06:09:15.076Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -153,14 +153,14 @@
       "elapsedMs": 147317
     },
     {
-      "storyId": "MU-023",
-      "title": "Build Team Management UI in Settings",
+      "storyId": "MU-024",
+      "title": "Build Team Invite acceptance page",
       "status": "passed",
-      "startedAt": "2026-04-22T06:07:29.371Z",
-      "finishedAt": "2026-04-22T06:11:21.317Z",
+      "startedAt": "2026-04-22T06:07:29.299Z",
+      "finishedAt": "2026-04-22T06:09:15.076Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 231946
+      "elapsedMs": 105777
     }
   ],
   "failedStories": [

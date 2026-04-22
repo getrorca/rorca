@@ -3,7 +3,7 @@
 Spec: rorca-opencode-terminal
 Run ID: 20260316000185
 Started: 2026-04-15T19:33:43.854Z
-Last Updated: 2026-04-22T06:11:21.317Z
+Last Updated: 2026-04-22T06:09:15.076Z
 
 ## Completed Stories (16)
 - OCT-016: Terminal panel — copy/paste, font sizing, fullscreen toggle — DONE (claude, 212s)
@@ -21,7 +21,7 @@ Last Updated: 2026-04-22T06:11:21.317Z
 - MU-011: Enable RLS on pipeline_runs, story_results, and run_output_chunks — DONE (codex, gpt-5.4, 68s)
 - MU-012: Enable RLS on direction_layers and wal_events — DONE (codex, gpt-5.4, 144s)
 - MU-013: Enable RLS on teams, team_members, and team_invites — DONE (codex, gpt-5.4, 147s)
-- MU-023: Build Team Management UI in Settings — DONE (codex, gpt-5.4, 232s)
+- MU-024: Build Team Invite acceptance page — DONE (codex, gpt-5.4, 106s)
 
 ## Failed Stories (1)
 - OCT-015: OpenCode not installed — graceful error state in terminal panel — FAILED (timeout)
