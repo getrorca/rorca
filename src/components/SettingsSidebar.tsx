@@ -34,6 +34,7 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
       { id: 'env-vars',  label: 'Environment',     icon: Variable  },
       { id: 'hooks',     label: 'Pipeline Hooks',  icon: Webhook   },
       { id: 'agents',    label: 'Agent Profiles',  icon: Users     },
+      { id: 'team',      label: 'Team',            icon: Users     },
       { id: 'context',   label: 'Context Routing', icon: Route     },
     ],
   },
