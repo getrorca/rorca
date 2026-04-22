@@ -57,6 +57,10 @@ import { getGraphContext, formatGraphContext } from './graph-context';
 import { logger } from './logger';
 import { autoSynthesizeMemory } from './auto-memory';
 import { writeMemoryMd } from './memory-projection';
+// execution-engine.ts intentionally does not use withUserClient(). It runs as a
+// system child process with RORCA_PROCESS_ROLE=engine, spawned by the worker on
+// behalf of the application, so its database access must remain service-role and
+// not inherit any individual request JWT claims for RLS.
 import {
   initRunState,
   markStoryStarted as rsMarkStoryStarted,
