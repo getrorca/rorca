@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T06:09:15.076Z",
+  "lastUpdatedAt": "2026-04-22T06:14:43.131Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -161,6 +161,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 105777
+    },
+    {
+      "storyId": "MU-015",
+      "title": "Enable RLS on user_settings, billing, and notification tables",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:12:36.862Z",
+      "finishedAt": "2026-04-22T06:14:43.131Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 126269
     }
   ],
   "failedStories": [
