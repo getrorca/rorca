@@ -6,7 +6,7 @@ import { useActiveSettingsTab } from '../routes';
 
 export type SettingsTab =
   // Workspace group
-  | 'general' | 'env-vars' | 'hooks' | 'agents' | 'context'
+  | 'general' | 'env-vars' | 'hooks' | 'agents' | 'context' | 'team'
   // Execution group
   | 'providers' | 'direction' | 'pipeline'
   // Integrations group
@@ -98,6 +98,10 @@ const IntegrationAuditLogTab = lazy(() =>
   import('./settings/IntegrationAuditLogTab').then((m) => ({ default: m.IntegrationAuditLogTab })),
 );
 
+const TeamSettingsTab = lazy(() =>
+  import('./settings/TeamSettingsTab').then((m) => ({ default: m.TeamSettingsTab })),
+);
+
 
 // ─── Loading fallback ────────────────────────────────────────────────────────
 
@@ -127,6 +131,7 @@ export default function SettingsPanel() {
           {activeTab === 'env-vars' && <DirectionSettings.WsEnvVarsSection />}
           {activeTab === 'hooks' && <DirectionSettings.WsHooksSection />}
           {activeTab === 'agents' && <DirectionSettings.WsAgentsSection />}
+          {activeTab === 'team' && <TeamSettingsTab />}
           {activeTab === 'context' && <DirectionSettings.WsContextSection />}
           {/* Execution group */}
           {activeTab === 'providers' && <ProviderSettingsTab />}
