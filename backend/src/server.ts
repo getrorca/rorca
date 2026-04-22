@@ -35,6 +35,7 @@ import budgetRouter from './routes/budget';
 import vaultRouter from './routes/vault';
 import usersRouter from './routes/users';
 import authRouter, { authRequired, LOCAL_ADMIN } from './routes/auth';
+import { supabaseAdmin } from './lib/supabase';
 import onboardingRouter from './routes/onboarding';
 import backupsRouter from './routes/backups';
 import healthRouter from './routes/health';
@@ -347,20 +348,17 @@ if (process.env.AUTH_REQUIRED === 'true') {
   // This allows tests that create real users and generate JWTs to work correctly.
   app.use(async (req: any, _res: any, next: any) => {
     const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7) : null;
-    if (token) {
+    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+    if (token && process.env.SUPABASE_URL?.trim()) {
       try {
-        const jwt = require('jsonwebtoken');
-        const { JWT_SECRET: secret } = require('./routes/auth');
-        const decoded = jwt.verify(token, secret) as { sub: string; email: string };
-        const { queryOne: qo } = require('./db/index');
-        const user = await qo('SELECT id, email, role FROM users WHERE id = $1', [decoded.sub]);
-        if (user) {
-          req.user = { id: user.id, email: user.email, role: user.role };
+        const { data, error } = await supabaseAdmin.auth.getUser(token);
+        const user = data.user;
+        if (!error && user?.id && user.email) {
+          req.user = { id: user.id, email: user.email, supabaseId: user.id, role: 'admin' };
           return next();
         }
       } catch {
-        // Invalid JWT — fall through to local admin
+        // Invalid Supabase token — fall through to local admin
       }
     }
     req.user = LOCAL_ADMIN;
