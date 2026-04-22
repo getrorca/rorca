@@ -1,5 +1,5 @@
 import { useState, type FormEvent } from 'react';
-import { useAuth } from '../contexts/AuthContext';
+import { supabase } from '../lib/supabase';
 import RorcaLogo from './RorcaLogo';
 
 const EMAIL_REGEX = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
@@ -16,8 +16,6 @@ interface FieldErrors {
 }
 
 export default function RegisterPage({ onSwitchToLogin }: RegisterPageProps) {
-  const { register } = useAuth();
-
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -64,11 +62,24 @@ export default function RegisterPage({ onSwitchToLogin }: RegisterPageProps) {
 
     setSubmitting(true);
     try {
-      await register(email.trim(), password, displayName.trim());
+      const { error: signUpError } = await supabase.auth.signUp({
+        email: email.trim(),
+        password,
+        options: {
+          data: {
+            display_name: displayName.trim(),
+          },
+        },
+      });
+
+      if (signUpError) {
+        throw signUpError;
+      }
+
+      onSwitchToLogin();
     } catch (err) {
       const message = err instanceof Error ? err.message : 'Registration failed';
-      const match = message.match(/"error":"([^"]+)"/);
-      setServerError(match ? match[1] : 'Registration failed. Please try again.');
+      setServerError(message || 'Registration failed. Please try again.');
     } finally {
       setSubmitting(false);
     }
