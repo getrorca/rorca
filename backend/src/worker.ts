@@ -35,6 +35,11 @@ import {
 import simpleGit from 'simple-git';
 import { performMerge } from './lib/merge-handler';
 import { initDb, query, queryOne, execute, closePool } from './db/index';
+
+// Worker code intentionally does not use `withUserClient()` / request-scoped JWT claims.
+// This process runs with `RORCA_PROCESS_ROLE=worker` and executes system-owned background
+// jobs on behalf of Rorca itself, not an individual HTTP user request, so it must continue
+// using the application service role / direct pool access rather than per-user RLS context.
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { logger } from './lib/logger';

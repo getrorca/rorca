@@ -24,6 +24,11 @@
  *   --agent <type>          Override RORCA_AGENT (claude|opencode|codex)
  *   --model <model>         Override RORCA_MODEL (e.g. openai/gpt-4o)
  *   --attach <addr>         OpenCode server socket address (passed by pipeline.ts)
+ *
+ * This process intentionally does not use request-scoped DB clients / RLS JWT claims.
+ * It runs as a system subprocess spawned by the worker with `RORCA_PROCESS_ROLE=engine`,
+ * so its DB and Supabase access stays on the service-role path rather than impersonating
+ * an end user from an HTTP request.
  */
 
 import { spawn, execSync, type ChildProcess } from 'child_process';

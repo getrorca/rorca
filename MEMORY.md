@@ -6,17 +6,17 @@
 Context: Confusing these causes file-not-found errors in pipeline trigger and archive panel.
 > Source: v2-platform
 
-## 2026-02-27 [Convention] chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
-> Rule: chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
-
-Context: The return type was changed from string to ChatResult in US-003 (model selection). All callers must use .text.
-> Source: US-003
-
 ## 2026-02-27 [Architecture] Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
 > Rule: Direction Stack 5-Layer Cascade: Direction Stack layers cascade L1 (global) → L5 (story annotations). Lower layers override higher ones, like CSS specificity.
 
 Context: L1-L2 are global engineering/domain principles. L3+ are per-workspace. L4/L5 come from spec brief and story annotations.
 > Source: CIE-003
+
+## 2026-02-27 [Convention] chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
+> Rule: chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
+
+Context: The return type was changed from string to ChatResult in US-003 (model selection). All callers must use .text.
+> Source: US-003
 
 ## 2026-02-27 [Gotcha] Backend requires restart after changes: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
 > Rule: Backend requires restart after changes: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
@@ -54,11 +54,11 @@ Context: SM-001 failed with reason='typecheck' despite potentially working at ru
 Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incremental approach of establishing shared utilities before complex features reduces integration risk.
 > Source: SM-003
 
-## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
-> Rule: Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
+## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
+> Rule: Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
 
-Context: The production-ready spec shows these are interdependent: rate limiting without CORS leaves attack vectors open; health checks without secrets management can't validate encrypted data access.
-> Source: rorca-production-ready
+Context: To change limits: UPDATE rate_limits table then call invalidateRateLimitCache() or restart backend. Skipped in NODE_ENV=test unless RATE_LIMIT_ENABLED=true. Implemented in rate-limiter.ts.
+> Source: PR-NEW-1
 
 ## 2026-03-08 [Decision] PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
 > Rule: PostgreSQL Migration Supersedes SQLite Optimization: When planning production infrastructure, choose PostgreSQL from day one rather than optimizing SQLite then migrating later
@@ -66,11 +66,11 @@ Context: The production-ready spec shows these are interdependent: rate limiting
 Context: PR-049 and PR-050 (SQLite optimization + benchmarks) were superseded by the rorca-postgres-migration spec. This teaches us that production-grade DB decisions should be made upfront, not incrementally optimized from dev-grade solutions.
 > Source: rorca-postgres-migration
 
-## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
-> Rule: Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
+## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
+> Rule: Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
 
-Context: To change limits: UPDATE rate_limits table then call invalidateRateLimitCache() or restart backend. Skipped in NODE_ENV=test unless RATE_LIMIT_ENABLED=true. Implemented in rate-limiter.ts.
-> Source: PR-NEW-1
+Context: The production-ready spec shows these are interdependent: rate limiting without CORS leaves attack vectors open; health checks without secrets management can't validate encrypted data access.
+> Source: rorca-production-ready
 
 ## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
 > Rule: Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
@@ -3359,3 +3359,30 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Decision] direction_layers RLS needs explicit admin helper for global writes: When a table mixes global rows (`workspace_id IS NULL`) and workspace-scoped rows, write policies must split those cases: workspace members can mutate scoped rows, but global rows require an explicit admin helper such as `is_admin(auth.uid())`.
 > Rule: direction_layers RLS needs explicit admin helper for global writes: When a table mixes global rows (`workspace_id IS NULL`) and workspace-scoped rows, write policies must split those cases: workspace members can mutate scoped rows, but global rows require an explicit admin helper such as `is_admin(auth.uid())`.
+
+## 2026-04-22 [Bug Fix] Workspace creation must seed workspace_members owner row: When creating a workspace under Supabase RLS, insert the workspace via a user-scoped client and immediately add a matching owner row in workspace_members for req.user.supabaseId.
+> Rule: Workspace creation must seed workspace_members owner row: When creating a workspace under Supabase RLS, insert the workspace via a user-scoped client and immediately add a matching owner row in workspace_members for req.user.supabaseId.
+
+## 2026-04-22 [Bug Fix] RLS request claims must use SET plus RESET: When projecting JWT claims into PostgreSQL for RLS on a pooled pg client, use session-level `SET request.jwt.claims = $1` and always `RESET request.jwt.claims` before releasing the client back to the pool.
+> Rule: RLS request claims must use SET plus RESET: When projecting JWT claims into PostgreSQL for RLS on a pooled pg client, use session-level `SET request.jwt.claims = $1` and always `RESET request.jwt.claims` before releasing the client back to the pool.
+
+## 2026-04-22 [Gotcha] Vault and GitHub RLS require workspace_id schema first: Do not add workspace-scoped RLS policies to `api_key_vault` or `github_connections` until each row has a non-null `workspace_id`; fail the migration loudly instead of creating false security.
+> Rule: Vault and GitHub RLS require workspace_id schema first: Do not add workspace-scoped RLS policies to `api_key_vault` or `github_connections` until each row has a non-null `workspace_id`; fail the migration loudly instead of creating false security.
+
+## 2026-04-22 [Decision] Legacy backend auth removed for Supabase cutover: When migrating fully to Supabase auth, delete server-managed auth endpoints and password storage together: drop refresh/reset/verification tables, drop users.password_hash, keep only GET /api/auth/me plus shared token-encryption helpers used by other routes.
+> Rule: Legacy backend auth removed for Supabase cutover: When migrating fully to Supabase auth, delete server-managed auth endpoints and password storage together: drop refresh/reset/verification tables, drop users.password_hash, keep only GET /api/auth/me plus shared token-encryption helpers used by other routes.
+
+## 2026-04-22 [Pattern] Supabase local dev uses dedicated CLI config: Keep local Supabase CLI ports and env examples aligned across supabase/config.toml, frontend .env.local.example, backend/.env.example, and developer docs, and document that Supabase CLI migrations are separate from backend pg-index migrations.
+> Rule: Supabase local dev uses dedicated CLI config: Keep local Supabase CLI ports and env examples aligned across supabase/config.toml, frontend .env.local.example, backend/.env.example, and developer docs, and document that Supabase CLI migrations are separate from backend pg-index migrations.
+
+## 2026-04-22 [Bug Fix] Workspace RLS needs owner membership bootstrap: When creating a workspace under Supabase RLS, insert the corresponding `workspace_members` owner row in the same user-scoped transaction immediately after the `workspaces` insert.
+> Rule: Workspace RLS needs owner membership bootstrap: When creating a workspace under Supabase RLS, insert the corresponding `workspace_members` owner row in the same user-scoped transaction immediately after the `workspaces` insert.
+
+## 2026-04-22 [Gotcha] Team RLS required schema backfill before policying: If a workspace-scoped RLS policy is required for teams, ensure `teams.workspace_id` exists and is backfilled from existing `workspace_access` rows before enabling policies.
+> Rule: Team RLS required schema backfill before policying: If a workspace-scoped RLS policy is required for teams, ensure `teams.workspace_id` exists and is backfilled from existing `workspace_access` rows before enabling policies.
+
+## 2026-04-22 [Bug Fix] Per-request Supabase clients must not reuse shared anon client session state: When enforcing RLS from Express routes, create a fresh Supabase client per request with the bearer token in global Authorization headers instead of mutating a shared singleton with setSession().
+> Rule: Per-request Supabase clients must not reuse shared anon client session state: When enforcing RLS from Express routes, create a fresh Supabase client per request with the bearer token in global Authorization headers instead of mutating a shared singleton with setSession().
+
+## 2026-04-22 [Bug Fix] RLS pool clients must RESET request.jwt.claims before release: When setting PostgreSQL JWT claims on a pooled client for RLS, use session-level `SET request.jwt.claims = ...`, then always `RESET request.jwt.claims` in a finally block before `client.release()`.
+> Rule: RLS pool clients must RESET request.jwt.claims before release: When setting PostgreSQL JWT claims on a pooled client for RLS, use session-level `SET request.jwt.claims = ...`, then always `RESET request.jwt.claims` in a finally block before `client.release()`.

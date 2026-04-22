@@ -6,6 +6,7 @@ import * as os from 'os';
 import simpleGit from 'simple-git';
 import { z } from 'zod';
 import { query, queryOne, execute, transaction } from '../db/index';
+import { withUserClient } from '../db/user-client';
 import { validateBody } from '../lib/validate';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
@@ -15,10 +16,11 @@ import { getWorkspaceEnvVars } from './env-vars';
 import { checkBudgetThresholds } from './budget';
 import { getVaultKey } from './vault';
 import { getCopilotToken } from './copilot';
+import { authRequired } from './auth';
 import type { AuthUser } from './auth';
 import type { AgentProfileRow } from './agent-profiles';
 import { handleRouteError } from '../lib/async-handler';
-import { parsePaginationParams, paginateQuery } from '../lib/paginate';
+import { parsePaginationParams, paginateQuery, decodeCursor, encodeCursor } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
 import { agentConfig, type AgentType } from '../lib/config';
@@ -2521,7 +2523,7 @@ router.post('/runs', async (req: Request, res: Response) => {
  *                   type: array
  *                   items: { $ref: '#/components/schemas/PipelineRun' }
  */
-router.get('/runs', async (req: Request, res: Response) => {
+router.get('/runs', authRequired, async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     if (!workspaceId) {
@@ -2530,14 +2532,37 @@ router.get('/runs', async (req: Request, res: Response) => {
     }
 
     const pagination = parsePaginationParams(req);
-    const result = await paginateQuery<PipelineRunRow>({
-      query: 'SELECT * FROM pipeline_runs WHERE workspace_id = $1',
-      countQuery: 'SELECT COUNT(*)::int as total FROM pipeline_runs WHERE workspace_id = $1',
-      params: [workspaceId],
-      pagination,
-      orderBy: 'id DESC',
-      cursorColumn: 'id',
-      cursorDirection: 'desc',
+    const result = await withUserClient(req, async (client) => {
+      const pageSize = pagination.limit;
+      const cursorId = pagination.cursor ? Number(decodeCursor(pagination.cursor)) : null;
+      const countResult = await client.query<{ total: number }>(
+        'SELECT COUNT(*)::int as total FROM pipeline_runs WHERE workspace_id = $1',
+        [workspaceId],
+      );
+
+      const params: unknown[] = [workspaceId];
+      let whereClause = 'workspace_id = $1';
+      if (cursorId != null && Number.isFinite(cursorId)) {
+        params.push(cursorId);
+        whereClause += ` AND id < $${params.length}`;
+      }
+      params.push(pageSize + 1);
+
+      const rowsResult = await client.query<PipelineRunRow>(
+        `SELECT * FROM pipeline_runs WHERE ${whereClause} ORDER BY id DESC LIMIT $${params.length}`,
+        params,
+      );
+
+      const items = rowsResult.rows.slice(0, pageSize);
+      const hasMore = rowsResult.rows.length > pageSize;
+      const nextCursor = hasMore && items.length > 0 ? encodeCursor(items[items.length - 1].id) : undefined;
+
+      return {
+        items,
+        total: countResult.rows[0]?.total ?? 0,
+        hasMore,
+        cursor: nextCursor,
+      };
     });
 
     res.json(result);
