@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:28:02.813Z",
+  "lastUpdatedAt": "2026-04-22T05:31:42.745Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -161,6 +161,15 @@
       "finishedAt": "2026-04-22T05:23:44.140Z",
       "agentType": "codex",
       "failReason": "blocked_by: MU-013"
+    },
+    {
+      "storyId": "MU-030",
+      "title": "MU-030",
+      "status": "skipped",
+      "startedAt": "2026-04-22T05:31:42.745Z",
+      "finishedAt": "2026-04-22T05:31:42.745Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: MU-027"
     }
   ],
   "currentStory": null,
