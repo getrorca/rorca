@@ -1,5 +1,4 @@
 import { Router, Request, Response } from 'express';
-import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { query, queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
@@ -8,13 +7,10 @@ import { ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
 
 const router = Router();
 
-const BCRYPT_COST = 12;
-
 interface UserRow {
   id: string;
   email: string;
   display_name: string;
-  password_hash: string;
   avatar_url: string | null;
 }
 
@@ -65,7 +61,7 @@ router.get('/profile', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
-  const row = await queryOne<Omit<UserRow, 'password_hash'>>(
+  const row = await queryOne<UserRow>(
     'SELECT id, email, display_name, avatar_url FROM users WHERE id = $1',
     [user.id],
   );
@@ -190,40 +186,7 @@ router.put('/profile', validateBody(ProfileUpdateSchema), async (req: Request, r
  *         description: No user configured
  */
 router.put('/password', async (req: Request, res: Response) => {
-  const user = await getEffectiveUser(req);
-  if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
-  const { currentPassword, newPassword } = req.body;
-
-  if (!currentPassword || typeof currentPassword !== 'string') {
-    throw new ValidationError('currentPassword is required');
-    return;
-  }
-  if (!newPassword || typeof newPassword !== 'string' || newPassword.length < 6) {
-    throw new ValidationError('newPassword must be at least 6 characters');
-    return;
-  }
-
-  const row = await queryOne<Pick<UserRow, 'password_hash'>>(
-    'SELECT password_hash FROM users WHERE id = $1',
-    [user.id],
-  );
-  if (!row) {
-    throw new NotFoundError('User not found');
-    return;
-  }
-
-  if (!bcrypt.compareSync(currentPassword, row.password_hash)) {
-    throw new ForbiddenError('Current password is incorrect');
-    return;
-  }
-
-  const hash = bcrypt.hashSync(newPassword, BCRYPT_COST);
-  await execute(
-    'UPDATE users SET password_hash = $1, updated_at = NOW() WHERE id = $2',
-    [hash, user.id],
-  );
-
-  res.json({ ok: true });
+  res.status(410).json({ error: 'Password changes are handled by Supabase auth.' });
 });
 
 /**

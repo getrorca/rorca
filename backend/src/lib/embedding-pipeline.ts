@@ -528,7 +528,7 @@ async function resolveApiKey(provider: 'openai' | 'voyage' | 'openrouter' | 'goo
       [vaultAliases]
     );
     if (row) {
-      const jwtSecret = process.env.JWT_SECRET || 'rorca-dev-secret';
+      const jwtSecret = process.env.SUPABASE_JWT_SECRET || process.env.VAULT_KEY || 'rorca-supabase-token-encryption-fallback';
       const vaultKey = crypto.createHash('sha256').update(jwtSecret).digest();
       const [ivHex, authTagHex, ciphertextHex] = row.encrypted_key.split(':');
       if (ivHex && authTagHex && ciphertextHex) {

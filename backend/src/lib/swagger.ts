@@ -22,7 +22,7 @@ const options: swaggerJsdoc.Options = {
           scheme: 'bearer',
           bearerFormat: 'JWT',
           description:
-            'JWT access token obtained from POST /api/auth/login or /api/auth/register. ' +
+            'Supabase JWT access token sent in the Authorization header. ' +
             'Pass as: Authorization: Bearer <token>',
         },
       },

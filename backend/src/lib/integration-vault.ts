@@ -4,8 +4,8 @@
  * Stores and retrieves encrypted OAuth tokens (access, refresh), API keys, and
  * webhook secrets for GitHub, Linear, Vercel, and Slack integrations.
  *
- * All tokens encrypted with AES-256-GCM. Key derived from JWT_SECRET (or VAULT_KEY
- * env var override) via SHA-256, matching the existing vault.ts pattern.
+ * All tokens encrypted with AES-256-GCM. Key derived from `VAULT_KEY` when set,
+ * otherwise from `SUPABASE_JWT_SECRET` via SHA-256.
  */
 
 import crypto from 'crypto';
@@ -57,10 +57,9 @@ const VALID_PROVIDERS: IntegrationProvider[] = ['github', 'linear', 'vercel', 's
 const VALID_TOKEN_TYPES: TokenType[] = ['oauth_access', 'oauth_refresh', 'api_key', 'webhook_secret'];
 
 function getVaultKey(): Buffer {
-  // Prefer explicit VAULT_KEY, fall back to JWT_SECRET (same pattern as vault.ts)
-  const raw = process.env.VAULT_KEY || process.env.JWT_SECRET;
+  const raw = process.env.VAULT_KEY || process.env.SUPABASE_JWT_SECRET;
   if (!raw) {
-    throw new ValidationError('VAULT_KEY environment variable required for token encryption');
+    throw new ValidationError('VAULT_KEY or SUPABASE_JWT_SECRET environment variable required for token encryption');
   }
 
   // If VAULT_KEY is explicitly set, validate it's a 64-char hex string
@@ -71,7 +70,7 @@ function getVaultKey(): Buffer {
     return Buffer.from(process.env.VAULT_KEY, 'hex');
   }
 
-  // Derive 32 bytes from JWT_SECRET via SHA-256 (matches vault.ts and auth.ts pattern)
+  // Derive 32 bytes from SUPABASE_JWT_SECRET via SHA-256.
   return crypto.createHash('sha256').update(raw).digest();
 }
 

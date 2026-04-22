@@ -44,8 +44,8 @@ beforeAll(async () => {
 
   await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);
   await execute(
-    `INSERT INTO users (id, email, display_name, password_hash, plan)
-     VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'x', 'pro')
+    `INSERT INTO users (id, email, display_name, plan)
+     VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'pro')
      ON CONFLICT (id) DO UPDATE SET plan = 'pro'`
   );
   await execute(
@@ -73,8 +73,8 @@ beforeEach(async () => {
 
   // Ensure users with plan='pro'
   await execute(
-    `INSERT INTO users (id, email, display_name, password_hash, plan)
-     VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'x', 'pro')
+    `INSERT INTO users (id, email, display_name, plan)
+     VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'pro')
      ON CONFLICT (id) DO UPDATE SET plan = 'pro', email = EXCLUDED.email`
   );
   await execute(`UPDATE users SET plan = 'pro' WHERE email = 'testauth@example.com'`);

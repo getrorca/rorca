@@ -3,7 +3,7 @@
 Spec: rorca-opencode-terminal
 Run ID: 20260316000185
 Started: 2026-04-15T19:33:43.854Z
-Last Updated: 2026-04-22T05:43:49.804Z
+Last Updated: 2026-04-22T05:56:52.688Z
 
 ## Completed Stories (14)
 - OCT-016: Terminal panel — copy/paste, font sizing, fullscreen toggle — DONE (claude, 212s)
@@ -19,13 +19,18 @@ Last Updated: 2026-04-22T05:43:49.804Z
 - MU-003: Add auth_id column and get_user_workspace_ids() helper function — DONE (codex, gpt-5.4, 40s)
 - MU-010: Enable RLS on workspaces table with membership-based access policies — DONE (codex, gpt-5.4, 94s)
 - MU-011: Enable RLS on pipeline_runs, story_results, and run_output_chunks — DONE (codex, gpt-5.4, 68s)
-- MU-016: Enable RLS on all remaining spec and operational tables — DONE (codex, gpt-5.4, 152s)
+- MU-020: Remove legacy auth tables and self-built auth backend routes — DONE (codex, gpt-5.4, 325s)
 
 ## Failed Stories (1)
 - OCT-015: OpenCode not installed — graceful error state in terminal panel — FAILED (timeout)
 
-## Skipped Stories (4)
+## Skipped Stories (9)
 - MU-016: Enable RLS on all remaining spec and operational tables — SKIPPED (blocked_by: MU-010, MU-011)
 - MU-029: Security audit: IDOR, RLS bypass, JWT manipulation, CSRF, XSS — SKIPPED (blocked_by: MU-021, MU-022)
 - MU-023: Build Team Management UI in Settings — SKIPPED (blocked_by: MU-013)
 - MU-024: Build Team Invite acceptance page — SKIPPED (blocked_by: MU-013)
+- MU-023: MU-023 — SKIPPED (blocked_by: MU-013)
+- MU-024: MU-024 — SKIPPED (blocked_by: MU-013)
+- MU-023: Build Team Management UI in Settings — SKIPPED (blocked_by: MU-013)
+- MU-024: Build Team Invite acceptance page — SKIPPED (blocked_by: MU-013)
+- MU-029: Security audit: IDOR, RLS bypass, JWT manipulation, CSRF, XSS — SKIPPED (blocked_by: MU-021, MU-022)
