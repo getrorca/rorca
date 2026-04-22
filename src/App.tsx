@@ -34,7 +34,6 @@ import { TerminalDrawerProvider, useTerminalDrawer } from './contexts/TerminalDr
 
 // — Lazy-loaded pages (not part of initial bundle) —
 const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
-const GitHubCallbackPage = lazy(() => import('./pages/GitHubCallbackPage'));
 const AuthCallbackPage = lazy(() => import('./pages/auth/AuthCallbackPage'));
 const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
 const RegisterPage = lazy(() => import('./pages/auth/RegisterPage'));
@@ -87,15 +86,6 @@ function AuthGate() {
     return (
       <Suspense fallback={<BoardSkeleton />}>
         <PublicReviewPage token={reviewMatch[1]} />
-      </Suspense>
-    );
-  }
-
-  // GitHub OAuth callback — rendered outside auth gate and shell (no sidebar/nav)
-  if (location.pathname === '/auth/github/callback') {
-    return (
-      <Suspense fallback={<BoardSkeleton />}>
-        <GitHubCallbackPage />
       </Suspense>
     );
   }
