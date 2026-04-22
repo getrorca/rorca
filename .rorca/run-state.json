@@ -2,7 +2,7 @@
   "specId": "rorca-supabase-auth-rls",
   "runId": 20260316000221,
   "startedAt": "2026-04-22T06:19:01.676Z",
-  "lastUpdatedAt": "2026-04-22T06:31:47.824Z",
+  "lastUpdatedAt": "2026-04-22T06:33:28.282Z",
   "completedStories": [
     {
       "storyId": "MU-015",
@@ -43,6 +43,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 167504
+    },
+    {
+      "storyId": "MU-027",
+      "title": "Set up local Supabase development environment",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:32:05.364Z",
+      "finishedAt": "2026-04-22T06:33:28.282Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 82918
     }
   ],
   "failedStories": [],

@@ -3416,3 +3416,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Pattern] RLS integration tests must use Supabase user clients: When validating Supabase RLS, perform assertions through @supabase/supabase-js clients authenticated as real users; use the raw pg pool only for setup and teardown that intentionally bypass RLS.
 > Rule: RLS integration tests must use Supabase user clients: When validating Supabase RLS, perform assertions through @supabase/supabase-js clients authenticated as real users; use the raw pg pool only for setup and teardown that intentionally bypass RLS.
+
+## 2026-04-22 [Decision] Supabase CLI config stays separate from app schema migrations: Use `supabase/config.toml` and `supabase/migrations/` only for Supabase-managed local services; keep Rorca app schema migrations in `backend/src/db/pg-migrations/` under the existing `pg-index.ts` runner.
+> Rule: Supabase CLI config stays separate from app schema migrations: Use `supabase/config.toml` and `supabase/migrations/` only for Supabase-managed local services; keep Rorca app schema migrations in `backend/src/db/pg-migrations/` under the existing `pg-index.ts` runner.
