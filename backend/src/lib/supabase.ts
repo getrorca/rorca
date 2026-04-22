@@ -48,6 +48,27 @@ function buildClient(kind: 'anon' | 'admin'): SupabaseClient {
   });
 }
 
+export function createUserClient(accessToken: string): SupabaseClient {
+  const { url, key } = getClientConfig('anon');
+
+  return createClient(url, key, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
+  });
+}
+
+export async function withUserClient<T>(accessToken: string, fn: (client: SupabaseClient) => Promise<T>): Promise<T> {
+  const client = createUserClient(accessToken);
+  return fn(client);
+}
+
 class LazyClient {
   private client: SupabaseClient | undefined;
 

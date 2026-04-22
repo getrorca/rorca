@@ -26,6 +26,7 @@ import { inferDomain } from '../lib/domain-inference';
 import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import * as ptyManager from '../lib/pty-manager';
+import { withUserClient } from '../lib/supabase';
 
 const router = Router();
 
@@ -117,6 +118,12 @@ const CreateWorkspaceSchema = z.object({
 router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'), async (req, res, next) => {
   try {
     const { id, label, path, domains } = req.body;
+    const authHeader = req.headers.authorization;
+    const accessToken = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
+
+    if (!req.user?.supabaseId || !accessToken) {
+      throw new ValidationError('Authenticated Supabase user is required to create a workspace');
+    }
 
     if (!fs.existsSync(path)) {
       throw new ValidationError(`Path does not exist on filesystem: ${path}`);
@@ -124,10 +131,27 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
     }
 
     try {
-      await execute(
-        'INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4)',
-        [id, label, path, JSON.stringify(domains)]
-      );
+      await withUserClient(accessToken, async (client) => {
+        const { error: workspaceError } = await client
+          .from('workspaces')
+          .insert({ id, label, path, domains });
+
+        if (workspaceError) {
+          throw workspaceError;
+        }
+
+        const { error: memberError } = await client
+          .from('workspace_members')
+          .insert({
+            workspace_id: id,
+            user_auth_id: req.user!.supabaseId,
+            role: 'owner',
+          });
+
+        if (memberError) {
+          throw memberError;
+        }
+      });
     } catch (err: any) {
       if (err.code === '23505' || err.message?.includes('duplicate key value violates unique constraint')) {
         throw new ConflictError(`Workspace '${id}' already exists`);
