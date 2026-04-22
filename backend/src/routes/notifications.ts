@@ -1,7 +1,7 @@
 import { Router } from 'express';
 import crypto from 'crypto';
 import { query, queryOne, execute, transaction } from '../db/index';
-import type { AuthUser } from './auth';
+import type { AuthUser } from '../lib/auth-utils';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { NotFoundError, ValidationError } from '../lib/errors';
 

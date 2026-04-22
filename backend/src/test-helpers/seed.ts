@@ -59,8 +59,8 @@ export async function seedUser(overrides: SeedUserOverrides = {}): Promise<UserR
   const plan = overrides.plan ?? 'pro';
 
   const row = await queryOne<UserRow>(
-    `INSERT INTO users (id, email, display_name, password_hash, plan)
-     VALUES ($1, $2, $3, 'x', $4)
+    `INSERT INTO users (id, email, display_name, plan)
+     VALUES ($1, $2, $3, $4)
      ON CONFLICT (id) DO UPDATE SET email = EXCLUDED.email, plan = EXCLUDED.plan
      RETURNING id, email, display_name, plan`,
     [id, email, displayName, plan],

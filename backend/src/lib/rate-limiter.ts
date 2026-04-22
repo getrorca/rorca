@@ -1,5 +1,5 @@
 import { Request, Response, NextFunction } from 'express';
-import type { AuthUser } from '../routes/auth';
+import type { AuthUser } from '../lib/auth-utils';
 import { query, queryOne } from '../db/index';
 
 // ─── In-memory sliding window store ───

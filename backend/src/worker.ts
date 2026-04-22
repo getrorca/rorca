@@ -2213,7 +2213,7 @@ async function runIntegrationHealthChecks(): Promise<void> {
 
   // 1. GitHub health checks via github_connections
   try {
-    const { decryptToken } = await import('./routes/auth');
+    const { decryptToken } = await import('./lib/auth-utils');
 
     type GithubConnRow = { user_id: string; encrypted_token: string; github_username: string | null };
     const ghConns = await query<GithubConnRow>(
