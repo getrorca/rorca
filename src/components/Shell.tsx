@@ -153,7 +153,7 @@ export function RunPill({ onNavigate }: { onNavigate?: (panel: PanelId) => void 
 // ─── User Menu ───────────────────────────────────────────────────────────────
 
 export function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void }) {
-  const { user, logout } = useAuth();
+  const { user, signOut } = useAuth();
   const [open, setOpen] = useState(false);
 
   if (!user) return null;
@@ -190,7 +190,7 @@ export function UserMenu({ onNavigate }: { onNavigate?: (panel: PanelId) => void
             </button>
             <button
               role="menuitem"
-              onClick={() => { setOpen(false); logout(); }}
+              onClick={() => { setOpen(false); void signOut(); }}
               className="w-full text-left px-3 py-2 text-sm text-muted hover:bg-bg hover:text-[var(--text)] transition-colors"
             >
               Sign out

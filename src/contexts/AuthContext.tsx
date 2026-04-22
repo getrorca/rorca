@@ -1,123 +1,86 @@
-import { createContext, useContext, useCallback, useEffect, useState, type ReactNode } from 'react';
-import { apiFetch, BASE_URL, setTokens, clearTokens, getRefreshToken } from '../lib/apiFetch';
-
-export interface AuthUser {
-  id: string;
-  email: string;
-  displayName: string;
-  githubConnected?: boolean;
-  emailVerified?: boolean;
-  plan?: 'free' | 'solo' | 'pro' | 'team';
-}
+import {
+  createContext,
+  useCallback,
+  useContext,
+  useEffect,
+  useMemo,
+  useState,
+  type ReactNode,
+} from 'react';
+import type { Session, User } from '@supabase/supabase-js';
+import { supabase } from '../lib/supabase';
 
 interface AuthContextValue {
-  user: AuthUser | null;
+  user: User | null;
+  session: Session | null;
   isAuthenticated: boolean;
-  loading: boolean;
-  login: (email: string, password: string) => Promise<void>;
-  register: (email: string, password: string, displayName: string) => Promise<void>;
-  loginWithGitHub: () => void;
-  logout: () => Promise<void>;
+  isLoading: boolean;
+  signOut: () => Promise<void>;
 }
 
 const AuthCtx = createContext<AuthContextValue | null>(null);
 
-interface LoginResponse {
-  user: AuthUser;
-  accessToken: string;
-  refreshToken: string;
-}
-
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [user, setUser] = useState<AuthUser | null>(null);
-  const [loading, setLoading] = useState(true);
+  const [session, setSession] = useState<Session | null>(null);
+  const [user, setUser] = useState<User | null>(null);
+  const [isLoading, setIsLoading] = useState(true);
 
-  // On mount: verify existing session.
-  // GitHub OAuth callback tokens are processed by GitHubCallbackPage directly —
-  // see src/pages/GitHubCallbackPage.tsx.
   useEffect(() => {
-    // Always call /api/auth/me — backend returns the first DB user when
-    // auth is globally bypassed (single-user local mode), so we don't need
-    // a token to get a valid session.
-    apiFetch<{ user: AuthUser }>('/api/auth/me')
-      .then((res) => setUser(res.user))
-      .catch(() => {
-        clearTokens();
-      })
-      .finally(() => setLoading(false));
-  }, []);
+    let isMounted = true;
 
-  const login = useCallback(async (email: string, password: string) => {
-    const res = await apiFetch<LoginResponse>('/api/auth/login', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password }),
-    });
-    setTokens(res.accessToken, res.refreshToken);
-    setUser(res.user);
-  }, []);
+    const restoreSession = async () => {
+      const { data, error } = await supabase.auth.getSession();
 
-  const register = useCallback(async (email: string, password: string, displayName: string) => {
-    const res = await apiFetch<LoginResponse>('/api/auth/register', {
-      method: 'POST',
-      headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ email, password, displayName }),
-    });
-    setTokens(res.accessToken, res.refreshToken);
-    setUser(res.user);
-  }, []);
+      if (!isMounted) return;
 
-  const loginWithGitHub = useCallback(() => {
-    window.location.href = `${BASE_URL}/api/auth/github`;
-  }, []);
-
-  // On 401 (auth expired) — clear session so AuthGate redirects to login
-  useEffect(() => {
-    const handler = () => {
-      clearTokens();
-      setUser(null);
-      // Store current panel/path as return URL for post-login redirect
-      try {
-        sessionStorage.setItem('rorca:returnUrl', window.location.href);
-      } catch { /* sessionStorage unavailable */ }
-    };
-    window.addEventListener('rorca:auth-expired', handler);
-    return () => window.removeEventListener('rorca:auth-expired', handler);
-  }, []);
-
-  const logout = useCallback(async () => {
-    try {
-      const rt = getRefreshToken();
-      if (rt) {
-        await apiFetch('/api/auth/logout', {
-          method: 'POST',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify({ refreshToken: rt }),
-        });
+      if (error) {
+        setSession(null);
+        setUser(null);
+      } else {
+        setSession(data.session ?? null);
+        setUser(data.session?.user ?? null);
       }
-    } catch {
-      // Logout is best-effort
-    } finally {
-      clearTokens();
-      setUser(null);
+
+      setIsLoading(false);
+    };
+
+    void restoreSession();
+
+    const {
+      data: { subscription },
+    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
+      if (!isMounted) return;
+      setSession(nextSession ?? null);
+      setUser(nextSession?.user ?? null);
+      setIsLoading(false);
+    });
+
+    return () => {
+      isMounted = false;
+      subscription.unsubscribe();
+    };
+  }, []);
+
+  const signOut = useCallback(async () => {
+    const { error } = await supabase.auth.signOut();
+
+    setSession(null);
+    setUser(null);
+
+    if (error) {
+      throw error;
     }
   }, []);
 
-  return (
-    <AuthCtx.Provider
-      value={{
-        user,
-        isAuthenticated: !!user,
-        loading,
-        login,
-        register,
-        loginWithGitHub,
-        logout,
-      }}
-    >
-      {children}
-    </AuthCtx.Provider>
-  );
+  const value = useMemo<AuthContextValue>(() => ({
+    user,
+    session,
+    isAuthenticated: Boolean(session?.access_token),
+    isLoading,
+    signOut,
+  }), [isLoading, session, signOut, user]);
+
+  return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;
 }
 
 export function useAuth() {
