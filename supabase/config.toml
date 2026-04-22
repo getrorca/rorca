@@ -1,0 +1,49 @@
+# Local Supabase CLI configuration for Rorca development.
+#
+# Note: Supabase CLI migrations and Rorca app schema migrations are separate systems.
+# - `supabase db reset` only applies SQL from `supabase/migrations/`
+# - Rorca app schema lives in `backend/src/db/pg-migrations/` and is applied by `pg-index.ts`
+
+project_id = "rorca-local"
+
+[api]
+enabled = true
+port = 54321
+schemas = ["public", "storage", "graphql_public"]
+extra_search_path = ["public", "extensions"]
+max_rows = 1000
+
+[db]
+port = 54322
+shadow_port = 54320
+major_version = 15
+
+[studio]
+enabled = true
+port = 54323
+
+[inbucket]
+enabled = true
+port = 54324
+
+[storage]
+enabled = true
+
+[auth]
+enabled = true
+site_url = "http://127.0.0.1:5210"
+additional_redirect_urls = [
+  "http://localhost:5210",
+  "http://127.0.0.1:5210",
+  "http://localhost:3030",
+  "http://127.0.0.1:3030"
+]
+jwt_expiry = 3600
+enable_signup = true
+enable_anonymous_sign_ins = false
+
+[auth.external.github]
+enabled = false
+client_id = "env(GITHUB_OAUTH_CLIENT_ID)"
+secret = "env(GITHUB_OAUTH_CLIENT_SECRET)"
+redirect_uri = "http://127.0.0.1:54321/auth/v1/callback"

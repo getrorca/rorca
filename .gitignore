@@ -23,3 +23,7 @@ bin/.generated/
 build/
 rorca
 .rorca-results.jsonl
+
+# Supabase local development temp state
+supabase/.branches/
+supabase/.temp/

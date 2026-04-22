@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T21:18:16.957Z",
+  "lastUpdatedAt": "2026-04-22T04:59:27.533Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -61,6 +61,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 200940
+    },
+    {
+      "storyId": "MU-027",
+      "title": "Set up local Supabase development environment",
+      "status": "passed",
+      "startedAt": "2026-04-22T04:58:13.103Z",
+      "finishedAt": "2026-04-22T04:59:27.533Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 74430
     }
   ],
   "failedStories": [

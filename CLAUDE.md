@@ -16,6 +16,11 @@ npm run build              # TypeScript + Vite production build
 npm run lint               # ESLint
 npx tsc --noEmit           # Frontend type check
 
+# Local Supabase (auth/dev)
+supabase start             # Start local Supabase stack (API :54321, DB :54322, Studio :54323)
+supabase stop              # Stop local Supabase stack
+supabase db reset          # Reset Supabase local DB and run ONLY `supabase/migrations/`
+
 # Backend (backend/)
 cd backend && npm run dev  # Express server (:3030) — auto-restarts on file save (tsx watch)
 cd backend && npm run worker  # pg-boss worker (required — picks up queued pipeline runs)
@@ -645,11 +650,23 @@ Multiple workspaces can run simultaneously. Same-workspace parallel runs require
 
 **Frontend** (`.env.local`, root): No required env vars — backend is always `http://localhost:3030`
 
+For local Supabase auth development, use:
+
+```bash
+VITE_SUPABASE_URL=http://127.0.0.1:54321
+VITE_SUPABASE_ANON_KEY=<local anon key>
+```
+
 **Backend** (`backend/.env`):
 ```bash
 # Core
 PORT=3030                     # Optional override
 DATABASE_URL=postgres://rorca:rorca@localhost:5432/rorca  # PostgreSQL connection string
+
+# Local Supabase
+SUPABASE_URL=http://127.0.0.1:54321
+SUPABASE_ANON_KEY=<local anon key>
+SUPABASE_SERVICE_ROLE_KEY=<local service role key>
 
 # Execution engine
 RORCA_AGENT=claude           # Options: claude (default), opencode, codex
@@ -665,6 +682,14 @@ OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
 # Process role (set automatically by worker — do not set manually)
 RORCA_PROCESS_ROLE=engine     # Set to 'engine' by worker.ts when spawning execution-engine subprocesses
 ```
+
+## Local Supabase notes
+
+- Local Supabase CLI config lives at `supabase/config.toml`
+- GitHub OAuth callback URL for local dev is `http://127.0.0.1:54321/auth/v1/callback`
+- `supabase db reset` applies only SQL in `supabase/migrations/`
+- Rorca app schema migrations remain in `backend/src/db/pg-migrations/` and run via `pg-index.ts` startup or your app migration command
+- Treat Supabase CLI migrations and Rorca app schema migrations as separate systems with different purposes
 
 ### Execution Engine: Claude vs OpenCode vs Codex
 
