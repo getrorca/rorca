@@ -52,9 +52,22 @@ The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS 
 
 - **Node.js** 18 or later
 - **Git** (for workspace registration and git hydration)
+- **Supabase CLI** for local auth/database development: `brew install supabase/tap/supabase`
 - **One of the following execution engines:**
   - **Claude Code CLI** installed and authenticated (`claude --version`) — uses your Pro/Max subscription, no API key
   - **OpenCode CLI** (`npm i -g opencode`, `opencode --version` >= 0.1.0) + an API key for your chosen provider
+
+## Local Supabase Development
+
+- Initialize local Supabase config with `supabase init` if needed
+- Start the local stack with `supabase start`
+- Stop it with `supabase stop`
+- Local endpoints: API `http://127.0.0.1:54321`, DB `127.0.0.1:54322`, Studio `http://127.0.0.1:54323`
+- Configure your GitHub OAuth app callback URL as `http://127.0.0.1:54321/auth/v1/callback`
+- Supabase CLI migrations and Rorca app schema migrations are separate systems:
+  - Supabase CLI uses `supabase/migrations/`
+  - Rorca app schema uses `backend/src/db/pg-migrations/` via `pg-index.ts`
+- `supabase db reset` only resets and reapplies `supabase/migrations/`; it does not run `backend/src/db/pg-migrations/`
 
 ---
 
