@@ -14,7 +14,7 @@
  */
 
 import { query, queryOne, execute } from '../db/index';
-import { decryptToken } from '../routes/auth';
+import { decryptToken } from '../lib/auth-utils';
 import { githubRateLimiter } from './github-rate-limiter';
 import { logger } from './logger';
 import { renderPrTemplate, PrTemplateData } from './github/pr-template';

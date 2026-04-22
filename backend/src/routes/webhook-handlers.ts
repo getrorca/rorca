@@ -24,7 +24,7 @@ import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { evaluatePrAndPostCheck } from '../lib/github-checks';
 import { onGithubEvent } from './webhooks';
 import { logger } from '../lib/logger';
-import { decryptToken } from './auth';
+import { decryptToken } from '../lib/auth-utils';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
