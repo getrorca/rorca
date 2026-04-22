@@ -9,6 +9,7 @@ import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { githubRateLimiter } from '../lib/github-rate-limiter';
 import { insertAuditEntry } from './integration-audit-log';
+import { withUserClient } from '../lib/with-user-client';
 
 const router = Router({ mergeParams: true });
 
@@ -27,6 +28,7 @@ interface GithubWebhookRow {
 
 interface GitHubConnectionRow {
   id: string;
+  workspace_id: string;
   user_id: string;
   github_user_id: string;
   encrypted_token: string;
@@ -411,14 +413,18 @@ router.post('/disconnect', async (req: Request, res: Response) => {
  */
 router.get('/account', async (req: Request, res: Response) => {
   try {
-    // Get first user's GitHub connection (auth is bypassed — single-user local tool)
-    // Single-user mode: find the first github_connection (any user) rather than
-    // relying on LIMIT 1 from users, which returns admin@rorca.local (created first)
-    // instead of the GitHub-authenticated user.
-    const conn = await queryOne<GitHubConnectionRow & { avatar_url: string | null }>(
-      'SELECT gc.*, u.avatar_url FROM github_connections gc JOIN users u ON gc.user_id = u.id ORDER BY gc.created_at DESC LIMIT 1',
-      []
-    );
+    const workspaceId = req.params.id;
+    const client = await withUserClient(req);
+    let conn: (GitHubConnectionRow & { avatar_url: string | null }) | undefined;
+    try {
+      const result = await client.query<GitHubConnectionRow & { avatar_url: string | null }>(
+        'SELECT gc.*, u.avatar_url FROM github_connections gc JOIN users u ON gc.user_id = u.id WHERE gc.workspace_id = $1 ORDER BY gc.created_at DESC LIMIT 1',
+        [workspaceId]
+      );
+      conn = result.rows[0];
+    } finally {
+      await client.release();
+    }
 
     if (!conn) {
       res.json({ connected: false });
@@ -462,11 +468,18 @@ router.get('/account', async (req: Request, res: Response) => {
  */
 router.post('/test-connection', async (req: Request, res: Response) => {
   try {
-    // Single-user mode: query github_connections directly.
-    const conn = await queryOne<Pick<GitHubConnectionRow, 'encrypted_token' | 'github_username'>>(
-      'SELECT encrypted_token, github_username FROM github_connections ORDER BY created_at DESC LIMIT 1',
-      []
-    );
+    const workspaceId = req.params.id;
+    const client = await withUserClient(req);
+    let conn: Pick<GitHubConnectionRow, 'encrypted_token' | 'github_username'> | undefined;
+    try {
+      const result = await client.query<Pick<GitHubConnectionRow, 'encrypted_token' | 'github_username'>>(
+        'SELECT encrypted_token, github_username FROM github_connections WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 1',
+        [workspaceId]
+      );
+      conn = result.rows[0];
+    } finally {
+      await client.release();
+    }
 
     if (!conn) {
       res.json({ valid: false, error: 'No GitHub connection found' });
@@ -647,8 +660,8 @@ router.delete('/', async (req: Request, res: Response) => {
     // Single-user mode: query github_connections directly (LIMIT 1 on users returns
     // admin@rorca.local, not the GitHub-authenticated user).
     const oauthConn = await queryOne<Pick<GitHubConnectionRow, 'id' | 'encrypted_token' | 'user_id'>>(
-      'SELECT id, encrypted_token, user_id FROM github_connections ORDER BY created_at DESC LIMIT 1',
-      [],
+      'SELECT id, encrypted_token, user_id FROM github_connections WHERE workspace_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [workspaceId],
     );
     const userId = oauthConn?.user_id ?? null;
 

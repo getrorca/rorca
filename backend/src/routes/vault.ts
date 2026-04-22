@@ -2,32 +2,18 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { query, queryOne, execute } from '../db/index';
 import { JWT_SECRET } from './auth';
-import type { AuthUser } from './auth';
 import { chatComplete } from '../lib/llm-client';
 import type { ProviderType } from '../lib/llm-client';
 import { invalidateProviderCache } from '../lib/embedding-pipeline';
 import { AuthError, NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { withUserClient } from '../lib/with-user-client';
+import { getEffectiveUser } from '../lib/get-user';
 
 const router = Router();
 
 // Derive a 32-byte AES-256 key from JWT_SECRET (same approach as auth.ts for GitHub tokens)
 const VAULT_KEY = crypto.createHash('sha256').update(JWT_SECRET).digest();
-
-// Auth is intentionally bypassed globally — fall back to the first registered user
-async function getEffectiveUser(req: Request): Promise<AuthUser | null> {
-  if (req.user) {
-    return {
-      id: req.user.id,
-      email: req.user.email,
-      supabaseId: req.user.supabaseId,
-      role: req.user.role ?? 'admin',
-      plan: req.user.plan,
-    };
-  }
-  const fallback = await queryOne<{ id: string; email: string }>('SELECT id, email FROM users LIMIT 1');
-  return fallback ? { ...fallback, supabaseId: fallback.id, role: 'admin' } : null;
-}
 
 // ─── Crypto helpers ─────────────────────────────────────────────────────────
 
@@ -63,6 +49,7 @@ function maskKey(encrypted: string): string {
 
 interface VaultRow {
   id: string;
+  workspace_id: string;
   user_id: string;
   provider: string;
   encrypted_key: string;
@@ -92,8 +79,9 @@ export interface VaultKeyResult {
  *         application/json:
  *           schema:
  *             type: object
- *             required: [provider, key]
+ *             required: [workspaceId, provider, key]
  *             properties:
+ *               workspaceId: { type: string, description: "Workspace ID" }
  *               provider: { type: string, enum: [anthropic, openai, openrouter, openai-compat] }
  *               key: { type: string, description: "Raw API key to encrypt and store" }
  *               label: { type: string, description: "Optional human-readable label" }
@@ -119,7 +107,12 @@ router.post('/', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { throw new AuthError('No user found'); return; }
 
-  const { provider, key, label, base_url } = req.body;
+  const { workspaceId, provider, key, label, base_url } = req.body;
+
+  if (!workspaceId || typeof workspaceId !== 'string') {
+    throw new ValidationError('workspaceId is required');
+    return;
+  }
 
   if (!provider || typeof provider !== 'string') {
     throw new ValidationError('provider is required');
@@ -141,10 +134,15 @@ router.post('/', async (req: Request, res: Response) => {
   const safeLabel = typeof label === 'string' ? label.trim() : '';
   const safeBaseUrl = typeof base_url === 'string' && base_url.trim() ? base_url.trim() : null;
 
-  await execute(
-    'INSERT INTO api_key_vault (id, user_id, provider, encrypted_key, label, base_url) VALUES ($1, $2, $3, $4, $5, $6)',
-    [id, user.id, provider, encryptedKey, safeLabel, safeBaseUrl]
-  );
+  const client = await withUserClient(req);
+  try {
+    await client.query(
+      'INSERT INTO api_key_vault (id, workspace_id, user_id, provider, encrypted_key, label, base_url) VALUES ($1, $2, $3, $4, $5, $6, $7)',
+      [id, workspaceId, user.id, provider, encryptedKey, safeLabel, safeBaseUrl]
+    );
+  } finally {
+    await client.release();
+  }
 
   // Invalidate embedding provider cache so auto-detection picks up the new key immediately
   invalidateProviderCache();
@@ -193,10 +191,23 @@ router.get('/', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { res.json({ keys: [] }); return; }
 
-  const rows = await query<VaultRow>(
-    'SELECT id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at FROM api_key_vault WHERE user_id = $1 ORDER BY created_at DESC',
-    [user.id]
-  );
+  const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
+  if (!workspaceId) {
+    throw new ValidationError('workspaceId query param is required');
+    return;
+  }
+
+  const client = await withUserClient(req);
+  let rows: VaultRow[] = [];
+  try {
+    const result = await client.query<VaultRow>(
+      'SELECT id, workspace_id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at FROM api_key_vault WHERE workspace_id = $1 ORDER BY created_at DESC',
+      [workspaceId]
+    );
+    rows = result.rows;
+  } finally {
+    await client.release();
+  }
 
   const keys = rows.map(row => ({
     id: row.id,
@@ -243,19 +254,30 @@ router.delete('/:id', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { throw new AuthError('No user found'); return; }
   const keyId = req.params.id;
+  const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
 
-  // Verify ownership before deleting
-  const existing = await queryOne<VaultRow>(
-    'SELECT id, spend_total_usd FROM api_key_vault WHERE id = $1 AND user_id = $2',
-    [keyId, user.id]
-  );
-
-  if (!existing) {
-    throw new NotFoundError('Key not found');
+  if (!workspaceId) {
+    throw new ValidationError('workspaceId query param is required');
     return;
   }
 
-  await execute('DELETE FROM api_key_vault WHERE id = $1 AND user_id = $2', [keyId, user.id]);
+  const client = await withUserClient(req);
+  let existing: Pick<VaultRow, 'id' | 'spend_total_usd'> | undefined;
+  try {
+    const existingResult = await client.query<Pick<VaultRow, 'id' | 'spend_total_usd'>>(
+      'SELECT id, spend_total_usd FROM api_key_vault WHERE id = $1 AND workspace_id = $2',
+      [keyId, workspaceId]
+    );
+    existing = existingResult.rows[0];
+
+    if (!existing) {
+      throw new NotFoundError('Key not found');
+    }
+
+    await client.query('DELETE FROM api_key_vault WHERE id = $1 AND workspace_id = $2', [keyId, workspaceId]);
+  } finally {
+    await client.release();
+  }
 
   // Invalidate embedding provider cache so auto-detection reflects the removed key
   invalidateProviderCache();
@@ -320,10 +342,22 @@ router.post('/test', async (req: Request, res: Response) => {
 
     if (provider !== 'claude-cli') {
       // Look up vault key for this user + provider
-      const row = await queryOne<Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'>>(
-        'SELECT id, encrypted_key, base_url FROM api_key_vault WHERE user_id = $1 AND provider = $2 ORDER BY created_at DESC LIMIT 1',
-        [user.id, provider]
-      );
+      const workspaceId = typeof req.body?.workspaceId === 'string' ? req.body.workspaceId : undefined;
+      if (!workspaceId) {
+        throw new ValidationError('workspaceId is required');
+      }
+
+      const client = await withUserClient(req);
+      let row: Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'> | undefined;
+      try {
+        const result = await client.query<Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'>>(
+          'SELECT id, encrypted_key, base_url FROM api_key_vault WHERE workspace_id = $1 AND provider = $2 ORDER BY created_at DESC LIMIT 1',
+          [workspaceId, provider]
+        );
+        row = result.rows[0];
+      } finally {
+        await client.release();
+      }
 
       if (!row) {
         throw new ValidationError(`No API key stored for provider "${provider}". Add a key first.`);
@@ -554,11 +588,16 @@ router.get('/providers', async (req: Request, res: Response) => {
 
 // ─── Exported helper: resolve a user's vault key for a provider ─────────────
 
-export async function getVaultKey(userId: string, provider: string): Promise<VaultKeyResult | null> {
-  const row = await queryOne<Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'>>(
-    'SELECT id, encrypted_key, base_url FROM api_key_vault WHERE user_id = $1 AND provider = $2 ORDER BY created_at DESC LIMIT 1',
-    [userId, provider]
-  );
+export async function getVaultKey(userId: string, provider: string, workspaceId?: string): Promise<VaultKeyResult | null> {
+  const row = workspaceId
+    ? await queryOne<Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'>>(
+        'SELECT id, encrypted_key, base_url FROM api_key_vault WHERE user_id = $1 AND workspace_id = $2 AND provider = $3 ORDER BY created_at DESC LIMIT 1',
+        [userId, workspaceId, provider]
+      )
+    : await queryOne<Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'>>(
+        'SELECT id, encrypted_key, base_url FROM api_key_vault WHERE user_id = $1 AND provider = $2 ORDER BY created_at DESC LIMIT 1',
+        [userId, provider]
+      );
 
   if (!row) return null;
 

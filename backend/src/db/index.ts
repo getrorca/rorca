@@ -154,7 +154,7 @@ let _pool: Pool | null = null;
 let _migrationsDone = false;
 let _migrationsRunning: Promise<void> | null = null;
 
-function getPool(): Pool {
+export function getPool(): Pool {
   if (!_pool) {
     _pool = new Pool(buildPoolConfig());
 
@@ -489,4 +489,3 @@ process.on('SIGINT', () => {
     shutdown().catch(() => {});
   }
 });
-
