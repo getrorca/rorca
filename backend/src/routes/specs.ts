@@ -7,6 +7,7 @@ import * as crypto from 'crypto';
 import simpleGit from 'simple-git';
 import { z } from 'zod';
 import { query, queryOne, execute, transaction, pool } from '../db/index';
+import { withUserClient } from '../db/user-client';
 import { validateBody } from '../lib/validate';
 import { synthesize, synthesizeWithMeta } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
@@ -14,7 +15,7 @@ import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, g
 import { writeSpec } from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey, getOpenRouterPrefs } from './vault';
-import type { AuthUser } from '../lib/auth-utils';
+import { authRequired, type AuthUser } from '../lib/auth-utils';
 import { getEffectiveUser } from '../lib/get-user';
 import { getPlanLimits, type PlanTier } from '../lib/plan-limits';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
@@ -445,7 +446,13 @@ function validateSuggestedSkills(
   }
 }
 
-async function getWorkspace(workspaceId: string): Promise<WorkspaceRow | undefined> {
+async function getWorkspace(workspaceId: string, req?: Request): Promise<WorkspaceRow | undefined> {
+  if (req?.user) {
+    return withUserClient(req, async (client) => {
+      const result = await client.query<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [workspaceId]);
+      return result.rows[0] as WorkspaceRow | undefined;
+    });
+  }
   return await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as WorkspaceRow | undefined;
 }
 
@@ -3052,7 +3059,7 @@ router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
  *                       tags: { type: array, items: { type: string } }
  *                       reviewStatus: { type: string }
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', authRequired, async (req: Request, res: Response) => {
   try {
     const workspaceId = req.query.workspaceId as string;
     const statusFilter = (req.query.status as string) || 'all';
@@ -3062,7 +3069,7 @@ router.get('/', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = await getWorkspace(workspaceId);
+    const workspace = await getWorkspace(workspaceId, req);
     if (!workspace) {
       throw new NotFoundError('Workspace not found');
       return;
@@ -3110,7 +3117,13 @@ router.get('/', async (req: Request, res: Response) => {
     const assigneeFilter = req.query.assignee as string | undefined;
     if (assigneeFilter) {
       const assignedSpecIds = new Set(
-        (await query("SELECT DISTINCT spec_id FROM spec_assignments WHERE workspace_id = $1 AND assignee_id = $2 AND story_id = ''", [workspaceId, assigneeFilter]) as { spec_id: string }[]).map(r => r.spec_id)
+        (await withUserClient(req, async (client) => {
+          const result = await client.query<{ spec_id: string }>(
+            "SELECT DISTINCT spec_id FROM spec_assignments WHERE workspace_id = $1 AND assignee_id = $2 AND story_id = ''",
+            [workspaceId, assigneeFilter],
+          );
+          return result.rows;
+        })).map(r => r.spec_id)
       );
       filtered = filtered.filter(s => assignedSpecIds.has(s.id));
     }
