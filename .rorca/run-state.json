@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:31:42.745Z",
+  "lastUpdatedAt": "2026-04-22T05:33:26.488Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -111,6 +111,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 39901
+    },
+    {
+      "storyId": "MU-010",
+      "title": "Enable RLS on workspaces table with membership-based access policies",
+      "status": "passed",
+      "startedAt": "2026-04-22T05:31:52.985Z",
+      "finishedAt": "2026-04-22T05:33:26.488Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 93503
     }
   ],
   "failedStories": [
@@ -161,15 +171,6 @@
       "finishedAt": "2026-04-22T05:23:44.140Z",
       "agentType": "codex",
       "failReason": "blocked_by: MU-013"
-    },
-    {
-      "storyId": "MU-030",
-      "title": "MU-030",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:31:42.745Z",
-      "finishedAt": "2026-04-22T05:31:42.745Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-027"
     }
   ],
   "currentStory": null,
