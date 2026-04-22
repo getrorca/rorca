@@ -26,6 +26,11 @@
  *   --attach <addr>         OpenCode server socket address (passed by pipeline.ts)
  */
 
+// This process is spawned with `RORCA_PROCESS_ROLE=engine` by the worker and
+// performs system-owned pipeline work. It intentionally uses service-role DB
+// access through the shared helpers instead of request-scoped `withUserClient()`
+// because there is no end-user request context to project into PostgreSQL RLS.
+
 import { spawn, execSync, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';

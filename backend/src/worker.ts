@@ -16,6 +16,10 @@ import 'dotenv/config';
 // Mark this process as 'worker' so db/index.ts doesn't register its own
 // SIGTERM handler — the worker manages pool teardown in its shutdown() function.
 process.env.RORCA_PROCESS_ROLE = 'worker';
+// Worker DB operations intentionally use the service role via shared pool helpers.
+// This process is system-owned, not request-owned, so it must not apply per-user
+// `request.jwt.claims` RLS scoping. Child engines are likewise marked with
+// `RORCA_PROCESS_ROLE=engine` and run on behalf of the platform.
 import * as path from 'path';
 import * as fs from 'fs';
 import * as os from 'os';
