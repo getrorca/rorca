@@ -105,13 +105,11 @@ export async function seedTestData(client: PoolClient): Promise<void> {
   `);
 
   // ── Users (default admin) ─────────────────────────────────────
-  // bcrypt hash of 'rorca123' (cost 10)
-  const defaultHash = '$2b$10$BMXqmRMejhhifW5gs6Ju.eI.cxoG/k7iW5sGJ86Nb4WloLowY.qxy';
   await client.query(`
-    INSERT INTO users (id, email, display_name, password_hash, role, plan, email_verified_at)
-    VALUES ('local-admin', 'admin@rorca.local', 'Admin', $1, 'admin', 'pro', NOW())
+    INSERT INTO users (id, email, display_name, role, plan, email_verified_at)
+    VALUES ('local-admin', 'admin@rorca.local', 'Admin', 'admin', 'pro', NOW())
     ON CONFLICT (id) DO NOTHING
-  `, [defaultHash]);
+  `);
 
   // ── Direction layers (L1-L3) ──────────────────────────────────
   await client.query(`

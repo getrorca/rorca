@@ -15,7 +15,7 @@ import { getWorkspaceEnvVars } from './env-vars';
 import { checkBudgetThresholds } from './budget';
 import { getVaultKey } from './vault';
 import { getCopilotToken } from './copilot';
-import type { AuthUser } from './auth';
+import type { AuthUser } from '../lib/auth-utils';
 import type { AgentProfileRow } from './agent-profiles';
 import { handleRouteError } from '../lib/async-handler';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';

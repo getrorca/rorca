@@ -2,7 +2,7 @@ import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { queryOne, execute } from '../db';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
-import { authRequired, type AuthUser } from './auth';
+import { authRequired, type AuthUser } from '../lib/auth-utils';
 import { handleRouteError } from '../lib/async-handler';
 import { logger } from '../lib/logger';
 import { ConflictError, ForbiddenError, GoneError, NotFoundError, TooManyRequestsError } from '../lib/errors';

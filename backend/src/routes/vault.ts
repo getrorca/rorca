@@ -1,8 +1,8 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { query, queryOne, execute } from '../db/index';
-import { JWT_SECRET } from './auth';
-import type { AuthUser } from './auth';
+import { JWT_SECRET } from '../lib/auth-utils';
+import type { AuthUser } from '../lib/auth-utils';
 import { chatComplete } from '../lib/llm-client';
 import type { ProviderType } from '../lib/llm-client';
 import { invalidateProviderCache } from '../lib/embedding-pipeline';

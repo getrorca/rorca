@@ -22,7 +22,6 @@
     "@types/helmet": "^0.0.48",
     "@types/multer": "^2.0.0",
     "@types/ws": "^8.18.1",
-    "bcryptjs": "^3.0.3",
     "chokidar": "^5.0.0",
     "chrome-devtools-mcp": "^0.21.0",
     "cors": "^2.8.5",
@@ -51,7 +50,6 @@
     "zod": "^4.3.6"
   },
   "devDependencies": {
-    "@types/bcryptjs": "^2.4.6",
     "@types/cors": "^2.8.17",
     "@types/express": "^5.0.0",
     "@types/jest": "^29.5.14",
