@@ -3,9 +3,9 @@
 Spec: rorca-opencode-terminal
 Run ID: 20260316000185
 Started: 2026-04-15T19:33:43.854Z
-Last Updated: 2026-04-22T05:28:02.813Z
+Last Updated: 2026-04-22T05:34:52.452Z
 
-## Completed Stories (11)
+## Completed Stories (12)
 - OCT-016: Terminal panel — copy/paste, font sizing, fullscreen toggle — DONE (claude, 212s)
 - OCT-021: WebSocket security — Origin validation, localhost binding, session token — DONE (claude, 341s)
 - OCT-036: Embedded terminal drawer — Cmd+J toggle, persistent bottom panel, drag-resize, fullscreen, mobile FAB — DONE (codex, gpt-5.4, 160s)
@@ -17,6 +17,7 @@ Last Updated: 2026-04-22T05:28:02.813Z
 - MU-019: Add security headers and CSRF protection — DONE (codex, gpt-5.4, 157s)
 - MU-017: Replace GitHub OAuth sign-in with Supabase GitHub provider — DONE (codex, gpt-5.4, 296s)
 - MU-003: Add auth_id column and get_user_workspace_ids() helper function — DONE (codex, gpt-5.4, 40s)
+- MU-021: Create getUserClient() for RLS-scoped DB queries in Express routes — DONE (codex, gpt-5.4, 179s)
 
 ## Failed Stories (1)
 - OCT-015: OpenCode not installed — graceful error state in terminal panel — FAILED (timeout)

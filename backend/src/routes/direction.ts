@@ -1,6 +1,7 @@
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { query, queryOne, execute } from '../db/index';
+import { withUserClient } from '../db/user-client';
 import { validateBody } from '../lib/validate';
 import { synthesize } from '../lib/direction-stack';
 import { chatComplete } from '../lib/llm-client';
@@ -104,23 +105,32 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     let row: { content_yaml: string } | undefined;
 
     if (layerNum === 1) {
-      row = await queryOne<{ content_yaml: string }>(
-        `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
-      );
+      row = await withUserClient(req, async (client) => {
+        const result = await client.query<{ content_yaml: string }>(
+          `SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`
+        );
+        return result.rows[0];
+      });
     } else if (layerNum === 2) {
       // L2 is domain-scoped; for the panel we fetch workspace-level L2
       row = workspaceId
-        ? await queryOne<{ content_yaml: string }>(
-            `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
-            [String(workspaceId)]
-          )
+        ? await withUserClient(req, async (client) => {
+            const result = await client.query<{ content_yaml: string }>(
+              `SELECT content_yaml FROM direction_layers WHERE layer = 2 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+              [String(workspaceId)]
+            );
+            return result.rows[0];
+          })
         : undefined;
     } else {
       const l3Row = workspaceId
-        ? await queryOne<{ content_yaml: string; preferred_model: string | null }>(
-            `SELECT content_yaml, preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
-            [String(workspaceId)]
-          )
+        ? await withUserClient(req, async (client) => {
+            const result = await client.query<{ content_yaml: string; preferred_model: string | null }>(
+              `SELECT content_yaml, preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+              [String(workspaceId)]
+            );
+            return result.rows[0];
+          })
         : undefined;
       res.json({ contentYaml: l3Row?.content_yaml ?? '', preferredModel: l3Row?.preferred_model ?? null });
       return;

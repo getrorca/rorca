@@ -35,6 +35,12 @@ import {
 import simpleGit from 'simple-git';
 import { performMerge } from './lib/merge-handler';
 import { initDb, query, queryOne, execute, closePool } from './db/index';
+
+// Worker jobs intentionally bypass request-scoped RLS claims and use the
+// application service role directly. This process runs with
+// `RORCA_PROCESS_ROLE=worker` on behalf of the system queue, not an individual
+// authenticated HTTP request, so `withUserClient()` must not be used here.
+
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
 import { logger } from './lib/logger';

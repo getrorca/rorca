@@ -3323,3 +3323,12 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-04-22 [Architecture] Supabase workspace RLS dependency chain: Create workspace_members and get_user_workspace_ids(auth_id) in the same migration that adds users.auth_id so workspace RLS policies never depend on objects created later.
 > Rule: Supabase workspace RLS dependency chain: Create workspace_members and get_user_workspace_ids(auth_id) in the same migration that adds users.auth_id so workspace RLS policies never depend on objects created later.
+
+## 2026-04-22 [Convention] Supabase local dev docs must separate migration systems: When documenting local Supabase setup, explicitly note that `supabase db reset` only runs `supabase/migrations/` and does not apply app schema migrations from `backend/src/db/pg-migrations/`.
+> Rule: Supabase local dev docs must separate migration systems: When documenting local Supabase setup, explicitly note that `supabase db reset` only runs `supabase/migrations/` and does not apply app schema migrations from `backend/src/db/pg-migrations/`.
+
+## 2026-04-22 [Pattern] Foundation RLS starts at workspaces SELECT gate: Enable RLS on `workspaces` first and define downstream visibility through `get_user_workspace_ids(auth.uid())`; other workspace-scoped tables can then safely chain access off workspace membership.
+> Rule: Foundation RLS starts at workspaces SELECT gate: Enable RLS on `workspaces` first and define downstream visibility through `get_user_workspace_ids(auth.uid())`; other workspace-scoped tables can then safely chain access off workspace membership.
+
+## 2026-04-22 [Gotcha] Pooled RLS claims must use SET plus RESET: When attaching JWT claims to a shared pg Pool client for PostgreSQL RLS, use session-level `SET request.jwt.claims = ...` and always `RESET request.jwt.claims` before `client.release()`; never rely on `SET LOCAL` in autocommit mode.
+> Rule: Pooled RLS claims must use SET plus RESET: When attaching JWT claims to a shared pg Pool client for PostgreSQL RLS, use session-level `SET request.jwt.claims = ...` and always `RESET request.jwt.claims` before `client.release()`; never rely on `SET LOCAL` in autocommit mode.

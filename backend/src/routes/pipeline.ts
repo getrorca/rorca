@@ -6,6 +6,7 @@ import * as os from 'os';
 import simpleGit from 'simple-git';
 import { z } from 'zod';
 import { query, queryOne, execute, transaction } from '../db/index';
+import { withUserClient } from '../db/user-client';
 import { validateBody } from '../lib/validate';
 import { broadcastAll, attachSSE, type WalEvent } from '../lib/sse-hub';
 import { runHooks } from '../lib/hook-runner';
@@ -2530,14 +2531,23 @@ router.get('/runs', async (req: Request, res: Response) => {
     }
 
     const pagination = parsePaginationParams(req);
-    const result = await paginateQuery<PipelineRunRow>({
-      query: 'SELECT * FROM pipeline_runs WHERE workspace_id = $1',
-      countQuery: 'SELECT COUNT(*)::int as total FROM pipeline_runs WHERE workspace_id = $1',
-      params: [workspaceId],
-      pagination,
-      orderBy: 'id DESC',
-      cursorColumn: 'id',
-      cursorDirection: 'desc',
+    const result = await withUserClient(req, async (client) => {
+      const countRow = await client.query<{ total: number }>(
+        'SELECT COUNT(*)::int as total FROM pipeline_runs WHERE workspace_id = $1',
+        [workspaceId],
+      );
+      const total = Number(countRow.rows[0]?.total ?? 0);
+
+      const itemsResult = await client.query<PipelineRunRow>(
+        'SELECT * FROM pipeline_runs WHERE workspace_id = $1 ORDER BY id DESC LIMIT $2 OFFSET $3',
+        [workspaceId, pagination.limit, pagination.offset],
+      );
+
+      return {
+        items: itemsResult.rows,
+        total,
+        hasMore: pagination.offset + itemsResult.rows.length < total,
+      };
     });
 
     res.json(result);

@@ -3,6 +3,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { z } from 'zod';
 import { query, queryOne, execute } from '../db/index';
+import { withUserClient } from '../db/user-client';
 import { validateBody } from '../lib/validate';
 import { hydrateSchema } from '../lib/schema-hydrator';
 import {
@@ -254,7 +255,10 @@ router.post('/', validateBody(CreateWorkspaceSchema), requirePlan('workspaces'),
 // GET /api/workspaces
 router.get('/', async (req, res, next) => {
   try {
-    const rows = await query<WorkspaceRow>('SELECT * FROM workspaces ORDER BY created_at DESC');
+    const rows = await withUserClient(req, async (client) => {
+      const result = await client.query<WorkspaceRow>('SELECT * FROM workspaces ORDER BY created_at DESC');
+      return result.rows;
+    });
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(rows.map(parseWorkspace), pagination, { cursorKey: (w) => w.id }));
   } catch (err) {

@@ -33,6 +33,12 @@ import * as path from 'path';
 import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
+
+// The execution engine intentionally bypasses request-scoped RLS claims and
+// uses the application service role directly. It runs with
+// `RORCA_PROCESS_ROLE=engine` as a system subprocess spawned by the worker, not
+// inside a user request, so `withUserClient()` does not apply here.
+
 import { detectOpenCode } from './opencode-detector';
 import { detectCapability } from './reasoning-detector';
 import {
