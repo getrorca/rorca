@@ -1,28 +1,20 @@
 import request from 'supertest';
 import crypto from 'crypto';
-import bcrypt from 'bcryptjs';
-import jwt from 'jsonwebtoken';
 import app from '../../server';
-import { JWT_SECRET } from '../auth';
 import { createNotification } from '../notifications';
 import { execute } from '../../db/index';
+import { LOCAL_ADMIN } from '../../lib/auth-utils';
 
 async function createUser(overrides: { email?: string } = {}) {
   const id = crypto.randomUUID();
   const email = overrides.email || `user-${id.slice(0, 8)}@test.com`;
-  const passwordHash = bcrypt.hashSync('password123', 4);
-  await execute(`INSERT INTO users (id, email, display_name, password_hash) VALUES ($1, $2, $3, $4)`, [id, email, 'Test User', passwordHash]);
+  await execute(`INSERT INTO users (id, email, display_name) VALUES ($1, $2, $3)`, [id, email, 'Test User']);
   return { id, email };
-}
-
-function tokenFor(user: { id: string; email: string }): string {
-  return jwt.sign({ sub: user.id, email: user.email }, JWT_SECRET, { expiresIn: '15m' });
 }
 
 afterEach(async () => {
   await execute(`DELETE FROM notification_preferences`);
   await execute(`DELETE FROM notifications`);
-  await execute(`DELETE FROM refresh_tokens`);
   await execute(`DELETE FROM users`);
 });
 
@@ -31,7 +23,8 @@ describe('GET /api/notifications', () => {
     const user = await createUser();
     const res = await request(app)
       .get('/api/notifications')
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email)
     expect(res.status).toBe(200);
     expect(res.body.items).toEqual([]);
     expect(res.body.unreadCount).toBe(0);
@@ -43,7 +36,8 @@ describe('GET /api/notifications', () => {
 
     const res = await request(app)
       .get('/api/notifications')
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email)
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(1);
     expect(res.body.items[0].title).toBe('Spec approved');
@@ -57,7 +51,8 @@ describe('GET /api/notifications', () => {
 
     const res = await request(app)
       .get('/api/notifications')
-      .set('Authorization', `Bearer ${tokenFor(user2)}`);
+      .set('x-test-user-id', user2.id)
+      .set('x-test-user-email', user2.email)
     expect(res.status).toBe(200);
     expect(res.body.items).toHaveLength(0);
   });
@@ -71,7 +66,8 @@ describe('GET /api/notifications/unread-count', () => {
 
     const res = await request(app)
       .get('/api/notifications/unread-count')
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email)
     expect(res.status).toBe(200);
     expect(res.body.count).toBe(2);
   });
@@ -84,12 +80,14 @@ describe('POST /api/notifications/:id/read', () => {
 
     const res = await request(app)
       .post(`/api/notifications/${nId}/read`)
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email)
     expect(res.status).toBe(200);
 
     const countRes = await request(app)
       .get('/api/notifications/unread-count')
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email)
     expect(countRes.body.count).toBe(0);
   });
 });
@@ -103,7 +101,8 @@ describe('POST /api/notifications/read-all', () => {
 
     const res = await request(app)
       .post('/api/notifications/read-all')
-      .set('Authorization', `Bearer ${tokenFor(user)}`);
+      .set('x-test-user-id', user.id)
+      .set('x-test-user-email', user.email)
     expect(res.status).toBe(200);
     expect(res.body.marked).toBe(3);
 

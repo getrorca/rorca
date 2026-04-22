@@ -3,7 +3,7 @@ import crypto from 'crypto';
 import bcrypt from 'bcryptjs';
 import jwt from 'jsonwebtoken';
 import app from '../../server';
-import { JWT_SECRET } from '../auth';
+import { JWT_SECRET } from '../lib/auth-utils';
 import { queryOne, execute } from '../../db/index';
 
 // Helpers

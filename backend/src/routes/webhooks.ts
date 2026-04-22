@@ -1,6 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { queryOne, execute } from '../db/index';
-import { decryptToken } from './auth';
+import { decryptToken } from '../lib/auth-utils';
 import { verifyWebhookSignature } from './workspace-github';
 import { logger } from '../lib/logger';
 import { AuthError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
