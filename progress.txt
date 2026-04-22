@@ -3,7 +3,7 @@
 Spec: rorca-opencode-terminal
 Run ID: 20260316000185
 Started: 2026-04-15T19:33:43.854Z
-Last Updated: 2026-04-22T05:53:52.826Z
+Last Updated: 2026-04-22T05:57:54.167Z
 
 ## Completed Stories (14)
 - OCT-016: Terminal panel — copy/paste, font sizing, fullscreen toggle — DONE (claude, 212s)
@@ -24,7 +24,7 @@ Last Updated: 2026-04-22T05:53:52.826Z
 ## Failed Stories (1)
 - OCT-015: OpenCode not installed — graceful error state in terminal panel — FAILED (timeout)
 
-## Skipped Stories (9)
+## Skipped Stories (21)
 - MU-016: Enable RLS on all remaining spec and operational tables — SKIPPED (blocked_by: MU-010, MU-011)
 - MU-029: Security audit: IDOR, RLS bypass, JWT manipulation, CSRF, XSS — SKIPPED (blocked_by: MU-021, MU-022)
 - MU-023: Build Team Management UI in Settings — SKIPPED (blocked_by: MU-013)
@@ -33,4 +33,16 @@ Last Updated: 2026-04-22T05:53:52.826Z
 - MU-024: MU-024 — SKIPPED (blocked_by: MU-013)
 - MU-023: Build Team Management UI in Settings — SKIPPED (blocked_by: MU-013)
 - MU-024: Build Team Invite acceptance page — SKIPPED (blocked_by: MU-013)
+- MU-029: Security audit: IDOR, RLS bypass, JWT manipulation, CSRF, XSS — SKIPPED (blocked_by: MU-021, MU-022)
+- MU-022: MU-022 — SKIPPED (blocked_by: MU-021)
+- MU-023: MU-023 — SKIPPED (blocked_by: MU-013)
+- MU-024: MU-024 — SKIPPED (blocked_by: MU-013)
+- MU-025: MU-025 — SKIPPED (blocked_by: MU-013, MU-014, MU-015, MU-021)
+- MU-029: MU-029 — SKIPPED (blocked_by: MU-021, MU-022)
+- MU-030: MU-030 — SKIPPED (blocked_by: MU-024, MU-027)
+- MU-023: Build Team Management UI in Settings — SKIPPED (blocked_by: MU-013)
+- MU-024: Build Team Invite acceptance page — SKIPPED (blocked_by: MU-013)
+- MU-022: Update key backend routes to use RLS-scoped queries — SKIPPED (blocked_by: MU-021)
+- MU-025: Write RLS policy integration tests — SKIPPED (blocked_by: MU-013, MU-014, MU-015, MU-021)
+- MU-030: Write E2E Playwright tests for complete auth flow — SKIPPED (blocked_by: MU-024, MU-027)
 - MU-029: Security audit: IDOR, RLS bypass, JWT manipulation, CSRF, XSS — SKIPPED (blocked_by: MU-021, MU-022)
