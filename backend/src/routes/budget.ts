@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { queryOne, execute } from '../db/index';
+import { withUserClient } from '../db/user-client';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
@@ -169,13 +170,6 @@ router.post('/', async (req: Request, res: Response) => {
       notify_emails?: string[];
     };
 
-    // Validate workspace exists
-    const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
-      return;
-    }
-
     // Validate period
     const validPeriods = ['daily', 'weekly', 'monthly'];
     const budgetPeriod = period || 'monthly';
@@ -201,16 +195,22 @@ router.post('/', async (req: Request, res: Response) => {
     const emailsJson = JSON.stringify(notify_emails || []);
 
     // Upsert
-    await execute(`
-      INSERT INTO budget_config (workspace_id, alert_threshold_usd, hard_cap_usd, period, notify_emails)
-      VALUES ($1, $2, $3, $4, $5)
-      ON CONFLICT(workspace_id) DO UPDATE SET
-        alert_threshold_usd = excluded.alert_threshold_usd,
-        hard_cap_usd = excluded.hard_cap_usd,
-        period = excluded.period,
-        notify_emails = excluded.notify_emails,
-        updated_at = NOW()
-    `, [workspaceId, alert_threshold_usd ?? null, hard_cap_usd ?? null, budgetPeriod, emailsJson]);
+    await withUserClient(req, async (client) => {
+      const workspace = await client.query('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+      if (workspace.rows.length === 0) {
+        throw new NotFoundError('Workspace not found');
+      }
+      await client.query(`
+        INSERT INTO budget_config (workspace_id, alert_threshold_usd, hard_cap_usd, period, notify_emails)
+        VALUES ($1, $2, $3, $4, $5)
+        ON CONFLICT(workspace_id) DO UPDATE SET
+          alert_threshold_usd = excluded.alert_threshold_usd,
+          hard_cap_usd = excluded.hard_cap_usd,
+          period = excluded.period,
+          notify_emails = excluded.notify_emails,
+          updated_at = NOW()
+      `, [workspaceId, alert_threshold_usd ?? null, hard_cap_usd ?? null, budgetPeriod, emailsJson]);
+    });
 
     // Emit WAL event for budget config change
     const walResult = await queryOne<{ id: number }>(
@@ -233,10 +233,10 @@ router.post('/', async (req: Request, res: Response) => {
     // Check thresholds immediately (in case spending already exceeds new config)
     const budgetStatus = await checkBudgetThresholds(workspaceId);
 
-    const config = await queryOne<BudgetConfigRow>(
-      'SELECT * FROM budget_config WHERE workspace_id = $1',
-      [workspaceId]
-    );
+    const config = await withUserClient(req, async (client) => {
+      const result = await client.query<BudgetConfigRow>('SELECT * FROM budget_config WHERE workspace_id = $1', [workspaceId]);
+      return result.rows[0];
+    });
 
     res.json({
       config: config ? {
@@ -286,17 +286,14 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = String(req.params.id);
 
-    // Validate workspace exists
-    const workspace = await queryOne('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
-      return;
-    }
-
-    const config = await queryOne<BudgetConfigRow>(
-      'SELECT * FROM budget_config WHERE workspace_id = $1',
-      [workspaceId]
-    );
+    const config = await withUserClient(req, async (client) => {
+      const workspace = await client.query('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+      if (workspace.rows.length === 0) {
+        throw new NotFoundError('Workspace not found');
+      }
+      const result = await client.query<BudgetConfigRow>('SELECT * FROM budget_config WHERE workspace_id = $1', [workspaceId]);
+      return result.rows[0];
+    });
 
     if (!config) {
       res.json({
@@ -363,7 +360,14 @@ router.get('/', async (req: Request, res: Response) => {
 router.delete('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = String(req.params.id);
-    const result = await execute('DELETE FROM budget_config WHERE workspace_id = $1', [workspaceId]);
+    const result = await withUserClient(req, async (client) => {
+      const workspace = await client.query('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+      if (workspace.rows.length === 0) {
+        throw new NotFoundError('Workspace not found');
+      }
+      const deletion = await client.query('DELETE FROM budget_config WHERE workspace_id = $1', [workspaceId]);
+      return { rowCount: deletion.rowCount ?? 0 };
+    });
 
     if (result.rowCount === 0) {
       throw new NotFoundError('No budget config found for this workspace');

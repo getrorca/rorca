@@ -1,10 +1,11 @@
 import { Router, Request, Response } from 'express';
 import { randomUUID } from 'crypto';
-import { query, queryOne, execute } from '../db/index';
+import { query, queryOne } from '../db/index';
 import { encryptToken, decryptToken } from '../lib/auth-utils';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { withUserClient } from '../db/user-client';
 
 const router = Router({ mergeParams: true });
 
@@ -59,16 +60,17 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
 
-    const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
-      return;
-    }
-
-    const rows = await query<EnvVarRow>(
-      'SELECT * FROM workspace_env_vars WHERE workspace_id = $1 ORDER BY key ASC',
-      [workspaceId]
-    );
+    const rows = await withUserClient(req, async (client) => {
+      const workspace = await client.query<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+      if (workspace.rows.length === 0) {
+        throw new NotFoundError('Workspace not found');
+      }
+      const result = await client.query<EnvVarRow>(
+        'SELECT * FROM workspace_env_vars WHERE workspace_id = $1 ORDER BY key ASC',
+        [workspaceId]
+      );
+      return result.rows;
+    });
 
     const envVars = rows.map(row => ({
       id: row.id,
@@ -139,51 +141,40 @@ router.post('/', async (req: Request, res: Response) => {
       return;
     }
 
-    const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
-      return;
-    }
-
     const secret = isSecret !== false ? 1 : 0; // default to secret
     const encryptedValue = encryptToken(value);
-
-    // Upsert: update if key exists for this workspace, otherwise insert
-    const existing = await queryOne<{ id: string }>(
-      'SELECT id FROM workspace_env_vars WHERE workspace_id = $1 AND key = $2',
-      [workspaceId, key]
-    );
-
-    if (existing) {
-      const row = await queryOne<EnvVarRow>(
-        `UPDATE workspace_env_vars SET encrypted_value = $1, is_secret = $2, updated_at = NOW() WHERE id = $3 RETURNING *`,
-        [encryptedValue, secret, existing.id]
+    const row = await withUserClient(req, async (client) => {
+      const workspace = await client.query<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+      if (workspace.rows.length === 0) {
+        throw new NotFoundError('Workspace not found');
+      }
+      const existing = await client.query<{ id: string }>(
+        'SELECT id FROM workspace_env_vars WHERE workspace_id = $1 AND key = $2',
+        [workspaceId, key]
       );
-
-      res.json({
-        id: row!.id,
-        key: row!.key,
-        value: row!.is_secret ? SECRET_MASK : value,
-        isSecret: !!row!.is_secret,
-        createdAt: row!.created_at,
-        updatedAt: row!.updated_at,
-      });
-    } else {
+      if (existing.rows[0]) {
+        const updated = await client.query<EnvVarRow>(
+          `UPDATE workspace_env_vars SET encrypted_value = $1, is_secret = $2, updated_at = NOW() WHERE id = $3 RETURNING *`,
+          [encryptedValue, secret, existing.rows[0].id]
+        );
+        return { row: updated.rows[0], created: false };
+      }
       const id = randomUUID();
-      const row = await queryOne<EnvVarRow>(
+      const inserted = await client.query<EnvVarRow>(
         `INSERT INTO workspace_env_vars (id, workspace_id, key, encrypted_value, is_secret) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
         [id, workspaceId, key, encryptedValue, secret]
       );
+      return { row: inserted.rows[0], created: true };
+    });
 
-      res.status(201).json({
-        id: row!.id,
-        key: row!.key,
-        value: row!.is_secret ? SECRET_MASK : value,
-        isSecret: !!row!.is_secret,
-        createdAt: row!.created_at,
-        updatedAt: row!.updated_at,
-      });
-    }
+    res.status(row.created ? 201 : 200).json({
+      id: row.row.id,
+      key: row.row.key,
+      value: row.row.is_secret ? SECRET_MASK : value,
+      isSecret: !!row.row.is_secret,
+      createdAt: row.row.created_at,
+      updatedAt: row.row.updated_at,
+    });
   } catch (error: any) {
     handleRouteError(res, error, '[EnvVars] Create/update');
   }
@@ -217,10 +208,17 @@ router.delete('/:key', async (req: Request, res: Response) => {
     const workspaceId = req.params.id;
     const key = req.params.key;
 
-    const result = await execute(
-      'DELETE FROM workspace_env_vars WHERE workspace_id = $1 AND key = $2',
-      [workspaceId, key]
-    );
+    const result = await withUserClient(req, async (client) => {
+      const workspace = await client.query<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
+      if (workspace.rows.length === 0) {
+        throw new NotFoundError('Workspace not found');
+      }
+      const deletion = await client.query(
+        'DELETE FROM workspace_env_vars WHERE workspace_id = $1 AND key = $2',
+        [workspaceId, key]
+      );
+      return { rowCount: deletion.rowCount ?? 0 };
+    });
 
     if (result.rowCount === 0) {
       throw new NotFoundError('Env var not found');
