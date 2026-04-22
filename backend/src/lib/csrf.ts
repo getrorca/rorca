@@ -1,12 +1,15 @@
 import { Request, Response, NextFunction } from 'express';
 import crypto from 'crypto';
-import { ForbiddenError } from './errors';
+import { UnprocessableError } from './errors';
 
 const STATE_CHANGING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 
 const EXEMPT_PREFIXES = [
   '/api/webhooks',
+  '/mcp',
   '/api/health',
+  '/api/docs',
+  '/api/auth/csrf-token',
   '/api/auth/login',
   '/api/auth/register',
   '/api/auth/github',
@@ -26,7 +29,7 @@ export function generateCsrfToken(): string {
 export function setCsrfCookie(res: Response, token: string): void {
   const isProduction = process.env.NODE_ENV === 'production';
   res.cookie('_csrf', token, {
-    httpOnly: false,  // JS must be able to read it for the double-submit pattern
+    httpOnly: true,
     sameSite: 'strict',
     secure: isProduction,
     path: '/',
@@ -37,10 +40,8 @@ export function setCsrfCookie(res: Response, token: string): void {
  * Double-submit cookie CSRF middleware.
  *
  * - Skips non-state-changing methods (GET, HEAD, OPTIONS).
- * - Skips exempt paths (webhooks, health, login, register).
- * - If no _csrf cookie is present, allows the request through
- *   (user not logged in — auth middleware handles 401).
- * - If _csrf cookie exists but X-CSRF-Token header is missing, returns 403.
+ * - Skips exempt paths (webhooks, docs, health, auth bootstrap, MCP).
+ * - Requires both _csrf cookie and X-CSRF-Token header.
  * - If header and cookie values don't match, returns 403.
  */
 export function csrfProtection(req: Request, _res: Response, next: NextFunction): void {
@@ -60,21 +61,19 @@ export function csrfProtection(req: Request, _res: Response, next: NextFunction)
   // Read the _csrf cookie from the Cookie header (no cookie-parser dependency needed)
   const cookieValue = parseCsrfCookie(req.headers.cookie || '');
 
-  // No cookie → user not logged in or cookie not yet set. Skip validation.
   if (!cookieValue) {
-    next();
-    return;
+    throw new UnprocessableError('Missing CSRF cookie', 'CSRF_INVALID');
   }
 
   const headerValue = req.headers['x-csrf-token'] as string | undefined;
 
   if (!headerValue) {
-    throw new ForbiddenError('Missing CSRF token header');
+    throw new UnprocessableError('Missing CSRF token header', 'CSRF_INVALID');
   }
 
   // Constant-time comparison to prevent timing attacks
   if (!timingSafeEqual(cookieValue, headerValue)) {
-    throw new ForbiddenError('CSRF token mismatch');
+    throw new UnprocessableError('CSRF token mismatch', 'CSRF_INVALID');
   }
 
   next();
