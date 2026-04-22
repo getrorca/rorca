@@ -9,6 +9,8 @@ import { logger } from '../lib/logger';
 import { ValidationError, AuthError, ConflictError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { validateBody } from '../lib/validate';
+import { authRequired } from './auth';
+import { supabaseAdmin } from '../lib/supabase';
 
 const router = Router();
 
@@ -69,6 +71,61 @@ router.get('/me', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Users] Get me');
+  }
+});
+
+const deleteMeSchema = z.object({
+  confirmation: z.string().min(1),
+});
+
+/**
+ * @swagger
+ * /api/users/me:
+ *   delete:
+ *     tags: [Users]
+ *     summary: Delete current Supabase user account
+ *     operationId: deleteCurrentUser
+ *     description: Permanently deletes the authenticated user's account via the Supabase Admin API. Confirmation must match DELETE or the user's email.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [confirmation]
+ *             properties:
+ *               confirmation:
+ *                 type: string
+ *     responses:
+ *       200:
+ *         description: Account deleted
+ *       400:
+ *         description: Invalid confirmation
+ *       401:
+ *         description: Not authenticated
+ */
+router.delete('/me', authRequired, async (req: Request, res: Response) => {
+  try {
+    const authReq = req as Request & { user?: { id: string; email?: string | null; supabaseId?: string | null } };
+    const { confirmation } = validateBody(deleteMeSchema, req.body);
+
+    if (!authReq.user?.supabaseId || !authReq.user.email) {
+      throw new AuthError('Authentication required');
+    }
+
+    if (confirmation !== 'DELETE' && confirmation !== authReq.user.email) {
+      throw new ValidationError('Confirmation must match DELETE or your email address');
+    }
+
+    const { error } = await supabaseAdmin.auth.admin.deleteUser(authReq.user.supabaseId);
+
+    if (error) {
+      throw new ConflictError(error.message);
+    }
+
+    res.json({ message: 'Account deleted successfully' });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Users] Delete me');
   }
 });
 
