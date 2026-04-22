@@ -240,32 +240,36 @@ router.get('/', async (req: Request, res: Response) => {
     throw new ValidationError('workspaceId query param is required');
   }
 
-  const userClient = await withUserClient(req);
+  try {
+    const userClient = await withUserClient(req);
 
-  const { data, error } = await userClient
-    .from('api_key_vault')
-    .select('id, workspace_id, user_id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at')
-    .eq('workspace_id', workspaceId)
-    .order('created_at', { ascending: false });
+    const { data, error } = await userClient
+      .from('api_key_vault')
+      .select('id, workspace_id, user_id, provider, encrypted_key, label, base_url, spend_total_usd, last_used_at, created_at')
+      .eq('workspace_id', workspaceId)
+      .order('created_at', { ascending: false });
 
-  if (error) {
-    throw new AuthError(error.message);
+    if (error) {
+      throw new AuthError(error.message);
+    }
+
+    const rows = (data ?? []) as VaultRow[];
+
+    const keys = rows.map(row => ({
+      id: row.id,
+      provider: row.provider,
+      label: row.label,
+      base_url: row.base_url,
+      masked_key: maskKey(row.encrypted_key),
+      spend_total_usd: row.spend_total_usd,
+      last_used_at: row.last_used_at,
+      created_at: row.created_at,
+    }));
+
+    res.json({ keys });
+  } finally {
+    await supabaseAnon.auth.signOut();
   }
-
-  const rows = (data ?? []) as VaultRow[];
-
-  const keys = rows.map(row => ({
-    id: row.id,
-    provider: row.provider,
-    label: row.label,
-    base_url: row.base_url,
-    masked_key: maskKey(row.encrypted_key),
-    spend_total_usd: row.spend_total_usd,
-    last_used_at: row.last_used_at,
-    created_at: row.created_at,
-  }));
-
-  res.json({ keys });
 });
 
 /**
