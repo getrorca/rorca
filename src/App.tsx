@@ -34,7 +34,7 @@ import { TerminalDrawerProvider, useTerminalDrawer } from './contexts/TerminalDr
 // — Lazy-loaded pages (not part of initial bundle) —
 const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
 const GitHubCallbackPage = lazy(() => import('./pages/GitHubCallbackPage'));
-const LoginPage = lazy(() => import('./components/LoginPage'));
+const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
 const RegisterPage = lazy(() => import('./components/RegisterPage'));
 const ForgotPasswordPage = lazy(() => import('./components/ForgotPasswordPage'));
 const ResetPasswordPage = lazy(() => import('./components/ResetPasswordPage'));
@@ -67,6 +67,14 @@ function AuthGate() {
     if (location.pathname === '/reset-password') return 'reset-password';
     return 'login';
   });
+
+  if (location.pathname === '/auth/login') {
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <LoginPage />
+      </Suspense>
+    );
+  }
 
   // EQ-007: Public review page — rendered outside auth gate
   const reviewMatch = location.pathname.match(/^\/review\/([a-f0-9-]+)$/i);
@@ -224,6 +232,14 @@ function AppRoutes() {
 
   return (
     <Routes>
+      <Route
+        path="/auth/login"
+        element={
+          <Suspense fallback={<BoardSkeleton />}>
+            <LoginPage />
+          </Suspense>
+        }
+      />
       <Route element={<AppLayout />}>
         {/* ULT-006: Index route → Specs */}
         <Route index element={<Navigate to="/specs" replace />} />
