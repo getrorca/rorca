@@ -1,3 +1,4 @@
+```typescript
 import { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
 import { Routes, Route, Navigate, Outlet, useLocation, useNavigate as useRouterNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
@@ -35,7 +36,7 @@ import { TerminalDrawerProvider, useTerminalDrawer } from './contexts/TerminalDr
 const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
 const GitHubCallbackPage = lazy(() => import('./pages/GitHubCallbackPage'));
 const LoginPage = lazy(() => import('./pages/auth/LoginPage'));
-const RegisterPage = lazy(() => import('./components/RegisterPage'));
+const RegisterPage = lazy(() => import('./pages/auth/RegisterPage'));
 const ForgotPasswordPage = lazy(() => import('./components/ForgotPasswordPage'));
 const ResetPasswordPage = lazy(() => import('./components/ResetPasswordPage'));
 const OnboardingWizard = lazy(() => import('./components/OnboardingWizard'));
@@ -59,6 +60,20 @@ const TerminalPanel = lazy(() => import('./panels/TerminalPanel'));
 type SettingsTab = import('./panels/SettingsPanel').SettingsTab;
 
 type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
+
+function PublicOnlyRoute({ children }: { children: JSX.Element }) {
+  const { isAuthenticated, isLoading } = useAuth();
+
+  if (isLoading) {
+    return <BoardSkeleton />;
+  }
+
+  if (isAuthenticated) {
+    return <Navigate to="/" replace />;
+  }
+
+  return children;
+}
 
 function AuthGate() {
   const { isAuthenticated, isLoading } = useAuth();
@@ -91,6 +106,29 @@ function AuthGate() {
     return (
       <Suspense fallback={<BoardSkeleton />}>
         <GitHubCallbackPage />
+      </Suspense>
+    );
+  }
+
+  if (location.pathname === '/auth/register') {
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <PublicOnlyRoute>
+          <RegisterPage />
+        </PublicOnlyRoute>
+      </Suspense>
+    );
+  }
+
+  if (location.pathname === '/auth/login') {
+    return (
+      <Suspense fallback={<BoardSkeleton />}>
+        <PublicOnlyRoute>
+          <LoginPage
+            onSwitchToRegister={() => { window.history.replaceState(null, '', '/auth/register'); setAuthPage('register'); }}
+            onSwitchToForgotPassword={() => setAuthPage('forgot-password')}
+          />
+        </PublicOnlyRoute>
       </Suspense>
     );
   }
@@ -140,9 +178,7 @@ function AuthGate() {
     if (authPage === 'register') {
       return (
         <Suspense fallback={<BoardSkeleton />}>
-          <RegisterPage
-            onSwitchToLogin={() => setAuthPage('login')}
-          />
+          <RegisterPage />
         </Suspense>
       );
     }
@@ -642,3 +678,4 @@ function App() {
 }
 
 export default App;
+```
