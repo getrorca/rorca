@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:06:38.624Z",
+  "lastUpdatedAt": "2026-04-22T05:06:49.896Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -83,14 +83,14 @@
       "elapsedMs": 228779
     },
     {
-      "storyId": "MU-005",
-      "title": "Build Login page with Supabase email+password auth",
+      "storyId": "MU-006",
+      "title": "Build Register page with Supabase email+password signup",
       "status": "passed",
-      "startedAt": "2026-04-22T05:05:08.975Z",
-      "finishedAt": "2026-04-22T05:06:38.624Z",
+      "startedAt": "2026-04-22T05:05:07.974Z",
+      "finishedAt": "2026-04-22T05:06:49.896Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 89649
+      "elapsedMs": 101922
     }
   ],
   "failedStories": [
