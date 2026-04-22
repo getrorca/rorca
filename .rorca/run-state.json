@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:37:06.180Z",
+  "lastUpdatedAt": "2026-04-22T05:38:29.396Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -121,6 +121,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 93503
+    },
+    {
+      "storyId": "MU-011",
+      "title": "Enable RLS on pipeline_runs, story_results, and run_output_chunks",
+      "status": "passed",
+      "startedAt": "2026-04-22T05:37:21.486Z",
+      "finishedAt": "2026-04-22T05:38:29.396Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 67910
     }
   ],
   "failedStories": [
@@ -171,42 +181,6 @@
       "finishedAt": "2026-04-22T05:23:44.140Z",
       "agentType": "codex",
       "failReason": "blocked_by: MU-013"
-    },
-    {
-      "storyId": "MU-022",
-      "title": "MU-022",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:37:04.134Z",
-      "finishedAt": "2026-04-22T05:37:04.134Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-021"
-    },
-    {
-      "storyId": "MU-025",
-      "title": "MU-025",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:37:04.156Z",
-      "finishedAt": "2026-04-22T05:37:04.156Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-021"
-    },
-    {
-      "storyId": "MU-029",
-      "title": "MU-029",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:37:04.171Z",
-      "finishedAt": "2026-04-22T05:37:04.171Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-021, MU-022"
-    },
-    {
-      "storyId": "MU-022",
-      "title": "Update key backend routes to use RLS-scoped queries",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:37:06.179Z",
-      "finishedAt": "2026-04-22T05:37:06.179Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-021"
     }
   ],
   "currentStory": null,
