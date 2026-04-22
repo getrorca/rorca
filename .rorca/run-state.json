@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-15T21:18:16.957Z",
+  "lastUpdatedAt": "2026-04-22T06:16:39.435Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -61,6 +61,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 200940
+    },
+    {
+      "storyId": "CP-001",
+      "title": "Introduce failure classification with `transient` vs `terminal` categories",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:02:26.194Z",
+      "finishedAt": "2026-04-22T06:16:39.435Z",
+      "agentType": "claude",
+      "model": "claude-opus-4-6",
+      "elapsedMs": 853241
     }
   ],
   "failedStories": [

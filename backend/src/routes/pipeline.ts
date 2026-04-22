@@ -3929,12 +3929,13 @@ router.post('/story-result', async (req: Request, res: Response) => {
     const {
       runId, storyId, status, worktreePath, worktreeBranch,
       inputTokens, outputTokens, reasoningTokens, modelUsed, costUsd,
-      logPath, blockedBy, activeSkills,
+      logPath, blockedBy, activeSkills, failureReason, recoveryClass,
     } = req.body as {
       runId?: number; storyId?: string; status?: string;
       worktreePath?: string; worktreeBranch?: string;
       inputTokens?: number; outputTokens?: number; reasoningTokens?: number; modelUsed?: string; costUsd?: number;
       logPath?: string; blockedBy?: string[]; activeSkills?: string[];
+      failureReason?: string; recoveryClass?: string;
     };
 
     if (!runId || !storyId || !status) {
@@ -3947,14 +3948,16 @@ router.post('/story-result', async (req: Request, res: Response) => {
       return;
     }
 
-    await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by, active_skills)
-       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12)`, [runId, storyId, status,
+    await execute(`INSERT INTO story_results (run_id, story_id, status, finished_at, worktree_path, worktree_branch, input_tokens, output_tokens, model_used, cost_usd, log_path, blocked_by, active_skills, failure_reason, recovery_class)
+       VALUES ($1, $2, $3, NOW(), $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14)`, [runId, storyId, status,
       worktreePath ?? null, worktreeBranch ?? null,
       inputTokens ?? null, outputTokens ?? null,
       modelUsed ?? null, costUsd ?? null,
       logPath ?? null,
       blockedBy && blockedBy.length > 0 ? JSON.stringify(blockedBy) : null,
-      activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,]);
+      activeSkills && activeSkills.length > 0 ? JSON.stringify(activeSkills) : null,
+      failureReason ?? null,
+      recoveryClass ?? null,]);
 
     // Also record into token_usage analytics table if tokens are present
     if ((inputTokens && inputTokens > 0) || (outputTokens && outputTokens > 0)) {
