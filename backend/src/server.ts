@@ -149,35 +149,6 @@ app.use((_req, res, next) => {
 // PR-008: Structured request/response logging — method, url, statusCode, responseTime
 app.use(pinoHttp({ logger }));
 
-// PR-006: HTTP security headers via helmet
-// HTTPS_ENABLED=1 must be set when serving over TLS — enables HSTS and CSP upgrade-insecure-requests.
-// Without it, those headers force the browser to HTTPS and break plain-HTTP deployments.
-const httpsEnabled = process.env.HTTPS_ENABLED === '1';
-app.use(helmet({
-  contentSecurityPolicy: {
-    directives: {
-      defaultSrc: ["'self'"],
-      scriptSrc: ["'self'", "'unsafe-inline'"],  // unsafe-inline needed for dynamic script chunks
-      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
-      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
-      imgSrc: ["'self'", 'data:', 'https:'],
-      connectSrc: ["'self'", 'ws:', 'wss:', 'http:', 'https:'],  // allow API calls regardless of origin
-      upgradeInsecureRequests: httpsEnabled ? [] : null,
-    },
-  },
-  frameguard: { action: 'deny' },               // X-Frame-Options: DENY
-  noSniff: true,                                 // X-Content-Type-Options: nosniff
-  hsts: httpsEnabled ? { maxAge: 31536000 } : false,
-  xssFilter: false,                              // X-XSS-Protection: 0 (CSP is the real protection)
-  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
-  permittedCrossDomainPolicies: false,
-}));
-// Permissions-Policy: restrict camera, microphone, geolocation
-app.use((_req, res, next) => {
-  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
-  next();
-});
-
 // CORS configuration — explicit origin required; no wildcards in production.
 // CORS_ORIGIN defaults to http://localhost:5210 for development.
 // In production, set CORS_ORIGIN to https://rorca.app (or comma-separated list).
@@ -224,6 +195,33 @@ app.use(express.json({
     }
   },
 }));
+
+// PR-006: HTTP security headers via helmet
+// Apply after CORS/body parsers and before all route mounts.
+const httpsEnabled = process.env.NODE_ENV === 'production';
+app.use(helmet({
+  contentSecurityPolicy: {
+    directives: {
+      defaultSrc: ["'self'"],
+      scriptSrc: ["'self'", "'unsafe-inline'"],
+      styleSrc: ["'self'", "'unsafe-inline'", 'https://fonts.googleapis.com'],
+      fontSrc: ["'self'", 'https://fonts.gstatic.com', 'data:'],
+      imgSrc: ["'self'", 'data:', 'https:'],
+      connectSrc: ["'self'", 'ws:', 'wss:', 'http:', 'https:'],
+      upgradeInsecureRequests: httpsEnabled ? [] : null,
+    },
+  },
+  frameguard: { action: 'deny' },
+  noSniff: true,
+  hsts: httpsEnabled ? { maxAge: 31536000, includeSubDomains: true } : false,
+  xssFilter: false,
+  referrerPolicy: { policy: 'strict-origin-when-cross-origin' },
+  permittedCrossDomainPolicies: false,
+}));
+app.use((_req, res, next) => {
+  res.setHeader('Permissions-Policy', 'camera=(), microphone=(), geolocation=()');
+  next();
+});
 
 // V2-099: Query timing middleware — logs requests taking >100ms
 app.use(queryTimerMiddleware);
@@ -371,8 +369,7 @@ app.use(rateLimiter);
 
 // ─── CSRF protection (double-submit cookie pattern) ───
 // Validates X-CSRF-Token header against _csrf cookie on POST/PUT/PATCH/DELETE.
-// Exempt: webhooks, health, login, register, GitHub OAuth, billing webhook.
-// Skips validation when _csrf cookie is absent (user not logged in).
+// Exempt: webhooks, MCP, docs, health, CSRF bootstrap, login/register, billing webhook.
 app.use(csrfProtection);
 
 // ─── Protected routes ───
@@ -601,7 +598,6 @@ if (process.env.NODE_ENV !== 'test') {
   httpServer.on('headers', (headers, req) => {
     if (req.url?.startsWith('/ws/terminal')) {
       headers.push('X-Content-Type-Options: nosniff');
-      headers.push('X-Frame-Options: DENY');
     }
   });
 

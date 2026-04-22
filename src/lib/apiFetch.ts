@@ -52,6 +52,7 @@ async function getSupabaseAccessToken(): Promise<string | null> {
 
 /** Routes excluded from 401 interception to prevent infinite refresh loops */
 const AUTH_BYPASS_PATHS = ['/api/auth/login', '/api/auth/refresh'];
+const CSRF_TOKEN_PATH = '/api/auth/csrf-token';
 
 // ─── Parse error body into ApiError ───────────────────────────────────────────
 
@@ -100,18 +101,53 @@ async function fetchWithRetry(
   }
 }
 
-// ─── CSRF cookie reader ──────────────────────────────────────────────────────
+// ─── CSRF token cache ────────────────────────────────────────────────────────
 
 const STATE_CHANGING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
+let csrfToken: string | null = null;
+let csrfTokenPromise: Promise<string> | null = null;
 
-function getCsrfToken(): string | null {
-  const match = document.cookie.match(/(?:^|;\s*)_csrf=([^;]*)/);
-  return match ? match[1] : null;
+async function fetchCsrfToken(): Promise<string> {
+  const res = await fetchWithRetry(`${BASE_URL}${CSRF_TOKEN_PATH}`, {
+    method: 'GET',
+    credentials: 'include',
+  });
+
+  if (!res.ok) {
+    const errText = await res.text();
+    throw parseErrorBody(res.status, errText);
+  }
+
+  const data = await res.json() as { token?: string };
+  if (!data.token) {
+    throw new ApiError(500, 'CSRF_BOOTSTRAP_FAILED', 'Missing CSRF token in response');
+  }
+  csrfToken = data.token;
+  return data.token;
+}
+
+async function getCsrfToken(forceRefresh = false): Promise<string> {
+  if (!forceRefresh && csrfToken) return csrfToken;
+  if (!forceRefresh && csrfTokenPromise) return csrfTokenPromise;
+
+  csrfTokenPromise = fetchCsrfToken().finally(() => {
+    csrfTokenPromise = null;
+  });
+
+  return csrfTokenPromise;
 }
 
 // ─── Core fetch ───────────────────────────────────────────────────────────────
 
 export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: boolean }): Promise<T> {
+  return apiFetchInternal<T>(path, opts, false);
+}
+
+async function apiFetchInternal<T>(
+  path: string,
+  opts: RequestInit & { silent?: boolean } | undefined,
+  hasRetriedCsrf: boolean,
+): Promise<T> {
   const at = await getSupabaseAccessToken();
 
   const headers: Record<string, string> = {
@@ -124,10 +160,7 @@ export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: 
   // US-044: Attach CSRF token on state-changing requests (double-submit cookie pattern)
   const method = (opts?.method || 'GET').toUpperCase();
   if (STATE_CHANGING_METHODS.has(method)) {
-    const csrf = getCsrfToken();
-    if (csrf) {
-      headers['X-CSRF-Token'] = csrf;
-    }
+    headers['X-CSRF-Token'] = await getCsrfToken();
   }
 
   const res = await fetchWithRetry(`${BASE_URL}${path}`, { ...opts, headers, credentials: 'include' });
@@ -140,12 +173,25 @@ export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: 
 
   if (!res.ok) {
     const errText = await res.text();
+    const parsedError = parseErrorBody(res.status, errText);
+
+    if (
+      !hasRetriedCsrf &&
+      STATE_CHANGING_METHODS.has(method) &&
+      res.status === 422 &&
+      parsedError.code === 'CSRF_INVALID'
+    ) {
+      csrfToken = null;
+      await getCsrfToken(true);
+      return apiFetchInternal<T>(path, opts, true);
+    }
+
     // 429 is transient (rate limit window resets soon) — never show toast.
     // Also skip toast if caller passed silent:true (background polling).
     if (res.status !== 429 && !opts?.silent) {
       notifyError(`${res.status}: ${errText.slice(0, 200)}`);
     }
-    throw parseErrorBody(res.status, errText);
+    throw parsedError;
   }
   return res.json() as Promise<T>;
 }
