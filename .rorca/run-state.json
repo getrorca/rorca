@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:06:13.736Z",
+  "lastUpdatedAt": "2026-04-22T05:06:24.241Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -83,14 +83,14 @@
       "elapsedMs": 228779
     },
     {
-      "storyId": "MU-008",
-      "title": "Build AuthCallback page for OAuth redirect handling",
+      "storyId": "MU-018",
+      "title": "Configure PKCE flow and secure token storage",
       "status": "passed",
-      "startedAt": "2026-04-22T05:05:09.128Z",
-      "finishedAt": "2026-04-22T05:06:13.736Z",
+      "startedAt": "2026-04-22T05:05:08.089Z",
+      "finishedAt": "2026-04-22T05:06:24.241Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 64608
+      "elapsedMs": 76152
     }
   ],
   "failedStories": [
