@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:04:53.986Z",
+  "lastUpdatedAt": "2026-04-22T05:06:38.624Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -81,6 +81,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 228779
+    },
+    {
+      "storyId": "MU-005",
+      "title": "Build Login page with Supabase email+password auth",
+      "status": "passed",
+      "startedAt": "2026-04-22T05:05:08.975Z",
+      "finishedAt": "2026-04-22T05:06:38.624Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 89649
     }
   ],
   "failedStories": [
@@ -95,152 +105,7 @@
       "elapsedMs": 185862
     }
   ],
-  "skippedStories": [
-    {
-      "storyId": "MU-010",
-      "title": "MU-010",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.842Z",
-      "finishedAt": "2026-04-22T05:04:51.842Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-003"
-    },
-    {
-      "storyId": "MU-011",
-      "title": "MU-011",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.855Z",
-      "finishedAt": "2026-04-22T05:04:51.855Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-010"
-    },
-    {
-      "storyId": "MU-012",
-      "title": "MU-012",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.873Z",
-      "finishedAt": "2026-04-22T05:04:51.873Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-010"
-    },
-    {
-      "storyId": "MU-013",
-      "title": "MU-013",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.883Z",
-      "finishedAt": "2026-04-22T05:04:51.883Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-010"
-    },
-    {
-      "storyId": "MU-014",
-      "title": "MU-014",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.887Z",
-      "finishedAt": "2026-04-22T05:04:51.887Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-010"
-    },
-    {
-      "storyId": "MU-015",
-      "title": "MU-015",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.896Z",
-      "finishedAt": "2026-04-22T05:04:51.896Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-010"
-    },
-    {
-      "storyId": "MU-016",
-      "title": "MU-016",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.901Z",
-      "finishedAt": "2026-04-22T05:04:51.901Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-010, MU-011"
-    },
-    {
-      "storyId": "MU-021",
-      "title": "MU-021",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.910Z",
-      "finishedAt": "2026-04-22T05:04:51.910Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-003"
-    },
-    {
-      "storyId": "MU-022",
-      "title": "MU-022",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.914Z",
-      "finishedAt": "2026-04-22T05:04:51.914Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-021, MU-010"
-    },
-    {
-      "storyId": "MU-023",
-      "title": "MU-023",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.917Z",
-      "finishedAt": "2026-04-22T05:04:51.917Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-013"
-    },
-    {
-      "storyId": "MU-024",
-      "title": "MU-024",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.921Z",
-      "finishedAt": "2026-04-22T05:04:51.921Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-013"
-    },
-    {
-      "storyId": "MU-025",
-      "title": "MU-025",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.924Z",
-      "finishedAt": "2026-04-22T05:04:51.924Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-010, MU-011, MU-012, MU-013, MU-014, MU-015, MU-016, MU-021"
-    },
-    {
-      "storyId": "MU-028",
-      "title": "MU-028",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.932Z",
-      "finishedAt": "2026-04-22T05:04:51.932Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-003, MU-010"
-    },
-    {
-      "storyId": "MU-029",
-      "title": "MU-029",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:51.935Z",
-      "finishedAt": "2026-04-22T05:04:51.935Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-021, MU-022"
-    },
-    {
-      "storyId": "MU-010",
-      "title": "Enable RLS on workspaces table with membership-based access policies",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:53.941Z",
-      "finishedAt": "2026-04-22T05:04:53.941Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-003"
-    },
-    {
-      "storyId": "MU-021",
-      "title": "Create getUserClient() for RLS-scoped DB queries in Express routes",
-      "status": "skipped",
-      "startedAt": "2026-04-22T05:04:53.986Z",
-      "finishedAt": "2026-04-22T05:04:53.986Z",
-      "agentType": "codex",
-      "failReason": "blocked_by: MU-003"
-    }
-  ],
+  "skippedStories": [],
   "currentStory": null,
   "decisions": [],
   "resumedFromStory": null
