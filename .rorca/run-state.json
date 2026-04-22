@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:04:33.989Z",
+  "lastUpdatedAt": "2026-04-22T05:06:13.736Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -81,6 +81,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 228779
+    },
+    {
+      "storyId": "MU-008",
+      "title": "Build AuthCallback page for OAuth redirect handling",
+      "status": "passed",
+      "startedAt": "2026-04-22T05:05:09.128Z",
+      "finishedAt": "2026-04-22T05:06:13.736Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 64608
     }
   ],
   "failedStories": [
