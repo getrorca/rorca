@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T05:07:44.485Z",
+  "lastUpdatedAt": "2026-04-22T05:13:44.319Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -105,7 +105,71 @@
       "elapsedMs": 185862
     }
   ],
-  "skippedStories": [],
+  "skippedStories": [
+    {
+      "storyId": "MU-011",
+      "title": "Enable RLS on pipeline_runs, story_results, and run_output_chunks",
+      "status": "skipped",
+      "startedAt": "2026-04-22T05:13:44.207Z",
+      "finishedAt": "2026-04-22T05:13:44.207Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: MU-010"
+    },
+    {
+      "storyId": "MU-012",
+      "title": "Enable RLS on direction_layers and wal_events",
+      "status": "skipped",
+      "startedAt": "2026-04-22T05:13:44.248Z",
+      "finishedAt": "2026-04-22T05:13:44.248Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: MU-010"
+    },
+    {
+      "storyId": "MU-013",
+      "title": "Enable RLS on teams, team_members, and team_invites",
+      "status": "skipped",
+      "startedAt": "2026-04-22T05:13:44.274Z",
+      "finishedAt": "2026-04-22T05:13:44.274Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: MU-010"
+    },
+    {
+      "storyId": "MU-014",
+      "title": "Enable RLS on vault_keys and github_connections",
+      "status": "skipped",
+      "startedAt": "2026-04-22T05:13:44.286Z",
+      "finishedAt": "2026-04-22T05:13:44.286Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: MU-010"
+    },
+    {
+      "storyId": "MU-015",
+      "title": "Enable RLS on user_settings, billing, and notification tables",
+      "status": "skipped",
+      "startedAt": "2026-04-22T05:13:44.296Z",
+      "finishedAt": "2026-04-22T05:13:44.296Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: MU-010"
+    },
+    {
+      "storyId": "MU-028",
+      "title": "Create workspace_members table and auto-enroll workspace creator as owner",
+      "status": "skipped",
+      "startedAt": "2026-04-22T05:13:44.307Z",
+      "finishedAt": "2026-04-22T05:13:44.307Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: MU-003, MU-010"
+    },
+    {
+      "storyId": "MU-022",
+      "title": "Update key backend routes to use RLS-scoped queries",
+      "status": "skipped",
+      "startedAt": "2026-04-22T05:13:44.318Z",
+      "finishedAt": "2026-04-22T05:13:44.318Z",
+      "agentType": "codex",
+      "failReason": "blocked_by: MU-021, MU-010"
+    }
+  ],
   "currentStory": null,
   "decisions": [],
   "resumedFromStory": null
