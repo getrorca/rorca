@@ -6,6 +6,8 @@ node_modules
 dist
 .DS_Store
 *.log
+supabase/.branches/
+supabase/.temp/
 
 # OCT-024: node-pty native prebuilds (platform-specific, rebuilt on install)
 backend/node_modules/node-pty/prebuilds/

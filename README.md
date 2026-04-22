@@ -14,6 +14,16 @@ The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS 
 
 ---
 
+## Prerequisites
+
+- Node.js 18+
+- PostgreSQL 16
+- Supabase CLI for local auth/dev services: `brew install supabase/tap/supabase`
+
+For local GitHub OAuth testing with Supabase, configure your GitHub OAuth app callback URL as `http://127.0.0.1:54321/auth/v1/callback`.
+
+---
+
 ## Architecture overview
 
 ```
@@ -48,7 +58,7 @@ The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS 
 
 ---
 
-## Prerequisites
+## Development Requirements
 
 - **Node.js** 18 or later
 - **Git** (for workspace registration and git hydration)

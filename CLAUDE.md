@@ -10,6 +10,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Start everything (recommended)
 npm run dev                # Frontend :5210 + Backend :3030 + pg-boss Worker concurrently
 
+# Local Supabase (auth + Studio + local API)
+supabase start             # Start local Supabase services
+supabase stop              # Stop local Supabase services
+supabase db reset          # Reset ONLY Supabase-managed local DB/migrations
+
 # Frontend (root)
 npm run dev                # Vite dev server (:5210)
 npm run build              # TypeScript + Vite production build
@@ -37,6 +42,32 @@ lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev
 # Self-hosting (register rorca/ as its own workspace)
 npm run self-register
 ```
+
+## Local Supabase Development
+
+Rorca uses the Supabase CLI for local development services. The local project config lives in `supabase/config.toml:1`.
+
+- API URL: `http://127.0.0.1:54321`
+- DB port: `54322`
+- Studio port: `54323`
+- Frontend env example: `.env.local.example:1`
+- Backend env example: `backend/.env.example:1`
+
+Use these commands during development:
+
+```bash
+supabase start
+supabase stop
+supabase db reset
+```
+
+Important migration boundary:
+
+- `supabase db reset` only applies migrations from `supabase/migrations/`
+- Rorca app schema migrations live in `backend/src/db/pg-migrations/` and are applied by the app's PostgreSQL runner (`pg-index.ts`) on backend startup
+- Use the app migration flow for Rorca schema changes; do not expect `supabase db reset` to run `backend/src/db/pg-migrations/`
+
+For local GitHub OAuth with Supabase Auth, configure the GitHub OAuth app callback URL as `http://127.0.0.1:54321/auth/v1/callback`.
 
 ## Architecture
 
