@@ -61,7 +61,7 @@ type SettingsTab = import('./panels/SettingsPanel').SettingsTab;
 type AuthPage = 'login' | 'register' | 'forgot-password' | 'reset-password';
 
 function AuthGate() {
-  const { isAuthenticated, loading } = useAuth();
+  const { isAuthenticated, isLoading } = useAuth();
   const location = useLocation();
   const [authPage, setAuthPage] = useState<AuthPage>(() => {
     if (location.pathname === '/reset-password') return 'reset-password';
@@ -87,7 +87,7 @@ function AuthGate() {
     );
   }
 
-  if (loading) {
+  if (isLoading) {
     return (
       <NotificationProvider>
         <WorkspaceProvider>

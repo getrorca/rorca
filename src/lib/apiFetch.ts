@@ -1,3 +1,5 @@
+import { supabase } from './supabase';
+
 // When served by Express (rorca start), use same-origin (empty base URL).
 // In dev mode (Vite on :5210), use the backend URL on :3030.
 export const BASE_URL = import.meta.env.VITE_API_URL
@@ -40,66 +42,12 @@ export function dispatch401() {
   window.dispatchEvent(new CustomEvent('rorca:auth-expired'));
 }
 
-// ─── Token storage (in-memory — XSS safety) ──────────────────────────────────
+// ─── Supabase session access token lookup ─────────────────────────────────────
 
-let accessToken: string | null = null;
-let refreshToken: string | null = null;
-
-export function getAccessToken(): string | null {
-  return accessToken;
-}
-
-export function getRefreshToken(): string | null {
-  return refreshToken;
-}
-
-export function setTokens(newAccessToken: string, newRefreshToken: string): void {
-  accessToken = newAccessToken;
-  refreshToken = newRefreshToken;
-}
-
-export function clearTokens(): void {
-  accessToken = null;
-  refreshToken = null;
-}
-
-// Refresh result: 'ok' = tokens refreshed, 'auth_failed' = refresh rejected (401/403),
-// 'network_error' = fetch threw (offline/DNS), 'no_token' = no refresh token stored.
-type RefreshResult = 'ok' | 'auth_failed' | 'network_error' | 'no_token';
-
-let refreshPromise: Promise<RefreshResult> | null = null;
-
-async function attemptRefresh(): Promise<RefreshResult> {
-  const rt = getRefreshToken();
-  if (!rt) return 'no_token';
-
-  // Deduplicate concurrent refresh attempts
-  if (refreshPromise) return refreshPromise;
-
-  refreshPromise = (async () => {
-    try {
-      const res = await fetch(`${BASE_URL}/api/auth/refresh`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ refreshToken: rt }),
-      });
-      if (!res.ok) {
-        clearTokens();
-        return 'auth_failed' as const;
-      }
-      const data = await res.json();
-      setTokens(data.accessToken, data.refreshToken);
-      return 'ok' as const;
-    } catch (err) {
-      if (isNetworkError(err)) return 'network_error' as const;
-      clearTokens();
-      return 'auth_failed' as const;
-    } finally {
-      refreshPromise = null;
-    }
-  })();
-
-  return refreshPromise;
+async function getSupabaseAccessToken(): Promise<string | null> {
+  const { data, error } = await supabase.auth.getSession();
+  if (error) return null;
+  return data.session?.access_token ?? null;
 }
 
 /** Routes excluded from 401 interception to prevent infinite refresh loops */
@@ -164,7 +112,7 @@ function getCsrfToken(): string | null {
 // ─── Core fetch ───────────────────────────────────────────────────────────────
 
 export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: boolean }): Promise<T> {
-  const at = getAccessToken();
+  const at = await getSupabaseAccessToken();
 
   const headers: Record<string, string> = {
     ...(opts?.headers as Record<string, string> | undefined),
@@ -184,35 +132,7 @@ export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: 
 
   const res = await fetchWithRetry(`${BASE_URL}${path}`, { ...opts, headers, credentials: 'include' });
 
-  // On 401, attempt silent token refresh and retry — unless this is an auth route itself
   if (res.status === 401 && !AUTH_BYPASS_PATHS.some((p) => path.startsWith(p))) {
-    const result = await attemptRefresh();
-
-    if (result === 'ok') {
-      // Refresh succeeded — retry original request with new token
-      const newToken = getAccessToken();
-      const retryHeaders: Record<string, string> = {
-        ...(opts?.headers as Record<string, string> | undefined),
-      };
-      if (newToken) {
-        retryHeaders['Authorization'] = `Bearer ${newToken}`;
-      }
-      const retryRes = await fetch(`${BASE_URL}${path}`, { ...opts, headers: retryHeaders });
-      if (!retryRes.ok) {
-        const errText = await retryRes.text();
-        throw parseErrorBody(retryRes.status, errText);
-      }
-      return retryRes.json() as Promise<T>;
-    }
-
-    if (result === 'network_error') {
-      // Network issue during refresh — don't redirect, show connection toast
-      notifyError('Connection error — please check your network and try again');
-      throw new ApiError(401, 'NETWORK_ERROR', 'Connection error during token refresh');
-    }
-
-    // auth_failed or no_token — session is dead, redirect to login
-    clearTokens();
     dispatch401();
     notifyError('Session expired, please log in again');
     throw new ApiError(401, 'SESSION_EXPIRED', 'Session expired');
