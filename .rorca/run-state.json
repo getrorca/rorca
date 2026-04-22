@@ -2,7 +2,7 @@
   "specId": "rorca-opencode-terminal",
   "runId": 20260316000185,
   "startedAt": "2026-04-15T19:33:43.854Z",
-  "lastUpdatedAt": "2026-04-22T06:09:15.076Z",
+  "lastUpdatedAt": "2026-04-22T06:16:20.524Z",
   "completedStories": [
     {
       "storyId": "OCT-016",
@@ -161,6 +161,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 105777
+    },
+    {
+      "storyId": "MU-014",
+      "title": "Enable RLS on vault_keys and github_connections",
+      "status": "passed",
+      "startedAt": "2026-04-22T06:12:38.939Z",
+      "finishedAt": "2026-04-22T06:16:20.524Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 221585
     }
   ],
   "failedStories": [

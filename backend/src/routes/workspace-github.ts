@@ -5,10 +5,11 @@ import * as path from 'path';
 import { queryOne, execute, transaction } from '../db/index';
 import { encryptToken, decryptToken } from './auth';
 import { logger } from '../lib/logger';
-import { ConflictError, NotFoundError, ValidationError } from '../lib/errors';
+import { AuthError, ConflictError, NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { githubRateLimiter } from '../lib/github-rate-limiter';
 import { insertAuditEntry } from './integration-audit-log';
+import { supabaseAnon } from '../lib/supabase';
 
 const router = Router({ mergeParams: true });
 
@@ -23,6 +24,28 @@ interface GithubWebhookRow {
   auto_pr_enabled: number;
   auto_pr_target_branch: string;
   auto_pr_reviewers: string;
+}
+
+function getBearerToken(req: Request): string | null {
+  const header = req.headers.authorization;
+  if (!header || !header.startsWith('Bearer ')) {
+    return null;
+  }
+  return header.slice('Bearer '.length).trim() || null;
+}
+
+async function withUserClient(req: Request) {
+  const accessToken = getBearerToken(req);
+  if (!accessToken) {
+    throw new AuthError('Missing bearer token');
+  }
+
+  const { error } = await supabaseAnon.auth.setSession({ access_token: accessToken, refresh_token: '' });
+  if (error) {
+    throw new AuthError(`Invalid Supabase session: ${error.message}`);
+  }
+
+  return supabaseAnon;
 }
 
 interface GitHubConnectionRow {
@@ -65,15 +88,18 @@ router.get('/', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
 
-    const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
+    const userClient = await withUserClient(req);
+    const { data, error } = await userClient
+      .from('workspace_github_webhooks')
+      .select('*')
+      .eq('workspace_id', workspaceId)
+      .limit(1);
+
+    if (error) {
+      throw new AuthError(error.message);
     }
 
-    const row = await queryOne<GithubWebhookRow>(
-      'SELECT * FROM workspace_github_webhooks WHERE workspace_id = $1',
-      [workspaceId]
-    );
+    const row = data?.[0] as GithubWebhookRow | undefined;
 
     if (!row) {
       res.json({ connected: false });
@@ -149,22 +175,24 @@ router.get('/', async (req: Request, res: Response) => {
 router.post('/connect', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
+    const userClient = await withUserClient(req);
     const { repoOwner, repoName, githubToken } = req.body;
 
     if (!repoOwner || !repoName || !githubToken) {
       throw new ValidationError('Missing required fields: repoOwner, repoName, githubToken');
     }
 
-    const workspace = await queryOne<{ id: string }>('SELECT id FROM workspaces WHERE id = $1', [workspaceId]);
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
+    const { data: existingRows, error: existingError } = await userClient
+      .from('workspace_github_webhooks')
+      .select('workspace_id')
+      .eq('workspace_id', workspaceId)
+      .limit(1);
+
+    if (existingError) {
+      throw new AuthError(existingError.message);
     }
 
-    // Check if already connected
-    const existing = await queryOne<{ workspace_id: string }>(
-      'SELECT workspace_id FROM workspace_github_webhooks WHERE workspace_id = $1',
-      [workspaceId]
-    );
+    const existing = existingRows?.[0] as Pick<GithubWebhookRow, 'workspace_id'> | undefined;
     if (existing) {
       throw new ConflictError('GitHub already connected for this workspace. Disconnect first.');
     }
@@ -244,11 +272,19 @@ router.post('/connect', async (req: Request, res: Response) => {
     }
 
     // Store connection (always — even without webhook)
-    await execute(
-      `INSERT INTO workspace_github_webhooks (workspace_id, repo_owner, repo_name, webhook_id, encrypted_webhook_secret)
-       VALUES ($1, $2, $3, $4, $5)`,
-      [workspaceId, repoOwner, repoName, webhookId, webhookSecret ? encryptToken(webhookSecret) : '']
-    );
+    const { error: insertError } = await userClient
+      .from('workspace_github_webhooks')
+      .insert({
+        workspace_id: workspaceId,
+        repo_owner: repoOwner,
+        repo_name: repoName,
+        webhook_id: webhookId,
+        encrypted_webhook_secret: webhookSecret ? encryptToken(webhookSecret) : '',
+      });
+
+    if (insertError) {
+      throw new AuthError(insertError.message);
+    }
 
     await execute(
       "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_connected', $1, $2)",
@@ -321,16 +357,24 @@ router.post('/connect', async (req: Request, res: Response) => {
 router.post('/disconnect', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
+    const userClient = await withUserClient(req);
     const { githubToken } = req.body;
 
     if (!githubToken) {
       throw new ValidationError('Missing required field: githubToken');
     }
 
-    const row = await queryOne<GithubWebhookRow>(
-      'SELECT * FROM workspace_github_webhooks WHERE workspace_id = $1',
-      [workspaceId]
-    );
+    const { data: rows, error: selectError } = await userClient
+      .from('workspace_github_webhooks')
+      .select('*')
+      .eq('workspace_id', workspaceId)
+      .limit(1);
+
+    if (selectError) {
+      throw new AuthError(selectError.message);
+    }
+
+    const row = rows?.[0] as GithubWebhookRow | undefined;
 
     if (!row) {
       throw new NotFoundError('No GitHub connection found for this workspace');
@@ -364,7 +408,14 @@ router.post('/disconnect', async (req: Request, res: Response) => {
     }
 
     // Remove from DB
-    await execute('DELETE FROM workspace_github_webhooks WHERE workspace_id = $1', [workspaceId]);
+    const { error: deleteError } = await userClient
+      .from('workspace_github_webhooks')
+      .delete()
+      .eq('workspace_id', workspaceId);
+
+    if (deleteError) {
+      throw new AuthError(deleteError.message);
+    }
 
     await execute(
       "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_disconnected', $1, $2)",
@@ -836,30 +887,37 @@ router.delete('/', async (req: Request, res: Response) => {
 router.put('/auto-pr', async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
+    const userClient = await withUserClient(req);
     const { enabled, targetBranch, reviewers } = req.body;
 
-    const row = await queryOne<{ workspace_id: string }>(
-      'SELECT workspace_id FROM workspace_github_webhooks WHERE workspace_id = $1',
-      [workspaceId]
-    );
+    const { data: rows, error: selectError } = await userClient
+      .from('workspace_github_webhooks')
+      .select('workspace_id')
+      .eq('workspace_id', workspaceId)
+      .limit(1);
+
+    if (selectError) {
+      throw new AuthError(selectError.message);
+    }
+
+    const row = rows?.[0] as Pick<GithubWebhookRow, 'workspace_id'> | undefined;
 
     if (!row) {
       throw new NotFoundError('No GitHub connection found for this workspace');
     }
 
-    await execute(
-      `UPDATE workspace_github_webhooks
-       SET auto_pr_enabled = $1,
-           auto_pr_target_branch = $2,
-           auto_pr_reviewers = $3
-       WHERE workspace_id = $4`,
-      [
-        enabled ? 1 : 0,
-        targetBranch || 'main',
-        JSON.stringify(Array.isArray(reviewers) ? reviewers : []),
-        workspaceId,
-      ]
-    );
+    const { error: updateError } = await userClient
+      .from('workspace_github_webhooks')
+      .update({
+        auto_pr_enabled: !!enabled,
+        auto_pr_target_branch: targetBranch || 'main',
+        auto_pr_reviewers: Array.isArray(reviewers) ? reviewers : [],
+      })
+      .eq('workspace_id', workspaceId);
+
+    if (updateError) {
+      throw new AuthError(updateError.message);
+    }
 
     await execute(
       "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('github_auto_pr_updated', $1, $2)",
