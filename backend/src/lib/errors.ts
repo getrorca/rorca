@@ -55,6 +55,15 @@ export class ForbiddenError extends AppError {
   }
 }
 
+/** 403 — invalid CSRF token or missing CSRF proof */
+export class CsrfError extends AppError {
+  readonly statusCode = 403 as const;
+
+  constructor(message = 'CSRF validation failed') {
+    super(message, 'CSRF_INVALID');
+  }
+}
+
 /** 404 — resource not found */
 export class NotFoundError extends AppError {
   readonly statusCode = 404 as const;
