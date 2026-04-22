@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
 import { query, queryOne, execute } from '../db/index';
-import { JWT_SECRET } from './auth';
 import type { AuthUser } from './auth';
 import { chatComplete } from '../lib/llm-client';
 import type { ProviderType } from '../lib/llm-client';
@@ -11,8 +10,9 @@ import { handleRouteError } from '../lib/async-handler';
 
 const router = Router();
 
-// Derive a 32-byte AES-256 key from JWT_SECRET (same approach as auth.ts for GitHub tokens)
-const VAULT_KEY = crypto.createHash('sha256').update(JWT_SECRET).digest();
+// Derive a 32-byte AES-256 key from VAULT_KEY or legacy JWT_SECRET fallback.
+const VAULT_SECRET = process.env.VAULT_KEY || process.env.JWT_SECRET || 'rorca-dev-secret-change-in-production';
+const VAULT_KEY = crypto.createHash('sha256').update(VAULT_SECRET).digest();
 
 // Auth is intentionally bypassed globally — fall back to the first registered user
 async function getEffectiveUser(req: Request): Promise<AuthUser | null> {

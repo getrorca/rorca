@@ -250,32 +250,7 @@ function ProfileSection() {
             {user && !user.emailVerified && (
               <div className="mt-2 flex items-center gap-2 text-xs">
                 <Mail size={12} className="text-amber-500" />
-                <span className="text-amber-400">Email not verified</span>
-                <button
-                  onClick={async () => {
-                    if (!user.email) return;
-                    setVerificationSending(true);
-                    setVerificationError(null);
-                    setVerificationSent(false);
-                    try {
-                      await apiFetch('/api/auth/resend-verification', {
-                        method: 'POST',
-                        headers: { 'Content-Type': 'application/json' },
-                        body: JSON.stringify({ email: user.email }),
-                      });
-                      setVerificationSent(true);
-                    } catch (err: any) {
-                      setVerificationError(err.message || 'Failed to resend');
-                    } finally {
-                      setVerificationSending(false);
-                    }
-                  }}
-                  disabled={verificationSending || verificationSent}
-                  className="text-amber-400 hover:text-amber-300 underline underline-offset-2 disabled:opacity-50"
-                >
-                  {verificationSending ? 'Sending...' : verificationSent ? 'Sent!' : 'Resend verification'}
-                </button>
-                {verificationError && <span className="text-red-400">{verificationError}</span>}
+                <span className="text-amber-400">Email verification is managed by Supabase</span>
               </div>
             )}
             {user?.emailVerified && (

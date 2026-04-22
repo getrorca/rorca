@@ -1,7 +1,6 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import bcrypt from 'bcryptjs';
 import { z } from 'zod';
 import { query, queryOne, execute, transaction } from '../db/index';
 import { getEffectiveUser } from '../lib/get-user';
@@ -270,8 +269,8 @@ router.get('/workspace-members', async (req: Request, res: Response) => {
  *     summary: Permanently delete user account
  *     operationId: deleteMyAccount
  *     description: |
- *       Hard-deletes personal data (refresh_tokens, vault_keys, github_connections,
- *       notification_subscriptions, notification_history, billing, password_reset_tokens).
+ *       Hard-deletes personal data (vault_keys, github_connections,
+ *       notification_subscriptions, notification_history, billing).
  *       Anonymizes operational records (pipeline_runs.triggered_by → 'deleted_user',
  *       story_comments.user_id → NULL). Requires password confirmation.
  *     requestBody:
@@ -282,17 +281,16 @@ router.get('/workspace-members', async (req: Request, res: Response) => {
  *             type: object
  *             required: [password]
  *             properties:
- *               password: { type: string }
+ *               password: { type: string, description: "Deprecated legacy field; ignored under Supabase auth" }
  *     responses:
  *       200: { description: Account deleted }
  *       400: { description: Password confirmation required }
- *       401: { description: Incorrect password }
  *       409: { description: Active pipeline run prevents deletion }
  */
 const deleteBodySchema = z.object({ password: z.string().min(1, 'Password confirmation required') });
 
 router.delete('/me', validateBody(deleteBodySchema), async (req: Request, res: Response) => {
-  const { password } = req.body as z.infer<typeof deleteBodySchema>;
+  const { password: _password } = req.body as z.infer<typeof deleteBodySchema>;
 
   // Identify user — route-level auth since global auth is bypassed
   const effectiveUser = await getEffectiveUser(req);
@@ -301,19 +299,12 @@ router.delete('/me', validateBody(deleteBodySchema), async (req: Request, res: R
   }
   const userId = effectiveUser.id;
 
-  // Fetch password hash
-  const user = await queryOne<{ id: string; email: string; password_hash: string }>(
-    'SELECT id, email, password_hash FROM users WHERE id = $1',
+  const user = await queryOne<{ id: string; email: string }>(
+    'SELECT id, email FROM users WHERE id = $1',
     [userId],
   );
   if (!user) {
     throw new AuthError('Authentication required');
-  }
-
-  // Verify password via bcrypt
-  const passwordValid = await bcrypt.compare(password, user.password_hash);
-  if (!passwordValid) {
-    throw new AuthError('Incorrect password');
   }
 
   // Block deletion if any pipeline run is active for user's workspaces

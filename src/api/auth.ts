@@ -1,42 +1,8 @@
 import { apiFetch } from '../lib/apiFetch';
-import type { ApiOptions, AuthUser, LoginResponse } from './types';
-
-export function login(
-  email: string,
-  password: string,
-  opts?: ApiOptions,
-): Promise<LoginResponse> {
-  return apiFetch('/api/auth/login', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password }),
-    signal: opts?.signal,
-  });
-}
-
-export function register(
-  email: string,
-  password: string,
-  displayName: string,
-  opts?: ApiOptions,
-): Promise<LoginResponse> {
-  return apiFetch('/api/auth/register', {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ email, password, displayName }),
-    signal: opts?.signal,
-  });
-}
+import type { ApiOptions, AuthUser } from './types';
 
 export function getMe(opts?: ApiOptions): Promise<{ user: AuthUser }> {
   return apiFetch('/api/auth/me', { signal: opts?.signal });
-}
-
-export function logout(opts?: ApiOptions): Promise<{ message: string }> {
-  return apiFetch('/api/auth/logout', {
-    method: 'POST',
-    signal: opts?.signal,
-  });
 }
 
 export function getGitHubAuthUrl(opts?: ApiOptions): Promise<{ authUrl: string }> {
