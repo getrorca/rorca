@@ -27,6 +27,7 @@ export default function LoginPage() {
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [loading, setLoading] = useState(false);
+  const [githubLoading, setGitHubLoading] = useState(false);
   const [error, setError] = useState('');
 
   const returnTo = getSafeReturnTo(searchParams.get('returnTo'));
@@ -60,6 +61,33 @@ export default function LoginPage() {
     }
   }
 
+  async function handleGitHubSignIn() {
+    setError('');
+    setGitHubLoading(true);
+
+    try {
+      const redirectParams = new URLSearchParams();
+      if (returnTo !== '/') {
+        redirectParams.set('returnTo', returnTo);
+      }
+
+      const redirectSuffix = redirectParams.toString();
+      const redirectTo = `${window.location.origin}/auth/callback${redirectSuffix ? `?${redirectSuffix}` : ''}`;
+
+      const { error: oauthError } = await supabase.auth.signInWithOAuth({
+        provider: 'github',
+        options: { redirectTo },
+      });
+
+      if (oauthError) {
+        throw oauthError;
+      }
+    } catch (err) {
+      setError(err instanceof Error ? err.message : 'Unable to start GitHub sign-in');
+      setGitHubLoading(false);
+    }
+  }
+
   return (
     <div className="min-h-screen bg-gray-900 px-4 py-10 text-white">
       <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-sm items-center justify-center">
@@ -71,6 +99,26 @@ export default function LoginPage() {
           </div>
 
           <form onSubmit={handleSubmit} className="space-y-4 px-6 py-8">
+            <button
+              type="button"
+              onClick={handleGitHubSignIn}
+              disabled={loading || githubLoading}
+              aria-label="Continue with GitHub"
+              className="flex w-full items-center justify-center gap-2 rounded-lg border border-gray-700 bg-gray-800 px-4 py-2.5 text-sm font-medium text-white transition-colors hover:bg-gray-750 disabled:cursor-not-allowed disabled:opacity-60"
+            >
+              {githubLoading ? <Spinner /> : null}
+              <span>{githubLoading ? 'Redirecting to GitHub...' : 'Continue with GitHub'}</span>
+            </button>
+
+            <div className="relative">
+              <div className="absolute inset-0 flex items-center" aria-hidden="true">
+                <div className="w-full border-t border-gray-800" />
+              </div>
+              <div className="relative flex justify-center text-xs uppercase tracking-wide text-gray-500">
+                <span className="bg-gray-900 px-2">Or continue with email</span>
+              </div>
+            </div>
+
             <div>
               <label htmlFor="login-email" className="mb-1 block text-sm text-gray-300">
                 Email

@@ -12,7 +12,6 @@ const EXEMPT_PREFIXES = [
   '/api/auth/csrf-token',
   '/api/auth/login',
   '/api/auth/register',
-  '/api/auth/github',
   '/api/billing/webhook',
 ];
 
