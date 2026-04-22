@@ -229,7 +229,7 @@ export function rateLimiter(req: Request, res: Response, next: NextFunction): vo
   // Auth is globally bypassed in single-user mode — fall back to cached user
   // so all requests count as authenticated (100/min vs 20/min unauthenticated).
   if (!user && fallbackUserId) {
-    user = { id: fallbackUserId, email: '', displayName: '', role: 'user' } as AuthUser;
+    user = { id: fallbackUserId, email: '', supabaseId: fallbackUserId, role: 'user' } as AuthUser;
   }
   const tier = user ? 'authenticated' : 'unauthenticated';
 

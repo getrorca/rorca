@@ -8,6 +8,7 @@ import { query, queryOne, execute } from '../db/index';
 import { validateBody } from '../lib/validate';
 import { logger } from '../lib/logger';
 import { generateCsrfToken, setCsrfCookie } from '../lib/csrf';
+import { supabaseAdmin } from '../lib/supabase';
 
 const router = Router();
 
@@ -17,8 +18,9 @@ const REFRESH_TOKEN_EXPIRES_DAYS = 7;
 
 /** Synthetic session for local single-user mode (no real auth required) */
 export const LOCAL_ADMIN = {
-  id: 'local-admin',
+  id: '00000000-0000-0000-0000-000000000001',
   email: 'admin@rorca.local',
+  supabaseId: '00000000-0000-0000-0000-000000000001',
   displayName: 'Admin',
   role: 'admin' as const,
   plan: 'pro' as const,
@@ -95,9 +97,12 @@ interface EmailVerificationTokenRow {
 export interface AuthUser {
   id: string;
   email: string;
+  supabaseId: string;
   role: string;
   plan?: string;
 }
+
+const SUPABASE_AUTH_ENABLED = Boolean(process.env.SUPABASE_URL?.trim());
 
 interface GitHubConnectionRow {
   id: string;
@@ -1440,21 +1445,24 @@ export const INTERNAL_SERVICE_TOKEN = `rorca-internal-${process.pid}`;
 export async function authRequired(req: Request, res: Response, next: NextFunction): Promise<void> {
   // Allow internal scheduler calls (same-process only, token includes PID)
   if (req.headers['x-rorca-internal'] === INTERNAL_SERVICE_TOKEN) {
-    (req as Request & { user: AuthUser }).user = { id: 'system', email: 'scheduler@rorca.internal', role: 'admin' };
+    req.user = {
+      id: '00000000-0000-0000-0000-000000000000',
+      email: 'scheduler@rorca.internal',
+      supabaseId: '00000000-0000-0000-0000-000000000000',
+      role: 'admin',
+    };
     next();
     return;
   }
 
-  // PR-009: Support JWT via query param for SSE endpoints (EventSource cannot send headers)
-  const authHeader = req.headers.authorization;
-  const queryToken = typeof req.query.token === 'string' ? req.query.token : null;
-
-  let token: string | null = null;
-  if (authHeader && authHeader.startsWith('Bearer ')) {
-    token = authHeader.slice(7);
-  } else if (queryToken) {
-    token = queryToken;
+  if (!SUPABASE_AUTH_ENABLED) {
+    req.user = LOCAL_ADMIN;
+    next();
+    return;
   }
+
+  const authHeader = req.headers.authorization;
+  const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
 
   if (!token) {
     res.status(401).json({ error: 'Authentication required' });
@@ -1462,30 +1470,21 @@ export async function authRequired(req: Request, res: Response, next: NextFuncti
   }
 
   try {
-    const decoded = jwt.verify(token, JWT_SECRET) as { sub: string; email: string };
-
-    // Look up user to get role
-    const user = await queryOne<Pick<UserRow, 'id' | 'email' | 'role'>>(
-      'SELECT id, email, role FROM users WHERE id = $1',
-      [decoded.sub]
-    );
-
-    if (!user) {
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    const user = data.user;
+    if (error || !user?.id || !user.email) {
       res.status(401).json({ error: 'Invalid token' });
       return;
     }
 
-    (req as Request & { user: AuthUser }).user = {
+    req.user = {
       id: user.id,
       email: user.email,
-      role: user.role,
+      supabaseId: user.id,
+      role: 'admin',
     };
     next();
-  } catch (err) {
-    if (err instanceof jwt.TokenExpiredError) {
-      res.status(401).json({ error: 'Invalid token' });
-      return;
-    }
+  } catch {
     res.status(401).json({ error: 'Invalid token' });
   }
 }
@@ -1512,7 +1511,7 @@ const ROLE_HIERARCHY: Record<TeamRole, number> = {
  */
 export function requireRole(minRole: TeamRole) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
-    const user = (req as Request & { user: AuthUser }).user;
+    const user = req.user;
     if (!user) {
       res.status(401).json({ error: 'Authentication required' });
       return;
