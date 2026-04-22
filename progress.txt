@@ -3,9 +3,9 @@
 Spec: rorca-opencode-terminal
 Run ID: 20260316000185
 Started: 2026-04-15T19:33:43.854Z
-Last Updated: 2026-04-22T05:26:09.193Z
+Last Updated: 2026-04-22T05:26:24.135Z
 
-## Completed Stories (11)
+## Completed Stories (10)
 - OCT-016: Terminal panel — copy/paste, font sizing, fullscreen toggle — DONE (claude, 212s)
 - OCT-021: WebSocket security — Origin validation, localhost binding, session token — DONE (claude, 341s)
 - OCT-036: Embedded terminal drawer — Cmd+J toggle, persistent bottom panel, drag-resize, fullscreen, mobile FAB — DONE (codex, gpt-5.4, 160s)
@@ -16,7 +16,14 @@ Last Updated: 2026-04-22T05:26:09.193Z
 - MU-004: Replace AuthContext with Supabase session management — DONE (codex, gpt-5.4, 229s)
 - MU-019: Add security headers and CSRF protection — DONE (codex, gpt-5.4, 157s)
 - MU-017: Replace GitHub OAuth sign-in with Supabase GitHub provider — DONE (codex, gpt-5.4, 296s)
-- MU-026: Build User Profile page with avatar and account management — DONE (codex, gpt-5.4, 140s)
 
 ## Failed Stories (1)
 - OCT-015: OpenCode not installed — graceful error state in terminal panel — FAILED (timeout)
+
+## Skipped Stories (6)
+- MU-016: Enable RLS on all remaining spec and operational tables — SKIPPED (blocked_by: MU-010, MU-011)
+- MU-029: Security audit: IDOR, RLS bypass, JWT manipulation, CSRF, XSS — SKIPPED (blocked_by: MU-021, MU-022)
+- MU-023: Build Team Management UI in Settings — SKIPPED (blocked_by: MU-013)
+- MU-024: Build Team Invite acceptance page — SKIPPED (blocked_by: MU-013)
+- MU-025: Write RLS policy integration tests — SKIPPED (blocked_by: MU-010, MU-011, MU-012, MU-013, MU-014, MU-015, MU-016, MU-021)
+- MU-030: Write E2E Playwright tests for complete auth flow — SKIPPED (blocked_by: MU-024, MU-027)
