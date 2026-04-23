@@ -15,7 +15,59 @@ import { isInitializeRequest } from '@modelcontextprotocol/sdk/types.js';
 import { randomUUID } from 'node:crypto';
 import { z } from 'zod';
 import type { Request, Response } from 'express';
+import * as fs from 'node:fs';
+import * as os from 'node:os';
+import * as path from 'node:path';
 import { logger } from './logger';
+
+// Claude Code truncates tool results over ~25k tokens (~100k chars).
+// When a response is too large, we spill it to disk and return a summary
+// so the agent can choose to Grep/Read targeted slices instead of loading the whole thing.
+const MAX_INLINE_CHARS = 80_000;
+const SPILL_DIR = path.join(os.tmpdir(), 'rorca-mcp-results');
+
+function spillLargeResult(toolName: string, body: unknown, fullText: string): string {
+  try {
+    fs.mkdirSync(SPILL_DIR, { recursive: true });
+  } catch { /* best effort */ }
+  const fname = `${toolName}-${Date.now()}-${randomUUID().slice(0, 8)}.json`;
+  const filePath = path.join(SPILL_DIR, fname);
+  try {
+    fs.writeFileSync(filePath, fullText, 'utf8');
+  } catch (err) {
+    logger.warn(`[MCP-HTTP] Failed to spill large result: ${err instanceof Error ? err.message : err}`);
+  }
+
+  // Build a compact summary the agent can reason about without reading the file.
+  const summary: Record<string, unknown> = {
+    _truncated: true,
+    _reason: `Response is ${fullText.length.toLocaleString()} chars — exceeds ${MAX_INLINE_CHARS.toLocaleString()} char inline limit.`,
+    _fullResultAt: filePath,
+    _hint: 'Use Read or Grep on _fullResultAt to retrieve specific fields. Do NOT read the whole file.',
+  };
+
+  if (body && typeof body === 'object' && !Array.isArray(body)) {
+    const obj = body as Record<string, unknown>;
+    // Surface commonly-useful lightweight fields so the caller rarely needs to read the file
+    const lightKeys = ['ok', 'id', 'slug', 'title', 'status', 'specId', 'runId', 'model', 'usage', 'message', 'note', 'error', 'code', 'count', 'total'];
+    for (const k of lightKeys) {
+      if (k in obj) summary[k] = obj[k];
+    }
+    // If there's an items/stories/results array, report length + first-item keys (not content)
+    for (const arrKey of ['items', 'results', 'userStories', 'stories', 'data']) {
+      const v = obj[arrKey];
+      if (Array.isArray(v)) {
+        const first = v[0];
+        summary[`${arrKey}_length`] = v.length;
+        if (first && typeof first === 'object') {
+          summary[`${arrKey}_shape`] = Object.keys(first as Record<string, unknown>).slice(0, 20);
+        }
+      }
+    }
+  }
+
+  return JSON.stringify(summary, null, 2);
+}
 
 const RORCA_API = process.env.RORCA_API_URL || 'http://localhost:3030';
 
@@ -266,9 +318,14 @@ async function executeApiCall(
     url += `?${new URLSearchParams(qsEntries).toString()}`;
   }
 
-  // Long-running endpoints (spec generation, enrichment, hydration, embedding, skills matching) need extended timeouts
-  const SLOW_PATHS = ['/api/specs/generate', '/api/specs/generate-batch', '/api/workspaces/', '/api/admin/embed-all', '/enrich', '/match-skills', '/suggest-skills', '/add-stories', '/knowledge-graph'];
-  const isSlowPath = SLOW_PATHS.some(p => resolvedPath.startsWith(p));
+  // Long-running endpoints (spec generation, enrichment, hydration, embedding, skills matching) need extended timeouts.
+  // Prefix matches for top-level paths, substring matches for verbs embedded in specId-parameterized routes
+  // (e.g. /api/specs/:specId/enrich, /api/specs/:specId/suggest-skills).
+  const SLOW_PREFIXES = ['/api/specs/generate', '/api/specs/generate-batch', '/api/workspaces/', '/api/admin/embed-all'];
+  const SLOW_SUFFIXES = ['/enrich', '/match-skills', '/suggest-skills', '/add-stories', '/knowledge-graph', '/hydrate', '/scan-direction', '/echolocate', '/discover', '/import', '/detect-dependencies', '/assign-models', '/suggest-models'];
+  const isSlowPath =
+    SLOW_PREFIXES.some(p => resolvedPath.startsWith(p)) ||
+    SLOW_SUFFIXES.some(s => resolvedPath.endsWith(s) || resolvedPath.includes(`${s}?`) || resolvedPath.includes(`${s}/`));
   const timeoutMs = isSlowPath ? 10 * 60 * 1000 : 30_000; // 10 min for slow (claude --print spec gen can take 5-8min), 30s default
   const controller = new AbortController();
   const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
@@ -336,15 +393,21 @@ export function createMcpHttpServer(spec: OpenAPISpec): McpServer {
 
           if (status >= 400) {
             const errorText = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+            const safeError = errorText.length > MAX_INLINE_CHARS
+              ? spillLargeResult(toolName, body, errorText)
+              : errorText;
             return {
-              content: [{ type: 'text' as const, text: `Error (${status}): ${errorText}` }],
+              content: [{ type: 'text' as const, text: `Error (${status}): ${safeError}` }],
               isError: true,
             };
           }
 
           const resultText = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+          const safeResult = resultText.length > MAX_INLINE_CHARS
+            ? spillLargeResult(toolName, body, resultText)
+            : resultText;
           return {
-            content: [{ type: 'text' as const, text: resultText }],
+            content: [{ type: 'text' as const, text: safeResult }],
           };
         } catch (err: unknown) {
           const isAbort = err instanceof Error && err.name === 'AbortError';
