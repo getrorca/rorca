@@ -55,6 +55,13 @@ export function csrfProtection(req: Request, _res: Response, next: NextFunction)
     }
   }
 
+  // Server-to-server requests (MCP, CLI tools, curl) have no Origin header.
+  // Browser CSRF attacks always send Origin. Exempt non-browser callers.
+  if (!req.headers.origin) {
+    next();
+    return;
+  }
+
   // Read the _csrf cookie from the Cookie header (no cookie-parser dependency needed)
   const cookieValue = parseCsrfCookie(req.headers.cookie || '');
 
