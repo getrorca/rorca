@@ -1,5 +1,6 @@
 import type { Request, Response, NextFunction } from 'express';
-import crypto from 'crypto';
+import crypto, { randomUUID } from 'crypto';
+import jwt from 'jsonwebtoken';
 import { supabaseAdmin } from '../lib/supabase';
 
 export interface AuthUser {
@@ -10,8 +11,15 @@ export interface AuthUser {
   plan?: string;
 }
 
+interface AppUserRow {
+  id: string;
+  email: string;
+  role: string;
+  plan: string | null;
+}
+
 export const LOCAL_ADMIN = {
-  id: '00000000-0000-0000-0000-000000000001',
+  id: 'local-admin',
   email: 'admin@rorca.local',
   supabaseId: '00000000-0000-0000-0000-000000000001',
   displayName: 'Admin',
@@ -45,6 +53,124 @@ export function decryptToken(encryptedStr: string): string {
 }
 
 export const INTERNAL_SERVICE_TOKEN = `rorca-internal-${process.pid}`;
+
+function getDeveloperSuperuserEmails(): Set<string> {
+  const configured = (process.env.RORCA_SUPERUSER_EMAILS || process.env.DEV_SUPERUSER_EMAILS || '')
+    .split(',')
+    .map((value) => value.trim().toLowerCase())
+    .filter(Boolean);
+
+  return new Set(['admin@rorca.local', ...configured]);
+}
+
+function isDeveloperSuperuserEmail(email: string): boolean {
+  return getDeveloperSuperuserEmails().has(email.trim().toLowerCase());
+}
+
+async function getOrCreateAppUser(authId: string, email: string, emailVerifiedAt?: string | null): Promise<AppUserRow> {
+  const { queryOne, execute } = await import('../db/index');
+
+  let appUser = await queryOne<AppUserRow>(
+    'SELECT id, email, role, plan FROM users WHERE auth_id = $1',
+    [authId],
+  );
+
+  const existingDeveloperAdmin = await queryOne<{ id: string }>(
+    "SELECT id FROM users WHERE role = 'admin' AND email <> 'admin@rorca.local' LIMIT 1"
+  );
+  const shouldBeAdmin = isDeveloperSuperuserEmail(email)
+    || (process.env.NODE_ENV !== 'production' && !existingDeveloperAdmin);
+
+  if (!appUser) {
+    const newId = shouldBeAdmin ? `dev-admin-${authId}` : randomUUID();
+    const displayName = email.split('@')[0] || 'User';
+    const role = shouldBeAdmin ? 'admin' : 'user';
+    const plan = shouldBeAdmin ? 'pro' : 'free';
+
+    await execute(
+      `INSERT INTO users (id, email, display_name, role, plan, email_verified_at, auth_id)
+       VALUES ($1, $2, $3, $4, $5, $6, $7::uuid)`,
+      [newId, email, displayName, role, plan, emailVerifiedAt ?? null, authId],
+    );
+
+    appUser = await queryOne<AppUserRow>(
+      'SELECT id, email, role, plan FROM users WHERE id = $1',
+      [newId],
+    );
+  } else if (shouldBeAdmin && appUser.role !== 'admin') {
+    await execute(
+      `UPDATE users
+       SET role = 'admin', plan = CASE WHEN plan = 'free' THEN 'pro' ELSE plan END, updated_at = NOW()
+       WHERE id = $1`,
+      [appUser.id],
+    );
+
+    appUser = await queryOne<AppUserRow>(
+      'SELECT id, email, role, plan FROM users WHERE id = $1',
+      [appUser.id],
+    );
+  }
+
+  if (!appUser) {
+    throw new Error('Failed to resolve application user');
+  }
+
+  return appUser;
+}
+
+export function isSuperUser(user: { role?: string } | null | undefined): boolean {
+  return user?.role === 'admin';
+}
+
+async function resolveAuthUserFromLocalJwt(token: string): Promise<AuthUser | null> {
+  try {
+    const payload = jwt.verify(token, JWT_SECRET) as jwt.JwtPayload;
+    const authId = typeof payload.sub === 'string' ? payload.sub : null;
+    const email = typeof payload.email === 'string' ? payload.email : null;
+
+    if (!authId || !email) {
+      return null;
+    }
+
+    const appUser = await getOrCreateAppUser(authId, email, null);
+    return {
+      id: appUser.id,
+      email,
+      supabaseId: authId,
+      role: appUser.role,
+      plan: appUser.plan ?? undefined,
+    };
+  } catch {
+    return null;
+  }
+}
+
+export async function resolveAuthUserFromToken(token: string): Promise<AuthUser | null> {
+  if (!token) {
+    return null;
+  }
+
+  if (SUPABASE_AUTH_ENABLED) {
+    const { data, error } = await supabaseAdmin.auth.getUser(token);
+    const user = data.user;
+    if (!error && user?.id && user.email) {
+      const appUser = await getOrCreateAppUser(user.id, user.email, user.email_confirmed_at ?? null);
+      return {
+        id: appUser.id,
+        email: user.email,
+        supabaseId: user.id,
+        role: appUser.role,
+        plan: appUser.plan ?? undefined,
+      };
+    }
+  }
+
+  if (process.env.NODE_ENV === 'test') {
+    return resolveAuthUserFromLocalJwt(token);
+  }
+
+  return null;
+}
 
 export async function authRequired(req: Request, res: Response, next: NextFunction): Promise<void> {
   if (req.headers['x-rorca-internal'] === INTERNAL_SERVICE_TOKEN) {
@@ -81,19 +207,13 @@ export async function authRequired(req: Request, res: Response, next: NextFuncti
   }
 
   try {
-    const { data, error } = await supabaseAdmin.auth.getUser(token);
-    const user = data.user;
-    if (error || !user?.id || !user.email) {
+    const resolvedUser = await resolveAuthUserFromToken(token);
+    if (!resolvedUser) {
       res.status(401).json({ error: 'Invalid token' });
       return;
     }
 
-    req.user = {
-      id: user.id,
-      email: user.email,
-      supabaseId: user.id,
-      role: 'admin',
-    };
+    req.user = resolvedUser;
     next();
   } catch {
     res.status(401).json({ error: 'Invalid token' });
@@ -103,6 +223,7 @@ export async function authRequired(req: Request, res: Response, next: NextFuncti
 export const requireAuth = authRequired;
 
 export type TeamRole = 'admin' | 'editor' | 'viewer';
+export type WorkspaceRole = 'owner' | 'admin' | 'member';
 
 const ROLE_HIERARCHY: Record<TeamRole, number> = {
   viewer: 0,
@@ -110,11 +231,83 @@ const ROLE_HIERARCHY: Record<TeamRole, number> = {
   admin: 2,
 };
 
+const WORKSPACE_ROLE_HIERARCHY: Record<WorkspaceRole, number> = {
+  member: 0,
+  admin: 1,
+  owner: 2,
+};
+
+function resolveWorkspaceId(req: Request): string | null {
+  const params = req.params as Record<string, string | undefined>;
+  const body = (req.body ?? {}) as Record<string, unknown>;
+  const query = req.query as Record<string, string | undefined>;
+
+  const candidate =
+    params.workspaceId ||
+    params.id ||
+    (typeof query.workspaceId === 'string' ? query.workspaceId : undefined) ||
+    (typeof body.workspaceId === 'string' ? body.workspaceId : undefined);
+
+  return candidate ? String(candidate) : null;
+}
+
+export function requireWorkspaceRole(minRole: WorkspaceRole) {
+  return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
+    const user = req.user;
+    if (!user) {
+      res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+
+    if (isSuperUser(user)) {
+      next();
+      return;
+    }
+
+    const workspaceId = resolveWorkspaceId(req);
+    if (!workspaceId) {
+      res.status(400).json({ error: 'Workspace ID is required' });
+      return;
+    }
+
+    try {
+      const { queryOne } = await import('../db/index');
+      const membership = await queryOne<{ role: WorkspaceRole }>(
+        'SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_auth_id = $2',
+        [workspaceId, user.supabaseId],
+      );
+
+      if (!membership) {
+        res.status(403).json({ error: 'Forbidden' });
+        return;
+      }
+
+      if (WORKSPACE_ROLE_HIERARCHY[membership.role] < WORKSPACE_ROLE_HIERARCHY[minRole]) {
+        res.status(403).json({ error: 'Forbidden' });
+        return;
+      }
+
+      next();
+    } catch {
+      res.status(500).json({ error: 'Failed to verify workspace permissions' });
+    }
+  };
+}
+
+export const requireWorkspaceMember = () => requireWorkspaceRole('member');
+export const requireWorkspaceAdmin = () => requireWorkspaceRole('admin');
+export const requireWorkspaceOwner = () => requireWorkspaceRole('owner');
+
 export function requireRole(minRole: TeamRole) {
   return async (req: Request, res: Response, next: NextFunction): Promise<void> => {
     const user = req.user;
     if (!user) {
       res.status(401).json({ error: 'Authentication required' });
+      return;
+    }
+
+    if (isSuperUser(user) || user.id === 'system') {
+      next();
       return;
     }
 
@@ -126,11 +319,6 @@ export function requireRole(minRole: TeamRole) {
 
     if (!teamId) {
       res.status(400).json({ error: 'Team ID is required' });
-      return;
-    }
-
-    if (user.id === 'system') {
-      next();
       return;
     }
 

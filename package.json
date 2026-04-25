@@ -7,10 +7,13 @@
     "rorca": "./bin/rorca.js"
   },
   "scripts": {
-    "dev": "concurrently --names frontend,server,worker \"npm run dev:frontend\" \"npm run dev:server\" \"npm run dev:worker\"",
+    "dev": "node scripts/dev-smart.mjs",
+    "dev:full": "concurrently --names frontend,server,worker \"npm run dev:frontend\" \"npm run dev:server\" \"npm run dev:worker:optional\"",
     "dev:frontend": "vite",
+    "dev:frontend-only": "vite",
     "dev:server": "cd backend && npx tsx src/server.ts",
     "dev:worker": "cd backend && npx tsx src/worker.ts",
+    "dev:worker:optional": "cd backend && RORCA_OPTIONAL_WORKER=true npx tsx src/worker.ts",
     "build": "vite build && cd backend && tsc && cd .. && npx tsc --project bin/tsconfig.json",
     "typecheck": "tsc --noEmit && cd backend && tsc --noEmit",
     "lint": "npx eslint src/",

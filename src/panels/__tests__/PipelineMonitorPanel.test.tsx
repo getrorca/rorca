@@ -1,6 +1,23 @@
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
 import { renderWithProviders, createMockWorkspace, createMockRun } from '../../test/helpers';
+
+vi.mock('react-router-dom', async () => {
+  const actual = await vi.importActual<typeof import('react-router-dom')>('react-router-dom');
+  return {
+    ...actual,
+    useNavigate: vi.fn(() => vi.fn()),
+  };
+});
+
+vi.mock('../../routes', async () => {
+  const actual = await vi.importActual<typeof import('../../routes')>('../../routes');
+  return {
+    ...actual,
+    useAppNavigate: vi.fn(() => ({ navigateTo: vi.fn() })),
+  };
+});
+
 import PipelineMonitorPanel from '../PipelineMonitorPanel';
 
 // ─── Mock apiFetch ────────────────────────────────────────────────────────────
@@ -24,6 +41,17 @@ const mockApiFetch = vi.mocked(apiFetch);
 
 const WORKSPACE_ROW = createMockWorkspace({ id: 'ws-1', label: 'Test Repo', path: '/tmp/test' });
 const WORKSPACE_RESPONSE = { items: [WORKSPACE_ROW], total: 1, hasMore: false };
+const HEALTH_RESPONSE = {
+  workerActive: true,
+  queueHealth: 'healthy' as const,
+  queueStats: {
+    pending: 0,
+    active: 0,
+    failed: 0,
+    failedInLast24h: 0,
+    oldestPendingAgeSeconds: null,
+  },
+};
 
 const RUNNING_RUN = createMockRun({
   id: 10,
@@ -76,6 +104,7 @@ beforeEach(() => {
 
   mockApiFetch.mockImplementation(async (path: string) => {
     if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+    if (path === '/api/pipeline/worker/health') return HEALTH_RESPONSE;
     if (path.includes('/api/pipeline/runs')) return { items: [], total: 0, hasMore: false };
     if (path.includes('/api/run-queue')) return { items: [] };
     return { items: [], total: 0, hasMore: false };
@@ -98,6 +127,7 @@ describe('PipelineMonitorPanel', () => {
 
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return { items: [], total: 0, hasMore: false };
+      if (path === '/api/pipeline/worker/health') return HEALTH_RESPONSE;
       return { items: [], total: 0, hasMore: false };
     });
 
@@ -111,6 +141,7 @@ describe('PipelineMonitorPanel', () => {
   it('shows empty state when no runs exist', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path === '/api/pipeline/worker/health') return HEALTH_RESPONSE;
       if (path.includes('/api/pipeline/runs')) return { items: [], total: 0, hasMore: false };
       if (path.includes('/api/run-queue')) return { items: [] };
       return { items: [], total: 0, hasMore: false };
@@ -132,6 +163,7 @@ describe('PipelineMonitorPanel', () => {
   it('displays active run in the run list', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path === '/api/pipeline/worker/health') return HEALTH_RESPONSE;
       if (path.includes('/api/pipeline/runs') && !path.includes('/api/pipeline/runs/')) {
         return { items: [RUNNING_RUN], total: 1, hasMore: false };
       }
@@ -157,6 +189,7 @@ describe('PipelineMonitorPanel', () => {
   it('displays completed run in the run list', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path === '/api/pipeline/worker/health') return HEALTH_RESPONSE;
       if (path.includes('/api/pipeline/runs') && !path.includes('/api/pipeline/runs/')) {
         return { items: [COMPLETED_RUN], total: 1, hasMore: false };
       }
@@ -182,6 +215,7 @@ describe('PipelineMonitorPanel', () => {
   it('displays story list with status badges when run is selected', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path === '/api/pipeline/worker/health') return HEALTH_RESPONSE;
       if (path.includes('/api/pipeline/runs') && !path.includes('/api/pipeline/runs/')) {
         return { items: [COMPLETED_RUN], total: 1, hasMore: false };
       }
@@ -213,6 +247,7 @@ describe('PipelineMonitorPanel', () => {
   it('handles API error gracefully', async () => {
     mockApiFetch.mockImplementation(async (path: string) => {
       if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path === '/api/pipeline/worker/health') return HEALTH_RESPONSE;
       if (path.includes('/api/pipeline/runs')) throw new Error('Server error');
       return { items: [], total: 0, hasMore: false };
     });

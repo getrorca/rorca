@@ -65,11 +65,22 @@ BEGIN
 END;
 $$ LANGUAGE plpgsql;
 
--- Add unique constraint for upsert target (if not exists)
+-- Add unique constraint for upsert target (if not exists).
+-- Scope the check to the rorca.spec_search_index table specifically: some older/dev
+-- databases also contain a legacy public.spec_search_index table, and checking only
+-- the constraint name can falsely skip creating the constraint on the real target
+-- table used by this migration.
 DO $$
+DECLARE
+  v_target regclass;
 BEGIN
-  IF NOT EXISTS (
-    SELECT 1 FROM pg_constraint WHERE conname = 'uq_spec_search_slug_workspace'
+  v_target := to_regclass('spec_search_index');
+
+  IF v_target IS NOT NULL AND NOT EXISTS (
+    SELECT 1
+    FROM pg_constraint
+    WHERE conname = 'uq_spec_search_slug_workspace'
+      AND conrelid = v_target
   ) THEN
     ALTER TABLE spec_search_index ADD CONSTRAINT uq_spec_search_slug_workspace UNIQUE (spec_slug, workspace_id);
   END IF;

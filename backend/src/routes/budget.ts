@@ -5,6 +5,7 @@ import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
 
 const router = Router({ mergeParams: true });
 
@@ -160,7 +161,7 @@ export async function checkBudgetThresholds(workspaceId: string): Promise<{
  *       404:
  *         description: Workspace not found
  */
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   try {
     const workspaceId = String(req.params.id);
     const { alert_threshold_usd, hard_cap_usd, period, notify_emails } = req.body as {
@@ -282,7 +283,7 @@ router.post('/', async (req: Request, res: Response) => {
  *       404:
  *         description: Workspace not found
  */
-router.get('/', async (req: Request, res: Response) => {
+router.get('/', requireWorkspaceMember(), async (req: Request, res: Response) => {
   try {
     const workspaceId = String(req.params.id);
 
@@ -357,7 +358,7 @@ router.get('/', async (req: Request, res: Response) => {
  *       404:
  *         description: No budget config found for this workspace
  */
-router.delete('/', async (req: Request, res: Response) => {
+router.delete('/', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   try {
     const workspaceId = String(req.params.id);
     const result = await withUserClient(req, async (client) => {

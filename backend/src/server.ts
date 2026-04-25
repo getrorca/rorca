@@ -35,7 +35,7 @@ import budgetRouter from './routes/budget';
 import vaultRouter from './routes/vault';
 import usersRouter from './routes/users';
 import authRouter from './routes/auth';
-import { authRequired, LOCAL_ADMIN } from './lib/auth-utils';
+import { authRequired, LOCAL_ADMIN, resolveAuthUserFromToken } from './lib/auth-utils';
 import { supabaseAdmin } from './lib/supabase';
 import onboardingRouter from './routes/onboarding';
 import backupsRouter from './routes/backups';
@@ -139,6 +139,7 @@ if (agentType === 'opencode') {
 
 const app = express();
 const PORT = process.env.PORT || 3030;
+const BACKGROUND_RUNTIME_ENABLED = process.env.NODE_ENV !== 'test';
 
 // Disable ETags on API responses — prevents browsers from caching 404s and replaying
 // stale error responses after backend state changes (workspace renames, schema fixes, etc.).
@@ -251,8 +252,10 @@ app.use('/api/billing', billingWebhookRouter); // Stripe webhook (no auth, needs
 app.use('/api/invites', rateLimiter, invitesRouter);
 // EQ-007: Public review routes (no auth required — accessed via shareable token)
 app.use('/api/review', rateLimiter, publicReviewRouter);
-registerWebhookHandlers();
-registerCiAutofixHandler();
+if (BACKGROUND_RUNTIME_ENABLED) {
+  registerWebhookHandlers();
+  registerCiAutofixHandler();
+}
 
 // CA-021: MCP Streamable HTTP transport — auto-generated from OpenAPI spec
 // MCP clients (Claude Code, IDE extensions) connect over HTTP without browser
@@ -354,12 +357,11 @@ if (process.env.AUTH_REQUIRED === 'true') {
   app.use(async (req: any, _res: any, next: any) => {
     const authHeader = req.headers.authorization;
     const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
-    if (token && process.env.SUPABASE_URL?.trim()) {
+    if (token) {
       try {
-        const { data, error } = await supabaseAdmin.auth.getUser(token);
-        const user = data.user;
-        if (!error && user?.id && user.email) {
-          req.user = { id: user.id, email: user.email, supabaseId: user.id, role: 'admin' };
+        const resolvedUser = await resolveAuthUserFromToken(token);
+        if (resolvedUser) {
+          req.user = resolvedUser;
           return next();
         }
       } catch {
@@ -438,63 +440,66 @@ app.use('/api/terminal', terminalRouter);
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);
 
-// V2-069: Subscribe agent hook runner to all WAL broadcasts
-subscribe(fireAgentHooks);
-
-// V2-073: Subscribe notification dispatcher to WAL broadcasts
-startNotificationDispatcher();
-
-// US-034: Subscribe draft PR lifecycle to update PR body on story completions
-registerDraftPrSubscriber();
-
-// RQ-002: Subscribe queue consumer to auto-trigger next run on completion
-startQueueConsumer();
-
-// CIE-005: Subscribe memory synthesis to generate ledger entries after successful runs
-startMemorySynthesis();
-
-// PG-007: Subscribe embedding pipeline to WAL events for automatic vector generation
-startEmbeddingPipeline();
-
-// PG-015: Subscribe graph populator to WAL events for knowledge graph edges
-startGraphPopulator();
-
-// PG-017: Subscribe drift detector to WAL events for post-run convention drift analysis
-startDriftSubscriber();
-
-// US-008: Subscribe marker injector to write story completion markers into run_output_chunks
-startMarkerInjector();
-
-// US-004: Subscribe story-log-follower to tail story logs and write prose to story_output_chunks
 const storyLogFollower = new StoryLogFollower();
-storyLogFollower.start();
 
-// US-027: Subscribe commit status poster to post GitHub status checks for story progress
-startCommitStatusPoster();
+if (BACKGROUND_RUNTIME_ENABLED) {
+  // V2-069: Subscribe agent hook runner to all WAL broadcasts
+  subscribe(fireAgentHooks);
 
-// US-030: Subscribe check run poster to manage GitHub Check Runs for pipeline runs
-startCheckRunPoster();
+  // V2-073: Subscribe notification dispatcher to WAL broadcasts
+  startNotificationDispatcher();
 
-// CAF-002: Subscribe CI autofix orchestrator to generate fix specs on ci_check_failed events
-startCiAutofixOrchestrator();
+  // US-034: Subscribe draft PR lifecycle to update PR body on story completions
+  registerDraftPrSubscriber();
 
-// PR-019: Auto-rotate memory after each pipeline run completion
-// PR-018: Auto-deduplicate memory after rotation (post-run)
-subscribe((event: WalEvent) => {
-  if (event.event_type !== 'run_finished' || !event.workspace_id) return;
-  const workspaceId = event.workspace_id;
-  (async () => {
-    try {
-      const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
-      if (!ws) return;
-      rotateMemory(ws.path);
-      // Run dedup after rotation — removes semantically duplicate entries
-      await deduplicateMemory(ws.path, workspaceId);
-    } catch {
-      // Non-fatal — rotation/dedup failure must not affect the run result
-    }
-  })();
-});
+  // RQ-002: Subscribe queue consumer to auto-trigger next run on completion
+  startQueueConsumer();
+
+  // CIE-005: Subscribe memory synthesis to generate ledger entries after successful runs
+  startMemorySynthesis();
+
+  // PG-007: Subscribe embedding pipeline to WAL events for automatic vector generation
+  startEmbeddingPipeline();
+
+  // PG-015: Subscribe graph populator to WAL events for knowledge graph edges
+  startGraphPopulator();
+
+  // PG-017: Subscribe drift detector to WAL events for post-run convention drift analysis
+  startDriftSubscriber();
+
+  // US-008: Subscribe marker injector to write story completion markers into run_output_chunks
+  startMarkerInjector();
+
+  // US-004: Subscribe story-log-follower to tail story logs and write prose to story_output_chunks
+  storyLogFollower.start();
+
+  // US-027: Subscribe commit status poster to post GitHub status checks for story progress
+  startCommitStatusPoster();
+
+  // US-030: Subscribe check run poster to manage GitHub Check Runs for pipeline runs
+  startCheckRunPoster();
+
+  // CAF-002: Subscribe CI autofix orchestrator to generate fix specs on ci_check_failed events
+  startCiAutofixOrchestrator();
+
+  // PR-019: Auto-rotate memory after each pipeline run completion
+  // PR-018: Auto-deduplicate memory after rotation (post-run)
+  subscribe((event: WalEvent) => {
+    if (event.event_type !== 'run_finished' || !event.workspace_id) return;
+    const workspaceId = event.workspace_id;
+    (async () => {
+      try {
+        const ws = await queryOne<{ path: string }>('SELECT path FROM workspaces WHERE id = $1', [workspaceId]);
+        if (!ws) return;
+        rotateMemory(ws.path);
+        // Run dedup after rotation — removes semantically duplicate entries
+        await deduplicateMemory(ws.path, workspaceId);
+      } catch {
+        // Non-fatal — rotation/dedup failure must not affect the run result
+      }
+    })();
+  });
+}
 
 // Safety net: log unhandled rejections instead of crashing the process.
 // Routes should handle their own errors, but this prevents a single bad request
@@ -544,7 +549,8 @@ if (process.env.NODE_ENV !== 'test') {
   // This reduces exposure of the unauthenticated local API/WebSocket surface; cloud/Docker
   // deployments can opt in to broader exposure with RORCA_BIND_HOST=0.0.0.0.
   const bindHost = process.env.RORCA_BIND_HOST || (process.env.NODE_ENV === 'production' ? '0.0.0.0' : '127.0.0.1');
-  const httpServer = app.listen(PORT, bindHost, () => {
+  const listenPort = Number(PORT);
+  const httpServer = app.listen(listenPort, bindHost, () => {
     logger.info(`Rorca backend listening on ${bindHost}:${PORT}`);
     execute(
       `UPDATE terminal_sessions
@@ -596,7 +602,7 @@ if (process.env.NODE_ENV !== 'test') {
       if (!origin || ALLOWED_WS_ORIGINS.includes(origin)) {
         done(true);
       } else {
-        logger.warn('[ws] Rejected WebSocket connection from disallowed origin', { origin });
+        logger.warn({ origin }, '[ws] Rejected WebSocket connection from disallowed origin');
         done(false, 403, 'Forbidden');
       }
     },

@@ -523,6 +523,7 @@ export async function finalizeDraftPr(opts: {
           agentType: runMeta?.agent_type ?? 'claude',
           model: runMeta?.agent_model ?? 'unknown',
           diffStats,
+          diffSummary: diffStats,
         },
       };
 

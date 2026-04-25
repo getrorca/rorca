@@ -1,16 +1,59 @@
+import nodemailer from 'nodemailer';
 import { Resend } from 'resend';
 
-const resend = new Resend(process.env.RESEND_API_KEY);
+const resend = process.env.RESEND_API_KEY ? new Resend(process.env.RESEND_API_KEY) : null;
 
-const FROM = 'Rorca <no-reply@rorca.ai>';
+const SMTP_HOST = process.env.SMTP_HOST?.trim();
+const SMTP_PORT = Number(process.env.SMTP_PORT || '587');
+const SMTP_SECURE = process.env.SMTP_SECURE === 'true';
+const SMTP_USER = process.env.SMTP_USER?.trim();
+const SMTP_PASS = process.env.SMTP_PASS?.trim();
+const SMTP_FROM = process.env.SMTP_FROM?.trim();
+
+const smtpTransport = SMTP_HOST && SMTP_USER && SMTP_PASS
+  ? nodemailer.createTransport({
+      host: SMTP_HOST,
+      port: SMTP_PORT,
+      secure: SMTP_SECURE,
+      auth: {
+        user: SMTP_USER,
+        pass: SMTP_PASS,
+      },
+    })
+  : null;
+
+const FROM = SMTP_FROM || process.env.RORCA_EMAIL_FROM || 'Rorca <no-reply@rorca.ai>';
 const BASE_URL = process.env.RORCA_BASE_URL || 'http://localhost:5210';
 
+async function sendEmail(to: string, subject: string, html: string): Promise<void> {
+  if (smtpTransport) {
+    await smtpTransport.sendMail({
+      from: FROM,
+      to,
+      subject,
+      html,
+    });
+    return;
+  }
+
+  if (resend) {
+    await resend.emails.send({
+      from: FROM,
+      to,
+      subject,
+      html,
+    });
+    return;
+  }
+
+  throw new Error('No email transport configured. Set SMTP_* for Google Workspace/Gmail SMTP or RESEND_API_KEY for Resend.');
+}
+
 export async function sendVerificationEmail(email: string, confirmationUrl: string): Promise<void> {
-  await resend.emails.send({
-    from: FROM,
-    to: email,
-    subject: 'Verify your Rorca account',
-    html: `
+  await sendEmail(
+    email,
+    'Verify your Rorca account',
+    `
       <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 24px">
         <h1 style="font-size:24px;font-weight:700;color:#0f172a;margin-bottom:8px">Verify your email</h1>
         <p style="color:#475569;margin-bottom:24px">
@@ -25,15 +68,14 @@ export async function sendVerificationEmail(email: string, confirmationUrl: stri
         </p>
       </div>
     `,
-  });
+  );
 }
 
 export async function sendPasswordResetEmail(email: string, resetUrl: string): Promise<void> {
-  await resend.emails.send({
-    from: FROM,
-    to: email,
-    subject: 'Reset your Rorca password',
-    html: `
+  await sendEmail(
+    email,
+    'Reset your Rorca password',
+    `
       <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 24px">
         <h1 style="font-size:24px;font-weight:700;color:#0f172a;margin-bottom:8px">Reset your password</h1>
         <p style="color:#475569;margin-bottom:24px">
@@ -48,7 +90,7 @@ export async function sendPasswordResetEmail(email: string, resetUrl: string): P
         </p>
       </div>
     `,
-  });
+  );
 }
 
 export async function sendTeamInviteEmail(
@@ -57,11 +99,10 @@ export async function sendTeamInviteEmail(
   teamName: string,
   inviteUrl: string,
 ): Promise<void> {
-  await resend.emails.send({
-    from: FROM,
-    to: email,
-    subject: `${inviterName} invited you to join ${teamName} on Rorca`,
-    html: `
+  await sendEmail(
+    email,
+    `${inviterName} invited you to join ${teamName} on Rorca`,
+    `
       <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 24px">
         <h1 style="font-size:24px;font-weight:700;color:#0f172a;margin-bottom:8px">You're invited</h1>
         <p style="color:#475569;margin-bottom:24px">
@@ -76,7 +117,7 @@ export async function sendTeamInviteEmail(
         </p>
       </div>
     `,
-  });
+  );
 }
 
 export async function sendRunCompleteEmail(
@@ -90,11 +131,10 @@ export async function sendRunCompleteEmail(
   const statusColor = allPassed ? '#22c55e' : '#f59e0b';
   const statusText = allPassed ? 'Completed' : 'Completed with failures';
 
-  await resend.emails.send({
-    from: FROM,
-    to: email,
-    subject: `Run ${allPassed ? 'completed' : 'finished with failures'}: ${specTitle}`,
-    html: `
+  await sendEmail(
+    email,
+    `Run ${allPassed ? 'completed' : 'finished with failures'}: ${specTitle}`,
+    `
       <div style="font-family:sans-serif;max-width:480px;margin:0 auto;padding:32px 24px">
         <h1 style="font-size:24px;font-weight:700;color:#0f172a;margin-bottom:8px">Pipeline run finished</h1>
         <p style="color:#475569;margin-bottom:8px">
@@ -110,5 +150,5 @@ export async function sendRunCompleteEmail(
         </a>
       </div>
     `,
-  });
+  );
 }

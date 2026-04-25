@@ -1275,7 +1275,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     if (forceAsync || autoAsync) {
       logger.info({ slug, storyCount, forceAsync, autoAsync }, '[Specs] Routing to async chunked generation');
 
-      const orPrefs = await getOpenRouterPrefs(resolvedModel);
+      const orPrefs = await getOpenRouterPrefs(resolvedModel, workspaceId);
       const chatOpts: import('../lib/llm-client').ChatOptions = {
         model: resolvedModel,
         apiKey: wfConfig.apiKey ?? undefined,
@@ -1366,7 +1366,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       }
 
       // Build shared chatOpts with thinking + OpenRouter provider prefs
-      const orPrefsMultiPass = await getOpenRouterPrefs(resolvedModel);
+      const orPrefsMultiPass = await getOpenRouterPrefs(resolvedModel, workspaceId);
       const specChatOpts: import('../lib/llm-client').ChatOptions = {
         model: resolvedModel,
         apiKey: wfConfig.apiKey ?? undefined,
@@ -2113,7 +2113,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         // Fallback to SDK path on OpenCode failure
         logger.warn(`[Specs] OpenCode spec gen failed (${ocResult.error}), falling back to SDK path`);
 
-        const orPrefsFallback = await getOpenRouterPrefs(resolvedModel);
+        const orPrefsFallback = await getOpenRouterPrefs(resolvedModel, workspaceId);
         const llmResult = await chatComplete(
           [{ role: 'user', content: fullPrompt }],
           {
@@ -2152,7 +2152,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       }
     } else {
       // ── SDK path: direct LLM call via chatComplete ──
-      const orPrefsSdk = await getOpenRouterPrefs(resolvedModel);
+      const orPrefsSdk = await getOpenRouterPrefs(resolvedModel, workspaceId);
       const llmResult = await chatComplete(
         [{ role: 'user', content: fullPrompt }],
         {
@@ -7243,7 +7243,7 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
     // Detect cycles
     const cycle = detectCycle(stories);
     if (cycle) {
-      throw new UnprocessableError('Circular dependency detected', { cycle } as Record<string, unknown>);
+      throw new UnprocessableError('Circular dependency detected', undefined, { cycle } as Record<string, unknown>);
       return;
     }
 

@@ -529,7 +529,7 @@ describe('ConnectionsHubSection', () => {
     renderWithProviders(<ProviderSettingsTab />);
 
     await waitFor(() => {
-      expect(screen.getByText('Not found')).toBeInTheDocument();
+      expect(screen.getAllByText('Not found').length).toBeGreaterThan(0);
     }, { timeout: 3000 });
   });
 

@@ -106,7 +106,13 @@ const deleteMeSchema = z.object({
 router.delete('/me', authRequired, async (req: Request, res: Response) => {
   try {
     const authReq = req as Request & { user?: { id: string; email?: string | null; supabaseId?: string | null } };
-    const { confirmation } = validateBody(deleteMeSchema, req.body);
+    const parsed = deleteMeSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new ValidationError('Validation failed', {
+        details: JSON.stringify(parsed.error.issues),
+      });
+    }
+    const { confirmation } = parsed.data;
 
     if (!authReq.user?.supabaseId || !authReq.user.email) {
       throw new AuthError('Authentication required');

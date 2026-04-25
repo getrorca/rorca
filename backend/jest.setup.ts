@@ -76,6 +76,39 @@ export default async function globalSetup(): Promise<void> {
   //    Pool size 1 prevents AGE LOAD 'age' from poisoning idle connections
   const testPool = new Pool({ connectionString: TEST_DB_URL, max: 1 });
   try {
+    // Test harness shim for Supabase/PostgREST auth helpers used by RLS migrations.
+    // Local Postgres doesn't provide auth schema/functions, so create minimal stubs.
+    await testPool.query(`
+      DO $$
+      BEGIN
+        IF NOT EXISTS (SELECT 1 FROM pg_roles WHERE rolname = 'authenticated') THEN
+          CREATE ROLE authenticated;
+        END IF;
+      END $$;
+    `);
+
+    await testPool.query(`CREATE SCHEMA IF NOT EXISTS auth`);
+
+    await testPool.query(`
+      CREATE OR REPLACE FUNCTION auth.uid()
+      RETURNS UUID
+      LANGUAGE sql
+      STABLE
+      AS $$
+        SELECT NULLIF(current_setting('request.jwt.claim.sub', true), '')::uuid
+      $$
+    `);
+
+    await testPool.query(`
+      CREATE OR REPLACE FUNCTION auth.jwt()
+      RETURNS JSONB
+      LANGUAGE sql
+      STABLE
+      AS $$
+        SELECT COALESCE(NULLIF(current_setting('request.jwt.claims', true), ''), '{}')::jsonb
+      $$
+    `);
+
     // Enable extensions — these are safe to run multiple times
     try {
       await testPool.query('CREATE EXTENSION IF NOT EXISTS pgcrypto');
@@ -89,6 +122,13 @@ export default async function globalSetup(): Promise<void> {
 
     // 3. Run all pg-migrations
     await runPgMigrations(testPool);
+
+    // Test-only grant shim so RLS tests exercise policies instead of failing on SQL GRANTs.
+    await testPool.query(`GRANT USAGE ON SCHEMA public, rorca, auth TO authenticated`);
+    await testPool.query(`GRANT SELECT, INSERT, UPDATE, DELETE ON ALL TABLES IN SCHEMA public, rorca, auth TO authenticated`);
+    await testPool.query(`GRANT USAGE, SELECT ON ALL SEQUENCES IN SCHEMA public, rorca TO authenticated`);
+    await testPool.query(`GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public, rorca, auth TO authenticated`);
+
     console.log('[jest-setup] Migrations applied to test database');
   } finally {
     await testPool.end();

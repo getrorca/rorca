@@ -57,6 +57,21 @@ describe('MU-010 workspaces RLS', () => {
       expect(anonResult.rows).toEqual([]);
 
       await setJwtClaims(client, USER_ONE, 'authenticated');
+      const grantsResult = await client.query<{ privilege_type: string }>(
+        `SELECT privilege_type
+         FROM information_schema.role_table_grants
+         WHERE table_schema = 'rorca'
+           AND table_name = 'workspaces'
+           AND grantee = 'authenticated'
+         ORDER BY privilege_type`
+      );
+      expect(grantsResult.rows.map((row) => row.privilege_type)).toEqual([
+        'DELETE',
+        'INSERT',
+        'SELECT',
+        'UPDATE',
+      ]);
+
       const userOneResult = await client.query<{ id: string }>('SELECT id FROM workspaces ORDER BY id');
       expect(userOneResult.rows.map((row) => row.id)).toEqual(['ws-rls-user-1']);
 
