@@ -1,21 +1,20 @@
 import { Router, Request, Response } from 'express';
 import crypto from 'crypto';
+import { createClient } from '@supabase/supabase-js';
 import { query, queryOne, execute } from '../db/index';
-import { JWT_SECRET } from '../lib/auth-utils';
-import type { AuthUser } from '../lib/auth-utils';
+import { JWT_SECRET, isSuperUser } from '../lib/auth-utils';
+import type { AuthUser, WorkspaceRole } from '../lib/auth-utils';
 import { chatComplete } from '../lib/llm-client';
 import type { ProviderType } from '../lib/llm-client';
 import { invalidateProviderCache } from '../lib/embedding-pipeline';
-import { AuthError, NotFoundError, ValidationError } from '../lib/errors';
+import { AuthError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
-import { supabaseAnon } from '../lib/supabase';
 
 const router = Router();
 
 // Derive a 32-byte AES-256 key from JWT_SECRET (same approach as auth.ts for GitHub tokens)
 const VAULT_KEY = crypto.createHash('sha256').update(JWT_SECRET).digest();
 
-// Auth is intentionally bypassed globally — fall back to the first registered user
 async function getEffectiveUser(req: Request): Promise<AuthUser | null> {
   if (req.user) {
     return {
@@ -26,8 +25,7 @@ async function getEffectiveUser(req: Request): Promise<AuthUser | null> {
       plan: req.user.plan,
     };
   }
-  const fallback = await queryOne<{ id: string; email: string }>('SELECT id, email FROM users LIMIT 1');
-  return fallback ? { ...fallback, supabaseId: fallback.id, role: 'admin' } : null;
+  return null;
 }
 
 // ─── Crypto helpers ─────────────────────────────────────────────────────────
@@ -88,19 +86,56 @@ function getBearerToken(req: Request): string | null {
   return header.slice('Bearer '.length).trim() || null;
 }
 
+async function assertWorkspaceAccess(req: Request, workspaceId: string, minRole: WorkspaceRole = 'member'): Promise<void> {
+  const user = req.user;
+  if (!user) {
+    throw new AuthError('Authentication required');
+  }
+
+  if (isSuperUser(user)) {
+    return;
+  }
+
+  const membership = await queryOne<{ role: WorkspaceRole }>(
+    'SELECT role FROM workspace_members WHERE workspace_id = $1 AND user_auth_id = $2',
+    [workspaceId, user.supabaseId]
+  );
+
+  if (!membership) {
+    throw new ForbiddenError('Forbidden');
+  }
+
+  const rank: Record<WorkspaceRole, number> = { member: 0, admin: 1, owner: 2 };
+  if (rank[membership.role] < rank[minRole]) {
+    throw new ForbiddenError('Forbidden');
+  }
+}
+
 function withUserClient(req: Request) {
   const accessToken = getBearerToken(req);
   if (!accessToken) {
     throw new AuthError('Missing bearer token');
   }
 
-  return supabaseAnon.auth.setSession({ access_token: accessToken, refresh_token: '' })
-    .then(({ error }) => {
-      if (error) {
-        throw new AuthError(`Invalid Supabase session: ${error.message}`);
-      }
-      return supabaseAnon;
-    });
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
+  const supabaseAnonKey = process.env.SUPABASE_ANON_KEY?.trim();
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new AuthError('Supabase anon client is not configured');
+  }
+
+  const client = createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
+  });
+
+  return Promise.resolve(client);
 }
 
 /**
@@ -151,6 +186,7 @@ router.post('/', async (req: Request, res: Response) => {
   if (!workspaceId || typeof workspaceId !== 'string') {
     throw new ValidationError('workspaceId is required');
   }
+  await assertWorkspaceAccess(req, workspaceId, 'admin');
 
   if (!provider || typeof provider !== 'string') {
     throw new ValidationError('provider is required');
@@ -239,6 +275,10 @@ router.get('/', async (req: Request, res: Response) => {
     const workspaceId = req.query.workspaceId;
     const hasWorkspaceFilter = typeof workspaceId === 'string' && workspaceId.length > 0;
 
+    if (hasWorkspaceFilter) {
+      await assertWorkspaceAccess(req, workspaceId as string, 'member');
+    }
+
     const rows = hasWorkspaceFilter
       ? await query<VaultRow>(
           `SELECT id, workspace_id, user_id, provider, encrypted_key, label, base_url,
@@ -248,12 +288,22 @@ router.get('/', async (req: Request, res: Response) => {
             ORDER BY created_at DESC`,
           [workspaceId]
         )
-      : await query<VaultRow>(
-          `SELECT id, workspace_id, user_id, provider, encrypted_key, label, base_url,
-                  spend_total_usd, last_used_at, created_at
-             FROM api_key_vault
-            ORDER BY created_at DESC`
-        );
+      : isSuperUser(req.user)
+        ? await query<VaultRow>(
+            `SELECT id, workspace_id, user_id, provider, encrypted_key, label, base_url,
+                    spend_total_usd, last_used_at, created_at
+               FROM api_key_vault
+              ORDER BY created_at DESC`
+          )
+        : await query<VaultRow>(
+            `SELECT akv.id, akv.workspace_id, akv.user_id, akv.provider, akv.encrypted_key, akv.label, akv.base_url,
+                    akv.spend_total_usd, akv.last_used_at, akv.created_at
+               FROM api_key_vault akv
+               JOIN workspace_members wm ON wm.workspace_id = akv.workspace_id
+              WHERE wm.user_auth_id = $1
+              ORDER BY akv.created_at DESC`,
+            [user.supabaseId]
+          );
 
     const keys = rows.map(row => ({
       id: row.id,
@@ -308,6 +358,7 @@ router.delete('/:id', async (req: Request, res: Response) => {
   if (!workspaceId || typeof workspaceId !== 'string') {
     throw new ValidationError('workspaceId query param is required');
   }
+  await assertWorkspaceAccess(req, workspaceId, 'admin');
 
   const userClient = await withUserClient(req);
 
@@ -388,6 +439,7 @@ router.post('/test', async (req: Request, res: Response) => {
   if (!workspaceId || typeof workspaceId !== 'string') {
     throw new ValidationError('workspaceId is required');
   }
+  await assertWorkspaceAccess(req, workspaceId, 'member');
 
   if (!provider || typeof provider !== 'string') {
     throw new ValidationError('provider is required');
@@ -496,6 +548,7 @@ router.get('/default-provider', async (req: Request, res: Response) => {
   }
 
   if (!user) { res.json({ provider: 'claude-cli' }); return; }
+  await assertWorkspaceAccess(req, workspaceId, 'member');
 
   const row = await queryOne<{ provider: string }>(
     'SELECT provider FROM provider_defaults WHERE user_id = $1 AND workspace_id = $2',
@@ -545,6 +598,7 @@ router.put('/default-provider', async (req: Request, res: Response) => {
     throw new ValidationError('workspaceId is required');
     return;
   }
+  await assertWorkspaceAccess(req, workspaceId, 'admin');
   if (!provider || typeof provider !== 'string') {
     throw new ValidationError('provider is required');
     return;
@@ -602,6 +656,13 @@ router.put('/default-provider', async (req: Request, res: Response) => {
  */
 router.get('/providers', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
+  const workspaceId = typeof req.query.workspaceId === 'string' && req.query.workspaceId.trim()
+    ? req.query.workspaceId.trim()
+    : null;
+
+  if (workspaceId) {
+    await assertWorkspaceAccess(req, workspaceId, 'member');
+  }
 
   const providers: Array<{
     id: string;
@@ -616,11 +677,26 @@ router.get('/providers', async (req: Request, res: Response) => {
     { id: 'openrouter', name: 'OpenRouter', configured: false, hasKey: false, baseUrl: null },
   ];
 
-  // Check vault for user's keys
-  const vaultRows = user ? await query<{ provider: string; base_url: string | null }>(
-    'SELECT provider, base_url FROM api_key_vault WHERE user_id = $1 ORDER BY created_at DESC',
-    [user.id]
-  ) : [];
+  // Check vault for keys visible in the current workspace scope.
+  const vaultRows = user
+    ? workspaceId
+      ? await query<{ provider: string; base_url: string | null }>(
+          'SELECT provider, base_url FROM api_key_vault WHERE workspace_id = $1 ORDER BY created_at DESC',
+          [workspaceId]
+        )
+      : isSuperUser(user)
+        ? await query<{ provider: string; base_url: string | null }>(
+            'SELECT provider, base_url FROM api_key_vault ORDER BY created_at DESC'
+          )
+        : await query<{ provider: string; base_url: string | null }>(
+            `SELECT akv.provider, akv.base_url
+               FROM api_key_vault akv
+               JOIN workspace_members wm ON wm.workspace_id = akv.workspace_id
+              WHERE wm.user_auth_id = $1
+              ORDER BY akv.created_at DESC`,
+            [user.supabaseId]
+          )
+    : [];
 
   for (const row of vaultRows) {
     const p = providers.find(p => p.id === row.provider);
@@ -681,14 +757,30 @@ export async function getVaultKey(userId: string, provider: string): Promise<Vau
  *       200:
  *         description: Array of per-model provider routing preferences
  */
-router.get('/openrouter-provider-prefs', async (_req: Request, res: Response) => {
+router.get('/openrouter-provider-prefs', async (req: Request, res: Response) => {
   try {
+    const workspaceId = typeof req.query.workspaceId === 'string' && req.query.workspaceId.trim()
+      ? req.query.workspaceId.trim()
+      : null;
+
+    if (workspaceId) {
+      await assertWorkspaceAccess(req, workspaceId, 'member');
+    } else if (!isSuperUser(req.user)) {
+      throw new ForbiddenError('Forbidden');
+    }
+
     const rows = await query<{
-      id: string; model_id: string; pref_order: string[] | null;
+      id: string; workspace_id: string | null; model_id: string; pref_order: string[] | null;
       ignore_list: string[] | null; allow_fallbacks: boolean;
-    }>('SELECT * FROM openrouter_provider_prefs ORDER BY model_id');
+    }>(
+      workspaceId
+        ? 'SELECT * FROM openrouter_provider_prefs WHERE workspace_id = $1 OR workspace_id IS NULL ORDER BY workspace_id NULLS LAST, model_id'
+        : 'SELECT * FROM openrouter_provider_prefs ORDER BY workspace_id NULLS LAST, model_id',
+      workspaceId ? [workspaceId] : []
+    );
     res.json(rows.map(r => ({
       id: r.id,
+      workspaceId: r.workspace_id,
       modelId: r.model_id,
       order: r.pref_order ?? [],
       ignore: r.ignore_list ?? [],
@@ -725,18 +817,50 @@ router.get('/openrouter-provider-prefs', async (_req: Request, res: Response) =>
  */
 router.put('/openrouter-provider-prefs', async (req: Request, res: Response) => {
   try {
-    const { modelId, order, ignore, allowFallbacks } = req.body;
+    const { workspaceId, modelId, order, ignore, allowFallbacks } = req.body;
     if (!modelId || typeof modelId !== 'string') throw new ValidationError('modelId is required');
 
-    const row = await queryOne<{ id: string }>(
-      `INSERT INTO openrouter_provider_prefs (model_id, pref_order, ignore_list, allow_fallbacks)
-       VALUES ($1, $2, $3, $4)
-       ON CONFLICT (model_id)
-       DO UPDATE SET pref_order = $2, ignore_list = $3, allow_fallbacks = $4, updated_at = NOW()
-       RETURNING id`,
-      [modelId, order ?? [], ignore ?? [], allowFallbacks ?? true],
+    if (workspaceId && typeof workspaceId !== 'string') {
+      throw new ValidationError('workspaceId must be a string when provided');
+    }
+
+    if (workspaceId) {
+      await assertWorkspaceAccess(req, workspaceId, 'admin');
+    } else if (!isSuperUser(req.user)) {
+      throw new ForbiddenError('Forbidden');
+    }
+
+    const existing = await queryOne<{ id: string }>(
+      workspaceId
+        ? 'SELECT id FROM openrouter_provider_prefs WHERE workspace_id = $1 AND model_id = $2'
+        : 'SELECT id FROM openrouter_provider_prefs WHERE workspace_id IS NULL AND model_id = $1',
+      workspaceId ? [workspaceId, modelId] : [modelId],
     );
-    res.json({ ok: true, id: row?.id, modelId });
+
+    let recordId = existing?.id;
+    if (existing) {
+      await execute(
+        workspaceId
+          ? `UPDATE openrouter_provider_prefs
+                SET pref_order = $3, ignore_list = $4, allow_fallbacks = $5, updated_at = NOW()
+              WHERE workspace_id = $1 AND model_id = $2`
+          : `UPDATE openrouter_provider_prefs
+                SET pref_order = $2, ignore_list = $3, allow_fallbacks = $4, updated_at = NOW()
+              WHERE workspace_id IS NULL AND model_id = $1`,
+        workspaceId
+          ? [workspaceId, modelId, order ?? [], ignore ?? [], allowFallbacks ?? true]
+          : [modelId, order ?? [], ignore ?? [], allowFallbacks ?? true],
+      );
+    } else {
+      recordId = crypto.randomUUID();
+      await execute(
+        `INSERT INTO openrouter_provider_prefs (id, workspace_id, model_id, pref_order, ignore_list, allow_fallbacks)
+         VALUES ($1, $2, $3, $4, $5, $6)`,
+        [recordId, workspaceId ?? null, modelId, order ?? [], ignore ?? [], allowFallbacks ?? true],
+      );
+    }
+
+    res.json({ ok: true, id: recordId, workspaceId: workspaceId ?? null, modelId });
   } catch (err) { handleRouteError(res, err); }
 });
 
@@ -751,16 +875,36 @@ router.put('/openrouter-provider-prefs', async (req: Request, res: Response) => 
 router.delete('/openrouter-provider-prefs/:modelId', async (req: Request, res: Response) => {
   try {
     const { modelId } = req.params;
-    await execute('DELETE FROM openrouter_provider_prefs WHERE model_id = $1', [modelId]);
+    const workspaceId = typeof req.query.workspaceId === 'string' && req.query.workspaceId.trim()
+      ? req.query.workspaceId.trim()
+      : null;
+
+    if (workspaceId) {
+      await assertWorkspaceAccess(req, workspaceId, 'admin');
+      await execute('DELETE FROM openrouter_provider_prefs WHERE workspace_id = $1 AND model_id = $2', [workspaceId, modelId]);
+    } else {
+      if (!isSuperUser(req.user)) {
+        throw new ForbiddenError('Forbidden');
+      }
+      await execute('DELETE FROM openrouter_provider_prefs WHERE workspace_id IS NULL AND model_id = $1', [modelId]);
+    }
+
     res.json({ ok: true });
   } catch (err) { handleRouteError(res, err); }
 });
 
 /** Look up DB-stored provider prefs for a model, returns null if none saved. */
-export async function getOpenRouterPrefs(modelId: string): Promise<{ order?: string[]; ignore?: string[]; allow_fallbacks?: boolean } | null> {
+export async function getOpenRouterPrefs(modelId: string, workspaceId?: string | null): Promise<{ order?: string[]; ignore?: string[]; allow_fallbacks?: boolean } | null> {
   const row = await queryOne<{ pref_order: string[] | null; ignore_list: string[] | null; allow_fallbacks: boolean }>(
-    'SELECT pref_order, ignore_list, allow_fallbacks FROM openrouter_provider_prefs WHERE model_id = $1',
-    [modelId],
+    workspaceId
+      ? `SELECT pref_order, ignore_list, allow_fallbacks
+           FROM openrouter_provider_prefs
+          WHERE model_id = $1
+            AND (workspace_id = $2 OR workspace_id IS NULL)
+          ORDER BY CASE WHEN workspace_id = $2 THEN 0 ELSE 1 END
+          LIMIT 1`
+      : 'SELECT pref_order, ignore_list, allow_fallbacks FROM openrouter_provider_prefs WHERE workspace_id IS NULL AND model_id = $1',
+    workspaceId ? [modelId, workspaceId] : [modelId],
   );
   if (!row) return null;
   return {

@@ -212,8 +212,8 @@ describe('RunStoryList Integration', () => {
 
     await waitFor(() => {
       const badge = screen.getByText('US-001');
-      // Running stories get blue badge styling
-      expect(badge.className).toContain('bg-blue-500/10');
+      // Current running story badge styling is emerald in RunStoryList
+      expect(badge.className).toContain('bg-emerald-500/10');
     });
 
     // Phase 3: story_passed — US-001 transitions to passed

@@ -34,7 +34,7 @@ function getClientConfig(kind: 'anon' | 'admin'): { url: string; key: string } {
     throw new Error(`Supabase ${kind} client is not configured. Missing: ${missingVars.join(', ')}`);
   }
 
-  return { url, key };
+  return { url: url!, key: key! };
 }
 
 function buildClient(kind: 'anon' | 'admin'): SupabaseClient {

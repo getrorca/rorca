@@ -225,7 +225,6 @@ function JobRow({
                 </p>
                 <pre
                   className="text-[10px] text-muted bg-surface border border-border rounded p-2 overflow-auto max-h-48 leading-relaxed"
-                  // eslint-disable-next-line react/no-danger
                   dangerouslySetInnerHTML={{ __html: escapedStack ?? '(no stack trace)' }}
                 />
               </div>

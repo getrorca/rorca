@@ -88,7 +88,7 @@ describe('checkSingletonGuard', () => {
 
   // ── (2) Second worker rejected when live heartbeat exists ─────────────────
 
-  it('exits when another worker has a live heartbeat and alive PID', async () => {
+  it('rejects startup when another worker has a live heartbeat and alive PID', async () => {
     const liveWorker = {
       worker_id: 'existing-worker-uuid',
       pid: 12345,
@@ -102,13 +102,14 @@ describe('checkSingletonGuard', () => {
       return true as any;
     });
 
-    await checkSingletonGuard();
+    const allowed = await checkSingletonGuard();
 
     // Should have checked PID liveness
     expect(killSpy).toHaveBeenCalledWith(12345, 0);
 
-    // Should exit to prevent duplicate workers
-    expect(exitSpy).toHaveBeenCalledWith(0);
+    // Should decline startup without hard-exiting the process
+    expect(allowed).toBe(false);
+    expect(exitSpy).not.toHaveBeenCalled();
   });
 
   // ── (3) Second worker takes over when heartbeat is stale (dead PID) ───────

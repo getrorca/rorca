@@ -18,6 +18,7 @@ import { loadRorcaConfig } from '../lib/rorca-config';
 import { markWriting } from '../lib/file-watcher';
 import { AuthError, ConflictError, ForbiddenError, NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
 
 const router = Router();
 
@@ -78,7 +79,7 @@ function countWords(text: string): number {
  *       200:
  *         description: Array of context file entries
  */
-router.get('/:id/context-files', async (req: Request, res: Response) => {
+router.get('/:id/context-files', requireWorkspaceMember(), async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     throw new NotFoundError('Workspace not found');
@@ -211,7 +212,7 @@ router.get('/:id/context-files', async (req: Request, res: Response) => {
  *       200:
  *         description: File content + metadata
  */
-router.get('/:id/context-files/read', async (req: Request, res: Response) => {
+router.get('/:id/context-files/read', requireWorkspaceMember(), async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     throw new NotFoundError('Workspace not found');
@@ -278,7 +279,7 @@ router.get('/:id/context-files/read', async (req: Request, res: Response) => {
  *       200:
  *         description: File saved successfully
  */
-router.put('/:id/context-files/write', async (req: Request, res: Response) => {
+router.put('/:id/context-files/write', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     throw new NotFoundError('Workspace not found');
@@ -343,7 +344,7 @@ router.put('/:id/context-files/write', async (req: Request, res: Response) => {
  *       200:
  *         description: Git diff output + committed content
  */
-router.get('/:id/context-files/diff', async (req: Request, res: Response) => {
+router.get('/:id/context-files/diff', requireWorkspaceMember(), async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     throw new NotFoundError('Workspace not found');
@@ -846,7 +847,7 @@ function requireRole(...roles: string[]) {
  *             schema:
  *               $ref: '#/components/schemas/Error'
  */
-router.post('/:id/context-files/create-skill', async (req: Request, res: Response) => {
+router.post('/:id/context-files/create-skill', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     throw new NotFoundError('Workspace not found');
@@ -909,7 +910,7 @@ router.post('/:id/context-files/create-skill', async (req: Request, res: Respons
  *       200:
  *         description: Array of template IDs with labels
  */
-router.get('/:id/context-files/skill-templates', (_req: Request, res: Response) => {
+router.get('/:id/context-files/skill-templates', requireWorkspaceMember(), (_req: Request, res: Response) => {
   const templates = Object.keys(SKILL_TEMPLATES).map(id => ({
     id,
     label: id === 'blank' ? 'Blank' : id.charAt(0).toUpperCase() + id.slice(1),
@@ -948,7 +949,7 @@ router.get('/:id/context-files/skill-templates', (_req: Request, res: Response) 
  *       404:
  *         description: File not found
  */
-router.delete('/:id/context-files/delete-skill', async (req: Request, res: Response) => {
+router.delete('/:id/context-files/delete-skill', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     throw new NotFoundError('Workspace not found');
@@ -1033,7 +1034,7 @@ router.delete('/:id/context-files/delete-skill', async (req: Request, res: Respo
  *       200:
  *         description: Usage counts per skill file
  */
-router.get('/:id/context-files/skill-usage', async (req: Request, res: Response) => {
+router.get('/:id/context-files/skill-usage', requireWorkspaceMember(), async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     throw new NotFoundError('Workspace not found');
@@ -1107,7 +1108,7 @@ router.get('/:id/context-files/skill-usage', async (req: Request, res: Response)
  *       201:
  *         description: Skill imported
  */
-router.post('/:id/context-files/import-skill', async (req: Request, res: Response) => {
+router.post('/:id/context-files/import-skill', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     throw new NotFoundError('Workspace not found');
@@ -1215,7 +1216,7 @@ router.post('/:id/context-files/import-skill', async (req: Request, res: Respons
  *       200:
  *         description: Markdown file download
  */
-router.get('/:id/context-files/export-skill', async (req: Request, res: Response) => {
+router.get('/:id/context-files/export-skill', requireWorkspaceMember(), async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     throw new NotFoundError('Workspace not found');
@@ -1268,7 +1269,7 @@ router.get('/:id/context-files/export-skill', async (req: Request, res: Response
  *       200:
  *         description: Map of skill file path to assigned scopes/tags
  */
-router.get('/:id/context-files/skill-assignments', async (req: Request, res: Response) => {
+router.get('/:id/context-files/skill-assignments', requireWorkspaceMember(), async (req: Request, res: Response) => {
   const wsPath = await resolveWorkspacePath(req.params.id as string);
   if (!wsPath) {
     throw new NotFoundError('Workspace not found');

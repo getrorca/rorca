@@ -1,5 +1,6 @@
 import { Router, Request, Response } from 'express';
 import { randomBytes, createHmac, timingSafeEqual } from 'crypto';
+import { createClient } from '@supabase/supabase-js';
 import * as fs from 'fs';
 import * as path from 'path';
 import { queryOne, execute, transaction } from '../db/index';
@@ -9,9 +10,11 @@ import { AuthError, ConflictError, NotFoundError, ValidationError } from '../lib
 import { handleRouteError } from '../lib/async-handler';
 import { githubRateLimiter } from '../lib/github-rate-limiter';
 import { insertAuditEntry } from './integration-audit-log';
-import { supabaseAnon } from '../lib/supabase';
+import { requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
 
 const router = Router({ mergeParams: true });
+
+router.use(requireWorkspaceMember());
 
 interface GithubWebhookRow {
   workspace_id: string;
@@ -40,12 +43,23 @@ async function withUserClient(req: Request) {
     throw new AuthError('Missing bearer token');
   }
 
-  const { error } = await supabaseAnon.auth.setSession({ access_token: accessToken, refresh_token: '' });
-  if (error) {
-    throw new AuthError(`Invalid Supabase session: ${error.message}`);
+  const supabaseUrl = process.env.SUPABASE_URL?.trim();
+  const supabaseAnonKey = process.env.SUPABASE_ANON_KEY?.trim();
+  if (!supabaseUrl || !supabaseAnonKey) {
+    throw new AuthError('Supabase anon client is not configured');
   }
 
-  return supabaseAnon;
+  return createClient(supabaseUrl, supabaseAnonKey, {
+    auth: {
+      autoRefreshToken: false,
+      persistSession: false,
+    },
+    global: {
+      headers: {
+        Authorization: `Bearer ${accessToken}`,
+      },
+    },
+  });
 }
 
 interface GitHubConnectionRow {
@@ -164,7 +178,7 @@ router.get('/', async (req: Request, res: Response) => {
  *       502:
  *         description: GitHub API error during webhook creation
  */
-router.post('/connect', async (req: Request, res: Response) => {
+router.post('/connect', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
     const userClient = await withUserClient(req);
@@ -346,7 +360,7 @@ router.post('/connect', async (req: Request, res: Response) => {
  *       502:
  *         description: GitHub API error during webhook deletion
  */
-router.post('/disconnect', async (req: Request, res: Response) => {
+router.post('/disconnect', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
     const userClient = await withUserClient(req);
@@ -454,13 +468,14 @@ router.post('/disconnect', async (req: Request, res: Response) => {
  */
 router.get('/account', async (req: Request, res: Response) => {
   try {
-    // Get first user's GitHub connection (auth is bypassed — single-user local tool)
-    // Single-user mode: find the first github_connection (any user) rather than
-    // relying on LIMIT 1 from users, which returns admin@rorca.local (created first)
-    // instead of the GitHub-authenticated user.
+    const currentUserId = req.user?.id;
+    if (!currentUserId) {
+      throw new AuthError('Authentication required');
+    }
+
     const conn = await queryOne<GitHubConnectionRow & { avatar_url: string | null }>(
-      'SELECT gc.*, u.avatar_url FROM github_connections gc JOIN users u ON gc.user_id = u.id ORDER BY gc.created_at DESC LIMIT 1',
-      []
+      'SELECT gc.*, u.avatar_url FROM github_connections gc JOIN users u ON gc.user_id = u.id WHERE gc.user_id = $1 ORDER BY gc.created_at DESC LIMIT 1',
+      [currentUserId]
     );
 
     if (!conn) {
@@ -505,10 +520,14 @@ router.get('/account', async (req: Request, res: Response) => {
  */
 router.post('/test-connection', async (req: Request, res: Response) => {
   try {
-    // Single-user mode: query github_connections directly.
+    const currentUserId = req.user?.id;
+    if (!currentUserId) {
+      throw new AuthError('Authentication required');
+    }
+
     const conn = await queryOne<Pick<GitHubConnectionRow, 'encrypted_token' | 'github_username'>>(
-      'SELECT encrypted_token, github_username FROM github_connections ORDER BY created_at DESC LIMIT 1',
-      []
+      'SELECT encrypted_token, github_username FROM github_connections WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [currentUserId]
     );
 
     if (!conn) {
@@ -567,11 +586,14 @@ router.post('/test-connection', async (req: Request, res: Response) => {
  */
 router.post('/disconnect-oauth', async (req: Request, res: Response) => {
   try {
-    // Single-user mode: query github_connections directly (not via LIMIT 1 on users,
-    // which returns admin@rorca.local instead of the GitHub-authenticated user).
+    const currentUserId = req.user?.id;
+    if (!currentUserId) {
+      throw new AuthError('Authentication required');
+    }
+
     const conn = await queryOne<Pick<GitHubConnectionRow, 'id' | 'encrypted_token' | 'user_id'>>(
-      'SELECT id, encrypted_token, user_id FROM github_connections ORDER BY created_at DESC LIMIT 1',
-      []
+      'SELECT id, encrypted_token, user_id FROM github_connections WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [currentUserId]
     );
 
     if (!conn) {
@@ -683,15 +705,17 @@ router.post('/disconnect-oauth', async (req: Request, res: Response) => {
  *       500:
  *         description: Internal server error
  */
-router.delete('/', async (req: Request, res: Response) => {
+router.delete('/', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   const workspaceId = req.params.id;
   try {
-    // Check if any GitHub connection exists (OAuth or webhook).
-    // Single-user mode: query github_connections directly (LIMIT 1 on users returns
-    // admin@rorca.local, not the GitHub-authenticated user).
+    const currentUserId = req.user?.id;
+    if (!currentUserId) {
+      throw new AuthError('Authentication required');
+    }
+
     const oauthConn = await queryOne<Pick<GitHubConnectionRow, 'id' | 'encrypted_token' | 'user_id'>>(
-      'SELECT id, encrypted_token, user_id FROM github_connections ORDER BY created_at DESC LIMIT 1',
-      [],
+      'SELECT id, encrypted_token, user_id FROM github_connections WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+      [currentUserId],
     );
     const userId = oauthConn?.user_id ?? null;
 
@@ -876,7 +900,7 @@ router.delete('/', async (req: Request, res: Response) => {
  *       500:
  *         description: Internal server error
  */
-router.put('/auto-pr', async (req: Request, res: Response) => {
+router.put('/auto-pr', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
     const userClient = await withUserClient(req);
@@ -1155,12 +1179,13 @@ router.get('/rate-limit', (_req: Request, res: Response) => {
 
 // ─── Helper: get OAuth token for the current user ─────────────────────────────
 
-async function getOAuthToken(): Promise<string | null> {
-  // Single-user mode: query github_connections directly rather than via LIMIT 1 on users,
-  // which returns admin@rorca.local instead of the GitHub-authenticated user.
+async function getOAuthToken(req: Request): Promise<string | null> {
+  const currentUserId = req.user?.id;
+  if (!currentUserId) return null;
+
   const conn = await queryOne<{ encrypted_token: string }>(
-    'SELECT encrypted_token FROM github_connections ORDER BY created_at DESC LIMIT 1',
-    []
+    'SELECT encrypted_token FROM github_connections WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1',
+    [currentUserId]
   );
   if (!conn) return null;
   return decryptToken(conn.encrypted_token);
@@ -1193,7 +1218,7 @@ async function getOAuthToken(): Promise<string | null> {
  */
 router.get('/repos', async (req: Request, res: Response) => {
   try {
-    const token = await getOAuthToken();
+    const token = await getOAuthToken(req);
     if (!token) {
       res.status(400).json({ error: 'No GitHub OAuth connection found. Connect GitHub in Settings > GitHub.' });
       return;
@@ -1285,7 +1310,7 @@ router.get('/repos/:owner/:repo/issues', async (req: Request, res: Response) => 
   try {
     const { owner, repo } = req.params;
 
-    const token = await getOAuthToken();
+    const token = await getOAuthToken(req);
     if (!token) {
       res.status(400).json({ error: 'No GitHub OAuth connection found. Connect GitHub in Settings > GitHub.' });
       return;
@@ -1411,7 +1436,7 @@ function repoToSpecSlug(repoName: string): string {
  *       502:
  *         description: GitHub API error
  */
-router.post('/import-issues', async (req: Request, res: Response) => {
+router.post('/import-issues', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   try {
     const workspaceId = req.params.id;
     const { owner, repo, issueNumbers, specTitle } = req.body as {
@@ -1436,7 +1461,7 @@ router.post('/import-issues', async (req: Request, res: Response) => {
       throw new NotFoundError('Workspace not found');
     }
 
-    const token = await getOAuthToken();
+    const token = await getOAuthToken(req);
     if (!token) {
       res.status(400).json({ error: 'No GitHub OAuth connection found. Connect GitHub in Settings > GitHub.' });
       return;
@@ -1610,7 +1635,7 @@ router.get('/workflow-config', async (req: Request, res: Response) => {
  *       404:
  *         description: Workspace or GitHub webhook connection not found
  */
-router.put('/workflow-config', async (req: Request, res: Response) => {
+router.put('/workflow-config', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   const workspaceId = req.params.id;
   const { workflowConfig } = req.body;
 
@@ -1690,7 +1715,7 @@ router.put('/workflow-config', async (req: Request, res: Response) => {
  *       502:
  *         description: GitHub API error
  */
-router.post('/dispatch', async (req: Request, res: Response) => {
+router.post('/dispatch', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   const workspaceId = req.params.id;
   const { owner, repo, workflow_id, ref, inputs } = req.body;
 
@@ -1703,7 +1728,7 @@ router.post('/dispatch', async (req: Request, res: Response) => {
     throw new NotFoundError('Workspace not found');
   }
 
-  const token = await getOAuthToken();
+  const token = await getOAuthToken(req);
   if (!token) {
     throw new NotFoundError('No GitHub OAuth connection found. Connect your GitHub account first.');
   }

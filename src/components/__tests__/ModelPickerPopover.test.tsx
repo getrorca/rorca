@@ -604,15 +604,15 @@ describe('ModelPickerPopover API interactions', () => {
 // ─── Codex disabled state ─────────────────────────────────────────────────────
 
 describe('ModelPickerPopover codex engine', () => {
-  it('renders trigger button as disabled for codex engine', () => {
+  it('renders trigger button as interactive for codex engine', () => {
     renderPicker({ engine: 'codex', value: '' });
     const trigger = screen.getByRole('button', { name: /Pick LLM model/i });
-    expect(trigger).toBeDisabled();
+    expect(trigger).not.toBeDisabled();
   });
 
-  it('shows ChatGPT (subscription) label for codex engine', () => {
+  it('shows Select GPT model label for codex engine before a model is chosen', () => {
     renderPicker({ engine: 'codex', value: '' });
     const trigger = screen.getByRole('button', { name: /Pick LLM model/i });
-    expect(trigger.textContent).toContain('ChatGPT (subscription)');
+    expect(trigger.textContent).toContain('Select GPT model');
   });
 });

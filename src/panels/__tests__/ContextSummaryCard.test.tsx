@@ -63,13 +63,13 @@ describe('ContextSummaryCard', () => {
     it('is expanded by default when isGenerating=true (above the fold, not collapsed)', () => {
       render(<ContextSummaryCard summary={FULL_SUMMARY} isGenerating />);
       // When expanded, direction layer content is visible without interaction
-      expect(screen.getByLabelText('L1 Standards: present')).toBeInTheDocument();
+      expect(screen.getByLabelText('L1: present')).toBeInTheDocument();
     });
 
     it('is collapsed by default when isGenerating is not set', () => {
       render(<ContextSummaryCard summary={FULL_SUMMARY} />);
-      // Direction layer expanded content should not be visible
-      expect(screen.queryByLabelText('L1 Standards: present')).not.toBeInTheDocument();
+      // Expanded direction layer titles should not be visible yet
+      expect(screen.queryByText('L1 Standards')).not.toBeInTheDocument();
     });
   });
 
@@ -85,16 +85,19 @@ describe('ContextSummaryCard', () => {
     it('shows full direction layer labels when expanded', () => {
       render(<ContextSummaryCard summary={FULL_SUMMARY} />);
       expandCard();
-      expect(screen.getByLabelText('L1 Standards: present')).toBeInTheDocument();
-      expect(screen.getByLabelText(/L2.*saas.*present/i)).toBeInTheDocument();
-      expect(screen.getByLabelText('L3 Project: present')).toBeInTheDocument();
+      expect(screen.getByLabelText('L1: present')).toBeInTheDocument();
+      expect(screen.getByLabelText('L2: present')).toBeInTheDocument();
+      expect(screen.getByLabelText('L3: present')).toBeInTheDocument();
+      expect(screen.getByText('L1 Standards')).toBeInTheDocument();
+      expect(screen.getByText('L2 saas')).toBeInTheDocument();
+      expect(screen.getByText('L3 Project')).toBeInTheDocument();
     });
 
     it('shows L2 domain label when domain is set', () => {
       render(<ContextSummaryCard summary={FULL_SUMMARY} />);
       expandCard();
       // L2 saas domain — rendered as "L2 saas"
-      const l2Badge = screen.getByLabelText(/L2.*saas/i);
+      const l2Badge = screen.getByText('L2 saas');
       expect(l2Badge).toBeInTheDocument();
     });
 
@@ -261,13 +264,13 @@ describe('ContextSummaryCard', () => {
     it('toggles expanded state on button click', () => {
       render(<ContextSummaryCard summary={FULL_SUMMARY} />);
       // Initially collapsed
-      expect(screen.queryByLabelText('L1 Standards: present')).not.toBeInTheDocument();
+      expect(screen.queryByText('L1 Standards')).not.toBeInTheDocument();
       // Expand
       expandCard();
-      expect(screen.getByLabelText('L1 Standards: present')).toBeInTheDocument();
+      expect(screen.getByText('L1 Standards')).toBeInTheDocument();
       // Collapse again
       expandCard();
-      expect(screen.queryByLabelText('L1 Standards: present')).not.toBeInTheDocument();
+      expect(screen.queryByText('L1 Standards')).not.toBeInTheDocument();
     });
 
     it('aria-expanded reflects expanded state', () => {

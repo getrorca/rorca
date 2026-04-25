@@ -23,15 +23,25 @@ function buildRequestJwtClaims(req: Request): string {
 }
 
 async function resetRequestJwtClaims(client: PoolClient): Promise<void> {
+  await client.query('RESET ROLE');
+  await client.query('RESET request.jwt.claim.sub');
   await client.query('RESET request.jwt.claims');
 }
 
 export async function getUserClient(req: Request): Promise<PoolClient> {
-  const claims = buildRequestJwtClaims(req);
   const client = await pool.connect();
 
+  if (req.user?.role === 'admin') {
+    return client;
+  }
+
+  const claims = buildRequestJwtClaims(req);
+
   try {
-    await client.query(`SET LOCAL request.jwt.claims = '${claims.replace(/'/g, "''")}'`);
+    const sub = req.user!.supabaseId.replace(/'/g, "''");
+    await client.query('SET ROLE authenticated');
+    await client.query(`SET request.jwt.claim.sub = '${sub}'`);
+    await client.query(`SET request.jwt.claims = '${claims.replace(/'/g, "''")}'`);
     return client;
   } catch (error) {
     try {
