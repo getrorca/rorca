@@ -24,6 +24,7 @@ const config: Config = {
   // Run them separately with npm run test:integration.
   testPathIgnorePatterns: [
     '/node_modules/',
+    '/dist/',
     'src/__tests__/pg-boss-cancel\\.test\\.ts',
     'src/__tests__/pg-boss-concurrency\\.test\\.ts',
     'src/__tests__/pg-boss-dlq\\.test\\.ts',
@@ -33,6 +34,7 @@ const config: Config = {
     'src/__tests__/pg-boss-scheduler\\.test\\.ts',
     'src/__tests__/pg-boss-zero-downtime\\.test\\.ts',
   ],
+  modulePathIgnorePatterns: ['<rootDir>/dist/'],
   // Extend timeout for DB-backed integration tests
   testTimeout: 30_000,
   // Force Jest to exit after all tests complete (prevents hanging async ops from keeping process alive)

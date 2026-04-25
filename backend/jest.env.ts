@@ -32,3 +32,4 @@ process.env.NODE_ENV = 'test';
 // pg Pool. With 54 tests in pipeline.test.ts, PG_POOL_SIZE=1 keeps total connections ~60,
 // safely under PostgreSQL's default max_connections=100.
 process.env.PG_POOL_SIZE = '1';
+process.env.JEST_SKIP_RUNTIME_MIGRATIONS = 'true';

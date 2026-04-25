@@ -26,7 +26,7 @@ import { requirePlan } from '../lib/require-plan';
 import { inferDomain } from '../lib/domain-inference';
 import { ConflictError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
-import { authRequired } from '../lib/auth-utils';
+import { authRequired, requireWorkspaceAdmin, requireWorkspaceMember } from '../lib/auth-utils';
 import * as ptyManager from '../lib/pty-manager';
 
 const router = Router();
@@ -274,6 +274,8 @@ router.get('/', authRequired, async (req, res, next) => {
   }
 });
 
+router.use('/:id', requireWorkspaceMember());
+
 /**
  * @swagger
  * /api/workspaces/{id}/context:
@@ -370,7 +372,7 @@ router.get('/:id/context', async (req, res, next) => {
  *                     newCommits: { type: integer }
  *       404: { description: "Workspace not found" }
  */
-router.post('/:id/hydrate', async (req, res, next) => {
+router.post('/:id/hydrate', requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const { id } = req.params;
     const types: string[] = req.body.types ?? ['schema', 'git'];
@@ -726,7 +728,7 @@ router.get('/:id', async (req, res, next) => {
  *               $ref: '#/components/schemas/Error'
  */
 // PATCH /api/workspaces/:id — Update workspace settings
-router.patch('/:id', async (req, res, next) => {
+router.patch('/:id', requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const row = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!row) {
@@ -862,7 +864,7 @@ router.get('/:id/pipeline-config', async (req, res, next) => {
  *                 ok: { type: boolean }
  *       404: { description: "Workspace not found" }
  */
-router.put('/:id/pipeline-config', async (req, res, next) => {
+router.put('/:id/pipeline-config', requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const row = await queryOne<{ id: string; pipeline_config: string }>('SELECT id, pipeline_config FROM workspaces WHERE id = $1', [req.params.id]);
     if (!row) {
@@ -1175,7 +1177,7 @@ router.get('/:id/team-members', async (req, res, next) => {
  *       500: { description: "Repo scan failed" }
  *       502: { description: "LLM returned invalid or incomplete response" }
  */
-router.post('/:id/scan-direction', async (req, res, next) => {
+router.post('/:id/scan-direction', requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
@@ -1523,7 +1525,7 @@ router.get('/:id/health', async (req, res, next) => {
  *       404: { description: "Workspace not found" }
  *       400: { description: "Workspace path does not exist" }
  */
-router.post('/:id/echolocate', async (req, res, next) => {
+router.post('/:id/echolocate', requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
@@ -1593,7 +1595,7 @@ router.post('/:id/echolocate', async (req, res, next) => {
  *       404: { description: "Workspace not found" }
  *       400: { description: "Not a monorepo or workspace path missing" }
  */
-router.post('/:id/monorepo/discover', async (req, res, next) => {
+router.post('/:id/monorepo/discover', requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
@@ -1733,7 +1735,7 @@ router.post('/:id/monorepo/discover', async (req, res, next) => {
  *       404: { description: "Workspace not found" }
  *       400: { description: "Invalid request" }
  */
-router.post('/:id/scaffold', async (req, res, next) => {
+router.post('/:id/scaffold', requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
@@ -1911,7 +1913,7 @@ router.post('/:id/scaffold', async (req, res, next) => {
  *       400: { description: "Workspace path does not exist" }
  *       500: { description: "Bootstrap failed" }
  */
-router.post('/:id/bootstrap', async (req, res, next) => {
+router.post('/:id/bootstrap', requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
@@ -2149,7 +2151,7 @@ router.post('/:id/bootstrap', async (req, res, next) => {
  *                 layersSaved: { type: integer }
  *       404: { description: "Workspace not found" }
  */
-router.post('/:id/bootstrap/commit', async (req, res, next) => {
+router.post('/:id/bootstrap/commit', requireWorkspaceAdmin(), async (req, res, next) => {
   try {
     const workspace = await queryOne<WorkspaceRow>('SELECT * FROM workspaces WHERE id = $1', [req.params.id]);
     if (!workspace) {
@@ -2160,8 +2162,9 @@ router.post('/:id/bootstrap/commit', async (req, res, next) => {
     const { direction, scopes } = req.body;
     let layersSaved = 0;
 
-    // Save L1 (Standards) — global, no workspace scoping
-    if (direction?.standards) {
+    // Save L1 (Standards) only for platform superusers. Workspace admins may not
+    // overwrite the global standards layer through a workspace-scoped endpoint.
+    if (direction?.standards && req.user?.role === 'admin') {
       await execute(
         `INSERT INTO direction_layers (layer, workspace_id, domain, content_yaml, preferred_model, updated_at)
          VALUES ($1, $2, $3, $4, NULL, NOW())
@@ -2430,9 +2433,9 @@ router.get('/:id/context-health', async (req, res, next) => {
  *               $ref: '#/components/schemas/Error'
  */
 // DELETE /api/workspaces/:id
-router.delete('/:id', async (req, res, next) => {
+router.delete('/:id', requireWorkspaceAdmin(), async (req, res, next) => {
   try {
-    const workspaceId = req.params.id;
+    const workspaceId = String(req.params.id);
 
     await execute('DELETE FROM workspaces WHERE id = $1', [workspaceId]);
 

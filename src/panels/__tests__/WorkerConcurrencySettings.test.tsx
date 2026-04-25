@@ -2,8 +2,8 @@
  * US-004: Worker concurrency Settings UI — Vitest unit tests
  *
  * Tests cover:
- *   (1) Component renders with fetched value (max_concurrent_runs: 4 → input shows 4)
- *   (2) User changes value to 7 and clicks Save → apiFetch PUT called with { max_concurrent_runs: 7 }
+ *   (1) Component renders with fetched values from /api/settings/worker
+ *   (2) User changes parallel run concurrency and saves
  */
 
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
@@ -39,7 +39,7 @@ const mockApiFetch = vi.mocked(apiFetch);
 
 // ─── Import component under test ─────────────────────────────────────────────
 
-import { ProviderSettingsTab } from '../settings/ProviderSettingsTab';
+import { WsPipelineSection } from '../WorkspaceSettingsPanel';
 
 // ─── Shared mock data ─────────────────────────────────────────────────────────
 
@@ -110,11 +110,17 @@ function buildApiMock(workerValue: number) {
     if (path === '/api/settings/worker') {
       if (init?.method === 'PUT') {
         const body = JSON.parse(init.body as string);
-        return { max_concurrent_runs: body.max_concurrent_runs };
+        return {
+          queue_max_concurrent: body.queue_max_concurrent,
+          run_now_max_concurrent: body.run_now_max_concurrent,
+        };
       }
-      return { max_concurrent_runs: workerValue };
+      return { queue_max_concurrent: 1, run_now_max_concurrent: workerValue };
     }
     if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+    if (path === '/api/workspaces/ws-1/pipeline-config') {
+      return { config: { autoWorktree: true, storyTimeoutMin: 45, maxRetries: 0, mergeStrategy: 'direct' } };
+    }
     if (path === '/api/config') return MOCK_AGENT_CONFIG;
     if (path.includes('/api/config/opencode-models')) return MOCK_OPENCODE_MODELS;
     if (path.includes('/api/config/embedding-provider')) return { provider: null };
@@ -151,65 +157,39 @@ beforeEach(() => {
 
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
-describe('ProviderSettingsTab — Pipeline Concurrency section', () => {
-  it('renders input with value fetched from /api/settings/worker (max_concurrent_runs: 4)', async () => {
+describe('WsPipelineSection — Worker Concurrency section', () => {
+  it('renders parallel run concurrency with fetched value 4', async () => {
     mockApiFetch.mockImplementation(buildApiMock(4));
 
-    renderWithProviders(<ProviderSettingsTab />);
+    renderWithProviders(<WsPipelineSection workspaceId="ws-1" showToast={vi.fn()} />);
 
-    // Wait for the async load to complete and the input to show value 4
     await waitFor(
       () => {
-        const inputs = screen.getAllByRole('spinbutton');
-        // Find the concurrency input (min=1, max=10)
-        const concurrencyInput = inputs.find(
-          (el) => el.getAttribute('min') === '1' && el.getAttribute('max') === '10',
-        ) as HTMLInputElement | undefined;
-        expect(concurrencyInput).toBeDefined();
-        expect(Number(concurrencyInput!.value)).toBe(4);
+        const concurrencyInput = screen.getByLabelText(/parallel run concurrency/i) as HTMLInputElement;
+        expect(Number(concurrencyInput.value)).toBe(4);
       },
       { timeout: 3000 },
     );
   });
 
-  it('calls apiFetch PUT with { max_concurrent_runs: 7 } when user changes value and saves', async () => {
+  it('calls apiFetch PUT with run_now_max_concurrent: 7 when user changes value and saves', async () => {
     mockApiFetch.mockImplementation(buildApiMock(4));
 
-    renderWithProviders(<ProviderSettingsTab />);
+    renderWithProviders(<WsPipelineSection workspaceId="ws-1" showToast={vi.fn()} />);
 
-    // Wait for the initial value to load
     await waitFor(
       () => {
-        const inputs = screen.getAllByRole('spinbutton');
-        const concurrencyInput = inputs.find(
-          (el) => el.getAttribute('min') === '1' && el.getAttribute('max') === '10',
-        ) as HTMLInputElement | undefined;
-        expect(concurrencyInput).toBeDefined();
-        expect(Number(concurrencyInput!.value)).toBe(4);
+        const concurrencyInput = screen.getByLabelText(/parallel run concurrency/i) as HTMLInputElement;
+        expect(Number(concurrencyInput.value)).toBe(4);
       },
       { timeout: 3000 },
     );
 
-    // Find the concurrency input and change its value to 7
-    const inputs = screen.getAllByRole('spinbutton');
-    const concurrencyInput = inputs.find(
-      (el) => el.getAttribute('min') === '1' && el.getAttribute('max') === '10',
-    ) as HTMLInputElement;
-
+    const concurrencyInput = screen.getByLabelText(/parallel run concurrency/i) as HTMLInputElement;
     fireEvent.change(concurrencyInput, { target: { value: '7' } });
 
-    // Find and click the Save button near the concurrency input
-    // The button is a sibling of the input — look for a button with "Save" text
-    const saveButtons = screen.getAllByRole('button', { name: /save/i });
-    // The concurrency Save button is close to the input; click the first one found
-    // (component may have multiple Save buttons; this test targets the concurrency Save)
-    const concurrencySaveBtn = saveButtons.find(btn =>
-      btn.closest('div')?.querySelector('input[min="1"][max="10"]') !== null,
-    );
-    expect(concurrencySaveBtn).toBeDefined();
-    fireEvent.click(concurrencySaveBtn!);
+    fireEvent.click(screen.getByRole('button', { name: /save worker settings/i }));
 
-    // Verify PUT was called with the new value
     await waitFor(() => {
       const putCalls = mockApiFetch.mock.calls.filter(
         ([path, init]) => path === '/api/settings/worker' && (init as RequestInit)?.method === 'PUT',
@@ -218,7 +198,8 @@ describe('ProviderSettingsTab — Pipeline Concurrency section', () => {
 
       const lastPut = putCalls[putCalls.length - 1];
       const body = JSON.parse((lastPut[1] as RequestInit).body as string);
-      expect(body.max_concurrent_runs).toBe(7);
+      expect(body.queue_max_concurrent).toBe(1);
+      expect(body.run_now_max_concurrent).toBe(7);
     });
   });
 });

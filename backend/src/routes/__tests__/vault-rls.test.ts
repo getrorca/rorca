@@ -19,11 +19,11 @@ describe('api_key_vault RLS policies', () => {
     const vaultKeyId = `vault_${suffix}`;
 
     await execute(
-      `INSERT INTO users (id, email, display_name, password_hash, auth_id)
+      `INSERT INTO users (id, email, display_name, auth_id)
        VALUES
-       ($1, $2, 'Owner A', 'x', $3),
-       ($4, $5, 'Owner B', 'x', $6),
-       ($7, $8, 'Member B', 'x', $9)`,
+       ($1, $2, 'Owner A', $3),
+       ($4, $5, 'Owner B', $6),
+       ($7, $8, 'Member B', $9)`,
       [
         ownerAId, `owner.a.${suffix}@example.com`, ownerAAuthId,
         ownerBId, `owner.b.${suffix}@example.com`, ownerBAuthId,

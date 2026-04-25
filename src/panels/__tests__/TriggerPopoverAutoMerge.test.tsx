@@ -33,7 +33,7 @@ beforeEach(() => {
 // ─── Tests ────────────────────────────────────────────────────────────────────
 
 describe('TriggerPopover — autoMerge checkbox', () => {
-  it('autoMerge checkbox is hidden when autoWorktree is off (default)', () => {
+  it('completion action control is hidden when autoWorktree is off (default)', () => {
     const onTrigger = vi.fn();
     render(
       <TriggerPopover
@@ -43,12 +43,11 @@ describe('TriggerPopover — autoMerge checkbox', () => {
       />,
     );
 
-    // autoWorktree is off by default — merge checkbox must not be in the DOM
-    const mergeCheckbox = screen.queryByRole('checkbox', { name: /merge to main/i });
-    expect(mergeCheckbox).toBeNull();
+    const completionAction = screen.queryByRole('combobox', { name: /completion action/i });
+    expect(completionAction).toBeNull();
   });
 
-  it('autoMerge checkbox is visible when autoWorktree is toggled on', () => {
+  it('completion action control is visible when autoWorktree is toggled on', () => {
     const onTrigger = vi.fn();
     render(
       <TriggerPopover
@@ -58,16 +57,16 @@ describe('TriggerPopover — autoMerge checkbox', () => {
       />,
     );
 
-    // Toggle on the "Use worktrees" checkbox
-    const worktreeCheckbox = screen.getByRole('checkbox', { name: /use worktrees/i });
+    // Toggle on the worktree isolation checkbox
+    const worktreeCheckbox = screen.getByRole('checkbox', { name: /isolate in worktree/i });
     fireEvent.click(worktreeCheckbox);
 
-    // Merge checkbox should now appear
-    const mergeCheckbox = screen.getByRole('checkbox', { name: /merge to main/i });
-    expect(mergeCheckbox).toBeInTheDocument();
+    const completionAction = screen.getByRole('combobox', { name: /completion action/i }) as HTMLSelectElement;
+    expect(completionAction).toBeInTheDocument();
+    expect(completionAction.value).toBe('direct');
   });
 
-  it('autoMerge checkbox is checked by default when autoWorktree is enabled', () => {
+  it('completion action defaults to direct merge when autoWorktree is enabled', () => {
     const onTrigger = vi.fn();
     render(
       <TriggerPopover
@@ -77,12 +76,12 @@ describe('TriggerPopover — autoMerge checkbox', () => {
       />,
     );
 
-    // Toggle worktrees on
-    const worktreeCheckbox = screen.getByRole('checkbox', { name: /use worktrees/i });
+    // Toggle worktree isolation on
+    const worktreeCheckbox = screen.getByRole('checkbox', { name: /isolate in worktree/i });
     fireEvent.click(worktreeCheckbox);
 
-    const mergeCheckbox = screen.getByRole('checkbox', { name: /merge to main/i }) as HTMLInputElement;
-    expect(mergeCheckbox.checked).toBe(true);
+    const completionAction = screen.getByRole('combobox', { name: /completion action/i }) as HTMLSelectElement;
+    expect(completionAction.value).toBe('direct');
   });
 
   it('payload sent to onTrigger includes autoMerge:true when worktree on and merge checked', () => {
@@ -95,8 +94,8 @@ describe('TriggerPopover — autoMerge checkbox', () => {
       />,
     );
 
-    // Enable worktree
-    const worktreeCheckbox = screen.getByRole('checkbox', { name: /use worktrees/i });
+    // Enable worktree isolation
+    const worktreeCheckbox = screen.getByRole('checkbox', { name: /isolate in worktree/i });
     fireEvent.click(worktreeCheckbox);
 
     // Merge is checked by default — click Run Now
@@ -109,7 +108,7 @@ describe('TriggerPopover — autoMerge checkbox', () => {
     expect(options?.autoMerge).toBe(true);
   });
 
-  it('autoMerge checkbox hidden again after autoWorktree is toggled back off', () => {
+  it('completion action control is hidden again after autoWorktree is toggled back off', () => {
     const onTrigger = vi.fn();
     render(
       <TriggerPopover
@@ -119,13 +118,13 @@ describe('TriggerPopover — autoMerge checkbox', () => {
       />,
     );
 
-    const worktreeCheckbox = screen.getByRole('checkbox', { name: /use worktrees/i });
+    const worktreeCheckbox = screen.getByRole('checkbox', { name: /isolate in worktree/i });
     // Toggle on
     fireEvent.click(worktreeCheckbox);
-    expect(screen.getByRole('checkbox', { name: /merge to main/i })).toBeInTheDocument();
+    expect(screen.getByRole('combobox', { name: /completion action/i })).toBeInTheDocument();
 
     // Toggle off
     fireEvent.click(worktreeCheckbox);
-    expect(screen.queryByRole('checkbox', { name: /merge to main/i })).toBeNull();
+    expect(screen.queryByRole('combobox', { name: /completion action/i })).toBeNull();
   });
 });

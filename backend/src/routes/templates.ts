@@ -35,6 +35,40 @@ async function getUserTeamIds(userId: string): Promise<string[]> {
   return rows.map(r => r.team_id);
 }
 
+async function getUserTeamRole(userId: string, teamId: string): Promise<string | null> {
+  const row = await queryOne<{ role: string }>(
+    'SELECT role FROM team_members WHERE user_id = $1 AND team_id = $2',
+    [userId, teamId]
+  );
+  return row?.role ?? null;
+}
+
+async function canReadTemplate(userId: string, row: Pick<TemplateRow, 'author_id' | 'team_id'>): Promise<boolean> {
+  if (row.author_id === userId) {
+    return true;
+  }
+
+  if (!row.team_id) {
+    return false;
+  }
+
+  const teamIds = await getUserTeamIds(userId);
+  return teamIds.includes(row.team_id);
+}
+
+async function canManageTemplate(userId: string, row: Pick<TemplateRow, 'author_id' | 'team_id'>): Promise<boolean> {
+  if (row.author_id === userId) {
+    return true;
+  }
+
+  if (!row.team_id) {
+    return false;
+  }
+
+  const role = await getUserTeamRole(userId, row.team_id);
+  return role === 'admin';
+}
+
 async function getTemplateRating(templateId: string): Promise<{ avgRating: number; ratingCount: number }> {
   const row = await queryOne<{ avg_rating: number | null; rating_count: number }>(
     `SELECT AVG(rating) as avg_rating, COUNT(*)::int as rating_count
@@ -264,16 +298,15 @@ router.get('/', async (req: Request, res: Response) => {
       // 'all' — personal + team templates visible to this user
       const teamIds = await getUserTeamIds(user.id);
       if (teamIds.length === 0) {
-        // No teams — show personal (author_id match) + templates with no team_id (legacy/global)
         rows = await query<TemplateRow>(
-          `SELECT * FROM templates WHERE author_id = $1 OR team_id IS NULL ORDER BY created_at DESC`,
+          `SELECT * FROM templates WHERE author_id = $1 ORDER BY created_at DESC`,
           [user.id]
         );
       } else {
         const placeholders = teamIds.map((_, i) => `$${i + 2}`).join(',');
         rows = await query<TemplateRow>(
           `SELECT * FROM templates
-           WHERE author_id = $1 OR team_id IS NULL OR team_id IN (${placeholders})
+           WHERE author_id = $1 OR team_id IN (${placeholders})
            ORDER BY created_at DESC`,
           [user.id, ...teamIds]
         );
@@ -344,8 +377,8 @@ router.post('/:id/rate', async (req: Request, res: Response) => {
     }
 
     // Check template exists
-    const template = await queryOne<Pick<TemplateRow, 'id' | 'team_id'>>(
-      'SELECT id, team_id FROM templates WHERE id = $1',
+    const template = await queryOne<Pick<TemplateRow, 'id' | 'team_id' | 'author_id'>>(
+      'SELECT id, team_id, author_id FROM templates WHERE id = $1',
       [templateId]
     );
     if (!template) {
@@ -353,13 +386,8 @@ router.post('/:id/rate', async (req: Request, res: Response) => {
       return;
     }
 
-    // If template belongs to a team, user must be a member
-    if (template.team_id) {
-      const userTeamIds = await getUserTeamIds(user.id);
-      if (!userTeamIds.includes(template.team_id)) {
-        throw new ForbiddenError('You must be a team member to rate this template');
-        return;
-      }
+    if (!(await canReadTemplate(user.id, template))) {
+      throw new ForbiddenError('You do not have access to this template');
     }
 
     // Upsert rating
@@ -405,15 +433,28 @@ router.post('/:id/rate', async (req: Request, res: Response) => {
  */
 router.post('/:id/use', async (req: Request, res: Response) => {
   try {
-    const result = await execute(
-      `UPDATE templates SET usage_count = usage_count + 1, last_used_at = NOW() WHERE id = $1`,
+    const user = await getEffectiveUser(req);
+    if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
+
+    const row = await queryOne<Pick<TemplateRow, 'id' | 'author_id' | 'team_id'>>(
+      'SELECT id, author_id, team_id FROM templates WHERE id = $1',
       [req.params.id]
     );
 
-    if (result.rowCount === 0) {
+    if (!row) {
       throw new NotFoundError('Template not found');
       return;
     }
+
+    if (!(await canReadTemplate(user.id, row))) {
+      throw new ForbiddenError('You do not have access to this template');
+      return;
+    }
+
+    await execute(
+      `UPDATE templates SET usage_count = usage_count + 1, last_used_at = NOW() WHERE id = $1`,
+      [req.params.id]
+    );
 
     res.json({ ok: true });
   } catch (error: any) {
@@ -463,6 +504,11 @@ router.get('/:id', async (req: Request, res: Response) => {
 
     if (!row) {
       throw new NotFoundError('Template not found');
+      return;
+    }
+
+    if (!(await canReadTemplate(user.id, row))) {
+      throw new ForbiddenError('You do not have access to this template');
       return;
     }
 
@@ -517,13 +563,25 @@ router.get('/:id', async (req: Request, res: Response) => {
  */
 router.delete('/:id', async (req: Request, res: Response) => {
   try {
-    const result = await execute('DELETE FROM templates WHERE id = $1', [req.params.id]);
+    const user = await getEffectiveUser(req);
+    if (!user) { res.status(500).json({ error: 'No user configured' }); return; }
 
-    if (result.rowCount === 0) {
+    const row = await queryOne<Pick<TemplateRow, 'id' | 'author_id' | 'team_id'>>(
+      'SELECT id, author_id, team_id FROM templates WHERE id = $1',
+      [req.params.id]
+    );
+
+    if (!row) {
       throw new NotFoundError('Template not found');
       return;
     }
 
+    if (!(await canManageTemplate(user.id, row))) {
+      throw new ForbiddenError('You do not have permission to delete this template');
+      return;
+    }
+
+    await execute('DELETE FROM templates WHERE id = $1', [req.params.id]);
     res.status(204).send();
   } catch (error: any) {
     handleRouteError(res, error, '[Templates] Delete');

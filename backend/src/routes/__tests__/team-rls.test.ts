@@ -19,8 +19,8 @@ describe('team RLS policies', () => {
     const inviteId = `invite_${suffix}`;
 
     await execute(
-      `INSERT INTO users (id, email, display_name, password_hash, auth_id)
-       VALUES ($1, $2, 'Owner', 'x', $3), ($4, $5, 'User A', 'x', $6), ($7, $8, 'User B', 'x', $9)`,
+      `INSERT INTO users (id, email, display_name, auth_id)
+       VALUES ($1, $2, 'Owner', $3), ($4, $5, 'User A', $6), ($7, $8, 'User B', $9)`,
       [ownerId, `owner.${suffix}@example.com`, ownerAuthId, userAId, `usera.${suffix}@example.com`, userAAuthId, userBId, `userb.${suffix}@example.com`, userBAuthId]
     );
 

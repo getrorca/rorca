@@ -1175,10 +1175,14 @@ function ProvidersSection() {
   const fetchData = useCallback(async () => {
     try {
       const [provData, keyData, defaultData] = await Promise.all([
-        apiFetch<{ providers: ProviderStatus[] }>('/api/vault/keys/providers'),
-        apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
+        apiFetch<{ providers: ProviderStatus[] }>(workspaceId
+          ? `/api/vault/keys/providers?workspaceId=${encodeURIComponent(workspaceId)}`
+          : '/api/vault/keys/providers'),
+        apiFetch<{ keys: ApiKeyEntry[] }>(workspaceId
+          ? `/api/vault/keys?workspaceId=${encodeURIComponent(workspaceId)}`
+          : '/api/vault/keys'),
         workspaceId
-          ? apiFetch<{ provider: string }>(`/api/vault/keys/default-provider?workspaceId=${workspaceId}`)
+          ? apiFetch<{ provider: string }>(`/api/vault/keys/default-provider?workspaceId=${encodeURIComponent(workspaceId)}`)
           : Promise.resolve({ provider: 'claude-cli' }),
       ]);
       setProviders(provData.providers);
@@ -1194,6 +1198,10 @@ function ProvidersSection() {
   useEffect(() => { fetchData(); }, [fetchData]);
 
   const handleAddKey = async (providerId: string) => {
+    if (!workspaceId) {
+      toast.show('Select a workspace first', 'error');
+      return;
+    }
     setAdding(true);
     setAddError(null);
     try {
@@ -1201,6 +1209,7 @@ function ProvidersSection() {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({
+          workspaceId,
           provider: providerId,
           key: addKey,
           label: addLabel,
@@ -1223,8 +1232,12 @@ function ProvidersSection() {
   };
 
   const removeKey = async (id: string) => {
+    if (!workspaceId) {
+      toast.show('Select a workspace first', 'error');
+      return;
+    }
     try {
-      await apiFetch(`/api/vault/keys/${id}`, { method: 'DELETE' });
+      await apiFetch(`/api/vault/keys/${id}?workspaceId=${encodeURIComponent(workspaceId)}`, { method: 'DELETE' });
       toast.show('API key removed', 'success');
       fetchData();
     } catch {
@@ -1233,13 +1246,17 @@ function ProvidersSection() {
   };
 
   const testConnection = async (providerId: string) => {
+    if (!workspaceId) {
+      setTestResult({ provider: providerId, ok: false, error: 'Select a workspace first' });
+      return;
+    }
     setTestingProvider(providerId);
     setTestResult(null);
     try {
       const result = await apiFetch<{ ok: boolean; latencyMs: number; response: string }>('/api/vault/keys/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider: providerId }),
+        body: JSON.stringify({ workspaceId, provider: providerId }),
       });
       setTestResult({ provider: providerId, ok: true, latencyMs: result.latencyMs, response: result.response });
     } catch (err: any) {
@@ -2219,10 +2236,10 @@ function WorkflowRouterSection() {
       apiFetch<{ models: ModelOption[] }>('/api/direction/models'),
     ])
       .then(([cfgs, status, keyData, modelData]) => {
-        setConfigs(cfgs);
-        setCliStatus({ opencodeInstalled: status.opencodeInstalled, codexInstalled: status.codexInstalled });
-        setVaultKeys(keyData.keys);
-        setAllModels(modelData.models);
+        setConfigs(Array.isArray(cfgs) ? cfgs : []);
+        setCliStatus({ opencodeInstalled: !!status?.opencodeInstalled, codexInstalled: !!status?.codexInstalled });
+        setVaultKeys(Array.isArray(keyData?.keys) ? keyData.keys : []);
+        setAllModels(Array.isArray(modelData?.models) ? modelData.models : []);
       })
       .catch(() => { /* silently fail — table shows empty */ })
       .finally(() => setLoading(false));

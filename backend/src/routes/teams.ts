@@ -3,11 +3,12 @@ import crypto from 'crypto';
 import { query, queryOne, execute } from '../db/index';
 import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import type { AuthUser } from '../lib/auth-utils';
-import { requireRole } from '../lib/auth-utils';
+import { requireRole, requireWorkspaceAdmin } from '../lib/auth-utils';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { synthesize } from '../lib/direction-stack';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
 import { logger } from '../lib/logger';
+import { sendTeamInviteEmail } from '../lib/email';
 import { ConflictError, NotFoundError, TooManyRequestsError, UnprocessableError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 
@@ -134,6 +135,7 @@ async function emitWalEvent(eventType: string, payload: Record<string, unknown>)
 router.get('/', async (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId.trim() : '';
     const rows = await query<{
       id: string;
       name: string;
@@ -141,13 +143,15 @@ router.get('/', async (req: Request, res: Response) => {
       ownerId: string;
       createdAt: string;
       role: string;
+      workspaceId: string;
     }>(`
-      SELECT t.id, t.name, t.slug, t.owner_id AS "ownerId", t.created_at AS "createdAt", tm.role
+      SELECT t.id, t.name, t.slug, t.owner_id AS "ownerId", t.created_at AS "createdAt", tm.role, t.workspace_id AS "workspaceId"
       FROM teams t
       JOIN team_members tm ON t.id = tm.team_id
       WHERE tm.user_id = $1
+        AND ($2 = '' OR t.workspace_id = $2)
       ORDER BY t.name ASC
-    `, [user.id]);
+    `, [user.id, workspaceId]);
 
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(rows, pagination, { cursorKey: (t) => t.id }));
@@ -215,10 +219,14 @@ router.get('/', async (req: Request, res: Response) => {
  *               $ref: '#/components/schemas/Error'
  */
 // POST /api/teams — Create a new team
-router.post('/', async (req: Request, res: Response) => {
+router.post('/', requireWorkspaceAdmin(), async (req: Request, res: Response) => {
   try {
     const user = getAuthUser(req);
-    const { name, slug } = req.body;
+    const { name, slug, workspaceId } = req.body;
+
+    if (!workspaceId || typeof workspaceId !== 'string' || !workspaceId.trim()) {
+      throw new ValidationError('Workspace ID is required');
+    }
 
     if (!name || typeof name !== 'string' || !name.trim()) {
       throw new ValidationError('Team name is required');
@@ -245,10 +253,19 @@ router.post('/', async (req: Request, res: Response) => {
     const teamId = crypto.randomUUID();
     const trimmedName = name.trim();
 
+    const trimmedWorkspaceId = workspaceId.trim();
+
     // Create team
     await execute(
-      'INSERT INTO teams (id, name, slug, owner_id) VALUES ($1, $2, $3, $4)',
-      [teamId, trimmedName, trimmedSlug, user.id]
+      'INSERT INTO teams (id, name, slug, owner_id, workspace_id) VALUES ($1, $2, $3, $4, $5)',
+      [teamId, trimmedName, trimmedSlug, user.id, trimmedWorkspaceId]
+    );
+
+    await execute(
+      `INSERT INTO workspace_access (workspace_id, team_id, permission)
+       VALUES ($1, $2, 'admin')
+       ON CONFLICT (workspace_id, team_id) DO NOTHING`,
+      [trimmedWorkspaceId, teamId]
     );
 
     // Add owner as admin member
@@ -257,13 +274,14 @@ router.post('/', async (req: Request, res: Response) => {
       [teamId, user.id]
     );
 
-    await emitWalEvent('team_created', { teamId, name: trimmedName, slug: trimmedSlug, ownerId: user.id });
+    await emitWalEvent('team_created', { teamId, workspaceId: trimmedWorkspaceId, name: trimmedName, slug: trimmedSlug, ownerId: user.id });
 
     res.status(201).json({
       id: teamId,
       name: trimmedName,
       slug: trimmedSlug,
       ownerId: user.id,
+      workspaceId: trimmedWorkspaceId,
       createdAt: new Date().toISOString(),
     });
   } catch (error: unknown) {
@@ -377,13 +395,28 @@ router.post('/:id/invites', requireRole('admin'), async (req: Request, res: Resp
       [inviteId, teamId, trimmedEmail, tokenHash, user.id, inviteRole, expiresAt]
     );
 
-    await emitWalEvent('team_invite_sent', { teamId, inviteId, email: trimmedEmail, role: inviteRole, invitedBy: user.id });
+    const inviteUrl = `${process.env.RORCA_BASE_URL || 'http://localhost:5210'}/invites/${rawToken}`;
+    let emailSent = false;
+    let emailError: string | null = null;
+
+    try {
+      await sendTeamInviteEmail(trimmedEmail, user.email || 'A teammate', team.name, inviteUrl);
+      emailSent = true;
+    } catch (error) {
+      emailError = error instanceof Error ? error.message : 'Failed to send invite email';
+      logger.warn({ err: error, teamId, inviteId, email: trimmedEmail }, '[Teams] invite email send failed');
+    }
+
+    await emitWalEvent('team_invite_sent', { teamId, inviteId, email: trimmedEmail, role: inviteRole, invitedBy: user.id, emailSent });
 
     res.status(201).json({
       inviteId,
       email: trimmedEmail,
       role: inviteRole,
       token: rawToken,
+      inviteUrl,
+      emailSent,
+      emailError,
       expiresAt,
       teamName: team.name,
     });

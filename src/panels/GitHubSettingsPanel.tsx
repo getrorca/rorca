@@ -1424,13 +1424,13 @@ function CiAutofixSection({ workspaceId }: { workspaceId: string | null }) {
                   <RefreshCw size={12} />
                 </button>
               </div>
-              {config?.recentRuns.length === 0 ? (
+              {(config?.recentRuns?.length ?? 0) === 0 ? (
                 <div className="p-4 rounded-lg border border-border text-center text-xs text-muted">
                   No autofix runs yet. Rorca will attempt fixes here once CI checks start failing.
                 </div>
               ) : (
                 <div className="rounded-lg border border-border overflow-hidden divide-y divide-border">
-                  {config?.recentRuns.map(run => (
+                  {(config?.recentRuns ?? []).map(run => (
                     <div key={run.id} className="flex items-start gap-3 px-3 py-2.5 hover:bg-white/2 transition-colors">
                       <div className="flex-1 min-w-0">
                         <div className="flex items-center gap-2 flex-wrap">

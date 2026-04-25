@@ -5,29 +5,38 @@
 -- Add triggered_by column (nullable TEXT, no FK — stores 'deleted_user' after deletion)
 ALTER TABLE pipeline_runs ADD COLUMN IF NOT EXISTS triggered_by TEXT;
 
--- Drop the existing CASCADE FK on story_comments.user_id and recreate as SET NULL
+-- Drop the existing FK on story_comments.user_id and recreate as SET NULL
 -- so account deletion anonymizes comments instead of deleting them.
 DO $$
+DECLARE
+  v_constraint_name text;
 BEGIN
-  -- Drop existing FK if it exists (named or unnamed)
-  IF EXISTS (
-    SELECT 1 FROM information_schema.table_constraints
-    WHERE table_name = 'story_comments'
-      AND constraint_type = 'FOREIGN KEY'
-      AND constraint_name IN (
-        SELECT constraint_name FROM information_schema.key_column_usage
-        WHERE table_name = 'story_comments' AND column_name = 'user_id'
-      )
+  SELECT tc.constraint_name
+    INTO v_constraint_name
+    FROM information_schema.table_constraints tc
+    JOIN information_schema.key_column_usage kcu
+      ON tc.constraint_name = kcu.constraint_name
+     AND tc.table_schema = kcu.table_schema
+     AND tc.table_name = kcu.table_name
+   WHERE tc.table_schema = 'rorca'
+     AND tc.table_name = 'story_comments'
+     AND tc.constraint_type = 'FOREIGN KEY'
+     AND kcu.column_name = 'user_id'
+   LIMIT 1;
+
+  IF v_constraint_name IS NOT NULL THEN
+    EXECUTE format('ALTER TABLE story_comments DROP CONSTRAINT IF EXISTS %I', v_constraint_name);
+  END IF;
+
+  IF NOT EXISTS (
+    SELECT 1
+    FROM information_schema.table_constraints
+    WHERE table_schema = 'rorca'
+      AND table_name = 'story_comments'
+      AND constraint_name = 'fk_story_comments_user_id'
   ) THEN
-    EXECUTE (
-      SELECT 'ALTER TABLE story_comments DROP CONSTRAINT ' || constraint_name
-      FROM information_schema.key_column_usage
-      WHERE table_name = 'story_comments' AND column_name = 'user_id'
-      LIMIT 1
-    );
+    ALTER TABLE story_comments
+      ADD CONSTRAINT fk_story_comments_user_id
+      FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL;
   END IF;
 END $$;
-
-ALTER TABLE story_comments
-  ADD CONSTRAINT fk_story_comments_user_id
-  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE SET NULL;

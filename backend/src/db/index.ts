@@ -173,6 +173,10 @@ function getPool(): Pool {
 
 /** Ensure migrations have run exactly once. Awaited before first query. */
 async function ensureMigrations(): Promise<void> {
+  if (process.env.JEST_SKIP_RUNTIME_MIGRATIONS === 'true') {
+    _migrationsDone = true;
+    return;
+  }
   if (_migrationsDone) return;
   if (_migrationsRunning) {
     await _migrationsRunning;

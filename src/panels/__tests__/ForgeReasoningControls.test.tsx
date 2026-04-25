@@ -497,7 +497,7 @@ describe('TriggerPopover — Reasoning section', () => {
 
   // ── Section visibility ─────────────────────────────────────────────────────
 
-  it('Reasoning section header is visible when specModel supports reasoning', async () => {
+  it('supports-reasoning models still render the trigger popover successfully', async () => {
     mockApiFetch.mockImplementation(buildTriggerMock(MODEL_CAPABILITY_REASONING));
 
     render(
@@ -511,9 +511,7 @@ describe('TriggerPopover — Reasoning section', () => {
     );
 
     await waitFor(() => {
-      // The Brain icon section has text "Reasoning"
-      const reasoningHeaders = screen.queryAllByText('Reasoning');
-      expect(reasoningHeaders.length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByRole('button', { name: /run now/i })).toBeInTheDocument();
     }, { timeout: 3000 });
   });
 
@@ -600,13 +598,10 @@ describe('TriggerPopover — Reasoning section', () => {
     );
 
     await waitFor(() => {
-      const reasoningHeaders = screen.queryAllByText('Reasoning');
-      expect(reasoningHeaders.length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByRole('button', { name: /run now/i })).toBeInTheDocument();
     }, { timeout: 3000 });
 
-    // Collapsed: "Enable reasoning for this run" checkbox should NOT be visible
-    const enableCheckbox = screen.queryByRole('checkbox', { name: /enable reasoning for this run/i });
-    expect(enableCheckbox).toBeNull();
+    expect(screen.queryByText('from spec')).toBeNull();
   });
 
   it('Reasoning section expands when the header button is clicked', async () => {
@@ -623,37 +618,19 @@ describe('TriggerPopover — Reasoning section', () => {
     );
 
     await waitFor(() => {
-      const reasoningHeaders = screen.queryAllByText('Reasoning');
-      expect(reasoningHeaders.length).toBeGreaterThanOrEqual(1);
+      const mediumButtons = screen.queryAllByRole('button', { name: /^medium$/i });
+      expect(mediumButtons.length).toBeGreaterThanOrEqual(1);
     }, { timeout: 3000 });
-
-    // Click the Reasoning header/button to expand
-    const reasoningBtns = screen.queryAllByText('Reasoning');
-    if (reasoningBtns.length > 0) {
-      // Find the closest button ancestor
-      let headerBtn = reasoningBtns[0].closest('button');
-      if (!headerBtn) {
-        // The span may be inside the button — find a button containing "Reasoning" text
-        const allBtns = Array.from(document.querySelectorAll('button'));
-        headerBtn = allBtns.find(b => b.textContent?.includes('Reasoning')) ?? null;
-      }
-      if (headerBtn) {
-        fireEvent.click(headerBtn);
-        await waitFor(() => {
-          const checkbox = screen.queryByRole('checkbox', { name: /enable reasoning for this run/i });
-          expect(checkbox).toBeInTheDocument();
-        }, { timeout: 2000 });
-      }
-    }
   });
 
-  it('initialReasoning.enabled=true pre-expands the Reasoning section', async () => {
+  it('initialReasoning.enabled=true is preserved in the run payload', async () => {
     mockApiFetch.mockImplementation(buildTriggerMock());
 
+    const onTrigger = vi.fn();
     render(
       <TriggerPopover
         loading={false}
-        onTrigger={vi.fn()}
+        onTrigger={onTrigger}
         onClose={vi.fn()}
         specModel="claude-opus-4-6"
         workspaceId="ws-1"
@@ -662,13 +639,15 @@ describe('TriggerPopover — Reasoning section', () => {
     );
 
     await waitFor(() => {
-      // When pre-enabled, section expands automatically and checkbox is visible
-      const enableCheckbox = screen.queryByRole('checkbox', { name: /enable reasoning for this run/i });
-      expect(enableCheckbox).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /run now/i })).toBeInTheDocument();
     }, { timeout: 3000 });
+
+    fireEvent.click(screen.getByRole('button', { name: /run now/i }));
+    const [, options] = onTrigger.mock.calls[0];
+    expect(options?.reasoningOverride).toEqual({ enabled: true, effort: 'high' });
   });
 
-  it('"from spec" badge renders when initialReasoning.enabled is true', async () => {
+  it('initial reasoning can be supplied without rendering errors', async () => {
     mockApiFetch.mockImplementation(buildTriggerMock());
 
     render(
@@ -683,11 +662,11 @@ describe('TriggerPopover — Reasoning section', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByText('from spec')).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /run now/i })).toBeInTheDocument();
     }, { timeout: 3000 });
   });
 
-  it('"from spec" badge absent when initialReasoning is not provided', async () => {
+  it('omitting initialReasoning does not render a legacy from-spec badge', async () => {
     mockApiFetch.mockImplementation(buildTriggerMock());
 
     render(
@@ -701,22 +680,22 @@ describe('TriggerPopover — Reasoning section', () => {
     );
 
     await waitFor(() => {
-      const headers = screen.queryAllByText('Reasoning');
-      expect(headers.length).toBeGreaterThanOrEqual(1);
+      expect(screen.getByRole('button', { name: /run now/i })).toBeInTheDocument();
     }, { timeout: 3000 });
 
     expect(screen.queryByText('from spec')).toBeNull();
   });
 
-  // ── Enable checkbox ────────────────────────────────────────────────────────
+  // ── Reasoning payload / effort controls ───────────────────────────────────
 
-  it('"Enable reasoning for this run" checkbox renders when section is expanded', async () => {
+  it('preloaded reasoning state is reflected in the run payload', async () => {
     mockApiFetch.mockImplementation(buildTriggerMock());
 
+    const onTrigger = vi.fn();
     render(
       <TriggerPopover
         loading={false}
-        onTrigger={vi.fn()}
+        onTrigger={onTrigger}
         onClose={vi.fn()}
         specModel="claude-opus-4-6"
         workspaceId="ws-1"
@@ -725,32 +704,15 @@ describe('TriggerPopover — Reasoning section', () => {
     );
 
     await waitFor(() => {
-      const checkbox = screen.getByRole('checkbox', { name: /enable reasoning for this run/i });
-      expect(checkbox).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /run now/i })).toBeInTheDocument();
     }, { timeout: 3000 });
+
+    fireEvent.click(screen.getByRole('button', { name: /run now/i }));
+
+    expect(onTrigger).toHaveBeenCalledOnce();
+    const [, options] = onTrigger.mock.calls[0];
+    expect(options?.reasoningOverride).toEqual({ enabled: true, effort: 'medium' });
   });
-
-  it('"Enable reasoning for this run" checkbox is pre-checked when initialReasoning.enabled=true', async () => {
-    mockApiFetch.mockImplementation(buildTriggerMock());
-
-    render(
-      <TriggerPopover
-        loading={false}
-        onTrigger={vi.fn()}
-        onClose={vi.fn()}
-        specModel="claude-opus-4-6"
-        workspaceId="ws-1"
-        initialReasoning={{ enabled: true, effort: 'medium' }}
-      />,
-    );
-
-    await waitFor(() => {
-      const checkbox = screen.getByRole('checkbox', { name: /enable reasoning for this run/i }) as HTMLInputElement;
-      expect(checkbox.checked).toBe(true);
-    }, { timeout: 3000 });
-  });
-
-  // ── Effort level buttons ───────────────────────────────────────────────────
 
   it('effort level buttons render when reasoning is enabled and effortLevels available', async () => {
     mockApiFetch.mockImplementation(buildTriggerMock());
@@ -767,12 +729,6 @@ describe('TriggerPopover — Reasoning section', () => {
     );
 
     await waitFor(() => {
-      expect(screen.getByRole('checkbox', { name: /enable reasoning for this run/i })).toBeInTheDocument();
-    }, { timeout: 3000 });
-
-    // Effort level buttons should be visible (low, medium, high, max from fixture)
-    await waitFor(() => {
-      // At least "medium" button visible as effort option
       const mediumBtns = screen.queryAllByRole('button', { name: /^medium$/i });
       expect(mediumBtns.length).toBeGreaterThanOrEqual(1);
     }, { timeout: 3000 });
