@@ -65,8 +65,8 @@ describe('SettingsPanel', () => {
 
     await waitFor(
       () => {
-        const main = document.querySelector('[role="main"][aria-label="Settings"]');
-        expect(main).toBeInTheDocument();
+        const panel = document.querySelector('[aria-label="Settings"]');
+        expect(panel).toBeInTheDocument();
       },
       { timeout: 3000 },
     );

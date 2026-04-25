@@ -178,6 +178,7 @@ router.put('/:workflowId', async (req: Request, res: Response) => {
     if (!(VALID_WORKFLOW_IDS as readonly string[]).includes(workflowId)) {
       throw new UnprocessableError(
         `Invalid workflowId: '${workflowId}'. Must be one of: ${VALID_WORKFLOW_IDS.join(', ')}`,
+        undefined,
         { workflowId, allowed: VALID_WORKFLOW_IDS },
       );
     }
@@ -196,6 +197,7 @@ router.put('/:workflowId', async (req: Request, res: Response) => {
     if (runtime && runtime !== 'native' && (workflowId === 'spec_generation' || workflowId === 'memory_consolidation')) {
       throw new UnprocessableError(
         `Workflow '${workflowId}' only supports runtime 'native'`,
+        undefined,
         { workflowId, requestedRuntime: runtime },
       );
     }

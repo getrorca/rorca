@@ -242,6 +242,7 @@ const WORKER_HOSTNAME: string = os.hostname();
 const WORKER_STARTED_AT: Date = new Date();
 
 const HEARTBEAT_INTERVAL_MS = 30_000; // 30 s
+const OPTIONAL_WORKER_MODE = process.env.RORCA_OPTIONAL_WORKER === 'true';
 
 // ── Active process map (runId → ChildProcess) ────────────────────────────
 // Declared early so writeHeartbeat() can read .size before activeProcesses
@@ -2148,7 +2149,7 @@ process.on('unhandledRejection', (reason) => {
 // which causes orphan sweep / stale-job recovery to kill each other's
 // engine processes (the root cause of runs dying mid-story).
 
-export async function checkSingletonGuard(): Promise<void> {
+export async function checkSingletonGuard(): Promise<boolean> {
   try {
     type LiveWorkerRow = { worker_id: string; pid: number; last_seen: string };
     const liveWorkers = await query<LiveWorkerRow>(
@@ -2163,11 +2164,18 @@ export async function checkSingletonGuard(): Promise<void> {
       for (const w of liveWorkers) {
         try {
           process.kill(w.pid, 0); // throws ESRCH if dead
+          if (OPTIONAL_WORKER_MODE) {
+            logger.info(
+              { existingWorkerId: w.worker_id, existingPid: w.pid, lastSeen: w.last_seen },
+              '[worker] Optional worker start skipped — another worker is already alive.',
+            );
+            return false;
+          }
           logger.error(
             { existingWorkerId: w.worker_id, existingPid: w.pid, lastSeen: w.last_seen },
             '[worker] SINGLETON GUARD — another worker is alive. Exiting to prevent duplicate workers.',
           );
-          process.exit(0);
+          return false;
         } catch {
           logger.info({ stalePid: w.pid }, '[worker] Cleaning stale heartbeat from dead worker');
           await execute(
@@ -2180,6 +2188,7 @@ export async function checkSingletonGuard(): Promise<void> {
   } catch {
     // worker_heartbeat table might not exist yet — continue startup
   }
+  return true;
 }
 
 // ── Integration health checks ────────────────────────────────────────────
@@ -2385,8 +2394,10 @@ async function start(): Promise<void> {
     process.exit(1);
   }
 
-  // 1b. Singleton guard — exit if another worker has a fresh heartbeat.
-  await checkSingletonGuard();
+  // 1b. Singleton guard — skip startup if another worker has a fresh heartbeat.
+  if (!(await checkSingletonGuard())) {
+    return;
+  }
 
   // 2. Start pg-boss — creates/upgrades pgboss.* schema automatically
   try {

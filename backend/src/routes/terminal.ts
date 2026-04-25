@@ -326,12 +326,17 @@ router.post('/sessions', validateBody(createSessionSchema), async (req: Request,
     await emitTerminalContextInjectedEvent(sessionId, body.workspaceId, workspace.path);
 
     broadcastAll({
-      type: 'terminal_session_started',
-      workspaceId: body.workspaceId,
-      payload: {
+      id: 0,
+      ts: new Date().toISOString(),
+      event_type: 'terminal_session_started',
+      workspace_id: body.workspaceId,
+      spec_id: null,
+      story_id: null,
+      actor: 'system',
+      payload: JSON.stringify({
         sessionId,
         cwd: workspace.path,
-      },
+      }),
     });
 
     // OCT-021: Generate short-lived WebSocket connection token
@@ -512,7 +517,7 @@ router.delete('/sessions/history', async (req: Request, res: Response) => {
  */
 router.get('/sessions/:sessionId', async (req: Request, res: Response) => {
   try {
-    const { sessionId } = req.params;
+    const sessionId = String(req.params.sessionId);
 
     const session = ptyManager.getSession(sessionId);
     if (!session) {
@@ -538,7 +543,7 @@ router.get('/sessions/:sessionId', async (req: Request, res: Response) => {
 
 router.delete('/sessions/:sessionId', async (req: Request, res: Response) => {
   try {
-    const { sessionId } = req.params;
+    const sessionId = String(req.params.sessionId);
 
     const session = ptyManager.getSession(sessionId);
     if (!session) {
@@ -761,8 +766,14 @@ router.get('/sessions/:sessionId/scrollback', async (req: Request, res: Response
  */
 router.patch('/sessions/:sessionId/resize', async (req: Request, res: Response) => {
   try {
-    const { sessionId } = req.params;
-    const body = validateBody(resizeSessionSchema, req.body);
+    const sessionId = String(req.params.sessionId);
+    const parsed = resizeSessionSchema.safeParse(req.body);
+    if (!parsed.success) {
+      throw new ValidationError('Validation failed', {
+        details: JSON.stringify(parsed.error.issues),
+      });
+    }
+    const body = parsed.data;
 
     // resizeSession throws if session not found
     try {

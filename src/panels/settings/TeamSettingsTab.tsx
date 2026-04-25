@@ -99,11 +99,14 @@ export function TeamSettingsTab() {
   const [teams, setTeams] = useState<Team[]>([]);
   const [selectedTeamId, setSelectedTeamId] = useState<string>('');
   const [members, setMembers] = useState<TeamMember[]>([]);
-  const [recentInvite, setRecentInvite] = useState<{ email: string; role: InviteRole; createdAt: string } | null>(null);
+  const [recentInvite, setRecentInvite] = useState<{ email: string; role: InviteRole; createdAt: string; inviteUrl?: string; emailSent?: boolean; emailError?: string | null } | null>(null);
   const [loading, setLoading] = useState(true);
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<InviteRole>('member');
   const [submittingInvite, setSubmittingInvite] = useState(false);
+  const [creatingTeam, setCreatingTeam] = useState(false);
+  const [newTeamName, setNewTeamName] = useState('');
+  const [newTeamSlug, setNewTeamSlug] = useState('');
   const [updatingMemberId, setUpdatingMemberId] = useState<string | null>(null);
   const [memberToRemove, setMemberToRemove] = useState<TeamMember | null>(null);
 
@@ -175,6 +178,48 @@ export function TeamSettingsTab() {
     };
   }, [selectedTeamId, loadTeamData, toast]);
 
+  const handleCreateTeam = useCallback(async (event: React.FormEvent<HTMLFormElement>) => {
+    event.preventDefault();
+    if (!workspaceId) {
+      toast.error('Select a workspace first');
+      return;
+    }
+
+    const name = newTeamName.trim();
+    const slug = newTeamSlug.trim().toLowerCase();
+
+    if (!name) {
+      toast.error('Team name is required');
+      return;
+    }
+
+    if (!slug) {
+      toast.error('Team slug is required');
+      return;
+    }
+
+    setCreatingTeam(true);
+    try {
+      const created = await apiFetch<Team>(`/api/teams`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ name, slug, workspaceId }),
+      });
+      setNewTeamName('');
+      setNewTeamSlug('');
+      setSelectedTeamId(created.id);
+      const response = await apiFetch<{ items: Team[]; total: number }>(`/api/teams?workspaceId=${encodeURIComponent(workspaceId)}`);
+      const nextTeams = response.items ?? [];
+      setTeams(nextTeams);
+      await loadTeamData(created.id);
+      toast.success('Team created');
+    } catch (error) {
+      toast.error(error instanceof Error ? error.message : 'Failed to create team');
+    } finally {
+      setCreatingTeam(false);
+    }
+  }, [loadTeamData, newTeamName, newTeamSlug, toast, workspaceId]);
+
   const handleInviteSubmit = useCallback(async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
     if (!selectedTeamId) return;
@@ -188,15 +233,22 @@ export function TeamSettingsTab() {
     setSubmittingInvite(true);
     try {
       const rolePayload = inviteRoleOptions.find((option) => option.value === inviteRole)?.apiValue ?? 'editor';
-      await apiFetch(`/api/teams/${selectedTeamId}/invites`, {
+      const response = await apiFetch<{ inviteUrl?: string; emailSent?: boolean; emailError?: string | null }>(`/api/teams/${selectedTeamId}/invites`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ email: trimmedEmail, role: rolePayload }),
       });
       setInviteEmail('');
       setInviteRole('member');
-      setRecentInvite({ email: trimmedEmail, role: inviteRole, createdAt: new Date().toISOString() });
-      toast.success('Invite sent');
+      setRecentInvite({
+        email: trimmedEmail,
+        role: inviteRole,
+        createdAt: new Date().toISOString(),
+        inviteUrl: response?.inviteUrl,
+        emailSent: response?.emailSent,
+        emailError: response?.emailError ?? null,
+      });
+      toast.success(response?.emailSent === false ? 'Invite created — email not sent' : 'Invite sent');
     } catch (error) {
       toast.error(error instanceof Error ? error.message : 'Failed to send invite');
     } finally {
@@ -245,10 +297,58 @@ export function TeamSettingsTab() {
 
   if (teams.length === 0 || !selectedTeamId) {
     return (
-      <section className="rounded-2xl border border-border bg-panel p-10 text-center">
-        <Users className="mx-auto mb-4 h-10 w-10 text-muted/50" />
-        <h2 className="text-lg font-semibold text-[var(--text)]">No team yet</h2>
-        <p className="mt-2 text-sm text-muted">No other team members yet — invite collaborators</p>
+      <section className="rounded-2xl border border-border bg-panel p-10">
+        <div className="text-center">
+          <Users className="mx-auto mb-4 h-10 w-10 text-muted/50" />
+          <h2 className="text-lg font-semibold text-[var(--text)]">No team yet</h2>
+          <p className="mt-2 text-sm text-muted">Create a team for this workspace, then you can invite collaborators.</p>
+        </div>
+
+        <form className="mx-auto mt-6 grid max-w-3xl gap-3 md:grid-cols-[minmax(0,1fr)_220px_auto]" onSubmit={handleCreateTeam}>
+          <label className="flex flex-col gap-1 text-sm text-muted" htmlFor="team-create-name">
+            Team name
+            <input
+              id="team-create-name"
+              aria-label="Team name"
+              type="text"
+              value={newTeamName}
+              onChange={(event) => {
+                const value = event.target.value;
+                setNewTeamName(value);
+                setNewTeamSlug((current) => current || value.trim().toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-+|-+$/g, ''));
+              }}
+              placeholder="Workspace"
+              className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-[var(--text)] outline-none transition focus:border-accent"
+              disabled={creatingTeam || !workspaceId}
+            />
+          </label>
+          <label className="flex flex-col gap-1 text-sm text-muted" htmlFor="team-create-slug">
+            Team slug
+            <input
+              id="team-create-slug"
+              aria-label="Team slug"
+              type="text"
+              value={newTeamSlug}
+              onChange={(event) => setNewTeamSlug(event.target.value.toLowerCase())}
+              placeholder="workspace"
+              className="rounded-lg border border-border bg-bg px-3 py-2 text-sm text-[var(--text)] outline-none transition focus:border-accent"
+              disabled={creatingTeam || !workspaceId}
+            />
+          </label>
+          <button
+            type="submit"
+            aria-label="Create team"
+            disabled={creatingTeam || !workspaceId}
+            className="inline-flex h-10 items-center justify-center gap-2 self-end rounded-lg bg-accent px-4 text-sm font-medium text-white transition hover:opacity-90 disabled:cursor-not-allowed disabled:opacity-50"
+          >
+            {creatingTeam ? <Loader2 className="h-4 w-4 animate-spin" /> : <Users className="h-4 w-4" />}
+            Create team
+          </button>
+        </form>
+
+        {!workspaceId && (
+          <p className="mt-3 text-center text-sm text-muted">Select a workspace before creating a team.</p>
+        )}
       </section>
     );
   }
@@ -446,7 +546,24 @@ export function TeamSettingsTab() {
                 <span>Sent {formatDate(recentInvite.createdAt)}</span>
               </div>
             </div>
-            <span className="text-sm text-muted">Invite sent successfully</span>
+            <div className="flex flex-col items-start gap-2 sm:items-end">
+              <span className="text-sm text-muted">{recentInvite.emailSent === false ? 'Invite created, email not sent' : 'Invite sent successfully'}</span>
+              {recentInvite.inviteUrl && (
+                <button
+                  type="button"
+                  onClick={() => {
+                    navigator.clipboard.writeText(recentInvite.inviteUrl!);
+                    toast.success('Invite link copied');
+                  }}
+                  className="text-xs text-accent hover:underline"
+                >
+                  Copy invite link
+                </button>
+              )}
+              {recentInvite.emailError && (
+                <span className="max-w-xs text-right text-xs text-muted">{recentInvite.emailError}</span>
+              )}
+            </div>
           </div>
         )}
       </section>

@@ -16,13 +16,11 @@ import { prepareShellIntegration, parseOsc133, type ShellEvent } from './shell-i
 
 // OCT-024: Graceful degradation when node-pty native module is not built
 let ptySpawn: typeof import('node-pty').spawn | null = null;
-let IPty: typeof import('node-pty').IPty | null = null;
 let PTY_AVAILABLE = false;
 
 try {
   const nodePty = require('node-pty');
   ptySpawn = nodePty.spawn;
-  IPty = nodePty.IPty;
   PTY_AVAILABLE = true;
   logger.info('[pty-manager] node-pty native module loaded successfully');
 } catch (err) {
@@ -527,7 +525,7 @@ export function processSessionOutput(sessionId: string, chunk: string): { cleanD
       .map((e) => ({
         type: 'shell_event',
         event: 'command_end',
-        exitCode: e.exitCode,
+        exitCode: e.exitCode ?? 0,
         durationMs: session.commandStartTime !== null ? Date.now() - session.commandStartTime : 0,
       })),
   };

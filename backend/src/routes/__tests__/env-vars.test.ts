@@ -3,6 +3,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
+import crypto from 'crypto';
 import { getAuthToken } from './helpers/auth-helper';
 import { queryOne, execute } from '../../db/index';
 
@@ -22,6 +23,7 @@ jest.mock('../../lib/llm-client', () => ({
 let app: Express;
 let tmpDir: string;
 let authToken: string;
+let authId: string;
 
 const WORKSPACE_ID = 'ws-env-test';
 
@@ -47,9 +49,18 @@ process.env.NODE_ENV = 'test';
   const serverMod = require('../../server');
   app = serverMod.default;
 // Seed a workspace
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2) ON CONFLICT (id) DO NOTHING`, [WORKSPACE_ID, tmpDir]);
+  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Test Workspace', $2) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [WORKSPACE_ID, tmpDir]);
+  await execute(`DELETE FROM workspace_env_vars WHERE workspace_id = $1`, [WORKSPACE_ID]);
 
-  authToken = await getAuthToken(app);
+  authId = crypto.randomUUID();
+  const email = `testauth+${authId}@example.com`;
+  authToken = await getAuthToken(app, { authId, email });
+  await execute(
+    `INSERT INTO workspace_members (workspace_id, user_auth_id, role)
+     VALUES ($1, $2::uuid, 'admin')
+     ON CONFLICT (workspace_id, user_auth_id) DO UPDATE SET role = EXCLUDED.role`,
+    [WORKSPACE_ID, authId],
+  );
 });
 
 afterEach(async () => {
@@ -148,14 +159,14 @@ describe('POST /api/workspaces/:id/env-vars', () => {
     expect(res.body.error).toContain('Invalid key format');
   });
 
-  test('nonexistent workspace → 404', async () => {
+  test('non-member access to nonexistent workspace is forbidden before route lookup', async () => {
     const res = await request(app)
       .post('/api/workspaces/nonexistent/env-vars')
       .set('Authorization', `Bearer ${authToken}`)
       .send({ key: 'MY_VAR', value: 'val' });
 
-    expect(res.status).toBe(404);
-    expect(res.body.error).toBe('Workspace not found');
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Forbidden');
   });
 });
 
@@ -199,13 +210,13 @@ describe('GET /api/workspaces/:id/env-vars', () => {
     expect(appMode.isSecret).toBe(false);
   });
 
-  test('nonexistent workspace → 404', async () => {
+  test('non-member access to nonexistent workspace is forbidden before route lookup', async () => {
     const res = await request(app)
       .get('/api/workspaces/nonexistent/env-vars')
       .set('Authorization', `Bearer ${authToken}`);
 
-    expect(res.status).toBe(404);
-    expect(res.body.error).toBe('Workspace not found');
+    expect(res.status).toBe(403);
+    expect(res.body.error).toBe('Forbidden');
   });
 });
 
@@ -257,7 +268,7 @@ describe('getWorkspaceEnvVars', () => {
       .send({ key: 'PUBLIC_VAR', value: 'public-val', isSecret: false });
 
     const { getWorkspaceEnvVars } = require('../env-vars');
-    const vars = getWorkspaceEnvVars(WORKSPACE_ID);
+    const vars = await getWorkspaceEnvVars(WORKSPACE_ID);
 
     expect(vars).toEqual({
       SECRET_KEY: 'my-secret',
@@ -265,9 +276,9 @@ describe('getWorkspaceEnvVars', () => {
     });
   });
 
-  test('returns empty object for workspace with no env vars', () => {
+  test('returns empty object for workspace with no env vars', async () => {
     const { getWorkspaceEnvVars } = require('../env-vars');
-    const vars = getWorkspaceEnvVars(WORKSPACE_ID);
+    const vars = await getWorkspaceEnvVars(WORKSPACE_ID);
     expect(vars).toEqual({});
   });
 });

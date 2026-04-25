@@ -216,13 +216,13 @@ function EntryRow({ item, isSelected, isEditing, onToggleSelect, onEdit, onSaveE
           )}
 
           {/* Related files */}
-          {item.relatedFiles.length > 0 && !isEditing && (
+          {(item.relatedFiles?.length ?? 0) > 0 && !isEditing && (
             <div className="flex flex-wrap gap-1 mt-1.5">
-              {item.relatedFiles.slice(0, 3).map((f) => (
+              {(item.relatedFiles ?? []).slice(0, 3).map((f) => (
                 <span key={f} className="px-1 py-0.5 text-[9px] font-mono rounded bg-surface-200 text-muted">{f}</span>
               ))}
-              {item.relatedFiles.length > 3 && (
-                <span className="text-[9px] text-muted">+{item.relatedFiles.length - 3} more</span>
+              {(item.relatedFiles?.length ?? 0) > 3 && (
+                <span className="text-[9px] text-muted">+{(item.relatedFiles?.length ?? 0) - 3} more</span>
               )}
             </div>
           )}
@@ -341,10 +341,10 @@ export default function MemoryPanel() {
 
     try {
       const data = await apiFetch<MemoryListResponse>(`/api/memory/items?${params}`);
-      setItems(data.items);
-      setTotalCount(data.total);
-      setPinnedCount(data.pinned);
-      setRecentRunIds(data.recentRunIds);
+      setItems(Array.isArray(data?.items) ? data.items : []);
+      setTotalCount(Number(data?.total ?? 0));
+      setPinnedCount(Number(data?.pinned ?? 0));
+      setRecentRunIds(Array.isArray(data?.recentRunIds) ? data.recentRunIds : []);
     } catch { /* ignore */ }
     setLoaded(true);
   }, [workspaceId, filterCategory, filterConfidence, filterRunId, searchText]);

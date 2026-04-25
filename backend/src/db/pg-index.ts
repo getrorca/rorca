@@ -17,6 +17,8 @@ import { Pool } from 'pg';
 import * as fs from 'fs';
 import * as path from 'path';
 
+const MIGRATIONS_ADVISORY_LOCK_KEY = 8_244_250_520_000;
+
 // ── Connection ────────────────────────────────────────────────────────────
 const DATABASE_URL = process.env.DATABASE_URL || 'postgres://localhost:5432/rorca';
 
@@ -66,22 +68,47 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
   if (!pool) pool = createPool();
 
   let client = await pool.connect();
+  let advisoryLockHeld = false;
 
   try {
+    // Serialize migration runners across server/worker/dev processes.
+    // Without this, two processes can both observe a migration as unapplied and race
+    // to INSERT the same version into schema_migrations, crashing one side during dev startup.
+    await client.query('SELECT pg_advisory_lock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]);
+    advisoryLockHeld = true;
+
+    // Ensure the application schema exists before any unqualified migration SQL runs.
+    // Without this, early migrations (e.g. 001_init.sql) land in public on a fresh
+    // database because rorca does not exist yet, while later reruns use rorca first.
+    // That split creates duplicate tables across schemas and breaks idempotency.
+    await client.query('CREATE SCHEMA IF NOT EXISTS rorca');
+
     // Pin search_path for the migration session. Include rorca so new RLS migrations
     // can reference app tables (run_output_chunks, pipeline_runs, etc.) by unqualified name.
-    // schema_migrations is created in public (first in path) to avoid AGE dual-schema issues.
     await client.query('SET search_path TO rorca, public');
 
-    // Ensure schema_migrations tracking table exists.
-    // version is BIGINT to support 14-digit timestamp prefixes (e.g. 20260313120000).
-    // Existing DBs are upgraded from INTEGER → BIGINT via migration 079.
+    // Ensure schema_migrations tracking table exists in public explicitly.
+    // On a brand-new database the rorca schema may not exist yet, so an unqualified
+    // CREATE TABLE would land in public on first boot but in rorca on later boots,
+    // splitting migration tracking across schemas and breaking idempotent reruns.
     await client.query(`
-      CREATE TABLE IF NOT EXISTS schema_migrations (
+      CREATE TABLE IF NOT EXISTS public.schema_migrations (
         version BIGINT PRIMARY KEY,
         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
         filename TEXT NOT NULL
       )
+    `);
+
+    await client.query(`
+      DO $$
+      BEGIN
+        IF to_regclass('rorca.schema_migrations') IS NOT NULL THEN
+          INSERT INTO public.schema_migrations (version, applied_at, filename)
+          SELECT version, applied_at, filename
+          FROM rorca.schema_migrations
+          ON CONFLICT (version) DO NOTHING;
+        END IF;
+      END $$;
     `);
 
     // Resolve migrations directory (works from both src/ and dist/)
@@ -118,7 +145,7 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
 
     // Fetch already-applied versions.
     // pg returns BIGINT as strings — coerce to numbers for Set.has() lookups.
-    const { rows: applied } = await client.query('SELECT version FROM schema_migrations');
+    const { rows: applied } = await client.query('SELECT version FROM public.schema_migrations');
     const appliedVersions = new Set(applied.map(r => Number(r.version)));
 
     // PG-019: Migrations that create extensions may fail on managed services
@@ -157,11 +184,20 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
       // Wrap each migration in a transaction
       try {
         await client.query('BEGIN');
+        // Re-assert search_path per migration transaction because some migrations
+        // temporarily switch it to public and do not restore it for the session.
+        await client.query('SET LOCAL search_path TO rorca, public');
         await client.query(sql);
-        await client.query(
-          'INSERT INTO schema_migrations (version, filename) VALUES ($1, $2)',
-          [version, file]
-        );
+        try {
+          await client.query(
+            'INSERT INTO public.schema_migrations (version, filename) VALUES ($1, $2)',
+            [version, file]
+          );
+        } catch (err) {
+          if ((err as { code?: string }).code !== '23505') {
+            throw err;
+          }
+        }
         await client.query('COMMIT');
         appliedCount++;
         console.log(`[pg-migrate] Applied: ${file}`);
@@ -186,7 +222,7 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
           // Record as applied to prevent retries
           try {
             await client.query(
-              'INSERT INTO schema_migrations (version, filename) VALUES ($1, $2)',
+              'INSERT INTO public.schema_migrations (version, filename) VALUES ($1, $2)',
               [version, `${file} [skipped: extension unavailable]`]
             );
           } catch {
@@ -208,6 +244,9 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     // We set search_path=public above; without restoring, subsequent queries
     // on this pooled connection miss the rorca schema (same bug as AGE pool poisoning).
     try { await client.query('SET search_path TO rorca, public'); } catch { /* best-effort */ }
+    if (advisoryLockHeld) {
+      try { await client.query('SELECT pg_advisory_unlock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]); } catch { /* best-effort */ }
+    }
     client.release();
     if (ownPool) await pool.end();
   }

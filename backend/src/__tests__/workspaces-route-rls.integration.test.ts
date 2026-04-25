@@ -1,3 +1,7 @@
+jest.mock('../lib/pty-manager', () => ({
+  killSessionsForWorkspace: jest.fn(),
+}));
+
 import express from 'express';
 import request from 'supertest';
 import { Pool } from 'pg';
@@ -19,8 +23,6 @@ describe('MU-022 GET /api/workspaces route RLS', () => {
   beforeAll(async () => {
     process.env.SUPABASE_URL = process.env.SUPABASE_URL || 'http://127.0.0.1:54321';
     pool = new Pool({ connectionString: DB_URL, max: 5 });
-    const { runPgMigrations } = await import('../db/pg-index');
-    await runPgMigrations(pool);
   });
 
   afterAll(async () => {
@@ -28,47 +30,46 @@ describe('MU-022 GET /api/workspaces route RLS', () => {
   });
 
   it("authenticated user A can't see user B workspaces", async () => {
-    const client = await pool.connect();
+    const workspaceA = `ws-route-rls-a-${Date.now()}`;
+    const workspaceB = `ws-route-rls-b-${Date.now()}`;
+
+    await pool.query('SET search_path = rorca, public');
+    await pool.query(
+      `INSERT INTO workspaces (id, label, path)
+       VALUES ($1, $2, $3), ($4, $5, $6)`,
+      [
+        workspaceA, 'Workspace Route A', `/tmp/${workspaceA}`,
+        workspaceB, 'Workspace Route B', `/tmp/${workspaceB}`,
+      ],
+    );
+
+    await pool.query(
+      `INSERT INTO workspace_members (workspace_id, user_auth_id, role)
+       VALUES ($1, $2::uuid, 'owner'), ($3, $4::uuid, 'owner')`,
+      [workspaceA, USER_ONE, workspaceB, USER_TWO],
+    );
+
+    const app = express();
+    app.use((req: any, _res, next) => {
+      req.user = {
+        id: USER_ONE,
+        email: 'user-a@example.com',
+        supabaseId: USER_ONE,
+        role: 'authenticated',
+      };
+      next();
+    });
+    app.use('/api/workspaces', workspacesRouter);
+    app.use(errorHandler);
 
     try {
-      await client.query('BEGIN');
-      await client.query('SET LOCAL search_path = rorca, public');
-
-      await client.query(
-        `INSERT INTO workspaces (id, label, path)
-         VALUES ($1, $2, $3), ($4, $5, $6)`,
-        [
-          'ws-route-rls-a', 'Workspace Route A', '/tmp/ws-route-rls-a',
-          'ws-route-rls-b', 'Workspace Route B', '/tmp/ws-route-rls-b',
-        ],
-      );
-
-      await client.query(
-        `INSERT INTO workspace_members (workspace_id, user_auth_id, role)
-         VALUES ($1, $2::uuid, 'owner'), ($3, $4::uuid, 'owner')`,
-        ['ws-route-rls-a', USER_ONE, 'ws-route-rls-b', USER_TWO],
-      );
-
-      const app = express();
-      app.use((req: any, _res, next) => {
-        req.user = {
-          id: USER_ONE,
-          email: 'user-a@example.com',
-          supabaseId: USER_ONE,
-          role: 'authenticated',
-        };
-        next();
-      });
-      app.use('/api/workspaces', workspacesRouter);
-      app.use(errorHandler);
-
       const response = await request(app).get('/api/workspaces');
 
       expect(response.status).toBe(200);
-      expect(response.body.items.map((row: { id: string }) => row.id)).toEqual(['ws-route-rls-a']);
+      expect(response.body.items.map((row: { id: string }) => row.id)).toEqual([workspaceA]);
     } finally {
-      await client.query('ROLLBACK');
-      client.release();
+      await pool.query('DELETE FROM workspace_members WHERE workspace_id IN ($1, $2)', [workspaceA, workspaceB]);
+      await pool.query('DELETE FROM workspaces WHERE id IN ($1, $2)', [workspaceA, workspaceB]);
     }
   });
 });
