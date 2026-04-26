@@ -1,10 +1,11 @@
 import { useState } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import {
-  Settings2, Layers, Route, Zap, Github, Variable, Play, Webhook, Users,
+  Settings2, Layers, Route, Zap, Variable, Play, Webhook, Users,
   User, CreditCard, Keyboard, ArrowLeft, ChevronRight,
   Key, Code2, Bell, Plug, Rss, LayoutGrid, ScrollText,
 } from 'lucide-react';
+import { Github } from './icons/GithubIcon';
 import type { PanelId } from './Sidebar';
 import type { SettingsTab } from '../panels/SettingsPanel';
 

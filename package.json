@@ -53,8 +53,10 @@
   ],
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
+    "@modelcontextprotocol/client": "^2.0.0-alpha.2",
     "@monaco-editor/react": "^4.7.0",
     "@supabase/supabase-js": "^2.104.1",
+    "@tailwindcss/postcss": "^4.2.4",
     "@tanstack/react-virtual": "^3.13.24",
     "@xterm/addon-fit": "^0.11.0",
     "@xterm/addon-search": "^0.16.0",

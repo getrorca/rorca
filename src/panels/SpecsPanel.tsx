@@ -11,8 +11,8 @@ import {
   GripVertical, Trash2, Palette, Pencil, AlignJustify,
   Sparkles,
   Paperclip,
-  Github,
 } from 'lucide-react';
+import { Github } from '../components/icons/GithubIcon';
 import EmptyState from '../components/EmptyState';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, ApiError, BASE_URL } from '../lib/apiFetch';

@@ -1,5 +1,6 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Github, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal, GitBranch, X, Brain } from 'lucide-react';
+import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal, GitBranch, X, Brain } from 'lucide-react';
+import { Github } from '../../components/icons/GithubIcon';
 import { type EffortLevel } from '../../components/ThinkingControls';
 import { ProBadge } from '../../components/UpgradePrompt';
 import { useAuth } from '../../contexts/AuthContext';

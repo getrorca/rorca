@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback } from 'react';
 import {
-  Settings2, Layers, Github, Variable, Play, Webhook,
+  Settings2, Layers, Variable, Play, Webhook,
   Save, Loader2, Check, FolderOpen, Plus, Trash2, X, Users, Route, FileText, Wrench,
   Package, Info,
 } from 'lucide-react';
+import { Github } from '../components/icons/GithubIcon';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';

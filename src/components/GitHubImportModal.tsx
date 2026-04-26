@@ -1,9 +1,10 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
 import {
-  X, Search, Github, CheckSquare, Square, Loader2,
+  X, Search, CheckSquare, Square, Loader2,
   AlertCircle, RefreshCw, ExternalLink, Tag, User,
   ChevronLeft, Plus,
 } from 'lucide-react';
+import { Github } from './icons/GithubIcon';
 import { apiFetch } from '../lib/apiFetch';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useGlobalToast } from '../contexts/ToastContext';

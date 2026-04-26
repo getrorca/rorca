@@ -1,9 +1,10 @@
 import { useState, useEffect, useCallback, useDeferredValue } from 'react';
 import {
-  Github, Link2, Unlink, Loader2, CheckCircle2, AlertCircle,
+  Link2, Unlink, Loader2, CheckCircle2, AlertCircle,
   Webhook, FileText, RotateCcw, Download, Shield, ExternalLink,
   RefreshCw, GitPullRequest, Users, X, Plus, Zap, Bot, ScrollText,
 } from 'lucide-react';
+import { Github } from '../components/icons/GithubIcon';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, BASE_URL, getAccessToken } from '../lib/apiFetch';
 
