@@ -1,5 +1,6 @@
 import { useState } from 'react';
-import { X, Terminal, Key, Zap, Globe, CheckCircle2, Copy, ExternalLink, Github } from 'lucide-react';
+import { X, Terminal, Key, Zap, Globe, CheckCircle2, Copy, ExternalLink } from 'lucide-react';
+import { Github } from './icons/GithubIcon';
 
 // ─── Provider Setup Steps ─────────────────────────────────────────────────────
 

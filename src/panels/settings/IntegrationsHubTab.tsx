@@ -1,6 +1,7 @@
 import { lazy, Suspense, useState, useEffect, useCallback } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Github, RefreshCw, AlertCircle, CheckCircle2, XCircle, Clock } from 'lucide-react';
+import { RefreshCw, AlertCircle, CheckCircle2, XCircle, Clock } from 'lucide-react';
+import { Github } from '../../components/icons/GithubIcon';
 import { apiFetch } from '../../lib/apiFetch';
 import { useWorkspace } from '../../contexts/WorkspaceContext';
 
