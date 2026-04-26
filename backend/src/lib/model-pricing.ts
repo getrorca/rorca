@@ -21,6 +21,9 @@ export interface ModelPricing {
 const BUILTIN_PRICING: Record<string, ModelPricing> = {
   // Anthropic
   'claude-opus-4-6':   { input: 0.000015,  output: 0.000075 },
+  // Temporary: mirror Opus 4.6 pricing until Anthropic publishes a distinct
+  // Opus 4.7 rate and Rorca's built-in pricing table is updated.
+  'claude-opus-4-7':   { input: 0.000015,  output: 0.000075 },
   'claude-sonnet-4-6': { input: 0.000003,  output: 0.000015 },
   'claude-haiku-4-5-20251001':  { input: 0.0000008, output: 0.000004 },
 
@@ -42,6 +45,7 @@ const BUILTIN_PRICING: Record<string, ModelPricing> = {
   'google/gemini-2.0-flash':  { input: 0.0000001,  output: 0.0000004 },
   'google/gemini-2.5-pro':    { input: 0.00000125, output: 0.00001 },
   'anthropic/claude-opus-4-6':           { input: 0.000015,  output: 0.000075 },
+  'anthropic/claude-opus-4-7':           { input: 0.000015,  output: 0.000075 },
   'anthropic/claude-sonnet-4-6':         { input: 0.000003,  output: 0.000015 },
   'anthropic/claude-haiku-4-5-20251001': { input: 0.0000008, output: 0.000004 },
 };

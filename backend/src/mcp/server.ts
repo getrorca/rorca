@@ -18,6 +18,7 @@ import * as dotenv from 'dotenv';
 import * as path from 'path';
 import { logger } from '../lib/logger';
 import { detectCapability } from '../lib/reasoning-detector';
+import { ALL_MODELS } from '../lib/llm-client';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
@@ -2883,11 +2884,17 @@ server.registerTool(
 
     // Validate model if provided (check against backend)
     if (model) {
-      // Quick check — allow any string for execution model (provider/model format for opencode)
-      // Only validate single-word Claude model IDs against SUPPORTED_MODELS
-      const CLAUDE_MODELS = ['claude-sonnet-4-6', 'claude-opus-4-6', 'claude-haiku-4-5-20251001',
-        'claude-sonnet-4-5-20250929', 'claude-haiku-4-5-20251001'];
-      if (!model.includes('/') && !CLAUDE_MODELS.includes(model)) {
+      // Quick check — allow any provider/model format for execution engines like
+      // OpenCode. For bare Claude IDs, validate against the canonical Anthropic
+      // registry instead of a duplicated hardcoded allowlist.
+      const CLAUDE_MODELS = new Set([
+        ...ALL_MODELS
+          .filter(m => m.providerType === 'anthropic')
+          .map(m => m.id),
+        // Back-compat dated IDs still accepted in specs / tests.
+        'claude-sonnet-4-5-20250929',
+      ]);
+      if (!model.includes('/') && !CLAUDE_MODELS.has(model)) {
         return errorResult({
           phase: 'validation',
           error: `Unsupported model: ${model}`,
