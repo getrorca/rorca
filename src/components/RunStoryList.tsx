@@ -1,6 +1,7 @@
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText, Github, Share2, Globe } from 'lucide-react';
+import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText, Share2, Globe } from 'lucide-react';
+import { Github } from './icons/GithubIcon';
 import { apiFetch } from '../lib/apiFetch';
 import { fetchStoryOutput, retryRun } from '../api/pipeline';
 import type { WalEvent } from '../hooks/usePipelineSSE';
