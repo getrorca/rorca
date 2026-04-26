@@ -37,7 +37,7 @@ BEGIN
 END;
 $$;
 
-ALTER FUNCTION is_admin(UUID) OWNER TO rorca;
+
 
 
 ALTER TABLE direction_layers ENABLE ROW LEVEL SECURITY;
