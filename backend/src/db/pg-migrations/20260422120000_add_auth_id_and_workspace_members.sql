@@ -91,5 +91,3 @@ BEGIN
   WHERE wm.user_auth_id = p_auth_id;
 END;
 $$;
-
-ALTER FUNCTION get_user_workspace_ids(UUID) OWNER TO rorca;

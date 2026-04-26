@@ -211,6 +211,19 @@ export const ALL_MODELS: ModelInfo[] = [
     costTier: 'premium',
   },
   {
+    id: 'claude-opus-4-7',
+    label: 'Claude Opus 4.7',
+    provider: 'Anthropic',
+    providerType: 'anthropic',
+    // Temporary: mirror Opus 4.6 pricing/capacity until Anthropic pricing is
+    // explicitly revised in Rorca's pricing table / UI copy.
+    costPer1kInput: 0.015,
+    costPer1kOutput: 0.075,
+    contextWindow: 200000,
+    speedTier: 'slow',
+    costTier: 'premium',
+  },
+  {
     id: 'claude-haiku-4-5-20251001',
     label: 'Claude Haiku 4.5',
     provider: 'Anthropic',
@@ -405,6 +418,7 @@ export const ALL_MODELS: ModelInfo[] = [
 export const SUPPORTED_MODELS = [
   'claude-sonnet-4-6',
   'claude-opus-4-6',
+  'claude-opus-4-7',
   'claude-haiku-4-5-20251001',
 ] as const;
 
@@ -419,6 +433,7 @@ export const DEFAULT_MODEL: SupportedModel = 'claude-sonnet-4-6';
 export const MODEL_INFO: Record<SupportedModel, ModelInfo> = {
   'claude-sonnet-4-6': ALL_MODELS.find(m => m.id === 'claude-sonnet-4-6')!,
   'claude-opus-4-6': ALL_MODELS.find(m => m.id === 'claude-opus-4-6')!,
+  'claude-opus-4-7': ALL_MODELS.find(m => m.id === 'claude-opus-4-7')!,
   'claude-haiku-4-5-20251001': ALL_MODELS.find(m => m.id === 'claude-haiku-4-5-20251001')!,
 };
 

@@ -189,9 +189,10 @@ describe('llm-client', () => {
 
   test('SUPPORTED_MODELS contains Anthropic models (backward compat)', () => {
     const { SUPPORTED_MODELS } = require('../llm-client');
-    expect(SUPPORTED_MODELS).toHaveLength(3);
+    expect(SUPPORTED_MODELS).toHaveLength(4);
     expect(SUPPORTED_MODELS).toContain('claude-sonnet-4-6');
     expect(SUPPORTED_MODELS).toContain('claude-opus-4-6');
+    expect(SUPPORTED_MODELS).toContain('claude-opus-4-7');
     expect(SUPPORTED_MODELS).toContain('claude-haiku-4-5-20251001');
   });
 
@@ -721,6 +722,7 @@ describe('llm-client', () => {
       const { MODEL_INFO } = require('../llm-client');
       expect(MODEL_INFO['claude-sonnet-4-6']).toBeDefined();
       expect(MODEL_INFO['claude-opus-4-6']).toBeDefined();
+      expect(MODEL_INFO['claude-opus-4-7']).toBeDefined();
       expect(MODEL_INFO['claude-haiku-4-5-20251001']).toBeDefined();
     });
   });

@@ -1,0 +1,329 @@
+{
+  "title": "rorca-mcp-reliability",
+  "specName": "MCP Reliability: Async Substrate + Model Registry + Operational Hardening",
+  "model": "claude-opus-4-6",
+  "generatedAt": "2026-04-25T16:27:37Z",
+  "userStories": [
+    {
+      "id": "MR-001",
+      "title": "Universal async jobs table and enqueue/poll API",
+      "description": "Create a `jobs` table and two API endpoints that become the universal substrate for every long-running Rorca operation. Any operation that can take longer than a few seconds — spec generation, enrichment, batch generation, workspace hydration, model probing — must be expressible as a job. POST /api/jobs enqueues a job and returns {jobId, status: 'queued'} in under 200ms. GET /api/jobs/:id returns {jobId, status, progress, result, error, createdAt, startedAt, finishedAt}. Status values: queued | running | done | failed. The result field holds the full operation output when done. The error field holds structured failure info when failed: {message, code, retriable}. Jobs are stored in pg-boss (reusing the existing queue infrastructure) under a queue name derived from the job type (e.g. 'jobs:spec-generate', 'jobs:enrich'). The jobs table in pg-boss IS the persistence layer — no separate DB table needed. Write a thin wrapper `backend/src/lib/job-queue.ts` with: enqueueJob(type, payload, opts?) → Promise<{jobId}>, getJobStatus(jobId) → Promise<JobStatus>, and completeJob / failJob helpers used by workers. Include idempotency: enqueueJob accepts an optional idempotencyKey; if a job with that key already exists in a non-failed state, return the existing jobId without re-enqueueing.",
+      "acceptanceCriteria": [
+        "POST /api/jobs with body {type: 'spec-generate', payload: {...}, idempotencyKey: 'abc'} returns {jobId, status: 'queued'} in < 200ms",
+        "GET /api/jobs/:id returns full status object with all fields",
+        "Calling POST /api/jobs twice with the same idempotencyKey returns the same jobId both times",
+        "Backend type-check passes with no new type errors",
+        "job-queue.ts exports: enqueueJob, getJobStatus, completeJob, failJob"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "MR-002",
+      "title": "Refactor spec generate to return jobId immediately",
+      "description": "Rewrite POST /api/specs/generate so it ALWAYS returns {jobId} in < 500ms regardless of story count, multiPass, or any other option. Remove the CHUNK_THRESHOLD branch entirely — there is no longer a synchronous path for generation. The route handler enqueues a 'jobs:spec-generate' pg-boss job with the full generation payload and returns immediately. The actual generation work (including multi-pass, chunking, direction synthesis, OpenCode calls) runs inside the worker that picks up the job. Worker writes progress updates via completeJob/failJob. The existing `spec-gen-chunked.ts` and `multiPass` pipeline become the single implementation path, both executed in the worker. Result payload when done: {specId, specPath, storyCount, generationLog}. Error payload when failed: {message, code: 'GENERATION_FAILED', retriable: true, detail}. Do not change any generation logic — only move execution from the HTTP request handler into the job worker.",
+      "acceptanceCriteria": [
+        "POST /api/specs/generate returns {jobId, status: 'queued'} in < 500ms for any story count",
+        "POST /api/specs/generate returns {jobId, status: 'queued'} even when multiPass: true",
+        "After the worker completes the job, GET /api/jobs/:id returns {status: 'done', result: {specId, specPath, storyCount}}",
+        "A 500-story spec request does not cause an HTTP timeout — the client gets jobId immediately",
+        "Synchronous CHUNK_THRESHOLD branch removed from specs.ts",
+        "spec-gen-chunked.ts generation logic unchanged — only caller changes from route handler to worker"
+      ],
+      "dependsOn": ["MR-001"],
+      "passes": false
+    },
+    {
+      "id": "MR-003",
+      "title": "Refactor enrich to return jobId immediately with per-story progress",
+      "description": "Rewrite POST /api/specs/:specId/enrich so it always returns {jobId} in < 200ms. Enrichment work (all story annotation calls) runs in the worker. Worker updates job progress field after each story batch completes: {storiesTotal, storiesDone, storiesFailed, annotations: [...]}. When all batches finish, worker calls completeJob with {storiesEnriched, storiesFailed: [{storyId, error}], requestedModel, actualModel, substitutionReason}. The substitutionReason field is populated whenever resolveModel() falls back (Phase 2 introduces resolveModel; for now use the existing isValidModel + DEFAULT_MODEL fallback already added to specs.ts). Concurrency cap of 3 stays. The 'failures array' must ALWAYS be present in the result even when empty — consumers must never need to guess whether failures occurred.",
+      "acceptanceCriteria": [
+        "POST /api/specs/:specId/enrich returns {jobId} in < 200ms",
+        "GET /api/jobs/:id returns progress.storiesDone incrementing as stories are annotated",
+        "Final result always includes failures array (empty or populated)",
+        "If all stories fail, status is 'failed' with code 'ENRICH_ALL_FAILED'",
+        "If some stories fail, status is 'done' with failures[] populated and storiesFailed > 0",
+        "requestedModel and actualModel always present in result (shows substitution if it occurred)"
+      ],
+      "dependsOn": ["MR-001", "MR-002"],
+      "passes": false
+    },
+    {
+      "id": "MR-004",
+      "title": "Refactor batch spec generation and workspace hydration to use job substrate",
+      "description": "Apply the same async refactor to two more long-running routes: (1) POST /api/specs/generate-batch — currently spawns N generation calls synchronously; refactor to enqueue one 'jobs:batch-generate' job per spec in the batch, return {batchId, jobIds[]}. Existing batch tracking in `spec_generation_jobs` table can remain but jobs are now pg-boss backed. (2) POST /api/workspaces/:id/hydrate — LLM map-reduce call can take 5-10 minutes; refactor to enqueue 'jobs:hydrate' and return {jobId}. Both routes must return their job references in < 500ms. This story is deliberately narrow: only the HTTP handler → async handoff changes. All generation/hydration logic stays in the existing functions.",
+      "acceptanceCriteria": [
+        "POST /api/specs/generate-batch returns {batchId, jobIds[]} in < 500ms",
+        "POST /api/workspaces/:id/hydrate returns {jobId} in < 500ms",
+        "Both operations complete successfully via worker (not HTTP request handler)",
+        "GET /api/jobs/:id works for hydrate jobId and returns workspace hydration result"
+      ],
+      "dependsOn": ["MR-001"],
+      "passes": false
+    },
+    {
+      "id": "MR-005",
+      "title": "MCP polling wrapper: rorca_job_status tool + async-aware tool wrappers",
+      "description": "Add one new MCP tool and update all generation tools to return jobId patterns that Claude can poll. New tool: rorca_job_status(jobId) — calls GET /api/jobs/:id and returns the full status object. Claude uses this after any tool call that returns a jobId to poll until status = 'done' or 'failed'. Update the auto-generated MCP tool descriptions for rorca_specs_generate, rorca_specs_generate_batch, rorca_specs_by_id_enrich, and rorca_workspaces_by_id_hydrate to include instructions like: 'This tool returns immediately with {jobId}. Poll rorca_job_status(jobId) every 10 seconds until status is done or failed. Do not retry the original tool call — the job is already running.' These instructions go in the @swagger description field of the route so they appear in the MCP tool description automatically. rorca_job_status must return a human-readable summary string in addition to the raw status object so Claude can report progress naturally ('14 of 47 stories enriched, 3 failed so far').",
+      "acceptanceCriteria": [
+        "rorca_job_status tool appears in MCP tool list",
+        "rorca_job_status(jobId) returns {status, progress, result, error, summary} where summary is a human-readable string",
+        "Swagger descriptions on generate/enrich/hydrate/batch routes include polling instructions",
+        "Claude can successfully generate a 50-story spec via MCP by: calling rorca_specs_generate → getting jobId → polling rorca_job_status every 10s → getting done result with specId",
+        "rorca_job_status returns clear error if jobId not found: {error: 'JOB_NOT_FOUND'}"
+      ],
+      "dependsOn": ["MR-002", "MR-003", "MR-004"],
+      "passes": false
+    },
+    {
+      "id": "MR-006",
+      "title": "Error surfacing: structured failures always reach the MCP caller",
+      "description": "Today Promise.allSettled swallows errors silently — the caller sees success:true, storiesEnriched:0 with no explanation. Fix: (1) Every job result must include a top-level failures[] array with {operation, error: {message, code}, retriable} entries. (2) Every job failure (status='failed') must include a structured error with code, message, and detail. (3) Add an AppError hierarchy entry: GenerationError (500, code: GENERATION_FAILED), EnrichError (500, code: ENRICH_FAILED), HydrationError (500, code: HYDRATION_FAILED). (4) The rorca_job_status MCP tool must surface failures prominently in its summary string: 'FAILED: 14 stories failed to enrich. Errors: [rate_limit_exceeded x9, invalid_model x5]. Action: check model availability or retry.' (5) Log every failure with structured fields {jobId, operation, storyId, model, errorCode, errorMessage} at warn level so failures are findable in backend logs even without a UI.",
+      "acceptanceCriteria": [
+        "Enriching a spec with an invalid model returns a job result with failures[] listing every story that failed and why",
+        "A job with status='failed' always has error.code and error.message (never undefined)",
+        "rorca_job_status summary string explicitly calls out failures when present",
+        "Backend log contains one structured warn entry per failed story with storyId + errorCode",
+        "Enriching classification-autoresearch-v2-eval-hardening (14 stories, gpt-5.4 model) produces status='done', storiesEnriched=14, failures=[], actualModel='claude-sonnet-4-6', substitutionReason='requested model gpt-5.4 not in registry'"
+      ],
+      "dependsOn": ["MR-003", "MR-005"],
+      "passes": false
+    },
+    {
+      "id": "MR-007",
+      "title": "Migration: model_capabilities table",
+      "description": "Create backend/src/db/pg-migrations/<timestamp>_create_model_capabilities.sql. Columns: provider TEXT NOT NULL (codex|claude|opencode|anthropic|openai|openrouter), model_id TEXT NOT NULL, display_name TEXT, context_window_tokens INTEGER, requires_subscription BOOL, requires_api_key BOOL, tier TEXT, last_probed_at TIMESTAMPTZ, probe_status TEXT NOT NULL DEFAULT 'unknown' (healthy|degraded|unavailable|unknown), probe_error TEXT, probe_latency_ms INTEGER, recent_success_count INTEGER DEFAULT 0, recent_failure_count INTEGER DEFAULT 0, last_succeeded_at TIMESTAMPTZ, created_at TIMESTAMPTZ DEFAULT NOW(), updated_at TIMESTAMPTZ DEFAULT NOW(). Primary key: (provider, model_id). Index on probe_status. Use timestamp format for migration filename per CLAUDE.md convention (YYYYMMDDHHMMSS_description.sql).",
+      "acceptanceCriteria": [
+        "Migration file exists with correct timestamp filename format",
+        "Migration runs without error on a fresh database",
+        "model_capabilities table created with all specified columns and correct types",
+        "Primary key constraint on (provider, model_id) enforced",
+        "Index on probe_status created",
+        "Backend type-check passes"
+      ],
+      "dependsOn": [],
+      "passes": false
+    },
+    {
+      "id": "MR-008",
+      "title": "model-registry.ts library with resolveModel and recordRunOutcome",
+      "description": "Create backend/src/lib/model-registry.ts with the following exports: (1) resolveModel(requestedId, opts?) → Promise<ResolvedModel | null>: looks up the model in model_capabilities. Returns the model if registered and probe_status != 'unavailable'. Returns null if unknown or unavailable. opts.allowDegraded defaults true. ResolvedModel = {provider, modelId, displayName, probeStatus, recentSuccessCount, health}. (2) listAvailableModels(opts) → Promise<RegisteredModel[]>: filtered by provider, probe_status (default: NOT unavailable), sorted by recent_success_count DESC. (3) recordRunOutcome(provider, modelId, success: boolean): increments recent_success_count or recent_failure_count, updates last_succeeded_at on success, updates updated_at. Called from execution-engine after each story. (4) recordProbeResult(provider, modelId, status, error?, latencyMs?): updates probe fields. Stub for Phase 2 probes. (5) computeHealth(row) → 'healthy' | 'degraded' | 'unavailable': composite scoring. NEVER marks unavailable if recent_success_count (last 7 days) > 5, regardless of probe_status. This protects gpt-5.4 which has 535 successful stories.",
+      "acceptanceCriteria": [
+        "model-registry.ts exports all 5 functions with correct TypeScript signatures",
+        "resolveModel('gpt-5.4') returns non-null after seed (MR-009) populates the registry",
+        "resolveModel('gpt-9.9-fake') returns null",
+        "computeHealth({probe_status: 'unavailable', recent_success_count: 10}) returns 'healthy' (success count overrides probe)",
+        "computeHealth({probe_status: 'unknown', recent_success_count: 0}) returns 'unknown'",
+        "recordRunOutcome increments the correct counter in the DB",
+        "Backend type-check passes"
+      ],
+      "dependsOn": ["MR-007"],
+      "passes": false
+    },
+    {
+      "id": "MR-009",
+      "title": "Seed registry from existing sources on startup",
+      "description": "On backend startup, call seedModelRegistry() which runs idempotently: (1) Read ~/.codex/models_cache.json if present. Upsert models with visibility='list' as provider='codex', requires_subscription=true, probe_status='unknown'. Only update static fields (display_name, context_window) on conflict — never reset metric fields. (2) Read ALL_MODELS from llm-client.ts. Upsert with appropriate provider per model prefix (claude-* → claude, gpt-* → openai, gemini-* → google, etc.). (3) Backfill historical runs: scan DISTINCT (agent_type, agent_model) from pipeline_runs over last 30 days. For each combo, upsert into model_capabilities setting last_succeeded_at from most recent successful run, and recent_success_count from story_results joined where status='pass'. This ensures gpt-5.4 shows 535 successful stories immediately on first load — it will never be hidden by a probe that lies. Seed must complete in < 5s. Log a summary: '[model-registry] Seeded N models from codex cache, M from llm-client, K from pipeline history'.",
+      "acceptanceCriteria": [
+        "seedModelRegistry() called from server.ts startup",
+        "model_capabilities contains (codex, gpt-5.4) after seed on a system with cashflow-app pipeline history",
+        "(codex, gpt-5.4) row has recent_success_count >= 30 and last_succeeded_at from the most recent successful run",
+        "Calling seedModelRegistry() twice does not reset recent_success_count or last_succeeded_at",
+        "Seed completes in < 5 seconds",
+        "Startup log shows seeded model counts"
+      ],
+      "dependsOn": ["MR-008"],
+      "passes": false
+    },
+    {
+      "id": "MR-010",
+      "title": "Retrofit enrich and spec generate to use resolveModel",
+      "description": "Replace the existing isValidModel() + DEFAULT_MODEL fallback in POST /api/specs/:specId/enrich (added in the previous session's hotfix) with a call to resolveModel(). Same retrofit for POST /api/specs/generate model validation. If resolveModel() returns null (model unknown or unavailable), log a warning and fall back to DEFAULT_MODEL. Surface the substitution in the job result payload: {requestedModel, actualModel, substitutionReason}. substitutionReason is a human-readable string: 'Requested model gpt-5.4 is not in the registry; fell back to claude-sonnet-4-6'. If resolveModel() returns a valid model, use it as-is. Add structured logging on every resolveModel decision: {requestedModel, resolvedModel, probeStatus, recentSuccesses} at debug level.",
+      "acceptanceCriteria": [
+        "Enriching a spec with model: 'gpt-5.4' (which IS in registry after seed) uses gpt-5.4 without substitution",
+        "Enriching a spec with model: 'gpt-9.9-fake' falls back to DEFAULT_MODEL, result includes substitutionReason",
+        "Generating a spec with model: 'gpt-9.9-fake' falls back to DEFAULT_MODEL, result includes substitutionReason",
+        "Backend log shows resolveModel decision for every enrich/generate call",
+        "isValidModel() call removed from enrich route — replaced by resolveModel()"
+      ],
+      "dependsOn": ["MR-003", "MR-008", "MR-009"],
+      "passes": false
+    },
+    {
+      "id": "MR-011",
+      "title": "Retrofit GET /api/config/codex-models and other model list endpoints",
+      "description": "Replace the models_cache.json direct read in backend/src/routes/config.ts (line ~1335) with a listAvailableModels({provider: 'codex'}) call. The cache file becomes a seeder input (read by seedModelRegistry), not the API response. Default filter: probe_status IN ('healthy', 'degraded', 'unknown') — i.e., exclude only 'unavailable'. Add ?includeUnavailable=true query param to include all. Also retrofit any other endpoint that returns model lists to the UI (check config.ts for similar patterns). The hardcoded FALLBACK array in codex-models (gpt-5.4, gpt-5.4-mini, gpt-5.3-codex, gpt-5.1-codex-mini) should be replaced by registry results — but seed must run first. Add a guard: if registry is empty at request time, fall back to the cache file read as before (graceful degradation during startup).",
+      "acceptanceCriteria": [
+        "GET /api/config/codex-models returns same 4 models it returns today, sourced from registry not cache file",
+        "GET /api/config/codex-models?includeUnavailable=true returns all models including unavailable ones",
+        "models_cache.json is no longer read directly by config.ts (only by seedModelRegistry)",
+        "If registry table is empty (first milliseconds of startup), endpoint falls back to cache file read",
+        "Response shape unchanged — UI receives same structure as before"
+      ],
+      "dependsOn": ["MR-008", "MR-009"],
+      "passes": false
+    },
+    {
+      "id": "MR-012",
+      "title": "Retrofit pipeline trigger with MODEL_UNAVAILABLE 422 and outcome recording",
+      "description": "Two changes to pipeline execution: (1) POST /api/pipeline/trigger calls resolveModel(provider, modelId) before queueing. If the model resolves as unavailable (not null, but computeHealth returns 'unavailable'), return HTTP 422 with body {error: 'Model is unavailable', code: 'MODEL_UNAVAILABLE', requestedModel, suggestedFallback: DEFAULT_MODEL}. If model is unknown (null from resolveModel), allow the run but log a warning — unknown models are given the benefit of the doubt at trigger time. (2) In execution-engine.ts, add recordRunOutcome(provider, modelId, true|false) calls at story end: in the story-pass branch (success=true) and in the story-failed/skipped branch (success=false). Provider is derived from the agent type: agent='codex' → provider='codex', agent='claude' → provider='claude', agent='opencode' → parse from RORCA_MODEL string. This is what keeps real-world success data flowing into the registry.",
+      "acceptanceCriteria": [
+        "POST /api/pipeline/trigger with a model that resolveModel marks 'unavailable' returns 422 with code: MODEL_UNAVAILABLE",
+        "POST /api/pipeline/trigger with an unknown model (not in registry) succeeds — run queues normally",
+        "After a successful story run with codex/gpt-5.4, model_capabilities row for (codex, gpt-5.4) has recent_success_count incremented",
+        "After a failed story run, recent_failure_count incremented",
+        "Structured log entry on every story end: {provider, modelId, success, recentSuccessCount}"
+      ],
+      "dependsOn": ["MR-008", "MR-009"],
+      "passes": false
+    },
+    {
+      "id": "MR-013",
+      "title": "MCP schema validation at boundary: reject malformed tool calls before they reach routes",
+      "description": "Today malformed MCP tool calls reach Express routes and fail with cryptic 500 errors or silent partial failures. Add a validation layer at the MCP HTTP boundary: before forwarding a tool call to the Express route, validate the request body against the route's OpenAPI schema. Use the existing openapi.json (generated by swagger.ts) as the schema source. For each tool call: extract the path + method, find the request body schema in openapi.json, run JSON Schema validation (use ajv, already likely in deps or add it). On validation failure, return a structured MCP error immediately without hitting the route: {error: 'VALIDATION_FAILED', code: 'INVALID_PARAMS', details: [{field, message}]}. This surfaces the problem at the tool-call level — Claude sees a clear error message instead of a 500 or silent partial result. Also validate that required fields are present (specId for enrich, workspaceId for hydrate, etc.).",
+      "acceptanceCriteria": [
+        "Calling rorca_specs_by_id_enrich without specId returns {error: 'VALIDATION_FAILED', details: [{field: 'specId', message: 'required'}]} immediately",
+        "Calling rorca_specs_generate without brief returns validation error",
+        "Valid tool calls pass through to routes unchanged",
+        "Validation adds < 5ms overhead per request",
+        "Backend type-check passes"
+      ],
+      "dependsOn": ["MR-005"],
+      "passes": false
+    },
+    {
+      "id": "MR-014",
+      "title": "Worker health check at MCP boundary and MCP health endpoint",
+      "description": "Two operational hardening changes: (1) MCP tool calls that enqueue jobs (generate, enrich, hydrate, batch) must first verify the worker is alive. Check worker_heartbeat table: if last_seen > 90s, return a clear MCP error before enqueueing: {error: 'Worker is not running. Start it with: cd backend && npm run worker', code: 'WORKER_DEAD'}. This prevents silent queuing into a dead queue. (2) Add GET /api/mcp/health endpoint (not behind auth) returning: {status: 'healthy'|'degraded'|'unavailable', worker: {alive, lastSeen, pid}, jobQueue: {queuedCount, runningCount, failedCount}, modelRegistry: {totalModels, healthyModels}, uptime: seconds}. Add this as an MCP tool: rorca_mcp_health — returns the full health payload so Claude can diagnose before taking action. Status is 'degraded' if worker dead, 'unavailable' if DB unreachable.",
+      "acceptanceCriteria": [
+        "Calling rorca_specs_generate when worker is dead returns {error: '...', code: 'WORKER_DEAD'} in < 200ms",
+        "GET /api/mcp/health returns correct status when worker alive vs dead",
+        "GET /api/mcp/health returns correct queuedCount from pg-boss",
+        "rorca_mcp_health MCP tool returns health payload",
+        "rorca_mcp_health is callable from Claude Code without error",
+        "Worker alive check adds < 50ms overhead to enqueue calls"
+      ],
+      "dependsOn": ["MR-001", "MR-005"],
+      "passes": false
+    },
+    {
+      "id": "MR-015",
+      "title": "Idempotency keys: safe retry for all async operations",
+      "description": "Extend idempotency (introduced in MR-001's enqueueJob) to all MCP-facing operations. The MCP client wrapper from MR-005 automatically generates an idempotencyKey for each tool call based on {toolName + JSON.stringify(args) + date_hour} — this means retrying the exact same call within the same hour returns the existing jobId, not a new job. Add the idempotencyKey to the MCP tool response: {jobId, idempotencyKey, cached: true|false}. cached=true means the call was deduplicated to an existing job. This protects against Claude retrying a timed-out tool call and creating duplicate specs. Also: add GET /api/jobs?type=spec-generate&idempotencyKey=X endpoint so clients can look up existing jobs by key. On the server side, store idempotencyKey in the pg-boss job data and index it for lookup.",
+      "acceptanceCriteria": [
+        "Calling rorca_specs_generate with identical args twice within 1 hour returns same jobId with cached: true on second call",
+        "Calling with different args (different brief text) returns new jobId",
+        "GET /api/jobs?idempotencyKey=X returns the job if found",
+        "cached: true in response when deduplication occurred",
+        "idempotency window is 1 hour (calls after 1 hour get a new job)"
+      ],
+      "dependsOn": ["MR-005"],
+      "passes": false
+    },
+    {
+      "id": "MR-016",
+      "title": "Async-aware rorca_specs_generate with built-in polling loop",
+      "description": "Add a high-level MCP convenience tool: rorca_generate_and_wait(brief, opts, timeoutSeconds=600). This tool internally calls the async generate endpoint, then polls rorca_job_status every 15 seconds until done or failed or timeoutSeconds exceeded. It streams progress to Claude as intermediate text chunks: 'Generating spec... (pass 1/6: PM Agent)', 'Generating spec... (pass 3/6: UX Designer)', 'Done: 47 stories generated'. If the job succeeds, returns the full spec result. If the job fails, returns the structured error. If timeout exceeded, returns {status: 'still_running', jobId, message: 'Job is still running. Poll rorca_job_status(jobId) to check progress.'}. This tool never times out itself — it always returns within timeoutSeconds with either a result or a still_running status. The key insight: Claude's tool call to rorca_generate_and_wait completes deterministically — worst case it returns 'still running' with the jobId for manual polling.",
+      "acceptanceCriteria": [
+        "rorca_generate_and_wait with a 10-story brief returns the full spec result (status='done') within the polling window",
+        "rorca_generate_and_wait with timeoutSeconds=30 on a slow spec returns {status: 'still_running', jobId} rather than hanging",
+        "Progress updates visible in intermediate tool output as generation advances through passes",
+        "Tool never throws an uncaught exception — all errors returned as structured result",
+        "Calling rorca_generate_and_wait when worker is dead returns {code: 'WORKER_DEAD'} immediately (uses MR-014 check)"
+      ],
+      "dependsOn": ["MR-005", "MR-014", "MR-015"],
+      "passes": false
+    },
+    {
+      "id": "MR-017",
+      "title": "Process supervisor: auto-restart worker on crash with exponential backoff",
+      "description": "Today if the worker crashes, pipeline runs silently queue forever. Add a lightweight process supervisor in backend/src/lib/worker-supervisor.ts that: (1) Starts the worker as a child process, (2) Watches for crash (exit code != 0 or SIGKILL), (3) Restarts with exponential backoff: 1s, 2s, 4s, 8s... up to max 60s between restarts, (4) Logs each restart with {pid, exitCode, restartCount, nextRestartIn}, (5) After 5 consecutive crashes within 60 seconds, stops auto-restarting and emits a WORKER_CRASH_LOOP alert to the SSE hub (so the UI shows a banner), (6) Exposes isWorkerAlive() and getWorkerStats() for use by the health endpoint in MR-014. The supervisor itself runs as a long-lived process alongside the API server — start it from server.ts if RORCA_PROCESS_ROLE != 'engine'. Worker crash detection uses the worker_heartbeat table as ground truth (heartbeat > 90s = dead, even if process appears running).",
+      "acceptanceCriteria": [
+        "Killing the worker process (kill -9 <pid>) causes it to restart within 2 seconds",
+        "After restart, new worker picks up queued jobs successfully",
+        "5 consecutive crashes within 60s stops auto-restart and logs CRASH_LOOP warning",
+        "getWorkerStats() returns {restartCount, lastRestartAt, consecutiveCrashes, backoffSeconds}",
+        "WORKER_CRASH_LOOP event emitted to SSE hub on crash loop detection",
+        "Supervisor does NOT start if RORCA_PROCESS_ROLE=engine (prevents nested supervisors)"
+      ],
+      "dependsOn": ["MR-014"],
+      "passes": false
+    },
+    {
+      "id": "MR-018",
+      "title": "Job result persistence: completed jobs survive backend restarts",
+      "description": "Today pg-boss job results are retained for a configurable TTL (default 30 days in pg-boss config). Verify this is set correctly and extend it: completed jobs must be queryable for at least 30 days after completion. Failed jobs must be queryable indefinitely (never auto-purged). Add a separate job_results table: {jobId TEXT PK, type TEXT, status TEXT, result JSONB, error JSONB, createdAt, startedAt, finishedAt, workspaceId, userId, idempotencyKey}. Write-through from completeJob/failJob helpers (MR-001) into this table. The job-queue.ts getJobStatus function reads from job_results first (fast), falls back to pg-boss (slower). This means job status survives even if pg-boss purges completed jobs. Add GET /api/jobs?workspaceId=X&type=spec-generate&limit=50 to list recent jobs by workspace. This lets Claude query 'what specs were generated recently in this workspace' without scanning spec files.",
+      "acceptanceCriteria": [
+        "After backend restart, GET /api/jobs/:id still returns result for a job completed before the restart",
+        "GET /api/jobs?workspaceId=X returns recent jobs for that workspace",
+        "Failed jobs are never purged from job_results",
+        "Completed jobs from > 7 days ago are still queryable",
+        "job_results migration uses timestamp filename format",
+        "completeJob and failJob both write to job_results table"
+      ],
+      "dependsOn": ["MR-001"],
+      "passes": false
+    },
+    {
+      "id": "MR-019",
+      "title": "MCP tool: rorca_list_jobs and rorca_cancel_job",
+      "description": "Two operational MCP tools: (1) rorca_list_jobs(opts) — lists recent jobs with optional filters: type (spec-generate, enrich, hydrate), status (queued, running, done, failed), workspaceId, limit (default 10). Returns [{jobId, type, status, progress, createdAt, summary}]. Useful for Claude to recover context after session interruption: 'what was I doing?' (2) rorca_cancel_job(jobId) — attempts to cancel a running or queued job. For queued jobs: remove from pg-boss queue (job never starts). For running jobs: send cancel signal to the worker handling that job (worker checks a cancelled flag in job_results before each work unit). For done/failed jobs: return {error: 'Cannot cancel — job already completed', code: 'JOB_ALREADY_DONE'}. Cancel is best-effort for running jobs: if the worker is between work units, it stops; if it's mid-LLM-call, it finishes the current call and stops before the next. This prevents runaway generation jobs consuming quota.",
+      "acceptanceCriteria": [
+        "rorca_list_jobs returns recent jobs with correct status",
+        "rorca_list_jobs with status='running' returns only running jobs",
+        "rorca_cancel_job on a queued job removes it from the queue (it never runs)",
+        "rorca_cancel_job on a running job causes the worker to stop after current work unit",
+        "rorca_cancel_job on a completed job returns JOB_ALREADY_DONE",
+        "rorca_list_jobs is usable for session recovery — returns enough context to resume"
+      ],
+      "dependsOn": ["MR-018", "MR-005"],
+      "passes": false
+    },
+    {
+      "id": "MR-020",
+      "title": "End-to-end integration: 100-story spec via MCP with zero timeouts",
+      "description": "Acceptance test story — validate the full MCP reliability stack works end-to-end. Write an automated integration test (backend/tests/mcp-reliability.test.ts using Jest) that: (1) Calls the generate endpoint directly (not via MCP — simulating what the MCP tool does) with a mock brief that produces 100 stories. (2) Receives jobId in < 500ms. (3) Polls getJobStatus every 5s until done or 15min timeout. (4) Verifies result has 100 stories, specId, specPath. (5) Verifies job_results table has the completed job. (6) Calls enrich on the resulting spec, receives jobId in < 200ms, polls until done, verifies all stories enriched. (7) Kills the worker process, calls generate again, verifies WORKER_DEAD error returned. (8) Restarts worker (supervisor auto-starts it), verifies recovery in < 5s. This test is the acceptance gate for the entire Phase 1+2+3 implementation. It must pass in CI before any story in this spec is considered done.",
+      "acceptanceCriteria": [
+        "mcp-reliability.test.ts exists and runs with jest",
+        "100-story generate call returns jobId in < 500ms",
+        "Job completes within 15min, result has correct shape",
+        "Enrich call on result returns jobId in < 200ms and completes successfully",
+        "WORKER_DEAD error returned when worker killed",
+        "Worker auto-restarts within 5s via supervisor",
+        "All assertions pass in a single test run on a clean database"
+      ],
+      "dependsOn": ["MR-002", "MR-003", "MR-006", "MR-014", "MR-017", "MR-018"],
+      "passes": false
+    },
+    {
+      "id": "MR-021",
+      "title": "UI: job status banner and async-aware action buttons",
+      "description": "Frontend changes to surface async job state to the user. (1) When the user clicks 'Generate Spec' or 'Enrich', the UI now receives {jobId} instead of the spec result. Show a progress banner: 'Generating spec... (queued)' → 'Generating spec... (running, pass 2/6)' → 'Done: 47 stories'. Banner polls GET /api/jobs/:jobId every 8 seconds via existing apiFetch. (2) Add a Jobs drawer accessible from the sidebar (small clock icon badge showing running job count). Lists recent jobs with their status and progress. Clicking a completed spec job navigates to the spec. (3) 'Generate' button disables while a generation job for the same workspace is running (check via rorca_list_jobs). (4) Show 'Cancel' button on running/queued jobs in the drawer. These are purely frontend changes — all polling uses existing GET /api/jobs/:id endpoint from MR-001.",
+      "acceptanceCriteria": [
+        "Clicking Generate shows progress banner that updates without page reload",
+        "Banner shows pass number for multi-pass generation (if progress data includes it)",
+        "Jobs drawer accessible from sidebar shows recent jobs",
+        "Completed job in drawer links to the generated spec",
+        "Cancel button in drawer calls rorca_cancel_job equivalent API",
+        "Generate button disabled while generation job running for same workspace"
+      ],
+      "dependsOn": ["MR-002", "MR-003", "MR-018"],
+      "passes": false
+    },
+    {
+      "id": "MR-022",
+      "title": "Documentation and runbook: MCP reliability architecture",
+      "description": "Update CLAUDE.md with the new async job architecture so future agents understand the pattern: (1) Add 'Async Job Architecture' section explaining the jobs table, job lifecycle, polling pattern, and idempotency. (2) Update the 'MCP Architecture' section to describe rorca_generate_and_wait, rorca_job_status, rorca_list_jobs, rorca_cancel_job, rorca_mcp_health tools. (3) Add 'Operational Runbook' section: how to diagnose a stuck generation job (check job_results, check worker heartbeat, restart worker), how to clear a crash loop, how to identify model substitutions in logs. (4) Update the spec pipeline status table in MEMORY.md to mark this spec as completed. (5) Add a feedback memory entry: 'MCP tools must never block the HTTP connection — all operations > 500ms must use async job pattern with polling' so future sessions remember this architectural constraint.",
+      "acceptanceCriteria": [
+        "CLAUDE.md contains Async Job Architecture section with job lifecycle diagram",
+        "CLAUDE.md MCP Architecture section updated with 4 new tools",
+        "CLAUDE.md Operational Runbook section added with diagnostic steps",
+        "MEMORY.md spec pipeline table updated",
+        "Memory file written: feedback_async_mcp_pattern.md",
+        "No other CLAUDE.md sections regressed or deleted"
+      ],
+      "dependsOn": ["MR-020"],
+      "passes": false
+    }
+  ]
+}

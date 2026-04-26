@@ -11,7 +11,7 @@ import { withUserClient } from '../db/user-client';
 import { validateBody } from '../lib/validate';
 import { synthesize, synthesizeWithMeta } from '../lib/direction-stack';
 import { generateDiagramBundle } from '../lib/diagram-generator';
-import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, getModelInfo, ALL_MODELS } from '../lib/llm-client';
+import { chatComplete, getActiveProvider, DEFAULT_MODEL, resolveVaultProvider, getModelInfo, ALL_MODELS, isValidModel } from '../lib/llm-client';
 import { writeSpec } from '../lib/spec-writer';
 import { broadcastAll, subscribe, type WalEvent } from '../lib/sse-hub';
 import { getVaultKey, getOpenRouterPrefs } from './vault';
@@ -11404,7 +11404,16 @@ router.post('/:specId/enrich', async (req: Request, res: Response) => {
     }
 
     // ── Per-story retrieval via memory-router.ts + annotation via chatComplete() ──
-    const annotationModel = modelOverride ?? specContent.model ?? DEFAULT_MODEL;
+    // Validate model: externally-created specs may have invalid/typo'd model IDs (e.g. "gpt-5.4").
+    // Fall back to DEFAULT_MODEL silently rather than failing all 14 stories with cryptic CLI errors.
+    const requestedModel = modelOverride ?? specContent.model ?? DEFAULT_MODEL;
+    const annotationModel = isValidModel(requestedModel) ? requestedModel : DEFAULT_MODEL;
+    if (annotationModel !== requestedModel) {
+      logger.warn(
+        { specId, requestedModel, fallback: annotationModel },
+        '[specs/enrich] Spec model not in registry — falling back to DEFAULT_MODEL',
+      );
+    }
     let totalInputTokens = 0;
     let totalOutputTokens = 0;
     let storiesEnriched = 0;
@@ -11464,16 +11473,25 @@ ${storyText}
 Respond with ONLY the annotation content (no preamble). Format as a markdown bulleted list.`;
     };
 
-    // Retrieve per-story context via memory-router.ts, then annotate in parallel
-    const results = await Promise.allSettled(
-      userStories.map(async story => {
-        const storyText = `${story.title} ${story.description ?? ''}`;
-        const ctx = await retrieveContext(workspaceId, storyText, { maxTokens: 2000, includeGraph: true });
-        const prompt = buildPromptForStory(story, ctx);
-        const result = await chatComplete([{ role: 'user', content: prompt }], annotationModel);
-        return { story, result, ctx };
-      })
-    );
+    // Retrieve per-story context via memory-router.ts, then annotate.
+    // Concurrency capped at 3: 14 parallel claude --print calls reliably trigger
+    // "Rate limit reached" on Claude subscription accounts, failing the whole enrich.
+    const ENRICH_CONCURRENCY = 3;
+    type StoryResult = { story: typeof userStories[0]; result: Awaited<ReturnType<typeof chatComplete>>; ctx: import('../lib/memory-router').RetrievedContext };
+    const results: PromiseSettledResult<StoryResult>[] = [];
+    for (let i = 0; i < userStories.length; i += ENRICH_CONCURRENCY) {
+      const batch = userStories.slice(i, i + ENRICH_CONCURRENCY);
+      const batchResults = await Promise.allSettled(
+        batch.map(async story => {
+          const storyText = `${story.title} ${story.description ?? ''}`;
+          const ctx = await retrieveContext(workspaceId, storyText, { maxTokens: 2000, includeGraph: true });
+          const prompt = buildPromptForStory(story, ctx);
+          const result = await chatComplete([{ role: 'user', content: prompt }], annotationModel);
+          return { story, result, ctx };
+        })
+      );
+      results.push(...batchResults);
+    }
 
     for (const outcome of results) {
       if (outcome.status === 'fulfilled') {
