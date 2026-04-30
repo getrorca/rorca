@@ -62,7 +62,7 @@ function buildGitHubHeaders(token: string): Record<string, string> {
 /**
  * Resolve GitHub token for the workspace. Returns null if not configured.
  */
-async function resolveGithubContext(workspaceId: string | number): Promise<{
+async function resolveGithubContext(workspaceId: string | number, force = false): Promise<{
   token: string;
   config: GithubWebhookConfig;
 } | null> {
@@ -72,7 +72,7 @@ async function resolveGithubContext(workspaceId: string | number): Promise<{
     [String(workspaceId)],
   );
 
-  if (!webhookConfig || !webhookConfig.auto_pr_enabled) {
+  if (!webhookConfig || (!force && !webhookConfig.auto_pr_enabled)) {
     return null;
   }
 
@@ -212,10 +212,11 @@ export async function createDraftPr(opts: {
   workspacePath: string;
   specTitle: string;
   totalStories: number;
+  force?: boolean;
 }): Promise<void> {
-  const { runId, workspaceId, branchName, specTitle, totalStories } = opts;
+  const { runId, workspaceId, branchName, specTitle, totalStories, force } = opts;
 
-  const ctx = await resolveGithubContext(workspaceId);
+  const ctx = await resolveGithubContext(workspaceId, force);
   if (!ctx) {
     logger.debug({ runId, workspaceId }, '[draft-pr] Skipping: GitHub not connected or auto-PR disabled');
     return;

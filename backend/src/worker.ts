@@ -1013,6 +1013,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                     workspaceId,
                     branchName: payload.branchName,
                     workspacePath,
+                    force: true,
                   });
                   mergeLog('[merge-strategy:pr] PR created');
                 } catch (prErr: any) {
@@ -1059,6 +1060,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                     workspacePath,
                     specTitle: draftSpecTitle,
                     totalStories: draftTotalStories,
+                    force: true,
                   });
                   mergeLog('[merge-strategy:draft-pr] Draft PR created');
                 } catch (prErr: any) {
