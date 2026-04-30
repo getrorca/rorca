@@ -68,6 +68,8 @@ export interface AutoPrOptions {
   workspaceId: number | string;
   branchName: string;
   workspacePath: string;
+  /** When true, skips the auto_pr_enabled check — used when user explicitly chose 'pr' or 'draft-pr' merge strategy. */
+  force?: boolean;
 }
 
 /**
@@ -75,7 +77,7 @@ export interface AutoPrOptions {
  * Never throws — all errors are caught, logged, and stored in the DB.
  */
 export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
-  const { runId, workspaceId, branchName } = opts;
+  const { runId, workspaceId, branchName, force } = opts;
 
   // 1. Look up GitHub webhook config for this workspace
   const webhookConfig = await queryOne<GithubWebhookConfig>(
@@ -89,7 +91,7 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
     return;
   }
 
-  if (!webhookConfig.auto_pr_enabled) {
+  if (!force && !webhookConfig.auto_pr_enabled) {
     logger.info({ runId, workspaceId }, '[auto-pr] Skipping auto-PR: auto_pr_enabled is false');
     return;
   }
