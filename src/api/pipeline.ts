@@ -12,6 +12,8 @@ export interface TriggerParams extends ApiOptions {
   specPath: string;
   workspaceId: string;
   autoWorktree?: boolean;
+  autoMerge?: boolean;
+  mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only';
   dryRun?: boolean;
   storyId?: string;
   forceSequential?: boolean;
@@ -39,6 +41,8 @@ export function triggerPipeline(p: TriggerParams): Promise<TriggerResponse> {
       specPath: p.specPath,
       workspaceId: p.workspaceId,
       autoWorktree: p.autoWorktree,
+      autoMerge: p.autoMerge,
+      mergeStrategy: p.mergeStrategy,
       dryRun: p.dryRun,
       storyId: p.storyId,
       forceSequential: p.forceSequential,
