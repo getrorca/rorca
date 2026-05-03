@@ -256,7 +256,7 @@ function storyWantsChromeMcp(story: UserStory, spec: SpecJson): boolean {
 
 /** Resolve the effective agent type for a story. Falls back to run-level config. */
 function resolveStoryAgent(story: UserStory, runAgent: AgentType): AgentType {
-  if (story.agent && (['claude', 'opencode', 'codex'] as AgentType[]).includes(story.agent)) {
+  if (story.agent && (['claude', 'opencode', 'codex', 'pi'] as AgentType[]).includes(story.agent)) {
     return story.agent;
   }
   return runAgent;
@@ -1137,6 +1137,8 @@ function runAgent(
     case 'codex':
       // thinking/effort flags are not forwarded to Codex
       return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServers);
+    case 'pi':
+      return Promise.reject(new Error('PI agent execution path is not implemented yet'));
   }
 }
 

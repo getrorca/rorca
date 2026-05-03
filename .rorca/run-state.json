@@ -1,88 +1,18 @@
 {
-  "specId": "rorca-supabase-auth-rls",
-  "runId": 20260316000221,
-  "startedAt": "2026-04-22T06:19:01.676Z",
-  "lastUpdatedAt": "2026-04-22T06:44:16.239Z",
+  "specId": "rorca-cli-tui-and-mcp-hardening",
+  "runId": 20260316000241,
+  "startedAt": "2026-05-03T04:28:17.577Z",
+  "lastUpdatedAt": "2026-05-03T04:30:11.781Z",
   "completedStories": [
     {
-      "storyId": "MU-015",
-      "title": "Enable RLS on user_settings, billing, and notification tables",
+      "storyId": "CLI-001",
+      "title": "Add 'pi' as a 4th AgentType in config.ts and VALID_AGENT_TYPES",
       "status": "passed",
-      "startedAt": "2026-04-22T06:19:02.399Z",
-      "finishedAt": "2026-04-22T06:21:14.212Z",
+      "startedAt": "2026-05-03T04:28:18.488Z",
+      "finishedAt": "2026-05-03T04:30:11.781Z",
       "agentType": "codex",
       "model": "gpt-5.4",
-      "elapsedMs": 131813
-    },
-    {
-      "storyId": "MU-021",
-      "title": "Create getUserClient() for RLS-scoped DB queries in Express routes",
-      "status": "passed",
-      "startedAt": "2026-04-22T06:21:30.442Z",
-      "finishedAt": "2026-04-22T06:24:28.833Z",
-      "agentType": "codex",
-      "model": "gpt-5.4",
-      "elapsedMs": 178391
-    },
-    {
-      "storyId": "MU-022",
-      "title": "Update key backend routes to use RLS-scoped queries",
-      "status": "passed",
-      "startedAt": "2026-04-22T06:24:45.430Z",
-      "finishedAt": "2026-04-22T06:28:43.812Z",
-      "agentType": "codex",
-      "model": "gpt-5.4",
-      "elapsedMs": 238382
-    },
-    {
-      "storyId": "MU-025",
-      "title": "Write RLS policy integration tests",
-      "status": "passed",
-      "startedAt": "2026-04-22T06:29:00.320Z",
-      "finishedAt": "2026-04-22T06:31:47.824Z",
-      "agentType": "codex",
-      "model": "gpt-5.4",
-      "elapsedMs": 167504
-    },
-    {
-      "storyId": "MU-027",
-      "title": "Set up local Supabase development environment",
-      "status": "passed",
-      "startedAt": "2026-04-22T06:32:05.364Z",
-      "finishedAt": "2026-04-22T06:33:28.282Z",
-      "agentType": "codex",
-      "model": "gpt-5.4",
-      "elapsedMs": 82918
-    },
-    {
-      "storyId": "MU-028",
-      "title": "Create workspace_members table and auto-enroll workspace creator as owner",
-      "status": "passed",
-      "startedAt": "2026-04-22T06:33:44.571Z",
-      "finishedAt": "2026-04-22T06:35:36.168Z",
-      "agentType": "codex",
-      "model": "gpt-5.4",
-      "elapsedMs": 111597
-    },
-    {
-      "storyId": "MU-029",
-      "title": "Security audit: IDOR, RLS bypass, JWT manipulation, CSRF, XSS",
-      "status": "passed",
-      "startedAt": "2026-04-22T06:35:52.513Z",
-      "finishedAt": "2026-04-22T06:41:02.810Z",
-      "agentType": "codex",
-      "model": "gpt-5.4",
-      "elapsedMs": 310297
-    },
-    {
-      "storyId": "MU-030",
-      "title": "Write E2E Playwright tests for complete auth flow",
-      "status": "passed",
-      "startedAt": "2026-04-22T06:41:19.877Z",
-      "finishedAt": "2026-04-22T06:44:16.239Z",
-      "agentType": "codex",
-      "model": "gpt-5.4",
-      "elapsedMs": 176362
+      "elapsedMs": 113293
     }
   ],
   "failedStories": [],
