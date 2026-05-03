@@ -60,6 +60,13 @@ describe('CommandPalette helpers', () => {
     expect(resolveCommandInput('unknown thing', buildCommands())).toBeNull();
   });
 
+  test('preserves literal remainder for single-argument commands like forge', () => {
+    expect(resolveCommandInput('forge   "ship  the   thing"  ', buildCommands())).toMatchObject({
+      command: expect.objectContaining({ id: 'forge' }),
+      args: ['"ship  the   thing"'],
+    });
+  });
+
   test('completion values use bare labels with trailing space only for arg commands', () => {
     expect(getCompletionValue(buildCommands()[0])).toBe('run ');
     expect(getCompletionValue(buildCommands()[10])).toBe('doctor');
