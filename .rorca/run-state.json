@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T07:11:10.624Z",
+  "lastUpdatedAt": "2026-05-03T07:46:34.693Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -293,9 +293,30 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 221429
+    },
+    {
+      "storyId": "CLI-028",
+      "title": "rorca chat: interactive pi session with Rorca context pre-injection",
+      "status": "passed",
+      "startedAt": "2026-05-03T07:42:48.274Z",
+      "finishedAt": "2026-05-03T07:46:34.693Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 226419
     }
   ],
-  "failedStories": [],
+  "failedStories": [
+    {
+      "storyId": "CLI-027",
+      "title": "Session persistence: Ctrl+C safety and detached-run semantics",
+      "status": "failed",
+      "startedAt": "2026-05-03T07:11:25.565Z",
+      "finishedAt": "2026-05-03T07:42:21.067Z",
+      "agentType": "codex",
+      "failReason": "timeout",
+      "elapsedMs": 1855502
+    }
+  ],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
