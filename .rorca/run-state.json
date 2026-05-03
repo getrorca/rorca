@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T05:14:27.724Z",
+  "lastUpdatedAt": "2026-05-03T05:19:47.885Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -113,6 +113,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 206598
+    },
+    {
+      "storyId": "CLI-010",
+      "title": "Context panel: live orchestration state from backend SSE stream",
+      "status": "passed",
+      "startedAt": "2026-05-03T05:14:43.435Z",
+      "finishedAt": "2026-05-03T05:19:47.885Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 304450
     }
   ],
   "failedStories": [],

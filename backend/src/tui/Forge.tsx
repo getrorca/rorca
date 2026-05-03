@@ -3,16 +3,10 @@ import { Box, Text, useStdout } from 'ink';
 import path from 'node:path';
 import { execSync } from 'node:child_process';
 import CommandPalette, { type ForgeCommand } from './CommandPalette';
+import useOrchestrationState, { type OrchestrationPhase } from './useOrchestrationState';
 
 const MAX_OUTPUT_LINES = 500;
 const CONTEXT_WIDTH = 35;
-type Phase = 'IDLE' | 'FORGING' | 'RETRYING' | 'COMPLETE';
-
-type SessionStats = {
-  inputTokens: number;
-  outputTokens: number;
-  costUsd: number;
-};
 
 function formatClock(now: Date): string {
   return now.toLocaleTimeString('en-US', {
@@ -44,20 +38,30 @@ function pushRingBuffer(lines: string[], next: string[]): string[] {
   return merged.length > MAX_OUTPUT_LINES ? merged.slice(merged.length - MAX_OUTPUT_LINES) : merged;
 }
 
+function phaseColor(phase: OrchestrationPhase): 'gray' | 'yellow' | 'green' | 'red' {
+  switch (phase) {
+    case 'FORGING':
+    case 'RETRYING':
+      return 'yellow';
+    case 'COMPLETE':
+      return 'green';
+    case 'FAILED':
+      return 'red';
+    case 'IDLE':
+    default:
+      return 'gray';
+  }
+}
+
 export function Forge(): JSX.Element {
   const { stdout } = useStdout();
   const [now, setNow] = useState(() => new Date());
   const [branchName] = useState(() => safeBranchName());
-  const [phase, setPhase] = useState<Phase>('IDLE');
   const [outputLines, setOutputLines] = useState<string[]>([]);
-  const [sessionStats] = useState<SessionStats>({
-    inputTokens: 0,
-    outputTokens: 0,
-    costUsd: 0,
-  });
+  const { orchestrationState, backendStatus, backendMessage } = useOrchestrationState();
+  const phase = orchestrationState.phase;
 
   const workspaceName = useMemo(() => path.basename(process.cwd()) || 'workspace', []);
-  const agentName = process.env.RORCA_AGENT ?? 'pi';
   const stdoutWidth = stdout?.columns ?? 80;
   const stdoutHeight = stdout?.rows ?? 24;
   const leftColumnWidth = Math.max(20, stdoutWidth - CONTEXT_WIDTH - 4);
@@ -76,7 +80,6 @@ export function Forge(): JSX.Element {
         description: 'Run an approved spec',
         args: ['<spec-slug>'],
         handler: (args) => {
-          setPhase('FORGING');
           appendOutput(`> run ${args.join(' ')}`.trimEnd(), `[forge] placeholder run handler for "${args.join(' ')}"`);
         },
       },
@@ -86,7 +89,6 @@ export function Forge(): JSX.Element {
         description: 'Generate a spec from a brief',
         args: ['<brief>'],
         handler: (args) => {
-          setPhase('FORGING');
           appendOutput(`> forge ${args.join(' ')}`.trimEnd(), `[forge] placeholder forge handler for "${args.join(' ')}"`);
         },
       },
@@ -95,7 +97,6 @@ export function Forge(): JSX.Element {
         label: 'board',
         description: 'Open the board view',
         handler: () => {
-          setPhase('IDLE');
           appendOutput('> board', '[forge] board view is not wired yet');
         },
       },
@@ -104,8 +105,10 @@ export function Forge(): JSX.Element {
         label: 'status',
         description: 'Show pipeline status',
         handler: () => {
-          setPhase('IDLE');
-          appendOutput('> status', `[forge] phase=${phase} agent=${agentName} branch=${branchName}`);
+          appendOutput(
+            '> status',
+            `[forge] phase=${phase} agent=${orchestrationState.activeAgent} branch=${branchName} backend=${backendStatus}`,
+          );
         },
       },
       {
@@ -180,7 +183,7 @@ export function Forge(): JSX.Element {
         handler: () => process.exit(0),
       },
     ],
-    [agentName, branchName, phase],
+    [backendStatus, branchName, orchestrationState.activeAgent, phase],
   );
 
   useEffect(() => {
@@ -195,7 +198,8 @@ export function Forge(): JSX.Element {
     <Box flexDirection="column" width={stdoutWidth} height={stdoutHeight}>
       <Box borderStyle="single" paddingX={1} height={3}>
         <Text wrap="truncate-end">
-          [RORCA FORGE] workspace:{workspaceName} agent:{agentName} branch:{branchName} {formatClock(now)}
+          [RORCA FORGE] workspace:{workspaceName} agent:{orchestrationState.activeAgent} branch:{branchName} {formatClock(now)}
+          {orchestrationState.backgroundRunsCount > 0 ? ` bg:${orchestrationState.backgroundRunsCount}` : ''}
         </Text>
       </Box>
 
@@ -208,16 +212,24 @@ export function Forge(): JSX.Element {
 
         <Box borderStyle="single" flexDirection="column" width={CONTEXT_WIDTH} paddingX={1}>
           <Text>STATE</Text>
-          <Text>phase: {phase}</Text>
           <Text>
-            step: {phase === 'FORGING' ? 'story 1 of 1' : phase === 'RETRYING' ? 'retry pass' : 'waiting'}
+            phase: <Text color={phaseColor(phase)}>{phase}</Text>
           </Text>
-          <Text>direction: placeholder rules loaded</Text>
-          <Text>pi session: inactive</Text>
-          <Text>tokens in: {sessionStats.inputTokens}</Text>
-          <Text>tokens out: {sessionStats.outputTokens}</Text>
-          <Text>cost usd: ${sessionStats.costUsd.toFixed(2)}</Text>
-          <Text>sse: placeholder until backend hook-up</Text>
+          {backendStatus === 'offline' ? <Text color="red">{backendMessage ?? 'Backend offline'}</Text> : null}
+          <Text>
+            stories: {orchestrationState.currentStory}/{orchestrationState.totalStories}
+          </Text>
+          <Text>spec: {orchestrationState.specSlug ?? 'none'}</Text>
+          <Text>agent: {orchestrationState.activeAgent}</Text>
+          <Text>model: {orchestrationState.activeModel ?? 'default'}</Text>
+          <Text>pi session: {orchestrationState.piSessionId ?? 'inactive'}</Text>
+          <Text>tokens in: {orchestrationState.cumulativeTokens.input}</Text>
+          <Text>tokens out: {orchestrationState.cumulativeTokens.output}</Text>
+          <Text>cost usd: ${orchestrationState.cumulativeTokens.cost.toFixed(2)}</Text>
+          <Text>direction: {orchestrationState.directionSummary ?? 'none'}</Text>
+          <Text>
+            background: {orchestrationState.backgroundRunsCount > 0 ? orchestrationState.backgroundRunsCount : 0}
+          </Text>
         </Box>
       </Box>
 
