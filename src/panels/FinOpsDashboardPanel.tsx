@@ -366,11 +366,11 @@ export default function FinOpsDashboardPanel() {
                         borderRadius: 8,
                         fontSize: 12,
                       }}
-                      formatter={(value: number | undefined, name: string | undefined) => {
-                        const v = value ?? 0;
+                      formatter={((value: string | number | undefined, name: string | number | undefined) => {
+                        const v = typeof value === 'number' ? value : Number(value ?? 0);
                         if (name === 'cost') return [formatCost(v), 'Cost'];
                         return [formatTokens(v), name === 'inputTokens' ? 'Input' : 'Output'];
-                      }}
+                      }) as any}
                     />
                     {data.allSubscription ? (
                       <>
@@ -430,10 +430,10 @@ export default function FinOpsDashboardPanel() {
                         borderRadius: 8,
                         fontSize: 12,
                       }}
-                      formatter={(value: number | undefined, name: string | undefined) => [
-                        `${value ?? 0} stories`,
-                        (name ?? '').charAt(0).toUpperCase() + (name ?? '').slice(1),
-                      ]}
+                      formatter={((value: string | number | undefined, name: string | number | undefined) => [
+                        `${typeof value === 'number' ? value : Number(value ?? 0)} stories`,
+                        String(name ?? '').charAt(0).toUpperCase() + String(name ?? '').slice(1),
+                      ]) as any}
                     />
                   </PieChart>
                 </ResponsiveContainer>
@@ -469,13 +469,13 @@ export default function FinOpsDashboardPanel() {
                       borderRadius: 8,
                       fontSize: 12,
                     }}
-                    formatter={(value: number | undefined, name: string | undefined) => {
-                      const v = value ?? 0;
+                    formatter={((value: string | number | undefined, name: string | number | undefined) => {
+                      const v = typeof value === 'number' ? value : Number(value ?? 0);
                       if (name === 'totalCost') return [formatCost(v), 'Cost'];
                       if (name === 'inputTokens') return [formatTokens(v), 'Input Tokens'];
                       if (name === 'reasoningTokens') return [formatTokens(v), 'Thinking Tokens'];
                       return [formatTokens(v), 'Output Tokens'];
-                    }}
+                    }) as any}
                   />
                   {data.allSubscription ? (
                     <>

@@ -121,11 +121,11 @@ function buildAcceptanceCriteria(
 
 function resolveAgent(pipelineConfig: Record<string, unknown>): AgentType {
   const wsAgent = pipelineConfig.agentType as string | undefined;
-  if (wsAgent && ['claude', 'opencode', 'codex'].includes(wsAgent)) {
+  if (wsAgent && ['claude', 'opencode', 'codex', 'pi'].includes(wsAgent)) {
     return wsAgent as AgentType;
   }
   const envAgent = process.env.RORCA_AGENT?.toLowerCase().trim();
-  if (envAgent && ['claude', 'opencode', 'codex'].includes(envAgent)) {
+  if (envAgent && ['claude', 'opencode', 'codex', 'pi'].includes(envAgent)) {
     return envAgent as AgentType;
   }
   return 'claude';

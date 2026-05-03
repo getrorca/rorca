@@ -22,9 +22,9 @@ export async function getAuthToken(_app?: Express, overrides?: { email?: string;
 
   if (!row) {
     await execute(
-      `INSERT INTO users (id, email, display_name, auth_id, role, plan)
-       VALUES ($1, $2, $3, $4::uuid, 'user', 'free')`,
-      [crypto.randomUUID(), email, email.split('@')[0], authId],
+      `INSERT INTO users (id, email, display_name, password_hash, auth_id, role, plan)
+       VALUES ($1, $2, $3, $4, $5::uuid, 'user', 'free')`,
+      [crypto.randomUUID(), email, email.split('@')[0], 'x', authId],
     );
     row = await queryOne<{ id: string; auth_id: string | null }>(
       'SELECT id, auth_id FROM users WHERE email = $1',

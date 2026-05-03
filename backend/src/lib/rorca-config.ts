@@ -103,7 +103,7 @@ const OrchestrationSchema = z.object({
   taskCascades: TaskCascadesSchema.optional(),
   escalation: EscalationSchema.default(() => EscalationSchema.parse({})),
   tokenBudgetPerStory: z.number().min(1000).default(50000),
-  fallbackEngine: z.enum(['claude', 'opencode', 'codex']).nullable().default(null),
+  fallbackEngine: z.enum(['claude', 'opencode', 'codex', 'pi']).nullable().default(null),
   capabilityMismatch: z.enum(['warn', 'reroute', 'block']).default('warn'),
 });
 

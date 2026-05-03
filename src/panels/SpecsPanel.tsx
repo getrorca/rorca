@@ -624,21 +624,21 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   const hasLoadedOnce = useRef(false);
   const [actionLoadingMap, setActionLoadingMap] = useState<Record<string, 'approve' | 'deny' | null>>({});
   const [activeRunSpecs, setActiveRunSpecs] = useState<Map<string, 'running' | 'queued'>>(new Map());
-  const sseFetchTimer = useRef<ReturnType<typeof setTimeout>>();
+  const sseFetchTimer = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Drag state — refs for performance (no re-renders during drag)
   const dragSpecIdRef = useRef<string | null>(null);
   const dragFromColumnRef = useRef<string | null>(null);
   const dragOverColumnRef = useRef<string | null>(null);
   const dragOverCardRef = useRef<{ specId: string; position: 'before' | 'after' } | null>(null);
-  const dragLeaveTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const dragLeaveTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const dragGhostRef = useRef<HTMLDivElement | null>(null);
   const [dragRenderKey, setDragRenderKey] = useState(0);
   // Column header drag state
   const dragColumnIdRef = useRef<number | null>(null);
   const dragColumnOverIdRef = useRef<number | null>(null);
   // Touch drag refs
-  const touchDragTimerRef = useRef<ReturnType<typeof setTimeout>>();
+  const touchDragTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const touchDragActiveRef = useRef(false);
   const touchStartPosRef = useRef<{ x: number; y: number } | null>(null);
   const touchCloneRef = useRef<HTMLDivElement | null>(null);
@@ -700,11 +700,11 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   }, [workspaceId]);
 
   const debouncedFetchKanban = useCallback(() => {
-    clearTimeout(sseFetchTimer.current);
+    clearTimeout(sseFetchTimer.current ?? undefined);
     sseFetchTimer.current = setTimeout(() => fetchKanban(), 300);
   }, [fetchKanban]);
 
-  useEffect(() => () => clearTimeout(sseFetchTimer.current), []);
+  useEffect(() => () => clearTimeout(sseFetchTimer.current ?? undefined), []);
 
   useEffect(() => {
     hasLoadedOnce.current = false;
@@ -998,7 +998,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
     dragOverCardRef.current = null;
     // Remove all drop indicators
     document.querySelectorAll('[data-drop-indicator]').forEach(el => el.remove());
-    clearTimeout(dragLeaveTimerRef.current);
+    clearTimeout(dragLeaveTimerRef.current ?? undefined);
     cleanupGhost();
     setDragRenderKey(k => k + 1);
   }, [cleanupGhost]);
@@ -1034,7 +1034,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   const handleDragOver = useCallback((e: React.DragEvent, columnKey: string) => {
     e.preventDefault();
     e.dataTransfer.dropEffect = 'move';
-    clearTimeout(dragLeaveTimerRef.current);
+    clearTimeout(dragLeaveTimerRef.current ?? undefined);
     if (dragOverColumnRef.current !== columnKey) {
       dragOverColumnRef.current = columnKey;
       setDragRenderKey(k => k + 1);
@@ -1042,7 +1042,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   }, []);
 
   const handleDragLeave = useCallback(() => {
-    clearTimeout(dragLeaveTimerRef.current);
+    clearTimeout(dragLeaveTimerRef.current ?? undefined);
     dragLeaveTimerRef.current = setTimeout(() => {
       dragOverColumnRef.current = null;
       setDragRenderKey(k => k + 1);
@@ -1051,7 +1051,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
 
   const handleDrop = useCallback(async (e: React.DragEvent, targetColumn: string) => {
     e.preventDefault();
-    clearTimeout(dragLeaveTimerRef.current);
+    clearTimeout(dragLeaveTimerRef.current ?? undefined);
     // Clean up drop indicators
     document.querySelectorAll('[data-drop-indicator]').forEach(el => el.remove());
 
@@ -1144,7 +1144,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
         const dx = touch.clientX - touchStartPosRef.current.x;
         const dy = touch.clientY - touchStartPosRef.current.y;
         if (Math.abs(dx) > 10 || Math.abs(dy) > 10) {
-          clearTimeout(touchDragTimerRef.current);
+          clearTimeout(touchDragTimerRef.current ?? undefined);
         }
       }
       return;
@@ -1167,7 +1167,7 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   }, []);
 
   const handleTouchEnd = useCallback((e: React.TouchEvent) => {
-    clearTimeout(touchDragTimerRef.current);
+    clearTimeout(touchDragTimerRef.current ?? undefined);
     (e.currentTarget as HTMLElement).style.opacity = '';
     if (touchDragActiveRef.current && dragSpecIdRef.current && dragFromColumnRef.current) {
       const specId = dragSpecIdRef.current;
@@ -1241,8 +1241,8 @@ function BoardView({ workspaceId, onSpecClick, onNavigate, onNewSpec }: {
   // Cleanup on unmount
   useEffect(() => () => {
     cleanupGhost();
-    clearTimeout(dragLeaveTimerRef.current);
-    clearTimeout(touchDragTimerRef.current);
+    clearTimeout(dragLeaveTimerRef.current ?? undefined);
+    clearTimeout(touchDragTimerRef.current ?? undefined);
     if (touchCloneRef.current) { document.body.removeChild(touchCloneRef.current); touchCloneRef.current = null; }
   }, [cleanupGhost]);
 
@@ -3176,4 +3176,3 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     </div>
   );
 }
-

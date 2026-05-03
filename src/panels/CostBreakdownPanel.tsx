@@ -397,10 +397,10 @@ function CostsTab({ data, loading, groupBy }: { data: CostResponse | null; loadi
                   borderRadius: '6px',
                   fontSize: '12px',
                 }}
-                formatter={(value?: number, name?: string) => [
-                  formatCost(value ?? 0),
+                formatter={((value: string | number | undefined, name: string | number | undefined) => [
+                  formatCost(typeof value === 'number' ? value : Number(value ?? 0)),
                   name === 'input_cost_usd' ? 'Input Cost' : 'Output Cost',
-                ]}
+                ]) as any}
               />
               <Legend formatter={(value: string) => value === 'input_cost_usd' ? 'Input Cost' : 'Output Cost'} />
               <Bar dataKey="input_cost_usd" fill="#6366f1" stackId="cost" radius={[0, 0, 0, 0]} />
@@ -514,10 +514,10 @@ function PeriodView({ periods }: { periods: PeriodCostRow[] }) {
                   borderRadius: '6px',
                   fontSize: '12px',
                 }}
-                formatter={(value?: number, name?: string) => [
-                  formatCost(value ?? 0),
+                formatter={((value: string | number | undefined, name: string | number | undefined) => [
+                  formatCost(typeof value === 'number' ? value : Number(value ?? 0)),
                   name === 'input_cost_usd' ? 'Input Cost' : 'Output Cost',
-                ]}
+                ]) as any}
               />
               <Legend formatter={(value: string) => value === 'input_cost_usd' ? 'Input Cost' : 'Output Cost'} />
               <Bar dataKey="input_cost_usd" fill="#6366f1" stackId="cost" />

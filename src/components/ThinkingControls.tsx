@@ -2,9 +2,11 @@ import { Brain } from 'lucide-react';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max';
 
+import type { EngineValue } from './EngineSelector';
+
 export interface ThinkingControlsProps {
   /** Current agent engine type */
-  engine: 'claude' | 'opencode' | 'codex' | null;
+  engine: EngineValue | null;
   /** Current model string (e.g. 'claude-opus-4-6', 'claude-sonnet-4-5-...') */
   model: string | null;
   /** Effort level selection */
