@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T04:31:25.402Z",
+  "lastUpdatedAt": "2026-05-03T04:33:00.112Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -23,6 +23,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 57703
+    },
+    {
+      "storyId": "CLI-003",
+      "title": "Expose pi-detector in GET /api/health endpoint",
+      "status": "passed",
+      "startedAt": "2026-05-03T04:31:40.930Z",
+      "finishedAt": "2026-05-03T04:33:00.111Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 79181
     }
   ],
   "failedStories": [],
