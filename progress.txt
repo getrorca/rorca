@@ -3,9 +3,9 @@
 Spec: rorca-cli-tui-and-mcp-hardening
 Run ID: 20260316000242
 Started: 2026-05-03T21:34:47.790Z
-Last Updated: 2026-05-03T21:56:34.983Z
+Last Updated: 2026-05-03T22:01:21.832Z
 
-## Completed Stories (39)
+## Completed Stories (40)
 - CLI-001: Add 'pi' as a 4th AgentType in config.ts and VALID_AGENT_TYPES — DONE (codex, gpt-5.4, 113s)
 - CLI-002: Create pi-detector.ts — binary detection, version parsing, model listing — DONE (codex, gpt-5.4, 58s)
 - CLI-003: Expose pi-detector in GET /api/health endpoint — DONE (codex, gpt-5.4, 79s)
@@ -45,3 +45,4 @@ Last Updated: 2026-05-03T21:56:34.983Z
 - CLI-027: Session persistence: Ctrl+C safety and detached-run semantics — DONE (codex, gpt-5.4, 325s)
 - CLI-035: Supervisor Daemon — rorca start spawns API + Worker children with graceful shutdown — DONE (codex, gpt-5.4, 378s)
 - CLI-036: Version Handshake — GET /api/version + CLI compatibility check on startup — DONE (codex, gpt-5.4, 556s)
+- CLI-037: Bundle Manifest — verify npm pack ships dist/ + backend/dist/, no build on user machine — DONE (codex, gpt-5.4, 266s)

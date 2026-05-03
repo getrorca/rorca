@@ -25,6 +25,7 @@
     "self-register": "npx tsx forge/self-register.ts",
     "start": "node cli.js start",
     "postinstall": "cd backend && npm install --production --ignore-scripts 2>/dev/null || true",
+    "prepack": "npm run build",
     "prepublishOnly": "npm run build",
     "test:e2e:first-run": "npx tsx test/e2e/first-run.test.ts",
     "auth:test": "npx playwright test tests/auth.spec.ts"
@@ -47,12 +48,14 @@
     "cli.js",
     "dist/",
     "backend/dist/",
-    "backend/src/db/migrations/",
+    "backend/src/db/pg-migrations/",
     "backend/package.json",
     "backend/package-lock.json",
     "forge/run-loop.sh",
     "forge/self-register.ts",
-    "package.json"
+    "package.json",
+    "README.md",
+    "LICENSE"
   ],
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
