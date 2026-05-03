@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T06:09:00.216Z",
+  "lastUpdatedAt": "2026-05-03T06:15:16.148Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -193,6 +193,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 236687
+    },
+    {
+      "storyId": "CLI-020",
+      "title": "Pi --skill flag: direction stack injected as pi skill file per story",
+      "status": "passed",
+      "startedAt": "2026-05-03T06:09:15.710Z",
+      "finishedAt": "2026-05-03T06:15:16.148Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 360438
     }
   ],
   "failedStories": [],

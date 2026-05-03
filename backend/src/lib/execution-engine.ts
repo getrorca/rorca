@@ -61,6 +61,8 @@ import { getGraphContext, formatGraphContext } from './graph-context';
 import { logger } from './logger';
 import { autoSynthesizeMemory } from './auto-memory';
 import { writeMemoryMd } from './memory-projection';
+import { getDirectionLayers } from './context-cache';
+import { synthesize } from './direction-stack';
 // execution-engine.ts intentionally does not use withUserClient(). It runs as a
 // system child process with RORCA_PROCESS_ROLE=engine, spawned by the worker on
 // behalf of the application, so its database access must remain service-role and
@@ -120,6 +122,7 @@ interface UserStory {
 
 interface SpecJson {
   title?: string;
+  brief?: string;
   mode?: string;
   playbook?: string;
   model?: string;
@@ -149,6 +152,7 @@ interface SpecJson {
    * content (take_snapshot, take_screenshot, list_console_messages, etc.).
    */
   chromeMcp?: boolean;
+  storyAnnotations?: Record<string, unknown> | string;
 }
 
 interface EngineConfig {
@@ -322,6 +326,9 @@ interface PiRpcServer {
   eventListeners: Array<(event: unknown) => void>;
   stderr: string;
   ready: boolean;
+  cwd: string;
+  model: string | null;
+  skillFile?: string;
 }
 let _piRpcServer: PiRpcServer | null = null;
 let _piRpcExitCleanupRegistered = false;
@@ -874,12 +881,25 @@ function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void)
   };
 }
 
-async function startPiRpcServer(cwd: string, model: string | null): Promise<PiRpcServer> {
-  if (_piRpcServer?.ready) {
+async function startPiRpcServer(
+  cwd: string,
+  model: string | null,
+  skillFile?: string,
+): Promise<PiRpcServer> {
+  if (
+    _piRpcServer?.ready
+    && _piRpcServer.cwd === cwd
+    && _piRpcServer.model === model
+    && _piRpcServer.skillFile === skillFile
+  ) {
     return _piRpcServer;
   }
 
-  const args = ['--mode', 'rpc', ...(model ? ['--model', model] : [])];
+  if (_piRpcServer) {
+    await stopPiRpcServer();
+  }
+
+  const args = ['--mode', 'rpc', ...(model ? ['--model', model] : []), ...(skillFile ? ['--skill', skillFile] : [])];
   const child = spawn(PI_BIN, args, {
     cwd,
     env: buildCleanEnv(),
@@ -893,6 +913,9 @@ async function startPiRpcServer(cwd: string, model: string | null): Promise<PiRp
     eventListeners: [],
     stderr: '',
     ready: false,
+    cwd,
+    model,
+    skillFile,
   };
 
   child.stderr?.on('data', (chunk: Buffer | string) => {
@@ -1060,6 +1083,64 @@ async function preparePiRpcSession(
   await sendCommand({ type: shouldClone ? 'clone' : 'new_session' });
   const state = await sendCommand({ type: 'get_state' });
   return extractPiSessionId(state);
+}
+
+function resolvePiSkillFile(cwd: string, override?: string): string | undefined {
+  const candidates = override
+    ? [override]
+    : [
+        path.join(cwd, '.rorca', 'skills', 'rorca.md'),
+        path.join(cwd, '.claude', 'skills', 'rorca.md'),
+      ];
+
+  return candidates.find(candidate => fs.existsSync(candidate));
+}
+
+function getStoryAnnotationText(spec: SpecJson | undefined, story: UserStory): string | undefined {
+  const annotations = spec?.storyAnnotations;
+  if (typeof annotations === 'string') return annotations.trim() || undefined;
+  if (!annotations || typeof annotations !== 'object') return undefined;
+
+  const raw = annotations[story.id];
+  if (raw == null) return undefined;
+  return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+}
+
+async function buildPiSessionOptions(
+  runId: number,
+  story: UserStory,
+  workspaceId: string | null,
+  spec?: SpecJson,
+): Promise<PiSessionOptions | undefined> {
+  if (!workspaceId) return undefined;
+
+  const layers = await getDirectionLayers(workspaceId);
+  const directionText = synthesize({
+    l1: layers.l1,
+    l2: layers.l2,
+    l3: layers.l3,
+    teamL1: layers.teamL1,
+    teamL2: layers.teamL2,
+    schemaSnapshot: layers.schemaSnapshot,
+    specBrief: spec?.brief ?? spec?.title ?? story.title,
+    storyAnnotations: getStoryAnnotationText(spec, story),
+  });
+
+  const skillFile = path.join(os.tmpdir(), `rorca-direction-${runId}-${story.id}.md`);
+  fs.writeFileSync(skillFile, directionText, { encoding: 'utf8', mode: 0o600 });
+  return { skillFile };
+}
+
+async function deleteFileIfExists(filePath?: string): Promise<void> {
+  if (!filePath) return;
+  try {
+    await fs.promises.unlink(filePath);
+  } catch (error: unknown) {
+    const code = typeof error === 'object' && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
+    if (code !== 'ENOENT') {
+      logger.warn(`  [pi] Failed to delete temp skill file ${filePath}: ${String(error)}`);
+    }
+  }
 }
 
 function readWorkspaceFile(cwd: string, ...segments: string[]): string {
@@ -1299,6 +1380,11 @@ interface PiRetryContext {
   attempt: number;
 }
 
+interface PiSessionOptions {
+  /** Explicit `--skill` path override. When set, auto-lookup is skipped entirely. */
+  skillFile?: string;
+}
+
 interface TokenUpdate {
   inputTokens: number;
   outputTokens: number;
@@ -1391,6 +1477,7 @@ function runAgent(
   mcpServers?: Record<string, string>,
   retryContext?: PiRetryContext,
   onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
+  piSessionOptions?: PiSessionOptions,
 ): Promise<AgentResult> {
   switch (agentType) {
     case 'claude':
@@ -1401,7 +1488,7 @@ function runAgent(
       // thinking/effort flags are not forwarded to Codex
       return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServers);
     case 'pi':
-      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady);
+      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piSessionOptions);
   }
 }
 
@@ -1976,6 +2063,7 @@ async function spawnPiRpc(
   onTokenUpdate?: TokenUpdateCallback,
   retryContext?: PiRetryContext,
   onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
+  piSessionOptions?: PiSessionOptions,
 ): Promise<AgentResult> {
   const previousStory = _piRpcStoryQueue;
   let releaseStoryQueue!: () => void;
@@ -1988,7 +2076,8 @@ async function spawnPiRpc(
 
   const startTime = Date.now();
   try {
-    const server = await startPiRpcServer(cwd, model);
+    const skillFile = resolvePiSkillFile(cwd, piSessionOptions?.skillFile);
+    const server = await startPiRpcServer(cwd, model, skillFile);
     const piSessionId = await preparePiRpcSession(
       (command) => sendPiRpcCommand(server, command),
       retryContext,
@@ -3516,6 +3605,9 @@ async function executeStory(
 
   const rateLimitKey = `rl:${story.id}`;
   let rateLimitAttempts = retryCounts.get(rateLimitKey) ?? 0;
+  const piSessionOptions = effectiveAgent === 'pi'
+    ? await buildPiSessionOptions(config.runId, story, workspaceId, spec)
+    : undefined;
 
   // Real-time token update callback — emits WAL events as tokens stream in
   const tokenUpdateCallback: TokenUpdateCallback | undefined =
@@ -3537,33 +3629,35 @@ async function executeStory(
       : undefined;
 
   // Rate limit retry loop
-  while (true) {
-    // Build the MCP servers map — only include entries that are actually available.
-    const mcpServers: Record<string, string> = {};
-    if (browserMcpUrl) mcpServers['playwright'] = browserMcpUrl;
-    if (chromeMcpUrl) mcpServers['chrome-devtools'] = chromeMcpUrl;
+  try {
+    while (true) {
+      // Build the MCP servers map — only include entries that are actually available.
+      const mcpServers: Record<string, string> = {};
+      if (browserMcpUrl) mcpServers['playwright'] = browserMcpUrl;
+      if (chromeMcpUrl) mcpServers['chrome-devtools'] = chromeMcpUrl;
 
-    const retryAttempt = retryCounts.get(story.id) ?? 0;
-    const piRetryContext: PiRetryContext | undefined = effectiveAgent === 'pi'
-      ? { isRetry: retryAttempt > 0, attempt: retryAttempt }
-      : undefined;
+      const retryAttempt = retryCounts.get(story.id) ?? 0;
+      const piRetryContext: PiRetryContext | undefined = effectiveAgent === 'pi'
+        ? { isRetry: retryAttempt > 0, attempt: retryAttempt }
+        : undefined;
 
-    const result = await runAgent(
-      effectiveAgent,
-      prompt,
-      effectiveCwd,
-      timeoutMin * 60 * 1000,
-      storyLogFile,
-      currentModel,
-      effectiveAttach,
-      tokenUpdateCallback,
-      config.thinkingEnabled,
-      config.thinkingBudget,
-      config.effortLevel,
-      Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-      piRetryContext,
-      effectiveAgent === 'pi' ? emitStoryStarted : undefined,
-    );
+      const result = await runAgent(
+        effectiveAgent,
+        prompt,
+        effectiveCwd,
+        timeoutMin * 60 * 1000,
+        storyLogFile,
+        currentModel,
+        effectiveAttach,
+        tokenUpdateCallback,
+        config.thinkingEnabled,
+        config.thinkingBudget,
+        config.effortLevel,
+        Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
+        piRetryContext,
+        effectiveAgent === 'pi' ? emitStoryStarted : undefined,
+        piSessionOptions,
+      );
 
     // Extract token usage from log file after agent exits
     const tokenUsage = extractTokenUsage(
@@ -4040,6 +4134,9 @@ async function executeStory(
       }, story.id);
     }
     return 'failed';
+    }
+  } finally {
+    await deleteFileIfExists(piSessionOptions?.skillFile);
   }
 }
 
