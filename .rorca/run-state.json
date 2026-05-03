@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T08:50:01.084Z",
+  "lastUpdatedAt": "2026-05-03T08:57:41.433Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -333,6 +333,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 2722130
+    },
+    {
+      "storyId": "CLI-040",
+      "title": "Pi Distribution: Detect + Prompt — guided install if pi binary missing",
+      "status": "passed",
+      "startedAt": "2026-05-03T08:50:33.962Z",
+      "finishedAt": "2026-05-03T08:57:41.433Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 427471
     }
   ],
   "failedStories": [
