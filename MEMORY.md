@@ -3440,3 +3440,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Gotcha] Backend Jest setup currently depends on AGE schema availability: When running backend Jest on this branch, expect global setup to fail before test execution if PostgreSQL lacks Apache AGE objects because migration 064 references ag_catalog.
 > Rule: Backend Jest setup currently depends on AGE schema availability: When running backend Jest on this branch, expect global setup to fail before test execution if PostgreSQL lacks Apache AGE objects because migration 064 references ag_catalog.
+
+## 2026-05-03 [Architecture] Pi provider is encoded in token_usage.model: For Pi FinOps and analytics, derive the provider from token_usage.model using the pi/<provider>/<model> format rather than expecting a dedicated provider column.
+> Rule: Pi provider is encoded in token_usage.model: For Pi FinOps and analytics, derive the provider from token_usage.model using the pi/<provider>/<model> format rather than expecting a dedicated provider column.
