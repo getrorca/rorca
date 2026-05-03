@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T05:06:05.692Z",
+  "lastUpdatedAt": "2026-05-03T05:10:45.121Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -93,6 +93,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 343333
+    },
+    {
+      "storyId": "CLI-008",
+      "title": "Create the Forge TUI process — Ink app skeleton with four-pane layout",
+      "status": "passed",
+      "startedAt": "2026-05-03T05:06:21.233Z",
+      "finishedAt": "2026-05-03T05:10:45.121Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 263888
     }
   ],
   "failedStories": [],
