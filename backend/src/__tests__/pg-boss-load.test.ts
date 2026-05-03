@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * PG-020: Load test — 10 concurrent runs with 6 worker slots (batchSize:3 × 2 instances).
  *
  * Setup:

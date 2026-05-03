@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 // ─── Workflow Config Resolver (WR-002) ──────────────────────────────────────
 // Resolves the effective runtime/provider/model/apiKey for a given workflow.
 // Resolution chain: DB workflow_configs → agent_config (pipeline_execution only)

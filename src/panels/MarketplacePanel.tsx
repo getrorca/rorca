@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Wrench, FileText, Package, Search, Loader2, Download, AlertTriangle, Trash2, Check, TrendingUp, X, ExternalLink } from 'lucide-react';
 import type { PanelId } from '../components/Sidebar';

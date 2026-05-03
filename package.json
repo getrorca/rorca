@@ -21,6 +21,8 @@
     "build": "vite build && cd backend && tsc && cd .. && npx tsc --project bin/tsconfig.json",
     "build:contract": "npx tsx scripts/build-public-contract.ts",
     "check:contract": "npx tsx scripts/check-contract-stability.ts",
+    "check:licenses": "npx tsx scripts/check-license-headers.ts",
+    "check:license-boundaries": "npx tsx scripts/check-license-boundaries.ts",
     "typecheck": "tsc --noEmit && cd backend && tsc --noEmit",
     "lint": "npx eslint src/",
     "lint:swagger": "npx tsx scripts/check-swagger-coverage.ts",

@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * ULT-021: Accessibility test helpers using axe-core.
  * Usage: import { testA11y } from '../test/a11y-helpers';
  *        await testA11y(container);

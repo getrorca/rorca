@@ -2,6 +2,7 @@
   "name": "@rorca/cli-internal",
   "version": "0.1.0",
   "private": true,
+  "license": "MIT",
   "type": "module",
   "scripts": {
     "test": "tsc -p tsconfig.json && node --test dist/version-check.test.js"

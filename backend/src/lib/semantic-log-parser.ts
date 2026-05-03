@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 // ─── Semantic Log Parser ──────────────────────────────────────────────────────
 // Parses structured JSON output from claude (--output-format stream-json) and
 // OpenCode (--format json) into SemanticStep objects for the Run View UI.

@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * jest.setup.ts — Jest globalSetup for PostgreSQL test database
  *
  * Connects to the Postgres test database, creates it if it doesn't exist,

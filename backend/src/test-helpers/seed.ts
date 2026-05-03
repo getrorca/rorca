@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * Shared seed helpers for backend integration tests.
  * Each helper inserts directly via query() and returns the inserted row.
  * Never creates its own DB connection — uses the shared pool from db/index.ts.

@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * QRW-012: Backend integration — execution-engine passes reasoning flags to Claude and OpenCode subprocesses
  *
  * Verifies that:

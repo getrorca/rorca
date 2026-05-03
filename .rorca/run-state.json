@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T23:35:02.099Z",
+  "lastUpdatedAt": "2026-05-03T23:40:43.597Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -503,6 +503,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 514024
+    },
+    {
+      "storyId": "CLI-055",
+      "title": "OPEN-CORE P0: License Header Enforcement — MIT for CLI, BSL for backend",
+      "status": "passed",
+      "startedAt": "2026-05-03T23:35:22.334Z",
+      "finishedAt": "2026-05-03T23:40:43.597Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 321263
     }
   ],
   "failedStories": [],
