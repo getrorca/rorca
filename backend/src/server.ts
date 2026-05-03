@@ -40,6 +40,7 @@ import { supabaseAdmin } from './lib/supabase';
 import onboardingRouter from './routes/onboarding';
 import backupsRouter from './routes/backups';
 import healthRouter from './routes/health';
+import doctorRouter from './routes/doctor';
 import versionRouter from './routes/version';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
@@ -233,6 +234,7 @@ app.use(queryTimerMiddleware);
 
 // ─── Public routes (no auth required) ───
 app.use('/api/health', healthRouter);
+app.use('/api/doctor', doctorRouter);
 app.use('/api/version', versionRouter);
 
 if (process.env.NODE_ENV === 'test') {
