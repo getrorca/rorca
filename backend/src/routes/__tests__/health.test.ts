@@ -65,6 +65,10 @@ describe('GET /api/health', () => {
     expect(res.body).toHaveProperty('piInstalled', false);
     expect(res.body).toHaveProperty('piVersion', null);
     expect(res.body).toHaveProperty('piBinPath', null);
+    expect(res.body).toHaveProperty('mcpTransport', 'http');
+    expect(res.body).toHaveProperty('mcp.enabled', true);
+    expect(res.body).toHaveProperty('mcp.status', 'healthy');
+    expect(res.body).toHaveProperty('mcp.url', 'http://localhost:3030/mcp');
   });
 
   it('returns no-cache headers', async () => {
@@ -90,6 +94,25 @@ describe('GET /api/health', () => {
 
     const res = await request(app).get('/api/health');
     expect(res.body.active_runs).toBe(2);
+  });
+
+  it('reports MCP disabled when RORCA_SERVE_MCP=false', async () => {
+    process.env.RORCA_SERVE_MCP = 'false';
+    jest.resetModules();
+    const serverMod = require('../../server');
+    const mcpDisabledApp = serverMod.default as Express;
+
+    const res = await request(mcpDisabledApp).get('/api/health');
+    expect(res.status).toBe(200);
+    expect(res.body.mcpTransport).toBe('disabled');
+    expect(res.body.mcp).toMatchObject({
+      enabled: false,
+      status: 'disabled',
+      url: 'http://localhost:3030/mcp',
+      sessions: 0,
+    });
+
+    delete process.env.RORCA_SERVE_MCP;
   });
 });
 

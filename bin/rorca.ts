@@ -99,6 +99,14 @@ type DoctorResponse = {
 type HealthResponse = {
   piInstalled?: boolean;
   piVersion?: string | null;
+  piBinPath?: string | null;
+  mcpTransport?: string;
+  mcp?: {
+    enabled: boolean;
+    status: 'healthy' | 'disabled';
+    url: string;
+    sessions: number;
+  };
 };
 
 type PiModel = {
@@ -563,9 +571,294 @@ function cleanupTempFile(filePath: string | null): void {
   }
 }
 
-async function spawnInteractivePi(args: string[]): Promise<number> {
+function resolvePiBinPathLocal(): string | null {
+  const envBin = process.env.PI_BIN?.trim();
+  if (envBin) return envBin;
+
+  const whichCommand = process.platform === 'win32' ? 'where' : 'which';
+  const result = spawnSync(whichCommand, ['pi'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+  });
+
+  if (result.status !== 0) return null;
+  const output = result.stdout.trim().split(/\r?\n/).find(Boolean);
+  return output || null;
+}
+
+function resolvePiBinPath(preferred?: string | null): string {
+  return preferred || resolvePiBinPathLocal() || 'pi';
+}
+
+function buildRorcaPiMcpExtension(mcpUrl: string): string {
+  const escapedUrl = JSON.stringify(mcpUrl);
+  return `import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
+
+type JsonSchema = {
+  type?: string;
+  description?: string;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  items?: JsonSchema;
+  enum?: unknown[];
+  anyOf?: JsonSchema[];
+  oneOf?: JsonSchema[];
+};
+
+type McpTool = {
+  name: string;
+  description?: string;
+  inputSchema?: JsonSchema;
+};
+
+const MCP_URL = process.env.RORCA_PI_MCP_URL || ${escapedUrl};
+const PROTOCOL_VERSION = "2024-11-05";
+let requestId = 0;
+
+function nextId(): number {
+  requestId += 1;
+  return requestId;
+}
+
+async function mcpPost(method: string, params: Record<string, unknown>, sessionId?: string, signal?: AbortSignal) {
+  const response = await fetch(MCP_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+      ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: nextId(),
+      method,
+      params,
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(\`\${method} failed (\${response.status}): \${body}\`);
+  }
+
+  const payload = await response.json() as {
+    result?: Record<string, unknown>;
+    error?: { message?: string };
+  };
+
+  if (payload.error?.message) {
+    throw new Error(payload.error.message);
+  }
+
+  return {
+    sessionId: response.headers.get("mcp-session-id") || sessionId || "",
+    result: payload.result || {},
+  };
+}
+
+async function initializeBridge(signal?: AbortSignal): Promise<{ sessionId: string; tools: McpTool[] }> {
+  const init = await mcpPost("initialize", {
+    protocolVersion: PROTOCOL_VERSION,
+    capabilities: {},
+    clientInfo: {
+      name: "rorca-pi-bridge",
+      version: "0.1.0",
+    },
+  }, undefined, signal);
+
+  if (!init.sessionId) {
+    throw new Error("MCP server did not return a session id");
+  }
+
+  const tools: McpTool[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const listed = await mcpPost("tools/list", cursor ? { cursor } : {}, init.sessionId, signal);
+    const pageTools = Array.isArray(listed.result.tools) ? listed.result.tools as McpTool[] : [];
+    tools.push(...pageTools);
+    const nextCursor = typeof listed.result.nextCursor === "string" ? listed.result.nextCursor : undefined;
+    if (!nextCursor) break;
+    cursor = nextCursor;
+  }
+
+  return {
+    sessionId: init.sessionId,
+    tools,
+  };
+}
+
+function schemaToType(schema: JsonSchema | undefined, required: boolean) {
+  const value = (() => {
+    if (!schema) {
+      return Type.Any();
+    }
+
+    if (Array.isArray(schema.anyOf) && schema.anyOf.length > 0) {
+      return Type.Any({ description: schema.description });
+    }
+
+    if (Array.isArray(schema.oneOf) && schema.oneOf.length > 0) {
+      return Type.Any({ description: schema.description });
+    }
+
+    if (Array.isArray(schema.enum) && schema.enum.length === 1) {
+      return Type.Literal(typeof schema.enum[0] === "string" ? schema.enum[0] : String(schema.enum[0]), schema.description ? { description: schema.description } : {});
+    }
+
+    if (Array.isArray(schema.enum) && schema.enum.length > 1) {
+      return Type.Union(
+        schema.enum.map((entry) => Type.Literal(typeof entry === "string" ? entry : String(entry))),
+        schema.description ? { description: schema.description } : {},
+      );
+    }
+
+    if (schema.type === "number" || schema.type === "integer") {
+      return Type.Number(schema.description ? { description: schema.description } : {});
+    }
+
+    if (schema.type === "boolean") {
+      return Type.Boolean(schema.description ? { description: schema.description } : {});
+    }
+
+    if (schema.type === "array") {
+      return Type.Array(schemaToType(schema.items, true), schema.description ? { description: schema.description } : {});
+    }
+
+    if (schema.type === "object" || schema.properties) {
+      const requiredKeys = new Set(schema.required || []);
+      const properties = Object.fromEntries(
+        Object.entries(schema.properties || {}).map(([key, child]) => [key, schemaToType(child, requiredKeys.has(key))]),
+      );
+      return Type.Object(properties, schema.description ? { description: schema.description } : {});
+    }
+
+    return Type.String(schema.description ? { description: schema.description } : {});
+  })();
+
+  return required ? value : Type.Optional(value);
+}
+
+function buildParametersSchema(tool: McpTool) {
+  const schema = tool.inputSchema;
+  const requiredKeys = new Set(schema?.required || []);
+  const properties = Object.fromEntries(
+    Object.entries(schema?.properties || {}).map(([key, child]) => [key, schemaToType(child, requiredKeys.has(key))]),
+  );
+  return Type.Object(properties);
+}
+
+function formatToolResult(result: Record<string, unknown>): string {
+  const content = Array.isArray(result.content) ? result.content : [];
+  const textParts = content
+    .filter((item): item is { type: string; text?: string } => Boolean(item) && typeof item === "object")
+    .map((item) => item.type === "text" && typeof item.text === "string" ? item.text : JSON.stringify(item, null, 2))
+    .filter(Boolean);
+
+  if (textParts.length > 0) {
+    return textParts.join("\\n\\n");
+  }
+
+  return JSON.stringify(result, null, 2);
+}
+
+export default function rorcaPiBridge(pi: ExtensionAPI) {
+  let bridgePromise: Promise<{ sessionId: string; tools: McpTool[] }> | null = null;
+  let sessionId: string | null = null;
+  const registeredTools = new Set<string>();
+
+  async function getBridge(signal?: AbortSignal) {
+    if (!bridgePromise) {
+      bridgePromise = initializeBridge(signal);
+    }
+    const bridge = await bridgePromise;
+    sessionId = bridge.sessionId;
+    return bridge;
+  }
+
+  function registerBridgeTool(tool: McpTool) {
+    if (registeredTools.has(tool.name)) return;
+    registeredTools.add(tool.name);
+
+    pi.registerTool({
+      name: tool.name,
+      label: tool.name,
+      description: tool.description || \`Rorca MCP tool: \${tool.name}\`,
+      parameters: buildParametersSchema(tool),
+      async execute(_toolCallId, params, signal) {
+        const bridge = await getBridge(signal);
+        const response = await mcpPost("tools/call", {
+          name: tool.name,
+          arguments: params,
+        }, bridge.sessionId, signal);
+
+        const result = response.result as Record<string, unknown>;
+        return {
+          content: [{ type: "text", text: formatToolResult(result) }],
+          details: {
+            bridge: "rorca-mcp",
+            tool: tool.name,
+          },
+        };
+      },
+    });
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    try {
+      const bridge = await getBridge();
+      for (const tool of bridge.tools) {
+        registerBridgeTool(tool);
+      }
+      ctx.ui.setStatus("rorca-mcp", \`Rorca MCP: \${bridge.tools.length} tools\`);
+      ctx.ui.notify(\`Loaded \${bridge.tools.length} Rorca MCP tools from \${MCP_URL}\`, "success");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.ui.setStatus("rorca-mcp", "Rorca MCP: unavailable");
+      ctx.ui.notify(\`Failed to load Rorca MCP bridge: \${message}\`, "error");
+    }
+  });
+
+  pi.registerCommand("rorca-mcp-status", {
+    description: "Show Rorca MCP bridge status",
+    handler: async (_args, ctx) => {
+      try {
+        const bridge = await getBridge();
+        for (const tool of bridge.tools) {
+          registerBridgeTool(tool);
+        }
+        ctx.ui.notify(\`Rorca MCP bridge healthy: \${bridge.tools.length} tools from \${MCP_URL}\`, "success");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(\`Rorca MCP bridge unavailable: \${message}\`, "error");
+      }
+    },
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (!sessionId) return;
+    try {
+      await fetch(MCP_URL, {
+        method: "DELETE",
+        headers: { "mcp-session-id": sessionId },
+      });
+    } catch {
+      // Best effort cleanup for server-side MCP sessions.
+    }
+  });
+}
+`;
+}
+
+async function fetchBackendHealth(): Promise<HealthResponse> {
+  return fetchJson<HealthResponse>('/api/health');
+}
+
+async function spawnInteractivePi(piBinPath: string, args: string[]): Promise<number> {
   return new Promise((resolve, reject) => {
-    const child = spawn('pi', args, {
+    const child = spawn(piBinPath, args, {
       stdio: 'inherit',
       shell: process.platform === 'win32',
     });
@@ -596,7 +889,28 @@ async function spawnInteractivePi(args: string[]): Promise<number> {
 async function runChat(options: { model?: string; workspaceId?: string }): Promise<number> {
   let workspaceName = options.workspaceId ?? 'default';
   let tempSkillFile: string | null = null;
-  let backendWarning: string | null = null;
+  let tempExtensionFile: string | null = null;
+  const health = await fetchBackendHealth().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Rorca backend is required for pi MCP bridge. Start \`npm run dev\` or \`rorca start\` first. (${message})`);
+  });
+
+  if (!health.piInstalled) {
+    printPiInstallMethods();
+    throw new Error('Pi CLI is not installed.');
+  }
+
+  if (!health.piBinPath && !resolvePiBinPathLocal()) {
+    printPiInstallMethods();
+    throw new Error('Pi CLI binary path could not be resolved.');
+  }
+
+  if (!health.mcp?.enabled || health.mcp.status !== 'healthy' || !health.mcp.url) {
+    const detail = health.mcp?.status === 'disabled'
+      ? 'MCP is disabled in the backend (`RORCA_SERVE_MCP=false`).'
+      : 'MCP bridge is not reachable from the backend.';
+    throw new Error(`Rorca MCP bridge is required for \`rorca chat\`. ${detail} Start \`npm run dev\` or \`rorca start\` with MCP enabled first.`);
+  }
 
   try {
     const workspace = options.workspaceId
@@ -613,32 +927,29 @@ async function runChat(options: { model?: string; workspaceId?: string }): Promi
 
     tempSkillFile = path.join(tmpdir(), `rorca-chat-context-${Date.now()}-${process.pid}.md`);
     writeFileSync(tempSkillFile, `${direction.synthesized.trim()}\n`, 'utf8');
+    tempExtensionFile = path.join(tmpdir(), `rorca-pi-mcp-bridge-${Date.now()}-${process.pid}.ts`);
+    writeFileSync(tempExtensionFile, buildRorcaPiMcpExtension(health.mcp.url), 'utf8');
   } catch (error) {
-    if (!isBackendUnavailableError(error)) {
-      throw error;
+    if (isBackendUnavailableError(error)) {
+      throw new Error('Rorca backend is required for `rorca chat`. Start `npm run dev` or `rorca start` first.');
     }
-    const message = error instanceof Error ? error.message : String(error);
-    backendWarning = `Warning: backend unreachable (${message}). Launching pi without Rorca context injection.`;
-    workspaceName = options.workspaceId ?? 'unavailable';
-  }
-
-  if (backendWarning) {
-    console.warn(yellow(backendWarning));
+    throw error;
   }
 
   const args = [
     ...(tempSkillFile ? ['--skill', tempSkillFile] : []),
+    ...(tempExtensionFile ? ['--extension', tempExtensionFile] : []),
     ...(options.model ? ['--model', options.model] : []),
   ];
 
   console.log('─── Rorca Chat ───────────────────────────────────────────────');
   console.log(
-    `Workspace: ${workspaceName}  Agent: pi  Model: ${options.model ?? 'default'}  Context: ${tempSkillFile ? 'L1-L5 injected' : 'not injected'}`,
+    `Workspace: ${workspaceName}  Agent: pi  Model: ${options.model ?? 'default'}  Context: ${tempSkillFile ? 'L1-L5 injected' : 'not injected'}  MCP: ${health.mcp.url}`,
   );
   console.log('─────────────────────────────────────────────────────────────');
 
   try {
-    return await spawnInteractivePi(args);
+    return await spawnInteractivePi(resolvePiBinPath(health.piBinPath), args);
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
       printPiInstallMethods();
@@ -646,6 +957,7 @@ async function runChat(options: { model?: string; workspaceId?: string }): Promi
     throw error;
   } finally {
     cleanupTempFile(tempSkillFile);
+    cleanupTempFile(tempExtensionFile);
     console.log('Chat session ended');
   }
 }
@@ -1093,12 +1405,31 @@ async function runDoctor(json = false): Promise<number> {
       : { label: 'Docker running', status: 'error', message: 'Docker not running', fix: 'Start Docker Desktop or OrbStack' },
   );
 
-  const backendHealth = await fetch(`${API_BASE}/api/health`).catch(() => null);
+  const backendHealth = await fetchBackendHealth().catch(() => null);
   localChecks.push(
-    backendHealth?.ok
+    backendHealth
       ? { label: 'Backend reachable', status: 'ok', message: 'OK' }
       : { label: 'Backend reachable', status: 'error', message: 'Backend not running', fix: 'Run: rorca start' },
   );
+
+  if (backendHealth) {
+    if (backendHealth.mcp?.status === 'healthy' && backendHealth.mcp.enabled) {
+      localChecks.push({
+        label: 'Rorca MCP bridge',
+        status: 'ok',
+        message: `OK (${backendHealth.mcp.url})`,
+      });
+    } else {
+      localChecks.push({
+        label: 'Rorca MCP bridge',
+        status: backendHealth.mcp?.status === 'disabled' ? 'error' : 'warning',
+        message: 'Rorca MCP bridge not connected — pi will run without Rorca tools',
+        fix: backendHealth.mcp?.status === 'disabled'
+          ? 'Start backend with RORCA_SERVE_MCP=1 (or unset RORCA_SERVE_MCP)'
+          : 'Start `npm run dev` or `rorca start` so /mcp is reachable',
+      });
+    }
+  }
 
   if (json) {
     const remote = await fetchJson<DoctorResponse>('/api/doctor');
@@ -1152,7 +1483,7 @@ function printPiInstallMethods(): void {
 }
 
 async function fetchPiHealth(): Promise<HealthResponse> {
-  return fetchJson<HealthResponse>('/api/health');
+  return fetchBackendHealth();
 }
 
 async function fetchPiModels(): Promise<PiModelsResponse> {
@@ -1226,7 +1557,7 @@ async function runPiAuthCommand(action: 'login' | 'logout', provider?: string): 
     args.push(provider);
   }
 
-  const result = await runCommand('pi', args, { stdio: 'inherit' });
+  const result = await runCommand(resolvePiBinPath(health.piBinPath), args, { stdio: 'inherit' });
   if (result.code !== 0) {
     return result.code;
   }
