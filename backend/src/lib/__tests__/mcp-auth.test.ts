@@ -18,7 +18,7 @@ describe('mcp-auth', () => {
   });
 
   it('creates a 64-char token with secure file permissions', () => {
-    const mod = require('../mcp-auth') as typeof import('../mcp-auth');
+    const mod = require('../mcp-auth.ts') as typeof import('../mcp-auth');
     const result = mod.ensureMcpToken();
     const tokenPath = mod.getMcpTokenPath();
 
@@ -31,7 +31,7 @@ describe('mcp-auth', () => {
   });
 
   it('rotates token atomically and invalidates the old token cache', () => {
-    const mod = require('../mcp-auth') as typeof import('../mcp-auth');
+    const mod = require('../mcp-auth.ts') as typeof import('../mcp-auth');
     const original = mod.ensureMcpToken().token;
     const rotated = mod.rotateMcpToken();
 
@@ -43,7 +43,7 @@ describe('mcp-auth', () => {
   });
 
   it('requires bearer auth and rejects invalid tokens without falling through', async () => {
-    const mod = require('../mcp-auth') as typeof import('../mcp-auth');
+    const mod = require('../mcp-auth.ts') as typeof import('../mcp-auth');
     const token = mod.ensureMcpToken().token;
     const app = express();
     app.get('/mcp', mod.requireMcpAuth, (_req, res) => {
@@ -64,7 +64,7 @@ describe('mcp-auth', () => {
   });
 
   it('returns 503 when the token file is not initialized', async () => {
-    const mod = require('../mcp-auth') as typeof import('../mcp-auth');
+    const mod = require('../mcp-auth.ts') as typeof import('../mcp-auth');
     const app = express();
     app.get('/mcp', mod.requireMcpAuth, (_req, res) => {
       res.json({ ok: true });

@@ -678,6 +678,20 @@ Express API routes → @swagger JSDoc annotations → OpenAPI spec (/api/docs/op
 
 Security: `/mcp` now requires `Authorization: Bearer <token>` where the token is stored at `~/.rorca/mcp-token` with mode `0600`. The backend generates this token at startup. Never log or commit it.
 
+### MCP Security Model (CLI-046)
+By default, MCP is **localhost-only** even when the main API is intentionally bound to `0.0.0.0` via `RORCA_BIND_HOST`. The `/mcp` routes enforce two layers:
+1. **CORS lockdown** — browser requests are allowed only from `http://localhost:3030` and `http://127.0.0.1:3030`. Server-to-server clients like Claude Code, curl, and stdio bridges typically send no `Origin` header and are allowed. Drive-by browser requests from `https://evil.com` are rejected at the CORS layer before auth runs.
+2. **Loopback gate** — `/mcp` rejects any non-local socket address unless `RORCA_MCP_ALLOW_REMOTE=true`. Accepted loopback forms are `127.0.0.1`, `::1`, and `::ffff:127.0.0.1`.
+
+Remote MCP is an explicit escape hatch:
+- Set `RORCA_MCP_ALLOW_REMOTE=true` only behind a trusted TLS terminator or auth proxy.
+- That proxy must validate and sanitize `Authorization` header forwarding to prevent header smuggling or accidental token passthrough from untrusted clients.
+- If remote MCP is enabled, configure Express `trust proxy` only in that trusted deployment shape so forwarded client IPs are meaningful.
+- Rotate the MCP bearer token regularly with `rorca mcp rotate-token`.
+- Review `mcp_audit_log` entries from CLI-051 as part of ongoing security monitoring.
+
+Asymmetry note: a localhost-gate failure returns structured JSON (`403 MCP_REMOTE_FORBIDDEN`), but a CORS denial comes from the `cors` middleware callback and surfaces as a generic CORS/network failure in browsers rather than the standard API JSON schema.
+
 Setup (Claude HTTP): `rorca mcp setup-claude`
 
 Manual token access: `rorca mcp token`
