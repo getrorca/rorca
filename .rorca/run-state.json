@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T22:57:03.708Z",
+  "lastUpdatedAt": "2026-05-03T23:05:29.907Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -463,6 +463,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 328250
+    },
+    {
+      "storyId": "CLI-051",
+      "title": "AEGIS P1: MCP Audit Log + Per-Token Rate Limiting",
+      "status": "passed",
+      "startedAt": "2026-05-03T22:57:23.874Z",
+      "finishedAt": "2026-05-03T23:05:29.907Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 486033
     }
   ],
   "failedStories": [],

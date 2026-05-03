@@ -35,7 +35,7 @@ describe('MCP tier exposure', () => {
     expect(getMcpToolDefinitions(spec as any)).toHaveLength(0);
   });
 
-  it('includes only public and auth operations in the MCP tool catalog', () => {
+  it('includes public/auth operations plus explicit admin MCP overrides in the tool catalog', () => {
     const spec = {
       paths: {
         '/api/specs': {
@@ -64,6 +64,14 @@ describe('MCP tier exposure', () => {
             'x-rorca-tier': 'admin',
           },
         },
+        '/api/admin/mcp-audit': {
+          get: {
+            summary: 'List MCP audit entries',
+            'x-rorca-tier': 'admin',
+            'x-mcp-tier': 'admin',
+            parameters: [],
+          },
+        },
       },
     };
 
@@ -72,6 +80,7 @@ describe('MCP tier exposure', () => {
     expect(tools.map(tool => tool.toolName)).toEqual([
       'rorca_specs',
       'rorca_profile',
+      'rorca_admin_mcp_audit',
     ]);
   });
 
