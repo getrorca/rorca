@@ -44,6 +44,7 @@ export async function apiJson<T>(
     method?: string;
     body?: unknown;
     headers?: Record<string, string>;
+    timeoutMs?: number;
   },
 ): Promise<T> {
   return new Promise<T>((resolve, reject) => {
@@ -64,6 +65,9 @@ export async function apiJson<T>(
       headers.Authorization = `Bearer ${authToken}`;
     }
 
+    let settled = false;
+    const timeoutMs = init?.timeoutMs ?? 30_000;
+
     const req = http.request(
       {
         protocol: target.protocol,
@@ -81,6 +85,10 @@ export async function apiJson<T>(
         });
 
         res.on('end', () => {
+          if (settled) {
+            return;
+          }
+          settled = true;
           const raw = Buffer.concat(chunks).toString('utf8');
 
           if ((res.statusCode ?? 500) >= 400) {
@@ -97,7 +105,21 @@ export async function apiJson<T>(
       },
     );
 
-    req.on('error', reject);
+    req.setTimeout(timeoutMs, () => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      req.destroy(new Error(`Request timed out after ${timeoutMs}ms`));
+    });
+
+    req.on('error', (error) => {
+      if (settled) {
+        return;
+      }
+      settled = true;
+      reject(error);
+    });
 
     if (body) {
       req.write(body);

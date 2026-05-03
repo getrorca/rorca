@@ -3434,3 +3434,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Gotcha] Local auth fallback must reject invalid bearer tokens: In local single-user mode, if an Authorization bearer token is present but cannot be resolved, return 401 AUTH_ERROR instead of silently falling back to LOCAL_ADMIN.
 > Rule: Local auth fallback must reject invalid bearer tokens: In local single-user mode, if an Authorization bearer token is present but cannot be resolved, return 401 AUTH_ERROR instead of silently falling back to LOCAL_ADMIN.
+
+## 2026-05-03 [Pattern] TUI single-argument commands must preserve the raw remainder: When parsing TUI command palette input, commands with exactly one argument should receive the literal remainder of the line after the command label, trimmed only at the ends.
+> Rule: TUI single-argument commands must preserve the raw remainder: When parsing TUI command palette input, commands with exactly one argument should receive the literal remainder of the line after the command label, trimmed only at the ends.
