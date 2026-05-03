@@ -19,6 +19,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import type { McpTier } from './mcp-auth';
+import { consumeMcpRateLimit, extractErrorCode, paramsHash, recordMcpCall } from './mcp-audit';
 import { logger } from './logger';
 import { getRorcaTier, tierAllowedFromMcp } from './tier-auth';
 
@@ -103,6 +104,7 @@ interface OpenAPIOperation {
   'x-rorca-tier'?: string;
   'x-rorca-rationale'?: string;
   'x-rorca-public-api'?: boolean;
+  'x-mcp-tier'?: string;
   parameters?: OpenAPIParameter[];
   requestBody?: {
     required?: boolean;
@@ -134,6 +136,15 @@ interface McpToolDefinition {
 
 interface McpHttpServerOptions {
   resolveSessionTier?: (sessionId: string | undefined) => McpTier | undefined;
+  getSessionRemoteAddr?: (sessionId: string | undefined) => string | undefined;
+}
+
+function getMcpExposureOverride(operation: OpenAPIOperation): McpTier | null {
+  const raw = operation['x-mcp-tier'];
+  if (raw === 'public' || raw === 'admin') {
+    return raw;
+  }
+  return null;
 }
 
 const PUBLIC_TOOL_RULES: Array<{ method: string; pattern: RegExp }> = [
@@ -416,7 +427,8 @@ export function getMcpToolDefinitions(spec: OpenAPISpec): McpToolDefinition[] {
   for (const [pathStr, methods] of Object.entries(spec.paths)) {
     for (const [method, operation] of Object.entries(methods)) {
       const { tier } = getRorcaTier(operation);
-      if (!tierAllowedFromMcp(tier)) continue;
+      const mcpOverride = getMcpExposureOverride(operation);
+      if (!tierAllowedFromMcp(tier) && !mcpOverride) continue;
 
       const httpMethod = method.toUpperCase();
       if (shouldSkipRoute(httpMethod, pathStr)) continue;
@@ -449,6 +461,7 @@ export function createMcpHttpServer(spec: OpenAPISpec, options: McpHttpServerOpt
     const handler = async (params: Record<string, unknown>, extra?: { requestId?: string | number; sessionId?: string }) => {
       const requiredTier = getMcpToolTier(definition);
       const tokenTier = options.resolveSessionTier?.(extra?.sessionId);
+      const remoteAddr = options.getSessionRemoteAddr?.(extra?.sessionId);
       if (requiredTier === 'admin' && tokenTier !== 'admin') {
         return {
           content: [{ type: 'text' as const, text: 'Error: This tool requires admin tier' }],
@@ -456,8 +469,56 @@ export function createMcpHttpServer(spec: OpenAPISpec, options: McpHttpServerOpt
         };
       }
 
+      const effectiveTokenTier = tokenTier ?? 'public';
+      const startMs = Date.now();
+      const hashedParams = paramsHash(params);
+      const rateLimit = consumeMcpRateLimit(toolName, effectiveTokenTier);
+      if (!rateLimit.allowed) {
+        const retryAfterSeconds = rateLimit.retryAfterSeconds ?? 60;
+        recordMcpCall({
+          toolName,
+          tokenTier: effectiveTokenTier,
+          remoteAddr,
+          sessionId: extra?.sessionId,
+          paramsHash: hashedParams,
+          params,
+          success: false,
+          errorCode: 'MCP_RATE_LIMITED',
+          durationMs: Date.now() - startMs,
+        }).catch((err) => logger.warn({ err }, '[MCP Audit] Failed to record call'));
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Error (429): ${JSON.stringify({
+              error: 'MCP tool rate limit exceeded',
+              code: 'MCP_RATE_LIMITED',
+              retryAfterSeconds,
+            }, null, 2)}`,
+          }],
+          isError: true,
+          _meta: {
+            httpStatus: 429,
+            headers: {
+              'Retry-After': String(retryAfterSeconds),
+            },
+          },
+        };
+      }
+
       try {
         const { status, body } = await executeApiCall(capturedMethod, capturedPath, params, capturedOperation);
+        recordMcpCall({
+          toolName,
+          tokenTier: effectiveTokenTier,
+          remoteAddr,
+          sessionId: extra?.sessionId,
+          paramsHash: hashedParams,
+          params,
+          success: status < 400,
+          errorCode: status >= 400 ? extractErrorCode(body) : null,
+          durationMs: Date.now() - startMs,
+        }).catch((err) => logger.warn({ err }, '[MCP Audit] Failed to record call'));
 
         if (status >= 400) {
           const errorText = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
@@ -477,9 +538,9 @@ export function createMcpHttpServer(spec: OpenAPISpec, options: McpHttpServerOpt
         logger.info({
           timestamp: new Date().toISOString(),
           toolName,
-          tokenTier: tokenTier ?? 'unknown',
+          tokenTier: effectiveTokenTier,
           success: true,
-          ...(tokenTier === 'admin'
+          ...(effectiveTokenTier === 'admin'
             ? {
                 sessionId: extra?.sessionId,
                 requestId: extra?.requestId,
@@ -496,6 +557,17 @@ export function createMcpHttpServer(spec: OpenAPISpec, options: McpHttpServerOpt
         const message = isAbort
           ? `Tool timed out. This is a long-running operation — the backend is still processing. Check results via the relevant list/get tool after a moment.`
           : err instanceof Error ? err.message : String(err);
+        recordMcpCall({
+          toolName,
+          tokenTier: effectiveTokenTier,
+          remoteAddr,
+          sessionId: extra?.sessionId,
+          paramsHash: hashedParams,
+          params,
+          success: false,
+          errorCode: isAbort ? 'MCP_TOOL_TIMEOUT' : 'MCP_TOOL_ERROR',
+          durationMs: Date.now() - startMs,
+        }).catch((auditErr) => logger.warn({ err: auditErr }, '[MCP Audit] Failed to record call'));
         return {
           content: [{ type: 'text' as const, text: `MCP tool error: ${message}` }],
           isError: true,
@@ -518,6 +590,7 @@ export function createMcpHttpServer(spec: OpenAPISpec, options: McpHttpServerOpt
 
 const transports = new Map<string, StreamableHTTPServerTransport>();
 const transportTiers = new Map<string, McpTier>();
+const transportRemoteAddrs = new Map<string, string>();
 
 export function getMcpTransportCount(): number {
   return transports.size;
@@ -530,10 +603,12 @@ export function getMcpTransportCount(): number {
 export function createMcpRequestHandler(spec: OpenAPISpec) {
   async function handlePost(req: Request, res: Response) {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    const remoteAddr = req.ip || req.socket.remoteAddress || 'unknown';
     let transport: StreamableHTTPServerTransport;
 
     if (sessionId && transports.has(sessionId)) {
       transport = transports.get(sessionId)!;
+      transportRemoteAddrs.set(sessionId, remoteAddr);
     } else if (!sessionId && isInitializeRequest(req.body)) {
       const requestTier = (req as Request & { mcpTier?: McpTier }).mcpTier;
       const mcpServer = createMcpHttpServer(spec, {
@@ -542,6 +617,10 @@ export function createMcpRequestHandler(spec: OpenAPISpec) {
             return transportTiers.get(sid);
           }
           return requestTier;
+        },
+        getSessionRemoteAddr: (sid) => {
+          if (!sid) return remoteAddr;
+          return transportRemoteAddrs.get(sid) ?? remoteAddr;
         },
       });
 
@@ -552,6 +631,7 @@ export function createMcpRequestHandler(spec: OpenAPISpec) {
           if (requestTier) {
             transportTiers.set(sid, requestTier);
           }
+          transportRemoteAddrs.set(sid, remoteAddr);
         },
         enableJsonResponse: true,
       });
@@ -560,6 +640,7 @@ export function createMcpRequestHandler(spec: OpenAPISpec) {
         if (transport.sessionId) {
           transports.delete(transport.sessionId);
           transportTiers.delete(transport.sessionId);
+          transportRemoteAddrs.delete(transport.sessionId);
         }
       };
 
@@ -591,6 +672,7 @@ export function createMcpRequestHandler(spec: OpenAPISpec) {
     await transport.handleRequest(req, res);
     transports.delete(sessionId);
     transportTiers.delete(sessionId);
+    transportRemoteAddrs.delete(sessionId);
   }
 
   return { handlePost, handleGet, handleDelete };

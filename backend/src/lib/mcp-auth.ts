@@ -2,6 +2,7 @@ import crypto from 'node:crypto';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { NextFunction, Request, Response } from 'express';
+import { paramsHash, recordMcpCall } from './mcp-audit';
 
 export type McpTier = 'public' | 'admin';
 
@@ -147,6 +148,39 @@ function resolveRequiredTier(
   return resolveToolTier(body.params.name);
 }
 
+function getAuditToolName(req: Request): string {
+  const body = req.body as {
+    method?: unknown;
+    params?: { name?: unknown };
+  } | undefined;
+  if (body?.method === 'tools/call' && typeof body.params?.name === 'string') {
+    return body.params.name;
+  }
+  return 'mcp_transport';
+}
+
+function getAuditParamsHash(req: Request): string | null {
+  const body = req.body as {
+    method?: unknown;
+    params?: { arguments?: unknown };
+  } | undefined;
+  if (body?.method !== 'tools/call') return null;
+  return paramsHash(body.params?.arguments ?? {});
+}
+
+function recordAuthFailure(req: Request, errorCode: string): void {
+  recordMcpCall({
+    toolName: getAuditToolName(req),
+    tokenTier: 'public',
+    remoteAddr: req.ip,
+    sessionId: typeof req.headers['mcp-session-id'] === 'string' ? req.headers['mcp-session-id'] : null,
+    paramsHash: getAuditParamsHash(req),
+    success: false,
+    errorCode,
+    durationMs: 0,
+  }).catch(() => {});
+}
+
 function resolveTokenTier(providedToken: string): TokenTierOrDenied {
   const publicToken = getMcpPublicToken();
   if (publicToken && safeCompareToken(providedToken, publicToken)) {
@@ -280,6 +314,7 @@ export function requireMcpAuth(requiredTier: McpTier = 'public', resolveToolTier
   return (req: Request, res: Response, next: NextFunction): void => {
     const authHeader = req.headers.authorization;
     if (!authHeader?.startsWith('Bearer ')) {
+      recordAuthFailure(req, 'MCP_AUTH_REQUIRED');
       res.status(401).json({
         error: 'Missing Bearer token',
         code: 'MCP_AUTH_REQUIRED',
@@ -302,12 +337,14 @@ export function requireMcpAuth(requiredTier: McpTier = 'public', resolveToolTier
 
     const tokenTier = resolveTokenTier(providedToken);
     if (tokenTier === 'denied') {
+      recordAuthFailure(req, 'MCP_AUTH_INVALID');
       res.status(401).json({ error: 'Invalid Bearer token', code: 'MCP_AUTH_INVALID' });
       return;
     }
 
     const effectiveRequiredTier = resolveRequiredTier(req, requiredTier, resolveToolTier);
     if (effectiveRequiredTier === 'admin' && tokenTier !== 'admin') {
+      recordAuthFailure(req, 'MCP_AUTH_INSUFFICIENT_TIER');
       res.status(403).json({
         error: 'Admin token required for this tool',
         code: 'MCP_AUTH_INSUFFICIENT_TIER',

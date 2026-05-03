@@ -3485,3 +3485,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Gotcha] MCP HTTP auth is Bearer-only; OAuth probes must return 501: Do not ship placeholder OAuth handlers for /mcp. Rorca MCP uses Bearer token auth from ~/.rorca/mcp-token, and OAuth-related endpoints should return explicit 501 guidance instead of fake tokens.
 > Rule: MCP HTTP auth is Bearer-only; OAuth probes must return 501: Do not ship placeholder OAuth handlers for /mcp. Rorca MCP uses Bearer token auth from ~/.rorca/mcp-token, and OAuth-related endpoints should return explicit 501 guidance instead of fake tokens.
+
+## 2026-05-03 [Architecture] Admin MCP exposure needs explicit x-mcp-tier override: Keep x-rorca-tier: admin routes excluded from MCP by default, and only expose an admin route to MCP when the OpenAPI operation also declares x-mcp-tier: admin.
+> Rule: Admin MCP exposure needs explicit x-mcp-tier override: Keep x-rorca-tier: admin routes excluded from MCP by default, and only expose an admin route to MCP when the OpenAPI operation also declares x-mcp-tier: admin.
