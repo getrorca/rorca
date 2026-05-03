@@ -5,6 +5,11 @@ import type { NextFunction, Request, Response } from 'express';
 
 let cachedToken: string | null = null;
 
+export const MCP_ALLOWED_ORIGINS = [
+  'http://localhost:3030',
+  'http://127.0.0.1:3030',
+] as const;
+
 export function generateMcpToken(): string {
   return crypto.randomBytes(32).toString('hex');
 }
@@ -92,6 +97,36 @@ export function getMcpToken(): string | null {
   const token = readTokenFile(tokenPath);
   cachedToken = token;
   return token;
+}
+
+export function isAllowedMcpOrigin(origin: string | undefined): boolean {
+  if (!origin) {
+    return true;
+  }
+
+  return MCP_ALLOWED_ORIGINS.includes(origin as (typeof MCP_ALLOWED_ORIGINS)[number]);
+}
+
+export function isLocalhostAddress(remoteAddress: string | undefined): boolean {
+  return remoteAddress === '127.0.0.1'
+    || remoteAddress === '::1'
+    || remoteAddress === '::ffff:127.0.0.1';
+}
+
+export function requireLocalhost(req: Request, res: Response, next: NextFunction): void {
+  const remoteAddress = req.socket.remoteAddress;
+  const allowRemote = process.env.RORCA_MCP_ALLOW_REMOTE === 'true';
+
+  if (!isLocalhostAddress(remoteAddress) && !allowRemote) {
+    res.status(403).json({
+      error: 'MCP only accessible from localhost',
+      code: 'MCP_REMOTE_FORBIDDEN',
+      hint: 'Set RORCA_MCP_ALLOW_REMOTE=true to enable (NOT recommended for production without auth proxy).',
+    });
+    return;
+  }
+
+  next();
 }
 
 export function requireMcpAuth(req: Request, res: Response, next: NextFunction): void {
