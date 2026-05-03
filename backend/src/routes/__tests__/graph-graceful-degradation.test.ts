@@ -223,26 +223,30 @@ describe('POST /api/pipeline/trigger with includeGraph', () => {
   });
 });
 
+function expectAgeUnavailable(body: Record<string, unknown>) {
+  expect(body).toMatchObject({
+    error: 'Apache AGE extension not available',
+    code: 'AGE_NOT_INSTALLED',
+    mode: 'lite',
+  });
+  expect(String(body.hint || '')).toMatch(/rorca db start/i);
+}
+
 // ─── 3. GET /api/specs/:specId/knowledge-graph — AGE unavailable ──────────
 
 describe('GET /api/specs/:specId/knowledge-graph (AGE unavailable)', () => {
-  test('returns empty arrays with available=false', async () => {
+  test('returns 503 with Lite Mode contract', async () => {
     mockAgeUnavailable();
 
     const res = await request(app)
       .get('/api/specs/any-spec/knowledge-graph')
       .set('Authorization', `Bearer ${authToken}`);
 
-    expect(res.status).toBe(200);
-    expect(res.body).toMatchObject({
-      available: false,
-      memories: [],
-      conventions: [],
-      relatedStories: [],
-    });
+    expect(res.status).toBe(503);
+    expectAgeUnavailable(res.body);
   });
 
-  test('does not throw 500 for valid specId', async () => {
+  test('stays on the Lite Mode error path for a real spec', async () => {
     mockAgeUnavailable();
 
     writeSpec('real-spec', {
@@ -262,18 +266,15 @@ describe('GET /api/specs/:specId/knowledge-graph (AGE unavailable)', () => {
       .get('/api/specs/real-spec/knowledge-graph')
       .set('Authorization', `Bearer ${authToken}`);
 
-    expect(res.status).toBe(200);
-    expect(res.body.available).toBe(false);
-    expect(Array.isArray(res.body.memories)).toBe(true);
-    expect(Array.isArray(res.body.conventions)).toBe(true);
-    expect(Array.isArray(res.body.relatedStories)).toBe(true);
+    expect(res.status).toBe(503);
+    expectAgeUnavailable(res.body);
   });
 });
 
 // ─── 4. POST /api/graph/populate — AGE unavailable ───────────────────────
 
 describe('POST /api/graph/populate (AGE unavailable)', () => {
-  test('returns 400 with descriptive error when AGE is unavailable', async () => {
+  test('returns 503 with Lite Mode contract when AGE is unavailable', async () => {
     mockAgeUnavailable();
 
     const res = await request(app)
@@ -281,9 +282,8 @@ describe('POST /api/graph/populate (AGE unavailable)', () => {
       .set('Authorization', `Bearer ${authToken}`)
       .send({ workspaceId: 'ws-graph-test' });
 
-    expect(res.status).toBe(400);
-    expect(res.body.error).toBeDefined();
-    expect(res.body.error).toMatch(/not available|AGE/i);
+    expect(res.status).toBe(503);
+    expectAgeUnavailable(res.body);
   });
 
   test('returns 400 when workspaceId is missing', async () => {

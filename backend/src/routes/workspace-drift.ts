@@ -13,6 +13,7 @@ import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 import { NotFoundError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { requireAge } from '../lib/age-guard';
 
 const router = Router({ mergeParams: true });
 
@@ -183,7 +184,7 @@ router.get('/:id/drift', async (req: Request, res: Response) => {
  *       404: { description: Workspace not found or no completed specs }
  *       500: { description: Drift detection failed }
  */
-router.post('/:id/drift/check', async (req: Request, res: Response) => {
+router.post('/:id/drift/check', requireAge(), async (req: Request, res: Response) => {
   const workspaceId = String(req.params.id);
   const requestSpecId = req.body?.specId ? String(req.body.specId) : undefined;
 

@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T06:33:32.502Z",
+  "lastUpdatedAt": "2026-05-03T06:41:24.570Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -233,6 +233,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 350983
+    },
+    {
+      "storyId": "CLI-039",
+      "title": "Lite Mode Contract — explicit 503s for AGE-dependent routes when graph extension missing",
+      "status": "passed",
+      "startedAt": "2026-05-03T06:33:48.138Z",
+      "finishedAt": "2026-05-03T06:41:24.570Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 456432
     }
   ],
   "failedStories": [],

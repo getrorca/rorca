@@ -27,6 +27,7 @@ import { SkillRegistry } from '../lib/skill-registry';
 import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
 import { querySkillEffectiveness, querySkillPathAffinity, isGraphAvailable, graphStats, querySpecKnowledgeGraph, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
+import { requireAge } from '../lib/age-guard';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
@@ -7354,15 +7355,9 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
  *                       title: { type: string }
  *                       relationship: { type: string }
  */
-router.get('/:specId/knowledge-graph', async (req: Request, res: Response) => {
+router.get('/:specId/knowledge-graph', requireAge(), async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
-
-    const stats = await graphStats();
-    if (!stats.available) {
-      res.json({ available: false, memories: [], conventions: [], relatedStories: [] });
-      return;
-    }
 
     const result = await querySpecKnowledgeGraph(specId);
     res.json({ available: true, ...result });
