@@ -3020,6 +3020,9 @@ router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
  *     summary: List specs (pending/approved/all)
  *     operationId: listSpecs
  *     description: Lists specs for a workspace filtered by status, tags, review status, and assignee. Returns paginated results sorted by generatedAt descending.
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only spec listing for local CLI, MCP, and web clients. Stable open-core surface with no billing or admin action."
+ *     x-rorca-public-api: true
  *     parameters:
  *       - in: query
  *         name: workspaceId

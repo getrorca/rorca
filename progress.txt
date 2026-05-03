@@ -3,9 +3,9 @@
 Spec: rorca-cli-tui-and-mcp-hardening
 Run ID: 20260316000242
 Started: 2026-05-03T21:34:47.790Z
-Last Updated: 2026-05-03T22:16:47.910Z
+Last Updated: 2026-05-03T22:23:12.493Z
 
-## Completed Stories (42)
+## Completed Stories (43)
 - CLI-001: Add 'pi' as a 4th AgentType in config.ts and VALID_AGENT_TYPES — DONE (codex, gpt-5.4, 113s)
 - CLI-002: Create pi-detector.ts — binary detection, version parsing, model listing — DONE (codex, gpt-5.4, 58s)
 - CLI-003: Expose pi-detector in GET /api/health endpoint — DONE (codex, gpt-5.4, 79s)
@@ -48,3 +48,4 @@ Last Updated: 2026-05-03T22:16:47.910Z
 - CLI-037: Bundle Manifest — verify npm pack ships dist/ + backend/dist/, no build on user machine — DONE (codex, gpt-5.4, 266s)
 - CLI-038: rorca doctor v2 — Docker, pi, ports, AGE, migrations, version match, worker heartbeat — DONE (codex, gpt-5.4, 683s)
 - CLI-046: AEGIS P0: MCP Origin Lockdown + 127.0.0.1 Bind — even when API is on 0.0.0.0 — DONE (codex, gpt-5.4, 202s)
+- CLI-047: AEGIS P0 + OPEN-CORE: x-rorca-tier Unified Annotation System (4-tier: public/auth/paid/admin) — DONE (codex, gpt-5.4, 364s)

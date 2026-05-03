@@ -19,6 +19,7 @@ import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
 import { logger } from './logger';
+import { getRorcaTier, tierAllowedFromMcp } from './tier-auth';
 
 // Claude Code truncates tool results over ~25k tokens (~100k chars).
 // When a response is too large, we spill it to disk and return a summary
@@ -98,6 +99,9 @@ interface OpenAPIOperation {
   description?: string;
   operationId?: string;
   tags?: string[];
+  'x-rorca-tier'?: string;
+  'x-rorca-rationale'?: string;
+  'x-rorca-public-api'?: boolean;
   parameters?: OpenAPIParameter[];
   requestBody?: {
     required?: boolean;
@@ -116,6 +120,15 @@ interface OpenAPIOperation {
 
 interface OpenAPISpec {
   paths: Record<string, Record<string, OpenAPIOperation>>;
+}
+
+interface McpToolDefinition {
+  toolName: string;
+  description: string;
+  zodShape: Record<string, z.ZodType>;
+  capturedMethod: string;
+  capturedPath: string;
+  capturedOperation: OpenAPIOperation;
 }
 
 // ─── Tool name generation ───────────────────────────────────────────────────
@@ -356,82 +369,89 @@ async function executeApiCall(
 
 // ─── Create MCP server with auto-generated tools ────────────────────────────
 
+export function getMcpToolDefinitions(spec: OpenAPISpec): McpToolDefinition[] {
+  const allPaths = new Map<string, string[]>();
+  for (const [pathStr, methods] of Object.entries(spec.paths)) {
+    allPaths.set(pathStr, Object.keys(methods).map(m => m.toUpperCase()));
+  }
+
+  const definitions: McpToolDefinition[] = [];
+
+  for (const [pathStr, methods] of Object.entries(spec.paths)) {
+    for (const [method, operation] of Object.entries(methods)) {
+      const { tier } = getRorcaTier(operation);
+      if (!tierAllowedFromMcp(tier)) continue;
+
+      const httpMethod = method.toUpperCase();
+      if (shouldSkipRoute(httpMethod, pathStr)) continue;
+
+      definitions.push({
+        toolName: generateToolName(httpMethod, pathStr, allPaths),
+        description: operation.summary || operation.description || `${httpMethod} ${pathStr}`,
+        zodShape: buildZodInputShape(operation),
+        capturedMethod: httpMethod,
+        capturedPath: pathStr,
+        capturedOperation: operation,
+      });
+    }
+  }
+
+  return definitions;
+}
+
 export function createMcpHttpServer(spec: OpenAPISpec): McpServer {
   const server = new McpServer({
     name: 'rorca-http',
     version: '2.0.0',
   });
 
-  const allPaths = new Map<string, string[]>();
-  for (const [pathStr, methods] of Object.entries(spec.paths)) {
-    allPaths.set(pathStr, Object.keys(methods).map(m => m.toUpperCase()));
-  }
+  const definitions = getMcpToolDefinitions(spec);
 
-  let toolCount = 0;
+  for (const definition of definitions) {
+    const { toolName, description, zodShape, capturedMethod, capturedPath, capturedOperation } = definition;
+    const hasParams = Object.keys(zodShape).length > 0;
+    const handler = async (params: Record<string, unknown>) => {
+      try {
+        const { status, body } = await executeApiCall(capturedMethod, capturedPath, params, capturedOperation);
 
-  for (const [pathStr, methods] of Object.entries(spec.paths)) {
-    for (const [method, operation] of Object.entries(methods)) {
-      const httpMethod = method.toUpperCase();
-
-      if (shouldSkipRoute(httpMethod, pathStr)) continue;
-
-      const toolName = generateToolName(httpMethod, pathStr, allPaths);
-      const description = operation.summary || operation.description || `${httpMethod} ${pathStr}`;
-      const zodShape = buildZodInputShape(operation);
-      const hasParams = Object.keys(zodShape).length > 0;
-
-      // Capture for closure
-      const capturedMethod = httpMethod;
-      const capturedPath = pathStr;
-
-      // Capture operation for default-param injection
-      const capturedOperation = operation;
-
-      const handler = async (params: Record<string, unknown>) => {
-        try {
-          const { status, body } = await executeApiCall(capturedMethod, capturedPath, params, capturedOperation);
-
-          if (status >= 400) {
-            const errorText = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
-            const safeError = errorText.length > MAX_INLINE_CHARS
-              ? spillLargeResult(toolName, body, errorText)
-              : errorText;
-            return {
-              content: [{ type: 'text' as const, text: `Error (${status}): ${safeError}` }],
-              isError: true,
-            };
-          }
-
-          const resultText = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
-          const safeResult = resultText.length > MAX_INLINE_CHARS
-            ? spillLargeResult(toolName, body, resultText)
-            : resultText;
+        if (status >= 400) {
+          const errorText = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+          const safeError = errorText.length > MAX_INLINE_CHARS
+            ? spillLargeResult(toolName, body, errorText)
+            : errorText;
           return {
-            content: [{ type: 'text' as const, text: safeResult }],
-          };
-        } catch (err: unknown) {
-          const isAbort = err instanceof Error && err.name === 'AbortError';
-          const message = isAbort
-            ? `Tool timed out. This is a long-running operation — the backend is still processing. Check results via the relevant list/get tool after a moment.`
-            : err instanceof Error ? err.message : String(err);
-          return {
-            content: [{ type: 'text' as const, text: `MCP tool error: ${message}` }],
+            content: [{ type: 'text' as const, text: `Error (${status}): ${safeError}` }],
             isError: true,
           };
         }
-      };
 
-      if (hasParams) {
-        server.tool(toolName, description, zodShape, handler);
-      } else {
-        server.tool(toolName, description, handler);
+        const resultText = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+        const safeResult = resultText.length > MAX_INLINE_CHARS
+          ? spillLargeResult(toolName, body, resultText)
+          : resultText;
+        return {
+          content: [{ type: 'text' as const, text: safeResult }],
+        };
+      } catch (err: unknown) {
+        const isAbort = err instanceof Error && err.name === 'AbortError';
+        const message = isAbort
+          ? `Tool timed out. This is a long-running operation — the backend is still processing. Check results via the relevant list/get tool after a moment.`
+          : err instanceof Error ? err.message : String(err);
+        return {
+          content: [{ type: 'text' as const, text: `MCP tool error: ${message}` }],
+          isError: true,
+        };
       }
+    };
 
-      toolCount++;
+    if (hasParams) {
+      server.tool(toolName, description, zodShape, handler);
+    } else {
+      server.tool(toolName, description, handler);
     }
   }
 
-  logger.info(`[MCP-HTTP] Registered ${toolCount} tools from OpenAPI spec`);
+  logger.info(`[MCP-HTTP] Registered ${definitions.length} tools from OpenAPI spec`);
   return server;
 }
 

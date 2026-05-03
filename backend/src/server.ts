@@ -89,7 +89,7 @@ import searchRouter from './routes/search';
 import recallRouter from './routes/recall';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
-import { createMcpRequestHandler } from './lib/mcp-http';
+import { createMcpRequestHandler, getMcpToolDefinitions } from './lib/mcp-http';
 import telemetryRouter from './routes/telemetry';
 import authE2ERouter from './routes/auth-e2e';
 import { logger } from './lib/logger';
@@ -118,6 +118,7 @@ import {
   requireLocalhost,
   requireMcpAuth,
 } from './lib/mcp-auth';
+import { summarizeRorcaTiers } from './lib/tier-auth';
 
 const OSC_TITLE_REGEX = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 const OSC_SEQUENCE_REGEX = /\x1b\][02];[^\x07\x1b]*(?:\x07|\x1b\\)/g;
@@ -487,6 +488,12 @@ process.on('uncaughtException', (err) => {
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
+  const tierSummary = summarizeRorcaTiers(swaggerSpec as any);
+  const mcpToolDefinitions = getMcpToolDefinitions(swaggerSpec as any);
+  logger.info(`[Rorca Tier] Route exposure: ${tierSummary.public} public, ${tierSummary.auth} auth, ${tierSummary.paid} paid, ${tierSummary.admin} admin (${tierSummary.denied} default-denied)`);
+  logger.info(`[Rorca Tier] MCP exposure: ${mcpToolDefinitions.length} tools (public + auth only)`);
+  logger.info(`[Rorca Tier] Open-source CLI surface: ${tierSummary.publicApi} routes (public + public-api flagged)`);
+
   if (MCP_HTTP_ENABLED) {
     const { created } = ensureMcpToken();
     if (created) {
