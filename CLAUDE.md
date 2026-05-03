@@ -73,6 +73,25 @@ Browser (React :5210)  ←→  Express API (:3030)  ←→  PostgreSQL 16
 Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 ```
 
+## Lite Mode
+
+When DB mode is `native`, Apache AGE is not installed. Rorca still works, but graph-backed features are explicitly disabled and surface `503` with:
+`{ error, code: 'AGE_NOT_INSTALLED', mode: 'lite', hint }`
+
+Disabled in Lite Mode:
+- `GET /api/specs/:specId/knowledge-graph` — spec review graph memory payload is unavailable.
+- `POST /api/graph/populate` — graph population job cannot run without AGE.
+- `POST /api/admin/graph-backfill` — admin graph backfill is unavailable.
+- `GET /api/admin/graph-stats` — admin graph statistics are unavailable.
+- `POST /api/workspaces/:id/drift/check` — graph-powered drift detection cannot run.
+- Related-context expansion in story prompts — `graph-context.ts` returns no graph enrichment when AGE is unavailable.
+
+Still available in Lite Mode:
+- `GET /api/graph/stats` — returns `available: false` for lightweight capability/status checks.
+- `GET /api/workspaces/:id/drift` — reads previously stored drift reports from PostgreSQL.
+- `GET /api/specs/:specId/graph` — this is the story dependency DAG from spec JSON, not Apache AGE.
+- Specs CRUD, runs, analytics, direction stack, and non-graph memory/search flows continue to work.
+
 **Stack**:
 - Frontend: React 18 + TypeScript + Vite + Tailwind CSS + xterm.js
 - Backend: Express.js + TypeScript + PostgreSQL 16 (`pg` Pool, async, connection pooling, pgvector, Apache AGE)
