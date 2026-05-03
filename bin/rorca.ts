@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { mkdirSync, existsSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
+import { mkdirSync, existsSync, writeFileSync, readFileSync, unlinkSync, statSync } from 'node:fs';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
@@ -9,6 +9,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline/promises';
 import { execa } from 'execa';
+import { ensureMcpToken, getMcpTokenPath, rotateMcpToken } from '../backend/src/lib/mcp-auth';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -108,6 +109,10 @@ type HealthResponse = {
     url: string;
     sessions: number;
   };
+};
+
+type McpToolsResponse = {
+  tools: Array<{ name: string }>;
 };
 
 type PiModel = {
@@ -628,6 +633,36 @@ function detectPi(): PiStatus {
   };
 }
 
+function resolveClaudeBinPathLocal(): string | null {
+  const envBin = process.env.CLAUDE_BIN?.trim();
+  if (envBin) return envBin;
+
+  const whichCommand = process.platform === 'win32' ? 'where' : 'which';
+  const result = spawnSync(whichCommand, ['claude'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+  });
+
+  if (result.status !== 0) return null;
+  const output = result.stdout.trim().split(/\r?\n/).find(Boolean);
+  return output || null;
+}
+
+function checkMcpTokenFile(): { exists: boolean; modeOk: boolean; mode: string | null } {
+  const tokenPath = getMcpTokenPath();
+  if (!existsSync(tokenPath)) {
+    return { exists: false, modeOk: false, mode: null };
+  }
+
+  if (process.platform === 'win32') {
+    return { exists: true, modeOk: true, mode: null };
+  }
+
+  const mode = (statSync(tokenPath).mode & 0o777).toString(8).padStart(3, '0');
+  return { exists: true, modeOk: mode === '600', mode };
+}
+
 function hasInteractiveTty(): boolean {
   return Boolean(process.stdout.isTTY && process.stdin.isTTY);
 }
@@ -1061,6 +1096,96 @@ export default function rorcaPiBridge(pi: ExtensionAPI) {
 
 async function fetchBackendHealth(): Promise<HealthResponse> {
   return fetchJson<HealthResponse>('/api/health');
+}
+
+async function runMcpToken(): Promise<number> {
+  const { token } = ensureMcpToken();
+  console.log(token);
+  return 0;
+}
+
+async function runMcpStatus(): Promise<number> {
+  const tokenStatus = checkMcpTokenFile();
+  const backendHealth = await fetchBackendHealth().catch(() => null);
+  const toolCount = await fetchJson<McpToolsResponse>('/api/mcp/tools')
+    .then((data) => data.tools.length)
+    .catch(() => null);
+
+  if (!tokenStatus.exists) {
+    console.log(`${red('ERR')} MCP token file: missing`);
+  } else if (!tokenStatus.modeOk) {
+    console.log(`${yellow('WARN')} MCP token file: mode ${tokenStatus.mode}, expected 600`);
+  } else {
+    console.log(`${green('OK')} MCP token file: ~/.rorca/mcp-token (mode 600)`);
+  }
+
+  if (!backendHealth) {
+    console.log(`${red('ERR')} MCP server: unreachable at ${API_BASE}/mcp`);
+  } else if (backendHealth.mcp?.enabled) {
+    console.log(`${green('OK')} MCP server: ${backendHealth.mcp.url}`);
+  } else {
+    console.log(`${yellow('WARN')} MCP server: disabled`);
+  }
+
+  if (toolCount == null) {
+    console.log(`${yellow('WARN')} MCP tools: unavailable`);
+  } else {
+    console.log(`${green('OK')} MCP tools: ${toolCount} registered`);
+  }
+
+  return !tokenStatus.exists || !backendHealth ? 1 : 0;
+}
+
+async function runMcpSetupClaude(): Promise<number> {
+  const claudeBin = resolveClaudeBinPathLocal();
+  if (!claudeBin) {
+    throw new Error('Claude CLI not found. Set CLAUDE_BIN or install `claude` first.');
+  }
+
+  const { token } = ensureMcpToken();
+  await runCommand(claudeBin, ['mcp', 'remove', 'rorca'], { stdio: 'pipe' });
+  const add = await runCommand(claudeBin, [
+    'mcp',
+    'add',
+    'rorca',
+    'http://localhost:3030/mcp',
+    '--header',
+    `Authorization: Bearer ${token}`,
+  ], { stdio: 'inherit' });
+
+  if (add.code !== 0) {
+    return add.code;
+  }
+
+  console.log('Claude MCP configured for Rorca.');
+  return 0;
+}
+
+async function runMcpRotateToken(): Promise<number> {
+  if (!hasInteractiveTty()) {
+    console.error('Rotate token requires an interactive TTY confirmation.');
+    return 1;
+  }
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  try {
+    const answer = (await rl.question('Rotate token? Existing MCP clients will need re-setup. [y/N] ')).trim().toLowerCase();
+    if (answer !== 'y' && answer !== 'yes') {
+      console.log('Token rotation cancelled.');
+      return 1;
+    }
+  } finally {
+    rl.close();
+  }
+
+  const token = rotateMcpToken();
+  console.log(token);
+  console.log('Run `rorca mcp setup-claude` to re-link Claude to the new token.');
+  return 0;
 }
 
 async function spawnInteractivePi(piBinPath: string, args: string[]): Promise<number> {
@@ -1610,6 +1735,15 @@ async function runStatus(runId?: number): Promise<void> {
 
 async function runDoctor(json = false): Promise<number> {
   const localChecks: Array<{ label: string; status: 'ok' | 'warning' | 'error'; message: string; fix?: string }> = [];
+  const mcpToken = checkMcpTokenFile();
+
+  localChecks.push(
+    !mcpToken.exists
+      ? { label: 'MCP token file', status: 'error', message: 'Missing', fix: 'Restart Rorca or run: rorca mcp token' }
+      : !mcpToken.modeOk
+        ? { label: 'MCP token file', status: 'warning', message: `Mode ${mcpToken.mode}, expected 600`, fix: 'Run: chmod 600 ~/.rorca/mcp-token' }
+        : { label: 'MCP token file', status: 'ok', message: 'OK' },
+  );
 
   const dockerInfo = await docker(['info']);
   localChecks.push(
@@ -2000,6 +2134,32 @@ program
   .command('tui')
   .action(async () => {
     process.exitCode = await runTui();
+  });
+
+const mcp = program.command('mcp').description('Manage MCP HTTP authentication');
+
+mcp
+  .command('token')
+  .action(async () => {
+    process.exitCode = await runMcpToken();
+  });
+
+mcp
+  .command('setup-claude')
+  .action(async () => {
+    process.exitCode = await runMcpSetupClaude();
+  });
+
+mcp
+  .command('rotate-token')
+  .action(async () => {
+    process.exitCode = await runMcpRotateToken();
+  });
+
+mcp
+  .command('status')
+  .action(async () => {
+    process.exitCode = await runMcpStatus();
   });
 
 const db = program.command('db').description('Manage the Docker Postgres sidecar');

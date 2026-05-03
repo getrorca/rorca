@@ -1,9 +1,11 @@
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import { randomUUID } from 'crypto';
 import type { Express } from 'express';
 import request from 'supertest';
 import { execute } from '../../db/index';
+import { ensureMcpToken, getMcpTokenPath } from '../../lib/mcp-auth';
 
 const mockExecSync = jest.fn();
 const mockDetectPi = jest.fn();
@@ -31,9 +33,17 @@ describe('GET /api/doctor', () => {
     mockExecSync.mockReset();
     mockDetectPi.mockReset();
     mockListPiModels.mockReset();
+    mockDetectPi.mockReturnValue({
+      piInstalled: false,
+      piVersion: null,
+      piBinPath: null,
+    });
+    mockListPiModels.mockReturnValue([]);
 
     tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-doctor-test-'));
     process.env.NODE_ENV = 'test';
+    process.env.HOME = tmpDir;
+    ensureMcpToken();
 
     const serverMod = require('../../server');
     app = serverMod.default;
@@ -60,8 +70,8 @@ describe('GET /api/doctor', () => {
     ]);
 
     await execute(
-      `INSERT INTO worker_heartbeat (worker_id, pid, hostname, last_seen) VALUES ($1, $2, $3, NOW())`,
-      [`doctor-worker-${Date.now()}`, 12345, 'localhost'],
+      `INSERT INTO worker_heartbeat (worker_id, pid, hostname, started_at, last_seen) VALUES ($1, $2, $3, NOW(), NOW())`,
+      [randomUUID(), 12345, 'localhost'],
     );
     await execute(
       `INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4) ON CONFLICT (id) DO NOTHING`,
@@ -78,6 +88,7 @@ describe('GET /api/doctor', () => {
       'database-container',
       'backend',
       'database',
+      'mcp-token',
       'worker',
       'pi-installed',
       'pi-authenticated',
@@ -93,10 +104,14 @@ describe('GET /api/doctor', () => {
       status: 'ok',
     });
     expect(res.body.checks[5]).toMatchObject({
-      id: 'pi-installed',
+      id: 'worker',
       status: 'ok',
     });
     expect(res.body.checks[6]).toMatchObject({
+      id: 'pi-installed',
+      status: 'ok',
+    });
+    expect(res.body.checks[7]).toMatchObject({
       id: 'pi-authenticated',
       status: 'ok',
     });
@@ -115,6 +130,7 @@ describe('GET /api/doctor', () => {
       piBinPath: null,
     });
     mockListPiModels.mockReturnValue([]);
+    await execute('DELETE FROM worker_heartbeat');
 
     const res = await request(app).get('/api/doctor');
 
@@ -131,12 +147,30 @@ describe('GET /api/doctor', () => {
       message: 'Database container not running',
     });
     expect(res.body.checks[5]).toMatchObject({
+      id: 'worker',
+      status: 'error',
+      message: 'Worker not running',
+    });
+    expect(res.body.checks[6]).toMatchObject({
       id: 'pi-installed',
       status: 'error',
       message: 'Pi not found',
     });
-    expect(res.body.checks[6]).toMatchObject({
+    expect(res.body.checks[7]).toMatchObject({
       id: 'pi-authenticated',
+      status: 'warning',
+    });
+  });
+
+  it('warns when the MCP token mode is not 0600', async () => {
+    const tokenPath = getMcpTokenPath();
+    fs.chmodSync(tokenPath, 0o644);
+
+    const res = await request(app).get('/api/doctor');
+
+    const tokenCheck = res.body.checks.find((check: { id: string }) => check.id === 'mcp-token');
+    expect(tokenCheck).toMatchObject({
+      id: 'mcp-token',
       status: 'warning',
     });
   });
