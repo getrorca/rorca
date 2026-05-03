@@ -51,7 +51,7 @@ async function runDockerOrThrow(
   throw new Error(detail);
 }
 
-async function requireDocker(): Promise<void> {
+export async function requireDocker(): Promise<void> {
   try {
     await runDockerOrThrow(['info'], { timeoutMs: 3000 });
     return;
