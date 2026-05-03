@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T07:07:08.422Z",
+  "lastUpdatedAt": "2026-05-03T07:11:10.624Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -283,6 +283,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 578846
+    },
+    {
+      "storyId": "CLI-026",
+      "title": "rorca auth: pi authentication wrapper with multi-method install instructions",
+      "status": "passed",
+      "startedAt": "2026-05-03T07:07:29.195Z",
+      "finishedAt": "2026-05-03T07:11:10.624Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 221429
     }
   ],
   "failedStories": [],
