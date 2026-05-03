@@ -6,6 +6,7 @@ import { HelpTipsProvider } from './contexts/HelpTipsContext';
 import { ToastProvider, useGlobalToast } from './contexts/ToastContext';
 import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import { NotificationProvider } from './contexts/NotificationContext';
+import { CapabilitiesProvider } from './contexts/CapabilitiesContext';
 import Shell from './components/Shell';
 import RequireAuth from './components/RequireAuth';
 import Sidebar, { type PanelId } from './components/Sidebar';
@@ -614,12 +615,14 @@ function App() {
         <ToastProvider>
           <TerminalDrawerProvider>
             <AuthProvider>
-              <WorkspaceProvider>
-                <NotificationProvider>
-                  <GlobalErrorWiring />
-                  <AppRoutes />
-                </NotificationProvider>
-              </WorkspaceProvider>
+              <CapabilitiesProvider>
+                <WorkspaceProvider>
+                  <NotificationProvider>
+                    <GlobalErrorWiring />
+                    <AppRoutes />
+                  </NotificationProvider>
+                </WorkspaceProvider>
+              </CapabilitiesProvider>
             </AuthProvider>
           </TerminalDrawerProvider>
         </ToastProvider>

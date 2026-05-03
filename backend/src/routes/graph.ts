@@ -3,6 +3,7 @@ import { graphStats, isGraphAvailable, populateFromRun, populateFromSpec } from 
 import { query, queryOne } from '../db/index';
 import { broadcastAll } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
+import { requireAge } from '../lib/age-guard';
 
 const router = Router();
 
@@ -156,16 +157,12 @@ async function emitWal(
  *       409:
  *         description: Population already in progress for this workspace
  */
-router.post('/populate', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/populate', requireAge(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { workspaceId } = req.body;
 
     if (!workspaceId || typeof workspaceId !== 'string') {
       return res.status(400).json({ error: 'workspaceId is required' });
-    }
-
-    if (!(await isGraphAvailable())) {
-      return res.status(400).json({ error: 'Knowledge graph is not available — Apache AGE extension required' });
     }
 
     if (activePopulations.has(workspaceId)) {
