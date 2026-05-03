@@ -8,7 +8,6 @@
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import jwt from 'jsonwebtoken';
 import { createBackup, listBackups, pruneOldBackups } from '../lib/backup';
 import { backfillAll, isBackfillRunning, getQueueStats, getEmbeddingCounts, getProvider } from '../lib/embedding-pipeline';
 import { isGraphAvailable, graphStats, populateFromSpec, populateFromRun } from '../lib/knowledge-graph';
@@ -19,6 +18,7 @@ import { handleRouteError } from '../lib/async-handler';
 import { checkAge, invalidateAgeCache, requireAge } from '../lib/age-guard';
 import { resetGraphAvailability } from '../lib/knowledge-graph';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
+import { createSignedLicense } from '../lib/license-verifier';
 
 const router = Router();
 
@@ -604,12 +604,12 @@ router.get('/mcp-audit/summary', async (req: Request, res: Response) => {
  * /api/admin/generate-license:
  *   post:
  *     tags: [Admin]
- *     summary: Generate an offline RS256 license JWT for self-hosted distribution
+ *     summary: Generate an offline RSA-signed license key for self-hosted distribution
  *     operationId: generateLicense
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "License generation is a sensitive commercial operator action and must never be exposed through MCP or the open-source CLI."
  *     description: |
- *       Signs a license JWT with the RORCA_LICENSE_PRIVATE_KEY. Requires RORCA_ADMIN_KEY header for authentication.
+ *       Signs a detached RSA license key with the RORCA_LICENSE_PRIVATE_KEY. Requires RORCA_ADMIN_KEY header for authentication.
  *       Used by Rorca admins to generate trial or paid licenses for self-hosted users.
  *     parameters:
  *       - in: header
@@ -631,13 +631,13 @@ router.get('/mcp-audit/summary', async (req: Request, res: Response) => {
  *               expiresInDays: { type: integer, description: "License validity in days (omit for perpetual)" }
  *     responses:
  *       200:
- *         description: License JWT generated
+ *         description: License key generated
  *         content:
  *           application/json:
  *             schema:
  *               type: object
  *               properties:
- *                 licenseKey: { type: string, description: "RS256-signed JWT license key" }
+ *                 licenseKey: { type: string, description: "RSA-signed detached license key" }
  *                 plan: { type: string }
  *                 email: { type: string }
  *                 expiresAt: { type: string, nullable: true }
@@ -671,7 +671,7 @@ router.post('/generate-license', async (req: Request, res: Response) => {
     }
 
     const { plan, email, expiresInDays } = req.body as {
-      plan?: string;
+      plan?: 'solo' | 'pro' | 'team' | 'enterprise';
       email?: string;
       expiresInDays?: number;
     };
@@ -685,22 +685,20 @@ router.post('/generate-license', async (req: Request, res: Response) => {
       return;
     }
 
-    const payload: Record<string, unknown> = {
+    const payload = {
       sub: email,
       plan,
       iss: 'rorca',
+      issuedAt: new Date().toISOString(),
+      expiresAt: null as string | null,
     };
 
-    const signOptions: jwt.SignOptions = { algorithm: 'RS256' };
-
     if (expiresInDays && expiresInDays > 0) {
-      payload.exp = Math.floor(Date.now() / 1000) + expiresInDays * 86400;
+      payload.expiresAt = new Date(Date.now() + expiresInDays * 86400 * 1000).toISOString();
     }
 
-    const licenseKey = jwt.sign(payload, privateKey, signOptions);
-    const expiresAt = payload.exp
-      ? new Date((payload.exp as number) * 1000).toISOString()
-      : null;
+    const licenseKey = createSignedLicense(payload, privateKey);
+    const expiresAt = payload.expiresAt;
 
     logger.info({ plan, email, expiresInDays: expiresInDays || 'perpetual' }, '[Admin] License generated');
 
