@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T08:02:53.649Z",
+  "lastUpdatedAt": "2026-05-03T08:50:01.084Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -323,6 +323,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 278646
+    },
+    {
+      "storyId": "CLI-023",
+      "title": "Backend type check and test suite quality gate — all pi harness changes",
+      "status": "passed",
+      "startedAt": "2026-05-03T08:04:38.953Z",
+      "finishedAt": "2026-05-03T08:50:01.083Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 2722130
     }
   ],
   "failedStories": [

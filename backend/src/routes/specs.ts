@@ -11128,7 +11128,7 @@ const UpdateSpecSchema = z.object({
   title: z.string().optional(),
   _notes: z.string().optional(),
   autoWorktree: z.boolean().optional(),
-  agentOverride: z.enum(['claude', 'opencode', 'codex']).optional(),
+  agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().optional(),
   effortLevel: z.enum(['low', 'medium', 'high']).optional(),

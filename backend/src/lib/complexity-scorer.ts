@@ -55,7 +55,7 @@ export interface OrchestrationConfig {
   taskCascades: Record<TaskType, string>;
   tokenBudgetPerStory: number;
   /** Secondary engine for rate limit overflow rerouting. null = disabled. */
-  fallbackEngine: 'claude' | 'opencode' | 'codex' | null;
+  fallbackEngine: 'claude' | 'opencode' | 'codex' | 'pi' | null;
   /** How to handle stories requiring tools the engine doesn't support. */
   capabilityMismatch: CapabilityMismatchMode;
 }
@@ -390,4 +390,3 @@ export function score(
 
   return { tier, score: totalScore, signals };
 }
-

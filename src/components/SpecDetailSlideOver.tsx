@@ -34,6 +34,7 @@ import ContextSummaryCard from './ContextSummaryCard';
 import type { ContextSummary } from '../panels/SpecForgeOutput';
 import { SpecModelControlBar } from './SpecModelControlBar';
 import type { SpecModelFields } from './SpecModelControlBar';
+import type { EngineValue } from './EngineSelector';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -63,7 +64,7 @@ interface SpecDetailData {
   diagrams?: Record<string, { mermaid?: string; ascii?: string }>;
   mermaidDiagram?: string;
   model?: string;
-  agentOverride?: 'claude' | 'opencode' | 'codex' | null;
+  agentOverride?: EngineValue | null;
   thinkingEnabled?: boolean;
   thinkingBudget?: number;
   effortLevel?: 'low' | 'medium' | 'high' | 'max';
@@ -1061,7 +1062,7 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
   onToggleExclude?: (storyId: string) => void;
   onStoryUpdated?: (story: Story) => void;
   specModelFields?: {
-    agentOverride?: 'claude' | 'opencode' | 'codex' | null;
+    agentOverride?: EngineValue | null;
     model?: string | null;
     thinkingEnabled?: boolean;
     thinkingBudget?: number;

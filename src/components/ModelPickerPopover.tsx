@@ -3,6 +3,7 @@ import { useVirtualizer } from '@tanstack/react-virtual';
 import { ChevronDown, Search, Check, Zap, Clock, Turtle, Sparkles, Brain } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import type { ModelOption } from './ModelSearchSelect';
+import type { EngineValue } from './EngineSelector';
 
 
 // ─── Hardcoded Claude models (subscription path) ──────────────────────────────
@@ -161,7 +162,7 @@ function buildFlatList(groups: ModelGroup[], collapsed: Set<string>): ListItem[]
 
 // ─── Props ────────────────────────────────────────────────────────────────────
 export interface ModelPickerPopoverProps {
-  engine: 'claude' | 'opencode' | 'codex';
+  engine: EngineValue;
   value: string;
   onChange: (modelId: string) => void;
   workspaceId?: string;

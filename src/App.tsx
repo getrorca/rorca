@@ -1,4 +1,4 @@
-import { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
+import { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy, type ReactElement } from 'react';
 import { Routes, Route, Navigate, Outlet, useLocation, useNavigate as useRouterNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -61,7 +61,7 @@ const TerminalPanel = lazy(() => import('./panels/TerminalPanel'));
 // SettingsTab type — imported from SettingsPanel module
 type SettingsTab = import('./panels/SettingsPanel').SettingsTab;
 
-function PublicOnlyRoute({ children }: { children: JSX.Element }) {
+function PublicOnlyRoute({ children }: { children: ReactElement }) {
   const { isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
