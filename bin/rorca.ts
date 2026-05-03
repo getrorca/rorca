@@ -2,15 +2,17 @@
 
 import { readFileSync, existsSync, mkdirSync, writeFileSync, createWriteStream, unlinkSync, rmSync, readdirSync, renameSync, statSync } from 'fs';
 import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { execSync, spawnSync, fork, spawn } from 'child_process';
 import { homedir, platform, arch } from 'os';
 import { get as httpsGet } from 'https';
 import { get as httpGet, type IncomingMessage } from 'http';
 import { createConnection } from 'net';
+import { createRequire } from 'module';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const require = createRequire(import.meta.url);
 
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as {
   version: string;
@@ -170,31 +172,37 @@ async function runStart(startArgs: string[]): Promise<void> {
     console.log(`Created config directory: ${rorcaHome}`);
   }
 
-  // ── Postgres provisioning ──
-  // If DATABASE_URL is already set and reachable, use it as-is (user-provided).
-  // Otherwise, provision and start a managed Postgres instance.
-  // --no-postgres skips provisioning entirely.
   let managedPostgresStarted = false;
   let databaseUrl = process.env.DATABASE_URL || '';
 
   if (noPostgres || databaseUrl) {
-    // User provided DATABASE_URL (or --no-postgres requires it) — check if it's reachable
+    await probeDatabaseConnection(databaseUrl);
     const urlObj = parsePostgresUrl(databaseUrl);
-    if (urlObj && await tcpReachable(urlObj.host, urlObj.port, 3000)) {
-      console.log(`Using user-provided DATABASE_URL (${urlObj.host}:${urlObj.port})`);
-    } else {
-      console.error(`Cannot reach Postgres at user-provided DATABASE_URL`);
-      console.error(`  DATABASE_URL: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
-      process.exit(1);
-    }
+    console.log(`Using user-provided DATABASE_URL (${urlObj?.host ?? 'unknown'}:${urlObj?.port ?? 'unknown'})`);
   } else {
-    // No DATABASE_URL — provision managed Postgres
-    const pgDir = await ensurePostgres();
-    await startPostgres(pgDir);
-    managedPostgresStarted = true;
-    databaseUrl = `postgres://rorca:rorca@127.0.0.1:${MANAGED_PG_PORT}/rorca`;
-    process.env.DATABASE_URL = databaseUrl;
-    console.log(`Managed Postgres ready at 127.0.0.1:${MANAGED_PG_PORT}`);
+    const { detectDbMode, getDbConnectionString } = await loadDbStrategy();
+    const mode = detectDbMode();
+
+    if (mode === 'docker') {
+      const { dbStart } = await loadDbSidecar();
+      await dbStart();
+      databaseUrl = getDbConnectionString('docker');
+      process.env.DATABASE_URL = databaseUrl;
+      console.log('Docker Postgres sidecar ready at localhost:5432');
+    } else if (mode === 'native') {
+      const pgDir = await ensurePostgres();
+      await startPostgres(pgDir);
+      managedPostgresStarted = true;
+      databaseUrl = `postgres://rorca:rorca@127.0.0.1:${MANAGED_PG_PORT}/rorca`;
+      process.env.DATABASE_URL = databaseUrl;
+      console.log(`Managed Postgres ready at 127.0.0.1:${MANAGED_PG_PORT}`);
+    } else {
+      databaseUrl = getDbConnectionString('byop');
+      await probeDatabaseConnection(databaseUrl);
+      process.env.DATABASE_URL = databaseUrl;
+      const urlObj = parsePostgresUrl(databaseUrl);
+      console.log(`Using external Postgres (${urlObj?.host ?? 'unknown'}:${urlObj?.port ?? 'unknown'})`);
+    }
   }
 
   // Auto-build frontend if dist/ is missing
@@ -349,6 +357,57 @@ async function runStart(startArgs: string[]): Promise<void> {
       killAll(sig);
       process.exit(0);
     });
+  }
+}
+
+type DbMode = 'native' | 'docker' | 'byop';
+
+interface DbStrategyModule {
+  detectDbMode(): DbMode;
+  getDbConnectionString(mode: DbMode): string;
+}
+
+interface DbSidecarModule {
+  dbStart(): Promise<void>;
+}
+
+async function importBackendModule<T>(distPath: string, srcPath: string): Promise<T> {
+  const rootDir = join(__dirname, '..');
+  const runtimePath = existsSync(join(rootDir, distPath)) ? join(rootDir, distPath) : join(rootDir, srcPath);
+  return import(pathToFileURL(runtimePath).href) as Promise<T>;
+}
+
+async function loadDbStrategy(): Promise<DbStrategyModule> {
+  return importBackendModule<DbStrategyModule>(
+    'backend/dist/lib/db-strategy.js',
+    'backend/src/lib/db-strategy.ts'
+  );
+}
+
+async function loadDbSidecar(): Promise<DbSidecarModule> {
+  return importBackendModule<DbSidecarModule>(
+    'backend/dist/lib/db-sidecar.js',
+    'backend/src/lib/db-sidecar.ts'
+  );
+}
+
+async function probeDatabaseConnection(databaseUrl: string): Promise<void> {
+  try {
+    const pg = require(join(__dirname, '..', 'backend', 'node_modules', 'pg')) as {
+      Client: new (opts: { connectionString: string; connectionTimeoutMillis: number }) => {
+        connect(): Promise<void>;
+        query(sql: string): Promise<unknown>;
+        end(): Promise<void>;
+      };
+    };
+    const client = new pg.Client({ connectionString: databaseUrl, connectionTimeoutMillis: 5000 });
+    await client.connect();
+    await client.query('SELECT 1');
+    await client.end();
+  } catch {
+    console.error('Cannot reach Postgres at the configured DATABASE_URL');
+    console.error(`  DATABASE_URL: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
+    process.exit(1);
   }
 }
 
