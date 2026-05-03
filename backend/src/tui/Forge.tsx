@@ -510,6 +510,7 @@ export function Forge(): JSX.Element {
   const cancelPromptTimerRef = useRef<NodeJS.Timeout | null>(null);
   const exitAfterCancelRef = useRef(false);
   const activeRunIdRef = useRef<number | null>(null);
+  const streamDetachedRunIdRef = useRef<number | null>(null);
   const isUnmountedRef = useRef(false);
   const boardWorkspaceRef = useRef<WorkspaceMatch | null>(null);
   const boardFetchInFlightRef = useRef(false);
@@ -856,10 +857,31 @@ export function Forge(): JSX.Element {
 
   const detachForegroundRunAndExit = (): void => {
     clearCancelPromptTimer();
-    closeRunStreams();
     activeRunIdRef.current = null;
+    closeRunStreams();
     setForegroundRun(null);
     process.exit(0);
+  };
+
+  const syncBackgroundRuns = async (): Promise<void> => {
+    try {
+      const workspace = boardWorkspaceRef.current ?? await resolveWorkspaceForCwd();
+      boardWorkspaceRef.current = workspace;
+
+      if (!workspace) {
+        setBackgroundRunsCount(0);
+        return;
+      }
+
+      const response = await apiJson<PipelineRunsResponse>(
+        `/api/pipeline/runs?workspaceId=${encodeURIComponent(workspace.id)}&limit=100`,
+      );
+      const activeCount = response.items.filter((run) => activeRunStatus(run.status)).length;
+      const foregroundAdjustment = activeRunIdRef.current != null ? 1 : 0;
+      setBackgroundRunsCount(Math.max(0, activeCount - foregroundAdjustment));
+    } catch {
+      // Best-effort only; live orchestration state remains the fallback signal.
+    }
   };
 
   const syncRunMetadata = async (runId: number): Promise<void> => {
@@ -922,11 +944,13 @@ export function Forge(): JSX.Element {
     }
 
     clearCancelPromptTimer();
-    closeRunStreams();
     activeRunIdRef.current = null;
+    streamDetachedRunIdRef.current = null;
+    closeRunStreams();
     setForegroundRun(null);
     setPhaseOverride(status === 'done' ? 'COMPLETE' : 'FAILED');
     await printRunSummary(runId, status);
+    void syncBackgroundRuns();
     if (status === 'cancelled') {
       appendOutput({ text: 'Run cancelled', color: 'yellow' });
     }
@@ -999,6 +1023,24 @@ export function Forge(): JSX.Element {
     }
   };
 
+  const handleForegroundStreamDisconnect = (runId: number, streamName: 'wal' | 'output'): void => {
+    if (isUnmountedRef.current || activeRunIdRef.current !== runId || streamDetachedRunIdRef.current === runId) {
+      return;
+    }
+
+    streamDetachedRunIdRef.current = runId;
+    activeRunIdRef.current = null;
+    clearCancelPromptTimer();
+    closeRunStreams();
+    setForegroundRun(null);
+    setPhaseOverride(null);
+    appendOutput({
+      text: `[${formatClock(new Date())}] ${streamName.toUpperCase()} stream disconnected for run #${runId}; run continues in background`,
+      color: 'yellow',
+    });
+    void syncBackgroundRuns();
+  };
+
   const connectWalStream = (runId: number): void => {
     const req = http.get(WAL_STREAM_URL, (res) => {
       walResponseRef.current = res;
@@ -1023,9 +1065,14 @@ export function Forge(): JSX.Element {
           boundary = buffer.indexOf('\n\n');
         }
       });
+
+      res.on('end', () => handleForegroundStreamDisconnect(runId, 'wal'));
+      res.on('close', () => handleForegroundStreamDisconnect(runId, 'wal'));
+      res.on('error', () => handleForegroundStreamDisconnect(runId, 'wal'));
     });
 
     walRequestRef.current = req;
+    req.on('error', () => handleForegroundStreamDisconnect(runId, 'wal'));
   };
 
   const connectOutputStream = (runId: number): void => {
@@ -1073,9 +1120,14 @@ export function Forge(): JSX.Element {
           boundary = buffer.indexOf('\n\n');
         }
       });
+
+      res.on('end', () => handleForegroundStreamDisconnect(runId, 'output'));
+      res.on('close', () => handleForegroundStreamDisconnect(runId, 'output'));
+      res.on('error', () => handleForegroundStreamDisconnect(runId, 'output'));
     });
 
     outputRequestRef.current = req;
+    req.on('error', () => handleForegroundStreamDisconnect(runId, 'output'));
   };
 
   const runSpec = async (
@@ -1113,6 +1165,7 @@ export function Forge(): JSX.Element {
         throw new Error(trigger.error ?? 'Pipeline trigger did not return a run ID');
       }
 
+      streamDetachedRunIdRef.current = null;
       activeRunIdRef.current = trigger.runId;
       setPhaseOverride('FORGING');
       setForegroundRun({
@@ -1143,6 +1196,7 @@ export function Forge(): JSX.Element {
       connectWalStream(trigger.runId);
       connectOutputStream(trigger.runId);
       void syncRunMetadata(trigger.runId);
+      void syncBackgroundRuns();
       if (boardOpen) {
         void refreshBoard();
       }
@@ -1469,6 +1523,7 @@ export function Forge(): JSX.Element {
       }
 
       const summary = summarizeRun(details.stories);
+      streamDetachedRunIdRef.current = null;
       activeRunIdRef.current = runId;
       setPhaseOverride('FORGING');
       setForegroundRun({
@@ -1499,6 +1554,7 @@ export function Forge(): JSX.Element {
       connectWalStream(runId);
       connectOutputStream(runId);
       void syncRunMetadata(runId);
+      void syncBackgroundRuns();
     } catch (error) {
       appendOutput({
         text: `No active run with ID ${runId}`,
@@ -1888,6 +1944,16 @@ export function Forge(): JSX.Element {
       clearInterval(pulseTimer);
     };
   }, [boardOpen]);
+
+  useEffect(() => {
+    void syncBackgroundRuns();
+
+    const timer = setInterval(() => {
+      void syncBackgroundRuns();
+    }, 10_000);
+
+    return () => clearInterval(timer);
+  }, [foregroundRun]);
 
   useInput((input, key) => {
     if (foregroundRun && key.ctrl && (input === 'c' || input === 'C')) {
@@ -2301,10 +2367,10 @@ export function Forge(): JSX.Element {
   const disabledMessage = foregroundRun
     ? foregroundRun.confirmCancel
       ? `Cancel run #${foregroundRun.runId}? Press Ctrl+C again to confirm, Esc to resume.`
-      : 'Run in progress... Press Ctrl+C to cancel.'
+      : 'Run in progress... Press Ctrl+C to detach or cancel.'
     : boardOpen
       ? 'Board active... use arrows, r, a, or Esc.'
-    : undefined;
+      : undefined;
   const boardColumnWidth = Math.max(18, Math.floor((leftColumnWidth - 6) / 3));
   const boardRenderedColumns = boardColumns.map((column) =>
     renderBoardColumnLines(
@@ -2362,13 +2428,14 @@ export function Forge(): JSX.Element {
       : forgeGenerationBrief
         ? spinnerLine ?? 'Generating spec...'
         : disabledMessage;
+  const effectiveBackgroundRunsCount = Math.max(backgroundRunsCount, orchestrationState.backgroundRunsCount);
 
   return (
     <Box flexDirection="column" width={stdoutWidth} height={stdoutHeight}>
       <Box borderStyle="single" paddingX={1} height={3}>
         <Text wrap="truncate-end">
           [RORCA FORGE] workspace:{workspaceName} agent:{orchestrationState.activeAgent} branch:{branchName} {formatClock(now)}
-          {orchestrationState.backgroundRunsCount > 0 ? ` bg:${orchestrationState.backgroundRunsCount}` : ''}
+          {effectiveBackgroundRunsCount > 0 ? `  Runs in background: ${effectiveBackgroundRunsCount}` : ''}
         </Text>
       </Box>
 
@@ -2529,7 +2596,7 @@ export function Forge(): JSX.Element {
           <Text>tokens out: {foregroundRun?.cumulativeOutput ?? orchestrationState.cumulativeTokens.output}</Text>
           <Text>cost usd: ${(foregroundRun?.cumulativeCost ?? orchestrationState.cumulativeTokens.cost).toFixed(2)}</Text>
           <Text>direction: {foregroundRun?.directionSummary ?? orchestrationState.directionSummary ?? 'none'}</Text>
-          <Text>background: {orchestrationState.backgroundRunsCount > 0 ? orchestrationState.backgroundRunsCount : 0}</Text>
+          <Text>background: {effectiveBackgroundRunsCount}</Text>
         </Box>
       </Box>
 
