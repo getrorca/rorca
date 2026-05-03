@@ -1,14 +1,17 @@
 #!/usr/bin/env node
-import { readFileSync, existsSync, mkdirSync, writeFileSync, createWriteStream, unlinkSync, rmSync, readdirSync, renameSync, statSync } from 'fs';
+import { readFileSync, existsSync, mkdirSync, writeFileSync, createWriteStream, unlinkSync, rmSync, readdirSync, renameSync, statSync, statfsSync } from 'fs';
 import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
+import { fileURLToPath, pathToFileURL } from 'url';
 import { execSync, spawnSync, fork, spawn } from 'child_process';
 import { homedir, platform, arch } from 'os';
 import { get as httpsGet } from 'https';
 import { get as httpGet } from 'http';
 import { createConnection } from 'net';
+import { createRequire } from 'module';
+import * as readline from 'readline/promises';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const require = createRequire(import.meta.url);
 const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8'));
 // ─── --version / --help ───
 const args = process.argv.slice(2);
@@ -22,6 +25,7 @@ rorca v${pkg.version} — AI spec orchestration pipeline
 
 Usage:
   rorca start [options]    Start the Rorca server
+  rorca db start           Start Docker Postgres, or upgrade Lite Mode to Docker + AGE
   rorca init               Register Rorca as an MCP server with claude CLI
   rorca --version          Print version
   rorca --help             Show this help message
@@ -30,12 +34,15 @@ Options for start:
   --port <port>            Server port (default: 3030)
   --no-open                Don't open browser on start
   --no-postgres            Skip managed Postgres; requires DATABASE_URL to be set
+  --dry-run                Validate config and exit without starting servers
 
 Examples:
   rorca start
   rorca start --port 4040
   rorca start --no-open
   rorca start --no-postgres
+  rorca start --dry-run
+  rorca db start
   rorca init
 `);
     process.exit(0);
@@ -46,12 +53,16 @@ if (command === 'init') {
     runInit();
     process.exit(0);
 }
+// ─── Command: db ───
+if (command === 'db') {
+    void runDb(args.slice(1)).catch(handleFatalCliError);
+}
 // ─── Command: start ───
 if (command === 'start') {
-    runStart(args.slice(1));
+    void runStart(args.slice(1)).catch(handleFatalCliError);
     // runStart sets up async process management — don't exit here
 }
-else {
+else if (command !== 'db') {
     console.error(`Unknown command: ${command}\nRun "rorca --help" for usage.`);
     process.exit(1);
 }
@@ -108,6 +119,7 @@ async function runStart(startArgs) {
     const port = portIdx !== -1 && startArgs[portIdx + 1] ? startArgs[portIdx + 1] : '3030';
     const noOpen = startArgs.includes('--no-open');
     const noPostgres = startArgs.includes('--no-postgres');
+    const dryRun = startArgs.includes('--dry-run');
     const portNum = parseInt(port, 10);
     if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
         console.error(`Invalid port: ${port}`);
@@ -118,38 +130,56 @@ async function runStart(startArgs) {
         console.error('DATABASE_URL required when --no-postgres is set');
         process.exit(1);
     }
+    // --dry-run: validate config and exit without starting servers
+    if (dryRun) {
+        console.log(`rorca v${pkg.version} — dry-run mode`);
+        console.log(`  Port: ${portNum}`);
+        const dbUrl = process.env.DATABASE_URL || '(managed Postgres will be provisioned)';
+        console.log(`  DATABASE_URL: ${dbUrl.replace(/\/\/[^@]*@/, '//***@')}`);
+        const rorcaHome = join(homedir(), '.rorca');
+        console.log(`  Config dir: ${rorcaHome}`);
+        console.log('Config OK — dry-run complete.');
+        process.exit(0);
+        return;
+    }
     // Ensure ~/.rorca/ config directory exists
     const rorcaHome = join(homedir(), '.rorca');
     if (!existsSync(rorcaHome)) {
         mkdirSync(rorcaHome, { recursive: true });
         console.log(`Created config directory: ${rorcaHome}`);
     }
-    // ── Postgres provisioning ──
-    // If DATABASE_URL is already set and reachable, use it as-is (user-provided).
-    // Otherwise, provision and start a managed Postgres instance.
-    // --no-postgres skips provisioning entirely.
     let managedPostgresStarted = false;
     let databaseUrl = process.env.DATABASE_URL || '';
     if (noPostgres || databaseUrl) {
-        // User provided DATABASE_URL (or --no-postgres requires it) — check if it's reachable
+        await probeDatabaseConnection(databaseUrl);
         const urlObj = parsePostgresUrl(databaseUrl);
-        if (urlObj && await tcpReachable(urlObj.host, urlObj.port, 3000)) {
-            console.log(`Using user-provided DATABASE_URL (${urlObj.host}:${urlObj.port})`);
-        }
-        else {
-            console.error(`Cannot reach Postgres at user-provided DATABASE_URL`);
-            console.error(`  DATABASE_URL: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
-            process.exit(1);
-        }
+        console.log(`Using user-provided DATABASE_URL (${urlObj?.host ?? 'unknown'}:${urlObj?.port ?? 'unknown'})`);
     }
     else {
-        // No DATABASE_URL — provision managed Postgres
-        const pgDir = await ensurePostgres();
-        await startPostgres(pgDir);
-        managedPostgresStarted = true;
-        databaseUrl = `postgres://rorca:rorca@127.0.0.1:${MANAGED_PG_PORT}/rorca`;
-        process.env.DATABASE_URL = databaseUrl;
-        console.log(`Managed Postgres ready at 127.0.0.1:${MANAGED_PG_PORT}`);
+        const { detectDbMode, getDbConnectionString } = await loadDbStrategy();
+        const mode = detectDbMode();
+        if (mode === 'docker') {
+            const { dbStart } = await loadDbSidecar();
+            await dbStart();
+            databaseUrl = getDbConnectionString('docker');
+            process.env.DATABASE_URL = databaseUrl;
+            console.log('Docker Postgres sidecar ready at localhost:5432');
+        }
+        else if (mode === 'native') {
+            const pgDir = await ensurePostgres();
+            await startPostgres(pgDir);
+            managedPostgresStarted = true;
+            databaseUrl = `postgres://rorca:rorca@127.0.0.1:${MANAGED_PG_PORT}/rorca`;
+            process.env.DATABASE_URL = databaseUrl;
+            console.log(`Managed Postgres ready at 127.0.0.1:${MANAGED_PG_PORT}`);
+        }
+        else {
+            databaseUrl = getDbConnectionString('byop');
+            await probeDatabaseConnection(databaseUrl);
+            process.env.DATABASE_URL = databaseUrl;
+            const urlObj = parsePostgresUrl(databaseUrl);
+            console.log(`Using external Postgres (${urlObj?.host ?? 'unknown'}:${urlObj?.port ?? 'unknown'})`);
+        }
     }
     // Auto-build frontend if dist/ is missing
     const rootDir = join(__dirname, '..');
@@ -301,6 +331,318 @@ async function runStart(startArgs) {
         });
     }
 }
+async function importBackendModule(distPath, srcPath) {
+    const rootDir = join(__dirname, '..');
+    const runtimePath = existsSync(join(rootDir, distPath)) ? join(rootDir, distPath) : join(rootDir, srcPath);
+    return import(pathToFileURL(runtimePath).href);
+}
+async function loadDbStrategy() {
+    return importBackendModule('backend/dist/lib/db-strategy.js', 'backend/src/lib/db-strategy.ts');
+}
+async function loadDbSidecar() {
+    return importBackendModule('backend/dist/lib/db-sidecar.js', 'backend/src/lib/db-sidecar.ts');
+}
+async function loadPgIndex() {
+    return importBackendModule('backend/dist/db/pg-index.js', 'backend/src/db/pg-index.ts');
+}
+async function probeDatabaseConnection(databaseUrl) {
+    try {
+        const pg = require(join(__dirname, '..', 'backend', 'node_modules', 'pg'));
+        const client = new pg.Client({ connectionString: databaseUrl, connectionTimeoutMillis: 5000 });
+        await client.connect();
+        await client.query('SELECT 1');
+        await client.end();
+    }
+    catch {
+        console.error('Cannot reach Postgres at the configured DATABASE_URL');
+        console.error(`  DATABASE_URL: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
+        process.exit(1);
+    }
+}
+function handleFatalCliError(err) {
+    const message = err instanceof Error ? err.message : String(err);
+    console.error(message);
+    process.exit(1);
+}
+function formatBytes(bytes) {
+    if (!Number.isFinite(bytes) || bytes <= 0)
+        return '0 B';
+    const units = ['B', 'KB', 'MB', 'GB', 'TB'];
+    let value = bytes;
+    let unitIdx = 0;
+    while (value >= 1024 && unitIdx < units.length - 1) {
+        value /= 1024;
+        unitIdx += 1;
+    }
+    return `${value >= 10 || unitIdx === 0 ? value.toFixed(0) : value.toFixed(1)} ${units[unitIdx]}`;
+}
+function createTimestamp() {
+    return new Date().toISOString().replace(/[:.]/g, '-');
+}
+function getRorcaHome() {
+    return join(homedir(), '.rorca');
+}
+function getNativePostgresDir() {
+    return join(getRorcaHome(), 'postgres');
+}
+function getNativeDataDir() {
+    return join(getNativePostgresDir(), 'data');
+}
+function getNativeDatabaseUrl() {
+    return `postgres://rorca:rorca@127.0.0.1:${MANAGED_PG_PORT}/rorca`;
+}
+function getMigrationBackupPath() {
+    const migrationsDir = join(getRorcaHome(), 'migrations');
+    mkdirSync(migrationsDir, { recursive: true });
+    return join(migrationsDir, `lite-backup-${createTimestamp()}.dump`);
+}
+function getBinaryExtension() {
+    return platform() === 'win32' ? '.exe' : '';
+}
+function resolveNativePgBinary(binary) {
+    const candidate = join(getNativePostgresDir(), 'bin', `${binary}${getBinaryExtension()}`);
+    if (existsSync(candidate))
+        return candidate;
+    const fallback = findBinary(binary);
+    if (fallback)
+        return fallback;
+    throw new Error(`Required binary not found: ${binary}`);
+}
+function getDirectorySizeBytes(dir) {
+    if (!existsSync(dir))
+        return 0;
+    const stat = statSync(dir);
+    if (!stat.isDirectory())
+        return stat.size;
+    let total = 0;
+    for (const entry of readdirSync(dir)) {
+        total += getDirectorySizeBytes(join(dir, entry));
+    }
+    return total;
+}
+function getFreeDiskBytes(pathname) {
+    const stats = statfsSync(pathname);
+    return Number(stats.bavail) * Number(stats.bsize);
+}
+function getPgModule() {
+    return require(join(__dirname, '..', 'backend', 'node_modules', 'pg'));
+}
+async function queryRows(databaseUrl, sql, params = []) {
+    const pg = getPgModule();
+    const client = new pg.Client({ connectionString: databaseUrl, connectionTimeoutMillis: 5000 });
+    await client.connect();
+    try {
+        const result = await client.query(sql, params);
+        return result.rows;
+    }
+    finally {
+        await client.end();
+    }
+}
+async function queryCount(databaseUrl, sql, params = []) {
+    const rows = await queryRows(databaseUrl, sql, params);
+    return Number(rows[0]?.count ?? 0);
+}
+async function getActivePipelineCounts(databaseUrl) {
+    const pipelineRuns = await queryCount(databaseUrl, `SELECT COUNT(*)::int AS count
+       FROM pipeline_runs
+      WHERE status IN ('running', 'queued')`);
+    let bossJobs = 0;
+    try {
+        bossJobs = await queryCount(databaseUrl, `SELECT COUNT(*)::int AS count
+         FROM pgboss.job
+        WHERE name LIKE 'pipeline:%'
+          AND state IN ('created', 'active', 'retry')`);
+    }
+    catch (err) {
+        const message = err instanceof Error ? err.message : String(err);
+        if (!message.includes('relation "pgboss.job" does not exist') && !message.includes('schema "pgboss" does not exist')) {
+            throw err;
+        }
+    }
+    return { pipelineRuns, bossJobs };
+}
+async function getWorkspaceCount(databaseUrl) {
+    return queryCount(databaseUrl, 'SELECT COUNT(*)::int AS count FROM workspaces');
+}
+async function confirmPrompt(prompt) {
+    if (!process.stdin.isTTY || !process.stdout.isTTY) {
+        throw new Error('Interactive confirmation required. Re-run this command in a terminal.');
+    }
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+        const answer = await rl.question(prompt);
+        return answer.trim().toLowerCase() === 'y';
+    }
+    finally {
+        rl.close();
+    }
+}
+function runBinaryWithProgress(label, binary, args, env, progressFile) {
+    return new Promise((resolve, reject) => {
+        const child = spawn(binary, args, {
+            env,
+            stdio: ['ignore', 'pipe', 'pipe'],
+        });
+        let stderr = '';
+        let stdout = '';
+        let progressTimer = null;
+        const printProgress = () => {
+            if (!progressFile || !existsSync(progressFile))
+                return;
+            try {
+                const size = statSync(progressFile).size;
+                process.stdout.write(`\r  ${label}... ${formatBytes(size)}`);
+            }
+            catch {
+                // best-effort progress
+            }
+        };
+        if (progressFile) {
+            progressTimer = setInterval(printProgress, 1000);
+        }
+        child.stdout?.on('data', (chunk) => { stdout += chunk.toString(); });
+        child.stderr?.on('data', (chunk) => { stderr += chunk.toString(); });
+        child.on('error', reject);
+        child.on('close', (code) => {
+            if (progressTimer)
+                clearInterval(progressTimer);
+            if (progressFile) {
+                printProgress();
+                process.stdout.write('\n');
+            }
+            if (code === 0) {
+                resolve();
+                return;
+            }
+            reject(new Error((stderr || stdout || `${binary} exited with code ${code}`).trim()));
+        });
+    });
+}
+async function createNativeBackup(backupPath) {
+    const pgDump = resolveNativePgBinary('pg_dump');
+    const env = {
+        ...process.env,
+        PGPASSWORD: 'rorca',
+    };
+    await runBinaryWithProgress('Backup in progress', pgDump, ['-h', '127.0.0.1', '-p', String(MANAGED_PG_PORT), '-U', 'rorca', '-d', 'rorca', '-Fc', '-f', backupPath], env, backupPath);
+}
+async function restoreBackupToDocker(backupPath) {
+    const pgRestore = resolveNativePgBinary('pg_restore');
+    const env = {
+        ...process.env,
+        PGPASSWORD: 'rorca',
+    };
+    await runBinaryWithProgress('Restore in progress', pgRestore, ['-h', '127.0.0.1', '-p', '5432', '-U', 'rorca', '-d', 'rorca', '--no-owner', '--no-acl', backupPath], env);
+}
+async function verifyAgeSmoke(databaseUrl) {
+    await queryRows(databaseUrl, 'SELECT * FROM ag_catalog.ag_graph LIMIT 1');
+}
+async function replayLiteSkippedMigrations(databaseUrl) {
+    const { createPoolForConnectionString, prepareLiteSkippedMigrationsForReplay, runPgMigrations } = await loadPgIndex();
+    const pool = createPoolForConnectionString(databaseUrl);
+    try {
+        const versions = await prepareLiteSkippedMigrationsForReplay(pool);
+        await runPgMigrations(pool);
+        return versions;
+    }
+    finally {
+        await pool.end();
+    }
+}
+async function runLiteToDockerUpgrade() {
+    const { setDbMode, getDbConnectionString } = await loadDbStrategy();
+    const { dbStart, requireDocker } = await loadDbSidecar();
+    const pgDir = await ensurePostgres();
+    await startPostgres(pgDir);
+    const nativeUrl = getNativeDatabaseUrl();
+    const dockerUrl = getDbConnectionString('docker');
+    const dataSizeBytes = getDirectorySizeBytes(getNativeDataDir());
+    const compressedBackupEstimateBytes = Math.ceil(dataSizeBytes * 1.5);
+    const dockerVolumeEstimateBytes = dataSizeBytes;
+    const totalRequiredBytes = compressedBackupEstimateBytes + dockerVolumeEstimateBytes;
+    const freeDiskBytes = getFreeDiskBytes(getRorcaHome());
+    const workspaceCountBefore = await getWorkspaceCount(nativeUrl);
+    const active = await getActivePipelineCounts(nativeUrl);
+    if (!(await confirmPrompt('Upgrade from Lite Mode (native) to Full Mode (Docker+AGE)? [y/N] '))) {
+        console.log('Upgrade cancelled.');
+        return;
+    }
+    if (!(await confirmPrompt(`This will copy ~${formatBytes(dataSizeBytes)} of data and needs ~${formatBytes(totalRequiredBytes)} free. Native DB will be stopped after migration. Continue? [y/N] `))) {
+        console.log('Upgrade cancelled.');
+        return;
+    }
+    console.log('Step 1/6: Pre-flight checks');
+    await requireDocker();
+    if (freeDiskBytes < totalRequiredBytes) {
+        throw new Error(`Insufficient disk space. Need ~${formatBytes(totalRequiredBytes)} free, found ${formatBytes(freeDiskBytes)}.`);
+    }
+    if (active.pipelineRuns > 0 || active.bossJobs > 0) {
+        throw new Error(`Active pipeline activity detected (pipeline_runs=${active.pipelineRuns}, pgboss.job=${active.bossJobs}). Finish or clear active work before upgrading.`);
+    }
+    console.log(`  Native DB reachable on :${MANAGED_PG_PORT}`);
+    console.log(`  Free disk: ${formatBytes(freeDiskBytes)}`);
+    console.log(`  Workspaces to migrate: ${workspaceCountBefore}`);
+    const backupPath = getMigrationBackupPath();
+    try {
+        console.log('Step 2/6: Backup native data');
+        await createNativeBackup(backupPath);
+        console.log(`  Backup written to ${backupPath}`);
+        console.log('Step 3/6: Start Docker + enable AGE/vector');
+        await dbStart();
+        console.log('  Docker Postgres ready at localhost:5432');
+        console.log('Step 4/6: Restore data into Docker');
+        await restoreBackupToDocker(backupPath);
+        console.log('  Restore complete');
+        console.log('Step 5/6: Replay Lite-skipped migrations');
+        const replayedVersions = await replayLiteSkippedMigrations(dockerUrl);
+        console.log(replayedVersions.length > 0
+            ? `  Replayed migrations: ${replayedVersions.join(', ')}`
+            : '  No Lite-skipped migrations needed replay');
+        console.log('Step 6/6: Verify and switch mode');
+        const workspaceCountAfter = await getWorkspaceCount(dockerUrl);
+        if (workspaceCountAfter !== workspaceCountBefore) {
+            throw new Error(`Workspace count mismatch after restore (native=${workspaceCountBefore}, docker=${workspaceCountAfter}).`);
+        }
+        await verifyAgeSmoke(dockerUrl);
+        setDbMode('docker');
+        stopManagedPostgres();
+        console.log('✓ Migration complete. Native PG data preserved at ~/.rorca/postgres/data/. To roll back, set RORCA_DB_MODE=native and restart.');
+        console.log('If Rorca is already running, restart it so the database pool reconnects to Docker Postgres.');
+    }
+    catch (err) {
+        setDbMode('native');
+        console.error('Migration failed. Native mode remains active; both databases have been left running for manual recovery.');
+        console.error(`Backup preserved at ${backupPath}`);
+        throw err;
+    }
+}
+async function runDb(dbArgs) {
+    const subcommand = dbArgs[0] || 'help';
+    if (subcommand === 'help' || dbArgs.includes('--help') || dbArgs.includes('-h')) {
+        console.log(`
+Usage:
+  rorca db start    Start Docker Postgres, or upgrade Lite Mode to Docker + AGE
+`);
+        return;
+    }
+    if (subcommand !== 'start') {
+        throw new Error(`Unknown db subcommand: ${subcommand}`);
+    }
+    const { detectDbMode } = await loadDbStrategy();
+    const mode = detectDbMode();
+    if (mode === 'byop') {
+        throw new Error('External Postgres is configured. BYOP databases are user-managed; `rorca db start` is not available.');
+    }
+    if (mode === 'docker') {
+        console.log('Docker mode detected — starting Docker Postgres.');
+        const { dbStart } = await loadDbSidecar();
+        await dbStart();
+        console.log('Docker Postgres ready at localhost:5432');
+        return;
+    }
+    await runLiteToDockerUpgrade();
+}
 // ────────────────────────────────────────────────────────────────
 // Embedded Postgres: detect, download, extract
 // ────────────────────────────────────────────────────────────────
@@ -332,13 +674,6 @@ function buildDownloadUrl(platformKey, version) {
     const mavenPlatform = PLATFORM_MAP[platformKey];
     const artifact = `embedded-postgres-binaries-${mavenPlatform}`;
     return `https://repo1.maven.org/maven2/io/zonky/test/postgres/${artifact}/${version}/${artifact}-${version}.jar`;
-}
-function formatBytes(bytes) {
-    if (bytes < 1024)
-        return `${bytes} B`;
-    if (bytes < 1024 * 1024)
-        return `${(bytes / 1024).toFixed(1)} KB`;
-    return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
 }
 const DOWNLOAD_TIMEOUT_MS = 60_000; // 60s with no data = timeout
 /**
