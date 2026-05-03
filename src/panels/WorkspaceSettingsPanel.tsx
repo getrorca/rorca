@@ -1,8 +1,9 @@
-import { useState, useEffect, useCallback } from 'react';
+import { useState, useEffect, useCallback, type ComponentType } from 'react';
 import {
   Settings2, Layers, Variable, Play, Webhook,
   Save, Loader2, Check, FolderOpen, Plus, Trash2, X, Users, Route, FileText, Wrench,
   Package, Info,
+  type LucideIcon,
 } from 'lucide-react';
 import { Github } from '../components/icons/GithubIcon';
 import { useWorkspace } from '../contexts/WorkspaceContext';
@@ -67,7 +68,7 @@ interface GithubStatus {
   connectedAt?: string;
 }
 
-const TABS: { id: WsSettingsTab; label: string; icon: typeof Settings2 }[] = [
+const TABS: { id: WsSettingsTab; label: string; icon: LucideIcon | ComponentType<{ size?: number; className?: string }> }[] = [
   { id: 'general',   label: 'General',           icon: Settings2 },
   { id: 'direction', label: 'Direction',           icon: Layers    },
   { id: 'context',   label: 'Workspace Context',  icon: Route     },

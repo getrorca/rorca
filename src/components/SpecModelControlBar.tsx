@@ -150,7 +150,7 @@ export function SpecModelControlBar({
       {engine === 'claude' && (
         <div className="px-3 pb-3">
           <ThinkingControls
-            engine={engine}
+            engine="claude"
             model={model}
             effortLevel={effortLevel}
             onEffortChange={handleEffortChange}

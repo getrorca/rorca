@@ -161,6 +161,9 @@ function getPool(): Pool {
     // Guarantee search_path on every new connection — guards against AGE graph
     // queries that SET search_path to ag_catalog and poison the pool connection.
     _pool.on('connect', (client) => {
+      client.query('RESET ROLE').catch(() => {});
+      client.query('RESET request.jwt.claim.sub').catch(() => {});
+      client.query('RESET request.jwt.claims').catch(() => {});
       client.query('SET search_path TO rorca, public').catch(() => {});
     });
 
@@ -270,6 +273,13 @@ function logSlowQuery(sql: string, params: unknown[] | undefined, durationMs: nu
   }
 }
 
+async function resetSessionState(client: PoolClient): Promise<void> {
+  await client.query('RESET ROLE');
+  await client.query('RESET request.jwt.claim.sub');
+  await client.query('RESET request.jwt.claims');
+  await client.query('SET search_path TO rorca, public');
+}
+
 // ── Query Helpers ────────────────────────────────────────────────────────
 
 /**
@@ -281,10 +291,16 @@ export async function query<T = Record<string, unknown>>(
 ): Promise<T[]> {
   await ensureMigrations();
   const p = getPool();
+  const client = await p.connect();
   const start = Date.now();
-  const result = await p.query(sql, params);
-  logSlowQuery(sql, params, Date.now() - start);
-  return result.rows as T[];
+  try {
+    await resetSessionState(client);
+    const result = await client.query(sql, params);
+    logSlowQuery(sql, params, Date.now() - start);
+    return result.rows as T[];
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -296,10 +312,16 @@ export async function queryOne<T = Record<string, unknown>>(
 ): Promise<T | undefined> {
   await ensureMigrations();
   const p = getPool();
+  const client = await p.connect();
   const start = Date.now();
-  const result = await p.query(sql, params);
-  logSlowQuery(sql, params, Date.now() - start);
-  return (result.rows[0] as T) ?? undefined;
+  try {
+    await resetSessionState(client);
+    const result = await client.query(sql, params);
+    logSlowQuery(sql, params, Date.now() - start);
+    return (result.rows[0] as T) ?? undefined;
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -311,10 +333,16 @@ export async function execute(
 ): Promise<{ rowCount: number }> {
   await ensureMigrations();
   const p = getPool();
+  const client = await p.connect();
   const start = Date.now();
-  const result = await p.query(sql, params);
-  logSlowQuery(sql, params, Date.now() - start);
-  return { rowCount: result.rowCount ?? 0 };
+  try {
+    await resetSessionState(client);
+    const result = await client.query(sql, params);
+    logSlowQuery(sql, params, Date.now() - start);
+    return { rowCount: result.rowCount ?? 0 };
+  } finally {
+    client.release();
+  }
 }
 
 /**
@@ -328,6 +356,7 @@ export async function transaction<T>(
   const p = getPool();
   const client = await p.connect();
   try {
+    await resetSessionState(client);
     await client.query('BEGIN');
     const result = await fn(client);
     await client.query('COMMIT');
@@ -493,4 +522,3 @@ process.on('SIGINT', () => {
     shutdown().catch(() => {});
   }
 });
-

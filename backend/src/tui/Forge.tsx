@@ -159,6 +159,7 @@ interface ForegroundRunState {
   directionSummary: string | null;
   exitPromptOpen: boolean;
   cancelRequested: boolean;
+  confirmCancel: boolean;
 }
 
 interface BoardLine {
@@ -1130,6 +1131,7 @@ export function Forge(): JSX.Element {
         directionSummary: null,
         exitPromptOpen: false,
         cancelRequested: false,
+        confirmCancel: false,
       });
 
       appendOutput({
@@ -1485,6 +1487,7 @@ export function Forge(): JSX.Element {
         directionSummary: null,
         exitPromptOpen: false,
         cancelRequested: false,
+        confirmCancel: false,
       });
 
       appendOutput({

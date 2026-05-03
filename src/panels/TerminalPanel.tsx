@@ -307,9 +307,9 @@ export default function TerminalPanel({ mode, onCollapse, onExpand }: TerminalPa
   const [backgroundSessionsVersion, setBackgroundSessionsVersion] = useState(0);
   const restoreRequestIdRef = useRef(0);
   const creatingRef = useRef(false);
-  const createSessionRef = useRef<(workspaceId: string, activate?: boolean) => Promise<void>>();
-  const persistWorkspaceSessionsRef = useRef<(targetWorkspaceId: string | null, nextSessions: TerminalSessionRecord[]) => void>();
-  const bumpBackgroundSessionsVersionRef = useRef<() => void>();
+  const createSessionRef = useRef<((workspaceId: string, activate?: boolean) => Promise<void>) | null>(null);
+  const persistWorkspaceSessionsRef = useRef<((targetWorkspaceId: string | null, nextSessions: TerminalSessionRecord[]) => void) | null>(null);
+  const bumpBackgroundSessionsVersionRef = useRef<(() => void) | null>(null);
   const isActiveRouteRef = useRef(false);
 
   const headerHeightClass = mode === 'panel' ? 'h-10' : 'h-9';

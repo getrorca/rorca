@@ -317,7 +317,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
   useEffect(() => { fetchInstalled(); }, [fetchInstalled]);
 
   // Debounced live search for skills.sh + workspace suggestions fallback
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (activeTab !== 'skills' || activeSource !== 'skills.sh') {
@@ -326,7 +326,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
       return;
     }
 
-    clearTimeout(debounceRef.current);
+    clearTimeout(debounceRef.current ?? undefined);
 
     const trimmed = searchQuery.trim();
 
@@ -363,12 +363,12 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
         });
     }
 
-    return () => clearTimeout(debounceRef.current);
+    return () => clearTimeout(debounceRef.current ?? undefined);
   }, [searchQuery, activeTab, activeSource]);
 
   // Cleanup debounce on unmount
   useEffect(() => {
-    return () => clearTimeout(debounceRef.current);
+    return () => clearTimeout(debounceRef.current ?? undefined);
   }, []);
 
   // Install handler
