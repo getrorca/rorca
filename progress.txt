@@ -3,9 +3,9 @@
 Spec: rorca-cli-tui-and-mcp-hardening
 Run ID: 20260316000242
 Started: 2026-05-03T21:34:47.790Z
-Last Updated: 2026-05-03T22:51:14.744Z
+Last Updated: 2026-05-03T22:57:03.708Z
 
-## Completed Stories (45)
+## Completed Stories (46)
 - CLI-001: Add 'pi' as a 4th AgentType in config.ts and VALID_AGENT_TYPES — DONE (codex, gpt-5.4, 113s)
 - CLI-002: Create pi-detector.ts — binary detection, version parsing, model listing — DONE (codex, gpt-5.4, 58s)
 - CLI-003: Expose pi-detector in GET /api/health endpoint — DONE (codex, gpt-5.4, 79s)
@@ -51,3 +51,4 @@ Last Updated: 2026-05-03T22:51:14.744Z
 - CLI-047: AEGIS P0 + OPEN-CORE: x-rorca-tier Unified Annotation System (4-tier: public/auth/paid/admin) — DONE (codex, gpt-5.4, 364s)
 - CLI-048: AEGIS P0 + OPEN-CORE: Curate the 4-tier Allow-list — public API contract, paid paywall, admin lockdown — DONE (codex, gpt-5.4, 831s)
 - CLI-049: AEGIS P0: Per-tier Authorization — public/admin scoped tokens — DONE (codex, gpt-5.4, 810s)
+- CLI-050: AEGIS P0: Remove No-op OAuth Theater — honest auth model — DONE (codex, gpt-5.4, 328s)

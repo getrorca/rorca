@@ -298,6 +298,24 @@ const mcpCors = cors({
   exposedHeaders: ['Mcp-Session-Id'],
   maxAge: 86400,
 });
+
+const NO_OAUTH_RESPONSE = {
+  error: 'OAuth not supported',
+  message: 'Rorca uses Bearer token authentication, not OAuth. See ~/.rorca/mcp-token.',
+  documentation: 'Run `rorca mcp setup-claude` to configure your MCP client.',
+};
+
+for (const oauthPath of [
+  '/.well-known/oauth-authorization-server',
+  '/.well-known/oauth-protected-resource',
+  '/oauth/authorize',
+  '/oauth/token',
+  '/oauth/register',
+  '/register',
+]) {
+  app.all(oauthPath, (_req, res) => res.status(501).json(NO_OAUTH_RESPONSE));
+}
+
 if (MCP_HTTP_ENABLED) {
   const mcpHandlers = createMcpRequestHandler(swaggerSpec as any);
   const mcpToolTierResolver = buildMcpToolTierResolver(swaggerSpec as any);

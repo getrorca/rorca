@@ -674,9 +674,19 @@ Express API routes → @swagger JSDoc annotations → OpenAPI spec (/api/docs/op
 
 **Current state**: 24 hand-written stdio MCP tools in `backend/src/mcp/server.ts`.
 
-**Bridge URL**: HTTP MCP transport is mounted at `http://localhost:3030/mcp` when `RORCA_SERVE_MCP` is unset or not equal to `false`. `RORCA_SERVE_MCP=false` disables the HTTP bridge and its local OAuth helper routes; Pi chat sessions then run without Rorca MCP tools.
+**Bridge URL**: HTTP MCP transport is mounted at `http://localhost:3030/mcp` when `RORCA_SERVE_MCP` is unset or not equal to `false`. `RORCA_SERVE_MCP=false` disables the HTTP bridge; Pi chat sessions then run without Rorca MCP tools.
 
 Security: `/mcp` now requires `Authorization: Bearer <token>` where the token is stored at `~/.rorca/mcp-token` with mode `0600`. The backend generates this token at startup. Never log or commit it.
+
+### MCP Auth Contract
+Rorca does not support OAuth on `/mcp`. The previous trivial OAuth shim was removed because it provided no real security and could mislead readers into thinking OAuth protection existed. This also avoids ambiguity with the real Bearer-token enforcement introduced for MCP HTTP.
+
+Use Bearer-token clients only:
+- Claude Code CLI: `rorca mcp setup-claude`
+- Manual Claude Code CLI: `claude mcp add rorca http://localhost:3030/mcp --header "Authorization: Bearer $(cat ~/.rorca/mcp-token)"`
+- VS Code/custom clients: configure an `Authorization: Bearer <token>` header explicitly
+
+Claude Desktop limitation: newer Claude Desktop builds require OAuth for MCP HTTP servers. Rorca cannot connect there in v0 without a real OAuth 2.1 + PKCE implementation. Use Claude Code CLI instead.
 
 ### MCP Security Model (CLI-046)
 By default, MCP is **localhost-only** even when the main API is intentionally bound to `0.0.0.0` via `RORCA_BIND_HOST`. The `/mcp` routes enforce two layers:
