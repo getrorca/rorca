@@ -3464,3 +3464,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Architecture] Forge TUI must treat SSE loss as detach, not run termination: When Forge loses its WAL or output SSE while a pipeline run is still active, clear the foreground attachment, keep the backend-owned run alive, and recover background state by polling GET /api/pipeline/runs.
 > Rule: Forge TUI must treat SSE loss as detach, not run termination: When Forge loses its WAL or output SSE while a pipeline run is still active, clear the foreground attachment, keep the backend-owned run alive, and recover background state by polling GET /api/pipeline/runs.
+
+## 2026-05-03 [Gotcha] Worker heartbeat stale threshold must stay 90 seconds everywhere: Use a single 90s worker-heartbeat staleness rule across supervisor restarts, health endpoints, and worker-monitoring code; do not mix 60s and 90s checks.
+> Rule: Worker heartbeat stale threshold must stay 90 seconds everywhere: Use a single 90s worker-heartbeat staleness rule across supervisor restarts, health endpoints, and worker-monitoring code; do not mix 60s and 90s checks.

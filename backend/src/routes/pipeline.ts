@@ -37,6 +37,7 @@ import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftRepo
 import { synthesizeRunMemory } from '../lib/auto-memory';
 import { logger } from '../lib/logger';
 import { getBoss } from '../lib/pg-boss';
+import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
 import { authRequired } from '../lib/auth-utils';
 import { ConflictError, ForbiddenError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
@@ -5589,7 +5590,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
  *       Returns the health status of the standalone pg-boss worker process by
  *       querying the worker_heartbeat table and pgboss.* tables directly.
  *       No IPC with the worker is required. The worker is considered active when
- *       its last_seen timestamp is within the past 60 seconds.
+ *       its last_seen timestamp is within the past 90 seconds.
  *     responses:
  *       200:
  *         description: Worker health object with queue statistics
@@ -5662,16 +5663,8 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
 router.get('/worker/health', async (req: Request, res: Response) => {
   try {
     // ── 1. Worker heartbeat ─────────────────────────────────────────────────
-    const heartbeat = await queryOne<{
-      pid: number;
-      started_at: string;
-      last_seen: string;
-      active_jobs: number;
-    }>('SELECT pid, started_at, last_seen, active_jobs FROM worker_heartbeat ORDER BY last_seen DESC LIMIT 1');
-
-    const workerActive = heartbeat
-      ? Date.now() - new Date(heartbeat.last_seen).getTime() < 60_000
-      : false;
+    const heartbeat = await getLatestWorkerHeartbeat();
+    const workerActive = heartbeat ? !isWorkerHeartbeatStale(heartbeat.last_seen) : false;
 
     // ── 2. Active jobs (pgboss.job joined with pipeline_runs) ───────────────
     interface ActiveJobRow {
