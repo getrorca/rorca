@@ -1274,8 +1274,18 @@ interface AgentResult {
   elapsedMs: number;
 }
 
+interface TokenUpdate {
+  inputTokens: number;
+  outputTokens: number;
+  turn: number;
+  cumulativeInput: number;
+  cumulativeOutput: number;
+  costUsd?: number;
+  cumulativeCostUsd?: number;
+}
+
 /** Callback for real-time token usage updates during agent execution. */
-type TokenUpdateCallback = (update: { inputTokens: number; outputTokens: number; turn: number; cumulativeInput: number; cumulativeOutput: number }) => void;
+type TokenUpdateCallback = (update: TokenUpdate) => void;
 
 // ─── Idle Watchdog ──────────────────────────────────────────────────────────
 
@@ -1981,6 +1991,7 @@ async function spawnPiRpc(
     let turnCount = 0;
     let cumulativeInput = 0;
     let cumulativeOutput = 0;
+    let cumulativeCostUsd = 0;
     const listener = (event: unknown, resolve?: () => void, reject?: (error: Error) => void): void => {
       const data = typeof event === 'object' && event !== null ? event as Record<string, unknown> : null;
       if (!data) return;
@@ -2019,27 +2030,41 @@ async function spawnPiRpc(
       if (eventType === 'turn_end') {
         const message = data.message as Record<string, unknown> | undefined;
         const usage = message?.usage as Record<string, unknown> | undefined;
-        if (usage && onTokenUpdate) {
+        if (usage) {
+          const costInfo = (usage.cost as Record<string, unknown> | undefined);
+          const hasUsageData = usage.input != null || usage.output != null || costInfo?.total != null;
+          if (!hasUsageData) {
+            if (!settled) {
+              settled = true;
+              resolve?.();
+            }
+            return;
+          }
+
           const input = Number(usage.input ?? 0);
           const output = Number(usage.output ?? 0);
-          if (input > 0 || output > 0) {
-            const turnInput = input - cumulativeInput;
-            const turnOutput = output - cumulativeOutput;
-            cumulativeInput = input;
-            cumulativeOutput = output;
-            turnCount++;
-            writeOutput(
-              `[Token] input=${turnInput > 0 ? turnInput : input} output=${turnOutput > 0 ? turnOutput : output} ` +
-              `cumulative_input=${cumulativeInput} cumulative_output=${cumulativeOutput} turn=${turnCount}\n`,
-            );
-            onTokenUpdate({
-              inputTokens: turnInput > 0 ? turnInput : input,
-              outputTokens: turnOutput > 0 ? turnOutput : output,
-              turn: turnCount,
-              cumulativeInput,
-              cumulativeOutput,
-            });
-          }
+          const cost = Number(costInfo?.total ?? 0);
+          const turnInput = input - cumulativeInput;
+          const turnOutput = output - cumulativeOutput;
+          const turnCostUsd = cost - cumulativeCostUsd;
+          cumulativeInput = input;
+          cumulativeOutput = output;
+          cumulativeCostUsd = cost;
+          turnCount++;
+          writeOutput(
+            `[Token] input=${turnInput > 0 ? turnInput : input} output=${turnOutput > 0 ? turnOutput : output} ` +
+            `cost=${turnCostUsd >= 0 ? turnCostUsd : cost} cumulative_input=${cumulativeInput} ` +
+            `cumulative_output=${cumulativeOutput} cumulative_cost=${cumulativeCostUsd} turn=${turnCount}\n`,
+          );
+          onTokenUpdate?.({
+            inputTokens: turnInput > 0 ? turnInput : input,
+            outputTokens: turnOutput > 0 ? turnOutput : output,
+            turn: turnCount,
+            cumulativeInput,
+            cumulativeOutput,
+            costUsd: turnCostUsd >= 0 ? turnCostUsd : cost,
+            cumulativeCostUsd,
+          });
         }
         if (!settled) {
           settled = true;
@@ -2257,7 +2282,7 @@ interface StoryTokenUsage {
  * Extract token usage from a story's log file based on agent type.
  * Reads the log file and parses tokens from the agent's output format.
  */
-function extractTokenUsage(
+export function extractTokenUsage(
   logFile: string,
   agentType: AgentType,
   agentModel: string | null,
@@ -2289,25 +2314,30 @@ function extractTokenUsage(
     if (agentType === 'pi') {
       let inputTokens = 0;
       let outputTokens = 0;
+      let costUsd = 0;
       const tokenLines = logContent.match(/^\[Token\].*$/gm) ?? [];
 
       for (const line of tokenLines) {
         const cumulativeInput = line.match(/\bcumulative_input=(\d+)/);
         const cumulativeOutput = line.match(/\bcumulative_output=(\d+)/);
+        const cumulativeCost = line.match(/\bcumulative_cost=([0-9]+(?:\.[0-9]+)?)/);
         const deltaInput = line.match(/\binput=(\d+)/);
         const deltaOutput = line.match(/\boutput=(\d+)/);
+        const deltaCost = line.match(/\bcost=([0-9]+(?:\.[0-9]+)?)/);
 
         if (cumulativeInput && cumulativeOutput) {
           inputTokens = Number(cumulativeInput[1]);
           outputTokens = Number(cumulativeOutput[1]);
+          if (cumulativeCost) costUsd = Number(cumulativeCost[1]);
           continue;
         }
 
         if (deltaInput) inputTokens += Number(deltaInput[1]);
         if (deltaOutput) outputTokens += Number(deltaOutput[1]);
+        if (deltaCost) costUsd += Number(deltaCost[1]);
       }
 
-      return { inputTokens, outputTokens, model: agentModel ?? 'pi', costUsd: 0 };
+      return { inputTokens, outputTokens, model: agentModel ?? 'pi', costUsd: Math.round(costUsd * 1_000_000) / 1_000_000 };
     }
 
     // codex — no known token output format yet
@@ -3449,7 +3479,7 @@ async function executeStory(
 
   // Real-time token update callback — emits WAL events as tokens stream in
   const tokenUpdateCallback: TokenUpdateCallback | undefined =
-    workspaceId && effectiveAgent === 'claude'
+    workspaceId && (effectiveAgent === 'claude' || effectiveAgent === 'pi')
       ? (update) => {
           // Fire-and-forget WAL event for live token streaming
           emitWalEvent(config.port, 'story_token_update', workspaceId, {
@@ -3459,6 +3489,8 @@ async function executeStory(
             output_tokens: update.outputTokens,
             cumulative_input: update.cumulativeInput,
             cumulative_output: update.cumulativeOutput,
+            ...(update.costUsd != null ? { cost_usd: update.costUsd } : {}),
+            ...(update.cumulativeCostUsd != null ? { cumulative_cost_usd: update.cumulativeCostUsd } : {}),
             turn: update.turn,
           }, story.id).catch(() => { /* best-effort — don't block execution */ });
         }
@@ -3815,6 +3847,7 @@ async function executeStory(
           agent_type: effectiveAgent,
           input_tokens: tokenPayload.inputTokens,
           output_tokens: tokenPayload.outputTokens,
+          cost_usd: tokenPayload.costUsd,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'pass', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
@@ -3848,6 +3881,7 @@ async function executeStory(
           log_file: storyLogFile,
           input_tokens: tokenPayload.inputTokens,
           output_tokens: tokenPayload.outputTokens,
+          cost_usd: tokenPayload.costUsd,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });

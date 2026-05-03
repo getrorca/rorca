@@ -759,6 +759,90 @@ describe('POST /api/pipeline/runs/:runId/stories/:storyId/tokens', () => {
     expect(res.status).toBe(404);
     expect(res.body.error).toContain('Story result not found');
   });
+
+  test('preserves explicit zero cost for pi token updates', async () => {
+    const runId = await seedRun({ status: 'running' });
+
+    await execute(`INSERT INTO story_results (run_id, story_id, status) VALUES ($1, 'US-PI-001', 'pass')`, [runId]);
+
+    const res = await request(app)
+      .post(`/api/pipeline/runs/${runId}/stories/US-PI-001/tokens`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ inputTokens: 400, outputTokens: 100, model: 'pi/omlx/local', costUsd: 0 });
+
+    expect(res.status).toBe(200);
+
+    const story = await queryOne(
+      `SELECT input_tokens, output_tokens, cost_usd FROM story_results WHERE run_id = $1 AND story_id = 'US-PI-001'`,
+      [runId],
+    ) as any;
+    expect(story.input_tokens).toBe(400);
+    expect(story.output_tokens).toBe(100);
+    expect(story.cost_usd).toBe(0);
+
+    const usage = await queryOne(
+      `SELECT model, input_tokens, output_tokens, cost_usd
+       FROM token_usage
+       WHERE run_id = $1 AND story_id = 'US-PI-001'
+       ORDER BY id DESC
+       LIMIT 1`,
+      [runId],
+    ) as any;
+    expect(usage.model).toBe('pi/omlx/local');
+    expect(usage.input_tokens).toBe(400);
+    expect(usage.output_tokens).toBe(100);
+    expect(usage.cost_usd).toBe(0);
+  });
+});
+
+// ─── POST /api/pipeline/story-result ────────────────────────────────────────
+
+describe('POST /api/pipeline/story-result', () => {
+  test('records explicit pi cost into story_results and token_usage', async () => {
+    const runId = await seedRun({ status: 'running' });
+
+    const res = await request(app)
+      .post('/api/pipeline/story-result')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        runId,
+        storyId: 'US-PI-002',
+        status: 'pass',
+        inputTokens: 1200,
+        outputTokens: 300,
+        modelUsed: 'pi/openai/gpt-4.1',
+        costUsd: 0.01875,
+      });
+
+    expect(res.status).toBe(201);
+    expect(res.body.ok).toBe(true);
+
+    const story = await queryOne(
+      `SELECT input_tokens, output_tokens, model_used, cost_usd
+       FROM story_results
+       WHERE run_id = $1 AND story_id = 'US-PI-002'
+       ORDER BY id DESC
+       LIMIT 1`,
+      [runId],
+    ) as any;
+    expect(story.input_tokens).toBe(1200);
+    expect(story.output_tokens).toBe(300);
+    expect(story.model_used).toBe('pi/openai/gpt-4.1');
+    expect(story.cost_usd).toBe(0.01875);
+
+    const usage = await queryOne(
+      `SELECT model, input_tokens, output_tokens, cost_usd
+       FROM token_usage
+       WHERE run_id = $1 AND story_id = 'US-PI-002'
+       ORDER BY id DESC
+       LIMIT 1`,
+      [runId],
+    ) as any;
+    expect(usage.model).toBe('pi/openai/gpt-4.1');
+    expect(usage.input_tokens).toBe(1200);
+    expect(usage.output_tokens).toBe(300);
+    expect(usage.cost_usd).toBe(0.01875);
+  });
 });
 
 // ─── GET /api/pipeline/runs/compare ─────────────────────────────────────────
