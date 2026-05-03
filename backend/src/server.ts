@@ -111,7 +111,13 @@ import { WebSocketServer, WebSocket } from 'ws';
 import * as ptyManager from './lib/pty-manager';
 import http from 'http';
 import { AuthError } from './lib/errors';
-import { ensureMcpToken, requireMcpAuth } from './lib/mcp-auth';
+import {
+  ensureMcpToken,
+  isAllowedMcpOrigin,
+  MCP_ALLOWED_ORIGINS,
+  requireLocalhost,
+  requireMcpAuth,
+} from './lib/mcp-auth';
 
 const OSC_TITLE_REGEX = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 const OSC_SEQUENCE_REGEX = /\x1b\][02];[^\x07\x1b]*(?:\x07|\x1b\\)/g;
@@ -162,6 +168,10 @@ app.use(pinoHttp({ logger }));
 // In production, set CORS_ORIGIN to https://rorca.app (or comma-separated list).
 let corsOrigin: boolean | string | string[];
 let allowCredentials = false;
+
+// CLI-046: Only trust proxy headers for MCP when operators explicitly opt into
+// remote MCP behind a trusted TLS terminator that sanitizes Authorization.
+app.set('trust proxy', process.env.RORCA_MCP_ALLOW_REMOTE === 'true');
 
 if (process.env.RORCA_SERVE_STATIC === '1') {
   // Same-origin static mode: reflect request origin (frontend served by Express)
@@ -267,9 +277,18 @@ if (BACKGROUND_RUNTIME_ENABLED) {
 // CA-021: MCP Streamable HTTP transport — auto-generated from OpenAPI spec
 // MCP clients (Claude Code, IDE extensions) connect over HTTP without browser
 // origin headers. Scoped CORS on /mcp only — no credentials, session-id header
-// allowed, localhost-only binding keeps it off the network.
+// allowed, and browser access is restricted to same-origin localhost tools.
+// CORS rejection is handled by the cors package callback and bubbles into the
+// generic Express error path rather than the JSON error schema used elsewhere.
 const mcpCors = cors({
-  origin: true,
+  origin: (origin, callback) => {
+    if (isAllowedMcpOrigin(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`Origin not allowed: ${origin}`));
+  },
   credentials: false,
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Accept', 'Mcp-Session-Id', 'Authorization'],
@@ -278,9 +297,10 @@ const mcpCors = cors({
 });
 if (MCP_HTTP_ENABLED) {
   const mcpHandlers = createMcpRequestHandler(swaggerSpec as any);
-  app.post('/mcp', mcpCors, requireMcpAuth, mcpHandlers.handlePost);
-  app.get('/mcp', mcpCors, requireMcpAuth, mcpHandlers.handleGet);
-  app.delete('/mcp', mcpCors, requireMcpAuth, mcpHandlers.handleDelete);
+  logger.info({ origins: MCP_ALLOWED_ORIGINS }, '[MCP Aegis] HTTP transport locked to localhost browser origins by default');
+  app.post('/mcp', mcpCors, requireLocalhost, requireMcpAuth, mcpHandlers.handlePost);
+  app.get('/mcp', mcpCors, requireLocalhost, requireMcpAuth, mcpHandlers.handleGet);
+  app.delete('/mcp', mcpCors, requireLocalhost, requireMcpAuth, mcpHandlers.handleDelete);
 }
 
 // MC-004: MCP Tools enumeration endpoint (public — used by VS Code extension, no auth required)
