@@ -57,6 +57,19 @@ The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS 
   - **Claude Code CLI** installed and authenticated (`claude --version`) — uses your Pro/Max subscription, no API key
   - **OpenCode CLI** (`npm i -g opencode`, `opencode --version` >= 0.1.0) + an API key for your chosen provider
 
+### Pi peer dependency
+
+`pi` is a peer dependency, not bundled into the Rorca package. That keeps the CLI and future standalone builds smaller and avoids auto-running remote installers without user consent.
+
+If `pi` is missing, `rorca init` and `rorca auth login` detect that and offer an install bridge:
+
+- `npm install -g @mariozechner/pi-coding-agent`
+- `pnpm add -g @mariozechner/pi-coding-agent`
+- `bun add -g @mariozechner/pi-coding-agent`
+- `curl -fsSL https://pi.mariozechner.com/install.sh | sh` after explicit confirmation
+
+For non-interactive environments, use `rorca init --auto-install-pi` to skip the prompt and run the npm install path directly.
+
 ## Local Supabase Development
 
 - Initialize local Supabase config with `supabase init` if needed

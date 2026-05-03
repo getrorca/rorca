@@ -66,6 +66,7 @@
     "ansi-to-html": "^0.7.2",
     "commander": "^12.1.0",
     "date-fns": "^4.1.0",
+    "execa": "^9.6.1",
     "framer-motion": "^12.38.0",
     "lucide-react": "^1.11.0",
     "mermaid": "^11.14.0",

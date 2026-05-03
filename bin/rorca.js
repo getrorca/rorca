@@ -7,6 +7,7 @@ import process from 'node:process';
 import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline/promises';
+import { execa } from 'execa';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -23,6 +24,7 @@ const PI_INSTALL_METHODS = {
     bun: 'bun add -g @mariozechner/pi-coding-agent',
     curl: 'curl -fsSL https://pi.mariozechner.com/install.sh | sh',
 };
+const PI_INSTALL_SCRIPT_URL = 'https://pi.mariozechner.com/install.sh';
 const PI_PROVIDER_LABELS = {
     openai: 'ChatGPT Plus/Pro',
     chatgpt: 'ChatGPT Plus/Pro',
@@ -417,6 +419,186 @@ function resolvePiBinPathLocal() {
 }
 function resolvePiBinPath(preferred) {
     return preferred || resolvePiBinPathLocal() || 'pi';
+}
+function parsePiVersion(output) {
+    const match = output.match(/(\d+\.\d+\.\d+)/);
+    return match ? match[1] : null;
+}
+function detectPi() {
+    const binPath = resolvePiBinPathLocal();
+    if (!binPath) {
+        return { piInstalled: false, piVersion: null, piBinPath: null };
+    }
+    const result = spawnSync(binPath, ['--version'], {
+        stdio: ['ignore', 'pipe', 'ignore'],
+        encoding: 'utf8',
+        shell: process.platform === 'win32',
+    });
+    if (result.status !== 0) {
+        return { piInstalled: false, piVersion: null, piBinPath: null };
+    }
+    return {
+        piInstalled: true,
+        piVersion: parsePiVersion(result.stdout),
+        piBinPath: binPath,
+    };
+}
+function hasInteractiveTty() {
+    return Boolean(process.stdout.isTTY && process.stdin.isTTY);
+}
+function detectPreferredPiInstallMethod() {
+    const userAgent = process.env.npm_config_user_agent?.toLowerCase() ?? '';
+    if (userAgent.startsWith('bun/'))
+        return 'bun';
+    if (userAgent.startsWith('pnpm/'))
+        return 'pnpm';
+    return 'npm';
+}
+function getShellRcPath() {
+    const shell = process.env.SHELL ?? '';
+    if (shell.includes('fish'))
+        return '~/.config/fish/config.fish';
+    if (shell.includes('bash'))
+        return '~/.bashrc';
+    return '~/.zshrc';
+}
+function printPiPathTroubleshooting() {
+    const shellRcPath = getShellRcPath();
+    console.error(red('✗ Pi installation completed but binary not on PATH.'));
+    console.error('');
+    console.error("This usually means npm's global bin directory is not in your PATH.");
+    console.error('Try:');
+    console.error('  npm config get prefix');
+    if (shellRcPath.endsWith('config.fish')) {
+        console.error(`  echo 'fish_add_path \"<prefix>/bin\"' >> ${shellRcPath}`);
+    }
+    else {
+        console.error(`  echo 'export PATH=\"<prefix>/bin:$PATH\"' >> ${shellRcPath}`);
+    }
+    console.error(`  source ${shellRcPath}`);
+}
+function printPiMissingInstructions(extra) {
+    console.error('Pi binary not found.');
+    console.error('');
+    console.error('Rorca uses pi (https://github.com/mariozechner/pi) as its execution engine.');
+    console.error('');
+    printPiInstallMethods();
+    if (extra?.includeAutoInstallHint) {
+        console.error('');
+        console.error('Non-interactive shell detected. Re-run with --auto-install-pi to install automatically.');
+    }
+}
+function splitInstallCommand(command) {
+    if (command === PI_INSTALL_METHODS.npm) {
+        return { cmd: 'npm', args: ['install', '-g', '@mariozechner/pi-coding-agent'] };
+    }
+    if (command === PI_INSTALL_METHODS.pnpm) {
+        return { cmd: 'pnpm', args: ['add', '-g', '@mariozechner/pi-coding-agent'] };
+    }
+    if (command === PI_INSTALL_METHODS.bun) {
+        return { cmd: 'bun', args: ['add', '-g', '@mariozechner/pi-coding-agent'] };
+    }
+    if (command === PI_INSTALL_METHODS.curl) {
+        return { cmd: 'sh', args: ['-c', command] };
+    }
+    throw new Error(`Unsupported pi install command: ${command}`);
+}
+async function promptForPiInstallMethod() {
+    const defaultMethod = detectPreferredPiInstallMethod();
+    const defaultChoice = defaultMethod === 'npm' ? '1' : defaultMethod === 'pnpm' ? '2' : '3';
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+        console.log('Pi binary not found.');
+        console.log('');
+        console.log('Rorca uses pi (https://github.com/mariozechner/pi) as its execution engine.');
+        console.log('');
+        console.log('Install pi now?');
+        console.log(`  [1] ${PI_INSTALL_METHODS.npm}${defaultChoice === '1' ? ' (default)' : ''}`);
+        console.log(`  [2] ${PI_INSTALL_METHODS.pnpm}${defaultChoice === '2' ? ' (default)' : ''}`);
+        console.log(`  [3] ${PI_INSTALL_METHODS.bun}${defaultChoice === '3' ? ' (default)' : ''}`);
+        console.log(`  [4] ${PI_INSTALL_METHODS.curl}`);
+        console.log("  [5] Skip — I'll install it manually");
+        console.log('');
+        const rawChoice = await rl.question(`Choice [1-5] (default ${defaultChoice}): `);
+        const choice = rawChoice.trim() || defaultChoice;
+        if (choice === '1')
+            return 'npm';
+        if (choice === '2')
+            return 'pnpm';
+        if (choice === '3')
+            return 'bun';
+        if (choice === '4')
+            return 'curl';
+        if (choice === '5')
+            return 'skip';
+        console.log(yellow(`Unrecognized choice "${choice}". Using default option ${defaultChoice}.`));
+        return defaultMethod;
+    }
+    finally {
+        rl.close();
+    }
+}
+async function confirmCurlInstall() {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+        console.log(PI_INSTALL_SCRIPT_URL);
+        const answer = await rl.question(`Run curl install script from pi.mariozechner.com? [y/N]: `);
+        return answer.trim().toLowerCase() === 'y';
+    }
+    finally {
+        rl.close();
+    }
+}
+async function executePiInstall(method) {
+    const command = PI_INSTALL_METHODS[method];
+    const { cmd, args } = splitInstallCommand(command);
+    if (method === 'curl') {
+        const confirmed = await confirmCurlInstall();
+        if (!confirmed) {
+            console.log(yellow(`Skipped pi install. Runs will fail until pi is installed: ${PI_INSTALL_SCRIPT_URL}`));
+            return { ok: true, skipped: true };
+        }
+    }
+    try {
+        await execa(cmd, args, { stdio: 'inherit', shell: process.platform === 'win32' });
+    }
+    catch (error) {
+        const timestamp = new Date().toISOString();
+        const exitCode = typeof error === 'object' && error !== null && 'exitCode' in error
+            ? String(error.exitCode ?? 'unknown')
+            : 'unknown';
+        const shortMessage = error instanceof Error
+            ? error.message.split('\n')[0]
+            : 'Unknown error';
+        console.error(red(`Pi installation failed: ${shortMessage}. See output above.`));
+        console.error(dim(`[debug ${timestamp}] command="${cmd} ${args.join(' ')}" exitCode=${exitCode}`));
+        return { ok: false };
+    }
+    const status = detectPi();
+    if (!status.piInstalled) {
+        printPiPathTroubleshooting();
+        return { ok: false };
+    }
+    return { ok: true };
+}
+async function ensurePiInstalled(options) {
+    const status = detectPi();
+    if (status.piInstalled) {
+        return { ok: true };
+    }
+    if (options?.autoInstall) {
+        return executePiInstall('npm');
+    }
+    if (!hasInteractiveTty()) {
+        printPiMissingInstructions({ includeAutoInstallHint: true });
+        return { ok: false };
+    }
+    const method = await promptForPiInstallMethod();
+    if (method === 'skip') {
+        console.log(yellow(`Runs will fail until pi is installed: ${PI_INSTALL_SCRIPT_URL}`));
+        return { ok: true, skipped: true };
+    }
+    return executePiInstall(method);
 }
 function buildRorcaPiMcpExtension(mcpUrl) {
     const escapedUrl = JSON.stringify(mcpUrl);
@@ -858,7 +1040,11 @@ async function startServer(options) {
         });
     });
 }
-async function runInit(targetPath) {
+async function runInit(targetPath, options) {
+    const pi = await ensurePiInstalled({ autoInstall: options?.autoInstallPi });
+    if (!pi.ok) {
+        return 1;
+    }
     const root = path.resolve(targetPath);
     const rorcaDir = path.join(root, '.rorca');
     const skillsDir = path.join(rorcaDir, 'skills');
@@ -893,6 +1079,7 @@ async function runInit(targetPath) {
     console.log('Next steps:');
     console.log('1. Register this workspace in Rorca if you have not already.');
     console.log('2. Run rorca start to launch.');
+    return 0;
 }
 function formatWalLine(event) {
     const payload = parseWalPayload(event);
@@ -1255,16 +1442,32 @@ async function runPiAuthStatus() {
     return 0;
 }
 async function runPiAuthCommand(action, provider) {
-    const health = await fetchPiHealth();
-    if (!health.piInstalled) {
-        printPiInstallMethods();
-        return 1;
+    if (action === 'login') {
+        const pi = await ensurePiInstalled();
+        if (!pi.ok) {
+            return 1;
+        }
+        if (pi.skipped) {
+            return 0;
+        }
+    }
+    const health = await fetchPiHealth().catch(() => null);
+    if (!health?.piInstalled) {
+        if (action === 'logout') {
+            printPiInstallMethods();
+            return 1;
+        }
+        const detected = detectPi();
+        if (!detected.piInstalled) {
+            printPiInstallMethods();
+            return 1;
+        }
     }
     const args = ['auth', action];
     if (provider) {
         args.push(provider);
     }
-    const result = await runCommand(resolvePiBinPath(health.piBinPath), args, { stdio: 'inherit' });
+    const result = await runCommand(resolvePiBinPath(health?.piBinPath), args, { stdio: 'inherit' });
     if (result.code !== 0) {
         return result.code;
     }
@@ -1348,8 +1551,9 @@ program
 program
     .command('init')
     .option('--path <dir>', 'Target directory', process.cwd())
+    .option('--auto-install-pi', 'Install pi automatically with npm in non-interactive environments')
     .action(async (options) => {
-    await runInit(options.path);
+    process.exitCode = await runInit(options.path, { autoInstallPi: Boolean(options.autoInstallPi) });
 });
 program
     .command('chat')
