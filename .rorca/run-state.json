@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T06:27:25.937Z",
+  "lastUpdatedAt": "2026-05-03T06:33:32.502Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -223,6 +223,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 339993
+    },
+    {
+      "storyId": "CLI-033",
+      "title": "DB Strategy Orchestrator — Native PG default, Docker opt-in (Strategy C)",
+      "status": "passed",
+      "startedAt": "2026-05-03T06:27:41.519Z",
+      "finishedAt": "2026-05-03T06:33:32.502Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 350983
     }
   ],
   "failedStories": [],
