@@ -3482,3 +3482,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Architecture] HTTP MCP and stdio MCP are separate exposure surfaces: When changing MCP security or route exposure, audit both the OpenAPI-generated HTTP bridge in backend/src/lib/mcp-http.ts and the legacy hand-registered stdio server in backend/src/mcp/server.ts.
 > Rule: HTTP MCP and stdio MCP are separate exposure surfaces: When changing MCP security or route exposure, audit both the OpenAPI-generated HTTP bridge in backend/src/lib/mcp-http.ts and the legacy hand-registered stdio server in backend/src/mcp/server.ts.
+
+## 2026-05-03 [Gotcha] MCP HTTP auth is Bearer-only; OAuth probes must return 501: Do not ship placeholder OAuth handlers for /mcp. Rorca MCP uses Bearer token auth from ~/.rorca/mcp-token, and OAuth-related endpoints should return explicit 501 guidance instead of fake tokens.
+> Rule: MCP HTTP auth is Bearer-only; OAuth probes must return 501: Do not ship placeholder OAuth handlers for /mcp. Rorca MCP uses Bearer token auth from ~/.rorca/mcp-token, and OAuth-related endpoints should return explicit 501 guidance instead of fake tokens.
