@@ -1573,6 +1573,7 @@ interface ROITimeSeriesRow {
  *     summary: ROI calculator — estimated developer hours saved
  *     operationId: getRoiMetrics
  *     x-rorca-tier: paid
+ *     x-rorca-capability: finops
  *     x-rorca-rationale: "ROI analytics are part of the commercial FinOps surface and should not be exposed through the free CLI contract."
  *     description: Calculates estimated developer hours saved based on passed stories, configurable hourly rate and hours-per-story values. Deduplicates retried stories and includes a daily time series for trend charts. Requires workspace_id.
  *     parameters:
@@ -1751,6 +1752,7 @@ router.get('/roi', async (req: Request, res: Response) => {
  *     summary: Update ROI calculator configuration
  *     operationId: updateRoiConfig
  *     x-rorca-tier: paid
+ *     x-rorca-capability: finops
  *     x-rorca-rationale: "ROI configuration is part of the commercial FinOps feature set and belongs behind the paid plan boundary."
  *     description: Updates the ROI calculator configuration (hours_per_story and hourly_rate) for a specific workspace. These values are used by the ROI metrics endpoint to estimate developer hours saved and net savings.
  *     requestBody:
@@ -1865,6 +1867,7 @@ function tierFromModel(model: string): string {
  *     summary: Per-run FinOps dashboard data
  *     operationId: getFinOpsRun
  *     x-rorca-tier: paid
+ *     x-rorca-capability: finops
  *     x-rorca-rationale: "Per-run FinOps analytics are commercial cost visibility features and must stay outside the free CLI/MCP surface."
  *     description: Returns detailed FinOps data for a specific pipeline run, including per-story cost breakdown with model tier classification, run summary aggregated by model, savings vs all-Opus baseline, model distribution for pie charts, and escalation log from WAL events. For subscription-based agents (claude, codex), savings and cost fields are null.
  *     parameters:
@@ -2073,6 +2076,7 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
  *     summary: Historical FinOps data
  *     operationId: getFinOpsHistorical
  *     x-rorca-tier: paid
+ *     x-rorca-capability: finops
  *     x-rorca-rationale: "Historical FinOps reporting is a commercial analytics feature and should not be part of the free contract."
  *     description: Returns cumulative cost data broken down by workspace, spec, and month, along with a daily cost trend for charts, model distribution, projected monthly cost, and savings vs all-Opus baseline. Default range is 90 days. For subscription-only runs, the savings field is null.
  *     parameters:
@@ -2312,6 +2316,7 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
  *     summary: Get Pi provider usage aggregates
  *     operationId: getPiProviderAnalytics
  *     x-rorca-tier: paid
+ *     x-rorca-capability: finops
  *     x-rorca-rationale: "Pi provider cost analytics are part of the paid FinOps surface and should not be reachable from the free CLI contract."
  *     description: Returns FinOps aggregates for Pi runs grouped by Pi provider. Data is derived from token_usage joined with pipeline_runs, filtered to pipeline runs where the execution agent is pi. Providers are parsed from Pi model identifiers such as pi/openai/gpt-4.1 or pi/omlx/local.
  *     parameters:
@@ -2404,6 +2409,7 @@ router.get('/pi-providers', async (req: Request, res: Response) => {
  *     summary: CSV export of per-story cost data
  *     operationId: exportFinOpsCsv
  *     x-rorca-tier: paid
+ *     x-rorca-capability: finops
  *     x-rorca-rationale: "FinOps export is a commercial reporting feature and should remain behind the paid plan boundary."
  *     description: Exports per-story token usage and cost data as a CSV file. Includes computed columns for model tier, Opus baseline cost, and savings vs Opus. Can be filtered by run_id, workspace_id, and date range. The CSV includes headers for run_id, story_id, spec_slug, model, tier, agent_type, input_tokens, output_tokens, cost_usd, opus_baseline_usd, savings_usd, recorded_at, and workspace_id.
  *     parameters:

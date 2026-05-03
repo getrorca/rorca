@@ -4,7 +4,14 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { fileURLToPath } from 'url';
 import { swaggerSpec } from '../backend/src/lib/swagger';
-import { getRorcaTier, summarizeRorcaTiers, type RorcaTier } from '../backend/src/lib/tier-auth';
+import {
+  getRorcaTier,
+  isPlanCapability,
+  PLAN_CAPABILITY_KEYS,
+  summarizeRorcaTiers,
+  type PlanCapability,
+  type RorcaTier,
+} from '../backend/src/lib/tier-auth';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -24,6 +31,7 @@ type Operation = {
     };
   };
   'x-rorca-tier'?: string;
+  'x-rorca-capability'?: string;
   'x-rorca-rationale'?: string;
   'x-rorca-public-api'?: boolean;
 };
@@ -111,6 +119,8 @@ const EXPECTED: Record<RorcaTier, string[]> = {
     'POST /api/admin/embed-all',
     'GET /api/admin/embed-all/status',
     'GET /api/admin/embedding-provider',
+    'GET /api/admin/mcp-audit',
+    'GET /api/admin/mcp-audit/summary',
     'POST /api/admin/graph-backfill',
     'GET /api/admin/graph-stats',
     'POST /api/admin/age-recheck',
@@ -130,6 +140,34 @@ const SENSITIVE_PREFIXES = [
 const SENSITIVE_EXACT = new Set([
   'POST /api/workspaces',
 ]);
+
+const EXPECTED_PAID_CAPABILITIES: Record<string, PlanCapability> = {
+  'GET /api/teams': 'teams',
+  'POST /api/teams': 'teams',
+  'POST /api/teams/{id}/invites': 'teams',
+  'GET /api/teams/{id}/members': 'teams',
+  'PATCH /api/teams/{id}/members/{userId}': 'teams',
+  'DELETE /api/teams/{id}/members/{userId}': 'teams',
+  'PATCH /api/teams/{id}/settings': 'teams',
+  'GET /api/teams/{id}/direction': 'teams',
+  'PUT /api/teams/{id}/direction': 'teams',
+  'POST /api/teams/{id}/direction/preview': 'teams',
+  'GET /api/invites/{token}': 'teams',
+  'POST /api/invites/{token}/accept': 'teams',
+  'GET /api/memory/cross-workspace/{workspaceId}': 'federatedMemory',
+  'POST /api/memory/cross-workspace/{workspaceId}/accept/{entryId}': 'federatedMemory',
+  'POST /api/memory/cross-workspace/{workspaceId}/dismiss/{entryId}': 'federatedMemory',
+  'GET /api/workspaces/{id}/integrations/audit-log': 'grcAuditTraces',
+  'GET /api/analytics/roi': 'finops',
+  'PUT /api/analytics/roi/config': 'finops',
+  'GET /api/analytics/finops/run/{runId}': 'finops',
+  'GET /api/analytics/finops/historical': 'finops',
+  'GET /api/analytics/pi-providers': 'finops',
+  'GET /api/analytics/finops/export': 'finops',
+  'GET /api/workspaces/{id}/team-members': 'teams',
+  'POST /api/marketplace/publish': 'marketplacePublish',
+  'POST /api/marketplace/{id}/fork': 'marketplacePublish',
+};
 
 function contractLine(method: string, pathname: string): string {
   return `${method.toUpperCase()} ${pathname}`;
@@ -215,6 +253,18 @@ function main(): void {
     if (!metadata.rationale) {
       errors.push(`Route ${key} is missing x-rorca-rationale`);
     }
+    if (expectedTier === 'paid') {
+      const rawCapability = operation['x-rorca-capability'];
+      if (!isPlanCapability(rawCapability)) {
+        errors.push(
+          `Paid route ${key} must include valid x-rorca-capability (${PLAN_CAPABILITY_KEYS.join(', ')})`,
+        );
+      } else if (EXPECTED_PAID_CAPABILITIES[key] && rawCapability !== EXPECTED_PAID_CAPABILITIES[key]) {
+        errors.push(
+          `Paid route ${key} expected capability ${EXPECTED_PAID_CAPABILITIES[key]} but found ${rawCapability}`,
+        );
+      }
+    }
     if (expectedTier === 'public' && metadata.publicApi !== true) {
       errors.push(`Public route ${key} must include x-rorca-public-api: true`);
     }
@@ -229,6 +279,14 @@ function main(): void {
 
     if (!expectedEntries.has(key)) {
       errors.push(`Unexpected tier annotation on ${key} (${metadata.tier})`);
+    }
+    if (metadata.tier === 'paid' && !expectedEntries.has(key)) {
+      const rawCapability = operation['x-rorca-capability'];
+      if (!isPlanCapability(rawCapability)) {
+        errors.push(
+          `Paid route ${key} must include valid x-rorca-capability (${PLAN_CAPABILITY_KEYS.join(', ')})`,
+        );
+      }
     }
 
     const pathname = key.slice(key.indexOf(' ') + 1);

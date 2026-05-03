@@ -112,6 +112,7 @@ Rorca runs on localhost as a single-user developer tool. Project Aegis exists so
 ### Default Stance
 
 - Browser/web UI: soft-auth can inject `LOCAL_ADMIN` for normal `/api/*` requests in local single-user mode. See **Critical Gotchas → Auth Middleware — Intentionally Bypassed**.
+- LOCAL_ADMIN carries `role: 'admin'` and `plan: 'pro'`, so local single-user development continues to pass auth-tier, paid-tier, and admin-tier HTTP checks without requiring Stripe or a cloud-issued subscription record.
 - MCP HTTP: Bearer token is always required. Missing tokens return `401 MCP_AUTH_REQUIRED`, invalid tokens return `401 MCP_AUTH_INVALID`, and neither case may ever fall through to `LOCAL_ADMIN`.
 - MCP admin tools: public tokens fail with `403 MCP_AUTH_INSUFFICIENT_TIER`.
 - Production deployments: set `AUTH_REQUIRED=true` to force full JWT auth for regular API routes.
@@ -142,6 +143,13 @@ Rorca runs on localhost as a single-user developer tool. Project Aegis exists so
 - Tokens are generated locally and must never be logged or committed.
 - Rotate with `rorca mcp rotate-token --public`, `--admin`, or `--all`.
 - Configure clients with `rorca mcp setup-claude` or `rorca mcp setup-claude --admin`.
+
+### Plan Resolution
+
+- Route-tier plan gating reads the effective user plan from `users.plan`.
+- Self-hosted instances can override paid capability checks with `RORCA_LICENSE_KEY`; valid licenses are decoded locally and can grant `pro`, `team`, or `enterprise`.
+- Cloud deployments keep `users.plan` in sync from Stripe webhooks.
+- Manual recovery or operator overrides are still valid: `UPDATE users SET plan='pro' WHERE id='...'`.
 
 ## Lite Mode
 
