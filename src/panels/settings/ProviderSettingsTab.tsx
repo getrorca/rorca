@@ -1,5 +1,5 @@
 import React, { useState, useEffect, useCallback, useRef, useMemo } from 'react';
-import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal, GitBranch, X, Brain } from 'lucide-react';
+import { Key, Save, Loader2, Trash2, Plus, Check, AlertTriangle, Zap, Globe, CheckCircle2, XCircle, Cpu, BookOpen, SlidersHorizontal, Search, Database, RefreshCw, ChevronDown, ChevronRight, Lock, Terminal, GitBranch, X, Brain, Copy } from 'lucide-react';
 import { Github } from '../../components/icons/GithubIcon';
 import { type EffortLevel } from '../../components/ThinkingControls';
 import { ProBadge } from '../../components/UpgradePrompt';
@@ -9,6 +9,7 @@ import { useWorkspace } from '../../contexts/WorkspaceContext';
 import { useTheme, type ThemeMode } from '../../contexts/ThemeContext';
 import { apiFetch } from '../../lib/apiFetch';
 import { useGlobalToast } from '../../contexts/ToastContext';
+import SlideOver from '../../components/SlideOver';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -96,6 +97,26 @@ interface ClaudeAuthState {
   cliVersion?: string;
 }
 
+interface HealthResponse {
+  piInstalled?: boolean;
+  piVersion?: string | null;
+}
+
+interface PiModel {
+  provider: string;
+  model: string;
+  contextTokens: number;
+  maxOutTokens: number;
+  thinking: boolean;
+  images: boolean;
+}
+
+interface PiModelsResponse {
+  models: PiModel[];
+  count: number;
+  piBinPath: string;
+}
+
 // ─── Constants ──────────────────────────────────────────────────────────────
 
 const PROVIDER_DESCRIPTIONS: Record<string, string> = {
@@ -118,6 +139,13 @@ const COST_LABELS: Record<string, { label: string; color: string }> = {
   high: { label: 'High', color: 'text-orange-500' },
   premium: { label: 'Premium', color: 'text-red-400' },
 };
+
+const PI_INSTALL_COMMANDS = {
+  npm: 'npm install -g @mariozechner/pi-coding-agent',
+  pnpm: 'pnpm add -g @mariozechner/pi-coding-agent',
+  bun: 'bun add -g @mariozechner/pi-coding-agent',
+  curl: 'curl -fsSL https://pi.mariozechner.com/install.sh | sh',
+} as const;
 
 // ─── Toggle Switch ───────────────────────────────────────────────────────────
 
@@ -943,6 +971,7 @@ function ConnectionsHubSection() {
   const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
   const [claudeAuth, setClaudeAuth] = useState<ClaudeAuthState | null>(null);
   const [agentConfig, setAgentConfig] = useState<AgentConfig | null>(null);
+  const [health, setHealth] = useState<HealthResponse | null>(null);
   const [ollamaStatus, setOllamaStatus] = useState<OllamaStatus | null>(null);
   const [openrouterViaEnv, setOpenrouterViaEnv] = useState(false);
   const [loading, setLoading] = useState(true);
@@ -953,16 +982,18 @@ function ConnectionsHubSection() {
 
   const fetchData = useCallback(async () => {
     try {
-      const [keyData, config, claude, ollama] = await Promise.all([
+      const [keyData, config, claude, ollama, healthData] = await Promise.all([
         apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
         apiFetch<AgentConfig>('/api/config'),
         apiFetch<ClaudeAuthState>('/api/config/claude-auth'),
         apiFetch<OllamaStatus>('/api/config/ollama'),
+        apiFetch<HealthResponse>('/api/health', { silent: true }).catch(() => null),
       ]);
       setKeys(keyData.keys);
       setAgentConfig(config);
       setClaudeAuth(claude);
       setOllamaStatus(ollama);
+      setHealth(healthData);
       setOpenrouterViaEnv(!!(config as any).openrouterViaEnv);
     } catch { /* silent */ } finally {
       setLoading(false);
@@ -1079,21 +1110,12 @@ function ConnectionsHubSection() {
       </ConnectionCard>
 
       {/* 4. Pi CLI */}
-      <ConnectionCard
-        icon={<span className="inline-flex h-4 w-4 items-center justify-center text-sm font-semibold leading-none">π</span>}
-        name="Pi"
-        description="Uses the Pi CLI as the 4th execution engine. No API key needed."
-        statusDot={agentConfig?.piInstalled ? 'green' : 'amber'}
-        statusLabel={
-          agentConfig?.piInstalled
-            ? `Installed${agentConfig.piVersion ? ` (v${agentConfig.piVersion})` : ''}`
-            : 'Not installed'
-        }
-      >
-        {!agentConfig?.piInstalled && (
-          <p className="mt-2 ml-7 text-[11px] text-amber-400">Install with: npm install -g @mariozechner/pi-coding-agent</p>
-        )}
-      </ConnectionCard>
+      <PiEngineCard
+        agentType={agentConfig?.agentType ?? null}
+        piInstalled={health?.piInstalled ?? agentConfig?.piInstalled ?? false}
+        piVersion={health?.piVersion ?? agentConfig?.piVersion ?? null}
+        onRefreshAgentConfig={fetchData}
+      />
 
       {/* 5. Anthropic API */}
       <ConnectionCard
@@ -1186,6 +1208,349 @@ function ConnectionsHubSection() {
         )}
       </ConnectionCard>
     </div>
+  );
+}
+
+type PiInstallMethod = keyof typeof PI_INSTALL_COMMANDS;
+
+function formatPiTokenCount(tokens: number): string {
+  if (tokens >= 1000000) return `${(tokens / 1000000).toFixed(tokens % 1000000 === 0 ? 0 : 1)}M`;
+  if (tokens >= 1000) return `${(tokens / 1000).toFixed(tokens % 1000 === 0 ? 0 : 1)}K`;
+  return String(tokens);
+}
+
+function PiInstallTabs() {
+  const toast = useGlobalToast();
+  const [activeTab, setActiveTab] = useState<PiInstallMethod>('npm');
+  const tabEntries = Object.entries(PI_INSTALL_COMMANDS) as Array<[PiInstallMethod, string]>;
+  const activeCommand = PI_INSTALL_COMMANDS[activeTab];
+
+  const handleCopy = useCallback(async (method: PiInstallMethod) => {
+    const command = PI_INSTALL_COMMANDS[method];
+    if (!navigator.clipboard?.writeText) {
+      toast.error('Clipboard access is unavailable here. Copy the command manually.');
+      return;
+    }
+
+    try {
+      await navigator.clipboard.writeText(command);
+      toast.success(`${method.toUpperCase()} install command copied`);
+    } catch {
+      toast.error('Could not copy automatically. Copy the command manually.');
+    }
+  }, [toast]);
+
+  return (
+    <div className="mt-3 rounded-lg border border-border bg-bg">
+      <div role="tablist" aria-label="Pi install methods" className="flex flex-wrap gap-1 border-b border-border p-1">
+        {tabEntries.map(([method]) => {
+          const isActive = method === activeTab;
+          return (
+            <button
+              key={method}
+              type="button"
+              role="tab"
+              aria-selected={isActive}
+              aria-controls={`pi-install-panel-${method}`}
+              id={`pi-install-tab-${method}`}
+              onClick={() => setActiveTab(method)}
+              className={`rounded-md px-3 py-1.5 text-[11px] font-medium uppercase tracking-wide transition-colors ${
+                isActive
+                  ? 'bg-accent/10 text-accent'
+                  : 'text-muted hover:bg-surface-100 hover:text-[var(--text)]'
+              }`}
+            >
+              {method.toUpperCase()}
+            </button>
+          );
+        })}
+      </div>
+
+      <div
+        id={`pi-install-panel-${activeTab}`}
+        role="tabpanel"
+        aria-labelledby={`pi-install-tab-${activeTab}`}
+        className="space-y-2 p-3"
+      >
+        <div className="flex flex-col gap-2 sm:flex-row sm:items-start sm:justify-between">
+          <code className="block min-w-0 overflow-x-auto rounded-md border border-border bg-panel px-3 py-2 text-[11px] text-[var(--text)]">
+            {activeCommand}
+          </code>
+          <button
+            type="button"
+            onClick={() => handleCopy(activeTab)}
+            aria-label={`Copy ${activeTab.toUpperCase()} install command`}
+            className="inline-flex items-center justify-center gap-1.5 rounded-md border border-border px-3 py-2 text-[11px] text-muted transition-colors hover:border-accent/40 hover:text-[var(--text)]"
+          >
+            <Copy size={11} />
+            Copy
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+function PiModelsSlideOver({
+  isOpen,
+  onClose,
+  loading,
+  error,
+  models,
+}: {
+  isOpen: boolean;
+  onClose: () => void;
+  loading: boolean;
+  error: string | null;
+  models: PiModel[];
+}) {
+  return (
+    <SlideOver isOpen={isOpen} onClose={onClose} title="Pi Model Browser">
+      <div className="p-4 sm:p-6">
+        <div className="mb-4">
+          <h3 className="text-sm font-semibold text-[var(--text)]">Available Pi Models</h3>
+          <p className="mt-1 text-xs text-muted">
+            Provider-authenticated models discovered from the local Pi CLI.
+          </p>
+        </div>
+
+        {loading ? (
+          <div className="flex min-h-40 items-center justify-center gap-2 rounded-xl border border-border bg-panel text-sm text-muted">
+            <Loader2 size={16} className="animate-spin" />
+            Loading models...
+          </div>
+        ) : error ? (
+          <div className="rounded-xl border border-red-500/20 bg-red-500/10 p-4 text-sm text-red-400">
+            {error}
+          </div>
+        ) : models.length === 0 ? (
+          <div className="rounded-xl border border-border bg-panel p-4 text-sm text-muted">
+            No Pi models were returned by the local CLI.
+          </div>
+        ) : (
+          <>
+            <div className="space-y-3 sm:hidden">
+              {models.map((model) => (
+                <div key={`${model.provider}:${model.model}`} className="rounded-xl border border-border bg-panel p-4">
+                  <div className="flex items-start justify-between gap-3">
+                    <div>
+                      <div className="text-sm font-medium text-[var(--text)]">{model.model}</div>
+                      <div className="mt-1 text-xs text-muted">{model.provider}</div>
+                    </div>
+                    <div className="flex gap-1">
+                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${model.thinking ? 'bg-emerald-500/10 text-emerald-400' : 'bg-surface-100 text-muted'}`}>Thinking</span>
+                      <span className={`rounded px-1.5 py-0.5 text-[10px] font-medium ${model.images ? 'bg-cyan-500/10 text-cyan-400' : 'bg-surface-100 text-muted'}`}>Images</span>
+                    </div>
+                  </div>
+                  <dl className="mt-3 grid grid-cols-2 gap-3 text-xs">
+                    <div>
+                      <dt className="text-muted">Context</dt>
+                      <dd className="mt-1 text-[var(--text)]">{formatPiTokenCount(model.contextTokens)}</dd>
+                    </div>
+                    <div>
+                      <dt className="text-muted">Max Out</dt>
+                      <dd className="mt-1 text-[var(--text)]">{formatPiTokenCount(model.maxOutTokens)}</dd>
+                    </div>
+                  </dl>
+                </div>
+              ))}
+            </div>
+
+            <div className="hidden overflow-x-auto sm:block">
+              <table className="min-w-full text-left text-sm">
+                <thead>
+                  <tr className="border-b border-border text-xs uppercase tracking-wide text-muted">
+                    <th className="px-3 py-2 font-medium">Provider</th>
+                    <th className="px-3 py-2 font-medium">Model</th>
+                    <th className="px-3 py-2 font-medium">Context</th>
+                    <th className="px-3 py-2 font-medium">Max Out</th>
+                    <th className="px-3 py-2 font-medium">Thinking</th>
+                    <th className="px-3 py-2 font-medium">Images</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {models.map((model) => (
+                    <tr key={`${model.provider}:${model.model}`} className="border-b border-border/60 last:border-0">
+                      <td className="px-3 py-3 text-muted">{model.provider}</td>
+                      <td className="px-3 py-3 font-medium text-[var(--text)]">{model.model}</td>
+                      <td className="px-3 py-3 text-muted">{formatPiTokenCount(model.contextTokens)}</td>
+                      <td className="px-3 py-3 text-muted">{formatPiTokenCount(model.maxOutTokens)}</td>
+                      <td className="px-3 py-3">
+                        <span className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-medium ${model.thinking ? 'bg-emerald-500/10 text-emerald-400' : 'bg-surface-100 text-muted'}`}>
+                          {model.thinking ? 'Yes' : 'No'}
+                        </span>
+                      </td>
+                      <td className="px-3 py-3">
+                        <span className={`inline-flex rounded px-1.5 py-0.5 text-[10px] font-medium ${model.images ? 'bg-cyan-500/10 text-cyan-400' : 'bg-surface-100 text-muted'}`}>
+                          {model.images ? 'Yes' : 'No'}
+                        </span>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          </>
+        )}
+      </div>
+    </SlideOver>
+  );
+}
+
+function PiEngineCard({
+  agentType,
+  piInstalled,
+  piVersion,
+  onRefreshAgentConfig,
+}: {
+  agentType: AgentConfig['agentType'] | null;
+  piInstalled: boolean;
+  piVersion: string | null;
+  onRefreshAgentConfig: () => Promise<void>;
+}) {
+  const toast = useGlobalToast();
+  const [models, setModels] = useState<PiModel[]>([]);
+  const [modelsLoading, setModelsLoading] = useState(false);
+  const [modelsLoaded, setModelsLoaded] = useState(false);
+  const [modelsError, setModelsError] = useState<string | null>(null);
+  const [isSlideOverOpen, setIsSlideOverOpen] = useState(false);
+  const [activating, setActivating] = useState(false);
+
+  const providerCount = useMemo(
+    () => new Set(models.map((model) => model.provider)).size,
+    [models],
+  );
+
+  const fetchModels = useCallback(async () => {
+    setModelsLoading(true);
+    setModelsError(null);
+    try {
+      const response = await apiFetch<PiModelsResponse>('/api/config/pi-models');
+      setModels(Array.isArray(response.models) ? response.models : []);
+      setModelsLoaded(true);
+    } catch {
+      setModels([]);
+      setModelsLoaded(true);
+      setModelsError('Could not load Pi models right now.');
+    } finally {
+      setModelsLoading(false);
+    }
+  }, []);
+
+  useEffect(() => {
+    if (piInstalled && !modelsLoaded && !modelsLoading) {
+      fetchModels();
+    }
+  }, [piInstalled, modelsLoaded, modelsLoading, fetchModels]);
+
+  const handleBrowseModels = useCallback(async () => {
+    setIsSlideOverOpen(true);
+    if (!piInstalled) return;
+    if ((!modelsLoaded || modelsError) && !modelsLoading) {
+      await fetchModels();
+    }
+  }, [fetchModels, modelsError, modelsLoaded, modelsLoading, piInstalled]);
+
+  const handleSetActive = useCallback(async () => {
+    setActivating(true);
+    try {
+      await apiFetch('/api/config/agent', {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ agent: 'pi' }),
+      });
+      await onRefreshAgentConfig();
+      toast.success('Pi is now the active execution engine');
+    } catch {
+      toast.error('Could not set Pi as the active engine');
+    } finally {
+      setActivating(false);
+    }
+  }, [onRefreshAgentConfig, toast]);
+
+  const isActive = agentType === 'pi';
+  const providerCountLabel = piInstalled
+    ? modelsLoading && !modelsLoaded
+      ? 'Loading provider catalog...'
+      : `${providerCount} provider${providerCount === 1 ? '' : 's'} available`
+    : '0 providers available';
+
+  return (
+    <>
+      <div className="rounded-xl border border-border bg-panel p-4">
+        <div className="flex items-start gap-3">
+          <div className="mt-0.5 flex h-4 w-4 items-center justify-center text-sm font-semibold leading-none text-muted shrink-0">π</div>
+          <div className="min-w-0 flex-1">
+            <div className="flex flex-wrap items-center gap-2">
+              <span className="text-sm font-medium text-[var(--text)]">Pi</span>
+              <span className={`h-2 w-2 rounded-full shrink-0 ${piInstalled ? 'bg-green-500' : 'bg-amber-500'}`} />
+              <span className="text-xs text-muted">
+                {piInstalled ? `Detected${piVersion ? ` (v${piVersion})` : ''}` : 'Not installed'}
+              </span>
+              {isActive && (
+                <span className="rounded bg-accent/15 px-1.5 py-0.5 text-[10px] font-semibold uppercase tracking-wider text-accent">
+                  Active
+                </span>
+              )}
+            </div>
+            <p className="mt-0.5 text-[11px] text-muted">
+              Uses the Pi CLI as the 4th execution engine. Pi manages provider authentication natively.
+            </p>
+          </div>
+          <div className="flex shrink-0 flex-col items-stretch gap-1.5 sm:flex-row">
+            <button
+              type="button"
+              onClick={handleBrowseModels}
+              disabled={!piInstalled}
+              className="flex items-center justify-center gap-1 px-2 py-1 text-[11px] border border-border rounded hover:border-accent/40 text-muted hover:text-[var(--text)] transition-colors disabled:cursor-not-allowed disabled:opacity-50"
+            >
+              <BookOpen size={10} />
+              Browse Models
+            </button>
+            <button
+              type="button"
+              onClick={handleSetActive}
+              disabled={!piInstalled || isActive || activating}
+              className="flex items-center justify-center gap-1 px-2 py-1 text-[11px] rounded transition-colors disabled:cursor-not-allowed disabled:opacity-50 bg-accent text-white hover:bg-accent/90"
+            >
+              {activating ? <Loader2 size={10} className="animate-spin" /> : isActive ? <Check size={10} /> : null}
+              {isActive ? 'Active' : 'Set as Active'}
+            </button>
+          </div>
+        </div>
+
+        {!piInstalled && (
+          <div className="ml-7 mt-3">
+            <p className="text-[11px] text-amber-400">
+              Install Pi with your preferred package manager.
+            </p>
+            <PiInstallTabs />
+          </div>
+        )}
+
+        <div className="ml-7 mt-3 rounded-lg border border-border bg-bg p-3">
+          <div className="flex items-start justify-between gap-3">
+            <div>
+              <div className="text-[11px] font-medium text-[var(--text)]">BYOA — Bring Your Own Auth</div>
+              <p className="mt-1 text-[11px] text-muted">
+                Pi manages provider authentication natively. Run <code className="rounded bg-panel px-1 py-0.5 font-mono text-[10px]">pi auth login &lt;provider&gt;</code> in your terminal. Rorca never stores Pi API keys.
+              </p>
+            </div>
+            <span className="rounded-full border border-border px-2 py-1 text-[10px] font-medium text-muted whitespace-nowrap">
+              {providerCountLabel}
+            </span>
+          </div>
+        </div>
+      </div>
+
+      <PiModelsSlideOver
+        isOpen={isSlideOverOpen}
+        onClose={() => setIsSlideOverOpen(false)}
+        loading={modelsLoading}
+        error={modelsError}
+        models={models}
+      />
+    </>
   );
 }
 
