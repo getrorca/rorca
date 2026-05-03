@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "AI spec orchestration pipeline — turn plain-English briefs into validated, executed code",
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "rorca": "./bin/rorca.js"
   },
