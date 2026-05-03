@@ -151,7 +151,9 @@ if (agentType === 'opencode') {
 
 const app = express();
 const PORT = process.env.PORT || 3030;
-const BACKGROUND_RUNTIME_ENABLED = process.env.NODE_ENV !== 'test';
+const BACKGROUND_RUNTIME_ENABLED =
+  process.env.NODE_ENV !== 'test' &&
+  process.env.RORCA_DISABLE_BACKGROUND_RUNTIME !== 'true';
 const MCP_HTTP_ENABLED = process.env.RORCA_SERVE_MCP !== 'false';
 
 // Disable ETags on API responses — prevents browsers from caching 404s and replaying
@@ -569,15 +571,23 @@ if (process.env.NODE_ENV !== 'test') {
        SET status = 'killed', exited_at = NOW()
        WHERE status = 'active'`
     ).catch(err => logger.error({ err }, '[terminal] Startup cleanup failed'));
+    initRateLimiterCache().catch(err => logger.error({ err }, '[RateLimiter] Cache init failed'));
+    runQueryPlanAudit().catch(err => logger.error({ err }, '[QueryAudit] Startup audit failed'));
+    queryOne('SELECT id FROM workspaces LIMIT 1').then(row => {
+      if (!row) logger.warn('[StartupCheck] No workspaces found — onboarding will show');
+      else logger.info({ id: (row as any).id }, '[StartupCheck] Workspace query OK — search_path verified');
+    }).catch(err => logger.error({ err }, '[StartupCheck] Workspace query FAILED — search_path may be wrong'));
+
+    if (!BACKGROUND_RUNTIME_ENABLED) {
+      logger.info('[server] Background runtime disabled for this process');
+      return;
+    }
+
     // OC-015: Clean up orphan runs (stale status='running' from crashed backend)
     cleanupOrphanRuns();
     // Scheduler runs in-process with API — see CLI-035 Supervisor decision.
     startScheduler();
     cleanupOldLogs();
-    // PR-xxx: Init rate limiter cache so fallback user ID is loaded (prevents 429s in single-user mode)
-    initRateLimiterCache().catch(err => logger.error({ err }, '[RateLimiter] Cache init failed'));
-    // V2-099: Run EXPLAIN QUERY PLAN audit at startup
-    runQueryPlanAudit().catch(err => logger.error({ err }, '[QueryAudit] Startup audit failed'));
     // CIE-009: Start file watchers for all registered workspaces
     startFileWatcher();
     // PG-004: Initialise pg-boss so the Express process can send jobs
@@ -586,11 +596,6 @@ if (process.env.NODE_ENV !== 'test') {
     storyLogFollower.recover().catch(err => logger.error({ err }, '[story-log-follower] Recovery failed'));
     // US-003: Start dedicated LISTEN/NOTIFY client for real-time WAL event push
     startWalListener();
-    // Startup self-test: verify workspace queries resolve against rorca schema (not ag_catalog)
-    queryOne('SELECT id FROM workspaces LIMIT 1').then(row => {
-      if (!row) logger.warn('[StartupCheck] No workspaces found — onboarding will show');
-      else logger.info({ id: (row as any).id }, '[StartupCheck] Workspace query OK — search_path verified');
-    }).catch(err => logger.error({ err }, '[StartupCheck] Workspace query FAILED — search_path may be wrong'));
   });
 
   // OCT-002/OCT-021: WebSocket server for PTY I/O with origin validation and connection tokens

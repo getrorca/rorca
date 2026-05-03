@@ -3491,3 +3491,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Convention] Paid tier routes need explicit capability annotations: Any route annotated with x-rorca-tier: paid must also declare x-rorca-capability with a valid PlanCapabilities key, and the HTTP plan gate enforces that capability against the resolved user plan.
 > Rule: Paid tier routes need explicit capability annotations: Any route annotated with x-rorca-tier: paid must also declare x-rorca-capability with a valid PlanCapabilities key, and the HTTP plan gate enforces that capability against the resolved user plan.
+
+## 2026-05-03 [Architecture] Contract tooling must target a fresh live tsx server: For OpenAPI contract generation in this repo, fetch /api/docs/openapi.json from a fresh tsx-backed server instance, not an older long-running build, because stale servers can omit newly added vendor extensions and collapse the public-route snapshot to zero.
+> Rule: Contract tooling must target a fresh live tsx server: For OpenAPI contract generation in this repo, fetch /api/docs/openapi.json from a fresh tsx-backed server instance, not an older long-running build, because stale servers can omit newly added vendor extensions and collapse the public-route snapshot to zero.
