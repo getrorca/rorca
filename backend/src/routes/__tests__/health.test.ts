@@ -214,7 +214,7 @@ describe('GET /api/health (agentType=opencode)', () => {
       agentModel: 'openai/gpt-4o',
       agentConfig: { agentType: 'opencode', agentModel: 'openai/gpt-4o' },
       parseAgentConfig: jest.fn(),
-      VALID_AGENT_TYPES: ['claude', 'opencode', 'codex'],
+      VALID_AGENT_TYPES: ['claude', 'opencode', 'codex', 'pi'],
     }));
 
     // Mock opencode-detector to return a known status

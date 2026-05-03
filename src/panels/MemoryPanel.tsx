@@ -311,7 +311,7 @@ export default function MemoryPanel() {
   const [filterRunId, setFilterRunId] = useState<string>('');
   const [filterSourceType, setFilterSourceType] = useState<string>('');
   const [searchText, setSearchText] = useState('');
-  const searchDebounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const searchDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // Reset filters when workspace changes
   useEffect(() => {

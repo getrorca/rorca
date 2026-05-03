@@ -161,7 +161,7 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     // PG-019: Migrations that create extensions may fail on managed services
     // (e.g., Supabase pre-installs pgvector, Neon doesn't support AGE).
     // Extension migration filenames contain these keywords for detection.
-    const EXTENSION_MIGRATION_PATTERNS = ['pgvector', 'pgcrypto', 'knowledge_graph', 'age', 'vector', 'enrich_spec_logs', 'memories', 'embedding_dimensions'];
+    const EXTENSION_MIGRATION_PATTERNS = ['048_pgcrypto', '049_pgvector_embeddings', '050_knowledge_graph'];
 
     function isExtensionMigration(filename: string): boolean {
       const lower = filename.toLowerCase();
@@ -224,10 +224,12 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
           console.warn(`[pg-migrate] Extension migration failed (non-fatal): ${file}`);
           console.warn(`[pg-migrate] Reason: ${(err as Error).message || err}`);
 
-          // The connection may be dead (LOAD 'age' crash). Get a fresh one.
-          try { client.release(); } catch { /* already released or dead */ }
+          // AGE's LOAD can leave the backend session poisoned even when the SQL
+          // error is non-fatal. Destroy the pooled connection so later DDL runs
+          // on a fresh backend instead of inheriting AGE hooks.
+          try { client.release(true); } catch { /* already released or dead */ }
           client = await pool.connect();
-          await client.query('SET search_path TO public');
+          await client.query('SET search_path TO rorca, public');
 
           // Record as applied to prevent retries
           try {

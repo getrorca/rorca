@@ -59,7 +59,7 @@ const PipelineRunPayloadSchema = z.object({
   runId: z.number().int().positive(),
   specPath: z.string().min(1),
   workspacePath: z.string().min(1),
-  agent: z.enum(['claude', 'opencode', 'codex']).default('claude'),
+  agent: z.enum(['claude', 'opencode', 'codex', 'pi']).default('claude'),
   model: z.string().nullable().default(null),
   worktreePath: z.string().nullable().default(null),
   branchName: z.string().nullable().default(null),
