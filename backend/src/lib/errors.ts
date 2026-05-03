@@ -55,6 +55,24 @@ export class ForbiddenError extends AppError {
   }
 }
 
+/** 402 — paid plan or license required */
+export class PaymentRequiredError extends AppError {
+  readonly statusCode = 402 as const;
+
+  constructor(message = 'Paid plan required', details?: Record<string, unknown>) {
+    super(message, 'PLAN_REQUIRED', details);
+  }
+}
+
+/** 403 — route reserved for local/operator admin */
+export class AdminRequiredError extends AppError {
+  readonly statusCode = 403 as const;
+
+  constructor(message = 'Admin access required') {
+    super(message, 'ADMIN_REQUIRED');
+  }
+}
+
 /** 403 — invalid CSRF token or missing CSRF proof */
 export class CsrfError extends AppError {
   readonly statusCode = 403 as const;

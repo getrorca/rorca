@@ -116,6 +116,9 @@ function getMcpBridgeHealth(): {
  *     tags: [Health]
  *     summary: Basic health check
  *     operationId: getHealth
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Health checks are safe read-only diagnostics that external CLI clients depend on before invoking higher-level workflows."
+ *     x-rorca-public-api: true
  *     description: Returns basic server health status including database connectivity, uptime, active pipeline runs, MCP transport mode, and telemetry status. When agent type is opencode or codex, includes installation status. Also returns unconditional Pi CLI detection status and component-level health for database, worker, github, postgres, and migrations.
  *     responses:
  *       200:

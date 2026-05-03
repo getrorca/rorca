@@ -20,6 +20,9 @@ const router = Router();
  *     tags: [Search]
  *     summary: Cross-source semantic + keyword search — use when searching across specs, stories, AND memories together
  *     operationId: hybridSearch
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Unified search is a read-only discovery surface that the open-source CLI and MCP tools need for cross-artifact lookup."
+ *     x-rorca-public-api: true
  *     description: >
  *       USE THIS for broad search across all content types ("find anything about Stripe integration",
  *       "search for authentication across specs and memories"). Combines keyword (tsvector) and semantic

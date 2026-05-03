@@ -829,6 +829,9 @@ const GenerateSpecSchema = z.object({
  *     tags: [Specs]
  *     summary: Generate a spec from a plain-English brief
  *     operationId: generateSpec
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Spec generation is a core open-source CLI workflow and intentionally part of the stable MCP-exposed contract."
+ *     x-rorca-public-api: true
  *     description: >
  *       Generates a structured spec (JSON with userStories array) from a plain-English
  *       brief using LLM with the synthesized direction stack (L1-L5) as context.
@@ -3175,6 +3178,9 @@ interface KanbanSpec {
  *     tags: [Specs]
  *     summary: Get kanban board data for a workspace
  *     operationId: getSpecsKanban
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Kanban state is core spec review/read visibility for the local CLI and MCP with no billing or operator side effects."
+ *     x-rorca-public-api: true
  *     description: >
  *       Returns specs organized into kanban columns: draft (pending), inProgress (approved,
  *       queued, or actively running), custom columns, and done (passed or manually marked done).
@@ -4299,6 +4305,9 @@ function computeRelevanceScore(snippets: MatchSnippet[]): number {
  *     tags: [Specs]
  *     summary: Search spec archive with pagination
  *     operationId: searchSpecArchive
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Archive search is part of the stable read surface for specs and does not mutate state or cross a billing boundary."
+ *     x-rorca-public-api: true
  *     description: Full-text searchable spec archive with pagination, date range filtering, tag filtering, and agent type filtering. Rebuilds FTS index on each call. Returns relevance-ranked results with match snippets when a search query is provided.
  *     parameters:
  *       - in: query
@@ -4569,6 +4578,9 @@ router.get('/archive', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Cross-spec story search
  *     operationId: searchStories
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Story search is a core discovery capability for CLI and MCP clients and is safe because it is read-only."
+ *     x-rorca-public-api: true
  *     description: Searches across all specs in a workspace for stories matching the query text. Matches against story ID, title, description, and acceptance criteria. Returns paginated results with match field indicators.
  *     parameters:
  *       - in: query
@@ -4674,6 +4686,9 @@ router.get('/search/stories', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Generate additional stories for an existing spec
  *     operationId: addStories
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Appending stories to a local spec is part of the open-source spec-authoring workflow and does not touch billing or admin controls."
+ *     x-rorca-public-api: true
  *     description: Uses LLM to generate new user stories and append them to an existing spec. Automatically continues the story ID sequence and regenerates the mermaid dependency diagram.
  *     parameters:
  *       - in: path
@@ -4892,6 +4907,9 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: List all versions for a spec
  *     operationId: listSpecVersions
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Version history is read-only spec metadata needed by external CLI consumers and safe to keep in the stable contract."
+ *     x-rorca-public-api: true
  *     description: Returns all versioned snapshots of a spec, ordered by version ascending. Each version includes status, rejection reason (if rejected), creation timestamp, title, and story count.
  *     parameters:
  *       - in: path
@@ -4988,6 +5006,9 @@ router.get('/:specId/versions', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Structured diff between two spec versions
  *     operationId: diffSpecVersions
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Spec diffs are read-only comparison data for CLI and MCP review flows with no privileged side effects."
+ *     x-rorca-public-api: true
  *     description: Computes a structured diff between two historical versions of a spec. Shows added, removed, modified, and unchanged stories along with field-level deltas for modified stories.
  *     parameters:
  *       - in: path
@@ -5198,6 +5219,9 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
  *     tags: [Specs]
  *     summary: Toggle story excluded flag or edit story fields
  *     operationId: patchStory
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Scoped story edits are part of the core open-source spec editing workflow and are intentionally exposed to CLI and MCP clients."
+ *     x-rorca-public-api: true
  *     description: Either toggles the excluded flag on a story (for approved or pending specs), or edits story fields (title, description, acceptanceCriteria) on pending specs only. Field edits create a version snapshot before applying changes.
  *     parameters:
  *       - in: path
@@ -5508,6 +5532,9 @@ router.put('/:specId/stories/:storyId', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Remove a single story from a spec
  *     operationId: deleteStory
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Deleting a story is a core local spec-authoring action and is part of the stable open-source CLI contract."
+ *     x-rorca-public-api: true
  *     description: Removes a story from a spec, creates a version snapshot before deletion, reindexes remaining story IDs sequentially, and updates dependsOn references. Emits a story_deleted WAL event.
  *     parameters:
  *       - in: path
@@ -5841,6 +5868,9 @@ router.get('/tags/autocomplete', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Get full spec detail
  *     operationId: getSpec
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Full spec detail is a canonical read endpoint for the open-source CLI contract and carries no billing or admin action."
+ *     x-rorca-public-api: true
  *     description: Retrieves the full spec JSON including all user stories, metadata, and computed readiness percentage. Looks in both pending and approved directories.
  *     parameters:
  *       - in: path
@@ -6046,6 +6076,9 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Approve a spec (move to approved/)
  *     operationId: approveSpec
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Approving a local spec is part of the core spec lifecycle that the open-source CLI must be able to drive."
+ *     x-rorca-public-api: true
  *     description: Moves a spec from pending/ to approved/ directory, making it eligible for pipeline execution. Emits a spec_approved WAL event.
  *     parameters:
  *       - in: path
@@ -6118,6 +6151,9 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Reject a spec (delete + preserve in WAL)
  *     operationId: rejectSpec
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Rejecting a local spec is part of the stable review lifecycle for CLI and MCP clients and has no billing or admin implications."
+ *     x-rorca-public-api: true
  *     description: Rejects a pending spec by deleting the file and preserving the content in spec_versions with rejection reason. Emits a spec_rejected WAL event.
  *     parameters:
  *       - in: path
@@ -7159,6 +7195,9 @@ router.post('/:specId/stories/bulk', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Get story dependency DAG
  *     operationId: getSpecGraph
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Dependency graph data is read-only planning context for execution and review flows and is safe for the stable public contract."
+ *     x-rorca-public-api: true
  *     description: Returns a directed acyclic graph (DAG) representation of story dependencies including nodes with status, edges, and parallel execution groups (waves). If a runId is provided, node statuses are populated from story_results.
  *     parameters:
  *       - in: path
@@ -11142,6 +11181,9 @@ const UpdateSpecSchema = z.object({
  * /api/specs/{specId}:
  *   put:
  *     summary: Update spec-level metadata
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Spec-level metadata edits are part of the core local authoring workflow that the open-source CLI relies on."
+ *     x-rorca-public-api: true
  *     description: Updates top-level metadata fields (model, title, _notes, agentOverride, thinkingEnabled, thinkingBudget, effortLevel) without touching userStories.
  *     tags: [Specs]
  *     parameters:

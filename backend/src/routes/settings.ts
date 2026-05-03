@@ -39,6 +39,8 @@ interface ReasoningDefaults {
  *     tags: [Settings]
  *     summary: Get user profile
  *     operationId: getUserProfile
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Profile data is user-owned account information and should only be exposed to authenticated callers."
  *     description: Returns the current user's profile information including display name, email, and avatar URL.
  *     responses:
  *       200:
@@ -86,6 +88,8 @@ router.get('/profile', async (req: Request, res: Response) => {
  *     tags: [Settings]
  *     summary: Update user profile
  *     operationId: updateUserProfile
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Profile updates mutate user-owned account data and require authenticated access."
  *     description: Updates the current user's display name and/or avatar URL.
  *     requestBody:
  *       required: true
@@ -157,6 +161,8 @@ router.put('/profile', validateBody(ProfileUpdateSchema), async (req: Request, r
  *     tags: [Settings]
  *     summary: Get display preferences
  *     operationId: getDisplaySettings
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Display preferences are per-user settings and belong behind authenticated access."
  *     description: Returns the current user's display preferences including default model and items per page.
  *     responses:
  *       200:
@@ -196,6 +202,8 @@ router.get('/display', async (req: Request, res: Response) => {
  *     tags: [Settings]
  *     summary: Update display preferences
  *     operationId: updateDisplaySettings
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Updating display preferences mutates per-user settings and should only be available to authenticated callers."
  *     description: Updates the current user's display preferences. Upserts into user_settings table.
  *     requestBody:
  *       required: true
@@ -278,6 +286,8 @@ interface WorkerSettingRow {
  *     tags: [Settings]
  *     summary: Get worker settings
  *     operationId: getWorkerSettings
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Worker settings reveal user-scoped runtime configuration and should require authenticated access."
  *     description: Returns configurable worker parameters. These settings persist across backend restarts.
  *     responses:
  *       200:

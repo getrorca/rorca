@@ -119,6 +119,7 @@ import {
   requireMcpAuth,
 } from './lib/mcp-auth';
 import { summarizeRorcaTiers } from './lib/tier-auth';
+import { createTierGate } from './lib/tier-gate';
 
 const OSC_TITLE_REGEX = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 const OSC_SEQUENCE_REGEX = /\x1b\][02];[^\x07\x1b]*(?:\x07|\x1b\\)/g;
@@ -214,6 +215,7 @@ app.use(express.json({
     }
   },
 }));
+app.use('/api', createTierGate(swaggerSpec as any));
 
 // PR-006: HTTP security headers via helmet
 // Apply after CORS/body parsers and before all route mounts.
