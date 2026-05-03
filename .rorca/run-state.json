@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T07:46:34.693Z",
+  "lastUpdatedAt": "2026-05-03T07:57:45.598Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -303,6 +303,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 226419
+    },
+    {
+      "storyId": "CLI-029",
+      "title": "Pi MCP bridge: mount Rorca's MCP tools inside pi interactive sessions",
+      "status": "passed",
+      "startedAt": "2026-05-03T07:47:14.680Z",
+      "finishedAt": "2026-05-03T07:57:45.598Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 630918
     }
   ],
   "failedStories": [

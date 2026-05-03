@@ -10,6 +10,7 @@ import { detectPi } from '../lib/pi-detector';
 import { isTelemetryEnabled } from '../lib/telemetry-config';
 import { getQueueStats } from '../lib/embedding-pipeline';
 import { cacheStats } from '../lib/context-cache';
+import { getMcpTransportCount } from '../lib/mcp-http';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -91,6 +92,23 @@ const NO_CACHE_HEADERS = {
   'Expires': '0',
 };
 
+type McpBridgeStatus = 'healthy' | 'disabled';
+
+function getMcpBridgeHealth(): {
+  enabled: boolean;
+  status: McpBridgeStatus;
+  url: string;
+  sessions: number;
+} {
+  const enabled = process.env.RORCA_SERVE_MCP !== 'false';
+  return {
+    enabled,
+    status: enabled ? 'healthy' : 'disabled',
+    url: `${process.env.RORCA_PUBLIC_URL || 'http://localhost:3030'}/mcp`,
+    sessions: enabled ? getMcpTransportCount() : 0,
+  };
+}
+
 /**
  * @swagger
  * /api/health:
@@ -115,6 +133,13 @@ const NO_CACHE_HEADERS = {
  *                 agentType: { type: string }
  *                 agentModel: { type: string, nullable: true }
  *                 mcpTransport: { type: string }
+ *                 mcp:
+ *                   type: object
+ *                   properties:
+ *                     enabled: { type: boolean }
+ *                     status: { type: string, enum: [healthy, disabled] }
+ *                     url: { type: string }
+ *                     sessions: { type: integer }
  *                 telemetryEnabled: { type: boolean }
  *                 authRequired: { type: boolean, description: "Whether AUTH_REQUIRED=true is set" }
  *                 opencodeInstalled: { type: boolean }
@@ -233,6 +258,7 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
 
     // MP-009: Detect all engines (cached 30s) for EngineSelector availability dots
     const engines = detectEngines();
+    const mcp = getMcpBridgeHealth();
 
     // Reconstruct dbHealthCheck fields from our component check
     const rawDbHealth = (dbHealth as ComponentDatabaseHealth);
@@ -254,8 +280,9 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       provider: rawDbHealth.provider,
       ...(rawDbHealth.extensionStatus ? { extensionStatus: rawDbHealth.extensionStatus } : {}),
       ...(rawDbHealth.connectionLimit ? { connectionLimit: rawDbHealth.connectionLimit } : {}),
-      // CA-021: Report MCP transport mode
-      mcpTransport: 'http',
+      // CA-021: Report MCP transport mode + bridge health
+      mcpTransport: mcp.enabled ? 'http' : 'disabled',
+      mcp,
       // PR-005: Report telemetry status
       telemetryEnabled: isTelemetryEnabled(),
       // PR-009: Report auth enforcement status
