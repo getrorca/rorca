@@ -23,6 +23,7 @@ interface EnginesStatus {
   claude: { installed: boolean };
   opencode: { installed: boolean; version?: string };
   codex: { installed: boolean; version?: string };
+  pi: { installed: boolean; version?: string };
 }
 
 let enginesCache: EnginesStatus | null = null;
@@ -53,6 +54,7 @@ function detectEngines(): EnginesStatus {
 
   const opencode = detectOpenCode();
   const codex = detectCodex();
+  const pi = detectPi();
 
   const result: EnginesStatus = {
     claude: { installed: claudeInstalled },
@@ -63,6 +65,10 @@ function detectEngines(): EnginesStatus {
     codex: {
       installed: codex.codexInstalled,
       ...(codex.codexVersion ? { version: codex.codexVersion } : {}),
+    },
+    pi: {
+      installed: pi.piInstalled,
+      ...(pi.piVersion ? { version: pi.piVersion } : {}),
     },
   };
 

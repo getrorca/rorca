@@ -55,10 +55,13 @@ const MOCK_AGENT_CONFIG = {
   claudeBin: '/usr/local/bin/claude',
   opencodeBin: null,
   codexBin: null,
+  piBin: null,
   opencodeInstalled: false,
   opencodeVersion: null,
   codexInstalled: false,
   codexVersion: null,
+  piInstalled: false,
+  piVersion: null,
 };
 
 const MOCK_OPENCODE_MODELS = {
