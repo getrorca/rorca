@@ -40,6 +40,7 @@ import { supabaseAdmin } from './lib/supabase';
 import onboardingRouter from './routes/onboarding';
 import backupsRouter from './routes/backups';
 import healthRouter from './routes/health';
+import versionRouter from './routes/version';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
 import { registerCiAutofixHandler } from './lib/ci-autofix/webhook-handler';
@@ -232,6 +233,7 @@ app.use(queryTimerMiddleware);
 
 // ─── Public routes (no auth required) ───
 app.use('/api/health', healthRouter);
+app.use('/api/version', versionRouter);
 
 if (process.env.NODE_ENV === 'test') {
   app.use('/api/test/auth', authE2ERouter);

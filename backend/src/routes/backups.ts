@@ -9,6 +9,8 @@ import { query } from '../db/index';
 import { logger } from '../lib/logger';
 import { ConflictError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { checkAge, invalidateAgeCache, requireAge } from '../lib/age-guard';
+import { resetGraphAvailability } from '../lib/knowledge-graph';
 
 const router = Router();
 
@@ -230,14 +232,8 @@ router.get('/embedding-provider', (_req: Request, res: Response) => {
  *       400:
  *         description: Apache AGE is not installed
  */
-router.post('/graph-backfill', async (_req: Request, res: Response) => {
+router.post('/graph-backfill', requireAge(), async (_req: Request, res: Response) => {
   try {
-    const available = await isGraphAvailable();
-    if (!available) {
-      throw new ValidationError('Apache AGE is not installed — graph features unavailable');
-      return;
-    }
-
     let specsProcessed = 0;
     let runsProcessed = 0;
 
@@ -331,12 +327,35 @@ router.post('/graph-backfill', async (_req: Request, res: Response) => {
  *                   type: array
  *                   items: { type: string }
  */
-router.get('/graph-stats', async (_req: Request, res: Response) => {
+router.get('/graph-stats', requireAge(), async (_req: Request, res: Response) => {
   try {
     const stats = await graphStats();
     res.json(stats);
   } catch (error: any) {
     handleRouteError(res, error, '[graph-stats]');
+  }
+});
+
+/**
+ * @swagger
+ * /api/admin/age-recheck:
+ *   post:
+ *     tags: [Admin]
+ *     summary: Re-check Apache AGE availability
+ *     operationId: recheckAge
+ *     description: Clears the cached AGE availability flag and probes the current database again. No auth gate is applied because Rorca runs as a local single-user tool.
+ *     responses:
+ *       200:
+ *         description: Re-check complete
+ */
+router.post('/age-recheck', async (_req: Request, res: Response) => {
+  try {
+    invalidateAgeCache();
+    resetGraphAvailability();
+    const age = await checkAge();
+    res.json({ ok: true, age });
+  } catch (error: any) {
+    handleRouteError(res, error, '[age-recheck]');
   }
 });
 
