@@ -3,9 +3,9 @@
 Spec: rorca-cli-tui-and-mcp-hardening
 Run ID: 20260316000241
 Started: 2026-05-03T04:28:17.577Z
-Last Updated: 2026-05-03T05:43:17.629Z
+Last Updated: 2026-05-03T05:51:47.323Z
 
-## Completed Stories (15)
+## Completed Stories (16)
 - CLI-001: Add 'pi' as a 4th AgentType in config.ts and VALID_AGENT_TYPES — DONE (codex, gpt-5.4, 113s)
 - CLI-002: Create pi-detector.ts — binary detection, version parsing, model listing — DONE (codex, gpt-5.4, 58s)
 - CLI-003: Expose pi-detector in GET /api/health endpoint — DONE (codex, gpt-5.4, 79s)
@@ -21,3 +21,4 @@ Last Updated: 2026-05-03T05:43:17.629Z
 - CLI-011: 'run' command: Rorca-as-orchestrator streaming pi execution to main viewport — DONE (codex, gpt-5.4, 549s)
 - CLI-012: 'board' command: inline kanban summary in the main viewport — DONE (codex, gpt-5.4, 451s)
 - CLI-013: 'forge' command: brief-to-spec pipeline with inline progress in the Forge TUI — DONE (codex, gpt-5.4, 362s)
+- CLI-014: 'recall' command: memory search rendered inline in main viewport — DONE (codex, gpt-5.4, 494s)
