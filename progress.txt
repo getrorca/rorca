@@ -1,11 +1,11 @@
 # Run State Summary
 
 Spec: rorca-cli-tui-and-mcp-hardening
-Run ID: 20260316000241
-Started: 2026-05-03T04:28:17.577Z
-Last Updated: 2026-05-03T10:29:56.313Z
+Run ID: 20260316000242
+Started: 2026-05-03T21:34:47.790Z
+Last Updated: 2026-05-03T21:40:19.159Z
 
-## Completed Stories (36)
+## Completed Stories (37)
 - CLI-001: Add 'pi' as a 4th AgentType in config.ts and VALID_AGENT_TYPES — DONE (codex, gpt-5.4, 113s)
 - CLI-002: Create pi-detector.ts — binary detection, version parsing, model listing — DONE (codex, gpt-5.4, 58s)
 - CLI-003: Expose pi-detector in GET /api/health endpoint — DONE (codex, gpt-5.4, 79s)
@@ -42,6 +42,4 @@ Last Updated: 2026-05-03T10:29:56.313Z
 - CLI-040: Pi Distribution: Detect + Prompt — guided install if pi binary missing — DONE (codex, gpt-5.4, 427s)
 - CLI-045: AEGIS P0: MCP Bearer Token Authentication — generate, store, enforce — DONE (codex, gpt-5.4, 2700s)
 - CLI-034: Workspace Migration — packages/rorca-cli/ via npm workspaces (single published package) — DONE (codex, gpt-5.4, 2759s)
-
-## Failed Stories (1)
-- CLI-027: Session persistence: Ctrl+C safety and detached-run semantics — FAILED (timeout)
+- CLI-027: Session persistence: Ctrl+C safety and detached-run semantics — DONE (codex, gpt-5.4, 325s)

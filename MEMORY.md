@@ -3461,3 +3461,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Gotcha] MCP HTTP transport requires local bearer token: Protect /mcp with requireMcpAuth and a bearer token loaded from ~/.rorca/mcp-token; invalid tokens must return 401 MCP_AUTH_INVALID and must never fall through to LOCAL_ADMIN.
 > Rule: MCP HTTP transport requires local bearer token: Protect /mcp with requireMcpAuth and a bearer token loaded from ~/.rorca/mcp-token; invalid tokens must return 401 MCP_AUTH_INVALID and must never fall through to LOCAL_ADMIN.
+
+## 2026-05-03 [Architecture] Forge TUI must treat SSE loss as detach, not run termination: When Forge loses its WAL or output SSE while a pipeline run is still active, clear the foreground attachment, keep the backend-owned run alive, and recover background state by polling GET /api/pipeline/runs.
+> Rule: Forge TUI must treat SSE loss as detach, not run termination: When Forge loses its WAL or output SSE while a pipeline run is still active, clear the foreground attachment, keep the backend-owned run alive, and recover background state by polling GET /api/pipeline/runs.
