@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T04:44:07.862Z",
+  "lastUpdatedAt": "2026-05-03T04:49:27.733Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -53,6 +53,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 314834
+    },
+    {
+      "storyId": "CLI-006",
+      "title": "Pi FinOps: extract cost from turn_end usage.cost and persist to token_usage table",
+      "status": "passed",
+      "startedAt": "2026-05-03T04:44:24.214Z",
+      "finishedAt": "2026-05-03T04:49:27.733Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 303519
     }
   ],
   "failedStories": [],
