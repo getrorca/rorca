@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * jest.teardown.ts — Jest globalTeardown for PostgreSQL test database
  *
  * By default: truncates all tables (keeps schema for fast re-runs).

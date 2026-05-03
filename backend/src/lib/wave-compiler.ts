@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * Wave Compiler — compiles a spec's userStories into topologically-ordered
  * execution waves using Kahn's algorithm. Each wave contains stories whose
  * dependsOn are all satisfied by earlier waves, meaning they can run concurrently.

@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * PG-015 / SW-005: Graph Populator — WAL event subscriber for knowledge graph population
  *
  * Listens to WAL events and populates the Apache AGE knowledge graph:

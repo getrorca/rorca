@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * PG-017: Workspace drift routes — graph-powered convention drift detection.
  *
  * GET  /api/workspaces/:id/drift       — latest drift report (optional ?specId= filter)

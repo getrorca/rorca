@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * useFileWatchSSE — CIE-009: Listen to SSE for context_file_changed WAL events
  * and show toast notifications when context/intent files are externally edited.
  */

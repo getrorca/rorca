@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * execution-engine.ts — Universal TypeScript execution engine for the Ralph Loop.
  *
  * Replaces both run-loop.sh and run-loop.ts. Supports three agent types:

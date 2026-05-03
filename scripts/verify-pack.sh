@@ -106,3 +106,47 @@ test -x "$INSTALL_DIR/node_modules/.bin/rorca" || {
 }
 
 echo "✓ Smoke install passed"
+
+CLI_PACK_JSON="$TMPDIR/cli-pack.json"
+(
+  cd "$ROOT_DIR/packages/rorca-cli"
+  npm pack --dry-run --json > "$CLI_PACK_JSON"
+)
+
+node <<'NODE' "$CLI_PACK_JSON" "$ROOT_DIR"
+const fs = require('fs');
+const path = require('path');
+
+const [jsonPath, rootDir] = process.argv.slice(2);
+const packEntries = JSON.parse(fs.readFileSync(jsonPath, 'utf8'));
+const files = packEntries[0]?.files ?? [];
+const headerRegex = /SPDX-License-Identifier:\s*MIT/;
+
+for (const file of files) {
+  const packagePath = file.path;
+
+  if (packagePath.startsWith('backend/') || packagePath.startsWith('src/')) {
+    console.error(`✗ CLI standalone tarball leaked proprietary path: ${packagePath}`);
+    process.exit(1);
+  }
+
+  if (!/\.(ts|tsx|js|jsx)$/.test(packagePath)) {
+    continue;
+  }
+
+  const sourcePath = path.join(rootDir, 'packages/rorca-cli', packagePath);
+  const contents = fs.readFileSync(sourcePath, 'utf8');
+  if (!headerRegex.test(contents)) {
+    console.error(`✗ CLI standalone tarball file missing MIT SPDX header: ${packagePath}`);
+    process.exit(1);
+  }
+}
+
+const hasLicenseFile = files.some((file) => file.path === 'LICENSE');
+if (!hasLicenseFile) {
+  console.error('✗ CLI standalone tarball is missing LICENSE');
+  process.exit(1);
+}
+
+console.log('✓ Standalone CLI tarball remains MIT-only');
+NODE

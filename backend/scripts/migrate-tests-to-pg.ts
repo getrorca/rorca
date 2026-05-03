@@ -1,5 +1,12 @@
 #!/usr/bin/env npx tsx
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * migrate-tests-to-pg.ts — Convert test files from SQLite to Postgres
  *
  * Rules:
