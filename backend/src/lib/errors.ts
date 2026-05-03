@@ -81,6 +81,23 @@ export class NotFoundError extends AppError {
   }
 }
 
+/** 404 — dependency or runtime capability missing */
+export class DependencyNotFoundError extends AppError {
+  readonly statusCode = 404 as const;
+
+  constructor(message: string, code = 'NOT_FOUND', details?: Record<string, unknown>) {
+    super(message, code, details);
+  }
+
+  override toJSON(): { error: string; code?: string; details?: Record<string, unknown> } & Record<string, unknown> {
+    return {
+      error: this.message,
+      ...(this.code ? { code: this.code } : {}),
+      ...(this.details ?? {}),
+    };
+  }
+}
+
 /** 410 — resource is gone (expired links, used tokens, etc.) */
 export class GoneError extends AppError {
   readonly statusCode = 410 as const;
