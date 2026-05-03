@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T06:41:24.570Z",
+  "lastUpdatedAt": "2026-05-03T06:50:20.947Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -243,6 +243,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 456432
+    },
+    {
+      "storyId": "CLI-044",
+      "title": "Lite-to-Full Migration — pg_dump from native to Docker for graph upgrade",
+      "status": "passed",
+      "startedAt": "2026-05-03T06:41:39.930Z",
+      "finishedAt": "2026-05-03T06:50:20.947Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 521017
     }
   ],
   "failedStories": [],
