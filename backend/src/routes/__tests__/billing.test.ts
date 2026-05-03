@@ -11,8 +11,8 @@ import * as path from 'path';
 import * as crypto from 'crypto';
 import type { Express } from 'express';
 import request from 'supertest';
-import jwt from 'jsonwebtoken';
-import { getAuthToken } from './helpers/auth-helper';
+import { ensureTestUser, getAuthToken } from './helpers/auth-helper';
+import { createSignedLicense, verifyLicense } from '../../lib/license-verifier';
 
 jest.mock('../../lib/llm-client', () => ({
   chatComplete: jest.fn(),
@@ -32,7 +32,7 @@ const { publicKey: TEST_PUBLIC_KEY, privateKey: TEST_PRIVATE_KEY } = crypto.gene
 });
 
 function signTestLicense(payload: Record<string, unknown>, privateKey: string = TEST_PRIVATE_KEY): string {
-  return jwt.sign(payload, privateKey, { algorithm: 'RS256' });
+  return createSignedLicense(payload as any, privateKey);
 }
 
 let app: Express;
@@ -64,6 +64,12 @@ beforeEach(async () => {
 
   const serverMod = require('../../server');
   app = serverMod.default;
+  await ensureTestUser({
+    email: 'seed-admin@example.com',
+    authId: crypto.randomUUID(),
+    role: 'admin',
+    plan: 'pro',
+  });
   authToken = await getAuthToken(app);
 
   // Reset billing state to prevent cross-test leakage
@@ -169,12 +175,11 @@ describe('POST /api/billing/activate-license', () => {
   });
 
   test('valid license key with expiry returns expiresAt', async () => {
-    const exp = Math.floor(Date.now() / 1000) + 86400 * 365; // 1 year
     const licenseKey = signTestLicense({
       sub: 'user@example.com',
       plan: 'team',
       iss: 'rorca',
-      exp,
+      expiresAt: new Date(Date.now() + 86400 * 365 * 1000).toISOString(),
     });
 
     const res = await request(app)
@@ -192,7 +197,7 @@ describe('POST /api/billing/activate-license', () => {
     const res = await request(app)
       .post('/api/billing/activate-license')
       .set('Authorization', `Bearer ${authToken}`)
-      .send({ licenseKey: 'eyJhbGciOiJSUzI1NiJ9.tampered.invalid' });
+      .send({ licenseKey: 'tampered.invalid.extra' });
 
     expect(res.status).toBe(422);
     expect(res.body.error).toMatch(/invalid license key/i);
@@ -274,6 +279,9 @@ describe('GET /api/billing/status (license info)', () => {
     expect(res.body.license).toBeTruthy();
     expect(res.body.license.licenseKey).toMatch(/^\.\.\..{8}$/); // last 8 chars only
     expect(res.body.license.activatedAt).toBeTruthy();
+    const decoded = verifyLicense(licenseKey);
+    expect(decoded.valid).toBe(true);
+    expect(decoded.payload?.plan).toBe('pro');
   });
 
   test('license is null when not activated', async () => {
