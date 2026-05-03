@@ -86,6 +86,63 @@ Browser (React :5210)  ←→  Express API (:3030)  ←→  PostgreSQL 16
 Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 ```
 
+## Security Model (Project Aegis)
+
+### Threat Model
+
+Rorca runs on localhost as a single-user developer tool. Project Aegis exists so future refactors do not silently undo the localhost-only and explicit-exposure guardrails.
+
+1. **Drive-by browser attack** — User visits `evil.com` in a tab while Rorca is running and the page attempts `fetch('http://localhost:3030/mcp', ...)`. Defense: browser-origin allow-list on `/mcp` plus Bearer token auth.
+2. **LAN attacker** — User is on shared Wi-Fi and an attacker can route traffic to `:3030`. Defense: `/mcp` loopback-only gate unless `RORCA_MCP_ALLOW_REMOTE=true`.
+3. **Compromised MCP client** — User installs or connects a malicious MCP client. Defense: separate public/admin tokens, tier enforcement per tool, and `mcp_audit_log`.
+4. **Token leak** — User pastes a token into chat, Discord, or logs. Defense: token tiering limits blast radius and `rorca mcp rotate-token` supports fast revocation.
+5. **Privilege escalation via auto-exposed routes** — Future `@swagger` work accidentally exposes a dangerous route to MCP. Defense: routes are MCP-denied by default unless they are `x-rorca-tier: public|auth` or explicitly overridden with `x-mcp-tier: admin`.
+6. **Insider abuse** — A valid client hammers expensive tools such as spec generation or pipeline trigger. Defense: per-tool/per-tier MCP rate limits plus audit anomaly scans.
+
+### Defense Layers
+
+1. **Origin lockdown** (CLI-046) — `/mcp` is meant for localhost browser origins only: `http://localhost:3030` and `http://127.0.0.1:3030`.
+2. **Localhost binding** (CLI-046) — `/mcp` rejects non-loopback socket addresses unless `RORCA_MCP_ALLOW_REMOTE=true`.
+3. **Bearer token authentication** (CLI-045) — missing or invalid MCP tokens fail closed at the HTTP layer.
+4. **Opt-in route annotations** (CLI-047) — unannotated routes are denied by default.
+5. **Curated allow-list** (CLI-048) — verified on May 3, 2026: `44` of `423` OpenAPI operations are MCP-exposed today (`27` public, `15` auth, `2` explicit admin overrides).
+6. **Scoped tier authorization** (CLI-049) — public tokens cannot call admin-tier MCP tools even if the tool is visible in `tools/list`.
+7. **Audit log + rate limit** (CLI-051) — every MCP call is recorded in `mcp_audit_log`, and high-risk tools have tighter per-minute caps.
+
+### Default Stance
+
+- Browser/web UI: soft-auth can inject `LOCAL_ADMIN` for normal `/api/*` requests in local single-user mode. See **Critical Gotchas → Auth Middleware — Intentionally Bypassed**.
+- MCP HTTP: Bearer token is always required. Missing tokens return `401 MCP_AUTH_REQUIRED`, invalid tokens return `401 MCP_AUTH_INVALID`, and neither case may ever fall through to `LOCAL_ADMIN`.
+- MCP admin tools: public tokens fail with `403 MCP_AUTH_INSUFFICIENT_TIER`.
+- Production deployments: set `AUTH_REQUIRED=true` to force full JWT auth for regular API routes.
+
+### Adding a New MCP Tool
+
+1. Add the `@swagger` annotation as usual.
+2. Set `x-rorca-tier` and `x-rorca-rationale`.
+3. If and only if an admin route must be reachable from MCP, add `x-mcp-tier: admin`. Do not invent `x-mcp-tier: public`; `public` and `auth` already opt in through `x-rorca-tier`.
+4. Run `npm run lint:tier` for route-tier drift. There is currently no dedicated `npm run lint:mcp`; the source-backed MCP exposure check is the backend startup log (`[Rorca Tier] MCP exposure: 44 tools`) plus `backend/src/__tests__/mcp-tier.test.ts`. Note: as of May 3, 2026, `lint:tier` still has a stale baseline for the two explicit admin MCP overrides.
+5. Expect extra scrutiny for anything touching filesystem writes, env vars, credentials, code execution, billing, or outbound network side effects.
+
+### What's Permanently Denied (and Why)
+
+- `/api/terminal/*` — PTY spawn is arbitrary code execution.
+- `/api/vault/*` — credential read/write surface.
+- `/api/billing/*` — Stripe and subscription side effects.
+- `/api/admin/*` by default — backups, license generation, embed-all, and other operator actions stay out of MCP unless explicitly overridden for forensics.
+- `/api/skills/install*` — skill install is a prompt-injection supply-chain surface.
+- `/api/workspaces/{id}/env-vars` mutations — environment injection surface.
+- `/api/webhooks/*` — signature spoofing and replay risk.
+- Most `DELETE` routes — destructive operations stay denied except narrow story/comment maintenance paths that are deliberately reviewed.
+
+### Token Management
+
+- Public token path: `~/.rorca/mcp-token` with mode `0600`
+- Admin token path: `~/.rorca/mcp-admin-token` with mode `0600`
+- Tokens are generated locally and must never be logged or committed.
+- Rotate with `rorca mcp rotate-token --public`, `--admin`, or `--all`.
+- Configure clients with `rorca mcp setup-claude` or `rorca mcp setup-claude --admin`.
+
 ## Lite Mode
 
 When DB mode is `native`, Apache AGE is not installed. Rorca still works, but graph-backed features are explicitly disabled and surface `503` with:
