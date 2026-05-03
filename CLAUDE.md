@@ -692,6 +692,23 @@ Remote MCP is an explicit escape hatch:
 
 Asymmetry note: a localhost-gate failure returns structured JSON (`403 MCP_REMOTE_FORBIDDEN`), but a CORS denial comes from the `cors` middleware callback and surfaces as a generic CORS/network failure in browsers rather than the standard API JSON schema.
 
+### Route Tier Model (CLI-047)
+OpenAPI route annotations now define a unified `x-rorca-tier` boundary for MCP exposure, the open-source CLI surface, and future plan-gating.
+
+| Tier | Who can call | MCP exposure | Typical examples |
+|------|--------------|--------------|------------------|
+| `public` | CLI/MCP/web without paid gating | Yes | Spec CRUD, local memory, recall, search, story execution |
+| `auth` | Logged-in user only | Yes | Personal profile, owned workspace settings, user preferences |
+| `paid` | Paid subscription only | No | Team RBAC, federated memory, GRC audit traces, FinOps |
+| `admin` | Local single-user admin only | No | Backups, license generation, embed-all, migrations |
+| unset | Default denied | No | Route stays out of MCP and future opt-in enforcement can 404 it |
+
+Rules:
+- `x-rorca-rationale` is required for any non-denied tier.
+- `x-rorca-public-api: true` is allowed only on `public` routes and marks stable open-source CLI contract surface.
+- `paid` and `admin` are never MCP-callable, even with admin tokens. This is defense-in-depth: LLMs must not trigger billing, backup, or other privileged operations.
+- V0 compatibility: unannotated routes still serve the web app normally, but they are excluded from MCP exposure by default.
+
 Setup (Claude HTTP): `rorca mcp setup-claude`
 
 Manual token access: `rorca mcp token`

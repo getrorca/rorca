@@ -27,10 +27,35 @@ Rorca is an AI spec orchestration and pipeline management platform for autonomou
 - **Rules**:
   - One file per resource (specs.ts, pipeline.ts, workspaces.ts, run-queue.ts, etc.)
   - JSDoc `@swagger` annotations on every public endpoint (feeds `/api/docs`)
+  - Add `x-rorca-tier` on every `@swagger` operation. Valid tiers: `public | auth | paid | admin`. Omitted tier defaults to denied and is never MCP-exposed.
+  - Any non-denied tier must include `x-rorca-rationale` explaining why that exposure level is correct.
+  - `x-rorca-public-api: true` is only valid on `public` routes and marks the stable open-source CLI contract surface.
   - Throw `AppError` subclasses — never raw `Error` or manual `res.status().json()` for errors
   - Use `paginate()` for list endpoints
   - Validate input at route boundary, trust internal code after
   - Kanban API (`GET /api/specs/kanban`) returns `activeRunStatus` and `queuePosition` per spec — frontend derives running vs queued visual state from these fields
+
+### Route Author Guide
+Use this annotation shape for every exposed route:
+```typescript
+/**
+ * @swagger
+ * /api/specs:
+ *   get:
+ *     summary: List specs
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only spec listing — stable local/MCP surface with no billing or admin action."
+ *     x-rorca-public-api: true
+ *     responses:
+ *       200: { description: OK }
+ */
+```
+
+Choose tiers this way:
+- `public`: safe local automation and CLI/MCP use, no billing/admin side effects
+- `auth`: user-owned settings or profile data, still MCP-callable
+- `paid`: subscription-gated product surface, never MCP-callable
+- `admin`: local operator-only maintenance and licensing, never MCP-callable
 
 ### Backend Libs (`backend/src/lib/`)
 - **Owner**: Architect
