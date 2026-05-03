@@ -523,6 +523,7 @@ if (process.env.NODE_ENV !== 'test') {
     ).catch(err => logger.error({ err }, '[terminal] Startup cleanup failed'));
     // OC-015: Clean up orphan runs (stale status='running' from crashed backend)
     cleanupOrphanRuns();
+    // Scheduler runs in-process with API — see CLI-035 Supervisor decision.
     startScheduler();
     cleanupOldLogs();
     // PR-xxx: Init rate limiter cache so fallback user ID is loaded (prevents 429s in single-user mode)
