@@ -18,7 +18,7 @@ import {
   type PipelineWalEvent,
   type WalPayload,
 } from './runFormatting';
-import { apiJson } from './apiClient';
+import { apiJson, TuiApiError } from './apiClient';
 import {
   buildBoardColumns,
   formatBoardMeta,
@@ -38,6 +38,21 @@ import {
   RECALL_CATEGORIES,
   type RecallColor,
 } from './recallFormatting';
+import {
+  buildAgentSwitchPayload,
+  buildModelPickerLines,
+  findSelectedModelIndex,
+  flattenModels,
+  formatActiveAgentLine,
+  getPiInstallLines,
+  getVisibleModelPickerLines,
+  groupPiModels,
+  moveModelSelection,
+  type PiInstallMethods,
+  type ProviderGroup,
+} from './modelPicker';
+import type { AgentType } from '../lib/config';
+import type { PiModel } from '../lib/pi-detector';
 
 const MAX_OUTPUT_LINES = 500;
 const CONTEXT_WIDTH = 35;
@@ -200,6 +215,29 @@ interface RecallState {
   error: string | null;
   entries: RecallEntry[];
   form: RecallFormState | null;
+}
+
+interface ConfigResponse {
+  agentType?: string;
+  agentModel?: string | null;
+}
+
+interface PiModelsResponse {
+  models?: PiModel[];
+  count?: number;
+  piBinPath?: string;
+}
+
+interface ModelPickerState {
+  loading: boolean;
+  switching: boolean;
+  groups: ProviderGroup[];
+  selectedIndex: number;
+  activeAgent: string;
+  activeModel: string | null;
+  error: string | null;
+  info: string | null;
+  installMethods: PiInstallMethods | null;
 }
 
 const WAL_STREAM_URL = 'http://localhost:3030/api/pipeline/stream';
@@ -435,6 +473,7 @@ export function Forge(): JSX.Element {
   const [forgeSpinnerFrameIndex, setForgeSpinnerFrameIndex] = useState(0);
   const [generatedSpecAction, setGeneratedSpecAction] = useState<GeneratedSpecActionState | null>(null);
   const [recallState, setRecallState] = useState<RecallState | null>(null);
+  const [modelPickerState, setModelPickerState] = useState<ModelPickerState | null>(null);
   const { orchestrationState, backendStatus, backendMessage } = useOrchestrationState();
 
   const keyCounterRef = useRef(0);
@@ -1273,6 +1312,96 @@ export function Forge(): JSX.Element {
     }
   };
 
+  const refreshActiveAgentConfig = async (): Promise<{ agentType: string; agentModel: string | null }> => {
+    const response = await apiJson<ConfigResponse>('/api/config');
+    return {
+      agentType: response.agentType ?? 'unknown',
+      agentModel: response.agentModel ?? null,
+    };
+  };
+
+  const handleAgentSwitch = async (agent: AgentType, model?: string | null): Promise<void> => {
+    setModelPickerState((current) => current ? { ...current, switching: true, error: null, info: null } : current);
+
+    try {
+      await apiJson('/api/config/agent', {
+        method: 'PUT',
+        body: buildAgentSwitchPayload(agent, model),
+      });
+      const refreshed = await refreshActiveAgentConfig();
+      setModelPickerState((current) => current
+        ? {
+            ...current,
+            switching: false,
+            activeAgent: refreshed.agentType,
+            activeModel: refreshed.agentModel,
+            info: formatActiveAgentLine(refreshed.agentType, refreshed.agentModel),
+          }
+        : current);
+    } catch (error) {
+      setModelPickerState((current) => current
+        ? {
+            ...current,
+            switching: false,
+            error: getUserFriendlyError(error),
+          }
+        : current);
+    }
+  };
+
+  const openModelPicker = async (): Promise<void> => {
+    appendOutput({ text: '> models', color: 'cyan' });
+    setForgeSpinnerFrameIndex(0);
+    setModelPickerState({
+      loading: true,
+      switching: false,
+      groups: [],
+      selectedIndex: 0,
+      activeAgent: orchestrationState.activeAgent,
+      activeModel: orchestrationState.activeModel,
+      error: null,
+      info: null,
+      installMethods: null,
+    });
+
+    try {
+      const active = await refreshActiveAgentConfig();
+      const response = await apiJson<PiModelsResponse>('/api/config/pi-models');
+      const groups = groupPiModels(response.models ?? []);
+      setModelPickerState({
+        loading: false,
+        switching: false,
+        groups,
+        selectedIndex: findSelectedModelIndex(groups, active.agentType === 'pi' ? active.agentModel : null),
+        activeAgent: active.agentType,
+        activeModel: active.agentModel,
+        error: null,
+        info: null,
+        installMethods: null,
+      });
+    } catch (error) {
+      const active = await refreshActiveAgentConfig().catch(() => ({
+        agentType: orchestrationState.activeAgent,
+        agentModel: orchestrationState.activeModel,
+      }));
+      const installMethods = error instanceof TuiApiError && error.code === 'PI_NOT_FOUND'
+        ? (((error.details as { installMethods?: PiInstallMethods } | undefined)?.installMethods) ?? null)
+        : null;
+
+      setModelPickerState({
+        loading: false,
+        switching: false,
+        groups: [],
+        selectedIndex: 0,
+        activeAgent: active.agentType,
+        activeModel: active.agentModel,
+        error: installMethods ? null : getUserFriendlyError(error),
+        info: null,
+        installMethods,
+      });
+    }
+  };
+
   const commands = useMemo<ForgeCommand[]>(
     () => [
       {
@@ -1335,7 +1464,9 @@ export function Forge(): JSX.Element {
         id: 'models',
         label: 'models',
         description: 'List available models',
-        handler: () => appendOutput({ text: '> models', color: 'cyan' }, { text: '[forge] model picker not wired yet' }),
+        handler: () => {
+          void openModelPicker();
+        },
       },
       {
         id: 'agent',
@@ -1416,7 +1547,7 @@ export function Forge(): JSX.Element {
   }, []);
 
   useEffect(() => {
-    if (!forgeGenerationBrief) {
+    if (!forgeGenerationBrief && !modelPickerState?.loading) {
       return;
     }
 
@@ -1425,7 +1556,7 @@ export function Forge(): JSX.Element {
     }, GENERATE_SPINNER_MS);
 
     return () => clearInterval(spinner);
-  }, [forgeGenerationBrief]);
+  }, [forgeGenerationBrief, modelPickerState?.loading]);
 
   useEffect(() => {
     if (!boardOpen) {
@@ -1588,6 +1719,66 @@ export function Forge(): JSX.Element {
       return;
     }
 
+    if (modelPickerState) {
+      if (key.escape) {
+        setModelPickerState(null);
+        return;
+      }
+
+      if (modelPickerState.loading || modelPickerState.switching) {
+        return;
+      }
+
+      const totalModels = flattenModels(modelPickerState.groups).length;
+
+      if (key.upArrow) {
+        setModelPickerState((current) => current
+          ? {
+              ...current,
+              selectedIndex: moveModelSelection(current.selectedIndex, -1, totalModels),
+              error: null,
+              info: null,
+            }
+          : current);
+        return;
+      }
+
+      if (key.downArrow) {
+        setModelPickerState((current) => current
+          ? {
+              ...current,
+              selectedIndex: moveModelSelection(current.selectedIndex, 1, totalModels),
+              error: null,
+              info: null,
+            }
+          : current);
+        return;
+      }
+
+      if (!key.ctrl && !key.meta && (input === 'c' || input === 'C')) {
+        void handleAgentSwitch('claude');
+        return;
+      }
+
+      if (!key.ctrl && !key.meta && (input === 'o' || input === 'O')) {
+        void handleAgentSwitch('opencode');
+        return;
+      }
+
+      if (!key.ctrl && !key.meta && (input === 'd' || input === 'D')) {
+        void handleAgentSwitch('codex');
+        return;
+      }
+
+      if (key.return && totalModels > 0) {
+        const selected = flattenModels(modelPickerState.groups)[modelPickerState.selectedIndex];
+        if (selected) {
+          void handleAgentSwitch('pi', selected.model);
+        }
+      }
+      return;
+    }
+
     if (generatedSpecAction) {
       if (key.return) {
         const next = generatedSpecAction;
@@ -1682,6 +1873,12 @@ export function Forge(): JSX.Element {
   const spinnerLine = forgeGenerationBrief
     ? `${GENERATE_SPINNER_FRAMES[forgeSpinnerFrameIndex]} Generating spec: ${truncateText(forgeGenerationBrief, Math.max(24, leftColumnWidth - 22))}`
     : null;
+  const modelPickerLines = modelPickerState
+    ? buildModelPickerLines(modelPickerState.groups, modelPickerState.selectedIndex, Math.max(18, leftColumnWidth - 30))
+    : null;
+  const visibleModelPickerLines = modelPickerLines
+    ? getVisibleModelPickerLines(modelPickerLines.lines, modelPickerLines.selectedLineIndex, Math.max(3, mainHeight - 5))
+    : [];
   const recallHeader = recallState
     ? formatRecallHeader(recallState.query, recallState.entries.length, Math.max(20, leftColumnWidth - 2))
     : null;
@@ -1689,13 +1886,20 @@ export function Forge(): JSX.Element {
     || boardOpen
     || Boolean(generatedSpecAction)
     || Boolean(forgeGenerationBrief)
-    || Boolean(recallState);
+    || Boolean(recallState)
+    || Boolean(modelPickerState);
   const commandPaletteDisabledMessage = recallState
     ? recallState.form
       ? recallState.form.saving
         ? 'Saving memory entry...'
         : '[Enter] Next/Save  [Tab] Next field  [←/→] Category  [Esc] Back'
       : '[n] New entry  [Esc] Back'
+    : modelPickerState
+      ? modelPickerState.loading
+        ? `${GENERATE_SPINNER_FRAMES[forgeSpinnerFrameIndex]} Loading Pi models...`
+        : modelPickerState.switching
+          ? 'Switching agent...'
+          : '[↑/↓] Navigate  [Enter] Use Pi model  [c/o/d] Switch agent  [Esc] Back'
     : generatedSpecAction
       ? '[Enter] Approve + Run  [s] Save as pending  [e] Edit stories  [Esc] Cancel'
       : forgeGenerationBrief
@@ -1751,6 +1955,35 @@ export function Forge(): JSX.Element {
                   {recallState.form.error ? <Text color="red">{recallState.form.error}</Text> : null}
                 </>
               ) : null}
+            </>
+          ) : modelPickerState ? (
+            <>
+              <Text color="cyan">{formatActiveAgentLine(modelPickerState.activeAgent, modelPickerState.activeModel)}</Text>
+              <Text color="gray">Pi model picker</Text>
+              {modelPickerState.loading ? <Text color="yellow">{`${GENERATE_SPINNER_FRAMES[forgeSpinnerFrameIndex]} Loading Pi models...`}</Text> : null}
+              {modelPickerState.info ? <Text color="green">{modelPickerState.info}</Text> : null}
+              {modelPickerState.error ? <Text color="red">{modelPickerState.error}</Text> : null}
+              {modelPickerState.installMethods
+                ? getPiInstallLines(modelPickerState.installMethods).map((line, index) => (
+                    <Text key={`pi-install-${index}`} color={index === 0 ? 'yellow' : 'white'}>
+                      {truncateText(line, Math.max(20, leftColumnWidth - 2))}
+                    </Text>
+                  ))
+                : null}
+              {!modelPickerState.loading && !modelPickerState.installMethods && modelPickerState.groups.length === 0 && !modelPickerState.error ? (
+                <Text color="yellow">No models available — is pi running?</Text>
+              ) : null}
+              {!modelPickerState.loading && !modelPickerState.installMethods
+                ? visibleModelPickerLines.map((line, index) => (
+                    <Text
+                      key={`model-picker-${index}`}
+                      color={line.isHeader ? 'cyan' : 'white'}
+                      inverse={line.selected}
+                    >
+                      {truncateText(line.text, Math.max(20, leftColumnWidth - 2))}
+                    </Text>
+                  ))
+                : null}
             </>
           ) : boardOpen ? (
             <>
