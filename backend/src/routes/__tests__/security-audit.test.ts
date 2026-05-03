@@ -17,10 +17,8 @@ describe('security audit regressions', () => {
       .get('/api/workspaces')
       .set('Authorization', 'Bearer forged.invalid.token');
 
-    expect([401, 200]).toContain(res.status);
-    if (res.status === 401) {
-      expect(res.body.code).toBe('AUTH_ERROR');
-      expect(JSON.stringify(res.body)).not.toMatch(/forged\.invalid\.token/);
-    }
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('AUTH_ERROR');
+    expect(JSON.stringify(res.body)).not.toMatch(/forged\.invalid\.token/);
   });
 });
