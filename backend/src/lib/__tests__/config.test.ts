@@ -1,4 +1,4 @@
-import { parseAgentConfig } from '../config';
+import { parseAgentConfig, setActiveAgentConfig, activeAgent, activeModel } from '../config';
 
 describe('parseAgentConfig', () => {
   it('defaults to claude when RORCA_AGENT is not set', () => {
@@ -72,5 +72,26 @@ describe('parseAgentConfig', () => {
       RORCA_MODEL: '  google/gemini-2.0-flash  ',
     });
     expect(config.agentModel).toBe('google/gemini-2.0-flash');
+  });
+});
+
+describe('setActiveAgentConfig', () => {
+  afterEach(() => {
+    setActiveAgentConfig({ agent: 'claude', model: null });
+  });
+
+  it('updates the mutable runtime agent and model', () => {
+    setActiveAgentConfig({ agent: 'opencode', model: 'openai/gpt-4o' });
+
+    expect(activeAgent).toBe('opencode');
+    expect(activeModel).toBe('openai/gpt-4o');
+  });
+
+  it('preserves the current model when model is omitted', () => {
+    setActiveAgentConfig({ agent: 'opencode', model: 'openai/gpt-4o' });
+    setActiveAgentConfig({ agent: 'codex' });
+
+    expect(activeAgent).toBe('codex');
+    expect(activeModel).toBe('openai/gpt-4o');
   });
 });

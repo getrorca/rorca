@@ -37,6 +37,15 @@ export const agentConfig: AgentConfig = parseAgentConfig();
 
 export const agentType: AgentType = agentConfig.agentType;
 export const agentModel: string | null = agentConfig.agentModel;
+export let activeAgent: AgentType = agentConfig.agentType;
+export let activeModel: string | null = agentConfig.agentModel;
+
+export function setActiveAgentConfig(next: { agent: AgentType; model?: string | null }): void {
+  activeAgent = next.agent;
+  if (Object.prototype.hasOwnProperty.call(next, 'model')) {
+    activeModel = next.model?.trim() || null;
+  }
+}
 
 // ─── Orchestration Config Validation (OC-021) ────────────────────────────────
 
