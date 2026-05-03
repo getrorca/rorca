@@ -1,0 +1,53 @@
+name: Public API Contract
+
+on:
+  pull_request:
+    branches: [main]
+
+jobs:
+  check:
+    name: Contract Stability
+    runs-on: ubuntu-latest
+    services:
+      postgres:
+        image: postgres:16
+        env:
+          POSTGRES_USER: rorca
+          POSTGRES_PASSWORD: rorca
+          POSTGRES_DB: rorca
+        ports:
+          - 5432:5432
+        options: >-
+          --health-cmd "pg_isready -U rorca -d rorca"
+          --health-interval 10s
+          --health-timeout 5s
+          --health-retries 5
+
+    env:
+      DATABASE_URL: postgres://rorca:rorca@127.0.0.1:5432/rorca
+      RORCA_DISABLE_BACKGROUND_RUNTIME: "true"
+      RORCA_SERVE_MCP: "false"
+      GITHUB_PR_CREATED_AT: ${{ github.event.pull_request.created_at }}
+
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - run: npm ci
+      - run: cd backend && npm ci
+      - run: npm run build
+      - run: git fetch origin "${{ github.base_ref }}" --depth=1
+      - name: Start backend
+        run: npm run dev:server:contract > /tmp/rorca-contract-server.log 2>&1 &
+      - run: npm run check:contract
+      - if: always()
+        run: cat /tmp/rorca-contract-server.log
