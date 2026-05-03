@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T07:57:45.598Z",
+  "lastUpdatedAt": "2026-05-03T08:02:53.649Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -313,6 +313,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 630918
+    },
+    {
+      "storyId": "CLI-022",
+      "title": "Update CLAUDE.md: Command Center architecture, BYOA model, four install methods",
+      "status": "passed",
+      "startedAt": "2026-05-03T07:58:15.003Z",
+      "finishedAt": "2026-05-03T08:02:53.649Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 278646
     }
   ],
   "failedStories": [

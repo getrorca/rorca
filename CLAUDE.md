@@ -43,6 +43,18 @@ lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev
 npm run self-register
 ```
 
+### CLI Commands
+
+| Command | Purpose |
+|---------|---------|
+| `rorca start` | Serve the built frontend and backend from one local process on `:3030`. |
+| `rorca doctor` | Verify local prerequisites, binary discovery, and runtime health before running specs. |
+| `rorca auth` | Manage local CLI authentication flows and provider sign-in state. |
+| `rorca chat` | Open the interactive chat control surface for live operator-driven work. |
+| `rorca forge` | Launch the Forge TUI for spec review, orchestration, and command-center control. |
+| `rorca attach` | Reattach to an existing run, session, or control surface without starting a new one. |
+| `npm run self-register` | Register the local `rorca/` repo as a workspace for self-hosting. |
+
 ## Supabase Local Development
 
 - Install the Supabase CLI first: `brew install supabase/tap/supabase`
@@ -68,7 +80,8 @@ Browser (React :5210)  ←→  Express API (:3030)  ←→  PostgreSQL 16
                                                    execution-engine subprocesses
                                                    ├── claude --print
                                                    ├── opencode run
-                                                   └── codex
+                                                   ├── codex
+                                                   └── pi run --jsonl
 
 Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 ```
@@ -95,7 +108,7 @@ Still available in Lite Mode:
 **Stack**:
 - Frontend: React 18 + TypeScript + Vite + Tailwind CSS + xterm.js
 - Backend: Express.js + TypeScript + PostgreSQL 16 (`pg` Pool, async, connection pooling, pgvector, Apache AGE)
-- Execution: `claude --print` (Claude sub) OR `opencode run --format json --attach` (OpenCode, any provider) OR `codex exec --dangerously-bypass-approvals-and-sandbox` (ChatGPT sub)
+- Execution: `claude --print` (Claude sub) OR `opencode run --format json --attach` (OpenCode, any provider) OR `codex exec --dangerously-bypass-approvals-and-sandbox` (ChatGPT sub) OR `pi run --jsonl` (pi subprocess)
 - Spec generation: OpenCode (autonomous codebase exploration) OR SDK fallback (`SPEC_PROVIDER` env var)
 - MCP: API-first (OpenAPI spec → auto-generated MCP tools via HTTP transport on :3030)
 
@@ -112,7 +125,28 @@ Spec (N stories)
   └── Story N  →  ...
 ```
 
-### Three execution paths — all first-class
+## Command Center Architecture
+
+Rorca's command center is split into four layers so interactive control, orchestration state, headless execution, and observability stay decoupled:
+
+| Layer | Role |
+|-------|------|
+| Forge TUI | Local control surface for `rorca forge`, `rorca chat`, approvals, and operator commands. |
+| Engine `:3030` | Orchestration state machine: API, WAL, pg-boss queue, worker coordination, and persistence. |
+| Muscle | Headless `pi` subprocesses that execute stories and chat tasks with the full tool set. |
+| Observatory | Web UI for run state, logs, analytics, and architecture audit views. |
+
+**BYOA model**: pi is bring-your-own-auth. `pi` manages provider auth locally, Rorca never stores pi API keys, and users run `pi auth login <provider>` once per provider on the machine that will execute runs.
+
+### Dual-Mode Vision
+
+| Mode | Entry Point | Purpose |
+|------|-------------|---------|
+| Interactive Chat | `rorca chat` | Operator-driven live sessions against the same local workspace context. |
+| Autonomous Spec | `rorca run` | Queue and execute approved specs through the orchestration engine. |
+| Architecture Audit | web Observatory | Inspect system state, traces, and architecture-level health from the browser UI. |
+
+### Four execution paths — all first-class
 
 **Claude subscription** (Pro / Max / Max 5x):
 - Binary: `claude --print`
@@ -134,7 +168,23 @@ Spec (N stories)
 - No model cascading — single model tied to ChatGPT subscription
 - Configured via `RORCA_AGENT=codex`
 
-**No raw SDK agent path for execution.** OpenCode IS the multi-model execution path. A raw `openai.chat.completions.create()` call cannot replace it — no persistent bash state, no surgical edits, no CLAUDE.md injection.
+**pi CLI** (provider auth handled locally by pi):
+- Package: `@mariozechner/pi-coding-agent`
+- Install:
+```bash
+npm i -g @mariozechner/pi-coding-agent
+pnpm add -g @mariozechner/pi-coding-agent
+bun add -g @mariozechner/pi-coding-agent
+curl -fsSL https://pi.run/install.sh | sh
+```
+- Binary invocation: `pi run --jsonl --skill <direction-file>`
+- JSON-L events stream to stdout for engine ingestion
+- Session controls: `--session`, `--fork`, and `--continue`
+- Direction injection: `--skill` is the direction-stack injection path for pi runs
+- Auth model: BYOA. Users run `pi auth login <provider>` once per provider; Rorca never stores pi API keys
+- Recommended for: Headless provider-flexible runs with pi-managed auth and resumable session/fork workflows
+
+**No raw SDK agent path for execution.** Claude, OpenCode, Codex, and pi are the supported execution harnesses. A raw SDK call cannot replace them — no persistent bash state, no surgical edits, no harness-native context injection.
 
 ### OpenCode for spec generation
 OpenCode also handles spec generation (not just execution). Spec gen benefits from tools: `glob` existing specs, `read` CLAUDE.md, `grep` codebase patterns, `webfetch` library docs. This makes specs dramatically more context-aware than a blind API call and replaces the manual context extraction step.
@@ -209,9 +259,9 @@ Pipeline runs are no longer spawned synchronously by `pipeline.ts`. The flow is:
 - `GET /api/pipeline/runs/:runId/output` SSE endpoint replays all chunks since sequence 0, then streams live
 
 ### The Ralph Loop (`backend/src/lib/execution-engine.ts`)
-The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by the **Worker process** (not directly by `pipeline.ts`). The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — only used if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all three agent types. **Always edit `execution-engine.ts` for all execution behavior.**
+The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by the **Worker process** (not directly by `pipeline.ts`). The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — only used if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all four agent types. **Always edit `execution-engine.ts` for all execution behavior.**
 
-**Flags**: `--json <path>` (spec file), `--cwd <path>` (workspace root), `--run-id <number>` (required for WAL events), `--story <ID>` (single story), `--dry-run` (preview only), `--port <number>` (default 3030), `--agent <claude|opencode|codex>`, `--model <model>`
+**Flags**: `--json <path>` (spec file), `--cwd <path>` (workspace root), `--run-id <number>` (required for WAL events), `--story <ID>` (single story), `--dry-run` (preview only), `--port <number>` (default 3030), `--agent <claude|opencode|codex|pi>`, `--model <model>`
 
 **Modes** (auto-detected from JSON structure):
 - Implementation (`impl`): `{ userStories: [...] }` — injects `.claude/skills/rorca.md`, `feat:` commits
@@ -220,7 +270,7 @@ The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScrip
 
 **What `execution-engine.ts` does per story**:
 1. `emitWalEvent('story_started')` via `fetch` to `/api/wal`
-2. Spawns agent subprocess (`claude --print`, `opencode run`, or `codex`) with clean env
+2. Spawns agent subprocess (`claude --print`, `opencode run`, `codex`, or `pi`) with clean env
 3. Timeout via SIGTERM → SIGKILL after 10s
 4. On exit 0: `markStoryPassed()` (writes spec JSON), `gitCommitStory()`, `emitWalEvent('story_passed')`, POST to `/api/pipeline/story-result`
 5. On exit 124 (timeout): `markStorySkipped()`, `emitWalEvent('story_failed', { reason: 'timeout' })`
@@ -254,6 +304,7 @@ rorca/
 │       │                     # errors, scheduler, agent-hook-runner, etc.)
 │       ├── worker.ts         # pg-boss worker process (pipeline job consumer)
 │       ├── mcp/              # MCP stdio server (5 tools)
+│       ├── tui/              # Forge TUI control surface
 │       └── db/
 │           ├── index.ts      # PostgreSQL Pool + async query helpers
 │           ├── pg-index.ts   # Migration runner (schema_migrations tracking)
@@ -690,10 +741,11 @@ PORT=3030                     # Optional override
 DATABASE_URL=postgres://rorca:rorca@localhost:5432/rorca  # PostgreSQL connection string
 
 # Execution engine
-RORCA_AGENT=claude           # Options: claude (default), opencode, codex
+RORCA_AGENT=claude           # Options: claude (default), opencode, codex, pi
 RORCA_MODEL=openai/gpt-4o   # OpenCode model string (provider/model) — ignored for codex
 OPENCODE_BIN=/path/to/opencode  # Auto-detected if in PATH
 CODEX_BIN=/path/to/codex        # Auto-detected if in PATH
+PI_BIN=/path/to/pi              # Auto-detected if in PATH
 
 # Spec generation providers (used when RORCA_AGENT=claude or as SDK fallback)
 SPEC_PROVIDER=claude          # Options: claude (default), anthropic, openrouter
@@ -704,9 +756,9 @@ OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
 RORCA_PROCESS_ROLE=engine     # Set to 'engine' by worker.ts when spawning execution-engine subprocesses
 ```
 
-### Execution Engine: Claude vs OpenCode vs Codex
+### Execution Engine: Claude vs OpenCode vs Codex vs pi
 
-Rorca supports three first-class execution paths. All use the same tool set (edit, bash, read, write, glob, grep, webfetch, websearch) and produce the same output.
+Rorca supports four first-class execution paths. All use the same tool set (edit, bash, read, write, glob, grep, webfetch, websearch) and produce the same output contract.
 
 **Claude subscription** (`RORCA_AGENT=claude`, default):
 - Binary: `claude --print --dangerously-skip-permissions --output-format stream-json`
@@ -746,6 +798,16 @@ Rorca supports three first-class execution paths. All use the same tool set (edi
   - **No structured JSON output** — stdout/stderr captured raw (like `claude --print`)
   - FinOps shows token counts only (no dollar cost — flat-rate subscription)
 - Recommended for: Teams with ChatGPT Plus/Pro subscriptions who prefer OpenAI models
+
+**pi CLI** (`RORCA_AGENT=pi`):
+- Binary: `pi run --jsonl --skill <direction-file>`
+- Auth: BYOA via local pi auth state. Users run `pi auth login <provider>` once per provider; Rorca never stores pi API keys
+- Advantages:
+  - **JSON-L events** — structured stdout stream for orchestration, logs, and replay
+  - **Session branching** — `--session`, `--fork`, and `--continue` support resumable and branchable runs
+  - **Skill injection** — `--skill` maps cleanly to synthesized direction-stack context
+  - **Provider-local auth** — provider credentials stay in pi's local auth store instead of the Rorca vault
+- Recommended for: Local-first headless execution with pi-managed sessions and provider auth
 
 ### OpenCode Setup (Step-by-Step)
 
