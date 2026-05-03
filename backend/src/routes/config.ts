@@ -1,5 +1,5 @@
 import { Router, Request, Response } from 'express';
-import { agentType, agentModel, AgentType, VALID_AGENT_TYPES, validateOrchestrationConfig } from '../lib/config';
+import { activeAgent, activeModel, AgentType, VALID_AGENT_TYPES, setActiveAgentConfig, validateOrchestrationConfig } from '../lib/config';
 import { loadOrchestrationConfig, clearConfigCache } from '../lib/complexity-scorer';
 import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
@@ -7,7 +7,7 @@ import { detectPi, listPiModels, PI_INSTALL_METHODS } from '../lib/pi-detector';
 import type { PiModel } from '../lib/pi-detector';
 import { getClaudeAuthState, triggerClaudeLogin, triggerClaudeLogout } from '../lib/claude-auth';
 import { getCodexAuthState, triggerCodexLogin, triggerCodexLogout } from '../lib/codex-auth';
-import { queryOne, execute } from '../db/index';
+import { queryOne } from '../db/index';
 import { getVaultKey } from './vault';
 import { getProviderAsync, getProviderSource, invalidateProviderCache } from '../lib/embedding-pipeline';
 import { loadRorcaConfig, writeRorcaConfig, invalidateConfigCache } from '../lib/rorca-config';
@@ -27,71 +27,7 @@ const OPENROUTER_CONTEXT_OVERRIDES: Record<string, number> = {
 };
 
 const router = Router();
-
-// ─── In-memory mutable config (hot-reloaded via PUT /agent) ──────────────────
-// On startup we use env-var defaults; the first request to GET /config will
-// lazy-load persisted values from the DB (async).  PUT /agent always persists.
-let currentAgentType: AgentType = agentType;
-let currentAgentModel: string | null = agentModel;
-let _persistedLoaded = false;
 let cachedPiModels: { models: PiModel[]; ts: number } | null = null;
-
-/**
- * Derive the workflow_configs provider value from agent runtime and model.
- * claude/codex/pi → CLI-backed runtime (stored as claude-cli provider bucket).
- * opencode → resolve from model prefix (openai/, google/ → 'openai-compat', etc.).
- */
-function providerForRuntime(runtime: string, model: string | null): string {
-  if (runtime === 'claude' || runtime === 'codex' || runtime === 'pi') return 'claude-cli';
-  if (runtime !== 'opencode' || !model) return 'claude-cli';
-  const prefix = model.split('/')[0];
-  switch (prefix) {
-    case 'openai':
-    case 'google':
-    case 'ollama':
-    case 'github':
-      return 'openai-compat';
-    case 'anthropic':
-      return 'anthropic';
-    case 'openrouter':
-      return 'openrouter';
-    default:
-      return 'openai-compat';
-  }
-}
-
-async function ensurePersistedConfig(): Promise<void> {
-  if (_persistedLoaded) return;
-  _persistedLoaded = true;
-  try {
-    const row = await queryOne<{ agent_type: string; agent_model: string | null }>(
-      'SELECT agent_type, agent_model FROM agent_config WHERE id = $1', ['default']
-    );
-    if (row && (VALID_AGENT_TYPES as readonly string[]).includes(row.agent_type)) {
-      currentAgentType = row.agent_type as AgentType;
-      currentAgentModel = row.agent_model;
-
-      // Seed workflow_configs from agent_config so existing users get their
-      // pipeline_execution row without a manual migration step.
-      try {
-        const provider = providerForRuntime(row.agent_type, row.agent_model);
-        await execute(
-          `INSERT INTO workflow_configs (workflow_id, runtime, provider, model)
-           VALUES ('pipeline_execution', $1, $2, $3)
-           ON CONFLICT (workflow_id) DO NOTHING`,
-          [row.agent_type, provider, row.agent_model],
-        );
-      } catch {
-        // workflow_configs table may not exist yet — safe to ignore
-      }
-    }
-  } catch {
-    // Table may not exist yet on first run — fall through to env defaults
-  }
-}
-
-export function getActiveAgentType(): AgentType { return currentAgentType; }
-export function getActiveAgentModel(): string | null { return currentAgentModel; }
 
 // ─── OpenCode model catalog (Models.dev compatible) ──────────────────────────
 interface OpenCodeModel {
@@ -154,8 +90,6 @@ const PROVIDER_KEY_MAP: Record<string, string[]> = {
  *         description: Current agent configuration
  */
 router.get('/', async (_req: Request, res: Response) => {
-  await ensurePersistedConfig();
-
   // Always detect both — UI needs status to show install badges when user toggles
   const opencode = detectOpenCode();
   const codex = detectCodex();
@@ -167,12 +101,12 @@ router.get('/', async (_req: Request, res: Response) => {
   let copilotConnected = false;
   let copilotUsername: string | null = null;
 
-  if (currentAgentType === 'opencode') {
-    if (currentAgentModel) {
-      const modelEntry = OPENCODE_MODELS.find(m => m.id === currentAgentModel);
-      if (currentAgentModel.startsWith('openrouter/') && !modelEntry) {
+  if (activeAgent === 'opencode') {
+    if (activeModel) {
+      const modelEntry = OPENCODE_MODELS.find(m => m.id === activeModel);
+      if (activeModel.startsWith('openrouter/') && !modelEntry) {
         // OpenRouter model from live catalog — extract provider family and model name
-        const orModelId = currentAgentModel.slice('openrouter/'.length); // e.g. "meta-llama/llama-3.3-70b"
+        const orModelId = activeModel.slice('openrouter/'.length); // e.g. "meta-llama/llama-3.3-70b"
         modelDisplayName = orModelId;
         // Check for OpenRouter API key
         const orKeyRow = await queryOne<{ count: number }>(
@@ -180,7 +114,7 @@ router.get('/', async (_req: Request, res: Response) => {
         );
         hasApiKey = !!orKeyRow || !!process.env.OPENROUTER_API_KEY;
       } else {
-        modelDisplayName = modelEntry?.name ?? currentAgentModel.split('/').pop() ?? currentAgentModel;
+        modelDisplayName = modelEntry?.name ?? activeModel.split('/').pop() ?? activeModel;
       }
       if (modelEntry) {
         if (modelEntry.provider === 'GitHub Copilot') {
@@ -222,8 +156,8 @@ router.get('/', async (_req: Request, res: Response) => {
   const openrouterViaEnv = !!(process.env.OPENROUTER_API_KEY);
 
   res.json({
-    agentType: currentAgentType,
-    agentModel: currentAgentModel,
+    agentType: activeAgent,
+    agentModel: activeModel,
     modelDisplayName,
     hasApiKey,
     copilotConnected,
@@ -620,20 +554,21 @@ router.post('/openrouter-test', async (req: Request, res: Response) => {
  * @swagger
  * /api/config/agent:
  *   put:
- *     summary: Update agent configuration (hot-reload, no restart required)
+ *     summary: Update active agent configuration in memory
  *     operationId: updateAgentConfig
- *     description: Switches the active execution engine and model with validation, persisting the change to the database.
+ *     description: Switches the active execution engine and model without restarting the backend. This is in-memory only and reverts to .env values on restart.
  *     tags: [Config]
  *     requestBody:
  *       content:
  *         application/json:
  *           schema:
  *             type: object
+ *             required: [agent]
  *             properties:
- *               agentType:
+ *               agent:
  *                 type: string
  *                 enum: [claude, opencode, codex, pi]
- *               agentModel:
+ *               model:
  *                 type: string
  *     responses:
  *       200:
@@ -642,47 +577,50 @@ router.post('/openrouter-test', async (req: Request, res: Response) => {
  *         description: Validation error
  */
 router.put('/agent', async (req: Request, res: Response) => {
-  await ensurePersistedConfig();
-
-  const { agentType: newType, agentModel: newModel } = req.body;
+  const body = req.body ?? {};
+  const newType = body.agent ?? body.agentType;
+  const hasModelField =
+    Object.prototype.hasOwnProperty.call(body, 'model') ||
+    Object.prototype.hasOwnProperty.call(body, 'agentModel');
+  const newModel = Object.prototype.hasOwnProperty.call(body, 'model')
+    ? body.model
+    : body.agentModel;
 
   // Validate agentType
-  if (newType !== undefined) {
-    if (!(VALID_AGENT_TYPES as readonly string[]).includes(newType)) {
-      throw new ValidationError(`Invalid agentType "${newType}". Must be one of: ${VALID_AGENT_TYPES.join(', ')}`);
+  if (!(VALID_AGENT_TYPES as readonly string[]).includes(newType)) {
+    throw new ValidationError(`Invalid agent "${newType}". Must be one of: ${VALID_AGENT_TYPES.join(', ')}`);
+    return;
+  }
+
+  // When switching to opencode, verify binary is available
+  if (newType === 'opencode') {
+    const status = detectOpenCode();
+    if (!status.opencodeInstalled) {
+      throw new ValidationError('OpenCode binary not found. Install it first: npm i -g opencode-ai');
       return;
     }
+  }
 
-    // When switching to opencode, verify binary is available
-    if (newType === 'opencode') {
-      const status = detectOpenCode();
-      if (!status.opencodeInstalled) {
-        throw new ValidationError('OpenCode binary not found. Install it first: npm i -g opencode-ai');
-        return;
-      }
+  // OC-024: When switching to codex, verify binary is available
+  if (newType === 'codex') {
+    const status = detectCodex();
+    if (!status.codexInstalled) {
+      throw new ValidationError('Codex CLI not found. Install it first: npm i -g @openai/codex');
+      return;
     }
+  }
 
-    // OC-024: When switching to codex, verify binary is available
-    if (newType === 'codex') {
-      const status = detectCodex();
-      if (!status.codexInstalled) {
-        throw new ValidationError('Codex CLI not found. Install it first: npm i -g @openai/codex');
-        return;
-      }
-    }
-
-    if (newType === 'pi') {
-      const status = detectPi();
-      if (!status.piInstalled) {
-        throw new ValidationError('Pi CLI not found. Install it first: npm install -g @mariozechner/pi-coding-agent');
-        return;
-      }
+  if (newType === 'pi') {
+    const status = detectPi();
+    if (!status.piInstalled) {
+      throw new ValidationError('Pi CLI not found. Install it first: npm install -g @mariozechner/pi-coding-agent');
+      return;
     }
   }
 
   // Validate model requires API key for OpenCode models
-  const effectiveType = newType ?? currentAgentType;
-  const effectiveModel = newModel !== undefined ? newModel : currentAgentModel;
+  const effectiveType = newType as AgentType;
+  const effectiveModel = hasModelField ? newModel : activeModel;
 
   if (effectiveType === 'opencode' && effectiveModel) {
     // Ollama models: validate Ollama is running instead of checking API key
@@ -735,40 +673,15 @@ router.put('/agent', async (req: Request, res: Response) => {
   }
 
   // Apply changes
-  if (newType !== undefined) currentAgentType = newType as AgentType;
-  if (newModel !== undefined) currentAgentModel = newModel || null;
-
-  // Persist to DB (agent_config row) for survival across restarts
-  await execute(`
-    INSERT INTO agent_config (id, agent_type, agent_model, updated_at)
-    VALUES ('default', $1, $2, NOW())
-    ON CONFLICT(id) DO UPDATE SET
-      agent_type = excluded.agent_type,
-      agent_model = excluded.agent_model,
-      updated_at = excluded.updated_at
-  `, [currentAgentType, currentAgentModel]);
-
-  // Dual-write to workflow_configs so the new workflow router stays in sync
-  try {
-    const provider = providerForRuntime(currentAgentType, currentAgentModel);
-    await execute(
-      `INSERT INTO workflow_configs (workflow_id, runtime, provider, model, updated_at)
-       VALUES ('pipeline_execution', $1, $2, $3, NOW())
-       ON CONFLICT (workflow_id) DO UPDATE SET
-         runtime = EXCLUDED.runtime,
-         model = EXCLUDED.model,
-         provider = EXCLUDED.provider,
-         updated_at = NOW()`,
-      [currentAgentType, provider, currentAgentModel],
-    );
-  } catch (err) {
-    // workflow_configs table may not exist yet on older DBs — log but don't fail
-    console.warn('[config] workflow_configs dual-write failed:', (err as Error).message);
-  }
+  setActiveAgentConfig({
+    agent: effectiveType,
+    ...(hasModelField ? { model: newModel } : {}),
+  });
 
   res.json({
-    agentType: currentAgentType,
-    agentModel: currentAgentModel,
+    agent: activeAgent,
+    model: activeModel,
+    changed: true,
   });
 });
 
