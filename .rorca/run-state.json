@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T06:57:08.524Z",
+  "lastUpdatedAt": "2026-05-03T07:07:08.422Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -273,6 +273,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 369909
+    },
+    {
+      "storyId": "CLI-025",
+      "title": "Create bin/rorca.ts — CLI entry point with start, init, run, status, doctor, db commands",
+      "status": "passed",
+      "startedAt": "2026-05-03T06:57:29.576Z",
+      "finishedAt": "2026-05-03T07:07:08.422Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 578846
     }
   ],
   "failedStories": [],
