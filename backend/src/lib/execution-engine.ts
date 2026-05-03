@@ -35,7 +35,9 @@ import { StringDecoder } from 'string_decoder';
 import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
-import { detectOpenCode } from './opencode-detector';
+import { detectOpenCode, requireOpenCode } from './opencode-detector';
+import { requireCodex } from './codex-detector';
+import { requirePi } from './pi-detector';
 import { detectCapability } from './reasoning-detector';
 import {
   loadOrchestrationConfig,
@@ -2026,6 +2028,10 @@ async function spawnPiRpc(
             cumulativeInput = input;
             cumulativeOutput = output;
             turnCount++;
+            writeOutput(
+              `[Token] input=${turnInput > 0 ? turnInput : input} output=${turnOutput > 0 ? turnOutput : output} ` +
+              `cumulative_input=${cumulativeInput} cumulative_output=${cumulativeOutput} turn=${turnCount}\n`,
+            );
             onTokenUpdate({
               inputTokens: turnInput > 0 ? turnInput : input,
               outputTokens: turnOutput > 0 ? turnOutput : output,
@@ -2278,6 +2284,30 @@ function extractTokenUsage(
       const model = usage.model ?? fallbackModel;
       const costUsd = calculateCost(usage.inputTokens, usage.outputTokens, model, cwd);
       return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, model, costUsd };
+    }
+
+    if (agentType === 'pi') {
+      let inputTokens = 0;
+      let outputTokens = 0;
+      const tokenLines = logContent.match(/^\[Token\].*$/gm) ?? [];
+
+      for (const line of tokenLines) {
+        const cumulativeInput = line.match(/\bcumulative_input=(\d+)/);
+        const cumulativeOutput = line.match(/\bcumulative_output=(\d+)/);
+        const deltaInput = line.match(/\binput=(\d+)/);
+        const deltaOutput = line.match(/\boutput=(\d+)/);
+
+        if (cumulativeInput && cumulativeOutput) {
+          inputTokens = Number(cumulativeInput[1]);
+          outputTokens = Number(cumulativeOutput[1]);
+          continue;
+        }
+
+        if (deltaInput) inputTokens += Number(deltaInput[1]);
+        if (deltaOutput) outputTokens += Number(deltaOutput[1]);
+      }
+
+      return { inputTokens, outputTokens, model: agentModel ?? 'pi', costUsd: 0 };
     }
 
     // codex — no known token output format yet
@@ -4018,6 +4048,10 @@ async function main(): Promise<void> {
   const requiredEngines = scanRequiredEngines(stories, config.agentType);
   const engineCounts = countStoriesByEngine(stories, config.agentType);
 
+  if (config.agentType === 'opencode' || requiredEngines.has('opencode')) requireOpenCode();
+  if (config.agentType === 'codex' || requiredEngines.has('codex')) requireCodex();
+  if (config.agentType === 'pi' || requiredEngines.has('pi')) requirePi();
+
   logger.info('========================================');
   logger.info(`  Rorca Engine — ${modeLabel}`);
   logger.info('========================================');
@@ -4071,6 +4105,10 @@ async function main(): Promise<void> {
   initRunState(config.cwd, specId, config.runId);
   const resumeCtx = getResumeContext(config.cwd, specId);
 
+  if (requiredEngines.has('pi')) {
+    await startPiRpcServer(config.cwd, config.agentModel);
+  }
+
   async function cleanupBrowserServers(): Promise<void> {
     await stopPiRpcServer();
     if (_playwrightMcpServerPid) {
@@ -4104,6 +4142,7 @@ async function main(): Promise<void> {
     })();
   });
 
+  try {
   // CA-009: Discover personas from .rorca/personas/
   const personaRegistry = new PersonaRegistry();
   const rorcaDir = path.join(config.cwd, '.rorca');
@@ -4126,7 +4165,7 @@ async function main(): Promise<void> {
 
   // ─── Parallel execution path (N > 1) ──────────────────────────────
   if (config.parallelism > 1 && !config.specificStory) {
-    await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, stories, personaRegistry);
+    process.exitCode = await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, stories, personaRegistry);
     return;
   }
 
@@ -4153,7 +4192,8 @@ async function main(): Promise<void> {
       story = currentStories.find(s => s.id === config.specificStory) ?? null;
       if (!story) {
         logger.error(`Story ${config.specificStory} not found!`);
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
     } else {
       story = getNextStory(currentStories);
@@ -4173,8 +4213,8 @@ async function main(): Promise<void> {
         }
         writeProgressTxt(config.cwd);
         archiveRunState(config.cwd, config.runId);
-        await cleanupBrowserServers();
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
       logger.info(`All stories complete! ${finalProgress.passed}/${finalProgress.total}`);
       // CIE-007: Archive run-state.json and write final progress.txt
@@ -4195,8 +4235,8 @@ async function main(): Promise<void> {
         }
       }
 
-      await cleanupBrowserServers();
-      process.exit(0);
+      process.exitCode = 0;
+      return;
     }
 
     const currentProgress = getProgress(currentStories);
@@ -4214,7 +4254,8 @@ async function main(): Promise<void> {
       const ac = getAcceptance(story);
       if (ac) logger.info(`  Acceptance: ${ac}`);
       logger.info('');
-      process.exit(0);
+      process.exitCode = 0;
+      return;
     }
 
     const seqResult = await executeStory(
@@ -4226,12 +4267,15 @@ async function main(): Promise<void> {
     );
 
     if (config.specificStory) {
-      await cleanupBrowserServers();
-      process.exit(seqResult === 'passed' ? 0 : 1);
+      process.exitCode = seqResult === 'passed' ? 0 : 1;
+      return;
     }
 
     logger.info('');
     await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+  } finally {
+    await cleanupBrowserServers();
   }
 }
 
@@ -4246,7 +4290,7 @@ async function runParallel(
   retryCounts: Map<string, number>,
   stories: UserStory[],
   personaRegistry?: PersonaRegistry,
-): Promise<void> {
+): Promise<number> {
   const waveStories: WaveUserStory[] = stories.map(s => ({
     id: s.id,
     title: s.title,
@@ -4264,7 +4308,7 @@ async function runParallel(
   if (isCycleError(waveResult)) {
     logger.error(`[engine] Dependency cycle detected among stories: ${waveResult.involvedIds.join(', ')}`);
     logger.error(`[engine] Cannot run in parallel mode. Fix dependsOn fields or use --parallelism 1`);
-    process.exit(1);
+    return 1;
   }
 
   const waves: Wave[] = waveResult;
@@ -4506,8 +4550,7 @@ async function runParallel(
   // CIE-007: Archive run-state.json and write final progress.txt
   writeProgressTxt(config.cwd);
   archiveRunState(config.cwd, config.runId);
-  await stopPiRpcServer();
-  process.exit(failedIds.size > 0 ? 1 : 0);
+  return failedIds.size > 0 ? 1 : 0;
 }
 
 // ─── Workspace Resolver ─────────────────────────────────────────────────────
