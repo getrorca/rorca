@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { Command } from 'commander';
-import { mkdirSync, existsSync, writeFileSync, readFileSync } from 'node:fs';
+import { mkdirSync, existsSync, writeFileSync, readFileSync, unlinkSync } from 'node:fs';
+import { tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
 import { spawn } from 'node:child_process';
@@ -370,6 +371,110 @@ async function getDefaultWorkspace() {
     }
     return workspaces[0];
 }
+async function getWorkspaceById(workspaceId) {
+    const workspaces = await getWorkspaces();
+    const workspace = workspaces.find((item) => item.id === workspaceId);
+    if (!workspace) {
+        throw new Error(`Workspace "${workspaceId}" not found.`);
+    }
+    return workspace;
+}
+function isBackendUnavailableError(error) {
+    if (!(error instanceof Error))
+        return false;
+    const message = error.message.toLowerCase();
+    return (message.includes('fetch failed')
+        || message.includes('networkerror')
+        || message.includes('econnrefused')
+        || message.includes('enotfound')
+        || message.includes('failed to fetch')
+        || message.includes('this operation was aborted'));
+}
+function cleanupTempFile(filePath) {
+    if (!filePath)
+        return;
+    try {
+        unlinkSync(filePath);
+    }
+    catch {
+        // Best-effort cleanup for temp context files.
+    }
+}
+async function spawnInteractivePi(args) {
+    return new Promise((resolve, reject) => {
+        const child = spawn('pi', args, {
+            stdio: 'inherit',
+            shell: process.platform === 'win32',
+        });
+        const forwardSignal = (signal) => {
+            if (!child.killed) {
+                child.kill(signal);
+            }
+        };
+        process.on('SIGINT', forwardSignal);
+        process.on('SIGTERM', forwardSignal);
+        child.on('error', (error) => {
+            process.removeListener('SIGINT', forwardSignal);
+            process.removeListener('SIGTERM', forwardSignal);
+            reject(error);
+        });
+        child.on('close', (code) => {
+            process.removeListener('SIGINT', forwardSignal);
+            process.removeListener('SIGTERM', forwardSignal);
+            resolve(code ?? 1);
+        });
+    });
+}
+async function runChat(options) {
+    let workspaceName = options.workspaceId ?? 'default';
+    let tempSkillFile = null;
+    let backendWarning = null;
+    try {
+        const workspace = options.workspaceId
+            ? await getWorkspaceById(options.workspaceId)
+            : await getDefaultWorkspace();
+        workspaceName = workspace.label || workspace.id;
+        const direction = await fetchJson('/api/direction/synthesize', {
+            method: 'POST',
+            body: JSON.stringify({
+                workspaceId: workspace.id,
+            }),
+        });
+        tempSkillFile = path.join(tmpdir(), `rorca-chat-context-${Date.now()}-${process.pid}.md`);
+        writeFileSync(tempSkillFile, `${direction.synthesized.trim()}\n`, 'utf8');
+    }
+    catch (error) {
+        if (!isBackendUnavailableError(error)) {
+            throw error;
+        }
+        const message = error instanceof Error ? error.message : String(error);
+        backendWarning = `Warning: backend unreachable (${message}). Launching pi without Rorca context injection.`;
+        workspaceName = options.workspaceId ?? 'unavailable';
+    }
+    if (backendWarning) {
+        console.warn(yellow(backendWarning));
+    }
+    const args = [
+        ...(tempSkillFile ? ['--skill', tempSkillFile] : []),
+        ...(options.model ? ['--model', options.model] : []),
+    ];
+    console.log('─── Rorca Chat ───────────────────────────────────────────────');
+    console.log(`Workspace: ${workspaceName}  Agent: pi  Model: ${options.model ?? 'default'}  Context: ${tempSkillFile ? 'L1-L5 injected' : 'not injected'}`);
+    console.log('─────────────────────────────────────────────────────────────');
+    try {
+        return await spawnInteractivePi(args);
+    }
+    catch (error) {
+        if (error?.code === 'ENOENT') {
+            printPiInstallMethods();
+        }
+        throw error;
+    }
+    finally {
+        cleanupTempFile(tempSkillFile);
+        console.log('Chat session ended');
+    }
+}
 async function resolveApprovedSpec(specSlug) {
     const workspaces = await getWorkspaces();
     if (workspaces.length === 0) {
@@ -514,6 +619,22 @@ function formatWalLine(event) {
             return null;
     }
 }
+function isActiveRunStatus(status) {
+    return status === 'queued' || status === 'running' || status === 'paused';
+}
+async function promptCancelDecision() {
+    const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+    try {
+        const answer = await Promise.race([
+            rl.question('Cancel run? [y/N] '),
+            new Promise((resolve) => setTimeout(() => resolve(''), 3000)),
+        ]);
+        return answer.trim().toLowerCase() === 'y' ? 'cancel' : 'detach';
+    }
+    finally {
+        rl.close();
+    }
+}
 async function streamWal(runId, signal) {
     let finalEvent = null;
     await readSse('/api/pipeline/stream', async (eventName, data) => {
@@ -559,6 +680,77 @@ async function streamRawOutput(runId, signal) {
         throw error;
     });
 }
+async function attachLiveRun(runId) {
+    let details;
+    try {
+        details = await fetchJson(`/api/pipeline/runs/${runId}`);
+    }
+    catch {
+        console.log(`No active run with ID ${runId}`);
+        return 1;
+    }
+    if (!isActiveRunStatus(details.run.status)) {
+        console.log(`No active run with ID ${runId}`);
+        return 1;
+    }
+    console.log(`Attached to run ${runId}`);
+    const walController = new AbortController();
+    const outputController = new AbortController();
+    let mode = 'attached';
+    let prompting = false;
+    const onSigint = () => {
+        if (prompting || mode === 'cancelling' || mode === 'detaching') {
+            return;
+        }
+        prompting = true;
+        void (async () => {
+            const decision = await promptCancelDecision();
+            prompting = false;
+            if (decision === 'cancel') {
+                mode = 'cancelling';
+                console.log('Cancelling run...');
+                try {
+                    await fetchJson(`/api/pipeline/runs/${runId}/cancel`, { method: 'POST' });
+                }
+                catch (error) {
+                    mode = 'attached';
+                    const message = error instanceof Error ? error.message : String(error);
+                    console.error(message);
+                }
+                return;
+            }
+            mode = 'detaching';
+            walController.abort();
+            outputController.abort();
+        })();
+    };
+    process.on('SIGINT', onSigint);
+    try {
+        const walPromise = streamWal(runId, walController.signal);
+        const outputPromise = streamRawOutput(runId, outputController.signal);
+        const { finalEvent } = await walPromise;
+        if (mode === 'detaching') {
+            return 0;
+        }
+        outputController.abort();
+        await Promise.race([outputPromise, sleep(200)]);
+        details = await fetchJson(`/api/pipeline/runs/${runId}`);
+        if (mode === 'cancelling'
+            && (details.run.status === 'cancelled' || finalEvent?.event_type === 'run_cancelled')) {
+            console.log('Run cancelled');
+        }
+        const failed = details.run.status === 'failed'
+            || details.run.status === 'cancelled'
+            || details.run.status === 'partial_failure'
+            || details.stories.some((story) => story.status === 'fail');
+        return failed ? 1 : 0;
+    }
+    finally {
+        process.removeListener('SIGINT', onSigint);
+        walController.abort();
+        outputController.abort();
+    }
+}
 async function runSpec(options) {
     const { workspace } = await resolveApprovedSpec(options.specSlug);
     const trigger = await fetchJson('/api/pipeline/trigger', {
@@ -585,48 +777,7 @@ async function runSpec(options) {
     if ('queued' in trigger && trigger.queued) {
         console.log(`Queued at position ${trigger.position ?? '?'}`);
     }
-    const walController = new AbortController();
-    const outputController = new AbortController();
-    let cancelling = false;
-    const cancelRun = async () => {
-        if (cancelling)
-            return;
-        cancelling = true;
-        console.log('Cancelling run...');
-        try {
-            await fetchJson(`/api/pipeline/runs/${runId}/cancel`, { method: 'POST' });
-        }
-        catch (error) {
-            const message = error instanceof Error ? error.message : String(error);
-            console.error(message);
-        }
-        finally {
-            walController.abort();
-            outputController.abort();
-        }
-    };
-    const onSigint = () => {
-        void cancelRun();
-    };
-    process.once('SIGINT', onSigint);
-    try {
-        const walPromise = streamWal(runId, walController.signal);
-        const outputPromise = options.tail ? streamRawOutput(runId, outputController.signal) : Promise.resolve();
-        await walPromise;
-        outputController.abort();
-        await Promise.race([outputPromise, sleep(200)]);
-        const details = await fetchJson(`/api/pipeline/runs/${runId}`);
-        const failed = details.run.status === 'failed'
-            || details.run.status === 'cancelled'
-            || details.run.status === 'partial_failure'
-            || details.stories.some((story) => story.status === 'fail');
-        return failed ? 1 : 0;
-    }
-    finally {
-        process.removeListener('SIGINT', onSigint);
-        walController.abort();
-        outputController.abort();
-    }
+    return attachLiveRun(runId);
 }
 async function runStatus(runId) {
     if (runId) {
@@ -884,6 +1035,13 @@ program
     await runInit(options.path);
 });
 program
+    .command('chat')
+    .option('--model <model>', 'Pi model override')
+    .option('--workspace-id <id>', 'Workspace to inject context from')
+    .action(async (options) => {
+    process.exitCode = await runChat(options);
+});
+program
     .command('run <specSlug>')
     .option('--story <id>', 'Run a single story')
     .option('--dry-run', 'Return dry-run estimate only')
@@ -906,6 +1064,18 @@ program
     .option('--run-id <id>', 'Show one run in detail')
     .action(async (options) => {
     await runStatus(options.runId ? Number(options.runId) : undefined);
+});
+program
+    .command('attach <runId>')
+    .description('Attach to an active run')
+    .action(async (runId) => {
+    const parsedRunId = Number(runId);
+    if (!Number.isInteger(parsedRunId) || parsedRunId < 1) {
+        console.log(`No active run with ID ${runId}`);
+        process.exitCode = 1;
+        return;
+    }
+    process.exitCode = await attachLiveRun(parsedRunId);
 });
 program
     .command('doctor')

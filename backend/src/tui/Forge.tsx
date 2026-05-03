@@ -123,6 +123,7 @@ interface RunDetailsResponse {
   run: {
     id: number;
     status: string;
+    spec_path?: string;
     started_at?: string | null;
     finished_at?: string | null;
   };
@@ -133,6 +134,13 @@ interface RunDetailsResponse {
     outputTokens?: number;
     totalCostUsd?: number;
   };
+}
+
+interface PipelineRunsResponse {
+  items: Array<{
+    id: number;
+    status: string;
+  }>;
 }
 
 interface ForegroundRunState {
@@ -149,7 +157,8 @@ interface ForegroundRunState {
   cumulativeOutput: number;
   cumulativeCost: number;
   directionSummary: string | null;
-  confirmCancel: boolean;
+  exitPromptOpen: boolean;
+  cancelRequested: boolean;
 }
 
 interface BoardLine {
@@ -334,6 +343,19 @@ function specPathFromSlug(specSlug: string): string {
   return `forge/specs/approved/${specSlug}.json`;
 }
 
+function activeRunStatus(status: string | null | undefined): boolean {
+  return status === 'queued' || status === 'running' || status === 'paused';
+}
+
+function specSlugFromRunPath(specPath: string | null | undefined, fallbackRunId: number): string {
+  if (!specPath) {
+    return `run-${fallbackRunId}`;
+  }
+
+  const basename = specPath.split('/').pop() ?? specPath;
+  return basename.endsWith('.json') ? basename.slice(0, -5) : basename;
+}
+
 function truncateText(input: string, width: number): string {
   if (input.length <= width) {
     return input;
@@ -461,6 +483,7 @@ export function Forge(): JSX.Element {
   const [branchName] = useState(() => safeBranchName());
   const [outputLines, setOutputLines] = useState<OutputEntry[]>([]);
   const [foregroundRun, setForegroundRun] = useState<ForegroundRunState | null>(null);
+  const [backgroundRunsCount, setBackgroundRunsCount] = useState(0);
   const [phaseOverride, setPhaseOverride] = useState<OrchestrationPhase | null>(null);
   const [boardOpen, setBoardOpen] = useState(false);
   const [boardPulseOn, setBoardPulseOn] = useState(true);
@@ -483,6 +506,8 @@ export function Forge(): JSX.Element {
   const outputRequestRef = useRef<ClientRequest | null>(null);
   const outputResponseRef = useRef<IncomingMessage | null>(null);
   const outputPartialRef = useRef('');
+  const cancelPromptTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const exitAfterCancelRef = useRef(false);
   const activeRunIdRef = useRef<number | null>(null);
   const isUnmountedRef = useRef(false);
   const boardWorkspaceRef = useRef<WorkspaceMatch | null>(null);
@@ -809,6 +834,13 @@ export function Forge(): JSX.Element {
     );
   };
 
+  const clearCancelPromptTimer = (): void => {
+    if (cancelPromptTimerRef.current) {
+      clearTimeout(cancelPromptTimerRef.current);
+      cancelPromptTimerRef.current = null;
+    }
+  };
+
   const closeRunStreams = (): void => {
     walRequestRef.current?.destroy();
     walResponseRef.current?.destroy();
@@ -819,6 +851,14 @@ export function Forge(): JSX.Element {
     outputRequestRef.current = null;
     outputResponseRef.current = null;
     outputPartialRef.current = '';
+  };
+
+  const detachForegroundRunAndExit = (): void => {
+    clearCancelPromptTimer();
+    closeRunStreams();
+    activeRunIdRef.current = null;
+    setForegroundRun(null);
+    process.exit(0);
   };
 
   const syncRunMetadata = async (runId: number): Promise<void> => {
@@ -880,11 +920,19 @@ export function Forge(): JSX.Element {
       return;
     }
 
+    clearCancelPromptTimer();
     closeRunStreams();
     activeRunIdRef.current = null;
     setForegroundRun(null);
     setPhaseOverride(status === 'done' ? 'COMPLETE' : 'FAILED');
     await printRunSummary(runId, status);
+    if (status === 'cancelled') {
+      appendOutput({ text: 'Run cancelled', color: 'yellow' });
+    }
+    if (exitAfterCancelRef.current) {
+      exitAfterCancelRef.current = false;
+      process.exit(0);
+    }
   };
 
   const handleWalEvent = async (event: PipelineWalEvent): Promise<void> => {
@@ -1080,7 +1128,8 @@ export function Forge(): JSX.Element {
         cumulativeOutput: 0,
         cumulativeCost: 0,
         directionSummary: null,
-        confirmCancel: false,
+        exitPromptOpen: false,
+        cancelRequested: false,
       });
 
       appendOutput({
@@ -1393,37 +1442,133 @@ export function Forge(): JSX.Element {
     }
   };
 
-  const requestCancel = (): boolean => {
+  const attachRun = async (rawRunId: string): Promise<void> => {
     if (!foregroundRun) {
+      // continue below for attach mode
+    } else {
+      appendOutput({ text: `[${formatClock(new Date())}] run already in progress`, color: 'yellow' });
+      return;
+    }
+
+    const normalized = rawRunId.trim();
+    const runId = Number.parseInt(normalized, 10);
+    if (!normalized || Number.isNaN(runId) || runId < 1) {
+      appendOutput({ text: `[${formatClock(new Date())}] usage: attach <runId>`, color: 'red' });
+      return;
+    }
+
+    appendOutput({ text: `> attach ${runId}`, color: 'cyan' });
+
+    try {
+      const details = await apiJson<RunDetailsResponse>(`/api/pipeline/runs/${runId}`);
+      if (!activeRunStatus(details.run.status)) {
+        appendOutput({ text: `No active run with ID ${runId}`, color: 'yellow' });
+        return;
+      }
+
+      const summary = summarizeRun(details.stories);
+      activeRunIdRef.current = runId;
+      setPhaseOverride('FORGING');
+      setForegroundRun({
+        runId,
+        specSlug: specSlugFromRunPath(details.run.spec_path, runId),
+        queuePosition: null,
+        currentStory: 0,
+        totalStories: details.specStories?.length ?? 0,
+        passedCount: summary.passed,
+        failedCount: summary.failed,
+        skippedCount: summary.skipped,
+        excludedCount: summary.excluded,
+        cumulativeInput: details.tokenSummary?.inputTokens ?? 0,
+        cumulativeOutput: details.tokenSummary?.outputTokens ?? 0,
+        cumulativeCost: details.tokenSummary?.totalCostUsd ?? 0,
+        directionSummary: null,
+        exitPromptOpen: false,
+        cancelRequested: false,
+      });
+
+      appendOutput({
+        text: `⟳ Attached to run #${runId}`,
+        color: 'yellow',
+      });
+
+      closeRunStreams();
+      connectWalStream(runId);
+      connectOutputStream(runId);
+      void syncRunMetadata(runId);
+    } catch (error) {
+      appendOutput({
+        text: `No active run with ID ${runId}`,
+        color: 'yellow',
+      });
+      if (process.env.NODE_ENV === 'test') {
+        void error;
+      }
+    }
+  };
+
+  const requestCancel = (): boolean => {
+    if (!foregroundRun || foregroundRun.cancelRequested) {
       return false;
     }
 
-    if (!foregroundRun.confirmCancel) {
-      setForegroundRun((current) => (current ? { ...current, confirmCancel: true } : current));
+    if (!foregroundRun.exitPromptOpen) {
+      clearCancelPromptTimer();
+      setForegroundRun((current) => (current ? { ...current, exitPromptOpen: true } : current));
       appendOutput({
-        text: `[${formatClock(new Date())}] confirm cancel run #${foregroundRun.runId} — press Ctrl+C again to send cancel`,
+        text: 'Cancel run? [y/N]',
         color: 'yellow',
       });
+      cancelPromptTimerRef.current = setTimeout(() => {
+        detachForegroundRunAndExit();
+      }, 3000);
       return true;
     }
+
+    return true;
+  };
+
+  const confirmCancelFromPrompt = (): void => {
+    if (!foregroundRun || !foregroundRun.exitPromptOpen || foregroundRun.cancelRequested) {
+      return;
+    }
+
+    clearCancelPromptTimer();
+    exitAfterCancelRef.current = true;
+    setForegroundRun((current) => (
+      current
+        ? {
+            ...current,
+            exitPromptOpen: false,
+            cancelRequested: true,
+          }
+        : current
+    ));
 
     void (async () => {
       try {
         await apiJson(`/api/pipeline/runs/${foregroundRun.runId}/cancel`, { method: 'POST' });
-        setForegroundRun((current) => (current ? { ...current, confirmCancel: false } : current));
         appendOutput({
           text: `[${formatClock(new Date())}] cancel requested for run #${foregroundRun.runId}`,
           color: 'yellow',
         });
       } catch (error) {
+        exitAfterCancelRef.current = false;
+        setForegroundRun((current) => (
+          current
+            ? {
+                ...current,
+                exitPromptOpen: false,
+                cancelRequested: false,
+              }
+            : current
+        ));
         appendOutput({
           text: `[${formatClock(new Date())}] cancel failed: ${(error as Error).message}`,
           color: 'red',
         });
       }
     })();
-
-    return true;
   };
 
   const approveSelectedBoardSpec = async (): Promise<void> => {
@@ -1638,7 +1783,9 @@ export function Forge(): JSX.Element {
         label: 'attach',
         description: 'Attach to an active run',
         args: ['<runId>'],
-        handler: (args) => appendOutput({ text: `> attach ${args.join(' ')}`.trimEnd(), color: 'cyan' }, { text: `[forge] attach placeholder for run "${args.join(' ')}"` }),
+        handler: (args) => {
+          void attachRun(args.join(' ').trim());
+        },
       },
       {
         id: 'chat',
@@ -1740,6 +1887,28 @@ export function Forge(): JSX.Element {
   }, [boardOpen]);
 
   useInput((input, key) => {
+    if (foregroundRun && key.ctrl && (input === 'c' || input === 'C')) {
+      requestCancel();
+      return;
+    }
+
+    if (foregroundRun?.exitPromptOpen) {
+      if (!key.ctrl && !key.meta && (input === 'y' || input === 'Y')) {
+        confirmCancelFromPrompt();
+        return;
+      }
+
+      if (
+        key.escape
+        || (!key.ctrl && !key.meta && (input === 'n' || input === 'N'))
+      ) {
+        detachForegroundRunAndExit();
+        return;
+      }
+
+      return;
+    }
+
     if (recallState) {
       if (key.escape) {
         setRecallState(null);
