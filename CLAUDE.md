@@ -441,7 +441,7 @@ Key `backend/src/lib/` modules beyond `llm-client` and `direction-stack`:
 - **`workspace-echolocation.ts`** — Workspace intelligence scanner. `echolocate(path)` → `EcholocationReport` detects stack (80+ npm packages, Cargo.toml, requirements.txt, go.mod, Dockerfile), context files, monorepo structure, and computes weighted health score (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt). `discoverMonorepo()` scans `apps/`, `packages/`, `libs/`, `services/`, `modules/` for manifests. `inferSkillsFromStack()` maps detected tech names to skill filenames via `STACK_TO_SKILLS` lookup. Health penalty: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit.
 
 ### Static Serving (Self-Hosted)
-When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the built frontend and handles SPA fallback. This is the `rorca start` CLI mode — frontend and backend served from the same process on port 3030.
+When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the built frontend and handles SPA fallback. This is the `rorca start` CLI mode — frontend and backend served from the same process on port 3030. MCP HTTP transport is enabled by default on the same process at `http://localhost:3030/mcp`; set `RORCA_SERVE_MCP=false` to disable the MCP bridge entirely.
 
 ## Critical Gotchas
 
@@ -612,6 +612,8 @@ Express API routes → @swagger JSDoc annotations → OpenAPI spec (/api/docs/op
 ```
 
 **Current state**: 24 hand-written stdio MCP tools in `backend/src/mcp/server.ts`.
+
+**Bridge URL**: HTTP MCP transport is mounted at `http://localhost:3030/mcp` when `RORCA_SERVE_MCP` is unset or not equal to `false`. `RORCA_SERVE_MCP=false` disables the HTTP bridge and its local OAuth helper routes; Pi chat sessions then run without Rorca MCP tools.
 
 Setup (stdio): `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
 
