@@ -1,8 +1,8 @@
 {
   "specId": "rorca-cli-tui-and-mcp-hardening",
-  "runId": 20260316000241,
-  "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T10:29:56.313Z",
+  "runId": 20260316000242,
+  "startedAt": "2026-05-03T21:34:47.790Z",
+  "lastUpdatedAt": "2026-05-03T21:40:19.159Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -363,22 +363,21 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 2759221
-    }
-  ],
-  "failedStories": [
+    },
     {
       "storyId": "CLI-027",
       "title": "Session persistence: Ctrl+C safety and detached-run semantics",
-      "status": "failed",
-      "startedAt": "2026-05-03T07:11:25.565Z",
-      "finishedAt": "2026-05-03T07:42:21.067Z",
+      "status": "passed",
+      "startedAt": "2026-05-03T21:34:54.081Z",
+      "finishedAt": "2026-05-03T21:40:19.159Z",
       "agentType": "codex",
-      "failReason": "timeout",
-      "elapsedMs": 1855502
+      "model": "gpt-5.4",
+      "elapsedMs": 325078
     }
   ],
+  "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
   "decisions": [],
-  "resumedFromStory": null
+  "resumedFromStory": "CLI-035"
 }
