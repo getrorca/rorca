@@ -16,6 +16,32 @@ const DB_CONTAINER = 'rorca-db';
 const DB_VOLUME = 'rorca-db-data';
 const DB_IMAGE = 'apache/age:latest';
 const pkg = JSON.parse(readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8'));
+const PI_INSTALL_METHODS = {
+    npm: 'npm install -g @mariozechner/pi-coding-agent',
+    pnpm: 'pnpm add -g @mariozechner/pi-coding-agent',
+    bun: 'bun add -g @mariozechner/pi-coding-agent',
+    curl: 'curl -fsSL https://pi.mariozechner.com/install.sh | sh',
+};
+const PI_PROVIDER_LABELS = {
+    openai: 'ChatGPT Plus/Pro',
+    chatgpt: 'ChatGPT Plus/Pro',
+    codex: 'ChatGPT Plus/Pro',
+    anthropic: 'Claude',
+    claude: 'Claude',
+    github: 'GitHub Copilot',
+    copilot: 'GitHub Copilot',
+    'github copilot': 'GitHub Copilot',
+    google: 'Gemini',
+    gemini: 'Gemini',
+    openrouter: 'OpenRouter',
+};
+const PI_PROVIDER_ORDER = [
+    'ChatGPT Plus/Pro',
+    'Claude',
+    'GitHub Copilot',
+    'Gemini',
+    'OpenRouter',
+];
 function red(text) {
     return `\x1b[31m${text}\x1b[0m`;
 }
@@ -687,29 +713,97 @@ async function runDoctor(json = false) {
     }
     return remote.summary.errors > 0 ? 1 : 0;
 }
-async function runAuth(action, provider) {
-    if (provider === 'pi') {
-        const args = ['auth', action];
-        const result = await runCommand('pi', args, { stdio: action === 'status' ? 'pipe' : 'inherit' });
-        if (result.code !== 0) {
-            throw new Error(result.stderr || result.stdout || `pi auth ${action} failed`);
-        }
-        if (action === 'status' && result.stdout) {
-            console.log(result.stdout);
-        }
-        return;
+function titleCase(input) {
+    return input
+        .split(/[\s/_-]+/)
+        .filter(Boolean)
+        .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
+        .join(' ');
+}
+function getPiProviderLabel(provider) {
+    const normalized = provider.trim().toLowerCase();
+    return PI_PROVIDER_LABELS[normalized] ?? titleCase(provider);
+}
+function printPiInstallMethods() {
+    console.log('Install Pi CLI with one of:');
+    console.log(`NPM   ${PI_INSTALL_METHODS.npm}`);
+    console.log(`PNPM  ${PI_INSTALL_METHODS.pnpm}`);
+    console.log(`BUN   ${PI_INSTALL_METHODS.bun}`);
+    console.log(`CURL  ${PI_INSTALL_METHODS.curl}`);
+}
+async function fetchPiHealth() {
+    return fetchJson('/api/health');
+}
+async function fetchPiModels() {
+    return fetchJson('/api/config/pi-models');
+}
+function buildPiProviderCounts(models) {
+    const counts = new Map();
+    for (const model of models) {
+        const label = getPiProviderLabel(model.provider);
+        counts.set(label, (counts.get(label) ?? 0) + 1);
     }
-    if (provider === 'claude' || provider === 'codex') {
-        if (action === 'status') {
-            const state = await fetchJson(`/api/config/${provider}-auth`);
-            console.log(JSON.stringify(state, null, 2));
-            return;
+    for (const label of PI_PROVIDER_ORDER) {
+        if (!counts.has(label)) {
+            counts.set(label, 0);
         }
-        const response = await fetchJson(`/api/config/${provider}-auth/${action}`, { method: 'POST' });
-        console.log(response.message || `${provider} ${action} complete`);
-        return;
     }
-    throw new Error(`Unsupported provider "${provider}". Use pi, claude, or codex.`);
+    return [...counts.entries()]
+        .map(([label, count]) => ({ label, count }))
+        .sort((a, b) => {
+        const aIndex = PI_PROVIDER_ORDER.indexOf(a.label);
+        const bIndex = PI_PROVIDER_ORDER.indexOf(b.label);
+        if (aIndex >= 0 && bIndex >= 0)
+            return aIndex - bIndex;
+        if (aIndex >= 0)
+            return -1;
+        if (bIndex >= 0)
+            return 1;
+        return a.label.localeCompare(b.label);
+    });
+}
+async function runPiAuthStatus() {
+    const health = await fetchPiHealth();
+    console.log(`Pi CLI: ${health.piInstalled ? health.piVersion ?? 'installed' : 'Not installed'}`);
+    if (!health.piInstalled) {
+        printPiInstallMethods();
+        return 1;
+    }
+    const { models } = await fetchPiModels();
+    const providers = buildPiProviderCounts(models);
+    console.log('');
+    console.log('Providers:');
+    for (const provider of providers) {
+        if (provider.count > 0) {
+            const noun = provider.count === 1 ? 'model' : 'models';
+            console.log(`  ${provider.label}: ${provider.count} ${noun} ${green('✓')}`);
+        }
+        else {
+            console.log(`  ${provider.label}: Not authenticated`);
+        }
+    }
+    console.log('');
+    console.log('To authenticate a provider: rorca auth login <provider>');
+    return 0;
+}
+async function runPiAuthCommand(action, provider) {
+    const health = await fetchPiHealth();
+    if (!health.piInstalled) {
+        printPiInstallMethods();
+        return 1;
+    }
+    const args = ['auth', action];
+    if (provider) {
+        args.push(provider);
+    }
+    const result = await runCommand('pi', args, { stdio: 'inherit' });
+    if (result.code !== 0) {
+        return result.code;
+    }
+    if (action === 'login') {
+        console.log('Auth complete — run rorca auth status to verify');
+    }
+    return 0;
 }
 async function waitForGeneratedSpec(jobId) {
     for (;;) {
@@ -819,11 +913,30 @@ program
     .action(async (options) => {
     process.exitCode = await runDoctor(Boolean(options.json));
 });
-program
-    .command('auth [action]')
-    .option('--provider <name>', 'Auth provider', 'pi')
-    .action(async (action, options) => {
-    await runAuth(action ?? 'status', options.provider);
+const auth = program.command('auth').description('Manage Pi authentication');
+auth
+    .action(async () => {
+    process.exitCode = await runPiAuthStatus();
+});
+auth
+    .command('status')
+    .action(async () => {
+    process.exitCode = await runPiAuthStatus();
+});
+auth
+    .command('login [provider]')
+    .action(async (provider) => {
+    process.exitCode = await runPiAuthCommand('login', provider);
+});
+auth
+    .command('logout [provider]')
+    .action(async (provider) => {
+    process.exitCode = await runPiAuthCommand('logout', provider);
+});
+auth
+    .command('install')
+    .action(() => {
+    printPiInstallMethods();
 });
 program
     .command('forge <brief...>')
