@@ -48,7 +48,7 @@ npm run self-register
 | Command | Purpose |
 |---------|---------|
 | `rorca start` | Serve the built frontend and backend from one local process on `:3030`. |
-| `rorca doctor` | Verify local prerequisites, binary discovery, and runtime health before running specs. |
+| `rorca doctor` | Verify local prerequisites, binary discovery, runtime health, and MCP token file permissions before running specs. |
 | `rorca auth` | Manage local CLI authentication flows and provider sign-in state. |
 | `rorca chat` | Open the interactive chat control surface for live operator-driven work. |
 | `rorca forge` | Launch the Forge TUI for spec review, orchestration, and command-center control. |
@@ -676,7 +676,15 @@ Express API routes → @swagger JSDoc annotations → OpenAPI spec (/api/docs/op
 
 **Bridge URL**: HTTP MCP transport is mounted at `http://localhost:3030/mcp` when `RORCA_SERVE_MCP` is unset or not equal to `false`. `RORCA_SERVE_MCP=false` disables the HTTP bridge and its local OAuth helper routes; Pi chat sessions then run without Rorca MCP tools.
 
-Setup (stdio): `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
+Security: `/mcp` now requires `Authorization: Bearer <token>` where the token is stored at `~/.rorca/mcp-token` with mode `0600`. The backend generates this token at startup. Never log or commit it.
+
+Setup (Claude HTTP): `rorca mcp setup-claude`
+
+Manual token access: `rorca mcp token`
+
+Token rotation: `rorca mcp rotate-token`
+
+Legacy stdio fallback: `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
 
 **Specs & Pipeline**
 | Tool | Purpose |
