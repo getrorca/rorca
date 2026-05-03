@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T22:37:24.156Z",
+  "lastUpdatedAt": "2026-05-03T22:51:14.744Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -443,6 +443,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 831014
+    },
+    {
+      "storyId": "CLI-049",
+      "title": "AEGIS P0: Per-tier Authorization — public/admin scoped tokens",
+      "status": "passed",
+      "startedAt": "2026-05-03T22:37:44.828Z",
+      "finishedAt": "2026-05-03T22:51:14.744Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 809916
     }
   ],
   "failedStories": [],

@@ -10,7 +10,14 @@ import { fileURLToPath } from 'node:url';
 import net from 'node:net';
 import readline from 'node:readline/promises';
 import { execa } from 'execa';
-import { ensureMcpToken, getMcpTokenPath, rotateMcpToken } from '../backend/src/lib/mcp-auth';
+import {
+  ensureMcpToken,
+  getMcpAdminToken,
+  getMcpAdminTokenPath,
+  getMcpPublicToken,
+  getMcpPublicTokenPath,
+  rotateMcpToken,
+} from '../backend/src/lib/mcp-auth';
 import { detectDbMode, isAgeAvailable, type DbMode } from '../backend/src/lib/db-strategy';
 import { dbStatus } from '../backend/src/lib/db-sidecar';
 import { MIN_PI_VERSION, detectPi as detectPiShared } from '../backend/src/lib/pi-detector';
@@ -104,6 +111,8 @@ type DoctorCheckId =
   | 'backend-version'
   | 'schema-migrations'
   | 'worker-heartbeat'
+  | 'mcp-public-token'
+  | 'mcp-admin-token'
   | 'mcp-bridge'
   | 'workspace-files';
 
@@ -844,8 +853,7 @@ function resolveClaudeBinPathLocal(): string | null {
   return output || null;
 }
 
-function checkMcpTokenFile(): { exists: boolean; modeOk: boolean; mode: string | null } {
-  const tokenPath = getMcpTokenPath();
+function checkMcpTokenFile(tokenPath: string): { exists: boolean; modeOk: boolean; mode: string | null } {
   if (!existsSync(tokenPath)) {
     return { exists: false, modeOk: false, mode: null };
   }
@@ -1051,6 +1059,7 @@ type McpTool = {
 };
 
 const MCP_URL = process.env.RORCA_PI_MCP_URL || ${escapedUrl};
+const MCP_TOKEN = process.env.RORCA_PI_MCP_TOKEN || "";
 const PROTOCOL_VERSION = "2024-11-05";
 let requestId = 0;
 
@@ -1065,6 +1074,7 @@ async function mcpPost(method: string, params: Record<string, unknown>, sessionI
     headers: {
       "Content-Type": "application/json",
       "Accept": "application/json",
+      ...(MCP_TOKEN ? { "Authorization": \`Bearer \${MCP_TOKEN}\` } : {}),
       ...(sessionId ? { "mcp-session-id": sessionId } : {}),
     },
     body: JSON.stringify({
@@ -1293,25 +1303,34 @@ async function fetchBackendHealth(options?: { skipVersionCheck?: boolean }): Pro
   return fetchJson<HealthResponse>('/api/health', undefined, 30_000, options);
 }
 
-async function runMcpToken(): Promise<number> {
-  const { token } = ensureMcpToken();
-  console.log(token);
+async function runMcpToken(options: { admin?: boolean } = {}): Promise<number> {
+  const tokens = ensureMcpToken();
+  console.log(options.admin ? tokens.adminToken : tokens.publicToken);
   return 0;
 }
 
 async function runMcpStatus(): Promise<number> {
-  const tokenStatus = checkMcpTokenFile();
+  const publicTokenStatus = checkMcpTokenFile(getMcpPublicTokenPath());
+  const adminTokenStatus = checkMcpTokenFile(getMcpAdminTokenPath());
   const backendHealth = await fetchBackendHealth({ skipVersionCheck: true }).catch(() => null);
   const toolCount = await fetchJson<McpToolsResponse>('/api/mcp/tools')
     .then((data) => data.tools.length)
     .catch(() => null);
 
-  if (!tokenStatus.exists) {
-    console.log(`${red('ERR')} MCP token file: missing`);
-  } else if (!tokenStatus.modeOk) {
-    console.log(`${yellow('WARN')} MCP token file: mode ${tokenStatus.mode}, expected 600`);
+  if (!publicTokenStatus.exists) {
+    console.log(`${red('ERR')} MCP public token file: missing`);
+  } else if (!publicTokenStatus.modeOk) {
+    console.log(`${yellow('WARN')} MCP public token file: mode ${publicTokenStatus.mode}, expected 600`);
   } else {
-    console.log(`${green('OK')} MCP token file: ~/.rorca/mcp-token (mode 600)`);
+    console.log(`${green('OK')} MCP public token file: ~/.rorca/mcp-token (mode 600)`);
+  }
+
+  if (!adminTokenStatus.exists) {
+    console.log(`${red('ERR')} MCP admin token file: missing`);
+  } else if (!adminTokenStatus.modeOk) {
+    console.log(`${yellow('WARN')} MCP admin token file: mode ${adminTokenStatus.mode}, expected 600`);
+  } else {
+    console.log(`${green('OK')} MCP admin token file: ~/.rorca/mcp-admin-token (mode 600)`);
   }
 
   if (!backendHealth) {
@@ -1328,16 +1347,17 @@ async function runMcpStatus(): Promise<number> {
     console.log(`${green('OK')} MCP tools: ${toolCount} registered`);
   }
 
-  return !tokenStatus.exists || !backendHealth ? 1 : 0;
+  return !publicTokenStatus.exists || !adminTokenStatus.exists || !backendHealth ? 1 : 0;
 }
 
-async function runMcpSetupClaude(): Promise<number> {
+async function runMcpSetupClaude(options: { admin?: boolean } = {}): Promise<number> {
   const claudeBin = resolveClaudeBinPathLocal();
   if (!claudeBin) {
     throw new Error('Claude CLI not found. Set CLAUDE_BIN or install `claude` first.');
   }
 
-  const { token } = ensureMcpToken();
+  const tokens = ensureMcpToken();
+  const token = options.admin ? tokens.adminToken : tokens.publicToken;
   await runCommand(claudeBin, ['mcp', 'remove', 'rorca'], { stdio: 'pipe' });
   const add = await runCommand(claudeBin, [
     'mcp',
@@ -1352,15 +1372,23 @@ async function runMcpSetupClaude(): Promise<number> {
     return add.code;
   }
 
-  console.log('Claude MCP configured for Rorca.');
+  console.log(`Claude MCP configured for Rorca (${options.admin ? 'admin' : 'public'} token).`);
   return 0;
 }
 
-async function runMcpRotateToken(): Promise<number> {
+async function runMcpRotateToken(options: { public?: boolean; admin?: boolean; all?: boolean } = {}): Promise<number> {
   if (!hasInteractiveTty()) {
     console.error('Rotate token requires an interactive TTY confirmation.');
     return 1;
   }
+
+  const selectedModes = [options.public, options.admin, options.all].filter(Boolean).length;
+  if (selectedModes > 1) {
+    console.error('Choose only one of --public, --admin, or --all.');
+    return 1;
+  }
+
+  const rotateTarget = options.all ? 'all' : options.admin ? 'admin' : 'public';
 
   const rl = readline.createInterface({
     input: process.stdin,
@@ -1368,7 +1396,7 @@ async function runMcpRotateToken(): Promise<number> {
   });
 
   try {
-    const answer = (await rl.question('Rotate token? Existing MCP clients will need re-setup. [y/N] ')).trim().toLowerCase();
+    const answer = (await rl.question(`Rotate ${rotateTarget} token${rotateTarget === 'all' ? 's' : ''}? Existing MCP clients will need re-setup. [y/N] `)).trim().toLowerCase();
     if (answer !== 'y' && answer !== 'yes') {
       console.log('Token rotation cancelled.');
       return 1;
@@ -1377,15 +1405,29 @@ async function runMcpRotateToken(): Promise<number> {
     rl.close();
   }
 
-  const token = rotateMcpToken();
-  console.log(token);
-  console.log('Run `rorca mcp setup-claude` to re-link Claude to the new token.');
+  const rotated = rotateMcpToken(rotateTarget);
+  if (typeof rotated === 'string') {
+    console.log(rotated);
+  } else {
+    console.log(JSON.stringify(rotated, null, 2));
+  }
+  if (rotateTarget === 'public') {
+    console.log('Public token rotated. Existing ~/.rorca/mcp-token consumers keep public-tier access only.');
+    console.log('Run `rorca mcp setup-claude` to re-link Claude to the new public token.');
+  } else if (rotateTarget === 'admin') {
+    console.log('Admin token rotated.');
+    console.log('Run `rorca mcp setup-claude --admin` to re-link Claude to the new admin token.');
+  } else {
+    console.log('Public and admin tokens rotated. Existing ~/.rorca/mcp-token consumers remain public-tier only.');
+    console.log('Run `rorca mcp setup-claude` and/or `rorca mcp setup-claude --admin` to re-link clients.');
+  }
   return 0;
 }
 
-async function spawnInteractivePi(piBinPath: string, args: string[]): Promise<number> {
+async function spawnInteractivePi(piBinPath: string, args: string[], env?: NodeJS.ProcessEnv): Promise<number> {
   return new Promise((resolve, reject) => {
     const child = spawn(piBinPath, args, {
+      env: env ? { ...process.env, ...env } : process.env,
       stdio: 'inherit',
       shell: process.platform === 'win32',
     });
@@ -1417,6 +1459,7 @@ async function runChat(options: { model?: string; workspaceId?: string }): Promi
   let workspaceName = options.workspaceId ?? 'default';
   let tempSkillFile: string | null = null;
   let tempExtensionFile: string | null = null;
+  const tokens = ensureMcpToken();
   const health = await fetchBackendHealth().catch((error) => {
     const message = error instanceof Error ? error.message : String(error);
     throw new Error(`Rorca backend is required for pi MCP bridge. Start \`npm run dev\` or \`rorca start\` first. (${message})`);
@@ -1476,7 +1519,9 @@ async function runChat(options: { model?: string; workspaceId?: string }): Promi
   console.log('─────────────────────────────────────────────────────────────');
 
   try {
-    return await spawnInteractivePi(resolvePiBinPath(health.piBinPath), args);
+    return await spawnInteractivePi(resolvePiBinPath(health.piBinPath), args, {
+      RORCA_PI_MCP_TOKEN: tokens.adminToken,
+    });
   } catch (error) {
     if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
       printPiInstallMethods();
@@ -1965,7 +2010,9 @@ function resolveDoctorSelection(input?: string): Set<DoctorCheckId> | null {
     'schema-migrations': ['schema-migrations'],
     worker: ['worker-heartbeat'],
     'worker-heartbeat': ['worker-heartbeat'],
-    mcp: ['mcp-bridge'],
+    mcp: ['mcp-public-token', 'mcp-admin-token', 'mcp-bridge'],
+    'mcp-public-token': ['mcp-public-token'],
+    'mcp-admin-token': ['mcp-admin-token'],
     'mcp-bridge': ['mcp-bridge'],
     workspace: ['workspace-files'],
     'workspace-files': ['workspace-files'],
@@ -2004,12 +2051,23 @@ function getMigrationFiles(): string[] {
   return readdirSync(migrationsDir).filter((file) => file.endsWith('.sql'));
 }
 
-function readMcpToken(): string | null {
-  try {
-    return readFileSync(getMcpTokenPath(), 'utf8').trim() || null;
-  } catch {
-    return null;
+function readMcpToken(tier: 'public' | 'admin' = 'public'): string | null {
+  return tier === 'admin' ? getMcpAdminToken() : getMcpPublicToken();
+}
+
+function checkMcpToken(tier: 'public' | 'admin'): DoctorCheckResult {
+  const tokenPath = tier === 'admin' ? getMcpAdminTokenPath() : getMcpPublicTokenPath();
+  const label = tier === 'admin' ? 'MCP admin token' : 'MCP public token';
+  const id: DoctorCheckId = tier === 'admin' ? 'mcp-admin-token' : 'mcp-public-token';
+  const status = checkMcpTokenFile(tokenPath);
+
+  if (!status.exists) {
+    return doctorWarn(id, label, 'missing', `Run: rorca mcp token${tier === 'admin' ? ' --admin' : ''}`);
   }
+  if (!status.modeOk) {
+    return doctorWarn(id, label, `mode ${status.mode}, expected 600`, `Run: chmod 600 ${tokenPath}`);
+  }
+  return doctorPass(id, label, `${tokenPath.replace(homedir(), '~')} (mode 0600)`);
 }
 
 async function isTcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
@@ -2236,7 +2294,7 @@ async function checkWorkerHeartbeat(): Promise<DoctorCheckResult> {
 }
 
 async function checkMcpBridge(): Promise<DoctorCheckResult> {
-  const token = readMcpToken();
+  const token = readMcpToken('public');
   const toolsResponse = await fetchRawJson<McpToolsResponse>('/api/mcp/tools');
   if (!token) {
     return doctorWarn('mcp-bridge', 'MCP bridge', 'token missing');
@@ -2280,6 +2338,8 @@ function skippedBackendCheck(id: DoctorCheckId): DoctorCheckResult {
     'backend-version': 'Backend version',
     'schema-migrations': 'Schema migrations',
     'worker-heartbeat': 'Worker heartbeat',
+    'mcp-public-token': 'MCP public token',
+    'mcp-admin-token': 'MCP admin token',
     'mcp-bridge': 'MCP bridge',
     'workspace-files': 'Workspace files',
   };
@@ -2384,6 +2444,14 @@ async function runDoctor(options: { json?: boolean; check?: string; verbose?: bo
     checks.push(selected === null && !backendUp
       ? skippedBackendCheck('worker-heartbeat')
       : await checkWorkerHeartbeat());
+  }
+
+  if (wants('mcp-public-token')) {
+    checks.push(checkMcpToken('public'));
+  }
+
+  if (wants('mcp-admin-token')) {
+    checks.push(checkMcpToken('admin'));
   }
 
   if (wants('mcp-bridge')) {
@@ -2744,20 +2812,25 @@ const mcp = program.command('mcp').description('Manage MCP HTTP authentication')
 
 mcp
   .command('token')
-  .action(async () => {
-    process.exitCode = await runMcpToken();
+  .option('--admin', 'Print the admin token instead of the public token')
+  .action(async (options: { admin?: boolean }) => {
+    process.exitCode = await runMcpToken(options);
   });
 
 mcp
   .command('setup-claude')
-  .action(async () => {
-    process.exitCode = await runMcpSetupClaude();
+  .option('--admin', 'Configure Claude to use the admin token instead of the public token')
+  .action(async (options: { admin?: boolean }) => {
+    process.exitCode = await runMcpSetupClaude(options);
   });
 
 mcp
   .command('rotate-token')
-  .action(async () => {
-    process.exitCode = await runMcpRotateToken();
+  .option('--public', 'Rotate only the public token (default)')
+  .option('--admin', 'Rotate only the admin token')
+  .option('--all', 'Rotate both public and admin tokens')
+  .action(async (options: { public?: boolean; admin?: boolean; all?: boolean }) => {
+    process.exitCode = await runMcpRotateToken(options);
   });
 
 mcp

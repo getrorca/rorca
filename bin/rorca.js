@@ -8,7 +8,7 @@ import { spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import readline from 'node:readline/promises';
 import { execa } from 'execa';
-import { ensureMcpToken, getMcpTokenPath, rotateMcpToken } from '../backend/src/lib/mcp-auth';
+import { ensureMcpToken, getMcpAdminToken, getMcpAdminTokenPath, getMcpPublicToken, getMcpPublicTokenPath, rotateMcpToken } from '../backend/src/lib/mcp-auth';
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const ROOT_DIR = path.resolve(__dirname, '..');
@@ -565,8 +565,7 @@ function resolveClaudeBinPathLocal() {
     const output = result.stdout.trim().split(/\r?\n/).find(Boolean);
     return output || null;
 }
-function checkMcpTokenFile() {
-    const tokenPath = getMcpTokenPath();
+function checkMcpTokenFile(tokenPath) {
     if (!existsSync(tokenPath)) {
         return { exists: false, modeOk: false, mode: null };
     }
@@ -756,6 +755,7 @@ type McpTool = {
 };
 
 const MCP_URL = process.env.RORCA_PI_MCP_URL || ${escapedUrl};
+const MCP_TOKEN = process.env.RORCA_PI_MCP_TOKEN || "";
 const PROTOCOL_VERSION = "2024-11-05";
 let requestId = 0;
 
@@ -770,6 +770,7 @@ async function mcpPost(method: string, params: Record<string, unknown>, sessionI
     headers: {
       "Content-Type": "application/json",
       "Accept": "application/json",
+      ...(MCP_TOKEN ? { "Authorization": \`Bearer \${MCP_TOKEN}\` } : {}),
       ...(sessionId ? { "mcp-session-id": sessionId } : {}),
     },
     body: JSON.stringify({
@@ -996,25 +997,35 @@ export default function rorcaPiBridge(pi: ExtensionAPI) {
 async function fetchBackendHealth(options) {
     return fetchJson('/api/health', undefined, 30_000, options);
 }
-async function runMcpToken() {
-    const { token } = ensureMcpToken();
-    console.log(token);
+async function runMcpToken(options = {}) {
+    const tokens = ensureMcpToken();
+    console.log(options.admin ? tokens.adminToken : tokens.publicToken);
     return 0;
 }
 async function runMcpStatus() {
-    const tokenStatus = checkMcpTokenFile();
+    const publicTokenStatus = checkMcpTokenFile(getMcpPublicTokenPath());
+    const adminTokenStatus = checkMcpTokenFile(getMcpAdminTokenPath());
     const backendHealth = await fetchBackendHealth({ skipVersionCheck: true }).catch(() => null);
     const toolCount = await fetchJson('/api/mcp/tools')
         .then((data) => data.tools.length)
         .catch(() => null);
-    if (!tokenStatus.exists) {
-        console.log(`${red('ERR')} MCP token file: missing`);
+    if (!publicTokenStatus.exists) {
+        console.log(`${red('ERR')} MCP public token file: missing`);
     }
-    else if (!tokenStatus.modeOk) {
-        console.log(`${yellow('WARN')} MCP token file: mode ${tokenStatus.mode}, expected 600`);
+    else if (!publicTokenStatus.modeOk) {
+        console.log(`${yellow('WARN')} MCP public token file: mode ${publicTokenStatus.mode}, expected 600`);
     }
     else {
-        console.log(`${green('OK')} MCP token file: ~/.rorca/mcp-token (mode 600)`);
+        console.log(`${green('OK')} MCP public token file: ~/.rorca/mcp-token (mode 600)`);
+    }
+    if (!adminTokenStatus.exists) {
+        console.log(`${red('ERR')} MCP admin token file: missing`);
+    }
+    else if (!adminTokenStatus.modeOk) {
+        console.log(`${yellow('WARN')} MCP admin token file: mode ${adminTokenStatus.mode}, expected 600`);
+    }
+    else {
+        console.log(`${green('OK')} MCP admin token file: ~/.rorca/mcp-admin-token (mode 600)`);
     }
     if (!backendHealth) {
         console.log(`${red('ERR')} MCP server: unreachable at ${API_BASE}/mcp`);
@@ -1031,14 +1042,15 @@ async function runMcpStatus() {
     else {
         console.log(`${green('OK')} MCP tools: ${toolCount} registered`);
     }
-    return !tokenStatus.exists || !backendHealth ? 1 : 0;
+    return !publicTokenStatus.exists || !adminTokenStatus.exists || !backendHealth ? 1 : 0;
 }
-async function runMcpSetupClaude() {
+async function runMcpSetupClaude(options = {}) {
     const claudeBin = resolveClaudeBinPathLocal();
     if (!claudeBin) {
         throw new Error('Claude CLI not found. Set CLAUDE_BIN or install `claude` first.');
     }
-    const { token } = ensureMcpToken();
+    const tokens = ensureMcpToken();
+    const token = options.admin ? tokens.adminToken : tokens.publicToken;
     await runCommand(claudeBin, ['mcp', 'remove', 'rorca'], { stdio: 'pipe' });
     const add = await runCommand(claudeBin, [
         'mcp',
@@ -1051,20 +1063,26 @@ async function runMcpSetupClaude() {
     if (add.code !== 0) {
         return add.code;
     }
-    console.log('Claude MCP configured for Rorca.');
+    console.log(`Claude MCP configured for Rorca (${options.admin ? 'admin' : 'public'} token).`);
     return 0;
 }
-async function runMcpRotateToken() {
+async function runMcpRotateToken(options = {}) {
     if (!hasInteractiveTty()) {
         console.error('Rotate token requires an interactive TTY confirmation.');
         return 1;
     }
+    const selectedModes = [options.public, options.admin, options.all].filter(Boolean).length;
+    if (selectedModes > 1) {
+        console.error('Choose only one of --public, --admin, or --all.');
+        return 1;
+    }
+    const rotateTarget = options.all ? 'all' : options.admin ? 'admin' : 'public';
     const rl = readline.createInterface({
         input: process.stdin,
         output: process.stdout,
     });
     try {
-        const answer = (await rl.question('Rotate token? Existing MCP clients will need re-setup. [y/N] ')).trim().toLowerCase();
+        const answer = (await rl.question(`Rotate ${rotateTarget} token${rotateTarget === 'all' ? 's' : ''}? Existing MCP clients will need re-setup. [y/N] `)).trim().toLowerCase();
         if (answer !== 'y' && answer !== 'yes') {
             console.log('Token rotation cancelled.');
             return 1;
@@ -1073,14 +1091,31 @@ async function runMcpRotateToken() {
     finally {
         rl.close();
     }
-    const token = rotateMcpToken();
-    console.log(token);
-    console.log('Run `rorca mcp setup-claude` to re-link Claude to the new token.');
+    const rotated = rotateMcpToken(rotateTarget);
+    if (typeof rotated === 'string') {
+        console.log(rotated);
+    }
+    else {
+        console.log(JSON.stringify(rotated, null, 2));
+    }
+    if (rotateTarget === 'public') {
+        console.log('Public token rotated. Existing ~/.rorca/mcp-token consumers keep public-tier access only.');
+        console.log('Run `rorca mcp setup-claude` to re-link Claude to the new public token.');
+    }
+    else if (rotateTarget === 'admin') {
+        console.log('Admin token rotated.');
+        console.log('Run `rorca mcp setup-claude --admin` to re-link Claude to the new admin token.');
+    }
+    else {
+        console.log('Public and admin tokens rotated. Existing ~/.rorca/mcp-token consumers remain public-tier only.');
+        console.log('Run `rorca mcp setup-claude` and/or `rorca mcp setup-claude --admin` to re-link clients.');
+    }
     return 0;
 }
-async function spawnInteractivePi(piBinPath, args) {
+async function spawnInteractivePi(piBinPath, args, env) {
     return new Promise((resolve, reject) => {
         const child = spawn(piBinPath, args, {
+            env: env ? { ...process.env, ...env } : process.env,
             stdio: 'inherit',
             shell: process.platform === 'win32',
         });
@@ -1107,6 +1142,7 @@ async function runChat(options) {
     let workspaceName = options.workspaceId ?? 'default';
     let tempSkillFile = null;
     let tempExtensionFile = null;
+    const tokens = ensureMcpToken();
     const health = await fetchBackendHealth().catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
         throw new Error(`Rorca backend is required for pi MCP bridge. Start \`npm run dev\` or \`rorca start\` first. (${message})`);
@@ -1156,7 +1192,9 @@ async function runChat(options) {
     console.log(`Workspace: ${workspaceName}  Agent: pi  Model: ${options.model ?? 'default'}  Context: ${tempSkillFile ? 'L1-L5 injected' : 'not injected'}  MCP: ${health.mcp.url}`);
     console.log('─────────────────────────────────────────────────────────────');
     try {
-        return await spawnInteractivePi(resolvePiBinPath(health.piBinPath), args);
+        return await spawnInteractivePi(resolvePiBinPath(health.piBinPath), args, {
+            RORCA_PI_MCP_TOKEN: tokens.adminToken,
+        });
     }
     catch (error) {
         if (error?.code === 'ENOENT') {
@@ -1531,12 +1569,18 @@ async function runStatus(runId) {
 }
 async function runDoctor(json = false) {
     const localChecks = [];
-    const mcpToken = checkMcpTokenFile();
-    localChecks.push(!mcpToken.exists
-        ? { label: 'MCP token file', status: 'error', message: 'Missing', fix: 'Restart Rorca or run: rorca mcp token' }
-        : !mcpToken.modeOk
-            ? { label: 'MCP token file', status: 'warning', message: `Mode ${mcpToken.mode}, expected 600`, fix: 'Run: chmod 600 ~/.rorca/mcp-token' }
-            : { label: 'MCP token file', status: 'ok', message: 'OK' });
+    const publicMcpToken = checkMcpTokenFile(getMcpPublicTokenPath());
+    const adminMcpToken = checkMcpTokenFile(getMcpAdminTokenPath());
+    localChecks.push(!publicMcpToken.exists
+        ? { label: 'MCP public token', status: 'error', message: 'Missing', fix: 'Restart Rorca or run: rorca mcp token' }
+        : !publicMcpToken.modeOk
+            ? { label: 'MCP public token', status: 'warning', message: `Mode ${publicMcpToken.mode}, expected 600`, fix: 'Run: chmod 600 ~/.rorca/mcp-token' }
+            : { label: 'MCP public token', status: 'ok', message: '~/.rorca/mcp-token (mode 0600)' });
+    localChecks.push(!adminMcpToken.exists
+        ? { label: 'MCP admin token', status: 'error', message: 'Missing', fix: 'Restart Rorca or run: rorca mcp token --admin' }
+        : !adminMcpToken.modeOk
+            ? { label: 'MCP admin token', status: 'warning', message: `Mode ${adminMcpToken.mode}, expected 600`, fix: 'Run: chmod 600 ~/.rorca/mcp-admin-token' }
+            : { label: 'MCP admin token', status: 'ok', message: '~/.rorca/mcp-admin-token (mode 0600)' });
     const dockerInfo = await docker(['info']);
     localChecks.push(dockerInfo.code === 0
         ? { label: 'Docker running', status: 'ok', message: 'OK' }
@@ -1884,18 +1928,23 @@ program
 const mcp = program.command('mcp').description('Manage MCP HTTP authentication');
 mcp
     .command('token')
-    .action(async () => {
-    process.exitCode = await runMcpToken();
+    .option('--admin', 'Print the admin token instead of the public token')
+    .action(async (options) => {
+    process.exitCode = await runMcpToken(options);
 });
 mcp
     .command('setup-claude')
-    .action(async () => {
-    process.exitCode = await runMcpSetupClaude();
+    .option('--admin', 'Configure Claude to use the admin token instead of the public token')
+    .action(async (options) => {
+    process.exitCode = await runMcpSetupClaude(options);
 });
 mcp
     .command('rotate-token')
-    .action(async () => {
-    process.exitCode = await runMcpRotateToken();
+    .option('--public', 'Rotate only the public token (default)')
+    .option('--admin', 'Rotate only the admin token')
+    .option('--all', 'Rotate both public and admin tokens')
+    .action(async (options) => {
+    process.exitCode = await runMcpRotateToken(options);
 });
 mcp
     .command('status')

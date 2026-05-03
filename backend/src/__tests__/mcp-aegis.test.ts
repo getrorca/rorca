@@ -38,7 +38,7 @@ describe('MCP aegis hardening', () => {
       delete process.env.RORCA_MCP_ALLOW_REMOTE;
     }
 
-    const token = mod.ensureMcpToken().token;
+    const token = mod.ensureMcpToken().publicToken;
     const app = express();
     const remoteAddress = options?.remoteAddress ?? '127.0.0.1';
 
@@ -66,7 +66,7 @@ describe('MCP aegis hardening', () => {
       next();
     });
 
-    app.get('/mcp', mcpCors, mod.requireLocalhost, mod.requireMcpAuth, (_req, res) => {
+    app.get('/mcp', mcpCors, mod.requireLocalhost, mod.requireMcpAuth(), (_req, res) => {
       res.status(200).json({ ok: true });
     });
 
