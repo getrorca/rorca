@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T22:23:12.493Z",
+  "lastUpdatedAt": "2026-05-03T22:37:24.156Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -433,6 +433,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 363708
+    },
+    {
+      "storyId": "CLI-048",
+      "title": "AEGIS P0 + OPEN-CORE: Curate the 4-tier Allow-list — public API contract, paid paywall, admin lockdown",
+      "status": "passed",
+      "startedAt": "2026-05-03T22:23:33.142Z",
+      "finishedAt": "2026-05-03T22:37:24.156Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 831014
     }
   ],
   "failedStories": [],

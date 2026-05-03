@@ -21,6 +21,8 @@ const router = Router();
  *     tags: [Admin]
  *     summary: Trigger an immediate database backup
  *     operationId: createBackup
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Database backup is an operator-only maintenance action and must never be exposed through CLI or MCP."
  *     description: Creates a new PostgreSQL database backup via pg_dump and prunes old backups beyond the retention limit.
  *     responses:
  *       201:
@@ -64,6 +66,8 @@ router.post('/backup', async (_req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: List available database backups
  *     operationId: listBackups
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Backup inventory is operator-only maintenance metadata and should remain outside CLI and MCP exposure."
  *     description: Returns a list of all available database backup files with their metadata.
  *     responses:
  *       200:
@@ -100,6 +104,8 @@ router.get('/backups', (_req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: Backfill embeddings for all content
  *     operationId: backfillEmbeddings
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Embedding backfill is an operator-controlled maintenance workflow and must not be exposed to MCP or the public CLI."
  *     description: Queues embedding jobs for all existing specs, stories, memory entries, and archived specs. Skips content whose hash matches existing embeddings (staleness check).
  *     requestBody:
  *       content:
@@ -144,6 +150,8 @@ router.post('/embed-all', async (req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: Get embedding backfill status
  *     operationId: getBackfillStatus
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Embedding backfill status is operator-focused maintenance telemetry and should remain admin-only."
  *     description: Returns current embedding queue depth, processed count, failed count, whether a backfill is in progress, and total embedding counts by source type.
  *     responses:
  *       200:
@@ -179,6 +187,8 @@ router.get('/embed-all/status', async (_req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: Get current embedding provider configuration
  *     operationId: getEmbeddingProvider
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Embedding provider configuration is operator-level infrastructure data and should remain admin-only."
  *     description: Returns the active embedding provider name, model identifier, and vector dimensions.
  *     responses:
  *       200:
@@ -208,6 +218,8 @@ router.get('/embedding-provider', (_req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: Backfill the knowledge graph from existing specs and runs
  *     operationId: graphBackfill
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Graph backfill is an operator-run maintenance job and must remain outside MCP and public CLI exposure."
  *     description: |
  *       Populates the Apache AGE knowledge graph from all approved spec JSONs
  *       found on disk and all completed pipeline runs in the database.
@@ -311,6 +323,8 @@ router.post('/graph-backfill', requireAge(), async (_req: Request, res: Response
  *     tags: [Admin]
  *     summary: Get knowledge graph statistics
  *     operationId: getGraphStats
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Admin graph stats are operator maintenance telemetry and should not be exposed to non-admin callers."
  *     description: Returns current vertex count, edge count, and label list from the Apache AGE knowledge graph. Returns available=false if AGE is not installed.
  *     responses:
  *       200:
@@ -343,6 +357,8 @@ router.get('/graph-stats', requireAge(), async (_req: Request, res: Response) =>
  *     tags: [Admin]
  *     summary: Re-check Apache AGE availability
  *     operationId: recheckAge
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "AGE rechecks are operator-only diagnostics and must remain admin-only."
  *     description: Clears the cached AGE availability flag and probes the current database again. No auth gate is applied because Rorca runs as a local single-user tool.
  *     responses:
  *       200:
@@ -368,6 +384,8 @@ router.post('/age-recheck', async (_req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: Generate an offline RS256 license JWT for self-hosted distribution
  *     operationId: generateLicense
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "License generation is a sensitive commercial operator action and must never be exposed through MCP or the open-source CLI."
  *     description: |
  *       Signs a license JWT with the RORCA_LICENSE_PRIVATE_KEY. Requires RORCA_ADMIN_KEY header for authentication.
  *       Used by Rorca admins to generate trial or paid licenses for self-hosted users.

@@ -58,6 +58,8 @@ async function emitWalEvent(eventType: string, payload: Record<string, unknown>)
  *     tags: [Teams]
  *     summary: Validate an invite token
  *     operationId: validateInviteToken
+ *     x-rorca-tier: paid
+ *     x-rorca-rationale: "Invite validation is part of the paid team-collaboration surface and should stay outside the free CLI contract."
  *     description: Validates a team invite token and returns the team info, invited email, role, and inviter name. This endpoint is public and does not require authentication.
  *     parameters:
  *       - in: path
@@ -146,6 +148,8 @@ router.get('/:token', async (req: Request, res: Response) => {
  *     tags: [Teams]
  *     summary: Accept a team invite
  *     operationId: acceptInvite
+ *     x-rorca-tier: paid
+ *     x-rorca-rationale: "Accepting team invites is a paid multi-user collaboration action and must not be part of the free CLI surface."
  *     description: Accepts a team invite token and adds the authenticated user as a team member. The user's email must match the invite email.
  *     parameters:
  *       - in: path

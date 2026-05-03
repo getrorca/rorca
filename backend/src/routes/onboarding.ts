@@ -33,6 +33,8 @@ async function ensureRow(): Promise<OnboardingRow> {
  *     tags: [Onboarding]
  *     summary: Get current onboarding state
  *     operationId: getOnboardingState
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Onboarding progress is user-specific state and should only be exposed to authenticated callers."
  *     description: Returns the current onboarding wizard progress including step number, workspace association, direction completion, and overall completion status.
  *     responses:
  *       200:
@@ -66,6 +68,8 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
  *     tags: [Onboarding]
  *     summary: Update onboarding state
  *     operationId: updateOnboardingState
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Updating onboarding progress mutates user-specific state and should require authenticated access."
  *     description: Updates one or more fields of the onboarding wizard state. Only provided fields are updated.
  *     requestBody:
  *       required: true
