@@ -1043,6 +1043,25 @@ function sendPiRpcCommand(server: PiRpcServer, command: object): Promise<unknown
   });
 }
 
+function extractPiSessionId(response: unknown): string | undefined {
+  if (typeof response !== 'object' || response === null) return undefined;
+  const data = (response as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return undefined;
+  return typeof (data as { sessionId?: unknown }).sessionId === 'string'
+    ? (data as { sessionId: string }).sessionId
+    : undefined;
+}
+
+async function preparePiRpcSession(
+  sendCommand: (command: object) => Promise<unknown>,
+  retryContext?: PiRetryContext,
+): Promise<string | undefined> {
+  const shouldClone = retryContext?.isRetry === true && retryContext.attempt > 0;
+  await sendCommand({ type: shouldClone ? 'clone' : 'new_session' });
+  const state = await sendCommand({ type: 'get_state' });
+  return extractPiSessionId(state);
+}
+
 function readWorkspaceFile(cwd: string, ...segments: string[]): string {
   try {
     return fs.readFileSync(path.join(cwd, ...segments), 'utf8');
@@ -1272,6 +1291,12 @@ interface AgentResult {
   exitCode: number;
   stderrTail: string;
   elapsedMs: number;
+  piSessionId?: string;
+}
+
+interface PiRetryContext {
+  isRetry: boolean;
+  attempt: number;
 }
 
 interface TokenUpdate {
@@ -1364,6 +1389,8 @@ function runAgent(
   thinkingBudget?: number,
   effortLevel?: 'low' | 'medium' | 'high' | 'max',
   mcpServers?: Record<string, string>,
+  retryContext?: PiRetryContext,
+  onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
 ): Promise<AgentResult> {
   switch (agentType) {
     case 'claude':
@@ -1374,7 +1401,7 @@ function runAgent(
       // thinking/effort flags are not forwarded to Codex
       return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServers);
     case 'pi':
-      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate);
+      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady);
   }
 }
 
@@ -1947,6 +1974,8 @@ async function spawnPiRpc(
   logFile: string,
   model: string | null,
   onTokenUpdate?: TokenUpdateCallback,
+  retryContext?: PiRetryContext,
+  onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
 ): Promise<AgentResult> {
   const previousStory = _piRpcStoryQueue;
   let releaseStoryQueue!: () => void;
@@ -1960,7 +1989,11 @@ async function spawnPiRpc(
   const startTime = Date.now();
   try {
     const server = await startPiRpcServer(cwd, model);
-    await sendPiRpcCommand(server, { type: 'new_session' });
+    const piSessionId = await preparePiRpcSession(
+      (command) => sendPiRpcCommand(server, command),
+      retryContext,
+    );
+    await onSessionReady?.(piSessionId);
 
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
     let storyTimedOut = false;
@@ -1970,6 +2003,7 @@ async function spawnPiRpc(
       exitCode,
       stderrTail: server.stderr.slice(-4096),
       elapsedMs: Date.now() - startTime,
+      piSessionId,
     });
 
     const writeOutput = (text: string): void => {
@@ -2123,6 +2157,7 @@ async function spawnPiRpc(
         exitCode: storyTimedOut ? 124 : 1,
         stderrTail: `${server.stderr.slice(-4096)}${message ? `\n${message}` : ''}`.trim(),
         elapsedMs: Date.now() - startTime,
+        piSessionId,
       };
     }
   } finally {
@@ -3439,8 +3474,8 @@ async function executeStory(
   const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
   const storyLogFile = path.join(logDir, `${story.id}_${timestamp}.log`);
 
-  // Emit story_started WAL event
-  if (workspaceId) {
+  const emitStoryStarted = async (piSessionId?: string): Promise<void> => {
+    if (!workspaceId) return;
     await emitWalEvent(config.port, 'story_started', workspaceId, {
       run_id: config.runId,
       story_id: story.id,
@@ -3448,6 +3483,7 @@ async function executeStory(
       agent_type: effectiveAgent,
       log_file: storyLogFile,
       browser_mcp: wantsBrowser,
+      piSessionId: piSessionId ?? null,
       ...(waveIndex != null ? { wave_index: waveIndex } : {}),
       ...(currentModel !== config.agentModel ? { model_override: currentModel } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
@@ -3455,6 +3491,10 @@ async function executeStory(
       ...(activeSkillNames.length > 0 ? { active_skills: activeSkillNames } : {}),
       ...(graphHits != null ? { graph_hits: graphHits } : {}),
     }, story.id);
+  };
+
+  if (effectiveAgent !== 'pi') {
+    await emitStoryStarted();
   }
 
   // US-003: Project DB memories to MEMORY.md before agent subprocess
@@ -3503,6 +3543,11 @@ async function executeStory(
     if (browserMcpUrl) mcpServers['playwright'] = browserMcpUrl;
     if (chromeMcpUrl) mcpServers['chrome-devtools'] = chromeMcpUrl;
 
+    const retryAttempt = retryCounts.get(story.id) ?? 0;
+    const piRetryContext: PiRetryContext | undefined = effectiveAgent === 'pi'
+      ? { isRetry: retryAttempt > 0, attempt: retryAttempt }
+      : undefined;
+
     const result = await runAgent(
       effectiveAgent,
       prompt,
@@ -3516,6 +3561,8 @@ async function executeStory(
       config.thinkingBudget,
       config.effortLevel,
       Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
+      piRetryContext,
+      effectiveAgent === 'pi' ? emitStoryStarted : undefined,
     );
 
     // Extract token usage from log file after agent exits
@@ -3618,10 +3665,11 @@ async function executeStory(
 
       await new Promise(resolve => setTimeout(resolve, backoffMs));
 
-      if (workspaceId) {
+      if (effectiveAgent !== 'pi' && workspaceId) {
         await emitWalEvent(config.port, 'story_started', workspaceId, {
           run_id: config.runId, story_id: story.id, story_title: story.title,
           agent_type: effectiveAgent,
+          piSessionId: null,
           ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
         }, story.id);
       }
@@ -3997,7 +4045,7 @@ async function executeStory(
 
 // ─── Exported helpers for pipeline.ts ────────────────────────────────────────
 
-export { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, createIdleWatchdog };
+export { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, createIdleWatchdog, preparePiRpcSession };
 export type { UserStory as EngineUserStory, RerouteInfo, IdleWatchdog };
 
 // ─── Bounded Concurrency ────────────────────────────────────────────────────

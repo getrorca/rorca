@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T06:04:48.156Z",
+  "lastUpdatedAt": "2026-05-03T06:09:00.216Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -183,6 +183,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 336782
+    },
+    {
+      "storyId": "CLI-019",
+      "title": "Pi RPC session forking — clean slate per story with context preservation on retry",
+      "status": "passed",
+      "startedAt": "2026-05-03T06:05:03.528Z",
+      "finishedAt": "2026-05-03T06:09:00.216Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 236687
     }
   ],
   "failedStories": [],
