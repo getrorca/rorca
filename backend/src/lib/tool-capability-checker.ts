@@ -50,6 +50,7 @@ export const TOOL_CAPABILITY_MATRIX: Record<AgentType | 'ollama', Set<ToolName>>
   claude: new Set(['bash', 'edit', 'read', 'write', 'glob', 'grep', 'webfetch', 'websearch', 'task', 'todowrite']),
   opencode: new Set(['bash', 'edit', 'read', 'write', 'glob', 'grep', 'webfetch', 'websearch']),
   codex: new Set(['bash', 'edit', 'read', 'write']),
+  pi: new Set(['bash', 'edit', 'read', 'write']),
   ollama: new Set(['bash', 'edit', 'read', 'write']),
 };
 
