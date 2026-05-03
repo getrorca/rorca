@@ -117,6 +117,14 @@ Rorca runs on localhost as a single-user developer tool. Project Aegis exists so
 - MCP admin tools: public tokens fail with `403 MCP_AUTH_INSUFFICIENT_TIER`.
 - Production deployments: set `AUTH_REQUIRED=true` to force full JWT auth for regular API routes.
 
+### Open-Core Trust Boundary
+
+- The CLI is open-source and untrusted. Users can fork it, remove UI checks, or fabricate headers.
+- The backend is authoritative. Authorization is enforced server-side with `402 PLAN_REQUIRED` and `403 ADMIN_REQUIRED`.
+- Plan resolution comes from `users.plan` at request time or a cryptographically signed self-hosted license key, never from request headers or JWT plan claims.
+- License keys are RSA-signed. The private key is never shipped in the OSS CLI; only the backend verifier carries the public key.
+- Forking the CLI must not unlock paid features. If a feature is paid, the backend must reject unauthorized requests even when the client lies.
+
 ### Adding a New MCP Tool
 
 1. Add the `@swagger` annotation as usual.

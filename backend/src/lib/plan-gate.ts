@@ -20,12 +20,11 @@ import {
 function resolveEffectivePlan(rawPlan: string | null | undefined): RorcaPlan {
   const envLicenseKey = process.env.RORCA_LICENSE_KEY;
   if (envLicenseKey) {
-    try {
-      const license = verifyLicense(envLicenseKey);
+    const license = verifyLicense(envLicenseKey);
+    if (license.valid && license.plan !== 'free') {
       return resolveRorcaPlan(license.plan);
-    } catch (error) {
-      logger.debug({ err: error }, '[plan-gate] Ignoring invalid or expired RORCA_LICENSE_KEY for plan resolution');
     }
+    logger.debug({ error: license.error }, '[plan-gate] Ignoring invalid or downgraded RORCA_LICENSE_KEY for plan resolution');
   }
 
   return resolveRorcaPlan(rawPlan);
