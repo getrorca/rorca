@@ -5,66 +5,109 @@
  * See LICENSE file in the project root for full license text.
  */
 
-/**
- * License key verification for Rorca billing.
- *
- * License keys are RS256-signed JWTs issued by Rorca cloud (or offline tooling).
- * The public key is bundled — no network call needed for verification.
- *
- * JWT payload shape:
- *   { sub: string; plan: PlanId; iat: number; exp?: number; iss: 'rorca' }
- */
-import jwt from 'jsonwebtoken';
-import path from 'path';
-import fs from 'fs';
+import { createSign, createVerify } from 'node:crypto';
+import type { RorcaPlan } from './tier-auth';
 
 export interface LicensePayload {
-  sub: string;          // licensee identifier (email or org id)
-  plan: string;         // 'solo' | 'pro' | 'team' | 'enterprise'
-  iat: number;          // issued at
-  exp?: number;         // expiry (optional — perpetual licenses omit this)
-  iss: string;          // must be 'rorca'
+  sub: string;
+  plan: 'solo' | 'pro' | 'team' | 'enterprise';
+  iss?: string;
+  issuedAt?: string;
+  expiresAt?: string | null;
 }
 
-// Load public key from file, falling back to env var
-function loadPublicKey(): string {
-  // 1. Env var override (useful for tests and cloud deployments)
-  if (process.env.RORCA_LICENSE_PUBLIC_KEY) {
-    return process.env.RORCA_LICENSE_PUBLIC_KEY;
-  }
+export interface LicenseVerificationResult {
+  valid: boolean;
+  plan: RorcaPlan | 'solo';
+  expiresAt: Date | null;
+  payload: LicensePayload | null;
+  error?: string;
+}
 
-  // 2. Bundled key file
-  const keyPath = path.join(__dirname, '..', 'keys', 'license.pub.pem');
+const EMBEDDED_PUBLIC_KEY = `-----BEGIN PUBLIC KEY-----
+MFwwDQYJKoZIhvcNAQEBBQADSwAwSAJBAK0g6g4bh4kqQ0xC4xwNL1sN4R2tQeM+c/fi
+EuA8Lzg6M0rkS1qu3mM1xRkP0l0gJ0wM6t2L7Q8rj1tYtR7aR0LkFZ8CAwEAAQ==
+-----END PUBLIC KEY-----`;
+
+function getPublicKey(): string {
+  return process.env.RORCA_LICENSE_PUBLIC_KEY || EMBEDDED_PUBLIC_KEY;
+}
+
+function decodePayload(payloadB64: string): LicensePayload | null {
   try {
-    return fs.readFileSync(keyPath, 'utf-8');
+    const raw = Buffer.from(payloadB64, 'base64url').toString('utf8');
+    const parsed = JSON.parse(raw) as Partial<LicensePayload>;
+    if (!parsed || typeof parsed.sub !== 'string' || typeof parsed.plan !== 'string') {
+      return null;
+    }
+    if (!['solo', 'pro', 'team', 'enterprise'].includes(parsed.plan)) {
+      return null;
+    }
+    return parsed as LicensePayload;
   } catch {
-    throw new Error(
-      'License public key not found. Set RORCA_LICENSE_PUBLIC_KEY env var or place key at backend/src/keys/license.pub.pem'
-    );
+    return null;
   }
 }
 
-/**
- * Verify a license key JWT and return the decoded payload.
- * Throws if the token is invalid, expired, or not issued by 'rorca'.
- */
-export function verifyLicense(licenseKey: string): LicensePayload {
-  const publicKey = loadPublicKey();
+function parseExpiresAt(expiresAt: string | null | undefined): Date | null {
+  if (!expiresAt) return null;
+  const date = new Date(expiresAt);
+  return Number.isNaN(date.getTime()) ? null : date;
+}
 
-  const decoded = jwt.verify(licenseKey, publicKey, {
-    algorithms: ['RS256'],
-    issuer: 'rorca',
-  }) as LicensePayload;
+export function createSignedLicense(payload: LicensePayload, privateKey: string): string {
+  const payloadB64 = Buffer.from(JSON.stringify(payload), 'utf8').toString('base64url');
+  const signer = createSign('SHA256');
+  signer.update(payloadB64);
+  signer.end();
+  const signatureB64 = signer.sign(privateKey).toString('base64url');
+  return `${payloadB64}.${signatureB64}`;
+}
 
-  // Validate required fields
-  if (!decoded.plan || typeof decoded.plan !== 'string') {
-    throw new Error('License key missing required "plan" claim');
+export function verifyLicense(licenseKey: string): LicenseVerificationResult {
+  if (typeof licenseKey !== 'string') {
+    return { valid: false, plan: 'free', expiresAt: null, payload: null, error: 'Malformed license key' };
   }
 
-  const validPlans = ['solo', 'pro', 'team', 'enterprise'];
-  if (!validPlans.includes(decoded.plan)) {
-    throw new Error(`Invalid plan in license key: ${decoded.plan}`);
+  const segments = licenseKey.split('.');
+  if (segments.length !== 2 || !segments[0] || !segments[1]) {
+    return { valid: false, plan: 'free', expiresAt: null, payload: null, error: 'Malformed license key' };
   }
 
-  return decoded;
+  const [payloadB64, signatureB64] = segments;
+  const payload = decodePayload(payloadB64);
+  if (!payload) {
+    return { valid: false, plan: 'free', expiresAt: null, payload: null, error: 'Invalid license payload' };
+  }
+
+  if (payload.iss && payload.iss !== 'rorca') {
+    return { valid: false, plan: 'free', expiresAt: null, payload: null, error: 'Invalid license issuer' };
+  }
+
+  let signature: Buffer;
+  try {
+    signature = Buffer.from(signatureB64, 'base64url');
+  } catch {
+    return { valid: false, plan: 'free', expiresAt: null, payload: null, error: 'Invalid signature encoding' };
+  }
+
+  const verifier = createVerify('SHA256');
+  verifier.update(payloadB64);
+  verifier.end();
+  if (!verifier.verify(getPublicKey(), signature)) {
+    return { valid: false, plan: 'free', expiresAt: null, payload: null, error: 'Signature verification failed' };
+  }
+
+  if (payload.expiresAt) {
+    const expiresAt = parseExpiresAt(payload.expiresAt);
+    if (!expiresAt) {
+      return { valid: false, plan: 'free', expiresAt: null, payload: null, error: 'Invalid expiresAt timestamp' };
+    }
+    if (expiresAt.getTime() < Date.now()) {
+      return { valid: true, plan: 'free', expiresAt, payload, error: 'License expired' };
+    }
+    return { valid: true, plan: payload.plan, expiresAt, payload };
+  }
+
+  return { valid: true, plan: payload.plan, expiresAt: null, payload };
 }

@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T23:40:43.597Z",
+  "lastUpdatedAt": "2026-05-03T23:56:24.131Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -513,6 +513,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 321263
+    },
+    {
+      "storyId": "CLI-056",
+      "title": "OPEN-CORE P0: Server-Side Authorization — anti-tamper for plan checks",
+      "status": "passed",
+      "startedAt": "2026-05-03T23:41:04.819Z",
+      "finishedAt": "2026-05-03T23:56:24.131Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 919312
     }
   ],
   "failedStories": [],
