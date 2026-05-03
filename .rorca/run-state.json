@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T22:16:47.910Z",
+  "lastUpdatedAt": "2026-05-03T22:23:12.493Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -423,6 +423,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 201934
+    },
+    {
+      "storyId": "CLI-047",
+      "title": "AEGIS P0 + OPEN-CORE: x-rorca-tier Unified Annotation System (4-tier: public/auth/paid/admin)",
+      "status": "passed",
+      "startedAt": "2026-05-03T22:17:08.785Z",
+      "finishedAt": "2026-05-03T22:23:12.493Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 363708
     }
   ],
   "failedStories": [],
