@@ -79,6 +79,9 @@ function hasDockerSidecar(): boolean {
  *     tags: [Health]
  *     summary: Backend version and compatibility metadata
  *     operationId: getVersion
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Version metadata is part of the stable compatibility contract for the open-source CLI and is read-only."
+ *     x-rorca-public-api: true
  *     description: Returns backend package version, API contract version, current schema migration version, minimum compatible CLI version, and additive capability flags for CLI compatibility checks.
  *     responses:
  *       200:

@@ -20,6 +20,8 @@ const router = Router();
  *     tags: [Users]
  *     summary: Get current user profile including plan
  *     operationId: getMe
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Current-user identity and plan metadata are user-owned account information and should require authenticated access."
  *     description: Returns the current user's profile including their plan tier (free/solo/pro/team). Falls back to the first registered user when auth is bypassed (local single-user mode).
  *     responses:
  *       200:

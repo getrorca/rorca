@@ -126,6 +126,8 @@ async function emitWal(
  *     tags: [Graph]
  *     summary: Populate the knowledge graph for a workspace
  *     operationId: populateGraph
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Graph population is an operator-controlled maintenance workflow and should remain admin-only."
  *     description: |
  *       Triggers a full graph population for a workspace by iterating all completed
  *       pipeline runs and approved specs. Returns 202 immediately; progress is reported

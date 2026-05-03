@@ -217,6 +217,8 @@ router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan(
  *     tags: [Workspaces]
  *     summary: List all workspaces
  *     operationId: listWorkspaces
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Workspace inventory is user-owned project metadata and should only be exposed to authenticated callers."
  *     description: >
  *       Returns all registered workspace entries ordered by creation date descending.
  *       Supports cursor-based pagination via query parameters.
@@ -582,6 +584,8 @@ router.get('/:id/files', async (req, res, next) => {
  *     tags: [Workspaces]
  *     summary: Get a single workspace
  *     operationId: getWorkspace
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Workspace detail includes local repository metadata and should require authenticated access."
  *     description: Returns the full details of a single workspace by its ID.
  *     parameters:
  *       - in: path
@@ -660,6 +664,8 @@ router.get('/:id', async (req, res, next) => {
  *     tags: [Workspaces]
  *     summary: Update workspace settings
  *     operationId: updateWorkspace
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Updating workspace metadata mutates user-owned project configuration and should require authenticated access."
  *     description: >
  *       Partially updates a workspace. All body fields are optional — only provided
  *       fields are updated. If path is supplied, it must exist on the filesystem.
@@ -900,6 +906,8 @@ router.put('/:id/pipeline-config', requireWorkspaceAdmin(), async (req, res, nex
  *     tags: [Workspaces]
  *     summary: Get summary stats for a workspace
  *     operationId: getWorkspaceStats
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Workspace stats expose user/project usage data and should only be visible to authenticated callers."
  *     description: >
  *       Returns aggregated statistics for a workspace including spec counts
  *       (pending/approved), pipeline run counts (total/active/completed/failed),
@@ -1045,6 +1053,8 @@ router.get('/:id/stats', async (req, res, next) => {
  *     tags: [Workspaces]
  *     summary: Get team members for a workspace
  *     operationId: getWorkspaceTeamMembers
+ *     x-rorca-tier: paid
+ *     x-rorca-rationale: "Workspace team membership is a multi-user collaboration feature and belongs behind the paid plan boundary."
  *     description: >
  *       Returns the team linked to this workspace via workspace_access, along with
  *       all team members and their roles. If no team is linked, returns an empty
@@ -1356,6 +1366,8 @@ Infer the tech stack, project purpose, coding conventions, and domain from the s
  *     tags: [Workspaces]
  *     summary: Get workspace health report with component breakdown
  *     operationId: getWorkspaceHealth
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Workspace health reveals project-specific context and operational metadata, so it should require authenticated access."
  *     description: >
  *       CIE-012: Returns context/intent completeness score (0-100%) with per-component
  *       breakdown showing CLAUDE.md depth, AGENTS.md roles, config scopes, MEMORY.md
