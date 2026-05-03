@@ -3476,3 +3476,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Bug Fix] Pi version detection must capture stderr-safe output: When probing `pi --version`, capture both stdout and stderr via `spawnSync(..., { stdio: ['ignore', 'pipe', 'pipe'] })` and parse the combined output instead of relying on stdout-only `execSync`.
 > Rule: Pi version detection must capture stderr-safe output: When probing `pi --version`, capture both stdout and stderr via `spawnSync(..., { stdio: ['ignore', 'pipe', 'pipe'] })` and parse the combined output instead of relying on stdout-only `execSync`.
+
+## 2026-05-03 [Gotcha] Jest mcp-auth imports must target TypeScript source explicitly: In backend Jest tests, require `mcp-auth.ts` explicitly instead of `mcp-auth` when a sibling `mcp-auth.js` artifact exists, otherwise Jest may resolve the stale ESM .js file first and fail before running the test.
+> Rule: Jest mcp-auth imports must target TypeScript source explicitly: In backend Jest tests, require `mcp-auth.ts` explicitly instead of `mcp-auth` when a sibling `mcp-auth.js` artifact exists, otherwise Jest may resolve the stale ESM .js file first and fail before running the test.

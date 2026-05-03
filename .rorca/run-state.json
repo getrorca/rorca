@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T22:13:05.634Z",
+  "lastUpdatedAt": "2026-05-03T22:16:47.910Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -413,6 +413,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 682817
+    },
+    {
+      "storyId": "CLI-046",
+      "title": "AEGIS P0: MCP Origin Lockdown + 127.0.0.1 Bind — even when API is on 0.0.0.0",
+      "status": "passed",
+      "startedAt": "2026-05-03T22:13:25.976Z",
+      "finishedAt": "2026-05-03T22:16:47.910Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 201934
     }
   ],
   "failedStories": [],
