@@ -30,6 +30,8 @@ import { spawn, execSync, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import type { Readable } from 'stream';
+import { StringDecoder } from 'string_decoder';
 import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
@@ -311,6 +313,18 @@ let _chromeMcpReady = false;
 let _chromeMcpCmd: string | null = null;
 let _chromeMcpArgs: string[] = [];
 
+interface PiRpcServer {
+  process: ChildProcess;
+  requestId: number;
+  pending: Map<string, { resolve: (r: unknown) => void; reject: (e: Error) => void }>;
+  eventListeners: Array<(event: unknown) => void>;
+  stderr: string;
+  ready: boolean;
+}
+let _piRpcServer: PiRpcServer | null = null;
+let _piRpcExitCleanupRegistered = false;
+let _piRpcStoryQueue: Promise<void> = Promise.resolve();
+
 const MAX_RETRIES = 3;
 const MAX_RATE_LIMIT_RETRIES = 4;
 const RATE_LIMIT_BACKOFF_MS = [30_000, 60_000, 120_000, 240_000];
@@ -334,6 +348,10 @@ const CODEX_BIN = process.env.CODEX_BIN ||
       return 'codex';
     }
   })();
+
+const PI_BIN = process.env.PI_BIN || (() => {
+  try { return execSync('which pi', { encoding: 'utf8' }).trim(); } catch { return 'pi'; }
+})();
 
 // Claude env vars that must be stripped to avoid nested-session detection
 const CLAUDE_ENV_VARS_TO_REMOVE = [
@@ -817,6 +835,212 @@ function buildCleanEnv(): Record<string, string> {
   return env;
 }
 
+function serializeJsonLine(value: unknown): string {
+  return JSON.stringify(value) + '\n';
+}
+
+function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
+  const decoder = new StringDecoder('utf8');
+  let buffer = '';
+
+  const handleData = (chunk: Buffer | string): void => {
+    buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+
+    let newlineIndex = buffer.indexOf('\n');
+    while (newlineIndex !== -1) {
+      const line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      onLine(line);
+      newlineIndex = buffer.indexOf('\n');
+    }
+  };
+
+  const handleEnd = (): void => {
+    buffer += decoder.end();
+    if (buffer.length > 0) {
+      onLine(buffer);
+      buffer = '';
+    }
+  };
+
+  stream.on('data', handleData);
+  stream.on('end', handleEnd);
+
+  return () => {
+    stream.off('data', handleData);
+    stream.off('end', handleEnd);
+  };
+}
+
+async function startPiRpcServer(cwd: string, model: string | null): Promise<PiRpcServer> {
+  if (_piRpcServer?.ready) {
+    return _piRpcServer;
+  }
+
+  const args = ['--mode', 'rpc', ...(model ? ['--model', model] : [])];
+  const child = spawn(PI_BIN, args, {
+    cwd,
+    env: buildCleanEnv(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  const server: PiRpcServer = {
+    process: child,
+    requestId: 0,
+    pending: new Map(),
+    eventListeners: [],
+    stderr: '',
+    ready: false,
+  };
+
+  child.stderr?.on('data', (chunk: Buffer | string) => {
+    server.stderr += chunk.toString();
+    if (server.stderr.length > 64 * 1024) {
+      server.stderr = server.stderr.slice(-64 * 1024);
+    }
+  });
+
+  const detachStdoutReader = child.stdout
+    ? attachJsonlLineReader(child.stdout, (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+
+      let data: unknown;
+      try {
+        data = JSON.parse(trimmed);
+      } catch {
+        server.stderr += `\n[pi-rpc] Invalid JSONL from stdout: ${trimmed.slice(0, 500)}`;
+        return;
+      }
+
+      if (
+        typeof data === 'object'
+        && data !== null
+        && (data as { type?: unknown }).type === 'response'
+        && typeof (data as { id?: unknown }).id === 'string'
+      ) {
+        const id = (data as { id: string }).id;
+        const pending = server.pending.get(id);
+        if (pending) {
+          server.pending.delete(id);
+          pending.resolve(data);
+        }
+        return;
+      }
+
+      for (const listener of [...server.eventListeners]) {
+        try {
+          listener(data);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          server.stderr += `\n[pi-rpc] Event listener error: ${message}`;
+        }
+      }
+    })
+    : () => {};
+
+  const failPending = (reason: string): void => {
+    for (const [id, pending] of server.pending.entries()) {
+      pending.reject(new Error(reason));
+      server.pending.delete(id);
+    }
+  };
+
+  child.on('error', (error) => {
+    failPending(`pi RPC server error: ${error.message}`);
+  });
+
+  child.on('exit', (code, signal) => {
+    detachStdoutReader();
+    server.ready = false;
+    if (_piRpcServer === server) {
+      _piRpcServer = null;
+    }
+    failPending(`pi RPC server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`);
+  });
+
+  await new Promise(resolve => setTimeout(resolve, 200));
+  if (child.exitCode !== null) {
+    detachStdoutReader();
+    throw new Error(`pi RPC server exited during startup (code=${child.exitCode}). stderr:\n${server.stderr.slice(-4096)}`);
+  }
+
+  server.ready = true;
+  _piRpcServer = server;
+
+  if (!_piRpcExitCleanupRegistered) {
+    _piRpcExitCleanupRegistered = true;
+    process.on('exit', () => {
+      if (_piRpcServer) {
+        try { _piRpcServer.process.kill('SIGTERM'); } catch { /* already gone */ }
+      }
+    });
+  }
+
+  return server;
+}
+
+async function stopPiRpcServer(): Promise<void> {
+  const server = _piRpcServer;
+  if (!server) return;
+
+  _piRpcServer = null;
+  server.ready = false;
+
+  const exitPromise = new Promise<void>((resolve) => {
+    if (server.process.exitCode !== null) {
+      resolve();
+      return;
+    }
+    server.process.once('exit', () => resolve());
+  });
+
+  try {
+    server.process.kill('SIGTERM');
+  } catch {
+    return;
+  }
+
+  const finished = await Promise.race([
+    exitPromise.then(() => true),
+    new Promise<boolean>(resolve => setTimeout(() => resolve(false), 3000)),
+  ]);
+
+  if (!finished) {
+    try { server.process.kill('SIGKILL'); } catch { /* already gone */ }
+    await exitPromise.catch(() => {});
+  }
+}
+
+function sendPiRpcCommand(server: PiRpcServer, command: object): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const id = `req_${++server.requestId}`;
+    const timeout = setTimeout(() => {
+      server.pending.delete(id);
+      reject(new Error(`pi RPC command timed out after 30000ms (id=${id}). stderr tail:\n${server.stderr.slice(-4096)}`));
+    }, 30_000);
+
+    server.pending.set(id, {
+      resolve: (result) => {
+        clearTimeout(timeout);
+        resolve(result);
+      },
+      reject: (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    });
+
+    try {
+      server.process.stdin?.write(serializeJsonLine({ ...command, id }));
+    } catch (error: unknown) {
+      server.pending.delete(id);
+      clearTimeout(timeout);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
 function readWorkspaceFile(cwd: string, ...segments: string[]): string {
   try {
     return fs.readFileSync(path.join(cwd, ...segments), 'utf8');
@@ -1138,7 +1362,7 @@ function runAgent(
       // thinking/effort flags are not forwarded to Codex
       return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServers);
     case 'pi':
-      return Promise.reject(new Error('PI agent execution path is not implemented yet'));
+      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate);
   }
 }
 
@@ -1702,6 +1926,177 @@ function spawnCodex(
       clearTimeout(timer);
     });
   });
+}
+
+async function spawnPiRpc(
+  prompt: string,
+  cwd: string,
+  timeoutMs: number,
+  logFile: string,
+  model: string | null,
+  onTokenUpdate?: TokenUpdateCallback,
+): Promise<AgentResult> {
+  const previousStory = _piRpcStoryQueue;
+  let releaseStoryQueue!: () => void;
+  const currentStory = new Promise<void>(resolve => {
+    releaseStoryQueue = resolve;
+  });
+  _piRpcStoryQueue = currentStory;
+
+  await previousStory;
+
+  const startTime = Date.now();
+  try {
+    const server = await startPiRpcServer(cwd, model);
+    await sendPiRpcCommand(server, { type: 'new_session' });
+
+    const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+    let storyTimedOut = false;
+    let settled = false;
+
+    const finish = (exitCode: number): AgentResult => ({
+      exitCode,
+      stderrTail: server.stderr.slice(-4096),
+      elapsedMs: Date.now() - startTime,
+    });
+
+    const writeOutput = (text: string): void => {
+      if (!text) return;
+      process.stdout.write(text);
+      logStream.write(text);
+    };
+
+    const summarizeArgs = (args: unknown): string => {
+      if (args === undefined) return '';
+      try {
+        const text = JSON.stringify(args);
+        return text.length > 240 ? `${text.slice(0, 237)}...` : text;
+      } catch {
+        return String(args);
+      }
+    };
+
+    let turnCount = 0;
+    let cumulativeInput = 0;
+    let cumulativeOutput = 0;
+    const listener = (event: unknown, resolve?: () => void, reject?: (error: Error) => void): void => {
+      const data = typeof event === 'object' && event !== null ? event as Record<string, unknown> : null;
+      if (!data) return;
+
+      const eventType = typeof data.type === 'string' ? data.type : '';
+      if (eventType === 'message_update') {
+        const assistantMessageEvent = data.assistantMessageEvent as Record<string, unknown> | undefined;
+        if (assistantMessageEvent?.type === 'text_delta' && typeof assistantMessageEvent.delta === 'string') {
+          writeOutput(assistantMessageEvent.delta);
+        }
+        return;
+      }
+
+      if (eventType === 'tool_execution_start') {
+        const toolName = typeof data.toolName === 'string'
+          ? data.toolName
+          : typeof data.name === 'string'
+            ? data.name
+            : 'unknown';
+        const argsText = summarizeArgs(data.args ?? data.input);
+        writeOutput(`[Tool] ${toolName}${argsText ? `: ${argsText}` : ''}\n`);
+        return;
+      }
+
+      if (eventType === 'tool_execution_end') {
+        const toolName = typeof data.toolName === 'string'
+          ? data.toolName
+          : typeof data.name === 'string'
+            ? data.name
+            : 'unknown';
+        const exitCode = data.exitCode ?? data.code ?? 'unknown';
+        writeOutput(`[Tool] ${toolName} done (${String(exitCode)})\n`);
+        return;
+      }
+
+      if (eventType === 'turn_end') {
+        const message = data.message as Record<string, unknown> | undefined;
+        const usage = message?.usage as Record<string, unknown> | undefined;
+        if (usage && onTokenUpdate) {
+          const input = Number(usage.input ?? 0);
+          const output = Number(usage.output ?? 0);
+          if (input > 0 || output > 0) {
+            const turnInput = input - cumulativeInput;
+            const turnOutput = output - cumulativeOutput;
+            cumulativeInput = input;
+            cumulativeOutput = output;
+            turnCount++;
+            onTokenUpdate({
+              inputTokens: turnInput > 0 ? turnInput : input,
+              outputTokens: turnOutput > 0 ? turnOutput : output,
+              turn: turnCount,
+              cumulativeInput,
+              cumulativeOutput,
+            });
+          }
+        }
+        if (!settled) {
+          settled = true;
+          resolve?.();
+        }
+        return;
+      }
+
+      if (eventType === 'agent_end' && !settled) {
+        settled = true;
+        resolve?.();
+        return;
+      }
+
+      if (eventType === 'error' && !settled) {
+        settled = true;
+        const message = typeof data.message === 'string' ? data.message : 'pi RPC story failed';
+        reject?.(new Error(message));
+      }
+    };
+
+    let boundListener: ((event: unknown) => void) | null = null;
+    const cleanupListener = (): void => {
+      if (!boundListener) return;
+      const idx = server.eventListeners.indexOf(boundListener);
+      if (idx !== -1) server.eventListeners.splice(idx, 1);
+      boundListener = null;
+    };
+
+    const storyDone = new Promise<void>((resolve, reject) => {
+      boundListener = (event: unknown): void => listener(event, resolve, reject);
+      server.eventListeners.push(boundListener);
+    });
+
+    const timeout = setTimeout(() => {
+      storyTimedOut = true;
+      void sendPiRpcCommand(server, { type: 'abort' }).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        writeOutput(`[System] Failed to abort pi RPC story cleanly: ${message}\n`);
+      });
+    }, timeoutMs);
+
+    try {
+      await sendPiRpcCommand(server, { type: 'prompt', message: prompt });
+      await storyDone;
+      clearTimeout(timeout);
+      cleanupListener();
+      logStream.end();
+      return finish(storyTimedOut ? 124 : 0);
+    } catch (error: unknown) {
+      clearTimeout(timeout);
+      cleanupListener();
+      logStream.end();
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        exitCode: storyTimedOut ? 124 : 1,
+        stderrTail: `${server.stderr.slice(-4096)}${message ? `\n${message}` : ''}`.trim(),
+        elapsedMs: Date.now() - startTime,
+      };
+    }
+  } finally {
+    releaseStoryQueue();
+  }
 }
 
 // ─── OpenCode Error Classification ──────────────────────────────────────────
@@ -3676,7 +4071,8 @@ async function main(): Promise<void> {
   initRunState(config.cwd, specId, config.runId);
   const resumeCtx = getResumeContext(config.cwd, specId);
 
-  function cleanupBrowserServers() {
+  async function cleanupBrowserServers(): Promise<void> {
+    await stopPiRpcServer();
     if (_playwrightMcpServerPid) {
       try { process.kill(_playwrightMcpServerPid, 'SIGTERM'); } catch { /* already gone */ }
     }
@@ -3693,15 +4089,19 @@ async function main(): Promise<void> {
   }
 
   process.on('SIGINT', () => {
-    logger.info('');
-    logger.info('Engine stopped by user.');
-    cleanupBrowserServers();
-    process.exit(0);
+    void (async () => {
+      logger.info('');
+      logger.info('Engine stopped by user.');
+      await cleanupBrowserServers();
+      process.exit(0);
+    })();
   });
 
   process.on('SIGTERM', () => {
-    cleanupBrowserServers();
-    process.exit(0);
+    void (async () => {
+      await cleanupBrowserServers();
+      process.exit(0);
+    })();
   });
 
   // CA-009: Discover personas from .rorca/personas/
@@ -3773,6 +4173,7 @@ async function main(): Promise<void> {
         }
         writeProgressTxt(config.cwd);
         archiveRunState(config.cwd, config.runId);
+        await cleanupBrowserServers();
         process.exit(1);
       }
       logger.info(`All stories complete! ${finalProgress.passed}/${finalProgress.total}`);
@@ -3794,6 +4195,7 @@ async function main(): Promise<void> {
         }
       }
 
+      await cleanupBrowserServers();
       process.exit(0);
     }
 
@@ -3824,6 +4226,7 @@ async function main(): Promise<void> {
     );
 
     if (config.specificStory) {
+      await cleanupBrowserServers();
       process.exit(seqResult === 'passed' ? 0 : 1);
     }
 
@@ -4103,6 +4506,7 @@ async function runParallel(
   // CIE-007: Archive run-state.json and write final progress.txt
   writeProgressTxt(config.cwd);
   archiveRunState(config.cwd, config.runId);
+  await stopPiRpcServer();
   process.exit(failedIds.size > 0 ? 1 : 0);
 }
 
