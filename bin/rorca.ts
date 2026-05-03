@@ -34,6 +34,7 @@ rorca v${pkg.version} — AI spec orchestration pipeline
 
 Usage:
   rorca start [options]    Start the Rorca server
+  rorca doctor [options]   Run system diagnostics
   rorca db start           Start Docker Postgres, or upgrade Lite Mode to Docker + AGE
   rorca init               Register Rorca as an MCP server with claude CLI
   rorca --version          Print version
@@ -51,6 +52,8 @@ Examples:
   rorca start --no-open
   rorca start --no-postgres
   rorca start --dry-run
+  rorca doctor
+  rorca doctor --json
   rorca db start
   rorca init
 `);
@@ -70,11 +73,16 @@ if (command === 'db') {
   void runDb(args.slice(1)).catch(handleFatalCliError);
 }
 
+// ─── Command: doctor ───
+if (command === 'doctor') {
+  void runDoctor(args.slice(1)).catch(handleFatalCliError);
+}
+
 // ─── Command: start ───
 if (command === 'start') {
   void runStart(args.slice(1)).catch(handleFatalCliError);
   // runStart sets up async process management — don't exit here
-} else if (command !== 'db') {
+} else if (command !== 'db' && command !== 'doctor') {
   console.error(`Unknown command: ${command}\nRun "rorca --help" for usage.`);
   process.exit(1);
 }
@@ -802,6 +810,189 @@ Usage:
   await runLiteToDockerUpgrade();
 }
 
+interface DoctorApiCheck {
+  id: string;
+  label: string;
+  status: 'ok' | 'warning' | 'error';
+  message: string;
+  fix?: string;
+}
+
+interface DoctorApiResponse {
+  status: 'ok' | 'error';
+  summary: {
+    errors: number;
+    warnings: number;
+    ok: number;
+    message: string;
+  };
+  agentType: string;
+  generatedAt: string;
+  checks: DoctorApiCheck[];
+}
+
+interface LocalDoctorCheck {
+  label: string;
+  status: 'ok' | 'warning' | 'error';
+  message: string;
+  fix?: string;
+}
+
+function runCliShellCommand(command: string, timeoutMs: number): string {
+  const shellCommand = process.platform === 'win32'
+    ? `cmd /d /s /c "${command}"`
+    : `sh -lc '${command.replace(/'/g, `'\\''`)}'`;
+
+  return execSync(shellCommand, {
+    stdio: 'pipe',
+    timeout: timeoutMs,
+    encoding: 'utf8',
+  }).trim();
+}
+
+async function runDoctor(doctorArgs: string[]): Promise<void> {
+  const jsonMode = doctorArgs.includes('--json');
+
+  if (doctorArgs.includes('--help') || doctorArgs.includes('-h')) {
+    console.log(`
+Usage:
+  rorca doctor
+  rorca doctor --json
+`);
+    return;
+  }
+
+  const localChecks = await runLocalDoctorPreflight();
+
+  if (jsonMode) {
+    const doctor = await fetchDoctorJson();
+    console.log(JSON.stringify(doctor, null, 2));
+    process.exit(doctor.summary.errors > 0 ? 1 : 0);
+    return;
+  }
+
+  for (const check of localChecks) {
+    printDoctorCheck(check);
+  }
+
+  const backendCheck = localChecks.find((check) => check.label === 'Backend reachable');
+  if (!backendCheck || backendCheck.status === 'error') {
+    const errorCount = localChecks.filter((check) => check.status === 'error').length;
+    console.error(colorRed(`${errorCount} issue(s) found`));
+    process.exit(1);
+    return;
+  }
+
+  const doctor = await fetchDoctorJson();
+  const remoteChecks = doctor.checks.filter((check) => !['docker', 'database-container', 'backend'].includes(check.id));
+  for (const check of remoteChecks) {
+    printDoctorCheck({
+      label: check.label,
+      status: check.status,
+      message: check.message,
+      fix: check.fix,
+    });
+  }
+
+  if (doctor.summary.errors > 0) {
+    console.error(colorRed(doctor.summary.message));
+    process.exit(1);
+    return;
+  }
+
+  if (doctor.summary.warnings > 0) {
+    console.log(colorGreen('All checks passed'));
+    process.exit(0);
+    return;
+  }
+
+  console.log(colorGreen('All checks passed'));
+  process.exit(0);
+}
+
+async function runLocalDoctorPreflight(): Promise<LocalDoctorCheck[]> {
+  const checks: LocalDoctorCheck[] = [];
+
+  if (!findBinary('docker')) {
+    checks.push({
+      label: 'Docker running',
+      status: 'error',
+      message: 'Docker not found',
+      fix: 'Install from https://docs.docker.com/get-docker/',
+    });
+    checks.push({
+      label: 'Database container running',
+      status: 'error',
+      message: 'Database container not running',
+      fix: 'Run: rorca db start',
+    });
+  } else {
+    try {
+      runCliShellCommand('docker info 2>/dev/null', 3000);
+      checks.push({
+        label: 'Docker running',
+        status: 'ok',
+        message: 'OK',
+      });
+    } catch {
+      checks.push({
+        label: 'Docker running',
+        status: 'error',
+        message: 'Docker not running',
+        fix: 'Start Docker Desktop (or OrbStack on macOS)',
+      });
+    }
+
+    try {
+      const status = runCliShellCommand(`docker ps --filter name=rorca-db --format '{{.Status}}'`, 3000);
+
+      if (status) {
+        checks.push({
+          label: 'Database container running',
+          status: 'ok',
+          message: `OK (${status})`,
+        });
+      } else {
+        checks.push({
+          label: 'Database container running',
+          status: 'error',
+          message: 'Database container not running',
+          fix: 'Run: rorca db start',
+        });
+      }
+    } catch {
+      checks.push({
+        label: 'Database container running',
+        status: 'error',
+        message: 'Database container not running',
+        fix: 'Run: rorca db start',
+      });
+    }
+  }
+
+  try {
+    await fetchJson('http://localhost:3030/api/health', 2000);
+    checks.push({
+      label: 'Backend reachable',
+      status: 'ok',
+      message: 'OK',
+    });
+  } catch {
+    checks.push({
+      label: 'Backend reachable',
+      status: 'error',
+      message: 'Backend not running',
+      fix: 'Start with: rorca start',
+    });
+  }
+
+  return checks;
+}
+
+async function fetchDoctorJson(): Promise<DoctorApiResponse> {
+  return fetchJson<DoctorApiResponse>('http://localhost:3030/api/doctor', 4000);
+}
+
 // ────────────────────────────────────────────────────────────────
 // Embedded Postgres: detect, download, extract
 // ────────────────────────────────────────────────────────────────
@@ -1341,6 +1532,43 @@ function findBinary(name: string): string | null {
   } catch {
     return null;
   }
+}
+
+async function fetchJson<T>(url: string, timeoutMs: number): Promise<T> {
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    const res = await fetch(url, { signal: controller.signal });
+    if (!res.ok) {
+      throw new Error(`HTTP ${res.status}`);
+    }
+    return await res.json() as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function colorGreen(text: string): string {
+  return `\x1b[32m${text}\x1b[0m`;
+}
+
+function colorYellow(text: string): string {
+  return `\x1b[33m${text}\x1b[0m`;
+}
+
+function colorRed(text: string): string {
+  return `\x1b[31m${text}\x1b[0m`;
+}
+
+function formatDoctorPrefix(status: LocalDoctorCheck['status']): string {
+  if (status === 'ok') return colorGreen('✓');
+  if (status === 'warning') return colorYellow('⚠');
+  return colorRed('✗');
+}
+
+function printDoctorCheck(check: LocalDoctorCheck): void {
+  const detail = check.fix ? ` — ${check.fix}` : '';
+  console.log(`${formatDoctorPrefix(check.status)} ${check.message}${detail}`);
 }
 
 function openBrowser(url: string): void {
