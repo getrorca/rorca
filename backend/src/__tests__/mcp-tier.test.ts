@@ -1,5 +1,8 @@
 import { swaggerSpec } from '../lib/swagger';
-import { getMcpToolDefinitions } from '../lib/mcp-http';
+import { createMcpHttpServer, getMcpToolDefinitions } from '../lib/mcp-http';
+
+const mockFetch = jest.fn();
+(global as any).fetch = mockFetch;
 
 describe('MCP tier exposure', () => {
   it('preserves x-rorca-* extensions in the generated OpenAPI spec', () => {
@@ -70,5 +73,64 @@ describe('MCP tier exposure', () => {
       'rorca_specs',
       'rorca_profile',
     ]);
+  });
+
+  it('enforces admin tier again inside tool dispatch', async () => {
+    const spec = {
+      paths: {
+        '/api/specs': {
+          get: {
+            summary: 'List specs',
+            'x-rorca-tier': 'public',
+            parameters: [],
+          },
+        },
+        '/api/pipeline/trigger': {
+          post: {
+            summary: 'Trigger run',
+            'x-rorca-tier': 'public',
+            requestBody: {
+              content: {
+                'application/json': {
+                  schema: {
+                    type: 'object',
+                    properties: {
+                      specId: { type: 'string' },
+                    },
+                  },
+                },
+              },
+            },
+          },
+        },
+      },
+    };
+
+    mockFetch.mockReset();
+    mockFetch.mockResolvedValue({
+      ok: true,
+      status: 200,
+      headers: { get: () => 'application/json' },
+      json: async () => ({ ok: true }),
+      text: async () => '{"ok":true}',
+    });
+
+    const publicServer = createMcpHttpServer(spec as any, {
+      resolveSessionTier: () => 'public',
+    });
+    const publicTools = (publicServer as any)._registeredTools as Record<string, { handler: Function }>;
+    const publicResult = await publicTools.rorca_specs.handler({}, { sessionId: 'public-session', requestId: '1' });
+    expect(publicResult.isError).toBeUndefined();
+
+    const deniedResult = await publicTools.rorca_pipeline_trigger.handler({ specId: 'spec-1' }, { sessionId: 'public-session', requestId: '2' });
+    expect(deniedResult.isError).toBe(true);
+    expect(deniedResult.content[0].text).toContain('requires admin tier');
+
+    const adminServer = createMcpHttpServer(spec as any, {
+      resolveSessionTier: () => 'admin',
+    });
+    const adminTools = (adminServer as any)._registeredTools as Record<string, { handler: Function }>;
+    const adminResult = await adminTools.rorca_pipeline_trigger.handler({ specId: 'spec-1' }, { sessionId: 'admin-session', requestId: '3' });
+    expect(adminResult.isError).toBeUndefined();
   });
 });
