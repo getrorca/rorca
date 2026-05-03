@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T22:51:14.744Z",
+  "lastUpdatedAt": "2026-05-03T22:57:03.708Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -453,6 +453,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 809916
+    },
+    {
+      "storyId": "CLI-050",
+      "title": "AEGIS P0: Remove No-op OAuth Theater — honest auth model",
+      "status": "passed",
+      "startedAt": "2026-05-03T22:51:35.458Z",
+      "finishedAt": "2026-05-03T22:57:03.708Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 328250
     }
   ],
   "failedStories": [],

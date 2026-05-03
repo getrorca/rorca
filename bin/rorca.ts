@@ -134,6 +134,14 @@ type DoctorJsonResponse = {
   exitCode: number;
 };
 
+type McpClientFinding = {
+  client: string;
+  configPath: string;
+  serverName: string;
+  issue: string;
+  fix: string;
+};
+
 type VersionResponse = {
   version: string;
   apiVersion: string;
@@ -1405,7 +1413,11 @@ async function runMcpRotateToken(options: { public?: boolean; admin?: boolean; a
     rl.close();
   }
 
-  const rotated = rotateMcpToken(rotateTarget);
+  const rotated = rotateTarget === 'all'
+    ? rotateMcpToken('all')
+    : rotateTarget === 'admin'
+      ? rotateMcpToken('admin')
+      : rotateMcpToken('public');
   if (typeof rotated === 'string') {
     console.log(rotated);
   } else {
@@ -1422,6 +1434,165 @@ async function runMcpRotateToken(options: { public?: boolean; admin?: boolean; a
     console.log('Run `rorca mcp setup-claude` and/or `rorca mcp setup-claude --admin` to re-link clients.');
   }
   return 0;
+}
+
+function appendUniquePath(paths: string[], candidate: string | undefined): void {
+  if (!candidate) return;
+  if (!paths.includes(candidate)) {
+    paths.push(candidate);
+  }
+}
+
+function getClaudeDesktopConfigPaths(): string[] {
+  const paths: string[] = [];
+  appendUniquePath(paths, path.join(homedir(), 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'));
+  appendUniquePath(paths, path.join(homedir(), '.config', 'Claude', 'claude_desktop_config.json'));
+  if (process.env.APPDATA) {
+    appendUniquePath(paths, path.join(process.env.APPDATA, 'Claude', 'claude_desktop_config.json'));
+  }
+  return paths;
+}
+
+function getVsCodeSettingsPaths(): string[] {
+  const paths: string[] = [];
+  appendUniquePath(paths, path.join(homedir(), 'Library', 'Application Support', 'Code', 'User', 'settings.json'));
+  appendUniquePath(paths, path.join(homedir(), '.config', 'Code', 'User', 'settings.json'));
+  if (process.env.APPDATA) {
+    appendUniquePath(paths, path.join(process.env.APPDATA, 'Code', 'User', 'settings.json'));
+  }
+  return paths;
+}
+
+function configTargetsRorcaMcp(serverConfig: unknown): boolean {
+  if (!serverConfig || typeof serverConfig !== 'object') {
+    return false;
+  }
+
+  const serialized = JSON.stringify(serverConfig).toLowerCase();
+  return serialized.includes('/mcp')
+    && (
+      serialized.includes('localhost:3030')
+      || serialized.includes('127.0.0.1:3030')
+      || serialized.includes('rorca_api_url')
+    );
+}
+
+function configHasBearerHeader(serverConfig: unknown): boolean {
+  if (!serverConfig || typeof serverConfig !== 'object') {
+    return false;
+  }
+
+  const serialized = JSON.stringify(serverConfig);
+  return serialized.includes('Authorization: Bearer')
+    || serialized.includes('"Authorization":"Bearer ')
+    || serialized.includes('"authorization":"Bearer ');
+}
+
+function collectSectionFindings(
+  section: unknown,
+  client: string,
+  configPath: string,
+  issue: string,
+  fix: string,
+): McpClientFinding[] {
+  if (!section || typeof section !== 'object') {
+    return [];
+  }
+
+  const findings: McpClientFinding[] = [];
+  for (const [serverName, serverConfig] of Object.entries(section as Record<string, unknown>)) {
+    if (!configTargetsRorcaMcp(serverConfig)) {
+      continue;
+    }
+    if (configHasBearerHeader(serverConfig)) {
+      continue;
+    }
+    findings.push({
+      client,
+      configPath,
+      serverName,
+      issue,
+      fix,
+    });
+  }
+
+  return findings;
+}
+
+function inspectJsonConfig(
+  filePath: string,
+  inspector: (parsed: unknown, filePath: string) => McpClientFinding[],
+): { findings: McpClientFinding[]; parseError?: string } {
+  try {
+    const raw = readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    return { findings: inspector(parsed, filePath) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { findings: [], parseError: message };
+  }
+}
+
+async function runMcpDiagnoseClients(): Promise<number> {
+  const findings: McpClientFinding[] = [];
+  const parseWarnings: string[] = [];
+
+  for (const configPath of getClaudeDesktopConfigPaths()) {
+    if (!existsSync(configPath)) continue;
+    const result = inspectJsonConfig(configPath, (parsed, filePath) => collectSectionFindings(
+      (parsed as { mcpServers?: unknown }).mcpServers,
+      'Claude Desktop',
+      filePath,
+      'Claude Desktop MCP HTTP configs that relied on the removed OAuth probe will fail. Rorca is Bearer-only now.',
+      'Use Claude Code CLI instead: `rorca mcp setup-claude` or `claude mcp add rorca http://localhost:3030/mcp --header \'Authorization: Bearer <token>\'`.',
+    ));
+    findings.push(...result.findings);
+    if (result.parseError) {
+      parseWarnings.push(`Claude Desktop config unreadable: ${configPath} (${result.parseError})`);
+    }
+  }
+
+  for (const configPath of getVsCodeSettingsPaths()) {
+    if (!existsSync(configPath)) continue;
+    const result = inspectJsonConfig(configPath, (parsed, filePath) => collectSectionFindings(
+      (parsed as { ['mcp.servers']?: unknown })['mcp.servers'],
+      'VS Code',
+      filePath,
+      'This VS Code MCP server points at Rorca /mcp without an Authorization Bearer header.',
+      'Add an `Authorization: Bearer <token>` header to that server entry. Use `rorca mcp token` for public access or `rorca mcp token --admin` for admin access.',
+    ));
+    findings.push(...result.findings);
+    if (result.parseError) {
+      parseWarnings.push(`VS Code settings unreadable: ${configPath} (${result.parseError})`);
+    }
+  }
+
+  if (findings.length === 0 && parseWarnings.length === 0) {
+    console.log('No broken MCP client configs detected.');
+    console.log('Rorca MCP is Bearer-only. Use `rorca mcp setup-claude` for Claude Code CLI.');
+    return 0;
+  }
+
+  if (findings.length > 0) {
+    console.log('Potentially broken MCP client configs:');
+    for (const finding of findings) {
+      console.log('');
+      console.log(`[${finding.client}] ${finding.serverName}`);
+      console.log(`Config: ${finding.configPath}`);
+      console.log(`Issue: ${finding.issue}`);
+      console.log(`Fix: ${finding.fix}`);
+    }
+  }
+
+  if (parseWarnings.length > 0) {
+    console.log('');
+    console.log('Unreadable config files:');
+    for (const warning of parseWarnings) {
+      console.log(`- ${warning}`);
+    }
+  }
+
+  return findings.length > 0 ? 1 : 0;
 }
 
 async function spawnInteractivePi(piBinPath: string, args: string[], env?: NodeJS.ProcessEnv): Promise<number> {
@@ -2837,6 +3008,13 @@ mcp
   .command('status')
   .action(async () => {
     process.exitCode = await runMcpStatus();
+  });
+
+mcp
+  .command('diagnose-clients')
+  .description('Scan known MCP client configs for broken Rorca OAuth-era entries')
+  .action(async () => {
+    process.exitCode = await runMcpDiagnoseClients();
   });
 
 const db = program.command('db').description('Manage the Docker Postgres sidecar');
