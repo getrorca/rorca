@@ -125,6 +125,7 @@ router.post('/preview-sanitize', (req: Request, res: Response) => {
  *     summary: Publish a spec to the community marketplace
  *     operationId: publishSpec
  *     x-rorca-tier: paid
+ *     x-rorca-capability: marketplacePublish
  *     x-rorca-rationale: "Marketplace publishing is a commercial distribution feature and should not be part of the free CLI contract."
  *     requestBody:
  *       required: true
@@ -250,6 +251,7 @@ router.post('/publish', requirePlan('marketplace_publish'), async (req: Request,
  *     summary: Fork a published spec into a workspace
  *     operationId: forkSpec
  *     x-rorca-tier: paid
+ *     x-rorca-capability: marketplacePublish
  *     x-rorca-rationale: "Marketplace forking is part of the commercial marketplace surface and belongs behind the paid plan boundary."
  *     parameters:
  *       - in: path

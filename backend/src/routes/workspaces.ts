@@ -1054,6 +1054,7 @@ router.get('/:id/stats', async (req, res, next) => {
  *     summary: Get team members for a workspace
  *     operationId: getWorkspaceTeamMembers
  *     x-rorca-tier: paid
+ *     x-rorca-capability: teams
  *     x-rorca-rationale: "Workspace team membership is a multi-user collaboration feature and belongs behind the paid plan boundary."
  *     description: >
  *       Returns the team linked to this workspace via workspace_access, along with

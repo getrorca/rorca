@@ -13,7 +13,7 @@ import fs from 'fs';
 
 export interface LicensePayload {
   sub: string;          // licensee identifier (email or org id)
-  plan: string;         // 'solo' | 'pro' | 'team'
+  plan: string;         // 'solo' | 'pro' | 'team' | 'enterprise'
   iat: number;          // issued at
   exp?: number;         // expiry (optional — perpetual licenses omit this)
   iss: string;          // must be 'rorca'
@@ -54,7 +54,7 @@ export function verifyLicense(licenseKey: string): LicensePayload {
     throw new Error('License key missing required "plan" claim');
   }
 
-  const validPlans = ['solo', 'pro', 'team'];
+  const validPlans = ['solo', 'pro', 'team', 'enterprise'];
   if (!validPlans.includes(decoded.plan)) {
     throw new Error(`Invalid plan in license key: ${decoded.plan}`);
   }

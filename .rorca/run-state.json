@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T23:16:42.191Z",
+  "lastUpdatedAt": "2026-05-03T23:26:07.695Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -483,6 +483,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 651466
+    },
+    {
+      "storyId": "CLI-053",
+      "title": "OPEN-CORE P0: Plan-Gating Middleware — 402 PLAN_REQUIRED on paid-tier routes",
+      "status": "passed",
+      "startedAt": "2026-05-03T23:17:02.744Z",
+      "finishedAt": "2026-05-03T23:26:07.695Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 544951
     }
   ],
   "failedStories": [],
