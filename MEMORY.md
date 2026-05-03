@@ -3458,3 +3458,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Architecture] Pi MCP integration must use a generated extension bridge: Do not assume Pi supports a native --mcp-server flag. For Rorca integration, verify Pi capabilities first and expose Rorca MCP tools by generating a temporary Pi extension that performs the MCP HTTP handshake and registers tools at session start.
 > Rule: Pi MCP integration must use a generated extension bridge: Do not assume Pi supports a native --mcp-server flag. For Rorca integration, verify Pi capabilities first and expose Rorca MCP tools by generating a temporary Pi extension that performs the MCP HTTP handshake and registers tools at session start.
+
+## 2026-05-03 [Gotcha] MCP HTTP transport requires local bearer token: Protect /mcp with requireMcpAuth and a bearer token loaded from ~/.rorca/mcp-token; invalid tokens must return 401 MCP_AUTH_INVALID and must never fall through to LOCAL_ADMIN.
+> Rule: MCP HTTP transport requires local bearer token: Protect /mcp with requireMcpAuth and a bearer token loaded from ~/.rorca/mcp-token; invalid tokens must return 401 MCP_AUTH_INVALID and must never fall through to LOCAL_ADMIN.

@@ -3,6 +3,8 @@ import { execSync } from 'child_process';
 import { dbHealthCheck, queryOne } from '../db/index';
 import { activeAgent } from '../lib/config';
 import { detectPi, listPiModels } from '../lib/pi-detector';
+import { getMcpTokenPath } from '../lib/mcp-auth';
+import fs from 'node:fs';
 
 const router = Router();
 
@@ -15,6 +17,7 @@ interface DoctorCheck {
     | 'backend'
     | 'database'
     | 'worker'
+    | 'mcp-token'
     | 'pi-installed'
     | 'pi-authenticated'
     | 'workspace'
@@ -210,6 +213,43 @@ router.get('/', async (_req, res, next) => {
         status: 'error',
         message: 'Database not connected',
         fix: 'Check DATABASE_URL',
+      });
+    }
+
+    try {
+      const tokenPath = getMcpTokenPath();
+      if (!fs.existsSync(tokenPath)) {
+        checks.push({
+          id: 'mcp-token',
+          label: 'MCP token',
+          status: 'error',
+          message: 'MCP token file is missing',
+          fix: 'Restart Rorca or run: rorca mcp token',
+        });
+      } else if (process.platform !== 'win32' && (fs.statSync(tokenPath).mode & 0o777) !== 0o600) {
+        const mode = (fs.statSync(tokenPath).mode & 0o777).toString(8);
+        checks.push({
+          id: 'mcp-token',
+          label: 'MCP token',
+          status: 'warning',
+          message: `MCP token file mode is ${mode}, expected 600`,
+          fix: 'Run: chmod 600 ~/.rorca/mcp-token',
+        });
+      } else {
+        checks.push({
+          id: 'mcp-token',
+          label: 'MCP token',
+          status: 'ok',
+          message: 'MCP token file exists with secure mode 0600',
+        });
+      }
+    } catch {
+      checks.push({
+        id: 'mcp-token',
+        label: 'MCP token',
+        status: 'warning',
+        message: 'Unable to verify MCP token file mode',
+        fix: 'Check ~/.rorca/mcp-token permissions',
       });
     }
 
