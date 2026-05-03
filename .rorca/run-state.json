@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T21:46:58.402Z",
+  "lastUpdatedAt": "2026-05-03T21:56:34.983Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -383,6 +383,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 377734
+    },
+    {
+      "storyId": "CLI-036",
+      "title": "Version Handshake — GET /api/version + CLI compatibility check on startup",
+      "status": "passed",
+      "startedAt": "2026-05-03T21:47:19.448Z",
+      "finishedAt": "2026-05-03T21:56:34.983Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 555535
     }
   ],
   "failedStories": [],

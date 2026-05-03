@@ -3467,3 +3467,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Gotcha] Worker heartbeat stale threshold must stay 90 seconds everywhere: Use a single 90s worker-heartbeat staleness rule across supervisor restarts, health endpoints, and worker-monitoring code; do not mix 60s and 90s checks.
 > Rule: Worker heartbeat stale threshold must stay 90 seconds everywhere: Use a single 90s worker-heartbeat staleness rule across supervisor restarts, health endpoints, and worker-monitoring code; do not mix 60s and 90s checks.
+
+## 2026-05-03 [Pattern] CLI/backend version preflight belongs in shared fetch path with doctor bypass: For API-backed CLI commands, run the backend compatibility handshake once in the shared request path and explicitly bypass it for diagnostics like doctor that must still run against mismatched backends.
+> Rule: CLI/backend version preflight belongs in shared fetch path with doctor bypass: For API-backed CLI commands, run the backend compatibility handshake once in the shared request path and explicitly bypass it for diagnostics like doctor that must still run against mismatched backends.
