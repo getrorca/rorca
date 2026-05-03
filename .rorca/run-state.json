@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T04:55:54.848Z",
+  "lastUpdatedAt": "2026-05-03T05:00:06.874Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -73,6 +73,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 371066
+    },
+    {
+      "storyId": "CLI-016",
+      "title": "Add GET /api/config/pi-models backend endpoint (60s cache)",
+      "status": "passed",
+      "startedAt": "2026-05-03T04:56:10.571Z",
+      "finishedAt": "2026-05-03T05:00:06.874Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 236303
     }
   ],
   "failedStories": [],
