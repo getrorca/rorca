@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T22:01:21.832Z",
+  "lastUpdatedAt": "2026-05-03T22:13:05.634Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -403,6 +403,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 265946
+    },
+    {
+      "storyId": "CLI-038",
+      "title": "rorca doctor v2 — Docker, pi, ports, AGE, migrations, version match, worker heartbeat",
+      "status": "passed",
+      "startedAt": "2026-05-03T22:01:42.817Z",
+      "finishedAt": "2026-05-03T22:13:05.634Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 682817
     }
   ],
   "failedStories": [],

@@ -1,15 +1,21 @@
 #!/usr/bin/env node
 
 import { Command } from 'commander';
-import { mkdirSync, existsSync, writeFileSync, readFileSync, unlinkSync, statSync } from 'node:fs';
-import { tmpdir } from 'node:os';
+import { mkdirSync, existsSync, writeFileSync, readFileSync, unlinkSync, statSync, readdirSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
 import path from 'node:path';
 import process from 'node:process';
-import { spawn, spawnSync } from 'node:child_process';
+import { execSync, spawn, spawnSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
+import net from 'node:net';
 import readline from 'node:readline/promises';
 import { execa } from 'execa';
 import { ensureMcpToken, getMcpTokenPath, rotateMcpToken } from '../backend/src/lib/mcp-auth';
+import { detectDbMode, isAgeAvailable, type DbMode } from '../backend/src/lib/db-strategy';
+import { dbStatus } from '../backend/src/lib/db-sidecar';
+import { MIN_PI_VERSION, detectPi as detectPiShared } from '../backend/src/lib/pi-detector';
+import { checkDuplicatePrefixes } from '../backend/src/db/pg-index';
+import { checkVersion as checkVersionShared, MIN_BACKEND_VERSION as SHARED_MIN_BACKEND_VERSION } from '../packages/rorca-cli/src/version-check';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
@@ -83,19 +89,40 @@ type WalEvent = {
   payload: string | null;
 };
 
-type DoctorResponse = {
-  summary: {
-    errors: number;
-    warnings: number;
-    ok: number;
-    message: string;
-  };
+type DoctorStatus = 'pass' | 'warn' | 'fail';
+
+type DoctorCheckId =
+  | 'node-version'
+  | 'pi-binary'
+  | 'pi-version'
+  | 'db-mode'
+  | 'native-pg'
+  | 'docker-daemon'
+  | 'db-container'
+  | 'age-extension'
+  | 'backend-port'
+  | 'backend-version'
+  | 'schema-migrations'
+  | 'worker-heartbeat'
+  | 'mcp-bridge'
+  | 'workspace-files';
+
+type DoctorCheckResult = {
+  id: DoctorCheckId;
+  name: string;
+  status: DoctorStatus;
+  detail: string;
+  hint?: string;
+};
+
+type DoctorJsonResponse = {
   checks: Array<{
-    label: string;
-    status: 'ok' | 'warning' | 'error';
-    message: string;
-    fix?: string;
+    name: string;
+    status: DoctorStatus;
+    detail: string;
+    hint?: string;
   }>;
+  exitCode: number;
 };
 
 type VersionResponse = {
@@ -119,6 +146,8 @@ type VersionCheckResult = {
 };
 
 type HealthResponse = {
+  status?: string;
+  version?: string;
   piInstalled?: boolean;
   piVersion?: string | null;
   piBinPath?: string | null;
@@ -128,6 +157,18 @@ type HealthResponse = {
     status: 'healthy' | 'disabled';
     url: string;
     sessions: number;
+  };
+  components?: {
+    worker?: {
+      status?: 'ok' | 'stale' | 'not_running' | 'down' | 'unknown';
+      lastHeartbeat?: string;
+      activePid?: number | null;
+    };
+    migrations?: {
+      status?: 'ok' | 'degraded' | 'unknown';
+      applied?: number;
+      pending?: number;
+    };
   };
 };
 
@@ -191,8 +232,16 @@ const PI_PROVIDER_ORDER = [
   'OpenRouter',
 ] as const;
 
-const MIN_BACKEND_VERSION = '0.1.0';
+const MIN_BACKEND_VERSION = SHARED_MIN_BACKEND_VERSION;
 const MIN_BACKEND_API_VERSION = '1.0';
+const MIN_NODE_VERSION = '20.0.0';
+const NATIVE_PG_PORT = 5433;
+const BACKEND_DEPENDENT_CHECKS: DoctorCheckId[] = [
+  'backend-version',
+  'schema-migrations',
+  'worker-heartbeat',
+  'mcp-bridge',
+];
 
 function red(text: string): string {
   return `\x1b[31m${text}\x1b[0m`;
@@ -1879,102 +1928,486 @@ async function runStatus(runId?: number): Promise<void> {
   printTable(['Run', 'Workspace', 'Status', 'Spec', 'Stories', 'Pass', 'Fail', 'Started'], rows);
 }
 
-async function runDoctor(json = false): Promise<number> {
-  const localChecks: Array<{ label: string; status: 'ok' | 'warning' | 'error'; message: string; fix?: string }> = [];
-  const mcpToken = checkMcpTokenFile();
+function parseApiAddress(): { host: string; port: number; label: string } {
+  const url = new URL(API_BASE);
+  const port = url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80);
+  return { host: url.hostname, port, label: `:${port}` };
+}
 
-  localChecks.push(
-    !mcpToken.exists
-      ? { label: 'MCP token file', status: 'error', message: 'Missing', fix: 'Restart Rorca or run: rorca mcp token' }
-      : !mcpToken.modeOk
-        ? { label: 'MCP token file', status: 'warning', message: `Mode ${mcpToken.mode}, expected 600`, fix: 'Run: chmod 600 ~/.rorca/mcp-token' }
-        : { label: 'MCP token file', status: 'ok', message: 'OK' },
-  );
+function normalizeDoctorStatus(status: DoctorStatus): string {
+  if (status === 'pass') return green('✓');
+  if (status === 'warn') return yellow('⚠');
+  return red('✗');
+}
 
-  const dockerInfo = await docker(['info']);
-  localChecks.push(
-    dockerInfo.code === 0
-      ? { label: 'Docker running', status: 'ok', message: 'OK' }
-      : { label: 'Docker running', status: 'error', message: 'Docker not running', fix: 'Start Docker Desktop or OrbStack' },
-  );
+function resolveDoctorSelection(input?: string): Set<DoctorCheckId> | null {
+  if (!input) return null;
+  const normalized = input.trim().toLowerCase();
+  const map: Record<string, DoctorCheckId[]> = {
+    node: ['node-version'],
+    'node-version': ['node-version'],
+    pi: ['pi-binary', 'pi-version'],
+    'pi-binary': ['pi-binary'],
+    'pi-version': ['pi-version'],
+    db: ['db-mode'],
+    'db-mode': ['db-mode'],
+    native: ['native-pg'],
+    'native-pg': ['native-pg'],
+    docker: ['docker-daemon', 'db-container', 'age-extension'],
+    'docker-daemon': ['docker-daemon'],
+    'db-container': ['db-container'],
+    age: ['age-extension'],
+    'age-extension': ['age-extension'],
+    backend: ['backend-port', 'backend-version'],
+    'backend-port': ['backend-port'],
+    'backend-version': ['backend-version'],
+    migrations: ['schema-migrations'],
+    'schema-migrations': ['schema-migrations'],
+    worker: ['worker-heartbeat'],
+    'worker-heartbeat': ['worker-heartbeat'],
+    mcp: ['mcp-bridge'],
+    'mcp-bridge': ['mcp-bridge'],
+    workspace: ['workspace-files'],
+    'workspace-files': ['workspace-files'],
+  };
+  return map[normalized] ? new Set(map[normalized]) : null;
+}
 
-  const backendHealth = await fetchBackendHealth().catch(() => null);
-  localChecks.push(
-    backendHealth
-      ? { label: 'Backend reachable', status: 'ok', message: 'OK' }
-      : { label: 'Backend reachable', status: 'error', message: 'Backend not running', fix: 'Run: rorca start' },
-  );
+function shouldRunDoctorCheck(selected: Set<DoctorCheckId> | null, id: DoctorCheckId): boolean {
+  return selected === null || selected.has(id);
+}
 
-  const versionResult = backendHealth
-    ? await checkVersion(API_BASE)
-    : { ok: false, reason: `Cannot reach backend at ${API_BASE}` } satisfies VersionCheckResult;
+function doctorPass(id: DoctorCheckId, name: string, detail: string): DoctorCheckResult {
+  return { id, name, status: 'pass', detail };
+}
 
-  if (backendHealth) {
-    localChecks.push(
-      versionResult.ok
-        ? {
-            label: 'CLI/backend version',
-            status: 'ok',
-            message: `CLI ${pkg.version} ↔ backend ${versionResult.backend?.version ?? 'unknown'}`,
-          }
-        : {
-            label: 'CLI/backend version',
-            status: 'error',
-            message: versionResult.reason ?? 'Version mismatch',
-            fix: 'Upgrade: npm install -g rorca@latest',
-          },
-    );
+function doctorWarn(id: DoctorCheckId, name: string, detail: string, hint?: string): DoctorCheckResult {
+  return { id, name, status: 'warn', detail, hint };
+}
+
+function doctorFail(id: DoctorCheckId, name: string, detail: string, hint?: string): DoctorCheckResult {
+  return { id, name, status: 'fail', detail, hint };
+}
+
+function doctorExitCode(checks: DoctorCheckResult[]): number {
+  if (checks.some((check) => check.status === 'fail')) return 1;
+  if (checks.some((check) => check.status === 'warn')) return 2;
+  return 0;
+}
+
+function formatAgeSeconds(ageSeconds: number): string {
+  return `${Math.round(ageSeconds)}s ago`;
+}
+
+function getMigrationFiles(): string[] {
+  const migrationsDir = path.join(BACKEND_DIR, 'src', 'db', 'pg-migrations');
+  return readdirSync(migrationsDir).filter((file) => file.endsWith('.sql'));
+}
+
+function readMcpToken(): string | null {
+  try {
+    return readFileSync(getMcpTokenPath(), 'utf8').trim() || null;
+  } catch {
+    return null;
   }
+}
 
-  if (backendHealth) {
-    if (backendHealth.mcp?.status === 'healthy' && backendHealth.mcp.enabled) {
-      localChecks.push({
-        label: 'Rorca MCP bridge',
-        status: 'ok',
-        message: `OK (${backendHealth.mcp.url})`,
-      });
-    } else {
-      localChecks.push({
-        label: 'Rorca MCP bridge',
-        status: backendHealth.mcp?.status === 'disabled' ? 'error' : 'warning',
-        message: 'Rorca MCP bridge not connected — pi will run without Rorca tools',
-        fix: backendHealth.mcp?.status === 'disabled'
-          ? 'Start backend with RORCA_SERVE_MCP=1 (or unset RORCA_SERVE_MCP)'
-          : 'Start `npm run dev` or `rorca start` so /mcp is reachable',
-      });
+async function isTcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    const finish = (result: boolean) => {
+      socket.destroy();
+      resolve(result);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+async function fetchRawJson<T>(
+  pathname: string,
+  timeoutMs = 3_000,
+  init?: RequestInit,
+): Promise<{ ok: boolean; status: number; data: T | null }> {
+  try {
+    const response = await fetch(`${API_BASE}${pathname}`, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: {
+        Accept: 'application/json',
+        ...(init?.headers ?? {}),
+      },
+    });
+    const text = await response.text();
+    const data = text ? JSON.parse(text) as T : null;
+    return { ok: response.ok, status: response.status, data };
+  } catch {
+    return { ok: false, status: 0, data: null };
+  }
+}
+
+async function fetchStatus(pathname: string, timeoutMs = 3_000, init?: RequestInit): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE}${pathname}`, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+function checkNodeVersion(): DoctorCheckResult {
+  if (semverGte(process.version, MIN_NODE_VERSION)) {
+    return doctorPass('node-version', 'Node version', process.version);
+  }
+  return doctorFail(
+    'node-version',
+    'Node version',
+    `${process.version} < required v${MIN_NODE_VERSION}`,
+    'Install Node 20 or newer',
+  );
+}
+
+function checkPiBinary(): { check: DoctorCheckResult; piStatus: PiStatus } {
+  const piStatus = detectPiShared();
+  if (piStatus.piInstalled) {
+    const version = piStatus.piVersion ? ` (v${piStatus.piVersion})` : '';
+    return {
+      piStatus,
+      check: doctorPass('pi-binary', 'Pi binary', `${piStatus.piBinPath ?? 'pi'}${version}`),
+    };
+  }
+  return {
+    piStatus,
+    check: doctorWarn('pi-binary', 'Pi binary', 'not installed', 'Run: rorca auth login'),
+  };
+}
+
+function checkPiVersion(piStatus: PiStatus): DoctorCheckResult {
+  if (!piStatus.piInstalled) {
+    return doctorWarn('pi-version', 'Pi version', 'skipped (pi missing)');
+  }
+  if (!piStatus.piVersion) {
+    return doctorWarn('pi-version', 'Pi version', 'unknown version', `Need >= ${MIN_PI_VERSION}`);
+  }
+  if (semverGte(piStatus.piVersion, MIN_PI_VERSION)) {
+    return doctorPass('pi-version', 'Pi version', `v${piStatus.piVersion}`);
+  }
+  return doctorWarn(
+    'pi-version',
+    'Pi version',
+    `v${piStatus.piVersion} < required ${MIN_PI_VERSION}`,
+    'Upgrade pi to a newer version',
+  );
+}
+
+function checkDbModeLocal(): { check: DoctorCheckResult; mode: DbMode } {
+  const mode = detectDbMode();
+  const detail = mode === 'native' ? 'native (default)' : mode === 'docker' ? 'docker (sidecar)' : 'byop (DATABASE_URL)';
+  return { mode, check: doctorPass('db-mode', 'DB mode', detail) };
+}
+
+async function checkNativePg(): Promise<DoctorCheckResult> {
+  const dataDir = path.join(homedir(), '.rorca', 'postgres');
+  if (!existsSync(dataDir)) {
+    return doctorFail('native-pg', 'Native PG', '~/.rorca/postgres missing', 'Run: rorca start');
+  }
+  const ready = await isTcpReachable('127.0.0.1', NATIVE_PG_PORT, 1_500);
+  if (ready) {
+    return doctorPass('native-pg', 'Native PG', `:${NATIVE_PG_PORT} ready`);
+  }
+  return doctorFail('native-pg', 'Native PG', `:${NATIVE_PG_PORT} unreachable`, 'Run: rorca start');
+}
+
+async function checkDockerDaemon(): Promise<DoctorCheckResult> {
+  try {
+    execSync('docker info', { stdio: 'ignore', timeout: 3_000 });
+    return doctorPass('docker-daemon', 'Docker daemon', 'running');
+  } catch {
+    return doctorFail('docker-daemon', 'Docker daemon', 'unavailable', 'Start Docker Desktop or OrbStack');
+  }
+}
+
+async function checkDbContainer(): Promise<DoctorCheckResult> {
+  const status = await dbStatus();
+  if (status.running) {
+    return doctorPass('db-container', 'DB container', 'running');
+  }
+  if (status.containerExists) {
+    return doctorFail('db-container', 'DB container', 'stopped', 'Run: rorca db start');
+  }
+  return doctorFail('db-container', 'DB container', 'not created', 'Run: rorca db start');
+}
+
+async function checkAgeExtensionLocal(): Promise<DoctorCheckResult> {
+  try {
+    const available = await isAgeAvailable();
+    if (available) {
+      return doctorPass('age-extension', 'AGE extension', 'enabled');
+    }
+    return doctorWarn('age-extension', 'AGE extension', 'not installed (graph features disabled)');
+  } catch {
+    return doctorWarn('age-extension', 'AGE extension', 'unable to verify');
+  }
+}
+
+async function checkBackendPort(): Promise<{ check: DoctorCheckResult; reachable: boolean }> {
+  const address = parseApiAddress();
+  const reachable = await isTcpReachable(address.host, address.port, 1_500);
+  if (reachable) {
+    return { reachable, check: doctorPass('backend-port', 'Backend port', `${address.label} reachable`) };
+  }
+  return {
+    reachable,
+    check: doctorFail('backend-port', 'Backend port', `${address.label} unreachable`, 'Run: rorca start'),
+  };
+}
+
+async function checkBackendVersionLocal(): Promise<{ check: DoctorCheckResult; result: VersionCheckResult }> {
+  const result = await checkVersionShared(API_BASE);
+  if (result.ok) {
+    return {
+      result,
+      check: doctorPass('backend-version', 'Backend version', result.backend?.version ?? 'unknown'),
+    };
+  }
+  return {
+    result,
+    check: doctorFail(
+      'backend-version',
+      'Backend version',
+      result.reason ?? `need >= ${MIN_BACKEND_VERSION}`,
+      'Upgrade: npm install -g rorca@latest',
+    ),
+  };
+}
+
+async function checkSchemaMigrations(backend: VersionResponse | undefined): Promise<DoctorCheckResult> {
+  try {
+    const files = getMigrationFiles();
+    checkDuplicatePrefixes(files);
+    const expected = files.length;
+    const response = await fetchRawJson<HealthResponse>('/api/health');
+    const applied = response.data?.components?.migrations?.applied;
+    if (!response.ok || typeof applied !== 'number') {
+      return doctorFail('schema-migrations', 'Schema migrations', 'unable to verify');
+    }
+    if (applied >= expected) {
+      const suffix = backend?.schemaVersion ? ` (latest ${backend.schemaVersion})` : '';
+      return doctorPass('schema-migrations', 'Schema migrations', `${applied}/${expected} applied${suffix}`);
+    }
+    const latest = backend?.schemaVersion ? `, latest ${backend.schemaVersion}` : '';
+    return doctorFail('schema-migrations', 'Schema migrations', `${applied}/${expected} applied${latest}`);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'unable to verify';
+    return doctorFail('schema-migrations', 'Schema migrations', message);
+  }
+}
+
+async function checkWorkerHeartbeat(): Promise<DoctorCheckResult> {
+  const [workerResponse, healthResponse] = await Promise.all([
+    fetchRawJson<{ workerActive: boolean; workerPid: number | null }>('/api/pipeline/worker/health'),
+    fetchRawJson<HealthResponse>('/api/health'),
+  ]);
+  const worker = workerResponse.data;
+  if (!workerResponse.ok || !worker) {
+    return doctorFail('worker-heartbeat', 'Worker heartbeat', 'unable to verify');
+  }
+  const lastHeartbeat = healthResponse.data?.components?.worker?.lastHeartbeat;
+  if (worker.workerActive) {
+    if (lastHeartbeat) {
+      const ageSeconds = (Date.now() - new Date(lastHeartbeat).getTime()) / 1000;
+      return doctorPass('worker-heartbeat', 'Worker heartbeat', `healthy ${formatAgeSeconds(ageSeconds)}`);
+    }
+    return doctorPass('worker-heartbeat', 'Worker heartbeat', 'healthy');
+  }
+  if (worker.workerPid === null) {
+    return doctorFail('worker-heartbeat', 'Worker heartbeat', 'no heartbeat');
+  }
+  if (lastHeartbeat) {
+    const ageSeconds = (Date.now() - new Date(lastHeartbeat).getTime()) / 1000;
+    return doctorWarn('worker-heartbeat', 'Worker heartbeat', `stale ${formatAgeSeconds(ageSeconds)}`);
+  }
+  return doctorWarn('worker-heartbeat', 'Worker heartbeat', 'stale');
+}
+
+async function checkMcpBridge(): Promise<DoctorCheckResult> {
+  const token = readMcpToken();
+  const toolsResponse = await fetchRawJson<McpToolsResponse>('/api/mcp/tools');
+  if (!token) {
+    return doctorWarn('mcp-bridge', 'MCP bridge', 'token missing');
+  }
+  const reachable = await fetchStatus('/mcp', 3_000, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!reachable) {
+    return doctorWarn('mcp-bridge', 'MCP bridge', 'unreachable');
+  }
+  const toolCount = Array.isArray(toolsResponse.data?.tools) ? toolsResponse.data.tools.length : 0;
+  return doctorPass('mcp-bridge', 'MCP bridge', `${toolCount} tools`);
+}
+
+function checkWorkspaceFiles(): DoctorCheckResult {
+  const required = [
+    path.join(process.cwd(), '.rorca', 'config.json'),
+    path.join(process.cwd(), 'MEMORY.md'),
+    path.join(process.cwd(), 'AGENTS.md'),
+  ];
+  const missing = required
+    .filter((target) => !existsSync(target))
+    .map((target) => path.relative(process.cwd(), target) || path.basename(target));
+  if (missing.length === 0) {
+    return doctorPass('workspace-files', 'Workspace files', 'all present');
+  }
+  return doctorWarn('workspace-files', 'Workspace files', `missing ${missing.join(', ')}`);
+}
+
+function skippedBackendCheck(id: DoctorCheckId): DoctorCheckResult {
+  const names: Record<DoctorCheckId, string> = {
+    'node-version': 'Node version',
+    'pi-binary': 'Pi binary',
+    'pi-version': 'Pi version',
+    'db-mode': 'DB mode',
+    'native-pg': 'Native PG',
+    'docker-daemon': 'Docker daemon',
+    'db-container': 'DB container',
+    'age-extension': 'AGE extension',
+    'backend-port': 'Backend port',
+    'backend-version': 'Backend version',
+    'schema-migrations': 'Schema migrations',
+    'worker-heartbeat': 'Worker heartbeat',
+    'mcp-bridge': 'MCP bridge',
+    'workspace-files': 'Workspace files',
+  };
+  return doctorFail(id, names[id], 'skipped (backend down)');
+}
+
+function printDoctorChecks(checks: DoctorCheckResult[], verbose = false): void {
+  const width = Math.max(...checks.map((check) => check.name.length), 16);
+  for (const check of checks) {
+    console.log(`  ${normalizeDoctorStatus(check.status)} ${check.name.padEnd(width)} ${check.detail}`);
+    if (verbose) {
+      console.log(`      → check=${check.id} status=${check.status}`);
+    }
+    if (check.hint) {
+      console.log(`      → ${check.hint}`);
     }
   }
+}
 
-  if (json) {
-    const remote = backendHealth
-      ? await fetchJson<DoctorResponse>('/api/doctor', undefined, 30_000, { skipVersionCheck: true })
-      : null;
-    console.log(JSON.stringify({ localChecks, remote, version: versionResult }, null, 2));
-    return (remote?.summary.errors ?? 0) > 0 || localChecks.some((check) => check.status === 'error') ? 1 : 0;
-  }
-
-  for (const check of localChecks) {
-    const prefix = check.status === 'ok' ? green('OK') : check.status === 'warning' ? yellow('WARN') : red('ERR');
-    console.log(`${prefix} ${check.label}: ${check.message}`);
-    if (check.fix) {
-      console.log(dim(`    fix: ${check.fix}`));
-    }
-  }
-
-  if (!backendHealth) {
+async function runDoctor(options: { json?: boolean; check?: string; verbose?: boolean } = {}): Promise<number> {
+  const selected = resolveDoctorSelection(options.check);
+  if (options.check && !selected) {
+    console.error(`Unknown doctor check: ${options.check}`);
     return 1;
   }
 
-  const remote = await fetchJson<DoctorResponse>('/api/doctor', undefined, 30_000, { skipVersionCheck: true });
-  for (const check of remote.checks) {
-    const prefix = check.status === 'ok' ? green('OK') : check.status === 'warning' ? yellow('WARN') : red('ERR');
-    console.log(`${prefix} ${check.label}: ${check.message}`);
-    if (check.fix) {
-      console.log(dim(`    fix: ${check.fix}`));
+  const checks: DoctorCheckResult[] = [];
+  const wants = (id: DoctorCheckId) => shouldRunDoctorCheck(selected, id);
+
+  let piStatus: PiStatus | null = null;
+  let dbMode: DbMode | null = null;
+  let backendUp = false;
+  let backendVersion: VersionResponse | undefined;
+
+  if (wants('node-version')) {
+    checks.push(checkNodeVersion());
+  }
+
+  if (wants('pi-binary') || wants('pi-version')) {
+    const piBinary = checkPiBinary();
+    piStatus = piBinary.piStatus;
+    if (wants('pi-binary')) checks.push(piBinary.check);
+    if (wants('pi-version')) checks.push(checkPiVersion(piStatus));
+  }
+
+  if (wants('db-mode')) {
+    const dbModeCheck = checkDbModeLocal();
+    dbMode = dbModeCheck.mode;
+    checks.push(dbModeCheck.check);
+  } else {
+    dbMode = detectDbMode();
+  }
+
+  if (wants('native-pg') && dbMode === 'native') {
+    checks.push(await checkNativePg());
+  }
+
+  if (dbMode === 'docker') {
+    let dockerFailed = false;
+    if (wants('docker-daemon')) {
+      const dockerCheck = await checkDockerDaemon();
+      checks.push(dockerCheck);
+      dockerFailed = dockerCheck.status === 'fail';
+    }
+    if (wants('db-container')) {
+      checks.push(selected === null && dockerFailed
+        ? doctorFail('db-container', 'DB container', 'skipped (docker unavailable)')
+        : await checkDbContainer());
+    }
+    if (wants('age-extension')) {
+      checks.push(selected === null && dockerFailed
+        ? doctorWarn('age-extension', 'AGE extension', 'skipped (docker unavailable)')
+        : await checkAgeExtensionLocal());
     }
   }
 
-  return remote.summary.errors > 0 || localChecks.some((check) => check.status === 'error') ? 1 : 0;
+  if (wants('backend-port')) {
+    const backendPort = await checkBackendPort();
+    backendUp = backendPort.reachable;
+    checks.push(backendPort.check);
+  } else if (selected === null || BACKEND_DEPENDENT_CHECKS.some((id) => selected.has(id))) {
+    backendUp = (await checkBackendPort()).reachable;
+  }
+
+  if (wants('backend-version')) {
+    if (selected === null && !backendUp) {
+      checks.push(skippedBackendCheck('backend-version'));
+    } else {
+      const versionCheck = await checkBackendVersionLocal();
+      backendVersion = versionCheck.result.backend;
+      checks.push(versionCheck.check);
+    }
+  }
+
+  if (wants('schema-migrations')) {
+    checks.push(selected === null && !backendUp
+      ? skippedBackendCheck('schema-migrations')
+      : await checkSchemaMigrations(backendVersion));
+  }
+
+  if (wants('worker-heartbeat')) {
+    checks.push(selected === null && !backendUp
+      ? skippedBackendCheck('worker-heartbeat')
+      : await checkWorkerHeartbeat());
+  }
+
+  if (wants('mcp-bridge')) {
+    checks.push(selected === null && !backendUp
+      ? skippedBackendCheck('mcp-bridge')
+      : await checkMcpBridge());
+  }
+
+  if (wants('workspace-files')) {
+    checks.push(checkWorkspaceFiles());
+  }
+
+  const exitCode = doctorExitCode(checks);
+  if (options.json) {
+    const payload: DoctorJsonResponse = {
+      checks: checks.map(({ name, status, detail, hint }) => ({ name, status, detail, ...(hint ? { hint } : {}) })),
+      exitCode,
+    };
+    console.log(JSON.stringify(payload, null, 2));
+    return exitCode;
+  }
+
+  printDoctorChecks(checks, Boolean(options.verbose));
+  return exitCode;
 }
 
 function titleCase(input: string): string {
@@ -2256,8 +2689,10 @@ program
 program
   .command('doctor')
   .option('--json', 'Emit JSON output')
-  .action(async (options: { json?: boolean }) => {
-    process.exitCode = await runDoctor(Boolean(options.json));
+  .option('--check <name>', 'Run a single named check')
+  .option('--verbose', 'Show verbose detail output')
+  .action(async (options: { json?: boolean; check?: string; verbose?: boolean }) => {
+    process.exitCode = await runDoctor(options);
   });
 
 const auth = program.command('auth').description('Manage Pi authentication');
