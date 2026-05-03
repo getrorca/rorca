@@ -3,7 +3,7 @@ import { CronExpressionParser } from 'cron-parser';
 import { execSync } from 'child_process';
 import { query, queryOne, dbHealthCheck } from '../db/index';
 import { listBackups } from '../lib/backup';
-import { agentType } from '../lib/config';
+import { activeAgent, activeModel, agentType } from '../lib/config';
 import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
 import { detectPi } from '../lib/pi-detector';
@@ -112,6 +112,8 @@ const NO_CACHE_HEADERS = {
  *                 uptime: { type: integer, description: "Uptime in seconds" }
  *                 db_connected: { type: boolean }
  *                 active_runs: { type: integer }
+ *                 agentType: { type: string }
+ *                 agentModel: { type: string, nullable: true }
  *                 mcpTransport: { type: string }
  *                 telemetryEnabled: { type: boolean }
  *                 authRequired: { type: boolean, description: "Whether AUTH_REQUIRED=true is set" }
@@ -242,6 +244,8 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       database: 'postgresql',
       db_connected: dbConnected,
       active_runs: activeRuns,
+      agentType: activeAgent,
+      agentModel: activeModel,
       db: rawDbHealth.poolStats,
       ...(rawDbHealth.pgVersion ? { pgVersion: rawDbHealth.pgVersion } : {}),
       ...(rawDbHealth.extensions ? { extensions: rawDbHealth.extensions } : {}),
