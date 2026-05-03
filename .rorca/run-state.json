@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T06:50:20.947Z",
+  "lastUpdatedAt": "2026-05-03T06:50:43.455Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -253,6 +253,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 521017
+    },
+    {
+      "storyId": "CLI-031",
+      "title": "[DEPRECATED — replaced by CLI-033] rorca db: Docker sidecar lifecycle management for Postgres+AGE",
+      "status": "passed",
+      "startedAt": "2026-05-03T06:50:36.477Z",
+      "finishedAt": "2026-05-03T06:50:43.455Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 6978
     }
   ],
   "failedStories": [],
