@@ -89,7 +89,7 @@ import searchRouter from './routes/search';
 import recallRouter from './routes/recall';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
-import { createMcpRequestHandler, getMcpToolDefinitions } from './lib/mcp-http';
+import { buildMcpToolTierResolver, createMcpRequestHandler, getMcpToolDefinitions } from './lib/mcp-http';
 import telemetryRouter from './routes/telemetry';
 import authE2ERouter from './routes/auth-e2e';
 import { logger } from './lib/logger';
@@ -300,10 +300,11 @@ const mcpCors = cors({
 });
 if (MCP_HTTP_ENABLED) {
   const mcpHandlers = createMcpRequestHandler(swaggerSpec as any);
+  const mcpToolTierResolver = buildMcpToolTierResolver(swaggerSpec as any);
   logger.info({ origins: MCP_ALLOWED_ORIGINS }, '[MCP Aegis] HTTP transport locked to localhost browser origins by default');
-  app.post('/mcp', mcpCors, requireLocalhost, requireMcpAuth, mcpHandlers.handlePost);
-  app.get('/mcp', mcpCors, requireLocalhost, requireMcpAuth, mcpHandlers.handleGet);
-  app.delete('/mcp', mcpCors, requireLocalhost, requireMcpAuth, mcpHandlers.handleDelete);
+  app.post('/mcp', mcpCors, requireLocalhost, requireMcpAuth('public', mcpToolTierResolver), mcpHandlers.handlePost);
+  app.get('/mcp', mcpCors, requireLocalhost, requireMcpAuth(), mcpHandlers.handleGet);
+  app.delete('/mcp', mcpCors, requireLocalhost, requireMcpAuth(), mcpHandlers.handleDelete);
 }
 
 // MC-004: MCP Tools enumeration endpoint (public — used by VS Code extension, no auth required)
@@ -497,12 +498,12 @@ if (process.env.NODE_ENV !== 'test') {
   logger.info(`[Rorca Tier] Open-source CLI surface: ${tierSummary.publicApi} routes (public + public-api flagged)`);
 
   if (MCP_HTTP_ENABLED) {
-    const { created } = ensureMcpToken();
-    if (created) {
-      logger.info('[MCP Aegis] Generated new MCP token at ~/.rorca/mcp-token (mode 0600)');
-      logger.info('[MCP Aegis] Run `rorca mcp setup-claude` to configure your MCP client');
+    const { publicCreated, adminCreated } = ensureMcpToken();
+    if (publicCreated || adminCreated) {
+      logger.info('[MCP Aegis] Ensured MCP public token at ~/.rorca/mcp-token and admin token at ~/.rorca/mcp-admin-token (mode 0600)');
+      logger.info('[MCP Aegis] Run `rorca mcp setup-claude` for public access or `rorca mcp setup-claude --admin` for admin access');
     } else {
-      logger.info('[MCP Aegis] Loaded existing MCP token');
+      logger.info('[MCP Aegis] Loaded existing MCP public/admin tokens');
     }
   }
 

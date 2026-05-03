@@ -18,6 +18,7 @@ import type { Request, Response } from 'express';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { McpTier } from './mcp-auth';
 import { logger } from './logger';
 import { getRorcaTier, tierAllowedFromMcp } from './tier-auth';
 
@@ -129,6 +130,41 @@ interface McpToolDefinition {
   capturedMethod: string;
   capturedPath: string;
   capturedOperation: OpenAPIOperation;
+}
+
+interface McpHttpServerOptions {
+  resolveSessionTier?: (sessionId: string | undefined) => McpTier | undefined;
+}
+
+const PUBLIC_TOOL_RULES: Array<{ method: string; pattern: RegExp }> = [
+  { method: 'GET', pattern: /^\/api\/specs(?:\/[^/]+(?:\/versions(?:\/[^/]+\/diff)?)?)?$/ },
+  { method: 'GET', pattern: /^\/api\/specs\/archive$/ },
+  { method: 'GET', pattern: /^\/api\/specs\/kanban$/ },
+  { method: 'GET', pattern: /^\/api\/specs\/[^/]+\/graph$/ },
+  { method: 'GET', pattern: /^\/api\/pipeline\/runs(?:\/[^/]+)?$/ },
+  { method: 'GET', pattern: /^\/api\/pipeline\/worker\/health$/ },
+  { method: 'GET', pattern: /^\/api\/analytics$/ },
+  { method: 'GET', pattern: /^\/api\/activity$/ },
+  { method: 'GET', pattern: /^\/api\/wal$/ },
+  { method: 'GET', pattern: /^\/api\/skills(?:\/top|\/suggestions|\/[^/]+\/content)?$/ },
+  { method: 'GET', pattern: /^\/api\/templates$/ },
+  { method: 'GET', pattern: /^\/api\/graph\/stats$/ },
+  { method: 'POST', pattern: /^\/api\/direction\/synthesize$/ },
+];
+
+function isPublicTool(definition: Pick<McpToolDefinition, 'capturedMethod' | 'capturedPath'>): boolean {
+  return PUBLIC_TOOL_RULES.some((rule) =>
+    rule.method === definition.capturedMethod && rule.pattern.test(definition.capturedPath));
+}
+
+export function getMcpToolTier(definition: Pick<McpToolDefinition, 'capturedMethod' | 'capturedPath'>): McpTier {
+  return isPublicTool(definition) ? 'public' : 'admin';
+}
+
+export function buildMcpToolTierResolver(spec: OpenAPISpec): (toolName: string) => McpTier {
+  const definitions = getMcpToolDefinitions(spec);
+  const toolTierMap = new Map(definitions.map((definition) => [definition.toolName, getMcpToolTier(definition)]));
+  return (toolName: string) => toolTierMap.get(toolName) ?? 'admin';
 }
 
 // ─── Tool name generation ───────────────────────────────────────────────────
@@ -399,7 +435,7 @@ export function getMcpToolDefinitions(spec: OpenAPISpec): McpToolDefinition[] {
   return definitions;
 }
 
-export function createMcpHttpServer(spec: OpenAPISpec): McpServer {
+export function createMcpHttpServer(spec: OpenAPISpec, options: McpHttpServerOptions = {}): McpServer {
   const server = new McpServer({
     name: 'rorca-http',
     version: '2.0.0',
@@ -410,7 +446,16 @@ export function createMcpHttpServer(spec: OpenAPISpec): McpServer {
   for (const definition of definitions) {
     const { toolName, description, zodShape, capturedMethod, capturedPath, capturedOperation } = definition;
     const hasParams = Object.keys(zodShape).length > 0;
-    const handler = async (params: Record<string, unknown>) => {
+    const handler = async (params: Record<string, unknown>, extra?: { requestId?: string | number; sessionId?: string }) => {
+      const requiredTier = getMcpToolTier(definition);
+      const tokenTier = options.resolveSessionTier?.(extra?.sessionId);
+      if (requiredTier === 'admin' && tokenTier !== 'admin') {
+        return {
+          content: [{ type: 'text' as const, text: 'Error: This tool requires admin tier' }],
+          isError: true,
+        };
+      }
+
       try {
         const { status, body } = await executeApiCall(capturedMethod, capturedPath, params, capturedOperation);
 
@@ -429,6 +474,20 @@ export function createMcpHttpServer(spec: OpenAPISpec): McpServer {
         const safeResult = resultText.length > MAX_INLINE_CHARS
           ? spillLargeResult(toolName, body, resultText)
           : resultText;
+        logger.info({
+          timestamp: new Date().toISOString(),
+          toolName,
+          tokenTier: tokenTier ?? 'unknown',
+          success: true,
+          ...(tokenTier === 'admin'
+            ? {
+                sessionId: extra?.sessionId,
+                requestId: extra?.requestId,
+                method: capturedMethod,
+                path: capturedPath,
+              }
+            : {}),
+        }, '[MCP Audit] Tool call succeeded');
         return {
           content: [{ type: 'text' as const, text: safeResult }],
         };
@@ -458,6 +517,7 @@ export function createMcpHttpServer(spec: OpenAPISpec): McpServer {
 // ─── Transport session management ───────────────────────────────────────────
 
 const transports = new Map<string, StreamableHTTPServerTransport>();
+const transportTiers = new Map<string, McpTier>();
 
 export function getMcpTransportCount(): number {
   return transports.size;
@@ -475,12 +535,23 @@ export function createMcpRequestHandler(spec: OpenAPISpec) {
     if (sessionId && transports.has(sessionId)) {
       transport = transports.get(sessionId)!;
     } else if (!sessionId && isInitializeRequest(req.body)) {
-      const mcpServer = createMcpHttpServer(spec);
+      const requestTier = (req as Request & { mcpTier?: McpTier }).mcpTier;
+      const mcpServer = createMcpHttpServer(spec, {
+        resolveSessionTier: (sid) => {
+          if (sid) {
+            return transportTiers.get(sid);
+          }
+          return requestTier;
+        },
+      });
 
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sid: string) => {
           transports.set(sid, transport);
+          if (requestTier) {
+            transportTiers.set(sid, requestTier);
+          }
         },
         enableJsonResponse: true,
       });
@@ -488,6 +559,7 @@ export function createMcpRequestHandler(spec: OpenAPISpec) {
       transport.onclose = () => {
         if (transport.sessionId) {
           transports.delete(transport.sessionId);
+          transportTiers.delete(transport.sessionId);
         }
       };
 
@@ -518,6 +590,7 @@ export function createMcpRequestHandler(spec: OpenAPISpec) {
     const transport = transports.get(sessionId)!;
     await transport.handleRequest(req, res);
     transports.delete(sessionId);
+    transportTiers.delete(sessionId);
   }
 
   return { handlePost, handleGet, handleDelete };
