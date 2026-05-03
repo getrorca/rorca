@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T06:50:43.455Z",
+  "lastUpdatedAt": "2026-05-03T06:57:08.524Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -263,6 +263,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 6978
+    },
+    {
+      "storyId": "CLI-024",
+      "title": "rorca doctor: startup health check with actionable fix suggestions",
+      "status": "passed",
+      "startedAt": "2026-05-03T06:50:58.615Z",
+      "finishedAt": "2026-05-03T06:57:08.524Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 369909
     }
   ],
   "failedStories": [],
