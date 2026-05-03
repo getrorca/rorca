@@ -3606,6 +3606,14 @@ async function executeStory(
           run_id: config.runId, story_id: story.id,
           attempt: rateLimitAttempts, retryAfterMs: backoffMs,
         }, story.id);
+        await emitWalEvent(config.port, 'story_retry', workspaceId, {
+          run_id: config.runId,
+          story_id: story.id,
+          story_title: story.title,
+          attempt: rateLimitAttempts + 1,
+          max_attempts: MAX_RATE_LIMIT_RETRIES + 1,
+          reason: 'rate_limit',
+        }, story.id);
       }
 
       await new Promise(resolve => setTimeout(resolve, backoffMs));
@@ -3973,6 +3981,16 @@ async function executeStory(
     logger.info(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES}): ${classified.category}`);
     logger.info(`   Log: ${storyLogFile}`);
     logger.info(`   Error: ${classified.message}`);
+    if (workspaceId) {
+      await emitWalEvent(config.port, 'story_retry', workspaceId, {
+        run_id: config.runId,
+        story_id: story.id,
+        story_title: story.title,
+        attempt: currentRetries + 1,
+        max_attempts: MAX_RETRIES,
+        reason: classified.category,
+      }, story.id);
+    }
     return 'failed';
   }
 }

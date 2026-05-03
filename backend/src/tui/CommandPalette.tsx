@@ -12,6 +12,10 @@ export interface ForgeCommand {
 type CommandPaletteProps = {
   commands: ForgeCommand[];
   onUnknownCommand: (input: string) => void;
+  disabled?: boolean;
+  disabledMessage?: string;
+  onCtrlC?: () => boolean | void;
+  onEscape?: () => void;
 };
 
 export function formatCommandSignature(command: Pick<ForgeCommand, 'label' | 'args'>): string {
@@ -70,7 +74,14 @@ export function getCompletionValue(command: ForgeCommand): string {
   return command.args && command.args.length > 0 ? `${command.label} ` : command.label;
 }
 
-export function CommandPalette({ commands, onUnknownCommand }: CommandPaletteProps): JSX.Element {
+export function CommandPalette({
+  commands,
+  onUnknownCommand,
+  disabled = false,
+  disabledMessage,
+  onCtrlC,
+  onEscape,
+}: CommandPaletteProps): JSX.Element {
   const [input, setInput] = useState('');
   const [activeIndex, setActiveIndex] = useState(0);
 
@@ -87,10 +98,17 @@ export function CommandPalette({ commands, onUnknownCommand }: CommandPalettePro
 
   useInput((value: string, key: Key) => {
     if (key.ctrl && value === 'c') {
-      process.exit(0);
+      const handled = onCtrlC?.();
+      if (!handled) {
+        process.exit(0);
+      }
+      return;
     }
 
     if (key.upArrow) {
+      if (disabled) {
+        return;
+      }
       if (suggestions.length > 0) {
         setActiveIndex((current) => (current - 1 + suggestions.length) % suggestions.length);
       }
@@ -98,6 +116,9 @@ export function CommandPalette({ commands, onUnknownCommand }: CommandPalettePro
     }
 
     if (key.downArrow) {
+      if (disabled) {
+        return;
+      }
       if (suggestions.length > 0) {
         setActiveIndex((current) => (current + 1) % suggestions.length);
       }
@@ -105,6 +126,9 @@ export function CommandPalette({ commands, onUnknownCommand }: CommandPalettePro
     }
 
     if (key.tab) {
+      if (disabled) {
+        return;
+      }
       const selected = suggestions[activeIndex];
       if (selected) {
         setInput(getCompletionValue(selected));
@@ -115,6 +139,11 @@ export function CommandPalette({ commands, onUnknownCommand }: CommandPalettePro
     if (key.escape) {
       setInput('');
       setActiveIndex(0);
+      onEscape?.();
+      return;
+    }
+
+    if (disabled) {
       return;
     }
 
@@ -150,7 +179,9 @@ export function CommandPalette({ commands, onUnknownCommand }: CommandPalettePro
 
   return (
     <Box flexDirection="column">
-      {suggestions.length > 0 ? (
+      {disabled ? (
+        <Text color="yellow">{disabledMessage ?? 'command palette disabled'}</Text>
+      ) : suggestions.length > 0 ? (
         suggestions.map((command, index) => {
           const signature = formatCommandSignature(command);
           const isActive = index === activeIndex;
