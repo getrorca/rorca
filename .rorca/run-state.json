@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T21:40:19.159Z",
+  "lastUpdatedAt": "2026-05-03T21:46:58.402Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -373,6 +373,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 325078
+    },
+    {
+      "storyId": "CLI-035",
+      "title": "Supervisor Daemon — rorca start spawns API + Worker children with graceful shutdown",
+      "status": "passed",
+      "startedAt": "2026-05-03T21:40:40.668Z",
+      "finishedAt": "2026-05-03T21:46:58.402Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 377734
     }
   ],
   "failedStories": [],
