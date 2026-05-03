@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T05:51:47.323Z",
+  "lastUpdatedAt": "2026-05-03T05:58:56.044Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -163,6 +163,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 494199
+    },
+    {
+      "storyId": "CLI-015",
+      "title": "'models' command: pi model browser with provider grouping and agent switching",
+      "status": "passed",
+      "startedAt": "2026-05-03T05:52:02.839Z",
+      "finishedAt": "2026-05-03T05:58:56.044Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 413205
     }
   ],
   "failedStories": [],
