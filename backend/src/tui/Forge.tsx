@@ -30,6 +30,14 @@ import {
   type KanbanResponse,
   type KanbanSpec,
 } from './boardUtils';
+import {
+  formatRecallHeader,
+  getRecallCategoryColor,
+  getRecallCategoryLabel,
+  parseMemoryContent,
+  RECALL_CATEGORIES,
+  type RecallColor,
+} from './recallFormatting';
 
 const MAX_OUTPUT_LINES = 500;
 const CONTEXT_WIDTH = 35;
@@ -131,6 +139,69 @@ interface BoardLine {
   inverse?: boolean;
 }
 
+interface MemoryItemResponse {
+  id: number;
+  workspaceId: string;
+  category: string;
+  content: string;
+  sourceStoryId: string | null;
+  sourceRunId: number | null;
+  confidence: string;
+  relatedFiles: string[];
+  pinned: boolean;
+  sourceType: string;
+  createdAt: string;
+}
+
+interface MemoryItemsResponse {
+  items: MemoryItemResponse[];
+  total: number;
+  page: number;
+  pageSize: number;
+}
+
+interface MemoryCreateResponse {
+  entry: {
+    date: string;
+    category: string;
+    title: string;
+    rule: string;
+    context: string;
+    source: string;
+  };
+  total: number;
+}
+
+interface RecallEntry {
+  id: string;
+  date: string;
+  category: string;
+  title: string;
+  body: string;
+  source: string | null;
+  color: RecallColor;
+}
+
+type RecallFormField = 'title' | 'body' | 'category';
+
+interface RecallFormState {
+  field: RecallFormField;
+  title: string;
+  body: string;
+  categoryIndex: number;
+  saving: boolean;
+  error: string | null;
+}
+
+interface RecallState {
+  workspace: WorkspaceMatch;
+  query: string;
+  loading: boolean;
+  error: string | null;
+  entries: RecallEntry[];
+  form: RecallFormState | null;
+}
+
 const WAL_STREAM_URL = 'http://localhost:3030/api/pipeline/stream';
 
 function safeBranchName(): string {
@@ -214,6 +285,44 @@ function truncateText(input: string, width: number): string {
   }
 
   return `${input.slice(0, Math.max(0, width - 1))}…`;
+}
+
+function formatRecallDate(date: string): string {
+  const parsed = Date.parse(date);
+  if (Number.isNaN(parsed)) {
+    return date.slice(0, 10);
+  }
+  return new Date(parsed).toISOString().slice(0, 10);
+}
+
+function memoryItemToRecallEntry(item: MemoryItemResponse): RecallEntry {
+  const parsed = parseMemoryContent(item.content);
+  const source = item.sourceStoryId ?? (item.sourceRunId != null ? `run-${item.sourceRunId}` : null);
+
+  return {
+    id: `memory-${item.id}`,
+    date: formatRecallDate(item.createdAt),
+    category: item.category,
+    title: parsed.title,
+    body: parsed.body || item.content,
+    source,
+    color: getRecallCategoryColor(item.category),
+  };
+}
+
+function buildCreatedRecallEntry(
+  entry: MemoryCreateResponse['entry'],
+  index: number,
+): RecallEntry {
+  return {
+    id: `memory-new-${index}`,
+    date: entry.date,
+    category: entry.category,
+    title: entry.title,
+    body: entry.rule,
+    source: entry.source || null,
+    color: getRecallCategoryColor(entry.category),
+  };
 }
 
 function sleep(ms: number): Promise<void> {
@@ -325,6 +434,7 @@ export function Forge(): JSX.Element {
   const [forgeGenerationBrief, setForgeGenerationBrief] = useState<string | null>(null);
   const [forgeSpinnerFrameIndex, setForgeSpinnerFrameIndex] = useState(0);
   const [generatedSpecAction, setGeneratedSpecAction] = useState<GeneratedSpecActionState | null>(null);
+  const [recallState, setRecallState] = useState<RecallState | null>(null);
   const { orchestrationState, backendStatus, backendMessage } = useOrchestrationState();
 
   const keyCounterRef = useRef(0);
@@ -409,6 +519,27 @@ export function Forge(): JSX.Element {
     return null;
   }, [boardColumns, boardSelection.specId]);
 
+  const renderRecallEntryLines = (
+    entry: RecallEntry,
+    width: number,
+  ): Array<{ text: string; color: RecallColor | 'gray' }> => {
+    const sourceSuffix = entry.source ? ` · ${entry.source}` : '';
+    return [
+      {
+        text: truncateText(`${entry.date}  [${getRecallCategoryLabel(entry.category)}] ${entry.title}${sourceSuffix}`, width),
+        color: entry.color,
+      },
+      {
+        text: truncateText(`  ${entry.body}`, width),
+        color: 'gray',
+      },
+    ];
+  };
+
+  const cycleRecallCategory = (currentIndex: number, delta: number): number => {
+    return (currentIndex + delta + RECALL_CATEGORIES.length) % RECALL_CATEGORIES.length;
+  };
+
   const refreshBoard = async (): Promise<void> => {
     if (boardFetchInFlightRef.current) {
       return;
@@ -447,6 +578,138 @@ export function Forge(): JSX.Element {
   const openBoard = (): void => {
     setBoardOpen(true);
     void refreshBoard();
+  };
+
+  const fetchRecallEntries = async (workspaceId: string, query: string): Promise<RecallEntry[]> => {
+    const endpoint = query
+      ? `/api/memory/items?workspaceId=${encodeURIComponent(workspaceId)}&search=${encodeURIComponent(query)}&limit=10`
+      : `/api/memory/items?workspaceId=${encodeURIComponent(workspaceId)}&limit=10`;
+    const response = await apiJson<MemoryItemsResponse>(endpoint);
+    return response.items.map(memoryItemToRecallEntry);
+  };
+
+  const openRecall = async (rawQuery: string): Promise<void> => {
+    const query = rawQuery.trim();
+    appendOutput({ text: `> recall ${query}`.trimEnd(), color: 'cyan' });
+
+    try {
+      const workspace = await resolveWorkspaceForCwd();
+      if (!workspace) {
+        throw new Error(`No registered workspace matches ${process.cwd()}`);
+      }
+
+      setRecallState({
+        workspace,
+        query,
+        loading: true,
+        error: null,
+        entries: [],
+        form: null,
+      });
+
+      const entries = await fetchRecallEntries(workspace.id, query);
+      setRecallState({
+        workspace,
+        query,
+        loading: false,
+        error: null,
+        entries,
+        form: null,
+      });
+    } catch (error) {
+      const message = getUserFriendlyError(error);
+      setRecallState((current) => current
+        ? { ...current, loading: false, error: message, entries: [] }
+        : null);
+      appendOutput({ text: `[${formatClock(new Date())}] recall failed: ${message}`, color: 'red' });
+    }
+  };
+
+  const openRecallForm = (): void => {
+    setRecallState((current) => {
+      if (!current) {
+        return current;
+      }
+
+      return {
+        ...current,
+        form: {
+          field: 'title',
+          title: '',
+          body: '',
+          categoryIndex: 0,
+          saving: false,
+          error: null,
+        },
+      };
+    });
+  };
+
+  const submitRecallEntry = async (): Promise<void> => {
+    if (!recallState?.form) {
+      return;
+    }
+
+    const title = recallState.form.title.trim();
+    const body = recallState.form.body.trim();
+    const category = RECALL_CATEGORIES[recallState.form.categoryIndex];
+
+    if (!title || !body) {
+      setRecallState((current) => current && current.form
+        ? {
+            ...current,
+            form: {
+              ...current.form,
+              error: !title ? 'Title is required' : 'Body is required',
+            },
+          }
+        : current);
+      return;
+    }
+
+    setRecallState((current) => current && current.form
+      ? {
+          ...current,
+          form: { ...current.form, saving: true, error: null },
+        }
+      : current);
+
+    try {
+      const response = await apiJson<MemoryCreateResponse>('/api/memory', {
+        method: 'POST',
+        body: {
+          workspaceId: recallState.workspace.id,
+          category,
+          title,
+          rule: body,
+          sourceType: 'manual',
+        },
+      });
+
+      setRecallState((current) => {
+        if (!current) {
+          return current;
+        }
+
+        const created = buildCreatedRecallEntry(response.entry, keyCounterRef.current++);
+        return {
+          ...current,
+          entries: [created, ...current.entries],
+          form: null,
+        };
+      });
+    } catch (error) {
+      setRecallState((current) => current && current.form
+        ? {
+            ...current,
+            form: {
+              ...current.form,
+              saving: false,
+              error: getUserFriendlyError(error),
+            },
+          }
+        : current);
+    }
   };
 
   const approveSpec = async (specSlug: string): Promise<void> => {
@@ -1054,8 +1317,10 @@ export function Forge(): JSX.Element {
         id: 'recall',
         label: 'recall',
         description: 'Search memory',
-        args: ['<query>'],
-        handler: (args) => appendOutput({ text: `> recall ${args.join(' ')}`.trimEnd(), color: 'cyan' }, { text: `[forge] recall placeholder for "${args.join(' ')}"` }),
+        args: ['[query]'],
+        handler: (args) => {
+          void openRecall(args.join(' '));
+        },
       },
       {
         id: 'approve',
@@ -1182,6 +1447,147 @@ export function Forge(): JSX.Element {
   }, [boardOpen]);
 
   useInput((input, key) => {
+    if (recallState) {
+      if (key.escape) {
+        setRecallState(null);
+        return;
+      }
+
+      if (!recallState.form) {
+        if ((input === 'n' || input === 'N') && !key.ctrl && !key.meta) {
+          openRecallForm();
+        }
+        return;
+      }
+
+      if (recallState.form.saving) {
+        return;
+      }
+
+      if (key.leftArrow || key.upArrow) {
+        if (recallState.form.field === 'category') {
+          setRecallState((current) => current && current.form
+            ? {
+                ...current,
+                form: {
+                  ...current.form,
+                  categoryIndex: cycleRecallCategory(current.form.categoryIndex, -1),
+                  error: null,
+                },
+              }
+            : current);
+        }
+        return;
+      }
+
+      if (key.rightArrow || key.downArrow) {
+        if (recallState.form.field === 'category') {
+          setRecallState((current) => current && current.form
+            ? {
+                ...current,
+                form: {
+                  ...current.form,
+                  categoryIndex: cycleRecallCategory(current.form.categoryIndex, 1),
+                  error: null,
+                },
+              }
+            : current);
+        }
+        return;
+      }
+
+      if (key.tab) {
+        setRecallState((current) => {
+          if (!current?.form) {
+            return current;
+          }
+
+          const nextField: Record<RecallFormField, RecallFormField> = {
+            title: 'body',
+            body: 'category',
+            category: 'title',
+          };
+
+          return {
+            ...current,
+            form: {
+              ...current.form,
+              field: nextField[current.form.field],
+              error: null,
+            },
+          };
+        });
+        return;
+      }
+
+      if (key.return) {
+        if (recallState.form.field === 'title') {
+          setRecallState((current) => current && current.form
+            ? {
+                ...current,
+                form: { ...current.form, field: 'body', error: null },
+              }
+            : current);
+          return;
+        }
+
+        if (recallState.form.field === 'body') {
+          setRecallState((current) => current && current.form
+            ? {
+                ...current,
+                form: { ...current.form, field: 'category', error: null },
+              }
+            : current);
+          return;
+        }
+
+        void submitRecallEntry();
+        return;
+      }
+
+      if (key.backspace || key.delete) {
+        setRecallState((current) => {
+          if (!current?.form || current.form.field === 'category') {
+            return current;
+          }
+
+          const field = current.form.field;
+          return {
+            ...current,
+            form: {
+              ...current.form,
+              [field]: current.form[field].slice(0, -1),
+              error: null,
+            },
+          };
+        });
+        return;
+      }
+
+      if (!key.ctrl && !key.meta && input && recallState.form.field !== 'category') {
+        setRecallState((current) => {
+          if (!current?.form) {
+            return current;
+          }
+
+          const field = current.form.field;
+          if (field === 'category') {
+            return current;
+          }
+
+          return {
+            ...current,
+            form: {
+              ...current.form,
+              [field]: current.form[field] + input,
+              error: null,
+            },
+          };
+        });
+      }
+      return;
+    }
+
     if (generatedSpecAction) {
       if (key.return) {
         const next = generatedSpecAction;
@@ -1276,12 +1682,25 @@ export function Forge(): JSX.Element {
   const spinnerLine = forgeGenerationBrief
     ? `${GENERATE_SPINNER_FRAMES[forgeSpinnerFrameIndex]} Generating spec: ${truncateText(forgeGenerationBrief, Math.max(24, leftColumnWidth - 22))}`
     : null;
-  const commandPaletteDisabled = Boolean(foregroundRun) || boardOpen || Boolean(generatedSpecAction) || Boolean(forgeGenerationBrief);
-  const commandPaletteDisabledMessage = generatedSpecAction
-    ? '[Enter] Approve + Run  [s] Save as pending  [e] Edit stories  [Esc] Cancel'
-    : forgeGenerationBrief
-      ? spinnerLine ?? 'Generating spec...'
-      : disabledMessage;
+  const recallHeader = recallState
+    ? formatRecallHeader(recallState.query, recallState.entries.length, Math.max(20, leftColumnWidth - 2))
+    : null;
+  const commandPaletteDisabled = Boolean(foregroundRun)
+    || boardOpen
+    || Boolean(generatedSpecAction)
+    || Boolean(forgeGenerationBrief)
+    || Boolean(recallState);
+  const commandPaletteDisabledMessage = recallState
+    ? recallState.form
+      ? recallState.form.saving
+        ? 'Saving memory entry...'
+        : '[Enter] Next/Save  [Tab] Next field  [←/→] Category  [Esc] Back'
+      : '[n] New entry  [Esc] Back'
+    : generatedSpecAction
+      ? '[Enter] Approve + Run  [s] Save as pending  [e] Edit stories  [Esc] Cancel'
+      : forgeGenerationBrief
+        ? spinnerLine ?? 'Generating spec...'
+        : disabledMessage;
 
   return (
     <Box flexDirection="column" width={stdoutWidth} height={stdoutHeight}>
@@ -1294,7 +1713,46 @@ export function Forge(): JSX.Element {
 
       <Box flexGrow={1}>
         <Box borderStyle="single" flexDirection="column" width={leftColumnWidth} paddingX={1}>
-          {boardOpen ? (
+          {recallState ? (
+            <>
+              <Text color="cyan">{recallHeader}</Text>
+              {recallState.loading ? <Text color="gray">Loading memory…</Text> : null}
+              {recallState.error ? <Text color="red">{recallState.error}</Text> : null}
+              {!recallState.loading && !recallState.error && recallState.entries.length === 0 ? (
+                <Text color="yellow">
+                  {recallState.query ? `No memory entries match ${recallState.query}` : 'No memory entries yet'}
+                </Text>
+              ) : null}
+              {!recallState.loading && !recallState.error
+                ? recallState.entries
+                    .flatMap((entry) => renderRecallEntryLines(entry, Math.max(20, leftColumnWidth - 2)))
+                    .slice(0, Math.max(0, mainHeight - (recallState.form ? 8 : 2)))
+                    .map((line, index) => (
+                      <Text key={`recall-line-${index}`} color={line.color}>
+                        {line.text}
+                      </Text>
+                    ))
+                : null}
+              {recallState.form ? (
+                <>
+                  <Text color="cyan">──── New Memory Entry ────</Text>
+                  <Text inverse={recallState.form.field === 'title'}>
+                    {truncateText(`Title: ${recallState.form.title}`, Math.max(20, leftColumnWidth - 2))}
+                  </Text>
+                  <Text inverse={recallState.form.field === 'body'}>
+                    {truncateText(`Body: ${recallState.form.body}`, Math.max(20, leftColumnWidth - 2))}
+                  </Text>
+                  <Text
+                    inverse={recallState.form.field === 'category'}
+                    color={getRecallCategoryColor(RECALL_CATEGORIES[recallState.form.categoryIndex])}
+                  >
+                    {truncateText(`Category: ${RECALL_CATEGORIES[recallState.form.categoryIndex]}`, Math.max(20, leftColumnWidth - 2))}
+                  </Text>
+                  {recallState.form.error ? <Text color="red">{recallState.form.error}</Text> : null}
+                </>
+              ) : null}
+            </>
+          ) : boardOpen ? (
             <>
               <Text color="cyan">{'PENDING'.padEnd(boardColumnWidth, ' ')}│{'APPROVED'.padEnd(boardColumnWidth, ' ')}│{'RUNNING/DONE'.padEnd(boardColumnWidth, ' ')}</Text>
               <Text color="gray">{'─'.repeat(boardColumnWidth)}│{'─'.repeat(boardColumnWidth)}│{'─'.repeat(boardColumnWidth)}</Text>

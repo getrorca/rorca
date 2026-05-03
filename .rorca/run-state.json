@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T05:43:17.629Z",
+  "lastUpdatedAt": "2026-05-03T05:51:47.323Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -153,6 +153,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 362396
+    },
+    {
+      "storyId": "CLI-014",
+      "title": "'recall' command: memory search rendered inline in main viewport",
+      "status": "passed",
+      "startedAt": "2026-05-03T05:43:33.124Z",
+      "finishedAt": "2026-05-03T05:51:47.323Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 494199
     }
   ],
   "failedStories": [],
