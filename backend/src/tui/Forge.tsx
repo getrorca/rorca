@@ -4,7 +4,6 @@ import path from 'node:path';
 import fs from 'node:fs';
 import http, { type ClientRequest, type IncomingMessage } from 'node:http';
 import { execSync } from 'node:child_process';
-import { query } from '../db/index';
 import type { SemanticStep } from '../lib/semantic-log-parser';
 import CommandPalette, { type ForgeCommand } from './CommandPalette';
 import useOrchestrationState, { type OrchestrationPhase } from './useOrchestrationState';
@@ -34,6 +33,11 @@ import {
 
 const MAX_OUTPUT_LINES = 500;
 const CONTEXT_WIDTH = 35;
+const GENERATE_SPINNER_FRAMES = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'] as const;
+const GENERATE_SPINNER_MS = 80;
+const GENERATE_TIMEOUT_MS = 10 * 60 * 1000;
+const GENERATE_POLL_INTERVAL_MS = 2_000;
+const STORY_TITLE_WIDTH = 46;
 
 interface OutputEntry extends FormattedLine {
   key: string;
@@ -43,6 +47,41 @@ interface WorkspaceMatch {
   id: string;
   label: string;
   path: string;
+}
+
+interface WorkspaceListResponse {
+  items?: WorkspaceMatch[];
+  workspaces?: WorkspaceMatch[];
+}
+
+interface GeneratedStorySummary {
+  id: string;
+  title: string;
+  complexity?: number;
+}
+
+interface GeneratedSpecActionState {
+  workspace: WorkspaceMatch;
+  brief: string;
+  slug: string;
+  stories: GeneratedStorySummary[];
+}
+
+interface GenerateSpecResponse {
+  id?: string;
+  slug?: string;
+  userStories?: GeneratedStorySummary[];
+  stories?: GeneratedStorySummary[];
+  async?: boolean;
+  jobId?: string;
+  error?: string;
+}
+
+interface SpecGenerationJobResponse {
+  jobId: string;
+  status: 'pending' | 'processing' | 'done' | 'failed';
+  slug?: string | null;
+  error?: string | null;
 }
 
 interface TriggerResponse {
@@ -169,6 +208,48 @@ function specPathFromSlug(specSlug: string): string {
   return `forge/specs/approved/${specSlug}.json`;
 }
 
+function truncateText(input: string, width: number): string {
+  if (input.length <= width) {
+    return input;
+  }
+
+  return `${input.slice(0, Math.max(0, width - 1))}…`;
+}
+
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function normalizeGeneratedStories(payload: {
+  userStories?: GeneratedStorySummary[];
+  stories?: GeneratedStorySummary[];
+}): GeneratedStorySummary[] {
+  const stories = Array.isArray(payload.userStories)
+    ? payload.userStories
+    : Array.isArray(payload.stories)
+      ? payload.stories
+      : [];
+
+  return stories.map((story) => ({
+    id: story.id,
+    title: story.title,
+    complexity: story.complexity,
+  }));
+}
+
+function formatStoryComplexity(complexity?: number): string {
+  return Number.isInteger(complexity) ? `C${complexity}` : '—';
+}
+
+function formatStoryTableLine(story: GeneratedStorySummary): string {
+  return `${story.id.padEnd(10, ' ')} ${truncateText(story.title, STORY_TITLE_WIDTH).padEnd(STORY_TITLE_WIDTH, ' ')} ${formatStoryComplexity(story.complexity)}`;
+}
+
+function getUserFriendlyError(error: unknown): string {
+  const message = error instanceof Error ? error.message : 'Unknown error';
+  return message.replace(/\s+/g, ' ').trim();
+}
+
 function summarizeDirection(payload: WalPayload): string | null {
   const contextFiles = Array.isArray(payload.context_files)
     ? payload.context_files.filter((value): value is string => typeof value === 'string')
@@ -185,7 +266,12 @@ function summarizeDirection(payload: WalPayload): string | null {
 }
 
 async function resolveWorkspaceForCwd(): Promise<WorkspaceMatch | null> {
-  const rows = await query<WorkspaceMatch>('SELECT id, label, path FROM workspaces');
+  const response = await apiJson<WorkspaceListResponse>('/api/workspaces');
+  const rows = Array.isArray(response.items)
+    ? response.items
+    : Array.isArray(response.workspaces)
+      ? response.workspaces
+      : [];
   const cwd = fs.realpathSync.native(process.cwd());
 
   const matches = rows
@@ -193,7 +279,7 @@ async function resolveWorkspaceForCwd(): Promise<WorkspaceMatch | null> {
     .filter((row) => cwd === row.path || cwd.startsWith(`${row.path}${path.sep}`))
     .sort((a, b) => b.path.length - a.path.length);
 
-  return matches[0] ?? null;
+  return matches[0] ?? rows[0] ?? null;
 }
 
 function summarizeRun(stories: RunDetailsResponse['stories']): {
@@ -236,6 +322,9 @@ export function Forge(): JSX.Element {
   const [boardColumns, setBoardColumns] = useState<BoardColumn[]>(() => buildBoardColumns({ draft: [], inProgress: [], done: [] }));
   const [boardSelection, setBoardSelection] = useState<BoardSelection>({ columnIndex: 0, specId: null });
   const [boardBusyAction, setBoardBusyAction] = useState<'approve' | 'run' | null>(null);
+  const [forgeGenerationBrief, setForgeGenerationBrief] = useState<string | null>(null);
+  const [forgeSpinnerFrameIndex, setForgeSpinnerFrameIndex] = useState(0);
+  const [generatedSpecAction, setGeneratedSpecAction] = useState<GeneratedSpecActionState | null>(null);
   const { orchestrationState, backendStatus, backendMessage } = useOrchestrationState();
 
   const keyCounterRef = useRef(0);
@@ -361,6 +450,13 @@ export function Forge(): JSX.Element {
   };
 
   const approveSpec = async (specSlug: string): Promise<void> => {
+    await approveSpecWithWorkspace(specSlug);
+  };
+
+  const approveSpecWithWorkspace = async (
+    specSlug: string,
+    workspaceOverride?: WorkspaceMatch | null,
+  ): Promise<void> => {
     const normalizedSlug = specSlug.trim();
     if (!normalizedSlug) {
       appendOutput({ text: `[${formatClock(new Date())}] usage: approve <spec-slug>`, color: 'red' });
@@ -368,7 +464,7 @@ export function Forge(): JSX.Element {
     }
 
     try {
-      const workspace = boardWorkspaceRef.current ?? await resolveWorkspaceForCwd();
+      const workspace = workspaceOverride ?? boardWorkspaceRef.current ?? await resolveWorkspaceForCwd();
       boardWorkspaceRef.current = workspace;
       if (!workspace) {
         throw new Error(`No registered workspace matches ${process.cwd()}`);
@@ -629,7 +725,10 @@ export function Forge(): JSX.Element {
     outputRequestRef.current = req;
   };
 
-  const runSpec = async (specSlug: string): Promise<void> => {
+  const runSpec = async (
+    specSlug: string,
+    workspaceOverride?: WorkspaceMatch | null,
+  ): Promise<void> => {
     if (foregroundRun) {
       appendOutput({ text: `[${formatClock(new Date())}] run already in progress`, color: 'yellow' });
       return;
@@ -644,7 +743,7 @@ export function Forge(): JSX.Element {
     appendOutput({ text: `> run ${normalizedSlug}`, color: 'cyan' });
 
     try {
-      const workspace = await resolveWorkspaceForCwd();
+      const workspace = workspaceOverride ?? await resolveWorkspaceForCwd();
       if (!workspace) {
         throw new Error(`No registered workspace matches ${process.cwd()}`);
       }
@@ -700,6 +799,137 @@ export function Forge(): JSX.Element {
         text: `[${formatClock(new Date())}] run failed to start: ${(error as Error).message}`,
         color: 'red',
       });
+    }
+  };
+
+  const fetchGeneratedSpec = async (
+    workspace: WorkspaceMatch,
+    brief: string,
+  ): Promise<GeneratedSpecActionState> => {
+    const response = await apiJson<GenerateSpecResponse>('/api/specs/generate', {
+      method: 'POST',
+      body: {
+        brief,
+        workspaceId: workspace.id,
+      },
+      timeoutMs: GENERATE_TIMEOUT_MS,
+    });
+
+    if (response.async && response.jobId) {
+      const startedAt = Date.now();
+
+      while (Date.now() - startedAt < GENERATE_TIMEOUT_MS) {
+        await sleep(GENERATE_POLL_INTERVAL_MS);
+        const job = await apiJson<SpecGenerationJobResponse>(`/api/specs/generate/job/${encodeURIComponent(response.jobId)}`, {
+          timeoutMs: 30_000,
+        });
+
+        if (job.status === 'failed') {
+          throw new Error(job.error || 'Spec generation failed');
+        }
+
+        if (job.status === 'done') {
+          const slug = job.slug || response.slug || response.id;
+          if (!slug) {
+            throw new Error('Spec generation finished without a slug');
+          }
+
+          const spec = await apiJson<GenerateSpecResponse>(`/api/specs/${encodeURIComponent(slug)}?workspaceId=${encodeURIComponent(workspace.id)}`, {
+            timeoutMs: 30_000,
+          });
+
+          return {
+            workspace,
+            brief,
+            slug,
+            stories: normalizeGeneratedStories(spec),
+          };
+        }
+      }
+
+      throw new Error('Spec generation timed out before completion');
+    }
+
+    const slug = response.id || response.slug;
+    if (!slug) {
+      throw new Error(response.error || 'Spec generation did not return a spec slug');
+    }
+
+    return {
+      workspace,
+      brief,
+      slug,
+      stories: normalizeGeneratedStories(response),
+    };
+  };
+
+  const printGeneratedSpec = (generated: GeneratedSpecActionState): void => {
+    const lines: FormattedLine[] = [
+      { text: `━━━━ Spec Generated: ${generated.slug} ━━━━`, color: 'green' },
+      { text: `${generated.stories.length} ${generated.stories.length === 1 ? 'story' : 'stories'}`, color: 'white' },
+      { text: `ID        ${'TITLE'.padEnd(STORY_TITLE_WIDTH, ' ')} COMPLEXITY`, color: 'cyan' },
+    ];
+
+    for (const story of generated.stories) {
+      lines.push({ text: formatStoryTableLine(story), color: 'white' });
+    }
+
+    appendOutput(...lines);
+  };
+
+  const startForgeGeneration = async (rawBrief: string): Promise<void> => {
+    const brief = rawBrief.trim();
+    if (!brief) {
+      appendOutput({ text: `[${formatClock(new Date())}] forge requires a non-empty brief`, color: 'red' });
+      return;
+    }
+
+    if (foregroundRun || forgeGenerationBrief || generatedSpecAction) {
+      appendOutput({ text: `[${formatClock(new Date())}] forge is busy`, color: 'yellow' });
+      return;
+    }
+
+    appendOutput({ text: `> forge ${brief}`, color: 'cyan' });
+    setGeneratedSpecAction(null);
+    setForgeSpinnerFrameIndex(0);
+    setForgeGenerationBrief(brief);
+    setPhaseOverride('FORGING');
+
+    try {
+      const workspace = await resolveWorkspaceForCwd();
+      boardWorkspaceRef.current = workspace;
+      if (!workspace) {
+        throw new Error(`No registered workspace matches ${process.cwd()}`);
+      }
+
+      const generated = await fetchGeneratedSpec(workspace, brief);
+      printGeneratedSpec(generated);
+      setGeneratedSpecAction(generated);
+      setPhaseOverride(null);
+    } catch (error) {
+      appendOutput(
+        {
+          text: `[${formatClock(new Date())}] generation failed: ${getUserFriendlyError(error)}`,
+          color: 'red',
+        },
+        {
+          text: `[forge] brief preserved: ${truncateText(brief, 80)}`,
+          color: 'gray',
+        },
+      );
+      setPhaseOverride(null);
+    } finally {
+      setForgeGenerationBrief(null);
+      setForgeSpinnerFrameIndex(0);
+    }
+  };
+
+  const approveAndRunGeneratedSpec = async (generated: GeneratedSpecActionState): Promise<void> => {
+    try {
+      await approveSpecWithWorkspace(generated.slug, generated.workspace);
+      await runSpec(generated.slug, generated.workspace);
+    } catch {
+      // approveSpecWithWorkspace / runSpec already print actionable errors
     }
   };
 
@@ -797,10 +1027,7 @@ export function Forge(): JSX.Element {
         description: 'Generate a spec from a brief',
         args: ['<brief>'],
         handler: (args) => {
-          appendOutput(
-            { text: `> forge ${args.join(' ')}`.trimEnd(), color: 'cyan' },
-            { text: `[forge] placeholder forge handler for "${args.join(' ')}"` },
-          );
+          void startForgeGeneration(args.join(' '));
         },
       },
       {
@@ -897,7 +1124,17 @@ export function Forge(): JSX.Element {
         handler: () => process.exit(0),
       },
     ],
-    [backendStatus, boardOpen, branchName, foregroundRun, orchestrationState.activeAgent, orchestrationState.phase, phaseOverride],
+    [
+      backendStatus,
+      boardOpen,
+      branchName,
+      forgeGenerationBrief,
+      foregroundRun,
+      generatedSpecAction,
+      orchestrationState.activeAgent,
+      orchestrationState.phase,
+      phaseOverride,
+    ],
   );
 
   useEffect(() => {
@@ -912,6 +1149,18 @@ export function Forge(): JSX.Element {
     isUnmountedRef.current = true;
     closeRunStreams();
   }, []);
+
+  useEffect(() => {
+    if (!forgeGenerationBrief) {
+      return;
+    }
+
+    const spinner = setInterval(() => {
+      setForgeSpinnerFrameIndex((current) => (current + 1) % GENERATE_SPINNER_FRAMES.length);
+    }, GENERATE_SPINNER_MS);
+
+    return () => clearInterval(spinner);
+  }, [forgeGenerationBrief]);
 
   useEffect(() => {
     if (!boardOpen) {
@@ -933,6 +1182,36 @@ export function Forge(): JSX.Element {
   }, [boardOpen]);
 
   useInput((input, key) => {
+    if (generatedSpecAction) {
+      if (key.return) {
+        const next = generatedSpecAction;
+        setGeneratedSpecAction(null);
+        void approveAndRunGeneratedSpec(next);
+        return;
+      }
+
+      if ((input === 's' || input === 'S') && !key.ctrl && !key.meta) {
+        appendOutput({ text: `Saved as pending: ${generatedSpecAction.slug}`, color: 'green' });
+        setGeneratedSpecAction(null);
+        return;
+      }
+
+      if ((input === 'e' || input === 'E') && !key.ctrl && !key.meta) {
+        appendOutput(
+          { text: `> edit stories ${generatedSpecAction.slug}`, color: 'cyan' },
+          { text: `[forge] story editor not wired yet — spec saved as pending: ${generatedSpecAction.slug}`, color: 'yellow' },
+        );
+        setGeneratedSpecAction(null);
+        return;
+      }
+
+      if (key.escape) {
+        appendOutput({ text: `Spec saved as pending: ${generatedSpecAction.slug}`, color: 'yellow' });
+        setGeneratedSpecAction(null);
+      }
+      return;
+    }
+
     if (!boardOpen) {
       return;
     }
@@ -994,6 +1273,15 @@ export function Forge(): JSX.Element {
   const boardLineCount = Math.max(...boardRenderedColumns.map((column) => column.length), 1);
   const boardCanApprove = boardColumns[boardSelection.columnIndex]?.key === 'pending' && Boolean(currentBoardSpec);
   const boardCanRun = boardColumns[boardSelection.columnIndex]?.key === 'approved' && Boolean(currentBoardSpec);
+  const spinnerLine = forgeGenerationBrief
+    ? `${GENERATE_SPINNER_FRAMES[forgeSpinnerFrameIndex]} Generating spec: ${truncateText(forgeGenerationBrief, Math.max(24, leftColumnWidth - 22))}`
+    : null;
+  const commandPaletteDisabled = Boolean(foregroundRun) || boardOpen || Boolean(generatedSpecAction) || Boolean(forgeGenerationBrief);
+  const commandPaletteDisabledMessage = generatedSpecAction
+    ? '[Enter] Approve + Run  [s] Save as pending  [e] Edit stories  [Esc] Cancel'
+    : forgeGenerationBrief
+      ? spinnerLine ?? 'Generating spec...'
+      : disabledMessage;
 
   return (
     <Box flexDirection="column" width={stdoutWidth} height={stdoutHeight}>
@@ -1034,11 +1322,14 @@ export function Forge(): JSX.Element {
               </Text>
             </>
           ) : (
-            visibleOutput.map((line) => (
-              <Text key={line.key} color={line.color} dimColor={line.dimColor}>
-                {line.text}
-              </Text>
-            ))
+            <>
+              {visibleOutput.map((line) => (
+                <Text key={line.key} color={line.color} dimColor={line.dimColor}>
+                  {line.text}
+                </Text>
+              ))}
+              {spinnerLine ? <Text color="yellow">{spinnerLine}</Text> : null}
+            </>
           )}
         </Box>
 
@@ -1064,8 +1355,8 @@ export function Forge(): JSX.Element {
       <Box borderStyle="single" flexDirection="column" paddingX={1} minHeight={3}>
         <CommandPalette
           commands={commands}
-          disabled={Boolean(foregroundRun) || boardOpen}
-          disabledMessage={disabledMessage}
+          disabled={commandPaletteDisabled}
+          disabledMessage={commandPaletteDisabledMessage}
           onCtrlC={requestCancel}
           onEscape={() => {
             if (foregroundRun?.confirmCancel) {
