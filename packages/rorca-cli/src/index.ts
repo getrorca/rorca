@@ -1,1 +1,1 @@
-console.log('rorca-cli scaffold OK');
+export * from './version-check';
