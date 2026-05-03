@@ -108,6 +108,7 @@ import { initBoss } from './lib/pg-boss';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as ptyManager from './lib/pty-manager';
 import http from 'http';
+import { AuthError } from './lib/errors';
 
 const OSC_TITLE_REGEX = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 const OSC_SEQUENCE_REGEX = /\x1b\][02];[^\x07\x1b]*(?:\x07|\x1b\\)/g;
@@ -364,8 +365,9 @@ if (process.env.AUTH_REQUIRED === 'true') {
           req.user = resolvedUser;
           return next();
         }
+        return next(new AuthError('Invalid token'));
       } catch {
-        // fall through to LOCAL_ADMIN
+        return next(new AuthError('Invalid token'));
       }
     }
     req.user = LOCAL_ADMIN;

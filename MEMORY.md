@@ -3431,3 +3431,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Convention] Backend Ink TUI must use CommonJS-compatible Ink packages: In the backend package, pin Ink to the CommonJS-compatible line (`ink@3.x` with matching `react` and `@types/react`) unless the backend module system is intentionally migrated away from CommonJS.
 > Rule: Backend Ink TUI must use CommonJS-compatible Ink packages: In the backend package, pin Ink to the CommonJS-compatible line (`ink@3.x` with matching `react` and `@types/react`) unless the backend module system is intentionally migrated away from CommonJS.
+
+## 2026-05-03 [Gotcha] Local auth fallback must reject invalid bearer tokens: In local single-user mode, if an Authorization bearer token is present but cannot be resolved, return 401 AUTH_ERROR instead of silently falling back to LOCAL_ADMIN.
+> Rule: Local auth fallback must reject invalid bearer tokens: In local single-user mode, if an Authorization bearer token is present but cannot be resolved, return 401 AUTH_ERROR instead of silently falling back to LOCAL_ADMIN.
