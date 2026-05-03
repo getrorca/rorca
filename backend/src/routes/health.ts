@@ -6,6 +6,7 @@ import { listBackups } from '../lib/backup';
 import { agentType } from '../lib/config';
 import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
+import { detectPi } from '../lib/pi-detector';
 import { isTelemetryEnabled } from '../lib/telemetry-config';
 import { getQueueStats } from '../lib/embedding-pipeline';
 import { cacheStats } from '../lib/context-cache';
@@ -91,7 +92,7 @@ const NO_CACHE_HEADERS = {
  *     tags: [Health]
  *     summary: Basic health check
  *     operationId: getHealth
- *     description: Returns basic server health status including database connectivity, uptime, active pipeline runs, MCP transport mode, and telemetry status. When agent type is opencode or codex, includes installation status. Also returns component-level health for database, worker, github, postgres, and migrations.
+ *     description: Returns basic server health status including database connectivity, uptime, active pipeline runs, MCP transport mode, and telemetry status. When agent type is opencode or codex, includes installation status. Also returns unconditional Pi CLI detection status and component-level health for database, worker, github, postgres, and migrations.
  *     responses:
  *       200:
  *         description: Server is healthy
@@ -112,6 +113,13 @@ const NO_CACHE_HEADERS = {
  *                 opencodeVersion: { type: string }
  *                 codexInstalled: { type: boolean }
  *                 codexVersion: { type: string }
+ *                 piInstalled: { type: boolean }
+ *                 piVersion:
+ *                   type: string
+ *                   nullable: true
+ *                 piBinPath:
+ *                   type: string
+ *                   nullable: true
  *                 engines:
  *                   type: object
  *                   description: "Availability status for each execution engine (cached 30s)"
@@ -203,6 +211,17 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
     const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
     // OC-024: Include codex status when agentType=codex
     const codex = agentType === 'codex' ? detectCodex() : undefined;
+    const pi = (() => {
+      try {
+        return detectPi();
+      } catch {
+        return {
+          piInstalled: false,
+          piVersion: null,
+          piBinPath: null,
+        };
+      }
+    })();
 
     // MP-009: Detect all engines (cached 30s) for EngineSelector availability dots
     const engines = detectEngines();
@@ -239,6 +258,9 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
         codexInstalled: codex.codexInstalled,
         codexVersion: codex.codexVersion,
       } : {}),
+      piInstalled: pi.piInstalled,
+      piVersion: pi.piVersion,
+      piBinPath: pi.piBinPath,
       // MP-009: Engine availability for EngineSelector (all three engines, cached 30s)
       engines,
       embeddings: getQueueStats(),
