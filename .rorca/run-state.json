@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T06:21:30.412Z",
+  "lastUpdatedAt": "2026-05-03T06:27:25.937Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -213,6 +213,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 358926
+    },
+    {
+      "storyId": "CLI-030",
+      "title": "FinOps: cross-provider cost aggregation dashboard for pi runs",
+      "status": "passed",
+      "startedAt": "2026-05-03T06:21:45.944Z",
+      "finishedAt": "2026-05-03T06:27:25.937Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 339993
     }
   ],
   "failedStories": [],
