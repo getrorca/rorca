@@ -24,6 +24,7 @@
     "@types/ws": "^8.18.1",
     "chokidar": "^5.0.0",
     "chrome-devtools-mcp": "^0.21.0",
+    "commander": "^12.1.0",
     "cors": "^2.8.5",
     "cron-parser": "^5.5.0",
     "dotenv": "^16.4.7",
