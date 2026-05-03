@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T04:33:00.112Z",
+  "lastUpdatedAt": "2026-05-03T04:38:36.612Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -33,6 +33,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 79181
+    },
+    {
+      "storyId": "CLI-004",
+      "title": "Add spawnPiRpc() — warm RPC server pattern for pi execution in execution-engine.ts",
+      "status": "passed",
+      "startedAt": "2026-05-03T04:33:19.293Z",
+      "finishedAt": "2026-05-03T04:38:36.611Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 317318
     }
   ],
   "failedStories": [],
