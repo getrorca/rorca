@@ -61,6 +61,14 @@ export function resolveCommandInput(
       continue;
     }
 
+    const remainder = trimmed.slice(command.label.length).trim();
+    if (command.args?.length === 1) {
+      return {
+        command,
+        args: remainder ? [remainder] : [],
+      };
+    }
+
     return {
       command,
       args: tokens.slice(labelTokens.length),
