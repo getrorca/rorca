@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * CA-021: MCP Streamable HTTP Transport — auto-generated from OpenAPI spec.
  *
  * Generates MCP tools from the OpenAPI spec at /api/docs/openapi.json and serves

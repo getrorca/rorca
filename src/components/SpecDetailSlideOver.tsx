@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * SpecDetailSlideOver — Single source of truth for spec review UI.
  *
  * Slides in from the right (480px desktop, full-width mobile).

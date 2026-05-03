@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * test-server.ts — Minimal Express server for pg-boss restart resilience tests (PG-014).
  *
  * Implements only the endpoints needed by the test:

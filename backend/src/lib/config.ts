@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 // ─── Agent Configuration ─────────────────────────────────────────────────────
 // OC-001: RORCA_AGENT and RORCA_MODEL env var support for multi-agent execution.
 

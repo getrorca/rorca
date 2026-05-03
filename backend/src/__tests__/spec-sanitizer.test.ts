@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * Unit tests for spec-sanitizer.ts — covers all 8 detection patterns with
  * real-world examples and verifies recursive sanitization.
  */

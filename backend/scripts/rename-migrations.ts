@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * rename-migrations.ts — Convert sequential migration filenames (001–078) to timestamp format
  *
  * This script renames all existing sequential migration files in backend/src/db/pg-migrations/

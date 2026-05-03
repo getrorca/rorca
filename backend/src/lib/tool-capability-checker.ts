@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * tool-capability-checker.ts — Pre-flight tool compatibility check for stories vs engines.
  *
  * OC-031: Before routing a story to an execution engine, check whether the story's

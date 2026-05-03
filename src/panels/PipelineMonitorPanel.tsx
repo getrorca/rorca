@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 // @refresh reset
 import { useState, useEffect, useCallback, useRef } from 'react';
 import { Terminal, Clock, ChevronRight, List, XCircle, ArrowRight, AlertTriangle, X, GitBranch, ArrowUpDown, Filter, Layers, ArrowDownUp } from 'lucide-react';

@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * memory-synthesis.ts — Post-Run Memory Synthesis (CIE-005 + CIE-014)
  *
  * Subscribes to WAL events. When a run finishes (done or failed),

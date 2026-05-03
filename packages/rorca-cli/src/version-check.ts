@@ -1,3 +1,8 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: MIT
+ */
+
 import pkg from '../package.json' with { type: 'json' };
 
 export const CLI_VERSION = pkg.version;

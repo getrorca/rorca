@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * renderMarkdown.ts — Shared lightweight Markdown-to-HTML renderer.
  *
  * Converts markdown text to HTML with support for headings (h1-h4),

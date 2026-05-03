@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * draft-pr-subscriber.ts — WAL event subscriber for draft PR progress updates.
  *
  * Subscribes to sse-hub and reacts to story completion events by triggering

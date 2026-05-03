@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response } from 'express';
 import { activeAgent, activeModel, AgentType, VALID_AGENT_TYPES, setActiveAgentConfig, validateOrchestrationConfig } from '../lib/config';
 import { loadOrchestrationConfig, clearConfigCache } from '../lib/complexity-scorer';

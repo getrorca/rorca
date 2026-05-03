@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * recall-types.ts — Shared types and Zod schemas for the /api/recall endpoint.
  *
  * Defines the RecallResponse shape (8 named sections + meta) and query param
