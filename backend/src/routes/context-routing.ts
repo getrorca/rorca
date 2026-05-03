@@ -195,6 +195,8 @@ router.get('/:id/skills', async (req: Request, res: Response) => {
  *   get:
  *     summary: Get the full .rorca/config.json (routing, context, orchestration, execution)
  *     operationId: getRorcaConfig
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Rorca config contains workspace-specific routing and execution preferences and should only be exposed to authenticated callers."
  *     description: Reads and returns the full .rorca/config.json with defaults applied for any missing fields.
  *     tags: [Context Routing]
  *     parameters:
@@ -227,6 +229,8 @@ router.get('/:id/rorca-config', async (req: Request, res: Response) => {
  *   put:
  *     summary: Save the full .rorca/config.json
  *     operationId: updateRorcaConfig
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Updating .rorca/config.json mutates workspace-owned execution settings and should require authenticated access."
  *     description: Validates and writes the provided config object to .rorca/config.json, creating the directory if needed.
  *     tags: [Context Routing]
  *     parameters:

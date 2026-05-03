@@ -990,6 +990,9 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Trigger a pipeline run (spawn run-loop.sh)
  *     operationId: triggerPipelineRun
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Starting a local spec run is a core open-source CLI action and must remain callable via MCP and REST."
+ *     x-rorca-public-api: true
  *     description: Spawns the execution engine as a subprocess to run all stories in the specified spec, optionally in a git worktree.
  *     requestBody:
  *       required: true
@@ -2506,6 +2509,9 @@ router.post('/runs', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: List pipeline runs
  *     operationId: listPipelineRuns
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Run listing is read-only execution metadata that the open-source CLI and MCP tools depend on."
+ *     x-rorca-public-api: true
  *     description: Returns a paginated list of pipeline runs for the specified workspace, ordered by most recent first.
  *     parameters:
  *       - in: query
@@ -2745,6 +2751,9 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Get a pipeline run with story results
  *     operationId: getPipelineRun
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Detailed run state is core read-only execution data for CLI reattachment, monitoring, and MCP usage."
+ *     x-rorca-public-api: true
  *     description: Retrieves a single pipeline run by ID along with all its story results and spec metadata.
  *     parameters:
  *       - in: path
@@ -2929,6 +2938,9 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Retry failed stories in a pipeline run via pg-boss job queue
  *     operationId: retryPipelineRun
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Retrying failed local stories is part of the stable open-source execution workflow and has no billing or admin side effects."
+ *     x-rorca-public-api: true
  *     description: Re-executes failed stories from a completed or partially failed pipeline run, optionally filtering to specific story IDs. Enqueues a pipeline:retry pg-boss job; worker handles the actual spawn.
  *     parameters:
  *       - in: path
@@ -3550,6 +3562,9 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Cancel a queued or running pipeline run
  *     operationId: cancelPipelineRun
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Cancelling a local run is a core operator action required by the stable open-source CLI surface."
+ *     x-rorca-public-api: true
  *     description: >
  *       For queued runs: removes the pg-boss job and marks the run as cancelled immediately.
  *       For running runs: delivers a pipeline:cancel job to the worker (which sends SIGTERM then SIGKILL after 10s) and returns 200 immediately — DB and WAL updates happen asynchronously in the worker.
@@ -4731,6 +4746,9 @@ router.get('/stream', async (_req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Download raw pipeline log file
  *     operationId: downloadPipelineLog
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Raw run logs are read-only debugging output that the local CLI contract explicitly supports."
+ *     x-rorca-public-api: true
  *     description: Returns the raw log file for a completed pipeline run as a downloadable text/plain attachment.
  *     parameters:
  *       - in: path
