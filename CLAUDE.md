@@ -184,6 +184,16 @@ curl -fsSL https://pi.run/install.sh | sh
 - Auth model: BYOA. Users run `pi auth login <provider>` once per provider; Rorca never stores pi API keys
 - Recommended for: Headless provider-flexible runs with pi-managed auth and resumable session/fork workflows
 
+### Pi peer dependency
+
+`pi` is intentionally a peer dependency, not bundled with Rorca. Rationale: bundling adds unnecessary 50-100MB tarball weight, and silent auto-download would remove user agency around what gets installed on the machine.
+
+The install bridge is detect + prompt:
+- `rorca init` checks for `pi` first and offers npm/pnpm/bun/curl install options
+- `rorca auth login` does the same before attempting provider login
+- `rorca init --auto-install-pi` exists for CI and other non-interactive environments
+- The curl path always requires an explicit confirmation prompt before execution
+
 **No raw SDK agent path for execution.** Claude, OpenCode, Codex, and pi are the supported execution harnesses. A raw SDK call cannot replace them — no persistent bash state, no surgical edits, no harness-native context injection.
 
 ### OpenCode for spec generation
