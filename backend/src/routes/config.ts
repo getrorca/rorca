@@ -3,6 +3,7 @@ import { agentType, agentModel, AgentType, VALID_AGENT_TYPES, validateOrchestrat
 import { loadOrchestrationConfig, clearConfigCache } from '../lib/complexity-scorer';
 import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
+import { detectPi } from '../lib/pi-detector';
 import { getClaudeAuthState, triggerClaudeLogin, triggerClaudeLogout } from '../lib/claude-auth';
 import { getCodexAuthState, triggerCodexLogin, triggerCodexLogout } from '../lib/codex-auth';
 import { queryOne, execute } from '../db/index';
@@ -35,11 +36,11 @@ let _persistedLoaded = false;
 
 /**
  * Derive the workflow_configs provider value from agent runtime and model.
- * claude/codex → 'claude-cli' (subscription auth).
+ * claude/codex/pi → CLI-backed runtime (stored as claude-cli provider bucket).
  * opencode → resolve from model prefix (openai/, google/ → 'openai-compat', etc.).
  */
 function providerForRuntime(runtime: string, model: string | null): string {
-  if (runtime === 'claude' || runtime === 'codex') return 'claude-cli';
+  if (runtime === 'claude' || runtime === 'codex' || runtime === 'pi') return 'claude-cli';
   if (runtime !== 'opencode' || !model) return 'claude-cli';
   const prefix = model.split('/')[0];
   switch (prefix) {
@@ -156,6 +157,7 @@ router.get('/', async (_req: Request, res: Response) => {
   // Always detect both — UI needs status to show install badges when user toggles
   const opencode = detectOpenCode();
   const codex = detectCodex();
+  const pi = detectPi();
 
   // Determine if user has an API key for the selected model's provider
   let hasApiKey = true; // claude doesn't need one
@@ -228,6 +230,8 @@ router.get('/', async (_req: Request, res: Response) => {
     opencodeVersion: opencode.opencodeVersion,
     codexInstalled: codex.codexInstalled,
     codexVersion: codex.codexVersion,
+    piInstalled: pi.piInstalled,
+    piVersion: pi.piVersion,
     openrouterViaEnv,
   });
 });
@@ -626,7 +630,7 @@ router.post('/openrouter-test', async (req: Request, res: Response) => {
  *             properties:
  *               agentType:
  *                 type: string
- *                 enum: [claude, opencode, codex]
+ *                 enum: [claude, opencode, codex, pi]
  *               agentModel:
  *                 type: string
  *     responses:
@@ -661,6 +665,14 @@ router.put('/agent', async (req: Request, res: Response) => {
       const status = detectCodex();
       if (!status.codexInstalled) {
         throw new ValidationError('Codex CLI not found. Install it first: npm i -g @openai/codex');
+        return;
+      }
+    }
+
+    if (newType === 'pi') {
+      const status = detectPi();
+      if (!status.piInstalled) {
+        throw new ValidationError('Pi CLI not found. Install it first: npm install -g @mariozechner/pi-coding-agent');
         return;
       }
     }

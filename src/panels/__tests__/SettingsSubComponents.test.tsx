@@ -49,10 +49,13 @@ const MOCK_AGENT_CONFIG = {
   claudeBin: '/usr/local/bin/claude',
   opencodeBin: null,
   codexBin: null,
+  piBin: null,
   opencodeInstalled: false,
   opencodeVersion: null,
   codexInstalled: false,
   codexVersion: null,
+  piInstalled: false,
+  piVersion: null,
 };
 
 const _MOCK_VAULT_KEYS = {
@@ -425,7 +428,18 @@ describe('ConnectionsHubSection', () => {
     const claudeAuth = overrides.claudeAuth ?? CLAUDE_AUTH_NOT_INSTALLED;
     const ollama = overrides.ollama ?? OLLAMA_NOT_RUNNING;
 
-    const BASE_CONFIG = { agentType: 'claude', agentModel: null, opencodeInstalled: false, opencodeVersion: null, codexInstalled: false, codexVersion: null, copilotConnected: false, copilotUsername: null };
+    const BASE_CONFIG = {
+      agentType: 'claude',
+      agentModel: null,
+      opencodeInstalled: false,
+      opencodeVersion: null,
+      codexInstalled: false,
+      codexVersion: null,
+      piInstalled: false,
+      piVersion: null,
+      copilotConnected: false,
+      copilotUsername: null,
+    };
     const BASE_EMBED_PROVIDER = { provider: 'local', model: 'local-tfidf', dimensions: 384, source: 'local', apiKeyConfigured: false };
     const BASE_EMBED_STATUS = { embeddingCount: 0, specCount: 0, storyCount: 0, memoryCount: 0, running: false, processed: 0, queueDepth: 0 };
     const BASE_WORKFLOW_CONFIGS: unknown[] = [];
@@ -467,12 +481,15 @@ describe('ConnectionsHubSection', () => {
     }, { timeout: 3000 });
   });
 
-  it('renders all 5 provider cards: Claude CLI, Anthropic API, OpenRouter, OpenAI-Compatible, Ollama', async () => {
+  it('renders CLI and provider cards including the new Pi row', async () => {
     mockApiFetch.mockImplementation(buildMock());
     renderWithProviders(<ProviderSettingsTab />);
 
     await waitFor(() => {
       expect(screen.getByText('Claude CLI')).toBeInTheDocument();
+      expect(screen.getByText('OpenCode CLI')).toBeInTheDocument();
+      expect(screen.getByText('Codex CLI')).toBeInTheDocument();
+      expect(screen.getByText('Pi')).toBeInTheDocument();
       expect(screen.getByText('Anthropic API')).toBeInTheDocument();
       expect(screen.getByText('OpenRouter')).toBeInTheDocument();
       expect(screen.getByText('OpenAI-Compatible')).toBeInTheDocument();
@@ -530,6 +547,15 @@ describe('ConnectionsHubSection', () => {
 
     await waitFor(() => {
       expect(screen.getAllByText('Not found').length).toBeGreaterThan(0);
+    }, { timeout: 3000 });
+  });
+
+  it('shows the Pi install hint when Pi is not installed', async () => {
+    mockApiFetch.mockImplementation(buildMock());
+    renderWithProviders(<ProviderSettingsTab />);
+
+    await waitFor(() => {
+      expect(screen.getByText('Install with: npm install -g @mariozechner/pi-coding-agent')).toBeInTheDocument();
     }, { timeout: 3000 });
   });
 

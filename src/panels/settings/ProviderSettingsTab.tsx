@@ -69,12 +69,14 @@ interface ModelTestResult {
 }
 
 interface AgentConfig {
-  agentType: 'claude' | 'opencode' | 'codex';
+  agentType: 'claude' | 'opencode' | 'codex' | 'pi';
   agentModel: string | null;
   opencodeInstalled: boolean | null;
   opencodeVersion: string | null;
   codexInstalled: boolean | null;
   codexVersion: string | null;
+  piInstalled: boolean | null;
+  piVersion: string | null;
   copilotConnected: boolean;
   copilotUsername: string | null;
 }
@@ -139,7 +141,7 @@ function ToggleSwitch({ checked, onChange }: { checked: boolean; onChange: () =>
 // ─── Status Bar ──────────────────────────────────────────────────────────────
 
 interface StatusBarData {
-  agentType: 'claude' | 'opencode' | 'codex' | null;
+  agentType: 'claude' | 'opencode' | 'codex' | 'pi' | null;
   agentModel: string | null;
   defaultModel: string | null;
   embeddingProvider: string | null;
@@ -197,6 +199,8 @@ function StatusBar() {
     ? 'bg-orange-400'
     : data.agentType === 'codex'
     ? 'bg-blue-400'
+    : data.agentType === 'pi'
+    ? 'bg-emerald-400'
     : 'bg-zinc-500';
 
   const agentLabel = data.agentType === 'claude'
@@ -205,6 +209,8 @@ function StatusBar() {
     ? 'OpenCode'
     : data.agentType === 'codex'
     ? 'Codex'
+    : data.agentType === 'pi'
+    ? 'Pi'
     : '—';
 
   const pillClass = 'flex items-center gap-1.5 text-xs text-muted bg-panel border border-border rounded-full px-2.5 py-1';
@@ -1038,24 +1044,58 @@ function ConnectionsHubSection() {
         )}
       </ConnectionCard>
 
-      {/* 2. Codex CLI */}
+      {/* 2. OpenCode CLI */}
+      <ConnectionCard
+        icon={<Terminal size={16} />}
+        name="OpenCode CLI"
+        description="Uses the OpenCode CLI for API-key-backed execution across 75+ model providers."
+        statusDot={agentConfig?.opencodeInstalled ? 'green' : 'amber'}
+        statusLabel={
+          agentConfig?.opencodeInstalled
+            ? `Installed${agentConfig.opencodeVersion ? ` (v${agentConfig.opencodeVersion})` : ''}`
+            : 'Not installed'
+        }
+      >
+        {!agentConfig?.opencodeInstalled && (
+          <p className="mt-2 ml-7 text-[11px] text-amber-400">Install with: npm install -g opencode</p>
+        )}
+      </ConnectionCard>
+
+      {/* 3. Codex CLI */}
       <ConnectionCard
         icon={<Terminal size={16} />}
         name="Codex CLI"
         description="Uses your ChatGPT Plus/Pro subscription via the Codex CLI. No API key needed."
-        statusDot={agentConfig?.codexInstalled ? 'green' : 'grey'}
+        statusDot={agentConfig?.codexInstalled ? 'green' : 'amber'}
         statusLabel={
           agentConfig?.codexInstalled
             ? `Installed${agentConfig.codexVersion ? ` (v${agentConfig.codexVersion})` : ''} — authenticated`
-            : 'Not found'
+            : 'Not installed'
         }
       >
         {!agentConfig?.codexInstalled && (
-          <p className="mt-2 ml-7 text-[11px] text-muted">Install with: npm install -g @openai/codex</p>
+          <p className="mt-2 ml-7 text-[11px] text-amber-400">Install with: npm install -g @openai/codex</p>
         )}
       </ConnectionCard>
 
-      {/* 3. Anthropic API */}
+      {/* 4. Pi CLI */}
+      <ConnectionCard
+        icon={<span className="inline-flex h-4 w-4 items-center justify-center text-sm font-semibold leading-none">π</span>}
+        name="Pi"
+        description="Uses the Pi CLI as the 4th execution engine. No API key needed."
+        statusDot={agentConfig?.piInstalled ? 'green' : 'amber'}
+        statusLabel={
+          agentConfig?.piInstalled
+            ? `Installed${agentConfig.piVersion ? ` (v${agentConfig.piVersion})` : ''}`
+            : 'Not installed'
+        }
+      >
+        {!agentConfig?.piInstalled && (
+          <p className="mt-2 ml-7 text-[11px] text-amber-400">Install with: npm install -g @mariozechner/pi-coding-agent</p>
+        )}
+      </ConnectionCard>
+
+      {/* 5. Anthropic API */}
       <ConnectionCard
         icon={<Cpu size={16} />}
         name="Anthropic API"
@@ -1073,7 +1113,7 @@ function ConnectionsHubSection() {
         testResult={testResults['anthropic'] ?? null}
       />
 
-      {/* 4. OpenRouter */}
+      {/* 6. OpenRouter */}
       <ConnectionCard
         icon={<Globe size={16} />}
         name="OpenRouter"
@@ -1091,7 +1131,7 @@ function ConnectionsHubSection() {
         testResult={testResults['openrouter'] ?? null}
       />
 
-      {/* 5. OpenAI-Compatible */}
+      {/* 7. OpenAI-Compatible */}
       <ConnectionCard
         icon={<Zap size={16} />}
         name="OpenAI-Compatible"
@@ -1112,7 +1152,7 @@ function ConnectionsHubSection() {
         testResult={testResults['openai-compat'] ?? null}
       />
 
-      {/* 6. Ollama */}
+      {/* 8. Ollama */}
       <ConnectionCard
         icon={<Cpu size={16} />}
         name="Ollama"
@@ -1985,12 +2025,14 @@ const WORKFLOW_ORDER = ['spec_generation', 'pipeline_execution', 'memory_consoli
 interface CliInstallStatus {
   opencodeInstalled: boolean;
   codexInstalled: boolean;
+  piInstalled: boolean;
 }
 
 const RUNTIME_SEGMENTS: { value: string; label: string; installedKey: keyof CliInstallStatus | null }[] = [
   { value: 'claude', label: 'Claude', installedKey: null }, // always installed
   { value: 'opencode', label: 'OpenCode', installedKey: 'opencodeInstalled' },
   { value: 'codex', label: 'Codex', installedKey: 'codexInstalled' },
+  { value: 'pi', label: 'Pi', installedKey: 'piInstalled' },
 ];
 
 // ─── Workflow Router Section ──────────────────────────────────────────────
@@ -2225,7 +2267,7 @@ function WorkflowRouterSection() {
   const toast = useGlobalToast();
   const [configs, setConfigs] = useState<WorkflowConfig[]>([]);
   const [loading, setLoading] = useState(true);
-  const [cliStatus, setCliStatus] = useState<CliInstallStatus>({ opencodeInstalled: false, codexInstalled: false });
+  const [cliStatus, setCliStatus] = useState<CliInstallStatus>({ opencodeInstalled: false, codexInstalled: false, piInstalled: false });
   const [vaultKeys, setVaultKeys] = useState<ApiKeyEntry[]>([]);
   const [allModels, setAllModels] = useState<ModelOption[]>([]);
 
@@ -2238,7 +2280,11 @@ function WorkflowRouterSection() {
     ])
       .then(([cfgs, status, keyData, modelData]) => {
         setConfigs(Array.isArray(cfgs) ? cfgs : []);
-        setCliStatus({ opencodeInstalled: !!status?.opencodeInstalled, codexInstalled: !!status?.codexInstalled });
+        setCliStatus({
+          opencodeInstalled: !!status?.opencodeInstalled,
+          codexInstalled: !!status?.codexInstalled,
+          piInstalled: !!status?.piInstalled,
+        });
         setVaultKeys(Array.isArray(keyData?.keys) ? keyData.keys : []);
         setAllModels(Array.isArray(modelData?.models) ? modelData.models : []);
       })
@@ -2422,7 +2468,7 @@ function WorkflowRouterSection() {
                     <td className="py-3 pr-4">
                       {(() => {
                         // Pipeline execution: locked when runtime is 'claude' or 'codex'
-                        const isProviderLocked = isPipeline && (cfg.runtime === 'claude' || cfg.runtime === 'codex');
+                        const isProviderLocked = isPipeline && (cfg.runtime === 'claude' || cfg.runtime === 'codex' || cfg.runtime === 'pi');
                         // Warning: selected provider is an API provider but has no vault key
                         const needsWarning = cfg.provider !== 'claude-cli' && !vaultProviderSet.has(cfg.provider);
 
