@@ -3473,3 +3473,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Gotcha] npm pack requires prepack, not prepublishOnly: Use a prepack build hook for any npm tarball verification or assembly path; prepublishOnly alone does not build artifacts for npm pack.
 > Rule: npm pack requires prepack, not prepublishOnly: Use a prepack build hook for any npm tarball verification or assembly path; prepublishOnly alone does not build artifacts for npm pack.
+
+## 2026-05-03 [Bug Fix] Pi version detection must capture stderr-safe output: When probing `pi --version`, capture both stdout and stderr via `spawnSync(..., { stdio: ['ignore', 'pipe', 'pipe'] })` and parse the combined output instead of relying on stdout-only `execSync`.
+> Rule: Pi version detection must capture stderr-safe output: When probing `pi --version`, capture both stdout and stderr via `spawnSync(..., { stdio: ['ignore', 'pipe', 'pipe'] })` and parse the combined output instead of relying on stdout-only `execSync`.
