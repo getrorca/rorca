@@ -2,7 +2,7 @@
 // Detect whether the Pi CLI binary is installed and accessible.
 // Used at startup (fail-fast) and by health endpoint (runtime check).
 
-import { execSync } from 'child_process';
+import { execSync, spawnSync } from 'child_process';
 import { logger } from './logger';
 
 export interface PiStatus {
@@ -26,6 +26,8 @@ export const PI_INSTALL_METHODS = {
   bun: 'bun add -g @mariozechner/pi-coding-agent',
   curl: 'curl -fsSL https://pi.mariozechner.com/install.sh | sh',
 } as const;
+
+export const MIN_PI_VERSION = '0.67.0';
 
 /**
  * Resolve the pi binary path.
@@ -66,7 +68,15 @@ export function detectPi(): PiStatus {
   }
 
   try {
-    const raw = execSync(`"${binPath}" --version`, { encoding: 'utf8', timeout: 5000 });
+    const result = spawnSync(binPath, ['--version'], {
+      encoding: 'utf8',
+      timeout: 5000,
+      stdio: ['ignore', 'pipe', 'pipe'],
+    });
+    if (result.status !== 0) {
+      return { piInstalled: false, piVersion: null, piBinPath: null };
+    }
+    const raw = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
     const version = parseVersion(raw);
     return {
       piInstalled: true,
