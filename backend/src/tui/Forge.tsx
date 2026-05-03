@@ -1,5 +1,5 @@
 import React, { useEffect, useMemo, useRef, useState } from 'react';
-import { Box, Text, useStdout } from 'ink';
+import { Box, Text, useInput, useStdout } from 'ink';
 import path from 'node:path';
 import fs from 'node:fs';
 import http, { type ClientRequest, type IncomingMessage } from 'node:http';
@@ -19,6 +19,18 @@ import {
   type PipelineWalEvent,
   type WalPayload,
 } from './runFormatting';
+import { apiJson } from './apiClient';
+import {
+  buildBoardColumns,
+  formatBoardMeta,
+  moveBoardSelection,
+  resolveBoardSelection,
+  truncateSlug,
+  type BoardColumn,
+  type BoardSelection,
+  type KanbanResponse,
+  type KanbanSpec,
+} from './boardUtils';
 
 const MAX_OUTPUT_LINES = 500;
 const CONTEXT_WIDTH = 35;
@@ -72,6 +84,12 @@ interface ForegroundRunState {
   cumulativeCost: number;
   directionSummary: string | null;
   confirmCancel: boolean;
+}
+
+interface BoardLine {
+  text: string;
+  color?: 'white' | 'gray' | 'yellow' | 'green' | 'cyan' | 'red';
+  inverse?: boolean;
 }
 
 const WAL_STREAM_URL = 'http://localhost:3030/api/pipeline/stream';
@@ -166,49 +184,6 @@ function summarizeDirection(payload: WalPayload): string | null {
     .join(', ');
 }
 
-async function httpJson<T>(url: string, init?: { method?: string; body?: unknown }): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const target = new URL(url);
-    const body = init?.body != null ? JSON.stringify(init.body) : null;
-    const req = http.request(
-      {
-        protocol: target.protocol,
-        hostname: target.hostname,
-        port: target.port,
-        path: `${target.pathname}${target.search}`,
-        method: init?.method ?? 'GET',
-        headers: body
-          ? {
-              'Content-Type': 'application/json',
-              'Content-Length': Buffer.byteLength(body),
-            }
-          : undefined,
-      },
-      (res) => {
-        const chunks: Buffer[] = [];
-        res.on('data', (chunk: Buffer | string) => {
-          chunks.push(Buffer.isBuffer(chunk) ? chunk : Buffer.from(chunk));
-        });
-        res.on('end', () => {
-          const raw = Buffer.concat(chunks).toString('utf8');
-          const parsed = raw ? JSON.parse(raw) as T & { error?: string } : {} as T;
-          if ((res.statusCode ?? 500) >= 400) {
-            reject(new Error((parsed as { error?: string }).error ?? `HTTP ${res.statusCode ?? 500}`));
-            return;
-          }
-          resolve(parsed);
-        });
-      },
-    );
-
-    req.on('error', reject);
-    if (body) {
-      req.write(body);
-    }
-    req.end();
-  });
-}
-
 async function resolveWorkspaceForCwd(): Promise<WorkspaceMatch | null> {
   const rows = await query<WorkspaceMatch>('SELECT id, label, path FROM workspaces');
   const cwd = fs.realpathSync.native(process.cwd());
@@ -254,6 +229,13 @@ export function Forge(): JSX.Element {
   const [outputLines, setOutputLines] = useState<OutputEntry[]>([]);
   const [foregroundRun, setForegroundRun] = useState<ForegroundRunState | null>(null);
   const [phaseOverride, setPhaseOverride] = useState<OrchestrationPhase | null>(null);
+  const [boardOpen, setBoardOpen] = useState(false);
+  const [boardPulseOn, setBoardPulseOn] = useState(true);
+  const [boardLoading, setBoardLoading] = useState(false);
+  const [boardError, setBoardError] = useState<string | null>(null);
+  const [boardColumns, setBoardColumns] = useState<BoardColumn[]>(() => buildBoardColumns({ draft: [], inProgress: [], done: [] }));
+  const [boardSelection, setBoardSelection] = useState<BoardSelection>({ columnIndex: 0, specId: null });
+  const [boardBusyAction, setBoardBusyAction] = useState<'approve' | 'run' | null>(null);
   const { orchestrationState, backendStatus, backendMessage } = useOrchestrationState();
 
   const keyCounterRef = useRef(0);
@@ -264,6 +246,9 @@ export function Forge(): JSX.Element {
   const outputPartialRef = useRef('');
   const activeRunIdRef = useRef<number | null>(null);
   const isUnmountedRef = useRef(false);
+  const boardWorkspaceRef = useRef<WorkspaceMatch | null>(null);
+  const boardFetchInFlightRef = useRef(false);
+  const boardSelectionRef = useRef<BoardSelection>({ columnIndex: 0, specId: null });
 
   const workspaceName = useMemo(() => path.basename(process.cwd()) || 'workspace', []);
   const stdoutWidth = stdout?.columns ?? 80;
@@ -271,6 +256,141 @@ export function Forge(): JSX.Element {
   const leftColumnWidth = Math.max(20, stdoutWidth - CONTEXT_WIDTH - 4);
   const mainHeight = Math.max(5, stdoutHeight - 7);
   const visibleOutput = outputLines.length === 0 ? [{ key: 'empty', text: '(no output yet)' }] : outputLines.slice(-mainHeight);
+
+  const updateBoardSelection = (selection: BoardSelection): void => {
+    boardSelectionRef.current = selection;
+    setBoardSelection(selection);
+  };
+
+  const renderBoardColumnLines = (
+    column: BoardColumn,
+    selectedSpecId: string | null,
+    width: number,
+  ): BoardLine[] => {
+    const visibleSpecs = column.specs.slice(0, 8);
+    const lines: BoardLine[] = [];
+
+    if (visibleSpecs.length === 0) {
+      lines.push({ text: '(empty)', color: 'gray' });
+    } else {
+      for (const spec of visibleSpecs) {
+        const selected = selectedSpecId === spec.id;
+        const indicator = spec.activeRunStatus === 'running'
+          ? boardPulseOn ? ' ●' : ' ○'
+          : spec.activeRunStatus === 'queued'
+            ? ` ○${spec.queuePosition ? `#${spec.queuePosition}` : ''}`
+            : '';
+        const color = spec.activeRunStatus === 'running'
+          ? 'green'
+          : spec.activeRunStatus === 'queued'
+            ? 'yellow'
+            : 'white';
+
+        lines.push({
+          text: `[${truncateSlug(spec.id)}]${indicator}`,
+          color,
+          inverse: selected,
+        });
+        lines.push({
+          text: formatBoardMeta(spec, column.key, now),
+          color: selected ? 'white' : 'gray',
+          inverse: selected,
+        });
+      }
+    }
+
+    if (column.specs.length > 8) {
+      lines.push({ text: `+${column.specs.length - 8} more`, color: 'gray' });
+    }
+
+    return lines.map((line) => ({
+      ...line,
+      text: line.text.length > width ? `${line.text.slice(0, Math.max(0, width - 1))}…` : line.text.padEnd(width, ' '),
+    }));
+  };
+
+  const currentBoardSpec = useMemo<KanbanSpec | null>(() => {
+    for (const column of boardColumns) {
+      const spec = column.specs.find((item) => item.id === boardSelection.specId);
+      if (spec) {
+        return spec;
+      }
+    }
+
+    return null;
+  }, [boardColumns, boardSelection.specId]);
+
+  const refreshBoard = async (): Promise<void> => {
+    if (boardFetchInFlightRef.current) {
+      return;
+    }
+
+    boardFetchInFlightRef.current = true;
+    setBoardLoading(true);
+    setBoardError(null);
+
+    try {
+      const workspace = boardWorkspaceRef.current ?? await resolveWorkspaceForCwd();
+      boardWorkspaceRef.current = workspace;
+
+      if (!workspace) {
+        throw new Error(`No registered workspace matches ${process.cwd()}`);
+      }
+
+      const kanban = await apiJson<KanbanResponse>(`/api/specs/kanban?workspaceId=${encodeURIComponent(workspace.id)}`);
+      const nextColumns = buildBoardColumns(kanban);
+      setBoardColumns(nextColumns);
+      updateBoardSelection(
+        resolveBoardSelection(
+          nextColumns,
+          boardSelectionRef.current.columnIndex,
+          boardSelectionRef.current.specId,
+        ),
+      );
+    } catch (error) {
+      setBoardError((error as Error).message);
+    } finally {
+      boardFetchInFlightRef.current = false;
+      setBoardLoading(false);
+    }
+  };
+
+  const openBoard = (): void => {
+    setBoardOpen(true);
+    void refreshBoard();
+  };
+
+  const approveSpec = async (specSlug: string): Promise<void> => {
+    const normalizedSlug = specSlug.trim();
+    if (!normalizedSlug) {
+      appendOutput({ text: `[${formatClock(new Date())}] usage: approve <spec-slug>`, color: 'red' });
+      return;
+    }
+
+    try {
+      const workspace = boardWorkspaceRef.current ?? await resolveWorkspaceForCwd();
+      boardWorkspaceRef.current = workspace;
+      if (!workspace) {
+        throw new Error(`No registered workspace matches ${process.cwd()}`);
+      }
+
+      await apiJson(`/api/specs/${encodeURIComponent(normalizedSlug)}/approve`, {
+        method: 'POST',
+        body: { workspaceId: workspace.id },
+      });
+
+      appendOutput(
+        { text: `> approve ${normalizedSlug}`, color: 'cyan' },
+        { text: `[forge] approved ${normalizedSlug}`, color: 'green' },
+      );
+    } catch (error) {
+      appendOutput({
+        text: `[${formatClock(new Date())}] approve failed: ${(error as Error).message}`,
+        color: 'red',
+      });
+      throw error;
+    }
+  };
 
   const appendOutput = (...entries: FormattedLine[]): void => {
     if (entries.length === 0) {
@@ -303,7 +423,7 @@ export function Forge(): JSX.Element {
 
   const syncRunMetadata = async (runId: number): Promise<void> => {
     try {
-      const details = await httpJson<RunDetailsResponse>(`http://localhost:3030/api/pipeline/runs/${runId}`);
+      const details = await apiJson<RunDetailsResponse>(`/api/pipeline/runs/${runId}`);
       if (activeRunIdRef.current !== runId || isUnmountedRef.current) {
         return;
       }
@@ -333,7 +453,7 @@ export function Forge(): JSX.Element {
 
   const printRunSummary = async (runId: number, status: string): Promise<void> => {
     try {
-      const details = await httpJson<RunDetailsResponse>(`http://localhost:3030/api/pipeline/runs/${runId}`);
+      const details = await apiJson<RunDetailsResponse>(`/api/pipeline/runs/${runId}`);
       const summary = summarizeRun(details.stories);
       const startedAt = details.run.started_at ? Date.parse(details.run.started_at) : NaN;
       const finishedAt = details.run.finished_at ? Date.parse(details.run.finished_at) : Date.now();
@@ -529,7 +649,7 @@ export function Forge(): JSX.Element {
         throw new Error(`No registered workspace matches ${process.cwd()}`);
       }
 
-      const trigger = await httpJson<TriggerResponse>('http://localhost:3030/api/pipeline/trigger', {
+      const trigger = await apiJson<TriggerResponse>('/api/pipeline/trigger', {
         method: 'POST',
         body: {
           workspaceId: workspace.id,
@@ -569,6 +689,9 @@ export function Forge(): JSX.Element {
       connectWalStream(trigger.runId);
       connectOutputStream(trigger.runId);
       void syncRunMetadata(trigger.runId);
+      if (boardOpen) {
+        void refreshBoard();
+      }
     } catch (error) {
       activeRunIdRef.current = null;
       setForegroundRun(null);
@@ -596,7 +719,7 @@ export function Forge(): JSX.Element {
 
     void (async () => {
       try {
-        await httpJson(`http://localhost:3030/api/pipeline/runs/${foregroundRun.runId}/cancel`, { method: 'POST' });
+        await apiJson(`/api/pipeline/runs/${foregroundRun.runId}/cancel`, { method: 'POST' });
         setForegroundRun((current) => (current ? { ...current, confirmCancel: false } : current));
         appendOutput({
           text: `[${formatClock(new Date())}] cancel requested for run #${foregroundRun.runId}`,
@@ -611,6 +734,50 @@ export function Forge(): JSX.Element {
     })();
 
     return true;
+  };
+
+  const approveSelectedBoardSpec = async (): Promise<void> => {
+    const selectedColumn = boardColumns[boardSelection.columnIndex];
+    if (!selectedColumn || selectedColumn.key !== 'pending' || !currentBoardSpec || boardBusyAction) {
+      return;
+    }
+
+    const selectedId = currentBoardSpec.id;
+    setBoardBusyAction('approve');
+    setBoardColumns((current) => {
+      const pending = current[0];
+      const approved = current[1];
+      return [
+        { ...pending, specs: pending.specs.filter((spec) => spec.id !== selectedId) },
+        { ...approved, specs: [{ ...currentBoardSpec }, ...approved.specs] },
+        current[2],
+      ];
+    });
+    updateBoardSelection({ columnIndex: 1, specId: selectedId });
+
+    try {
+      await approveSpec(selectedId);
+      await refreshBoard();
+    } catch {
+      await refreshBoard();
+    } finally {
+      setBoardBusyAction(null);
+    }
+  };
+
+  const runSelectedBoardSpec = async (): Promise<void> => {
+    const selectedColumn = boardColumns[boardSelection.columnIndex];
+    if (!selectedColumn || selectedColumn.key !== 'approved' || !currentBoardSpec || boardBusyAction) {
+      return;
+    }
+
+    setBoardBusyAction('run');
+    try {
+      await runSpec(currentBoardSpec.id);
+      await refreshBoard();
+    } finally {
+      setBoardBusyAction(null);
+    }
   };
 
   const commands = useMemo<ForgeCommand[]>(
@@ -641,7 +808,8 @@ export function Forge(): JSX.Element {
         label: 'board',
         description: 'Open the board view',
         handler: () => {
-          appendOutput({ text: '> board', color: 'cyan' }, { text: '[forge] board view is not wired yet' });
+          appendOutput({ text: '> board', color: 'cyan' });
+          openBoard();
         },
       },
       {
@@ -667,7 +835,9 @@ export function Forge(): JSX.Element {
         label: 'approve',
         description: 'Approve a pending spec',
         args: ['<spec-slug>'],
-        handler: (args) => appendOutput({ text: `> approve ${args.join(' ')}`.trimEnd(), color: 'cyan' }, { text: `[forge] approve placeholder for "${args.join(' ')}"` }),
+        handler: (args) => {
+          void approveSpec(args.join(' ').trim());
+        },
       },
       {
         id: 'models',
@@ -727,7 +897,7 @@ export function Forge(): JSX.Element {
         handler: () => process.exit(0),
       },
     ],
-    [backendStatus, branchName, foregroundRun, orchestrationState.activeAgent, orchestrationState.phase, phaseOverride],
+    [backendStatus, boardOpen, branchName, foregroundRun, orchestrationState.activeAgent, orchestrationState.phase, phaseOverride],
   );
 
   useEffect(() => {
@@ -743,6 +913,65 @@ export function Forge(): JSX.Element {
     closeRunStreams();
   }, []);
 
+  useEffect(() => {
+    if (!boardOpen) {
+      return;
+    }
+
+    void refreshBoard();
+    const refreshTimer = setInterval(() => {
+      void refreshBoard();
+    }, 5000);
+    const pulseTimer = setInterval(() => {
+      setBoardPulseOn((current) => !current);
+    }, 500);
+
+    return () => {
+      clearInterval(refreshTimer);
+      clearInterval(pulseTimer);
+    };
+  }, [boardOpen]);
+
+  useInput((input, key) => {
+    if (!boardOpen) {
+      return;
+    }
+
+    if (key.escape) {
+      setBoardOpen(false);
+      return;
+    }
+
+    if (key.leftArrow) {
+      updateBoardSelection(moveBoardSelection(boardColumns, boardSelectionRef.current, 'left'));
+      return;
+    }
+
+    if (key.rightArrow) {
+      updateBoardSelection(moveBoardSelection(boardColumns, boardSelectionRef.current, 'right'));
+      return;
+    }
+
+    if (key.upArrow) {
+      updateBoardSelection(moveBoardSelection(boardColumns, boardSelectionRef.current, 'up'));
+      return;
+    }
+
+    if (key.downArrow) {
+      updateBoardSelection(moveBoardSelection(boardColumns, boardSelectionRef.current, 'down'));
+      return;
+    }
+
+    if ((input === 'a' || input === 'A') && !key.ctrl && !key.meta) {
+      void approveSelectedBoardSpec();
+      return;
+    }
+
+    if ((input === 'r' || input === 'R') && !key.ctrl && !key.meta) {
+      void runSelectedBoardSpec();
+    }
+  });
+
   const effectivePhase = phaseOverride ?? orchestrationState.phase;
   const displayedStoryProgress = foregroundRun
     ? `${foregroundRun.currentStory}/${foregroundRun.totalStories}`
@@ -751,7 +980,20 @@ export function Forge(): JSX.Element {
     ? foregroundRun.confirmCancel
       ? `Cancel run #${foregroundRun.runId}? Press Ctrl+C again to confirm, Esc to resume.`
       : 'Run in progress... Press Ctrl+C to cancel.'
+    : boardOpen
+      ? 'Board active... use arrows, r, a, or Esc.'
     : undefined;
+  const boardColumnWidth = Math.max(18, Math.floor((leftColumnWidth - 6) / 3));
+  const boardRenderedColumns = boardColumns.map((column) =>
+    renderBoardColumnLines(
+      column,
+      boardSelection.columnIndex === boardColumns.findIndex((item) => item.key === column.key) ? boardSelection.specId : null,
+      boardColumnWidth,
+    ),
+  );
+  const boardLineCount = Math.max(...boardRenderedColumns.map((column) => column.length), 1);
+  const boardCanApprove = boardColumns[boardSelection.columnIndex]?.key === 'pending' && Boolean(currentBoardSpec);
+  const boardCanRun = boardColumns[boardSelection.columnIndex]?.key === 'approved' && Boolean(currentBoardSpec);
 
   return (
     <Box flexDirection="column" width={stdoutWidth} height={stdoutHeight}>
@@ -764,11 +1006,40 @@ export function Forge(): JSX.Element {
 
       <Box flexGrow={1}>
         <Box borderStyle="single" flexDirection="column" width={leftColumnWidth} paddingX={1}>
-          {visibleOutput.map((line) => (
-            <Text key={line.key} color={line.color} dimColor={line.dimColor}>
-              {line.text}
-            </Text>
-          ))}
+          {boardOpen ? (
+            <>
+              <Text color="cyan">{'PENDING'.padEnd(boardColumnWidth, ' ')}│{'APPROVED'.padEnd(boardColumnWidth, ' ')}│{'RUNNING/DONE'.padEnd(boardColumnWidth, ' ')}</Text>
+              <Text color="gray">{'─'.repeat(boardColumnWidth)}│{'─'.repeat(boardColumnWidth)}│{'─'.repeat(boardColumnWidth)}</Text>
+              {boardLoading && boardColumns.every((column) => column.specs.length === 0) ? (
+                <Text color="gray">Loading board…</Text>
+              ) : null}
+              {boardError ? (
+                <Text color="red">{boardError}</Text>
+              ) : null}
+              {Array.from({ length: Math.min(mainHeight - 3, boardLineCount) }, (_, rowIndex) => (
+                <Text key={`board-row-${rowIndex}`}>
+                  {boardRenderedColumns.map((columnLines, columnIndex) => {
+                    const line = columnLines[rowIndex] ?? { text: ''.padEnd(boardColumnWidth, ' ') };
+                    return (
+                      <Text key={`board-cell-${columnIndex}`} color={line.color} inverse={line.inverse}>
+                        {columnIndex > 0 ? '│' : ''}
+                        {line.text}
+                      </Text>
+                    );
+                  })}
+                </Text>
+              ))}
+              <Text color="gray">
+                [r] run {boardCanRun ? '' : '(approved only)'}  [a] approve {boardCanApprove ? '' : '(pending only)'}  [Esc] back
+              </Text>
+            </>
+          ) : (
+            visibleOutput.map((line) => (
+              <Text key={line.key} color={line.color} dimColor={line.dimColor}>
+                {line.text}
+              </Text>
+            ))
+          )}
         </Box>
 
         <Box borderStyle="single" flexDirection="column" width={CONTEXT_WIDTH} paddingX={1}>
@@ -793,7 +1064,7 @@ export function Forge(): JSX.Element {
       <Box borderStyle="single" flexDirection="column" paddingX={1} minHeight={3}>
         <CommandPalette
           commands={commands}
-          disabled={Boolean(foregroundRun)}
+          disabled={Boolean(foregroundRun) || boardOpen}
           disabledMessage={disabledMessage}
           onCtrlC={requestCancel}
           onEscape={() => {

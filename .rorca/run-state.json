@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T05:29:12.733Z",
+  "lastUpdatedAt": "2026-05-03T05:36:59.199Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -133,6 +133,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 549187
+    },
+    {
+      "storyId": "CLI-012",
+      "title": "'board' command: inline kanban summary in the main viewport",
+      "status": "passed",
+      "startedAt": "2026-05-03T05:29:28.352Z",
+      "finishedAt": "2026-05-03T05:36:59.199Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 450847
     }
   ],
   "failedStories": [],
