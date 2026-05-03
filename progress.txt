@@ -3,9 +3,9 @@
 Spec: rorca-cli-tui-and-mcp-hardening
 Run ID: 20260316000241
 Started: 2026-05-03T04:28:17.577Z
-Last Updated: 2026-05-03T06:41:24.570Z
+Last Updated: 2026-05-03T06:50:20.947Z
 
-## Completed Stories (24)
+## Completed Stories (25)
 - CLI-001: Add 'pi' as a 4th AgentType in config.ts and VALID_AGENT_TYPES — DONE (codex, gpt-5.4, 113s)
 - CLI-002: Create pi-detector.ts — binary detection, version parsing, model listing — DONE (codex, gpt-5.4, 58s)
 - CLI-003: Expose pi-detector in GET /api/health endpoint — DONE (codex, gpt-5.4, 79s)
@@ -30,3 +30,4 @@ Last Updated: 2026-05-03T06:41:24.570Z
 - CLI-030: FinOps: cross-provider cost aggregation dashboard for pi runs — DONE (codex, gpt-5.4, 340s)
 - CLI-033: DB Strategy Orchestrator — Native PG default, Docker opt-in (Strategy C) — DONE (codex, gpt-5.4, 351s)
 - CLI-039: Lite Mode Contract — explicit 503s for AGE-dependent routes when graph extension missing — DONE (codex, gpt-5.4, 456s)
+- CLI-044: Lite-to-Full Migration — pg_dump from native to Docker for graph upgrade — DONE (codex, gpt-5.4, 521s)

@@ -26,6 +26,10 @@ export function createPool(): Pool {
   return new Pool({ connectionString: DATABASE_URL });
 }
 
+export function createPoolForConnectionString(connectionString: string): Pool {
+  return new Pool({ connectionString });
+}
+
 // ── Duplicate-prefix guard ────────────────────────────────────────────────
 /**
  * Checks a list of migration filenames for duplicate numeric prefixes.
@@ -95,16 +99,22 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
       CREATE TABLE IF NOT EXISTS public.schema_migrations (
         version BIGINT PRIMARY KEY,
         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        filename TEXT NOT NULL
+        filename TEXT NOT NULL,
+        skipped_in_lite_mode BOOLEAN NOT NULL DEFAULT FALSE
       )
+    `);
+
+    await client.query(`
+      ALTER TABLE public.schema_migrations
+      ADD COLUMN IF NOT EXISTS skipped_in_lite_mode BOOLEAN NOT NULL DEFAULT FALSE
     `);
 
     await client.query(`
       DO $$
       BEGIN
         IF to_regclass('rorca.schema_migrations') IS NOT NULL THEN
-          INSERT INTO public.schema_migrations (version, applied_at, filename)
-          SELECT version, applied_at, filename
+          INSERT INTO public.schema_migrations (version, applied_at, filename, skipped_in_lite_mode)
+          SELECT version, applied_at, filename, FALSE
           FROM rorca.schema_migrations
           ON CONFLICT (version) DO NOTHING;
         END IF;
@@ -222,7 +232,7 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
           // Record as applied to prevent retries
           try {
             await client.query(
-              'INSERT INTO public.schema_migrations (version, filename) VALUES ($1, $2)',
+              'INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode) VALUES ($1, $2, TRUE)',
               [version, `${file} [skipped: extension unavailable]`]
             );
           } catch {
@@ -247,6 +257,40 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     if (advisoryLockHeld) {
       try { await client.query('SELECT pg_advisory_unlock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]); } catch { /* best-effort */ }
     }
+    client.release();
+    if (ownPool) await pool.end();
+  }
+}
+
+export async function prepareLiteSkippedMigrationsForReplay(pool?: Pool): Promise<number[]> {
+  const ownPool = !pool;
+  if (!pool) pool = createPool();
+
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      ALTER TABLE public.schema_migrations
+      ADD COLUMN IF NOT EXISTS skipped_in_lite_mode BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+
+    const { rows } = await client.query<{ version: string }>(`
+      SELECT version::text
+      FROM public.schema_migrations
+      WHERE skipped_in_lite_mode = TRUE
+         OR filename LIKE '%[skipped: extension unavailable]%'
+      ORDER BY version ASC
+    `);
+
+    const versions = rows.map((row) => Number(row.version));
+    if (versions.length === 0) return [];
+
+    await client.query(
+      'DELETE FROM public.schema_migrations WHERE version = ANY($1::bigint[])',
+      [versions]
+    );
+
+    return versions;
+  } finally {
     client.release();
     if (ownPool) await pool.end();
   }
