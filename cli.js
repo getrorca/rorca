@@ -3,11 +3,13 @@
 import { readFileSync, existsSync, mkdirSync } from 'fs';
 import { join, dirname } from 'path';
 import { fileURLToPath } from 'url';
-import { execSync, fork, spawn } from 'child_process';
+import { execSync } from 'child_process';
 import { homedir } from 'os';
+import { createRequire } from 'module';
 
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = dirname(__filename);
+const require = createRequire(import.meta.url);
 
 const pkg = JSON.parse(readFileSync(join(__dirname, 'package.json'), 'utf8'));
 
@@ -80,67 +82,71 @@ if (!existsSync(join(distDir, 'index.html'))) {
   }
 }
 
-// ─── Start the server ───
-console.log(`Starting Rorca on port ${portNum}...`);
-console.log(`Database: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
+await runStart();
 
-const env = {
-  ...process.env,
-  PORT: String(portNum),
-  DATABASE_URL: databaseUrl,
-  RORCA_SERVE_STATIC: '1',
-  RORCA_STATIC_DIR: distDir,
-  RORCA_HOME: rorchHome,
-  NODE_ENV: process.env.NODE_ENV || 'production',
-};
+async function runStart() {
+  console.log(`Starting Rorca on port ${portNum}...`);
+  console.log(`Database: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
 
-const backendDir = join(__dirname, 'backend');
-const backendEntry = join(backendDir, 'dist', 'server.js');
-const backendTsEntry = join(backendDir, 'src', 'server.ts');
+  const backendDir = join(__dirname, 'backend');
+  const apiEntry = join(backendDir, 'dist', 'server.js');
+  const workerEntry = join(backendDir, 'dist', 'worker.js');
+  const supervisorEntry = join(backendDir, 'dist', 'lib', 'supervisor.js');
 
-let child;
-if (existsSync(backendEntry)) {
-  // Production: run compiled JS via fork (Node.js child process)
-  child = fork(backendEntry, [], { env, cwd: backendDir, stdio: 'inherit' });
-} else if (existsSync(backendTsEntry)) {
-  // Development: use tsx to run TypeScript source directly
-  child = spawn('npx', ['tsx', backendTsEntry], {
-    env,
-    cwd: backendDir,
-    stdio: 'inherit',
-    shell: true,
-  });
-} else {
-  console.error('Could not find backend entry point. Run "npm run build" first.');
-  process.exit(1);
-}
-
-child.on('error', (err) => {
-  console.error('Failed to start server:', err.message);
-  process.exit(1);
-});
-
-child.on('exit', (code) => {
-  if (code !== 0 && code !== null) {
-    console.error(`Server exited with code ${code}`);
+  if (!existsSync(apiEntry) || !existsSync(workerEntry) || !existsSync(supervisorEntry)) {
+    console.error('Compiled backend entry points are missing. Run "npm run build" first.');
+    process.exit(1);
   }
-  process.exit(code ?? 1);
-});
 
-// Open browser after a short delay to let server start
-if (!noOpen) {
-  setTimeout(() => {
-    const url = `http://localhost:${portNum}`;
-    console.log(`Opening ${url} in your browser...`);
-    openBrowser(url);
-  }, 1500);
-}
+  const env = {
+    ...process.env,
+    PORT: String(portNum),
+    DATABASE_URL: databaseUrl,
+    RORCA_SERVE_STATIC: '1',
+    RORCA_STATIC_DIR: distDir,
+    RORCA_HOME: rorchHome,
+    NODE_ENV: process.env.NODE_ENV || 'production',
+  };
 
-// Forward signals for clean shutdown
-for (const sig of ['SIGINT', 'SIGTERM']) {
-  process.on(sig, () => {
-    child.kill(sig);
+  const { Supervisor } = require(supervisorEntry);
+  const supervisor = new Supervisor({
+    api: {
+      cmd: process.execPath,
+      args: [apiEntry],
+      env: { ...env, RORCA_PROCESS_ROLE: 'api' },
+      cwd: backendDir,
+    },
+    worker: {
+      cmd: process.execPath,
+      args: [workerEntry],
+      env: { ...env, RORCA_PROCESS_ROLE: 'worker' },
+      cwd: backendDir,
+    },
+    apiHealthUrl: `http://localhost:${portNum}/api/health`,
+    healthTimeoutMs: 10_000,
   });
+
+  try {
+    await supervisor.start();
+  } catch (err) {
+    console.error(`Failed to start Rorca: ${err instanceof Error ? err.message : String(err)}`);
+    process.exit(1);
+  }
+
+  if (!noOpen) {
+    setTimeout(() => {
+      const url = `http://localhost:${portNum}`;
+      console.log(`Opening ${url} in your browser...`);
+      openBrowser(url);
+    }, 1500);
+  }
+
+  for (const sig of ['SIGINT', 'SIGTERM']) {
+    process.on(sig, async () => {
+      await supervisor.stop();
+      process.exit(0);
+    });
+  }
 }
 
 function openBrowser(url) {
