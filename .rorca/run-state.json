@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T09:43:12.368Z",
+  "lastUpdatedAt": "2026-05-03T10:29:56.313Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -353,6 +353,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 2700030
+    },
+    {
+      "storyId": "CLI-034",
+      "title": "Workspace Migration — packages/rorca-cli/ via npm workspaces (single published package)",
+      "status": "passed",
+      "startedAt": "2026-05-03T09:43:57.091Z",
+      "finishedAt": "2026-05-03T10:29:56.312Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 2759221
     }
   ],
   "failedStories": [
