@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T23:26:07.695Z",
+  "lastUpdatedAt": "2026-05-03T23:35:02.099Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -493,6 +493,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 544951
+    },
+    {
+      "storyId": "CLI-054",
+      "title": "OPEN-CORE P0: Public API Contract Enforcement — break-detection CI gate",
+      "status": "passed",
+      "startedAt": "2026-05-03T23:26:28.075Z",
+      "finishedAt": "2026-05-03T23:35:02.099Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 514024
     }
   ],
   "failedStories": [],
