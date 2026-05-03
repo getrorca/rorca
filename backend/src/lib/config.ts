@@ -1,7 +1,7 @@
 // ─── Agent Configuration ─────────────────────────────────────────────────────
 // OC-001: RORCA_AGENT and RORCA_MODEL env var support for multi-agent execution.
 
-export const VALID_AGENT_TYPES = ['claude', 'opencode', 'codex'] as const;
+export const VALID_AGENT_TYPES = ['claude', 'opencode', 'codex', 'pi'] as const;
 export type AgentType = typeof VALID_AGENT_TYPES[number];
 
 export interface AgentConfig {
