@@ -1423,6 +1423,51 @@ describe('V2-083: Story exclusion', () => {
   });
 });
 
+describe('PUT /api/specs/:specId/stories/:storyId', () => {
+  function seedEditableSpec(dir: string, slug: string) {
+    fs.mkdirSync(dir, { recursive: true });
+    const spec = {
+      title: slug,
+      userStories: [
+        {
+          id: 'US-001',
+          title: 'Original title',
+          description: 'Original description',
+          acceptanceCriteria: ['AC1'],
+          complexity: 2,
+          dependsOn: [],
+          passes: false,
+        },
+      ],
+      generatedAt: '2026-03-12T00:00:00.000Z',
+    };
+    fs.writeFileSync(path.join(dir, `${slug}.json`), JSON.stringify(spec, null, 2), 'utf8');
+  }
+
+  test('updates title and complexity for a single story', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
+    seedEditableSpec(pendingDir, 'story-edit-test');
+
+    const res = await request(app)
+      .put('/api/specs/story-edit-test/stories/US-001')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Edited title',
+        complexity: 5,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.story.title).toBe('Edited title');
+    expect(res.body.story.complexity).toBe(5);
+
+    const content = JSON.parse(fs.readFileSync(path.join(pendingDir, 'story-edit-test.json'), 'utf8'));
+    expect(content.userStories[0].title).toBe('Edited title');
+    expect(content.userStories[0].complexity).toBe(5);
+  });
+});
+
 // ─── SV-001: GET /:specId/check — Structural spec validation ──────────────────
 
 describe('GET /api/specs/:id/check', () => {
