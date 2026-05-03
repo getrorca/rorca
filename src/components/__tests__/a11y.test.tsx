@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * ULT-021: Automated accessibility regression tests.
  * Uses axe-core to verify WCAG 2.1 AA compliance on key components.
  * Run: npx vitest run src/components/__tests__/a11y.test.tsx

@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useEffect, useMemo, useState } from 'react';
 import type { FormEvent } from 'react';
 import { AlertTriangle, Loader2, Save, Trash2, User as UserIcon } from 'lucide-react';

@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * Tests for the centralized error handler middleware (US-046).
  * Verifies that all AppError subclasses serialize to the standard
  * { error, code, details? } shape and that non-AppError errors return 500

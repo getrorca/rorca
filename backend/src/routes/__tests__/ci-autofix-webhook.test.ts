@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * Tests for ci-autofix/webhook-handler.ts:
  * - check_run handler fires WAL event on failure
  * - non-failure conclusions are silently ignored

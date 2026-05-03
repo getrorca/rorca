@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * PR-008: Structured JSON logging via pino.
  *
  * - Production: JSON format (pipe to Datadog / Grafana Loki / ELK)

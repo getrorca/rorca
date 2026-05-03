@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Zap, ArrowUpDown, Calendar, Loader2, AlertTriangle, Check } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
