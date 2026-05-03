@@ -3,7 +3,8 @@ import { agentType, agentModel, AgentType, VALID_AGENT_TYPES, validateOrchestrat
 import { loadOrchestrationConfig, clearConfigCache } from '../lib/complexity-scorer';
 import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
-import { detectPi } from '../lib/pi-detector';
+import { detectPi, listPiModels, PI_INSTALL_METHODS } from '../lib/pi-detector';
+import type { PiModel } from '../lib/pi-detector';
 import { getClaudeAuthState, triggerClaudeLogin, triggerClaudeLogout } from '../lib/claude-auth';
 import { getCodexAuthState, triggerCodexLogin, triggerCodexLogout } from '../lib/codex-auth';
 import { queryOne, execute } from '../db/index';
@@ -13,7 +14,7 @@ import { loadRorcaConfig, writeRorcaConfig, invalidateConfigCache } from '../lib
 import * as fs from 'fs';
 import * as path from 'path';
 import * as os from 'os';
-import { AuthError, NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
+import { AuthError, DependencyNotFoundError, NotFoundError, TooManyRequestsError, ValidationError } from '../lib/errors';
 import { detectCapability, OpenRouterModelMetadata } from '../lib/reasoning-detector';
 import { isModelMarkedNonReasoning } from '../lib/llm-client';
 
@@ -33,6 +34,7 @@ const router = Router();
 let currentAgentType: AgentType = agentType;
 let currentAgentModel: string | null = agentModel;
 let _persistedLoaded = false;
+let cachedPiModels: { models: PiModel[]; ts: number } | null = null;
 
 /**
  * Derive the workflow_configs provider value from agent runtime and model.
@@ -1331,6 +1333,44 @@ router.get('/model-capability', async (req: Request, res: Response) => {
     ...finalCapability,
     fromGracefulDegradationCache: markedNonReasoning,
     cachedAt: now,
+  });
+});
+
+/**
+ * @swagger
+ * /api/config/pi-models:
+ *   get:
+ *     summary: Get available Pi CLI models
+ *     description: Detects the local Pi CLI installation and returns the available models from `pi --list-models`. Results are cached in memory for 60 seconds.
+ *     tags: [Config]
+ *     responses:
+ *       200:
+ *         description: List of Pi CLI models
+ *       404:
+ *         description: Pi CLI is not installed
+ */
+router.get('/pi-models', (_req: Request, res: Response) => {
+  const status = detectPi();
+  if (!status.piInstalled || !status.piBinPath) {
+    throw new DependencyNotFoundError('Pi CLI not installed', 'PI_NOT_FOUND', {
+      installMethods: PI_INSTALL_METHODS,
+    });
+  }
+
+  const now = Date.now();
+  const models =
+    cachedPiModels && now - cachedPiModels.ts < 60_000
+      ? cachedPiModels.models
+      : (() => {
+          const freshModels = listPiModels(status.piBinPath!);
+          cachedPiModels = { models: freshModels, ts: now };
+          return freshModels;
+        })();
+
+  res.json({
+    models,
+    count: models.length,
+    piBinPath: status.piBinPath,
   });
 });
 
