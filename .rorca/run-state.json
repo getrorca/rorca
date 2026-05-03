@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T05:58:56.044Z",
+  "lastUpdatedAt": "2026-05-03T06:04:48.156Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -173,6 +173,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 413205
+    },
+    {
+      "storyId": "CLI-018",
+      "title": "TUI story editor: inline story editing from the 'forge' command output",
+      "status": "passed",
+      "startedAt": "2026-05-03T05:59:11.374Z",
+      "finishedAt": "2026-05-03T06:04:48.156Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 336782
     }
   ],
   "failedStories": [],

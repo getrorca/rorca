@@ -53,6 +53,16 @@ import {
 } from './modelPicker';
 import type { AgentType } from '../lib/config';
 import type { PiModel } from '../lib/pi-detector';
+import {
+  getEffectiveStoryDraft,
+  normalizeSpecStories,
+  updateComplexityDraft,
+  updateTitleDraft,
+  validateStoryDraft,
+  type StoryEditorDirtyMap,
+  type StoryEditorFocus,
+  type StoryEditorStory,
+} from './storyEditor';
 
 const MAX_OUTPUT_LINES = 500;
 const CONTEXT_WIDTH = 35;
@@ -77,24 +87,18 @@ interface WorkspaceListResponse {
   workspaces?: WorkspaceMatch[];
 }
 
-interface GeneratedStorySummary {
-  id: string;
-  title: string;
-  complexity?: number;
-}
-
 interface GeneratedSpecActionState {
   workspace: WorkspaceMatch;
   brief: string;
   slug: string;
-  stories: GeneratedStorySummary[];
+  stories: StoryEditorStory[];
 }
 
 interface GenerateSpecResponse {
   id?: string;
   slug?: string;
-  userStories?: GeneratedStorySummary[];
-  stories?: GeneratedStorySummary[];
+  userStories?: unknown[];
+  stories?: unknown[];
   async?: boolean;
   jobId?: string;
   error?: string;
@@ -240,6 +244,19 @@ interface ModelPickerState {
   installMethods: PiInstallMethods | null;
 }
 
+interface StoryEditorState {
+  workspace: WorkspaceMatch;
+  specSlug: string;
+  stories: StoryEditorStory[];
+  storyIndex: number;
+  focus: StoryEditorFocus;
+  dirtyMap: StoryEditorDirtyMap;
+  loading: boolean;
+  saving: boolean;
+  status: string | null;
+  error: string | null;
+}
+
 const WAL_STREAM_URL = 'http://localhost:3030/api/pipeline/stream';
 
 function safeBranchName(): string {
@@ -367,28 +384,11 @@ function sleep(ms: number): Promise<void> {
   return new Promise((resolve) => setTimeout(resolve, ms));
 }
 
-function normalizeGeneratedStories(payload: {
-  userStories?: GeneratedStorySummary[];
-  stories?: GeneratedStorySummary[];
-}): GeneratedStorySummary[] {
-  const stories = Array.isArray(payload.userStories)
-    ? payload.userStories
-    : Array.isArray(payload.stories)
-      ? payload.stories
-      : [];
-
-  return stories.map((story) => ({
-    id: story.id,
-    title: story.title,
-    complexity: story.complexity,
-  }));
-}
-
 function formatStoryComplexity(complexity?: number): string {
   return Number.isInteger(complexity) ? `C${complexity}` : '—';
 }
 
-function formatStoryTableLine(story: GeneratedStorySummary): string {
+function formatStoryTableLine(story: StoryEditorStory): string {
   return `${story.id.padEnd(10, ' ')} ${truncateText(story.title, STORY_TITLE_WIDTH).padEnd(STORY_TITLE_WIDTH, ' ')} ${formatStoryComplexity(story.complexity)}`;
 }
 
@@ -472,6 +472,7 @@ export function Forge(): JSX.Element {
   const [forgeGenerationBrief, setForgeGenerationBrief] = useState<string | null>(null);
   const [forgeSpinnerFrameIndex, setForgeSpinnerFrameIndex] = useState(0);
   const [generatedSpecAction, setGeneratedSpecAction] = useState<GeneratedSpecActionState | null>(null);
+  const [storyEditorState, setStoryEditorState] = useState<StoryEditorState | null>(null);
   const [recallState, setRecallState] = useState<RecallState | null>(null);
   const [modelPickerState, setModelPickerState] = useState<ModelPickerState | null>(null);
   const { orchestrationState, backendStatus, backendMessage } = useOrchestrationState();
@@ -487,6 +488,7 @@ export function Forge(): JSX.Element {
   const boardWorkspaceRef = useRef<WorkspaceMatch | null>(null);
   const boardFetchInFlightRef = useRef(false);
   const boardSelectionRef = useRef<BoardSelection>({ columnIndex: 0, specId: null });
+  const storyEditorStateRef = useRef<StoryEditorState | null>(null);
 
   const workspaceName = useMemo(() => path.basename(process.cwd()) || 'workspace', []);
   const stdoutWidth = stdout?.columns ?? 80;
@@ -1144,7 +1146,7 @@ export function Forge(): JSX.Element {
             workspace,
             brief,
             slug,
-            stories: normalizeGeneratedStories(spec),
+            stories: normalizeSpecStories(spec),
           };
         }
       }
@@ -1161,7 +1163,7 @@ export function Forge(): JSX.Element {
       workspace,
       brief,
       slug,
-      stories: normalizeGeneratedStories(response),
+      stories: normalizeSpecStories(response),
     };
   };
 
@@ -1177,6 +1179,162 @@ export function Forge(): JSX.Element {
     }
 
     appendOutput(...lines);
+  };
+
+  const loadSpecStories = async (
+    workspace: WorkspaceMatch,
+    specSlug: string,
+  ): Promise<StoryEditorStory[]> => {
+    const spec = await apiJson<GenerateSpecResponse>(`/api/specs/${encodeURIComponent(specSlug)}?workspaceId=${encodeURIComponent(workspace.id)}`);
+    return normalizeSpecStories(spec);
+  };
+
+  const findSpecRunStatus = async (
+    workspaceId: string,
+    specSlug: string,
+  ): Promise<'running' | 'queued' | null> => {
+    const kanban = await apiJson<KanbanResponse>(`/api/specs/kanban?workspaceId=${encodeURIComponent(workspaceId)}`);
+    const spec = [...kanban.draft, ...kanban.inProgress, ...kanban.done].find((item) => item.id === specSlug);
+    return spec?.activeRunStatus ?? null;
+  };
+
+  const openStoryEditor = async (generated: GeneratedSpecActionState): Promise<void> => {
+    setGeneratedSpecAction(null);
+    setStoryEditorState({
+      workspace: generated.workspace,
+      specSlug: generated.slug,
+      stories: generated.stories,
+      storyIndex: 0,
+      focus: 'title',
+      dirtyMap: new Map(),
+      loading: true,
+      saving: false,
+      status: null,
+      error: null,
+    });
+
+    try {
+      const stories = await loadSpecStories(generated.workspace, generated.slug);
+      setStoryEditorState((current) => current
+        ? {
+            ...current,
+            stories,
+            loading: false,
+            status: `Editing ${stories[0]?.id ?? 'story'}`,
+          }
+        : current);
+    } catch (error) {
+      const message = getUserFriendlyError(error);
+      appendOutput({ text: `[${formatClock(new Date())}] story editor failed: ${message}`, color: 'red' });
+      setStoryEditorState(null);
+    }
+  };
+
+  const saveEditorStory = async (
+    editor: StoryEditorState,
+    storyId: string,
+  ): Promise<{ ok: true } | { ok: false; message: string }> => {
+    const story = editor.stories.find((item) => item.id === storyId);
+    if (!story) {
+      return { ok: false, message: `${storyId}: story not found` };
+    }
+
+    const validationError = validateStoryDraft(story, editor.dirtyMap);
+    if (validationError) {
+      return { ok: false, message: validationError };
+    }
+
+    const runStatus = await findSpecRunStatus(editor.workspace.id, editor.specSlug);
+    if (runStatus === 'running') {
+      return { ok: false, message: `${storyId}: spec is running; stop the pipeline before editing` };
+    }
+
+    const draft = editor.dirtyMap.get(storyId);
+    if (!draft) {
+      return { ok: true };
+    }
+
+    try {
+      const response = await apiJson<{ ok: boolean; story: StoryEditorStory }>(
+        `/api/specs/${encodeURIComponent(editor.specSlug)}/stories/${encodeURIComponent(storyId)}`,
+        {
+          method: 'PUT',
+          body: {
+            workspaceId: editor.workspace.id,
+            ...(draft.title !== undefined ? { title: draft.title.trim() } : {}),
+            ...(draft.complexity !== undefined ? { complexity: draft.complexity } : {}),
+          },
+        },
+      );
+
+      setStoryEditorState((current) => {
+        if (!current || current.specSlug !== editor.specSlug) {
+          return current;
+        }
+
+        const nextDirty = new Map(current.dirtyMap);
+        nextDirty.delete(storyId);
+        return {
+          ...current,
+          stories: current.stories.map((item) => item.id === storyId ? response.story : item),
+          dirtyMap: nextDirty,
+          status: `${storyId} saved`,
+          error: null,
+        };
+      });
+
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, message: `${storyId}: ${getUserFriendlyError(error)}` };
+    }
+  };
+
+  const saveAllEditorStories = async (
+    editor: StoryEditorState,
+    returnToSummary: boolean,
+  ): Promise<void> => {
+    const dirtyIds = Array.from(editor.dirtyMap.keys());
+    if (dirtyIds.length === 0) {
+      setStoryEditorState(returnToSummary ? null : { ...editor, status: 'No unsaved changes', error: null });
+      return;
+    }
+
+    setStoryEditorState((current) => current ? { ...current, saving: true, status: `Saving ${dirtyIds.length} stor${dirtyIds.length === 1 ? 'y' : 'ies'}...`, error: null } : current);
+    const failures: string[] = [];
+
+    for (const storyId of dirtyIds) {
+      const snapshot = storyEditorStateRef.current;
+      if (!snapshot) {
+        return;
+      }
+
+      const result = await saveEditorStory(snapshot, storyId);
+      if (!result.ok) {
+        failures.push(result.message);
+      }
+    }
+
+    if (failures.length > 0) {
+      setStoryEditorState((current) => current
+        ? {
+            ...current,
+            saving: false,
+            status: `${dirtyIds.length - failures.length}/${dirtyIds.length} stories saved`,
+            error: failures.join(' | '),
+          }
+        : current);
+      return;
+    }
+
+    appendOutput({ text: `[forge] saved ${dirtyIds.length} stor${dirtyIds.length === 1 ? 'y' : 'ies'} for ${editor.specSlug}`, color: 'green' });
+    if (returnToSummary) {
+      setStoryEditorState(null);
+      return;
+    }
+
+    setStoryEditorState((current) => current
+      ? { ...current, saving: false, status: 'All changes saved', error: null }
+      : current);
   };
 
   const startForgeGeneration = async (rawBrief: string): Promise<void> => {
@@ -1547,6 +1705,10 @@ export function Forge(): JSX.Element {
   }, []);
 
   useEffect(() => {
+    storyEditorStateRef.current = storyEditorState;
+  }, [storyEditorState]);
+
+  useEffect(() => {
     if (!forgeGenerationBrief && !modelPickerState?.loading) {
       return;
     }
@@ -1779,6 +1941,121 @@ export function Forge(): JSX.Element {
       return;
     }
 
+    if (storyEditorState) {
+      if (key.escape) {
+        setStoryEditorState(null);
+        return;
+      }
+
+      if (storyEditorState.loading || storyEditorState.saving) {
+        return;
+      }
+
+      const currentStory = storyEditorState.stories[storyEditorState.storyIndex];
+      if (!currentStory) {
+        return;
+      }
+
+      if (key.tab) {
+        setStoryEditorState((current) => current
+          ? {
+              ...current,
+              focus: current.focus === 'title' ? 'complexity' : 'title',
+              error: null,
+            }
+          : current);
+        return;
+      }
+
+      if (key.pageDown) {
+        setStoryEditorState((current) => current
+          ? {
+              ...current,
+              storyIndex: Math.min(current.stories.length - 1, current.storyIndex + 1),
+              error: null,
+            }
+          : current);
+        return;
+      }
+
+      if (key.pageUp) {
+        setStoryEditorState((current) => current
+          ? {
+              ...current,
+              storyIndex: Math.max(0, current.storyIndex - 1),
+              error: null,
+            }
+          : current);
+        return;
+      }
+
+      if ((input === 's' || input === 'S') && !key.ctrl && !key.meta) {
+        void saveAllEditorStories(storyEditorState, true);
+        return;
+      }
+
+      if (key.return) {
+        setStoryEditorState((current) => current ? { ...current, saving: true, status: `Saving ${currentStory.id}...`, error: null } : current);
+        void saveEditorStory(storyEditorState, currentStory.id).then((result) => {
+          if (!result.ok) {
+            setStoryEditorState((current) => current
+              ? { ...current, saving: false, error: result.message, status: null }
+              : current);
+            return;
+          }
+
+          setStoryEditorState((current) => current
+            ? { ...current, saving: false, error: null, status: `${currentStory.id} saved` }
+            : current);
+        });
+        return;
+      }
+
+      if (storyEditorState.focus === 'complexity' && (key.leftArrow || key.rightArrow)) {
+        setStoryEditorState((current) => current
+          ? {
+              ...current,
+              dirtyMap: updateComplexityDraft(current.dirtyMap, current.stories[current.storyIndex], key.rightArrow ? 1 : -1),
+              error: null,
+              status: null,
+            }
+          : current);
+        return;
+      }
+
+      if (storyEditorState.focus === 'title' && (key.backspace || key.delete)) {
+        setStoryEditorState((current) => current
+          ? {
+              ...current,
+              dirtyMap: updateTitleDraft(
+                current.dirtyMap,
+                current.stories[current.storyIndex],
+                getEffectiveStoryDraft(current.stories[current.storyIndex], current.dirtyMap).title.slice(0, -1),
+              ),
+              error: null,
+              status: null,
+            }
+          : current);
+        return;
+      }
+
+      if (storyEditorState.focus === 'title' && !key.ctrl && !key.meta && input) {
+        setStoryEditorState((current) => current
+          ? {
+              ...current,
+              dirtyMap: updateTitleDraft(
+                current.dirtyMap,
+                current.stories[current.storyIndex],
+                getEffectiveStoryDraft(current.stories[current.storyIndex], current.dirtyMap).title + input,
+              ),
+              error: null,
+              status: null,
+            }
+          : current);
+      }
+      return;
+    }
+
     if (generatedSpecAction) {
       if (key.return) {
         const next = generatedSpecAction;
@@ -1794,11 +2071,8 @@ export function Forge(): JSX.Element {
       }
 
       if ((input === 'e' || input === 'E') && !key.ctrl && !key.meta) {
-        appendOutput(
-          { text: `> edit stories ${generatedSpecAction.slug}`, color: 'cyan' },
-          { text: `[forge] story editor not wired yet — spec saved as pending: ${generatedSpecAction.slug}`, color: 'yellow' },
-        );
-        setGeneratedSpecAction(null);
+        appendOutput({ text: `> edit stories ${generatedSpecAction.slug}`, color: 'cyan' });
+        void openStoryEditor(generatedSpecAction);
         return;
       }
 
@@ -1882,12 +2156,17 @@ export function Forge(): JSX.Element {
   const recallHeader = recallState
     ? formatRecallHeader(recallState.query, recallState.entries.length, Math.max(20, leftColumnWidth - 2))
     : null;
+  const editorStory = storyEditorState?.stories[storyEditorState.storyIndex] ?? null;
+  const editorDraft = editorStory && storyEditorState
+    ? getEffectiveStoryDraft(editorStory, storyEditorState.dirtyMap)
+    : null;
   const commandPaletteDisabled = Boolean(foregroundRun)
     || boardOpen
     || Boolean(generatedSpecAction)
     || Boolean(forgeGenerationBrief)
     || Boolean(recallState)
-    || Boolean(modelPickerState);
+    || Boolean(modelPickerState)
+    || Boolean(storyEditorState);
   const commandPaletteDisabledMessage = recallState
     ? recallState.form
       ? recallState.form.saving
@@ -1900,6 +2179,12 @@ export function Forge(): JSX.Element {
         : modelPickerState.switching
           ? 'Switching agent...'
           : '[↑/↓] Navigate  [Enter] Use Pi model  [c/o/d] Switch agent  [Esc] Back'
+    : storyEditorState
+      ? storyEditorState.loading
+        ? `${GENERATE_SPINNER_FRAMES[forgeSpinnerFrameIndex]} Loading stories...`
+        : storyEditorState.saving
+          ? 'Saving story edits...'
+          : '[Tab] Focus  [Enter] Save  [PgUp/PgDn] Story  [s] Save all  [Esc] Discard'
     : generatedSpecAction
       ? '[Enter] Approve + Run  [s] Save as pending  [e] Edit stories  [Esc] Cancel'
       : forgeGenerationBrief
@@ -1984,6 +2269,39 @@ export function Forge(): JSX.Element {
                     </Text>
                   ))
                 : null}
+            </>
+          ) : storyEditorState ? (
+            <>
+              <Text color="cyan">{`Story Editor · ${storyEditorState.specSlug}`}</Text>
+              {storyEditorState.loading ? <Text color="yellow">{`${GENERATE_SPINNER_FRAMES[forgeSpinnerFrameIndex]} Loading stories...`}</Text> : null}
+              {editorStory && editorDraft ? (
+                <>
+                  <Text color="white">
+                    {`${editorStory.id}${storyEditorState.dirtyMap.has(editorStory.id) ? '*' : ''}  ${storyEditorState.storyIndex + 1}/${storyEditorState.stories.length}`}
+                  </Text>
+                  <Text inverse={storyEditorState.focus === 'title'}>
+                    {truncateText(`Title: ${editorDraft.title}`, Math.max(20, leftColumnWidth - 2))}
+                  </Text>
+                  <Text inverse={storyEditorState.focus === 'complexity'}>
+                    {truncateText(`Complexity: ${editorDraft.complexity}   DependsOn: ${editorStory.dependsOn.join(', ') || '—'}`, Math.max(20, leftColumnWidth - 2))}
+                  </Text>
+                  <Text color="gray">
+                    {truncateText(`Description: ${editorStory.description}`, Math.max(20, leftColumnWidth - 2))}
+                  </Text>
+                  <Text color="gray">Acceptance Criteria:</Text>
+                  {editorStory.acceptanceCriteria.slice(0, Math.max(1, mainHeight - 9)).map((criterion, index) => (
+                    <Text key={`criterion-${index}`} color="gray">
+                      {truncateText(`${index + 1}. ${criterion}`, Math.max(20, leftColumnWidth - 2))}
+                    </Text>
+                  ))}
+                </>
+              ) : null}
+              {storyEditorState.status ? (
+                <Text color="green">{truncateText(storyEditorState.status, Math.max(20, leftColumnWidth - 2))}</Text>
+              ) : null}
+              {storyEditorState.error ? (
+                <Text color="red">{truncateText(storyEditorState.error, Math.max(20, leftColumnWidth - 2))}</Text>
+              ) : null}
             </>
           ) : boardOpen ? (
             <>
