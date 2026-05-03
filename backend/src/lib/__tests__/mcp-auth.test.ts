@@ -17,36 +17,85 @@ describe('mcp-auth', () => {
     fs.rmSync(tmpHome, { recursive: true, force: true });
   });
 
-  it('creates a 64-char token with secure file permissions', () => {
+  it('creates public and admin tokens with secure file permissions', () => {
     const mod = require('../mcp-auth.ts') as typeof import('../mcp-auth');
     const result = mod.ensureMcpToken();
-    const tokenPath = mod.getMcpTokenPath();
 
-    expect(result.created).toBe(true);
-    expect(result.token).toMatch(/^[a-f0-9]{64}$/);
-    expect(fs.existsSync(tokenPath)).toBe(true);
-    expect(fs.readFileSync(tokenPath, 'utf8')).toBe(result.token);
-    expect(fs.statSync(path.dirname(tokenPath)).mode & 0o777).toBe(0o700);
-    expect(fs.statSync(tokenPath).mode & 0o777).toBe(0o600);
+    expect(result.publicCreated).toBe(true);
+    expect(result.adminCreated).toBe(true);
+    expect(result.publicToken).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.adminToken).toMatch(/^[a-f0-9]{64}$/);
+    expect(result.adminToken).not.toBe(result.publicToken);
+    expect(fs.existsSync(mod.getMcpPublicTokenPath())).toBe(true);
+    expect(fs.existsSync(mod.getMcpAdminTokenPath())).toBe(true);
+    expect(fs.readFileSync(mod.getMcpPublicTokenPath(), 'utf8')).toBe(result.publicToken);
+    expect(fs.readFileSync(mod.getMcpAdminTokenPath(), 'utf8')).toBe(result.adminToken);
+    expect(fs.statSync(path.dirname(mod.getMcpPublicTokenPath())).mode & 0o777).toBe(0o700);
+    expect(fs.statSync(mod.getMcpPublicTokenPath()).mode & 0o777).toBe(0o600);
+    expect(fs.statSync(mod.getMcpAdminTokenPath()).mode & 0o777).toBe(0o600);
   });
 
-  it('rotates token atomically and invalidates the old token cache', () => {
+  it('rotates public, admin, and all tokens atomically', () => {
     const mod = require('../mcp-auth.ts') as typeof import('../mcp-auth');
-    const original = mod.ensureMcpToken().token;
-    const rotated = mod.rotateMcpToken();
+    const original = mod.ensureMcpToken();
 
-    expect(rotated).toMatch(/^[a-f0-9]{64}$/);
-    expect(rotated).not.toBe(original);
-    expect(mod.getMcpToken()).toBe(rotated);
-    expect(fs.readFileSync(mod.getMcpTokenPath(), 'utf8')).toBe(rotated);
-    expect(fs.readdirSync(path.dirname(mod.getMcpTokenPath())).filter((name) => name.includes('mcp-token.tmp'))).toHaveLength(0);
+    const rotatedPublic = mod.rotateMcpToken('public');
+    expect(typeof rotatedPublic).toBe('string');
+    expect(rotatedPublic).not.toBe(original.publicToken);
+    expect(mod.getMcpPublicToken()).toBe(rotatedPublic);
+
+    const rotatedAdmin = mod.rotateMcpToken('admin');
+    expect(typeof rotatedAdmin).toBe('string');
+    expect(rotatedAdmin).not.toBe(original.adminToken);
+    expect(mod.getMcpAdminToken()).toBe(rotatedAdmin);
+
+    const rotatedAll = mod.rotateMcpToken('all');
+    expect(rotatedAll.publicToken).toMatch(/^[a-f0-9]{64}$/);
+    expect(rotatedAll.adminToken).toMatch(/^[a-f0-9]{64}$/);
+    expect(fs.readdirSync(path.dirname(mod.getMcpPublicTokenPath())).filter((name) => name.includes('mcp-token.tmp'))).toHaveLength(0);
+    expect(fs.readdirSync(path.dirname(mod.getMcpAdminTokenPath())).filter((name) => name.includes('mcp-admin-token.tmp'))).toHaveLength(0);
   });
 
-  it('requires bearer auth and rejects invalid tokens without falling through', async () => {
+  it('enforces the public/admin curl matrix at the middleware layer', async () => {
     const mod = require('../mcp-auth.ts') as typeof import('../mcp-auth');
-    const token = mod.ensureMcpToken().token;
+    const tokens = mod.ensureMcpToken();
     const app = express();
-    app.get('/mcp', mod.requireMcpAuth, (_req, res) => {
+    app.use(express.json());
+    app.post('/mcp', mod.requireMcpAuth('public', (toolName) => toolName === 'rorca_pipeline_trigger' ? 'admin' : 'public'), (_req, res) => {
+      res.json({ ok: true });
+    });
+
+    const publicPublic = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${tokens.publicToken}`)
+      .send({ method: 'tools/call', params: { name: 'rorca_specs' } });
+    expect(publicPublic.status).toBe(200);
+
+    const publicAdmin = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${tokens.publicToken}`)
+      .send({ method: 'tools/call', params: { name: 'rorca_pipeline_trigger' } });
+    expect(publicAdmin.status).toBe(403);
+    expect(publicAdmin.body.code).toBe('MCP_AUTH_INSUFFICIENT_TIER');
+
+    const adminAdmin = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${tokens.adminToken}`)
+      .send({ method: 'tools/call', params: { name: 'rorca_pipeline_trigger' } });
+    expect(adminAdmin.status).toBe(200);
+
+    const adminPublic = await request(app)
+      .post('/mcp')
+      .set('Authorization', `Bearer ${tokens.adminToken}`)
+      .send({ method: 'tools/call', params: { name: 'rorca_specs' } });
+    expect(adminPublic.status).toBe(200);
+  });
+
+  it('rejects invalid or mismatched-length tokens without throwing', async () => {
+    const mod = require('../mcp-auth.ts') as typeof import('../mcp-auth');
+    mod.ensureMcpToken();
+    const app = express();
+    app.get('/mcp', mod.requireMcpAuth(), (_req, res) => {
       res.json({ ok: true });
     });
 
@@ -54,19 +103,19 @@ describe('mcp-auth', () => {
     expect(missing.status).toBe(401);
     expect(missing.body.code).toBe('MCP_AUTH_REQUIRED');
 
-    const invalid = await request(app).get('/mcp').set('Authorization', 'Bearer wrong');
-    expect(invalid.status).toBe(401);
-    expect(invalid.body.code).toBe('MCP_AUTH_INVALID');
+    const invalidShort = await request(app).get('/mcp').set('Authorization', 'Bearer short');
+    expect(invalidShort.status).toBe(401);
+    expect(invalidShort.body.code).toBe('MCP_AUTH_INVALID');
 
-    const valid = await request(app).get('/mcp').set('Authorization', `Bearer ${token}`);
-    expect(valid.status).toBe(200);
-    expect(valid.body).toEqual({ ok: true });
+    const invalidLong = await request(app).get('/mcp').set('Authorization', `Bearer ${'a'.repeat(128)}`);
+    expect(invalidLong.status).toBe(401);
+    expect(invalidLong.body.code).toBe('MCP_AUTH_INVALID');
   });
 
-  it('returns 503 when the token file is not initialized', async () => {
+  it('returns 503 when either token file is not initialized', async () => {
     const mod = require('../mcp-auth.ts') as typeof import('../mcp-auth');
     const app = express();
-    app.get('/mcp', mod.requireMcpAuth, (_req, res) => {
+    app.get('/mcp', mod.requireMcpAuth(), (_req, res) => {
       res.json({ ok: true });
     });
 
