@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T23:05:29.907Z",
+  "lastUpdatedAt": "2026-05-03T23:16:42.191Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -473,6 +473,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 486033
+    },
+    {
+      "storyId": "CLI-052",
+      "title": "AEGIS P1: Hardening Documentation + Threat Model in CLAUDE.md",
+      "status": "passed",
+      "startedAt": "2026-05-03T23:05:50.725Z",
+      "finishedAt": "2026-05-03T23:16:42.191Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 651466
     }
   ],
   "failedStories": [],
