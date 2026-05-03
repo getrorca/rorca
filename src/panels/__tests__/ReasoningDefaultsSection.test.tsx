@@ -163,7 +163,7 @@ function buildMock(overrides: {
     if (path.includes('/api/config/embedding-provider')) return { provider: 'local', model: 'local-tfidf', dimensions: 384, source: 'local', apiKeyConfigured: false };
     if (path.includes('/api/config/opencode-models')) return { models: [], grouped: {}, ollamaAvailable: false };
     if (path.includes('/api/config/orchestration')) return { router: 'auto', thresholds: { haiku: [0, 40], sonnet: [40, 80], opus: [80, 100] }, taskCascades: { echolocation: '', planning: '', coding: '', lintFix: '', testing: '', documentation: '' }, escalation: { enabled: true, maxRetriesOnTier: 2, chain: ['haiku', 'sonnet', 'opus'], escalateTo: {} }, tokenBudgetPerStory: 100000 };
-    if (path === '/api/config') return { agentType: 'claude', agentModel: null, claudeBin: '/usr/local/bin/claude', opencodeBin: null, codexBin: null, opencodeInstalled: false, opencodeVersion: null, codexInstalled: false, codexVersion: null, copilotConnected: false, copilotUsername: null };
+    if (path === '/api/config') return { agentType: 'claude', agentModel: null, claudeBin: '/usr/local/bin/claude', opencodeBin: null, codexBin: null, piBin: null, opencodeInstalled: false, opencodeVersion: null, codexInstalled: false, codexVersion: null, piInstalled: false, piVersion: null, copilotConnected: false, copilotUsername: null };
     if (path.includes('/api/admin/embed-all/status')) return { embeddingCount: 0, specCount: 0, storyCount: 0, memoryCount: 0, running: false, processed: 0, queueDepth: 0 };
     if (path.includes('/api/admin/graph-stats')) return { nodeCount: 0, edgeCount: 0 };
     if (path === '/api/workflow-router' && !opts?.method) return WORKFLOW_CONFIGS_DEFAULT;

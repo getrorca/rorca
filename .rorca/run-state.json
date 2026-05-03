@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T04:49:27.733Z",
+  "lastUpdatedAt": "2026-05-03T04:55:54.848Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -63,6 +63,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 303519
+    },
+    {
+      "storyId": "CLI-007",
+      "title": "Update .env.example and web Settings UI: pi row with correct install command",
+      "status": "passed",
+      "startedAt": "2026-05-03T04:49:43.782Z",
+      "finishedAt": "2026-05-03T04:55:54.848Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 371066
     }
   ],
   "failedStories": [],
