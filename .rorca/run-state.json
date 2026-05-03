@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T04:38:36.612Z",
+  "lastUpdatedAt": "2026-05-03T04:44:07.862Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -43,6 +43,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 317318
+    },
+    {
+      "storyId": "CLI-005",
+      "title": "Wire spawnPiRpc() into runAgent() and manage warm server lifecycle in execution-engine.ts",
+      "status": "passed",
+      "startedAt": "2026-05-03T04:38:53.027Z",
+      "finishedAt": "2026-05-03T04:44:07.861Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 314834
     }
   ],
   "failedStories": [],
