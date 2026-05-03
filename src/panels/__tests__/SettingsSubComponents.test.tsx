@@ -158,9 +158,11 @@ beforeEach(() => {
 describe('ProviderSettingsTab', () => {
   function providersMock(path: string) {
     if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+    if (path === '/api/health') return { piInstalled: false, piVersion: null };
     if (path.includes('/api/vault/keys/default-provider')) return { provider: 'claude-cli' };
     if (path.includes('/api/vault/keys/providers')) return { providers: [] };
     if (path.includes('/api/vault/keys/test')) return { ok: true, latencyMs: 50, response: 'ok' };
+    if (path.includes('/api/config/pi-models')) return { models: [], count: 0, piBinPath: '/usr/local/bin/pi' };
     if (path.includes('/api/vault/keys')) return { keys: [] };
     if (path.includes('/api/config/claude-auth')) return { connected: false, cliInstalled: false };
     if (path.includes('/api/config/ollama')) return { available: false, models: [] };
@@ -448,9 +450,18 @@ describe('ConnectionsHubSection', () => {
     return async (path: string) => {
       // Order matters — more-specific paths must come before broader matches
       if (path === '/api/workspaces') return { items: [{ id: 'ws-1', label: 'My Repo', path: '/tmp/repo', domains: [] }], total: 1, hasMore: false };
+      if (path === '/api/health') return { piInstalled: BASE_CONFIG.piInstalled, piVersion: BASE_CONFIG.piVersion };
       if (path.includes('/api/vault/keys/default-provider')) return { provider: 'claude-cli' };
       if (path.includes('/api/vault/keys/providers')) return { providers: [] };
       if (path.includes('/api/vault/keys/test')) return { ok: true, latencyMs: 50, response: 'ok' };
+      if (path.includes('/api/config/pi-models')) return {
+        models: [
+          { provider: 'openai', model: 'gpt-5', contextTokens: 200000, maxOutTokens: 32000, thinking: true, images: false },
+          { provider: 'anthropic', model: 'claude-opus', contextTokens: 200000, maxOutTokens: 64000, thinking: true, images: true },
+        ],
+        count: 2,
+        piBinPath: '/usr/local/bin/pi',
+      };
       if (path.includes('/api/vault/keys')) return vaultKeys;
       if (path.includes('/api/config/claude-auth')) return claudeAuth;
       if (path.includes('/api/config/ollama')) return ollama;
@@ -555,7 +566,87 @@ describe('ConnectionsHubSection', () => {
     renderWithProviders(<ProviderSettingsTab />);
 
     await waitFor(() => {
-      expect(screen.getByText('Install with: npm install -g @mariozechner/pi-coding-agent')).toBeInTheDocument();
+      expect(screen.getByText('npm install -g @mariozechner/pi-coding-agent')).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'PNPM' })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'BUN' })).toBeInTheDocument();
+      expect(screen.getByRole('tab', { name: 'CURL' })).toBeInTheDocument();
+    }, { timeout: 3000 });
+  });
+
+  it('opens the Pi model browser slide-over and renders model rows', async () => {
+    const base = buildMock();
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/config') {
+        return {
+          agentType: 'claude',
+          agentModel: null,
+          opencodeInstalled: false,
+          opencodeVersion: null,
+          codexInstalled: false,
+          codexVersion: null,
+          piInstalled: true,
+          piVersion: '1.2.3',
+          copilotConnected: false,
+          copilotUsername: null,
+        };
+      }
+      if (path === '/api/health') return { piInstalled: true, piVersion: '1.2.3' };
+      return base(path);
+    });
+
+    renderWithProviders(<ProviderSettingsTab />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Browse Models/i })).toBeEnabled();
+      expect(screen.getByText('2 providers available')).toBeInTheDocument();
+    }, { timeout: 3000 });
+
+    fireEvent.click(screen.getByRole('button', { name: /Browse Models/i }));
+
+    await waitFor(() => {
+      expect(screen.getByText('Pi Model Browser')).toBeInTheDocument();
+      expect(screen.getByText('gpt-5')).toBeInTheDocument();
+      expect(screen.getByText('claude-opus')).toBeInTheDocument();
+    }, { timeout: 3000 });
+  });
+
+  it('calls PUT /api/config/agent when setting Pi as active', async () => {
+    const base = buildMock();
+    mockApiFetch.mockImplementation(async (path: string, options?: RequestInit) => {
+      if (path === '/api/config/agent' && options?.method === 'PUT') {
+        return { agent: 'pi', model: null, changed: true };
+      }
+      if (path === '/api/config') {
+        return {
+          agentType: 'claude',
+          agentModel: null,
+          opencodeInstalled: false,
+          opencodeVersion: null,
+          codexInstalled: false,
+          codexVersion: null,
+          piInstalled: true,
+          piVersion: '1.2.3',
+          copilotConnected: false,
+          copilotUsername: null,
+        };
+      }
+      if (path === '/api/health') return { piInstalled: true, piVersion: '1.2.3' };
+      return base(path);
+    });
+
+    renderWithProviders(<ProviderSettingsTab />);
+
+    await waitFor(() => {
+      expect(screen.getByRole('button', { name: /Set as Active/i })).toBeEnabled();
+    }, { timeout: 3000 });
+
+    fireEvent.click(screen.getByRole('button', { name: /Set as Active/i }));
+
+    await waitFor(() => {
+      expect(mockApiFetch).toHaveBeenCalledWith(
+        '/api/config/agent',
+        expect.objectContaining({ method: 'PUT' }),
+      );
     }, { timeout: 3000 });
   });
 

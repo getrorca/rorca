@@ -3,9 +3,9 @@
 Spec: rorca-cli-tui-and-mcp-hardening
 Run ID: 20260316000241
 Started: 2026-05-03T04:28:17.577Z
-Last Updated: 2026-05-03T06:15:16.148Z
+Last Updated: 2026-05-03T06:21:30.412Z
 
-## Completed Stories (20)
+## Completed Stories (21)
 - CLI-001: Add 'pi' as a 4th AgentType in config.ts and VALID_AGENT_TYPES — DONE (codex, gpt-5.4, 113s)
 - CLI-002: Create pi-detector.ts — binary detection, version parsing, model listing — DONE (codex, gpt-5.4, 58s)
 - CLI-003: Expose pi-detector in GET /api/health endpoint — DONE (codex, gpt-5.4, 79s)
@@ -26,3 +26,4 @@ Last Updated: 2026-05-03T06:15:16.148Z
 - CLI-018: TUI story editor: inline story editing from the 'forge' command output — DONE (codex, gpt-5.4, 337s)
 - CLI-019: Pi RPC session forking — clean slate per story with context preservation on retry — DONE (codex, gpt-5.4, 237s)
 - CLI-020: Pi --skill flag: direction stack injected as pi skill file per story — DONE (codex, gpt-5.4, 360s)
+- CLI-021: Web Settings UI: Pi harness card with model browser, BYOA callout, and install tabs — DONE (codex, gpt-5.4, 359s)

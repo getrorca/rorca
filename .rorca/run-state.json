@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T06:15:16.148Z",
+  "lastUpdatedAt": "2026-05-03T06:21:30.412Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -203,6 +203,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 360438
+    },
+    {
+      "storyId": "CLI-021",
+      "title": "Web Settings UI: Pi harness card with model browser, BYOA callout, and install tabs",
+      "status": "passed",
+      "startedAt": "2026-05-03T06:15:31.486Z",
+      "finishedAt": "2026-05-03T06:21:30.412Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 358926
     }
   ],
   "failedStories": [],
