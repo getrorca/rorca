@@ -7,6 +7,7 @@ export class TuiApiError extends Error {
     public readonly status: number,
     public readonly code: string,
     message: string,
+    public readonly details?: unknown,
   ) {
     super(message);
     this.name = 'TuiApiError';
@@ -27,11 +28,12 @@ function resolveUrl(pathOrUrl: string): URL {
 
 function parseError(status: number, body: string): TuiApiError {
   try {
-    const parsed = JSON.parse(body) as { error?: string; code?: string };
+    const parsed = JSON.parse(body) as { error?: string; code?: string; details?: unknown };
     return new TuiApiError(
       status,
       parsed.code || `HTTP_${status}`,
       parsed.error || body || `HTTP ${status}`,
+      parsed.details,
     );
   } catch {
     return new TuiApiError(status, `HTTP_${status}`, body || `HTTP ${status}`);
