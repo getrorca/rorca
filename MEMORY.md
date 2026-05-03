@@ -3488,3 +3488,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Architecture] Admin MCP exposure needs explicit x-mcp-tier override: Keep x-rorca-tier: admin routes excluded from MCP by default, and only expose an admin route to MCP when the OpenAPI operation also declares x-mcp-tier: admin.
 > Rule: Admin MCP exposure needs explicit x-mcp-tier override: Keep x-rorca-tier: admin routes excluded from MCP by default, and only expose an admin route to MCP when the OpenAPI operation also declares x-mcp-tier: admin.
+
+## 2026-05-03 [Convention] Paid tier routes need explicit capability annotations: Any route annotated with x-rorca-tier: paid must also declare x-rorca-capability with a valid PlanCapabilities key, and the HTTP plan gate enforces that capability against the resolved user plan.
+> Rule: Paid tier routes need explicit capability annotations: Any route annotated with x-rorca-tier: paid must also declare x-rorca-capability with a valid PlanCapabilities key, and the HTTP plan gate enforces that capability against the resolved user plan.

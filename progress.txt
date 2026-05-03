@@ -3,9 +3,9 @@
 Spec: rorca-cli-tui-and-mcp-hardening
 Run ID: 20260316000242
 Started: 2026-05-03T21:34:47.790Z
-Last Updated: 2026-05-03T23:16:42.191Z
+Last Updated: 2026-05-03T23:26:07.695Z
 
-## Completed Stories (48)
+## Completed Stories (49)
 - CLI-001: Add 'pi' as a 4th AgentType in config.ts and VALID_AGENT_TYPES — DONE (codex, gpt-5.4, 113s)
 - CLI-002: Create pi-detector.ts — binary detection, version parsing, model listing — DONE (codex, gpt-5.4, 58s)
 - CLI-003: Expose pi-detector in GET /api/health endpoint — DONE (codex, gpt-5.4, 79s)
@@ -54,3 +54,4 @@ Last Updated: 2026-05-03T23:16:42.191Z
 - CLI-050: AEGIS P0: Remove No-op OAuth Theater — honest auth model — DONE (codex, gpt-5.4, 328s)
 - CLI-051: AEGIS P1: MCP Audit Log + Per-Token Rate Limiting — DONE (codex, gpt-5.4, 486s)
 - CLI-052: AEGIS P1: Hardening Documentation + Threat Model in CLAUDE.md — DONE (codex, gpt-5.4, 651s)
+- CLI-053: OPEN-CORE P0: Plan-Gating Middleware — 402 PLAN_REQUIRED on paid-tier routes — DONE (codex, gpt-5.4, 545s)
