@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T21:56:34.983Z",
+  "lastUpdatedAt": "2026-05-03T22:01:21.832Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -393,6 +393,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 555535
+    },
+    {
+      "storyId": "CLI-037",
+      "title": "Bundle Manifest — verify npm pack ships dist/ + backend/dist/, no build on user machine",
+      "status": "passed",
+      "startedAt": "2026-05-03T21:56:55.886Z",
+      "finishedAt": "2026-05-03T22:01:21.832Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 265946
     }
   ],
   "failedStories": [],

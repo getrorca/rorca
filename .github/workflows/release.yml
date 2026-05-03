@@ -4,14 +4,49 @@ on:
   push:
     tags:
       - 'v*'
+  pull_request:
+    paths:
+      - '.github/workflows/release.yml'
+      - 'package.json'
+      - 'package-lock.json'
+      - 'backend/package.json'
+      - 'backend/package-lock.json'
+      - 'cli.js'
+      - 'bin/**'
+      - 'scripts/verify-pack.sh'
+      - 'scripts/build-binaries.sh'
+      - 'scripts/_compile-target.ts'
+      - 'scripts/_generate-embedded-assets.ts'
+      - 'vite.config.*'
+      - 'tsconfig.json'
+      - 'backend/tsconfig.json'
 
 permissions:
   contents: write
 
 jobs:
+  verify-pack:
+    name: Verify Pack
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+          cache-dependency-path: |
+            package-lock.json
+            backend/package-lock.json
+
+      - name: Verify pack
+        run: ./scripts/verify-pack.sh
+
   # ── Quality gates (must pass before any binary build) ──
   validate:
     name: Validate
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
+    needs: verify-pack
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -57,6 +92,7 @@ jobs:
   # ── Step 6: Matrix build — 4 parallel jobs producing platform binaries ──
   build:
     name: Building ${{ matrix.name }}...
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     needs: validate
     runs-on: ubuntu-latest
     strategy:
@@ -119,6 +155,7 @@ jobs:
   # ── Step 9: Smoke test all platform binaries (matrix) ──
   smoke-test:
     name: Smoke test (${{ matrix.name }})
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     needs: build
     timeout-minutes: 1
     strategy:
@@ -319,6 +356,7 @@ jobs:
   # ── Steps 7-8: Generate release notes + create release + upload assets ──
   release:
     name: Create Release
+    if: ${{ github.event_name == 'push' && startsWith(github.ref, 'refs/tags/v') }}
     needs: [build, smoke-test]
     runs-on: ubuntu-latest
     steps:
