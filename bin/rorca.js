@@ -46,6 +46,8 @@ const PI_PROVIDER_ORDER = [
     'Gemini',
     'OpenRouter',
 ];
+const MIN_BACKEND_VERSION = '0.1.0';
+const MIN_BACKEND_API_VERSION = '1.0';
 function red(text) {
     return `\x1b[31m${text}\x1b[0m`;
 }
@@ -63,6 +65,11 @@ function dim(text) {
 }
 function bold(text) {
     return `\x1b[1m${text}\x1b[0m`;
+}
+class PrintedCliError extends Error {
+    constructor() {
+        super('printed-cli-error');
+    }
 }
 function sleep(ms) {
     return new Promise((resolve) => setTimeout(resolve, ms));
@@ -283,7 +290,106 @@ async function handleDbCommand(action, options = {}) {
         throw new Error('Failed to stream database logs.');
     }
 }
-async function fetchJson(pathname, init, timeoutMs = 30_000) {
+function parseSemver(input) {
+    const match = input.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
+    if (!match)
+        return null;
+    return [
+        Number.parseInt(match[1], 10),
+        Number.parseInt(match[2], 10),
+        Number.parseInt(match[3], 10),
+    ];
+}
+function semverGte(left, right) {
+    const a = parseSemver(left);
+    const b = parseSemver(right);
+    if (!a || !b)
+        return left === right;
+    for (let index = 0; index < 3; index += 1) {
+        if (a[index] > b[index])
+            return true;
+        if (a[index] < b[index])
+            return false;
+    }
+    return true;
+}
+async function checkVersion(backendUrl) {
+    const baseUrl = backendUrl.replace(/\/$/, '');
+    try {
+        const response = await fetch(`${baseUrl}/api/version`, {
+            headers: { Accept: 'application/json' },
+            signal: AbortSignal.timeout(3_000),
+        });
+        if (!response.ok) {
+            return { ok: false, reason: `Backend health check failed (${response.status})` };
+        }
+        const backend = await response.json();
+        if (!semverGte(backend.version, MIN_BACKEND_VERSION)) {
+            return {
+                ok: false,
+                reason: `Backend ${backend.version} < required ${MIN_BACKEND_VERSION}`,
+                backend,
+            };
+        }
+        if (backend.apiVersion !== MIN_BACKEND_API_VERSION) {
+            return {
+                ok: false,
+                reason: `API version ${backend.apiVersion} != ${MIN_BACKEND_API_VERSION}`,
+                backend,
+            };
+        }
+        if (!semverGte(pkg.version, backend.minCliVersion)) {
+            return {
+                ok: false,
+                reason: `CLI ${pkg.version} < backend minimum ${backend.minCliVersion}`,
+                backend,
+            };
+        }
+        return { ok: true, backend };
+    }
+    catch {
+        return { ok: false, reason: `Cannot reach backend at ${baseUrl}` };
+    }
+}
+function printVersionMismatch(result) {
+    const backendVersion = result.backend?.version ?? 'unknown';
+    let requirement = `need >= ${MIN_BACKEND_VERSION}`;
+    if (result.backend && result.backend.apiVersion !== MIN_BACKEND_API_VERSION) {
+        requirement = `API ${result.backend.apiVersion}, need ${MIN_BACKEND_API_VERSION}`;
+    }
+    else if (result.backend && !semverGte(pkg.version, result.backend.minCliVersion)) {
+        requirement = `requires CLI >= ${result.backend.minCliVersion}`;
+    }
+    console.error(`${red('✗')} Version mismatch:`);
+    console.error(`   CLI:     ${pkg.version}`);
+    console.error(`   Backend: ${backendVersion} (${requirement})`);
+    console.error('');
+    console.error('Upgrade:  npm install -g rorca@latest');
+    console.error(`Downgrade: npm install -g rorca@${backendVersion}`);
+}
+function printBackendUnavailable(reason) {
+    console.error(`${red('✗')} ${reason}`);
+    console.error('Hint: run `rorca start`');
+}
+let versionCheckPromise = null;
+async function ensureBackendVersionCompatible() {
+    if (!versionCheckPromise) {
+        versionCheckPromise = checkVersion(API_BASE);
+    }
+    const result = await versionCheckPromise;
+    if (result.ok)
+        return;
+    if (result.reason?.startsWith('Cannot reach backend at ')) {
+        printBackendUnavailable(result.reason);
+        throw new PrintedCliError();
+    }
+    printVersionMismatch(result);
+    throw new PrintedCliError();
+}
+async function fetchJson(pathname, init, timeoutMs = 30_000, options) {
+    if (!options?.skipVersionCheck && pathname !== '/api/version') {
+        await ensureBackendVersionCompatible();
+    }
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), timeoutMs);
     try {
@@ -887,8 +993,8 @@ export default function rorcaPiBridge(pi: ExtensionAPI) {
 }
 `;
 }
-async function fetchBackendHealth() {
-    return fetchJson('/api/health');
+async function fetchBackendHealth(options) {
+    return fetchJson('/api/health', undefined, 30_000, options);
 }
 async function runMcpToken() {
     const { token } = ensureMcpToken();
@@ -897,7 +1003,7 @@ async function runMcpToken() {
 }
 async function runMcpStatus() {
     const tokenStatus = checkMcpTokenFile();
-    const backendHealth = await fetchBackendHealth().catch(() => null);
+    const backendHealth = await fetchBackendHealth({ skipVersionCheck: true }).catch(() => null);
     const toolCount = await fetchJson('/api/mcp/tools')
         .then((data) => data.tools.length)
         .catch(() => null);
@@ -1439,6 +1545,23 @@ async function runDoctor(json = false) {
     localChecks.push(backendHealth
         ? { label: 'Backend reachable', status: 'ok', message: 'OK' }
         : { label: 'Backend reachable', status: 'error', message: 'Backend not running', fix: 'Run: rorca start' });
+    const versionResult = backendHealth
+        ? await checkVersion(API_BASE)
+        : { ok: false, reason: `Cannot reach backend at ${API_BASE}` };
+    if (backendHealth) {
+        localChecks.push(versionResult.ok
+            ? {
+                label: 'CLI/backend version',
+                status: 'ok',
+                message: `CLI ${pkg.version} ↔ backend ${versionResult.backend?.version ?? 'unknown'}`,
+            }
+            : {
+                label: 'CLI/backend version',
+                status: 'error',
+                message: versionResult.reason ?? 'Version mismatch',
+                fix: 'Upgrade: npm install -g rorca@latest',
+            });
+    }
     if (backendHealth) {
         if (backendHealth.mcp?.status === 'healthy' && backendHealth.mcp.enabled) {
             localChecks.push({
@@ -1459,9 +1582,11 @@ async function runDoctor(json = false) {
         }
     }
     if (json) {
-        const remote = await fetchJson('/api/doctor');
-        console.log(JSON.stringify({ localChecks, remote }, null, 2));
-        return remote.summary.errors > 0 ? 1 : 0;
+        const remote = backendHealth
+            ? await fetchJson('/api/doctor', undefined, 30_000, { skipVersionCheck: true })
+            : null;
+        console.log(JSON.stringify({ localChecks, remote, version: versionResult }, null, 2));
+        return (remote?.summary.errors ?? 0) > 0 || localChecks.some((check) => check.status === 'error') ? 1 : 0;
     }
     for (const check of localChecks) {
         const prefix = check.status === 'ok' ? green('OK') : check.status === 'warning' ? yellow('WARN') : red('ERR');
@@ -1470,10 +1595,10 @@ async function runDoctor(json = false) {
             console.log(dim(`    fix: ${check.fix}`));
         }
     }
-    if (localChecks.some((check) => check.status === 'error')) {
+    if (!backendHealth) {
         return 1;
     }
-    const remote = await fetchJson('/api/doctor');
+    const remote = await fetchJson('/api/doctor', undefined, 30_000, { skipVersionCheck: true });
     for (const check of remote.checks) {
         const prefix = check.status === 'ok' ? green('OK') : check.status === 'warning' ? yellow('WARN') : red('ERR');
         console.log(`${prefix} ${check.label}: ${check.message}`);
@@ -1481,7 +1606,7 @@ async function runDoctor(json = false) {
             console.log(dim(`    fix: ${check.fix}`));
         }
     }
-    return remote.summary.errors > 0 ? 1 : 0;
+    return remote.summary.errors > 0 || localChecks.some((check) => check.status === 'error') ? 1 : 0;
 }
 function titleCase(input) {
     return input
@@ -1799,6 +1924,9 @@ db.command('logs')
 });
 program.showHelpAfterError();
 program.parseAsync(process.argv).catch((error) => {
+    if (error instanceof PrintedCliError) {
+        process.exit(1);
+    }
     const message = error instanceof Error ? error.message : String(error);
     console.error(message);
     process.exit(1);
