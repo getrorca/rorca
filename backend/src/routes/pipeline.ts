@@ -22,7 +22,7 @@ import { handleRouteError } from '../lib/async-handler';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
-import { agentConfig, type AgentType } from '../lib/config';
+import { activeAgent, activeModel, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { synthesize } from '../lib/direction-stack';
@@ -951,7 +951,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
 
     const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
     const stories = (specJson.userStories ?? []) as CapabilityStory[];
-    const resolvedAgent = agentConfig.agentType;
+    const resolvedAgent = activeAgent;
     const report = checkSpec(stories, resolvedAgent);
     const orchConfig = loadOrchestrationConfig(workspace.path);
 
@@ -1095,7 +1095,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     // 3. Resolve agent type and model.
     //    Model: ONLY from spec JSON or per-story override. No hidden DB/env fallbacks.
-    //    Agent runtime: request agentOverride > spec agentOverride > wfConfig.runtime
+    //    Agent runtime: request agentOverride > spec agentOverride > in-memory active agent
     const pipelineUser = await getEffectiveUser(req);
     const wfConfig = await resolveWorkflowConfig('pipeline_execution', pipelineUser?.id);
 
@@ -1123,10 +1123,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       && resolvedAgentModel.includes('/')
       && !resolvedAgentModel.startsWith('claude-')
       && !resolvedAgentModel.startsWith('anthropic/claude-');
-    const wfRuntime = wfConfig.runtime as AgentType;
-    const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !specLevelAgent && wfRuntime === 'claude';
-    // Priority: request agentOverride > spec-level agentOverride > auto-detect from model > wfConfig.runtime
-    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : wfRuntime);
+    const runtimeAgent = activeAgent;
+    const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !specLevelAgent && runtimeAgent === 'claude';
+    // Priority: request agentOverride > spec-level agentOverride > auto-detect from model > in-memory active agent
+    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : runtimeAgent);
 
     // Translate model IDs for OpenCode execution.
     // OpenCode expects "provider/org/model" format (e.g. "openrouter/anthropic/claude-opus-4.6").
@@ -2303,7 +2303,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       if (openrouterVaultKey) env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
 
       // Inject Copilot token when using github/copilot model
-      const resolvedModel = agentConfig.agentModel;
+      const resolvedModel = activeModel;
       if (resolvedModel === 'github/copilot') {
         const copilotToken = await getCopilotToken(user.id);
         if (copilotToken) env['GITHUB_TOKEN'] = copilotToken;
@@ -3172,8 +3172,8 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       workspacePath: workspace.path,
       specPath: originalRun.spec_path,
       retrySpecPath,
-      agent: agentConfig.agentType,
-      model: agentConfig.agentModel ?? null,
+      agent: activeAgent,
+      model: activeModel ?? null,
       worktreePath: originalRun.worktree_path ?? null,
       sequenceOffset,
       envOverrides,

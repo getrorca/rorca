@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T05:00:06.874Z",
+  "lastUpdatedAt": "2026-05-03T05:06:05.692Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -83,6 +83,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 236303
+    },
+    {
+      "storyId": "CLI-017",
+      "title": "Add PUT /api/config/agent endpoint — runtime agent switching without restart",
+      "status": "passed",
+      "startedAt": "2026-05-03T05:00:22.358Z",
+      "finishedAt": "2026-05-03T05:06:05.691Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 343333
     }
   ],
   "failedStories": [],
