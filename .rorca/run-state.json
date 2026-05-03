@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000241,
   "startedAt": "2026-05-03T04:28:17.577Z",
-  "lastUpdatedAt": "2026-05-03T05:10:45.121Z",
+  "lastUpdatedAt": "2026-05-03T05:14:27.724Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -103,6 +103,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 263888
+    },
+    {
+      "storyId": "CLI-009",
+      "title": "Command palette: fuzzy command registry with keyboard navigation",
+      "status": "passed",
+      "startedAt": "2026-05-03T05:11:01.126Z",
+      "finishedAt": "2026-05-03T05:14:27.724Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 206598
     }
   ],
   "failedStories": [],
