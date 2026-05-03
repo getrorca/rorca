@@ -619,7 +619,7 @@ router.get('/mcp-audit/summary', async (req: Request, res: Response) => {
  *             type: object
  *             required: [plan, email]
  *             properties:
- *               plan: { type: string, enum: [solo, pro, team], description: "License plan tier" }
+ *               plan: { type: string, enum: [solo, pro, team, enterprise], description: "License plan tier" }
  *               email: { type: string, description: "Licensee email address" }
  *               expiresInDays: { type: integer, description: "License validity in days (omit for perpetual)" }
  *     responses:
@@ -669,8 +669,8 @@ router.post('/generate-license', async (req: Request, res: Response) => {
       expiresInDays?: number;
     };
 
-    if (!plan || !['solo', 'pro', 'team'].includes(plan)) {
-      res.status(400).json({ error: 'plan must be one of: solo, pro, team' });
+    if (!plan || !['solo', 'pro', 'team', 'enterprise'].includes(plan)) {
+      res.status(400).json({ error: 'plan must be one of: solo, pro, team, enterprise' });
       return;
     }
     if (!email || typeof email !== 'string') {

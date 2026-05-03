@@ -1,25 +1,36 @@
 import {
   getRorcaTier,
+  planHasCapability,
+  resolveRorcaPlan,
   summarizeRorcaTiers,
   tierAllowedFromMcp,
 } from '../tier-auth';
 
 describe('tier-auth', () => {
   it('returns denied for missing or invalid tiers', () => {
-    expect(getRorcaTier({})).toEqual({ tier: 'denied' });
-    expect(getRorcaTier({ 'x-rorca-tier': 'nope' })).toEqual({ tier: 'denied' });
+    expect(getRorcaTier({})).toEqual({ tier: 'denied', capability: null });
+    expect(getRorcaTier({ 'x-rorca-tier': 'nope' })).toEqual({ tier: 'denied', capability: null });
   });
 
   it('returns structured metadata for valid tiers', () => {
     expect(getRorcaTier({
-      'x-rorca-tier': 'public',
-      'x-rorca-rationale': 'Stable read-only route',
-      'x-rorca-public-api': true,
+      'x-rorca-tier': 'paid',
+      'x-rorca-rationale': 'Capability-gated route',
+      'x-rorca-capability': 'teams',
     })).toEqual({
-      tier: 'public',
-      rationale: 'Stable read-only route',
-      publicApi: true,
+      tier: 'paid',
+      rationale: 'Capability-gated route',
+      publicApi: false,
+      capability: 'teams',
     });
+  });
+
+  it('normalizes legacy plans and evaluates capabilities', () => {
+    expect(resolveRorcaPlan('solo')).toBe('free');
+    expect(resolveRorcaPlan('enterprise')).toBe('enterprise');
+    expect(planHasCapability('pro', 'teams')).toBe(true);
+    expect(planHasCapability('pro', 'multiEntity')).toBe(false);
+    expect(planHasCapability('enterprise', 'multiEntity')).toBe(true);
   });
 
   it('allows only public and auth tiers through MCP', () => {

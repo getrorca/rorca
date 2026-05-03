@@ -85,6 +85,7 @@ async function emitWalEvent(eventType: string, payload: Record<string, unknown>)
  *     summary: List teams the user belongs to
  *     operationId: listTeams
  *     x-rorca-tier: paid
+ *     x-rorca-capability: teams
  *     x-rorca-rationale: "Team listing is part of the multi-user collaboration surface and belongs behind the paid plan boundary."
  *     description: Returns a paginated list of teams that the authenticated user is a member of.
  *     parameters:
@@ -114,6 +115,7 @@ async function emitWalEvent(eventType: string, payload: Record<string, unknown>)
  *     summary: Create a new team
  *     operationId: createTeam
  *     x-rorca-tier: paid
+ *     x-rorca-capability: teams
  *     x-rorca-rationale: "Creating teams is a paid collaboration feature and must not be reachable from the free CLI contract."
  *     description: Creates a new team with the given name and slug. The authenticated user becomes the owner and is added as an admin member.
  *     requestBody:
@@ -172,6 +174,7 @@ router.get('/', async (req: Request, res: Response) => {
  *     summary: Create a new team
  *     operationId: createTeam
  *     x-rorca-tier: paid
+ *     x-rorca-capability: teams
  *     x-rorca-rationale: "Creating teams is a paid collaboration feature and must not be reachable from the free CLI contract."
  *     description: >
  *       Creates a new team and assigns the authenticated user as its owner with admin role.
@@ -303,6 +306,7 @@ router.post('/', requireWorkspaceAdmin(), async (req: Request, res: Response) =>
  *     summary: Send a team invitation
  *     operationId: createTeamInvite
  *     x-rorca-tier: paid
+ *     x-rorca-capability: teams
  *     x-rorca-rationale: "Issuing team invites is a multi-user collaboration action and belongs behind the paid plan boundary."
  *     description: Sends an email invitation to join the team. Requires admin role. Subject to free-tier pending invite limits.
  *     parameters:
@@ -441,6 +445,7 @@ router.post('/:id/invites', requireRole('admin'), async (req: Request, res: Resp
  *     summary: List team members
  *     operationId: listTeamMembers
  *     x-rorca-tier: paid
+ *     x-rorca-capability: teams
  *     x-rorca-rationale: "Team membership is part of the paid collaboration surface and should never be exposed through the free CLI contract."
  *     description: Returns all members of the specified team with their roles and activity timestamps. Requires viewer role.
  *     parameters:
@@ -510,6 +515,7 @@ router.get('/:id/members', requireRole('viewer'), async (req: Request, res: Resp
  *     summary: Update a team member's role
  *     operationId: updateTeamMemberRole
  *     x-rorca-tier: paid
+ *     x-rorca-capability: teams
  *     x-rorca-rationale: "Managing team member roles is a paid RBAC capability and must stay outside the free contract."
  *     description: Changes the role of an existing team member. Requires admin role.
  *     parameters:
@@ -588,6 +594,7 @@ router.patch('/:id/members/:userId', requireRole('admin'), async (req: Request, 
  *     summary: Remove a team member
  *     operationId: removeTeamMember
  *     x-rorca-tier: paid
+ *     x-rorca-capability: teams
  *     x-rorca-rationale: "Removing team members is part of the paid RBAC surface and should not be MCP-exposed to free users."
  *     description: Removes a member from the team. The team owner cannot be removed. Requires admin role.
  *     parameters:
@@ -653,6 +660,7 @@ router.delete('/:id/members/:userId', requireRole('admin'), async (req: Request,
  *     summary: Update team settings
  *     operationId: updateTeamSettings
  *     x-rorca-tier: paid
+ *     x-rorca-capability: teams
  *     x-rorca-rationale: "Team settings are multi-user collaboration controls and belong behind the paid plan boundary."
  *     description: Updates team settings such as the team name. Requires admin role.
  *     parameters:
@@ -720,6 +728,7 @@ router.patch('/:id/settings', requireRole('admin'), async (req: Request, res: Re
  *     summary: Get team direction layers
  *     operationId: getTeamDirection
  *     x-rorca-tier: paid
+ *     x-rorca-capability: teams
  *     x-rorca-rationale: "Team-scoped direction is a collaboration feature and should only be available on paid plans."
  *     description: Fetches team-scoped L1 (engineering principles) and L2 (domain conventions) direction layers.
  *     parameters:
@@ -782,6 +791,7 @@ router.get('/:id/direction', requireRole('viewer'), async (req: Request, res: Re
  *     summary: Update team direction layer
  *     operationId: updateTeamDirection
  *     x-rorca-tier: paid
+ *     x-rorca-capability: teams
  *     x-rorca-rationale: "Updating team-scoped direction mutates paid collaboration state and should not be in the free contract."
  *     description: Creates or updates a team-scoped L1 or L2 direction layer. YAML content is validated before saving. Requires admin role.
  *     parameters:
@@ -872,6 +882,7 @@ router.put('/:id/direction', requireRole('admin'), async (req: Request, res: Res
  *     summary: Preview merged direction stack
  *     operationId: previewTeamDirection
  *     x-rorca-tier: paid
+ *     x-rorca-capability: teams
  *     x-rorca-rationale: "Team direction preview relies on team-scoped collaboration state and belongs behind the paid plan boundary."
  *     description: Synthesizes and previews the merged direction stack output for a team, optionally scoped to a workspace and spec brief. Merges global L1/L2, team L1/L2, and workspace L3 layers.
  *     parameters:
