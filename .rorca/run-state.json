@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-04T00:17:38.305Z",
+  "lastUpdatedAt": "2026-05-04T00:23:40.053Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -563,6 +563,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 527916
+    },
+    {
+      "storyId": "CLI-060",
+      "title": "MCP ASYNC P0: switch MCP tools (rorca_enrich_spec, rorca_match_skills) to fire-and-poll",
+      "status": "passed",
+      "startedAt": "2026-05-04T00:17:58.808Z",
+      "finishedAt": "2026-05-04T00:23:40.053Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 341245
     }
   ],
   "failedStories": [],
