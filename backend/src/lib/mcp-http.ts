@@ -25,6 +25,8 @@ import type { Request, Response } from 'express';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { SpecJobState } from '../db/spec-jobs';
+import { pollSpecJob } from '../mcp/spec-job-poller';
 import type { McpTier } from './mcp-auth';
 import { consumeMcpRateLimit, extractErrorCode, paramsHash, recordMcpCall } from './mcp-audit';
 import { logger } from './logger';
@@ -346,6 +348,66 @@ async function getDefaultWorkspaceId(): Promise<string | null> {
   } catch { return null; }
 }
 
+const ASYNC_SPEC_JOB_SUFFIXES = ['/enrich', '/match-skills', '/suggest-skills'] as const;
+const SLOW_PREFIXES = ['/api/specs/generate', '/api/specs/generate-batch', '/api/workspaces/', '/api/admin/embed-all'];
+const SLOW_SUFFIXES = ['/enrich', '/match-skills', '/suggest-skills', '/add-stories', '/knowledge-graph', '/hydrate', '/scan-direction', '/echolocate', '/discover', '/import', '/detect-dependencies', '/assign-models', '/suggest-models'];
+
+function isSlowPath(resolvedPath: string): boolean {
+  return (
+    SLOW_PREFIXES.some(p => resolvedPath.startsWith(p)) ||
+    SLOW_SUFFIXES.some(s => resolvedPath.endsWith(s) || resolvedPath.includes(`${s}?`) || resolvedPath.includes(`${s}/`))
+  );
+}
+
+function shouldUseAsyncSpecJob(method: string, resolvedPath: string): boolean {
+  return method === 'POST'
+    && !resolvedPath.endsWith('/async')
+    && ASYNC_SPEC_JOB_SUFFIXES.some(suffix => resolvedPath.endsWith(suffix));
+}
+
+async function readFetchBody(fetchRes: Awaited<ReturnType<typeof fetch>>): Promise<unknown> {
+  const contentType = fetchRes.headers.get('content-type') || '';
+  return contentType.includes('application/json')
+    ? await fetchRes.json()
+    : await fetchRes.text();
+}
+
+async function fetchJsonWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number,
+): Promise<{ status: number; body: unknown }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const fetchRes = await fetch(url, { ...options, signal: controller.signal });
+    return {
+      status: fetchRes.status,
+      body: await readFetchBody(fetchRes),
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function mapTerminalSpecJobState(job: SpecJobState): { status: number; body: unknown } {
+  if (job.status === 'completed') {
+    return { status: 200, body: job.result };
+  }
+
+  const message = job.error || `Spec job ${job.id} ${job.status}`;
+  return {
+    status: job.status === 'cancelled' ? 409 : 500,
+    body: {
+      error: message,
+      code: job.status === 'cancelled' ? 'SPEC_JOB_CANCELLED' : 'SPEC_JOB_FAILED',
+      jobId: job.id,
+      status: job.status,
+    },
+  };
+}
+
 async function executeApiCall(
   method: string,
   pathTemplate: string,
@@ -384,41 +446,33 @@ async function executeApiCall(
   if (qsEntries.length > 0) {
     url += `?${new URLSearchParams(qsEntries).toString()}`;
   }
-
-  // Long-running endpoints (spec generation, enrichment, hydration, embedding, skills matching) need extended timeouts.
-  // Prefix matches for top-level paths, substring matches for verbs embedded in specId-parameterized routes
-  // (e.g. /api/specs/:specId/enrich, /api/specs/:specId/suggest-skills).
-  const SLOW_PREFIXES = ['/api/specs/generate', '/api/specs/generate-batch', '/api/workspaces/', '/api/admin/embed-all'];
-  const SLOW_SUFFIXES = ['/enrich', '/match-skills', '/suggest-skills', '/add-stories', '/knowledge-graph', '/hydrate', '/scan-direction', '/echolocate', '/discover', '/import', '/detect-dependencies', '/assign-models', '/suggest-models'];
-  const isSlowPath =
-    SLOW_PREFIXES.some(p => resolvedPath.startsWith(p)) ||
-    SLOW_SUFFIXES.some(s => resolvedPath.endsWith(s) || resolvedPath.includes(`${s}?`) || resolvedPath.includes(`${s}/`));
-  const timeoutMs = isSlowPath ? 10 * 60 * 1000 : 30_000; // 10 min for slow (claude --print spec gen can take 5-8min), 30s default
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+  const asyncUrl = `${RORCA_API}${resolvedPath}/async${qsEntries.length > 0 ? `?${new URLSearchParams(qsEntries).toString()}` : ''}`;
 
   const fetchOptions: RequestInit = {
     method,
     headers: { 'Content-Type': 'application/json' },
-    signal: controller.signal,
   };
 
   if (method !== 'GET' && method !== 'DELETE' && Object.keys(bodyParams).length > 0) {
     fetchOptions.body = JSON.stringify(bodyParams);
   }
 
-  let fetchRes: Awaited<ReturnType<typeof fetch>>;
-  try {
-    fetchRes = await fetch(url, fetchOptions);
-  } finally {
-    clearTimeout(timeoutId);
-  }
-  const contentType = fetchRes.headers.get('content-type') || '';
-  const body = contentType.includes('application/json')
-    ? await fetchRes.json()
-    : await fetchRes.text();
+  if (shouldUseAsyncSpecJob(method, resolvedPath)) {
+    const enqueue = await fetchJsonWithTimeout(asyncUrl, fetchOptions, 30_000);
+    const enqueueBody = enqueue.body as { jobId?: string };
+    if (enqueue.status < 200 || enqueue.status >= 300 || !enqueueBody?.jobId) {
+      return enqueue;
+    }
 
-  return { status: fetchRes.status, body };
+    const finalState = await pollSpecJob(enqueueBody.jobId, {
+      intervalMs: 2_000,
+      maxWaitMs: 1_800_000,
+    });
+    return mapTerminalSpecJobState(finalState);
+  }
+
+  const timeoutMs = isSlowPath(resolvedPath) ? 10 * 60 * 1000 : 30_000;
+  return fetchJsonWithTimeout(url, fetchOptions, timeoutMs);
 }
 
 // ─── Create MCP server with auto-generated tools ────────────────────────────
@@ -461,9 +515,13 @@ export function createMcpHttpServer(spec: OpenAPISpec, options: McpHttpServerOpt
   });
 
   const definitions = getMcpToolDefinitions(spec);
-
-  for (const definition of definitions) {
-    const { toolName, description, zodShape, capturedMethod, capturedPath, capturedOperation } = definition;
+  const registerDefinition = (
+    definition: McpToolDefinition,
+    overrides?: { toolName?: string; description?: string },
+  ) => {
+    const toolName = overrides?.toolName ?? definition.toolName;
+    const description = overrides?.description ?? definition.description;
+    const { zodShape, capturedMethod, capturedPath, capturedOperation } = definition;
     const hasParams = Object.keys(zodShape).length > 0;
     const handler = async (params: Record<string, unknown>, extra?: { requestId?: string | number; sessionId?: string }) => {
       const requiredTier = getMcpToolTier(definition);
@@ -587,9 +645,44 @@ export function createMcpHttpServer(spec: OpenAPISpec, options: McpHttpServerOpt
     } else {
       server.tool(toolName, description, handler);
     }
+  };
+
+  for (const definition of definitions) {
+    registerDefinition(definition);
   }
 
-  logger.info(`[MCP-HTTP] Registered ${definitions.length} tools from OpenAPI spec`);
+  const definitionByPath = new Map(definitions.map((definition) => [definition.capturedPath, definition]));
+  const legacyAliases = [
+    {
+      toolName: 'rorca_enrich_spec',
+      description: 'Legacy alias for spec enrichment via the async spec-job bridge.',
+      path: '/api/specs/{specId}/enrich',
+    },
+    {
+      toolName: 'rorca_match_skills',
+      description: 'Legacy alias for spec skill matching via the async spec-job bridge.',
+      path: '/api/specs/{specId}/match-skills',
+    },
+    {
+      toolName: 'rorca_suggest_skills',
+      description: 'Legacy alias for spec skill suggestions via the async spec-job bridge.',
+      path: '/api/specs/{specId}/suggest-skills',
+    },
+  ] as const;
+
+  let aliasCount = 0;
+  for (const alias of legacyAliases) {
+    const definition = definitionByPath.get(alias.path);
+    if (definition) {
+      registerDefinition(definition, {
+        toolName: alias.toolName,
+        description: alias.description,
+      });
+      aliasCount += 1;
+    }
+  }
+
+  logger.info(`[MCP-HTTP] Registered ${definitions.length} OpenAPI tools and ${aliasCount} legacy aliases`);
   return server;
 }
 
