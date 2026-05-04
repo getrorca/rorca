@@ -3,7 +3,8 @@
 Spec: Rorca Pi-Native Execution Runtime and Embedded TUI
 Run ID: 20260316000259
 Started: 2026-05-04T07:24:12.380Z
-Last Updated: 2026-05-04T07:24:22.612Z
+Last Updated: 2026-05-04T07:24:47.002Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Hardened MCP Bridge with Live Tool Discovery and Semantic Overrides — DONE (pi, gpt-5.4, 8s)
+- US-002: Pi-Native Execution Mode Agent Type Registration — DONE (pi, gpt-5.4, 9s)
