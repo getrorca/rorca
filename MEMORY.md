@@ -3494,3 +3494,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-03 [Architecture] Contract tooling must target a fresh live tsx server: For OpenAPI contract generation in this repo, fetch /api/docs/openapi.json from a fresh tsx-backed server instance, not an older long-running build, because stale servers can omit newly added vendor extensions and collapse the public-route snapshot to zero.
 > Rule: Contract tooling must target a fresh live tsx server: For OpenAPI contract generation in this repo, fetch /api/docs/openapi.json from a fresh tsx-backed server instance, not an older long-running build, because stale servers can omit newly added vendor extensions and collapse the public-route snapshot to zero.
+
+## 2026-05-04 [Gotcha] Compiled CLI wrapper cannot be verified directly in repo checkout: When verifying changes in `bin/rorca.ts`, prefer `npx tsx bin/rorca.ts ...` in the repo checkout because emitted `bin/rorca.js` imports backend source modules via extensionless ESM paths that Node cannot resolve directly here.
+> Rule: Compiled CLI wrapper cannot be verified directly in repo checkout: When verifying changes in `bin/rorca.ts`, prefer `npx tsx bin/rorca.ts ...` in the repo checkout because emitted `bin/rorca.js` imports backend source modules via extensionless ESM paths that Node cannot resolve directly here.

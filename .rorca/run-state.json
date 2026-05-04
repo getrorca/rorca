@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-03T23:56:24.131Z",
+  "lastUpdatedAt": "2026-05-04T00:00:25.902Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -523,6 +523,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 919312
+    },
+    {
+      "storyId": "CLI-032",
+      "title": "[DEPRECATED — folded into CLI-033 + CLI-040 + CLI-044] rorca init: guided first-run setup — Docker pull, AGE bootstrap, workspace scaffold",
+      "status": "passed",
+      "startedAt": "2026-05-03T23:56:44.111Z",
+      "finishedAt": "2026-05-04T00:00:25.902Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 221791
     }
   ],
   "failedStories": [],
