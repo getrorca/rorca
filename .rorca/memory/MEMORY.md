@@ -239,3 +239,68 @@
 > Rule: execution-engine.ts uses `failureRegistry: Map<string, FailureRecord>` (from failure-registry.ts) instead of `failedIds: Set<string>`. Use `markFailed()`, `isFailed()`, `getFailureRecord()`, `removeFailure()` helpers. `computeBlockedStories()` accepts FailureRegistryMap and extracts keys via `failedIdSet()`. FailureRecord tracks: storyId, waveIndex, failedAt, reason, recoveryClass, recoveryAttempts, lastRecoveryAt, recoveryInFlight, conflictingFiles?, stderrTail?.
 > Context: CP-002 foundational data-structure change for cascade prevention. Every subsequent CP story builds on this registry. Removal from registry on recovery success is the mechanism for unblocking dependants.
 > Source: CP-002
+
+## 2026-05-03 [Convention] Backend Ink TUI must use CommonJS-compatible Ink packages
+> Rule: In the backend package, pin Ink to the CommonJS-compatible line (`ink@3.x` with matching `react` and `@types/react`) unless the backend module system is intentionally migrated away from CommonJS.
+> Context: The backend tsx/tsconfig setup currently compiles as CommonJS. Newer Ink releases are ESM-oriented and caused runtime failures when launching the Forge TUI.
+> Source: CLI-008
+
+## 2026-05-03 [Architecture] Pi provider is encoded in token_usage.model
+> Rule: For Pi FinOps and analytics, derive the provider from token_usage.model using the pi/<provider>/<model> format rather than expecting a dedicated provider column.
+> Context: Pi multiplexes multiple upstream providers inside one run, and the persisted provider identity currently lives in the model string. Analytics code should parse it consistently to avoid schema drift assumptions.
+> Source: CLI-030
+
+## 2026-05-03 [Architecture] CLI loads backend DB helpers at runtime across separate builds
+> Rule: When bin/rorca.ts needs backend-only helpers, load backend/dist modules at runtime and fall back to backend/src under tsx instead of adding static cross-package TS imports.
+> Context: The root CLI and backend compile independently; static imports from bin/ to backend/src create fragile build coupling and can emit files into the wrong tree.
+> Source: CLI-033
+
+## 2026-05-03 [Architecture] Pi MCP integration must use a generated extension bridge
+> Rule: Do not assume Pi supports a native --mcp-server flag. For Rorca integration, verify Pi capabilities first and expose Rorca MCP tools by generating a temporary Pi extension that performs the MCP HTTP handshake and registers tools at session start.
+> Context: Pi's CLI help and upstream README state there is no built-in MCP transport. Native Rorca tool access in Pi therefore depends on extension-based bridging, not direct CLI flag wiring.
+> Source: CLI-029
+
+## 2026-05-03 [Architecture] Forge TUI must treat SSE loss as detach, not run termination
+> Rule: When Forge loses its WAL or output SSE while a pipeline run is still active, clear the foreground attachment, keep the backend-owned run alive, and recover background state by polling GET /api/pipeline/runs.
+> Context: The TUI is only a view over a worker-owned run. Stream disconnects or Ctrl+C in the TUI must never imply that the pi subprocess should stop.
+> Source: CLI-027
+
+## 2026-05-03 [Architecture] HTTP MCP and stdio MCP are separate exposure surfaces
+> Rule: When changing MCP security or route exposure, audit both the OpenAPI-generated HTTP bridge in backend/src/lib/mcp-http.ts and the legacy hand-registered stdio server in backend/src/mcp/server.ts.
+> Context: Patching only the HTTP /mcp path can leave the offline stdio fallback with older exposure behavior, creating a partial security rollout.
+> Source: CLI-047
+
+## 2026-05-03 [Architecture] Admin MCP exposure needs explicit x-mcp-tier override
+> Rule: Keep x-rorca-tier: admin routes excluded from MCP by default, and only expose an admin route to MCP when the OpenAPI operation also declares x-mcp-tier: admin.
+> Context: This preserves the default-deny admin posture while still allowing narrow forensic or operator tools to be callable through the authenticated MCP HTTP bridge.
+> Source: CLI-051
+
+## 2026-05-03 [Convention] Paid tier routes need explicit capability annotations
+> Rule: Any route annotated with x-rorca-tier: paid must also declare x-rorca-capability with a valid PlanCapabilities key, and the HTTP plan gate enforces that capability against the resolved user plan.
+> Context: The paid/admin/public/auth tier system alone is too coarse for commercial enforcement; capability names are now part of the stable annotation contract and lint fails if a paid route omits them.
+> Source: CLI-053
+
+## 2026-05-03 [Architecture] Contract tooling must target a fresh live tsx server
+> Rule: For OpenAPI contract generation in this repo, fetch /api/docs/openapi.json from a fresh tsx-backed server instance, not an older long-running build, because stale servers can omit newly added vendor extensions and collapse the public-route snapshot to zero.
+> Context: CLI-054 depends on x-rorca-public-api from the live OpenAPI payload. An already-running older server on :3030 returned a spec without the current vendor extensions, producing an empty contract snapshot until a fresh server was started on a different port.
+> Source: CLI-054
+
+## 2026-05-04 [Convention] New Postgres migrations use timestamp prefixes
+> Rule: Add new backend SQL migrations as YYYYMMDDHHMMSS_description.sql so parallel branches cannot collide on numeric prefixes.
+> Context: The pg migration runner supports both legacy sequential files and new timestamp-based migrations; new job-tracking tables should follow the timestamp convention.
+> Source: CLI-057
+
+## 2026-05-04 [Architecture] Spec long-runners should share pure job handlers behind pg-boss queues
+> Rule: For long-running spec operations, keep the LLM/filesystem logic in reusable lib handlers and let the worker own pg-boss queue pickup, spec_jobs status transitions, and throttled progress writes.
+> Context: This avoids duplicating route logic inside the worker, survives backend restarts, and prevents progress updates from hammering the database.
+> Source: CLI-058
+
+## 2026-05-04 [Architecture] sse-hub is process-local, not cross-process
+> Rule: Do not rely on `broadcastAll()` or in-memory topic subscribers to deliver worker events to Express routes when the worker runs as a separate process; pair them with a DB-backed or polling fallback.
+> Context: CLI-059 async spec job streaming needed a polling fallback because spec job handlers run in the standalone worker while SSE clients connect to the API process.
+> Source: CLI-059
+
+## 2026-05-04 [Architecture] MCP spec enrichment and skill tools must use async job endpoints
+> Rule: When exposing long-running spec operations over MCP, call the `/async` variant first and poll `/api/spec-jobs/:jobId` server-side until terminal status instead of holding the synchronous LLM HTTP request open.
+> Context: Anthropic-side HTTP timeouts can kill MCP tool calls even though the MCP session itself supports long-running operations. Decoupling the job from the tool transport preserves the MCP call while the backend job continues independently.
+> Source: CLI-060

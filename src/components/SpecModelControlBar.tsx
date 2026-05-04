@@ -7,7 +7,7 @@
  * Layout: engine pills (left) | model picker (center) | thinking controls (right)
  * Height: ~48px collapsed, expands when thinking toggle is on.
  */
-import { useState, useCallback } from 'react';
+import { useState, useCallback, useEffect } from 'react';
 import { Loader2, Brain } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';
 import { EngineSelector } from './EngineSelector';
@@ -15,6 +15,13 @@ import type { EngineValue } from './EngineSelector';
 import ModelPickerPopover from './ModelPickerPopover';
 import ThinkingControls from './ThinkingControls';
 import type { EffortLevel } from './ThinkingControls';
+
+interface ModelCapability {
+  supportsReasoning: boolean;
+  effortLevels: string[];
+  defaultEffort: string | null;
+  costMultiplier?: Record<string, number>;
+}
 
 /* ─── Reasoning types ────────────────────────────────────────────────── */
 
@@ -75,6 +82,14 @@ export function SpecModelControlBar({
   const [thinkingEnabled, setThinkingEnabled] = useState(initialThinkingEnabled);
   const [effortLevel, setEffortLevel] = useState<EffortLevel>(initialEffortLevel);
   const [saving, setSaving] = useState(false);
+  const [modelCapability, setModelCapability] = useState<ModelCapability | null>(null);
+
+  useEffect(() => {
+    if (!model) return;
+    apiFetch<ModelCapability>(`/api/config/model-capability?modelId=${encodeURIComponent(model)}`)
+      .then(setModelCapability)
+      .catch(() => {});
+  }, [model]);
 
   const persist = useCallback(async (patch: SpecModelFields) => {
     setSaving(true);
@@ -146,8 +161,8 @@ export function SpecModelControlBar({
         </div>
       </div>
 
-      {/* Thinking controls — full-width row, only shown when engine is claude */}
-      {engine === 'claude' && (
+      {/* Thinking controls — shown whenever the model supports reasoning */}
+      {modelCapability?.supportsReasoning && (
         <div className="px-3 pb-3">
           <ThinkingControls
             engine={engine}
@@ -156,6 +171,9 @@ export function SpecModelControlBar({
             onEffortChange={handleEffortChange}
             thinkingEnabled={thinkingEnabled}
             onThinkingEnabledChange={handleThinkingEnabledChange}
+            supportedEffortLevels={modelCapability.effortLevels}
+            supportsReasoning={modelCapability.supportsReasoning}
+            costMultiplier={modelCapability.costMultiplier}
           />
         </div>
       )}

@@ -66,7 +66,7 @@ interface SpecDetailData {
   agentOverride?: 'claude' | 'opencode' | 'codex' | null;
   thinkingEnabled?: boolean;
   thinkingBudget?: number;
-  effortLevel?: 'low' | 'medium' | 'high' | 'max';
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh';
   reasoning?: { enabled: boolean; effort?: string };
   readinessPercent?: number;
   [key: string]: unknown;
@@ -509,7 +509,7 @@ function SpecDetailContent({
     } catch { setLocalStories(prev => prev.map(s => s.id === storyId ? { ...s, excluded: story.excluded } : s)); }
   };
 
-  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string }; forceRerun?: boolean }) => {
+  const handleRun = async (autoWorktree: boolean, options?: { forceSequential?: boolean; queue?: boolean; autoMerge?: boolean; mergeStrategy?: 'direct' | 'pr' | 'draft-pr' | 'branch-only'; includeGraph?: boolean; effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh'; thinkingEnabled?: boolean; thinkingBudget?: number; reasoningOverride?: { enabled: boolean; effort?: string }; forceRerun?: boolean }) => {
     if (!workspaceId || !summary) return;
     setShowTriggerPopover(false);
     setRunState('triggering');
@@ -1065,7 +1065,7 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
     model?: string | null;
     thinkingEnabled?: boolean;
     thinkingBudget?: number;
-    effortLevel?: 'low' | 'medium' | 'high' | 'max';
+    effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh';
     reasoning?: { enabled: boolean; effort?: string };
   };
   onSpecModelUpdated?: (fields: SpecModelFields) => void;

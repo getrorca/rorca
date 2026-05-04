@@ -1056,3 +1056,72 @@
 > Rule: In local fallback auth mode, if an Authorization bearer token is present but Supabase rejects it, return `401 AUTH_ERROR` instead of silently injecting the local admin user.
 > Context: Falling back to local admin on invalid supplied tokens turns JWT manipulation into an auth bypass in mixed local/Supabase environments.
 > Source: MU-029
+## 2026-05-03 [Gotcha] Local auth fallback must reject invalid bearer tokens
+> Rule: In local single-user mode, if an Authorization bearer token is present but cannot be resolved, return 401 AUTH_ERROR instead of silently falling back to LOCAL_ADMIN.
+> Context: CLI and browser clients can carry stale Supabase sessions; silently accepting bad tokens masks auth bugs and violates routes that are expected to honor explicit bearer auth.
+> Source: CLI-012
+
+## 2026-05-03 [Pattern] TUI single-argument commands must preserve the raw remainder
+> Rule: When parsing TUI command palette input, commands with exactly one argument should receive the literal remainder of the line after the command label, trimmed only at the ends.
+> Context: Commands like `forge <brief>` need to preserve internal spaces and quotes instead of whitespace-tokenizing the brief.
+> Source: CLI-013
+
+## 2026-05-03 [Gotcha] Backend Jest setup currently depends on AGE schema availability
+> Rule: When running backend Jest on this branch, expect global setup to fail before test execution if PostgreSQL lacks Apache AGE objects because migration 064 references ag_catalog.
+> Context: Focused unit tests can be blocked by migration startup rather than the code under test, so verify the test database has AGE installed or isolate the run path before debugging Jest failures.
+> Source: CLI-019
+
+## 2026-05-03 [Gotcha] Spec graph route is not Apache AGE-backed
+> Rule: Treat `GET /api/specs/:specId/graph` as the spec JSON dependency DAG and keep it available in Lite Mode; only `knowledge-graph` and graph-memory routes need AGE guards.
+> Context: The route name is easy to misread during graph-related work, but guarding it would disable a non-AGE feature and break the spec dependency view unnecessarily.
+> Source: CLI-039
+
+## 2026-05-03 [Bug Fix] Track lite-skipped migrations explicitly for DB upgrades
+> Rule: When Lite Mode skips extension-dependent migrations, record them in schema_migrations with skipped_in_lite_mode=true so a later native-to-Docker upgrade can delete and replay exactly those versions after AGE becomes available.
+> Context: Without an explicit skip marker, upgrading from native Postgres to Docker+AGE preserves fake-applied migration rows and silently leaves graph features uninitialized after restore.
+> Source: CLI-044
+
+## 2026-05-03 [Pattern] CLI diagnostics need local preflight before API-backed checks
+> Rule: For commands like `rorca doctor`, run local Docker/backend reachability checks before relying on backend endpoints, then use the API route for the richer in-process checks and JSON output.
+> Context: If the backend is down, a doctor command that only calls `/api/doctor` cannot diagnose why startup failed. Local preflight preserves actionable offline diagnostics while keeping the backend endpoint as the canonical structured report.
+> Source: CLI-024
+
+## 2026-05-03 [Gotcha] MCP HTTP transport requires local bearer token
+> Rule: Protect /mcp with requireMcpAuth and a bearer token loaded from ~/.rorca/mcp-token; invalid tokens must return 401 MCP_AUTH_INVALID and must never fall through to LOCAL_ADMIN.
+> Context: The MCP HTTP bridge exposes hundreds of privileged tools, so localhost reachability alone is not a sufficient security boundary.
+> Source: CLI-045
+
+## 2026-05-03 [Gotcha] Worker heartbeat stale threshold must stay 90 seconds everywhere
+> Rule: Use a single 90s worker-heartbeat staleness rule across supervisor restarts, health endpoints, and worker-monitoring code; do not mix 60s and 90s checks.
+> Context: CLI-035 exposed a drift where the worker health route treated heartbeats as stale after 60s while the rest of the worker lifecycle used 90s, which can produce false unhealthy states and unnecessary restarts.
+> Source: CLI-035
+
+## 2026-05-03 [Pattern] CLI/backend version preflight belongs in shared fetch path with doctor bypass
+> Rule: For API-backed CLI commands, run the backend compatibility handshake once in the shared request path and explicitly bypass it for diagnostics like doctor that must still run against mismatched backends.
+> Context: This prevents silent corruption on normal commands while preserving doctor as the recovery tool when CLI and backend versions drift apart.
+> Source: CLI-036
+
+## 2026-05-03 [Gotcha] npm pack requires prepack, not prepublishOnly
+> Rule: Use a prepack build hook for any npm tarball verification or assembly path; prepublishOnly alone does not build artifacts for npm pack.
+> Context: Clean-clone tarball checks and local npm pack flows otherwise miss compiled dist assets even when publish itself would build them.
+> Source: CLI-037
+
+## 2026-05-03 [Bug Fix] Pi version detection must capture stderr-safe output
+> Rule: When probing `pi --version`, capture both stdout and stderr via `spawnSync(..., { stdio: ['ignore', 'pipe', 'pipe'] })` and parse the combined output instead of relying on stdout-only `execSync`.
+> Context: The Pi CLI can emit its version string in a way that bypasses stdout-only parsing, which both leaked raw output into `rorca doctor --json` and caused the detector to report a null version.
+> Source: CLI-038
+
+## 2026-05-03 [Gotcha] Jest mcp-auth imports must target TypeScript source explicitly
+> Rule: In backend Jest tests, require `mcp-auth.ts` explicitly instead of `mcp-auth` when a sibling `mcp-auth.js` artifact exists, otherwise Jest may resolve the stale ESM .js file first and fail before running the test.
+> Context: The backend test runner resolves extensionless requires to `mcp-auth.js` before `mcp-auth.ts`. That shadowed the live source and caused `Cannot use import statement outside a module` failures unrelated to the actual MCP auth logic.
+> Source: CLI-046
+
+## 2026-05-03 [Gotcha] MCP HTTP auth is Bearer-only; OAuth probes must return 501
+> Rule: Do not ship placeholder OAuth handlers for /mcp. Rorca MCP uses Bearer token auth from ~/.rorca/mcp-token, and OAuth-related endpoints should return explicit 501 guidance instead of fake tokens.
+> Context: A trivial OAuth shim can mislead reviewers into believing auth exists and can conflict with real Bearer enforcement.
+> Source: CLI-050
+
+## 2026-05-04 [Gotcha] Compiled CLI wrapper cannot be verified directly in repo checkout
+> Rule: When verifying changes in `bin/rorca.ts`, prefer `npx tsx bin/rorca.ts ...` in the repo checkout because emitted `bin/rorca.js` imports backend source modules via extensionless ESM paths that Node cannot resolve directly here.
+> Context: Direct `node bin/rorca.js ...` verification failed with `ERR_MODULE_NOT_FOUND` for `../backend/src/lib/mcp-auth`, so source-entry verification is the reliable path until the generated CLI wrapper's module resolution is fixed.
+> Source: CLI-032

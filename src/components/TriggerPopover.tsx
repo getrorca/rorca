@@ -112,6 +112,7 @@ interface ModelCapability {
   reasoningType: 'anthropic-thinking' | 'effort-levels' | 'native-cot' | 'none';
   effortLevels: string[];
   defaultEffort: string | null;
+  costMultiplier?: Record<string, number>;
 }
 
 interface DryRunCostEstimate {
@@ -328,10 +329,14 @@ export default function TriggerPopover({
       .catch(() => {});
   }, [workspaceId]);
 
-  // Fetch model reasoning capability on mount
+  // Fetch model reasoning capability on mount.
+  // Prefer the currently-selected agent model (which the user can switch in this
+  // popover), falling back to the spec's stored model. This keeps the Effort
+  // segmented control in sync with whichever model will actually run.
   useEffect(() => {
-    if (!specModel) return;
-    apiFetch<ModelCapability>(`/api/config/model-capability?modelId=${encodeURIComponent(specModel)}`)
+    const targetModel = agentConfig?.agentModel ?? specModel;
+    if (!targetModel) return;
+    apiFetch<ModelCapability>(`/api/config/model-capability?modelId=${encodeURIComponent(targetModel)}`)
       .then((cap) => {
         setModelCapability(cap);
         // If the model supports reasoning and spec has reasoning config, pre-expand the section
@@ -344,7 +349,7 @@ export default function TriggerPopover({
         }
       })
       .catch(() => {});
-  }, [specModel, initialReasoning?.enabled, initialReasoning?.effort]);
+  }, [agentConfig?.agentModel, specModel, initialReasoning?.enabled, initialReasoning?.effort]);
 
   // Fetch context preview on mount
   useEffect(() => {
@@ -905,7 +910,7 @@ export default function TriggerPopover({
         {/* Divider */}
         <div className="border-t border-border/50" />
 
-        {/* Thinking controls — Claude Opus/Sonnet only */}
+        {/* Thinking controls — effort levels are driven by the model's capability */}
         <ThinkingControls
           engine={agentConfig?.agentType ?? null}
           model={agentConfig?.agentModel ?? null}
@@ -915,7 +920,9 @@ export default function TriggerPopover({
           onThinkingEnabledChange={(enabled) => { setThinkingEnabled(enabled); setDryRunEstimate(null); }}
           thinkingBudget={thinkingBudget}
           onThinkingBudgetChange={setThinkingBudget}
-          costMultiplier={reasoningCostMultipliers}
+          costMultiplier={modelCapability?.costMultiplier ?? reasoningCostMultipliers}
+          supportedEffortLevels={modelCapability?.effortLevels}
+          supportsReasoning={modelCapability?.supportsReasoning}
         />
 
       </div>

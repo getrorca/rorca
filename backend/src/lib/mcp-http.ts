@@ -318,23 +318,29 @@ async function executeApiCall(
     url += `?${new URLSearchParams(qsEntries).toString()}`;
   }
 
-  // Long-running endpoints (spec generation, enrichment, hydration, embedding, skills matching) need extended timeouts.
-  // Prefix matches for top-level paths, substring matches for verbs embedded in specId-parameterized routes
-  // (e.g. /api/specs/:specId/enrich, /api/specs/:specId/suggest-skills).
+  // Slow paths run unbounded — server-side timeout removed entirely. The upstream
+  // Anthropic MCP client has its own (lower) timeout, but we no longer add a ceiling
+  // on top of it. For enrich/match-skills/suggest-skills/etc., the long-term fix is
+  // async job IDs (tracked in spec rorca-cli-tui-and-mcp-hardening, MCP-A* stories).
+  // Fast paths still get 30s as a sanity bound.
   const SLOW_PREFIXES = ['/api/specs/generate', '/api/specs/generate-batch', '/api/workspaces/', '/api/admin/embed-all'];
   const SLOW_SUFFIXES = ['/enrich', '/match-skills', '/suggest-skills', '/add-stories', '/knowledge-graph', '/hydrate', '/scan-direction', '/echolocate', '/discover', '/import', '/detect-dependencies', '/assign-models', '/suggest-models'];
   const isSlowPath =
     SLOW_PREFIXES.some(p => resolvedPath.startsWith(p)) ||
     SLOW_SUFFIXES.some(s => resolvedPath.endsWith(s) || resolvedPath.includes(`${s}?`) || resolvedPath.includes(`${s}/`));
-  const timeoutMs = isSlowPath ? 10 * 60 * 1000 : 30_000; // 10 min for slow (claude --print spec gen can take 5-8min), 30s default
-  const controller = new AbortController();
-  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
 
   const fetchOptions: RequestInit = {
     method,
     headers: { 'Content-Type': 'application/json' },
-    signal: controller.signal,
   };
+
+  // Only attach AbortController for fast paths. Slow paths run without an internal timeout.
+  let timeoutId: NodeJS.Timeout | undefined;
+  if (!isSlowPath) {
+    const controller = new AbortController();
+    timeoutId = setTimeout(() => controller.abort(), 30_000);
+    fetchOptions.signal = controller.signal;
+  }
 
   if (method !== 'GET' && method !== 'DELETE' && Object.keys(bodyParams).length > 0) {
     fetchOptions.body = JSON.stringify(bodyParams);
@@ -344,7 +350,7 @@ async function executeApiCall(
   try {
     fetchRes = await fetch(url, fetchOptions);
   } finally {
-    clearTimeout(timeoutId);
+    if (timeoutId) clearTimeout(timeoutId);
   }
   const contentType = fetchRes.headers.get('content-type') || '';
   const body = contentType.includes('application/json')

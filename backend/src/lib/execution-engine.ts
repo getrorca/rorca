@@ -172,8 +172,8 @@ interface EngineConfig {
   thinkingEnabled?: boolean;
   /** Token budget for extended thinking (requires thinkingEnabled). */
   thinkingBudget?: number;
-  /** Effort level hint for models that support it (e.g. 'low'|'medium'|'high'). */
-  effortLevel?: 'low' | 'medium' | 'high' | 'max';
+  /** Effort level hint for models that support it (e.g. 'low'|'medium'|'high'|'xhigh'). */
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh';
 }
 
 // ─── Browser MCP Auto-Detection ─────────────────────────────────────────────
@@ -1126,7 +1126,7 @@ function runAgent(
   onTokenUpdate?: TokenUpdateCallback,
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
-  effortLevel?: 'low' | 'medium' | 'high' | 'max',
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   switch (agentType) {
@@ -1150,7 +1150,7 @@ function spawnClaude(
   onTokenUpdate?: TokenUpdateCallback,
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
-  effortLevel?: 'low' | 'medium' | 'high' | 'max',
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
@@ -1385,7 +1385,7 @@ export function buildOpenCodeReasoningEnv(
   agentModel: string | null,
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
-  effortLevel?: 'low' | 'medium' | 'high' | 'max',
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
 ): Record<string, string> {
   if (!thinkingEnabled || !agentModel) return {};
   const cap = detectCapability(agentModel);
@@ -1418,7 +1418,7 @@ function spawnOpenCode(
   attachAddr: string | null,
   thinkingEnabled?: boolean,
   thinkingBudget?: number,
-  effortLevel?: 'low' | 'medium' | 'high' | 'max',
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   return new Promise((resolve) => {
@@ -4148,7 +4148,7 @@ function parseArgs(): EngineConfig {
   let includeGraph = false;
   let thinkingEnabled: boolean | undefined;
   let thinkingBudget: number | undefined;
-  let effortLevel: 'low' | 'medium' | 'high' | 'max' | undefined;
+  let effortLevel: 'low' | 'medium' | 'high' | 'max' | 'xhigh' | undefined;
 
   for (let i = 0; i < args.length; i++) {
     switch (args[i]) {
@@ -4207,13 +4207,13 @@ function parseArgs(): EngineConfig {
         thinkingBudget = parseInt(args[++i], 10);
         break;
       case '--effort':
-        effortLevel = args[++i] as 'low' | 'medium' | 'high' | 'max';
+        effortLevel = args[++i] as 'low' | 'medium' | 'high' | 'max' | 'xhigh';
         break;
       case '--effort-level':
-        effortLevel = args[++i] as 'low' | 'medium' | 'high' | 'max';
+        effortLevel = args[++i] as 'low' | 'medium' | 'high' | 'max' | 'xhigh';
         break;
       case '--reasoning-effort':
-        effortLevel = args[++i] as 'low' | 'medium' | 'high' | 'max';
+        effortLevel = args[++i] as 'low' | 'medium' | 'high' | 'max' | 'xhigh';
         break;
       default:
         logger.error(`Unknown arg: ${args[i]}`);
