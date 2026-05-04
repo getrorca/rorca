@@ -2880,8 +2880,18 @@ router.post('/runs/:id/finalize', async (req: Request, res: Response) => {
  *     parameters:
  *       - in: query
  *         name: workspaceId
- *         required: true
+ *         required: false
  *         schema: { type: string }
+ *       - in: query
+ *         name: agent
+ *         required: false
+ *         schema: { type: string, enum: [claude, opencode, codex, pi] }
+ *       - in: query
+ *         name: status
+ *         required: false
+ *         schema:
+ *           type: string
+ *           description: "Comma-separated raw pipeline run statuses, e.g. pi_native,running,cancelling"
  *     responses:
  *       200:
  *         description: List of runs
@@ -2896,20 +2906,48 @@ router.post('/runs/:id/finalize', async (req: Request, res: Response) => {
  */
 router.get('/runs', authRequired, async (req: Request, res: Response) => {
   try {
-    const workspaceId = req.query.workspaceId as string;
-    if (!workspaceId) {
-      throw new ValidationError('Missing required query param: workspaceId');
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : '';
+    const agent = typeof req.query.agent === 'string' ? req.query.agent.trim() : '';
+    const rawStatus = typeof req.query.status === 'string' ? req.query.status : '';
+    const statuses = rawStatus
+      .split(',')
+      .map((status) => status.trim())
+      .filter(Boolean);
+
+    if (!workspaceId && !agent && statuses.length === 0) {
+      throw new ValidationError('Missing filter: provide workspaceId, agent, or status');
       return;
     }
 
     const { limit, offset } = parsePaginationParams(req);
+    const whereClauses: string[] = [];
+    const params: Array<string | number | string[]> = [];
+
+    if (workspaceId) {
+      params.push(workspaceId);
+      whereClauses.push(`workspace_id = $${params.length}`);
+    }
+
+    if (agent) {
+      params.push(agent);
+      whereClauses.push(`agent_type = $${params.length}`);
+    }
+
+    if (statuses.length > 0) {
+      params.push(statuses);
+      whereClauses.push(`status = ANY($${params.length}::text[])`);
+    }
+
+    const whereSql = whereClauses.length > 0 ? `WHERE ${whereClauses.join(' AND ')}` : '';
     const total = (await queryOne<{ total: number }>(
-      'SELECT COUNT(*)::int as total FROM pipeline_runs WHERE workspace_id = $1',
-      [workspaceId]
+      `SELECT COUNT(*)::int as total FROM pipeline_runs ${whereSql}`,
+      params,
     ))?.total ?? 0;
+
+    const rowParams = [...params, limit, offset];
     const rows = await query<PipelineRunRow>(
-      'SELECT * FROM pipeline_runs WHERE workspace_id = $1 ORDER BY id DESC LIMIT $2 OFFSET $3',
-      [workspaceId, limit, offset]
+      `SELECT * FROM pipeline_runs ${whereSql} ORDER BY id DESC LIMIT $${rowParams.length - 1} OFFSET $${rowParams.length}`,
+      rowParams,
     );
     const items = rows.map(toClientRun);
 
