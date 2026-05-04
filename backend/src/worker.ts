@@ -725,7 +725,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     // on the same workspace would cause git conflicts.
     const concurrentRow = await queryOne<{ count: string }>(
       `SELECT COUNT(*) AS count FROM pipeline_runs
-       WHERE workspace_id = $1 AND status = 'running' AND id != $2`,
+       WHERE workspace_id = $1 AND status IN ('running', 'pi_native', 'cancelling') AND id != $2`,
       [workspaceId, runId],
     );
     const activeForWorkspace = parseInt(concurrentRow?.count ?? '0', 10);
@@ -1495,6 +1495,37 @@ async function handlePipelineCancel(jobs: PgBoss.Job<Record<string, unknown>>[])
     } else {
       logger.warn({ jobId: job.id, runId }, '[worker] pipeline:cancel — no active process found for runId');
     }
+  }
+}
+
+async function handleStalePiRuns(): Promise<void> {
+  try {
+    const staleRuns = await query<{ id: number; workspace_id: string }>(
+      `UPDATE pipeline_runs
+       SET status = 'stale',
+           finished_at = NOW()
+       WHERE agent_type = 'pi'
+         AND status IN ('pi_native', 'running', 'cancelling')
+         AND last_heartbeat_at < NOW() - INTERVAL '3 minutes'
+         AND last_heartbeat_at IS NOT NULL
+       RETURNING id, workspace_id`,
+    );
+
+    for (const run of staleRuns) {
+      await execute(
+        `INSERT INTO wal_events (event_type, workspace_id, payload, ts)
+         VALUES ('run_finished', $1, $2, NOW())`,
+        [run.workspace_id, JSON.stringify({ type: 'run_finished', runId: run.id, run_id: run.id, status: 'stale' })],
+      ).catch((err) => {
+        logger.warn({ err, runId: run.id }, '[worker] Failed to emit stale pi run WAL event');
+      });
+    }
+
+    if (staleRuns.length > 0) {
+      logger.warn({ runIds: staleRuns.map((run) => run.id) }, '[worker] Marked stale pi-native runs');
+    }
+  } catch (err) {
+    logger.warn({ err }, '[worker] pipeline:stale-pi-runs handler failed');
   }
 }
 
@@ -2483,6 +2514,9 @@ async function start(): Promise<void> {
   await boss.work('pipeline:retry', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRetry);
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
+  await boss.work('pipeline:stale-pi-runs', { batchSize: 1 }, async () => {
+    await handleStalePiRuns();
+  });
   await registerSpecJobHandlers(boss);
 
   // Poll worker_settings every WORKER_SETTINGS_POLL_MS (default 30s).
@@ -2716,6 +2750,13 @@ async function start(): Promise<void> {
     logger.info('[worker] integration:health-check cron registered (every 5 min)');
   } catch (err) {
     logger.warn({ err }, '[worker] integration:health-check schedule registration failed (non-fatal)');
+  }
+
+  try {
+    await boss.schedule('pipeline:stale-pi-runs', '* * * * *', {});
+    logger.info('[worker] pipeline:stale-pi-runs cron registered (every minute)');
+  } catch (err) {
+    logger.warn({ err }, '[worker] pipeline:stale-pi-runs schedule registration failed (non-fatal)');
   }
 
   // 4. Bulk-register all enabled pipeline_schedules with pg-boss native scheduling.

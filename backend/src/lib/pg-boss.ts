@@ -93,6 +93,7 @@ export async function ensureQueues(boss: PgBoss): Promise<void> {
   await boss.createQueue('pipeline:cancel');
   await boss.createQueue('pipeline:cron');
   await boss.createQueue('pipeline:merge');
+  await boss.createQueue('pipeline:stale-pi-runs');
   await boss.createQueue('spec:enrich');
   await boss.createQueue('context:enrich');
   await boss.createQueue('spec:match-skills');

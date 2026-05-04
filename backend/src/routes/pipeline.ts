@@ -872,12 +872,15 @@ interface PipelineRunRow {
   spec_path: string;
   workspace_id: string;
   status: string;
+  idempotency_key?: string | null;
   pid: number | null;
   branch_name: string | null;
   worktree_path: string | null;
   trigger_type: string;
   started_at: string;
   finished_at: string | null;
+  last_heartbeat_at?: string | null;
+  summary?: string | null;
   retried_from_run_id: number | null;
   log_path: string | null;
   agent: string;
@@ -913,6 +916,23 @@ interface StoryResultRow {
   model_used: string | null;
   cost_usd: number | null;
 }
+
+const externalRunCreateSchema = z.object({
+  specPath: z.string().startsWith('forge/specs/approved/'),
+  workspaceId: z.string().min(1),
+  idempotencyKey: z.string().max(128).regex(/^[A-Za-z0-9_-]+$/),
+  agent: z.literal('pi'),
+  model: z.string().min(1).optional(),
+});
+
+const externalFinalizeSchema = z.object({
+  status: z.enum(['passed', 'failed', 'cancelled']),
+  summary: z.string().max(2000).optional(),
+});
+
+const externalRunIdParamSchema = z.object({
+  id: z.coerce.number().int().positive(),
+});
 
 /**
  * @swagger
@@ -1384,19 +1404,19 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const runNowMaxConcurrent = concurrencyRows.length > 0 ? parseInt(concurrencyRows[0].value, 10) : 3;
 
         const activeWorktreeCount = Number((await queryOne<{ count: string }>(
-          `SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') AND worktree_path IS NOT NULL`,
+          `SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native', 'cancelling') AND worktree_path IS NOT NULL`,
           [workspaceId],
         ))?.count ?? '0');
 
         if (activeWorktreeCount >= runNowMaxConcurrent) {
-          const activeRun = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') AND worktree_path IS NOT NULL LIMIT 1`, [workspaceId]);
+          const activeRun = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native', 'cancelling') AND worktree_path IS NOT NULL LIMIT 1`, [workspaceId]);
           res.json({ conflict: true, activeRunId: activeRun?.id, reason: `Maximum ${runNowMaxConcurrent} concurrent worktree runs reached. Wait for an active run to complete or increase run_now_max_concurrent.` });
           return;
         }
         // Fall through — allowed, will create worktree below
       } else {
         // ── 4c. Run Now without autoWorktree: conflict if any run active ──────
-        const activeRun = await queryOne<PipelineRunRow>(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') LIMIT 1`, [workspaceId]);
+        const activeRun = await queryOne<PipelineRunRow>(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native', 'cancelling') LIMIT 1`, [workspaceId]);
         if (activeRun) {
           res.json({ conflict: true, activeRunId: activeRun.id });
           return;
@@ -2137,7 +2157,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 4. Conflict detection
-    const activeRun = await queryOne(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') LIMIT 1`, [workspaceId]) as PipelineRunRow | undefined;
+    const activeRun = await queryOne(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native', 'cancelling') LIMIT 1`, [workspaceId]) as PipelineRunRow | undefined;
     if (activeRun) {
       res.json({ conflict: true, activeRunId: activeRun.id });
       return;
@@ -2538,6 +2558,222 @@ router.post('/runs', async (req: Request, res: Response) => {
     res.status(201).json({ run });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Create run');
+  }
+});
+
+/**
+ * @swagger
+ * /api/pipeline/runs/external:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Create or reuse an external pi-native run
+ *     operationId: createExternalPipelineRun
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Pi-native run lifecycle mutations own run state and must be authenticated to prevent orphan runs from external callers."
+ *     description: Creates an idempotent pipeline_runs row for the external pi orchestrator, or returns the existing run for the same idempotency key.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [specPath, workspaceId, idempotencyKey, agent]
+ *             properties:
+ *               specPath: { type: string, description: "Relative approved spec path beginning with forge/specs/approved/" }
+ *               workspaceId: { type: string, description: "Workspace ID" }
+ *               idempotencyKey: { type: string, maxLength: 128 }
+ *               agent: { type: string, enum: [pi] }
+ *               model: { type: string, nullable: true }
+ *     responses:
+ *       200: { description: "Existing run reused" }
+ *       201: { description: "New pi-native run created" }
+ *       400: { description: "Invalid request" }
+ *       500: { description: "Run creation failed" }
+ */
+router.post('/runs/external', async (req: Request, res: Response) => {
+  try {
+    const body = externalRunCreateSchema.parse(req.body);
+
+    try {
+      const existing = await queryOne<{ id: number }>(
+        'SELECT id FROM pipeline_runs WHERE idempotency_key = $1 LIMIT 1',
+        [body.idempotencyKey],
+      );
+      if (existing) {
+        res.status(200).json({ runId: existing.id, idempotent: true });
+        return;
+      }
+
+      const created = await queryOne<{ id: number }>(
+        `INSERT INTO pipeline_runs
+           (spec_path, workspace_id, idempotency_key, agent, agent_type, agent_model, status, started_at, last_heartbeat_at)
+         VALUES ($1, $2, $3, 'pi', 'pi', $4, 'pi_native', NOW(), NOW())
+         RETURNING id`,
+        [body.specPath, body.workspaceId, body.idempotencyKey, body.model ?? null],
+      );
+
+      const runId = created?.id;
+      if (!runId) {
+        throw new Error('Run creation returned no row');
+      }
+
+      const specId = path.basename(body.specPath, '.json');
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, spec_id, workspace_id, payload, ts)
+         VALUES ('pi_native_run_requested', $1, $2, $3, NOW())
+         RETURNING *`,
+        [specId, body.workspaceId, JSON.stringify({
+          type: 'pi_native_run_requested',
+          runId,
+          run_id: runId,
+          specId,
+          spec_id: specId,
+          workspaceId: body.workspaceId,
+          workspace_id: body.workspaceId,
+          model: body.model ?? null,
+        })],
+      );
+
+      if (walEvent) broadcastAll(walEvent);
+      res.status(201).json({ runId });
+    } catch (error: any) {
+      if (error?.code === '23505') {
+        const existing = await queryOne<{ id: number }>(
+          'SELECT id FROM pipeline_runs WHERE idempotency_key = $1 LIMIT 1',
+          [body.idempotencyKey],
+        );
+        if (existing) {
+          res.status(200).json({ runId: existing.id, idempotent: true });
+          return;
+        }
+      }
+
+      logger.error({ err: error }, '[Pipeline] External run create failed');
+      res.status(500).json({ error: 'Failed to create run', code: 'RUN_CREATE_FAILED' });
+    }
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] Create external run');
+  }
+});
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{id}/heartbeat:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Record an external pi-native run heartbeat
+ *     operationId: heartbeatExternalPipelineRun
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Pi-native run lifecycle mutations own run state and must be authenticated to prevent orphan runs from external callers."
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: "Heartbeat recorded" }
+ *       404: { description: "Run not found or not active" }
+ */
+router.post('/runs/:id/heartbeat', async (req: Request, res: Response) => {
+  try {
+    const { id } = externalRunIdParamSchema.parse(req.params);
+    const updated = await queryOne<{ last_heartbeat_at: string }>(
+      `UPDATE pipeline_runs
+       SET last_heartbeat_at = NOW()
+       WHERE id = $1
+         AND agent_type = 'pi'
+         AND status NOT IN ('passed', 'failed', 'cancelled', 'stale')
+       RETURNING last_heartbeat_at`,
+      [id],
+    );
+
+    if (!updated) {
+      res.status(404).json({
+        error: 'Run not found or not in an active pi-native state',
+        code: 'RUN_NOT_ACTIVE',
+      });
+      return;
+    }
+
+    res.status(200).json({ ok: true, lastHeartbeatAt: updated.last_heartbeat_at });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] Heartbeat external run');
+  }
+});
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{id}/finalize:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Finalize an external pi-native run
+ *     operationId: finalizeExternalPipelineRun
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Pi-native run lifecycle mutations own run state and must be authenticated to prevent orphan runs from external callers."
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [status]
+ *             properties:
+ *               status: { type: string, enum: [passed, failed, cancelled] }
+ *               summary: { type: string, maxLength: 2000, nullable: true }
+ *     parameters:
+ *       - in: path
+ *         name: id
+ *         required: true
+ *         schema: { type: integer }
+ *     responses:
+ *       200: { description: "Run finalized or already terminal" }
+ *       404: { description: "Run not found" }
+ */
+router.post('/runs/:id/finalize', async (req: Request, res: Response) => {
+  try {
+    const { id } = externalRunIdParamSchema.parse(req.params);
+    const body = externalFinalizeSchema.parse(req.body);
+    const existing = await queryOne<{ status: string; workspace_id: string }>(
+      'SELECT status, workspace_id FROM pipeline_runs WHERE id = $1',
+      [id],
+    );
+
+    if (!existing) {
+      res.status(404).json({ error: 'Run not found', code: 'RUN_NOT_FOUND' });
+      return;
+    }
+
+    if (existing.status === 'passed' || existing.status === 'failed' || existing.status === 'cancelled') {
+      res.status(200).json({ ok: true, idempotent: true, currentStatus: existing.status });
+      return;
+    }
+
+    await execute(
+      `UPDATE pipeline_runs
+       SET status = $2,
+           finished_at = NOW(),
+           summary = $3
+       WHERE id = $1`,
+      [id, body.status, body.summary ?? null],
+    );
+
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, workspace_id, payload, ts)
+       VALUES ('run_finished', $1, $2, NOW())
+       RETURNING *`,
+      [existing.workspace_id, JSON.stringify({
+        type: 'run_finished',
+        runId: id,
+        run_id: id,
+        status: body.status,
+        summary: body.summary ?? null,
+      })],
+    );
+
+    if (walEvent) broadcastAll(walEvent);
+    res.status(200).json({ ok: true });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] Finalize external run');
   }
 });
 
@@ -3601,15 +3837,14 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
  * /api/pipeline/runs/{runId}/cancel:
  *   post:
  *     tags: [Pipeline]
- *     summary: Cancel a queued or running pipeline run
+ *     summary: Cancel a queued, running, or pi-native pipeline run
  *     operationId: cancelPipelineRun
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Cancelling a local run is a core operator action required by the stable open-source CLI surface."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Pi-native run lifecycle mutations own run state and must be authenticated to prevent orphan runs from external callers."
  *     description: >
  *       For queued runs: removes the pg-boss job and marks the run as cancelled immediately.
  *       For running runs: delivers a pipeline:cancel job to the worker (which sends SIGTERM then SIGKILL after 10s) and returns 200 immediately — DB and WAL updates happen asynchronously in the worker.
- *       Returns 409 if the run is already completed or cancelled.
+ *       For pi-native runs: moves the run into 'cancelling' and emits a pi_native_run_cancel_requested WAL event.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -3628,8 +3863,8 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne<{ id: number; status: string; workspace_id: string; started_at: string; pid: number | null }>(
-      'SELECT id, status, workspace_id, started_at, pid FROM pipeline_runs WHERE id = $1',
+    const run = await queryOne<{ id: number; status: string; workspace_id: string; started_at: string; pid: number | null; agent_type: string | null }>(
+      'SELECT id, status, workspace_id, started_at, pid, agent_type FROM pipeline_runs WHERE id = $1',
       [runId],
     );
 
@@ -3639,6 +3874,30 @@ router.post('/runs/:runId/cancel', async (req: Request, res: Response) => {
     }
 
     const { status } = run;
+
+    if (run.agent_type === 'pi') {
+      if (['passed', 'failed', 'cancelled', 'stale'].includes(status)) {
+        res.json({ ok: true, idempotent: true });
+        return;
+      }
+
+      await execute(`UPDATE pipeline_runs SET status = 'cancelling' WHERE id = $1`, [runId]);
+
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, workspace_id, payload, ts)
+         VALUES ('pi_native_run_cancel_requested', $1, $2, NOW())
+         RETURNING *`,
+        [run.workspace_id, JSON.stringify({
+          type: 'pi_native_run_cancel_requested',
+          runId,
+          run_id: runId,
+        })],
+      );
+      if (walEvent) broadcastAll(walEvent);
+
+      res.json({ ok: true, status: 'cancelling' });
+      return;
+    }
 
     // Already done — conflict
     if (status !== 'queued' && status !== 'running' && status !== 'paused') {
@@ -5357,7 +5616,7 @@ router.post('/queue', async (req: Request, res: Response) => {
 
     // Check for active run
     const activeRun = await queryOne(
-      `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') LIMIT 1`,
+      `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native', 'cancelling') LIMIT 1`,
       [workspaceId]
     ) as { id: number } | undefined;
 
@@ -5930,9 +6189,9 @@ router.get('/worker/health', async (req: Request, res: Response) => {
     const workspaceQueueRows = await query<WorkspaceQueueRow>(
       `SELECT workspace_id,
               COUNT(*) FILTER (WHERE status = 'queued')::text AS queued_count,
-              COUNT(*) FILTER (WHERE status IN ('running', 'paused'))::text AS active_count
+              COUNT(*) FILTER (WHERE status IN ('running', 'paused', 'pi_native', 'cancelling'))::text AS active_count
        FROM pipeline_runs
-       WHERE status IN ('queued', 'running', 'paused')
+       WHERE status IN ('queued', 'running', 'paused', 'pi_native', 'cancelling')
        GROUP BY workspace_id`,
     ).catch(() => [] as WorkspaceQueueRow[]);
 
@@ -6442,7 +6701,7 @@ router.get('/queue/:workspaceId', async (req: Request, res: Response) => {
     const activeRuns = await query<{ id: number; spec_path: string; status: string; started_at: string; triggered_via: string; branch_name: string | null; worktree_path: string | null; agent_type: string }>(
       `SELECT id, spec_path, status, started_at, triggered_via, branch_name, worktree_path, agent_type
        FROM pipeline_runs
-       WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native')
+       WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native', 'cancelling')
        ORDER BY started_at ASC`,
       [workspaceId],
     );

@@ -91,7 +91,7 @@ const options: swaggerJsdoc.Options = {
             spec_path: { type: 'string' },
             status: {
               type: 'string',
-              enum: ['running', 'passed', 'failed', 'paused', 'cancelled'],
+              enum: ['queued', 'running', 'paused', 'pi_native', 'cancelling', 'done', 'passed', 'failed', 'partial_failure', 'cancelled', 'stale'],
             },
             pid: { type: 'integer', nullable: true },
             started_at: { type: 'string', format: 'date-time' },

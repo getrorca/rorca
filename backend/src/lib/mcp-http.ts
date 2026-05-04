@@ -170,6 +170,10 @@ const PUBLIC_TOOL_RULES: Array<{ method: string; pattern: RegExp }> = [
   { method: 'GET', pattern: /^\/api\/templates$/ },
   { method: 'GET', pattern: /^\/api\/graph\/stats$/ },
   { method: 'POST', pattern: /^\/api\/direction\/synthesize$/ },
+  { method: 'POST', pattern: /^\/api\/pipeline\/runs\/external$/ },
+  { method: 'POST', pattern: /^\/api\/pipeline\/runs\/[^/]+\/heartbeat$/ },
+  { method: 'POST', pattern: /^\/api\/pipeline\/runs\/[^/]+\/finalize$/ },
+  { method: 'POST', pattern: /^\/api\/pipeline\/runs\/[^/]+\/cancel$/ },
 ];
 
 function isPublicTool(definition: Pick<McpToolDefinition, 'capturedMethod' | 'capturedPath'>): boolean {
