@@ -10,30 +10,49 @@ import {
   SpecJobPayload,
   type SpecJobPayloadType,
 } from './pg-boss-schemas';
-import { updateJobStatus } from '../db/spec-jobs';
+import { getJob, updateJobStatus } from '../db/spec-jobs';
 import { logger } from './logger';
 import { runEnrichJob, runMatchSkillsJob, runSuggestSkillsJob, type ProgressCallback } from './spec-job-handlers';
+import { publishSpecJobSnapshot } from './spec-job-events';
 
-const SPEC_ENRICH_QUEUE = 'spec:enrich';
-const SPEC_MATCH_SKILLS_QUEUE = 'spec:match-skills';
-const SPEC_SUGGEST_SKILLS_QUEUE = 'spec:suggest-skills';
+export const SPEC_ENRICH_QUEUE = 'spec:enrich';
+export const SPEC_MATCH_SKILLS_QUEUE = 'spec:match-skills';
+export const SPEC_SUGGEST_SKILLS_QUEUE = 'spec:suggest-skills';
 const PROGRESS_THROTTLE_MS = 500;
+
+class SpecJobCancelledError extends Error {
+  constructor() {
+    super('Spec job cancelled');
+    this.name = 'SpecJobCancelledError';
+  }
+}
+
+async function throwIfCancelled(jobId: string): Promise<void> {
+  const job = await getJob(jobId);
+  if (job?.status === 'cancelled') {
+    throw new SpecJobCancelledError();
+  }
+}
 
 function buildProgressUpdater(jobId: string): ProgressCallback {
   let lastUpdateAt = 0;
   let pendingUpdate: Promise<void> = Promise.resolve();
 
   return async (progress) => {
+    await throwIfCancelled(jobId);
     const now = Date.now();
     if (now - lastUpdateAt < PROGRESS_THROTTLE_MS) {
       return;
     }
     lastUpdateAt = now;
-    pendingUpdate = pendingUpdate.then(() => updateJobStatus(jobId, 'running', {
-      progressCurrent: progress.current,
-      progressTotal: progress.total,
-      progressMessage: progress.message,
-    }));
+    pendingUpdate = pendingUpdate.then(async () => {
+      await updateJobStatus(jobId, 'running', {
+        progressCurrent: progress.current,
+        progressTotal: progress.total,
+        progressMessage: progress.message,
+      });
+      await publishSpecJobSnapshot(jobId, 'progress');
+    });
     await pendingUpdate;
   };
 }
@@ -57,6 +76,13 @@ async function handleSpecJobs(
     }
 
     const payload = parsed.data;
+    const existing = await getJob(payload.jobId);
+    if (existing?.status === 'cancelled') {
+      await publishSpecJobSnapshot(payload.jobId, 'terminal');
+      logger.info({ queueName, jobId: payload.jobId }, '[spec-job-worker] skipped cancelled job before start');
+      return;
+    }
+
     const startedAt = new Date();
     const onProgress = buildProgressUpdater(payload.jobId);
     await updateJobStatus(payload.jobId, 'running', {
@@ -65,20 +91,47 @@ async function handleSpecJobs(
       progressTotal: 0,
       progressMessage: `Picked up ${queueName} job`,
     });
+    await publishSpecJobSnapshot(payload.jobId, 'progress');
 
     try {
       const resultPayload = await runner(payload, onProgress);
+      await throwIfCancelled(payload.jobId);
       await updateJobStatus(payload.jobId, 'completed', {
         resultPayload: resultPayload as never,
         finishedAt: new Date(),
       });
+      await publishSpecJobSnapshot(payload.jobId, 'terminal');
       logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId }, '[spec-job-worker] job completed');
     } catch (error) {
+      if (error instanceof SpecJobCancelledError) {
+        await updateJobStatus(payload.jobId, 'cancelled', {
+          finishedAt: new Date(),
+          progressMessage: 'Cancelled by user',
+          errorMessage: null,
+        });
+        await publishSpecJobSnapshot(payload.jobId, 'terminal');
+        logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId }, '[spec-job-worker] job cancelled');
+        return;
+      }
+
+      const latest = await getJob(payload.jobId);
+      if (latest?.status === 'cancelled') {
+        await updateJobStatus(payload.jobId, 'cancelled', {
+          finishedAt: new Date(),
+          progressMessage: 'Cancelled by user',
+          errorMessage: null,
+        });
+        await publishSpecJobSnapshot(payload.jobId, 'terminal');
+        logger.info({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId }, '[spec-job-worker] cancellation won race with failure');
+        return;
+      }
+
       const message = errorMessageFor(error);
       await updateJobStatus(payload.jobId, 'failed', {
         errorMessage: message,
         finishedAt: new Date(),
       });
+      await publishSpecJobSnapshot(payload.jobId, 'terminal');
       logger.warn({ queueName, jobId: payload.jobId, specId: payload.specId, workspaceId: payload.workspaceId, error: message }, '[spec-job-worker] job failed');
       throw error;
     }

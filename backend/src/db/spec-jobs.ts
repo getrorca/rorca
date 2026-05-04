@@ -34,6 +34,7 @@ export interface SpecJob {
   workspaceId: string;
   jobType: SpecJobType;
   status: SpecJobStatus;
+  bossJobId: string | null;
   progressCurrent: number;
   progressTotal: number;
   progressMessage: string | null;
@@ -51,6 +52,7 @@ interface SpecJobRow {
   workspace_id: string;
   job_type: SpecJobType;
   status: SpecJobStatus;
+  boss_job_id: string | null;
   progress_current: number | null;
   progress_total: number | null;
   progress_message: string | null;
@@ -63,6 +65,7 @@ interface SpecJobRow {
 }
 
 export interface UpdateJobStatusFields {
+  bossJobId?: string | null;
   progressCurrent?: number;
   progressTotal?: number;
   progressMessage?: string | null;
@@ -85,6 +88,7 @@ function mapSpecJobRow(row: SpecJobRow): SpecJob {
     workspaceId: row.workspace_id,
     jobType: row.job_type,
     status: row.status,
+    bossJobId: row.boss_job_id,
     progressCurrent: row.progress_current ?? 0,
     progressTotal: row.progress_total ?? 0,
     progressMessage: row.progress_message,
@@ -95,6 +99,48 @@ function mapSpecJobRow(row: SpecJobRow): SpecJob {
     finishedAt: asDate(row.finished_at),
     createdAt: asDate(row.created_at) ?? new Date(0),
   };
+}
+
+export interface SpecJobState {
+  id: string;
+  specId: string;
+  workspaceId: string;
+  jobType: SpecJobType;
+  status: SpecJobStatus;
+  progress: {
+    current: number;
+    total: number;
+    message: string | null;
+  };
+  result: JsonValue | null;
+  error: string | null;
+  startedAt: Date | null;
+  finishedAt: Date | null;
+  createdAt: Date;
+}
+
+export function toSpecJobState(job: SpecJob): SpecJobState {
+  return {
+    id: job.id,
+    specId: job.specId,
+    workspaceId: job.workspaceId,
+    jobType: job.jobType,
+    status: job.status,
+    progress: {
+      current: job.progressCurrent,
+      total: job.progressTotal,
+      message: job.progressMessage,
+    },
+    result: job.resultPayload,
+    error: job.errorMessage,
+    startedAt: job.startedAt,
+    finishedAt: job.finishedAt,
+    createdAt: job.createdAt,
+  };
+}
+
+export function isTerminalStatus(status: SpecJobStatus): boolean {
+  return status === 'completed' || status === 'failed' || status === 'cancelled';
 }
 
 export async function createJob(
@@ -117,6 +163,7 @@ export async function createJob(
       workspace_id,
       job_type,
       status,
+      boss_job_id,
       progress_current,
       progress_total,
       progress_message,
@@ -144,6 +191,7 @@ export async function getJob(jobId: string): Promise<SpecJob | null> {
       workspace_id,
       job_type,
       status,
+      boss_job_id,
       progress_current,
       progress_total,
       progress_message,
@@ -170,6 +218,10 @@ export async function updateJobStatus(
   const values: Array<string | number | Date | JsonValue | null> = [jobId, status];
   let paramIndex = 3;
 
+  if (fields.bossJobId !== undefined) {
+    updates.push(`boss_job_id = $${paramIndex++}`);
+    values.push(fields.bossJobId);
+  }
   if (fields.progressCurrent !== undefined) {
     updates.push(`progress_current = $${paramIndex++}`);
     values.push(fields.progressCurrent);
@@ -220,6 +272,7 @@ export async function listActiveJobs(workspaceId: string, specId?: string): Prom
         workspace_id,
         job_type,
         status,
+        boss_job_id,
         progress_current,
         progress_total,
         progress_message,
@@ -243,6 +296,7 @@ export async function listActiveJobs(workspaceId: string, specId?: string): Prom
         workspace_id,
         job_type,
         status,
+        boss_job_id,
         progress_current,
         progress_total,
         progress_message,
