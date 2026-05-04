@@ -2,7 +2,7 @@
   "specId": "Rorca Pi-Native Execution Runtime and Embedded TUI",
   "runId": 20260316000259,
   "startedAt": "2026-05-04T07:24:12.380Z",
-  "lastUpdatedAt": "2026-05-04T07:24:22.612Z",
+  "lastUpdatedAt": "2026-05-04T07:24:47.002Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -13,6 +13,16 @@
       "agentType": "pi",
       "model": "gpt-5.4",
       "elapsedMs": 7795
+    },
+    {
+      "storyId": "US-002",
+      "title": "Pi-Native Execution Mode Agent Type Registration",
+      "status": "passed",
+      "startedAt": "2026-05-04T07:24:38.206Z",
+      "finishedAt": "2026-05-04T07:24:47.002Z",
+      "agentType": "pi",
+      "model": "gpt-5.4",
+      "elapsedMs": 8796
     }
   ],
   "failedStories": [],
