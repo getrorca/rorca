@@ -2,7 +2,7 @@
   "specId": "Rorca Pi-Native Execution Runtime and Embedded TUI",
   "runId": 20260316000259,
   "startedAt": "2026-05-04T07:24:12.380Z",
-  "lastUpdatedAt": "2026-05-04T07:31:04.403Z",
+  "lastUpdatedAt": "2026-05-04T07:31:31.060Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -173,6 +173,16 @@
       "agentType": "pi",
       "model": "gpt-5.4",
       "elapsedMs": 10231
+    },
+    {
+      "storyId": "US-018",
+      "title": "Pi Extension Bootstrap, Command Registration, and E2E Integration Test",
+      "status": "passed",
+      "startedAt": "2026-05-04T07:31:19.346Z",
+      "finishedAt": "2026-05-04T07:31:31.060Z",
+      "agentType": "pi",
+      "model": "gpt-5.4",
+      "elapsedMs": 11714
     }
   ],
   "failedStories": [],
