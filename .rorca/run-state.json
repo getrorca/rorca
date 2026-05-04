@@ -2,7 +2,7 @@
   "specId": "Rorca Pi-Native Execution Runtime and Embedded TUI",
   "runId": 20260316000259,
   "startedAt": "2026-05-04T07:24:12.380Z",
-  "lastUpdatedAt": "2026-05-04T07:29:51.958Z",
+  "lastUpdatedAt": "2026-05-04T07:30:16.108Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -143,6 +143,16 @@
       "agentType": "pi",
       "model": "gpt-5.4",
       "elapsedMs": 8287
+    },
+    {
+      "storyId": "US-015",
+      "title": "Embedded TUI: Memory Browser and Proposal Review Modal",
+      "status": "passed",
+      "startedAt": "2026-05-04T07:30:06.975Z",
+      "finishedAt": "2026-05-04T07:30:16.108Z",
+      "agentType": "pi",
+      "model": "gpt-5.4",
+      "elapsedMs": 9133
     }
   ],
   "failedStories": [],
