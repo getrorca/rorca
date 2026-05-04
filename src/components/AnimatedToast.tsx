@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * AnimatedToast: Toast notification with slideRight entry and fadeOut exit
  * Used for: success messages, error alerts, notifications
  * Animation: slideRight from left (100ms), exit fadeOut (100ms)

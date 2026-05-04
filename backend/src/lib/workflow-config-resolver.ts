@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 // ─── Workflow Config Resolver (WR-002) ──────────────────────────────────────
 // Resolves the effective runtime/provider/model/apiKey for a given workflow.
 // Resolution chain: DB workflow_configs → agent_config (pipeline_execution only)
@@ -10,7 +17,7 @@ import { logger } from './logger';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
-export type WorkflowRuntime = 'native' | 'claude' | 'opencode' | 'codex';
+export type WorkflowRuntime = 'native' | 'claude' | 'opencode' | 'codex' | 'pi';
 
 export type WorkflowId = 'spec_generation' | 'pipeline_execution' | 'memory_consolidation';
 
@@ -50,6 +57,7 @@ const AGENT_TO_RUNTIME: Record<string, WorkflowRuntime> = {
   claude: 'claude',
   opencode: 'opencode',
   codex: 'codex',
+  pi: 'pi',
 };
 
 // Map provider names to env var keys for API key fallback
@@ -138,7 +146,7 @@ async function resolveApiKey(
   runtime: WorkflowRuntime,
 ): Promise<{ apiKey: string | null; baseUrl: string | null }> {
   // claude-cli runtime uses subscription auth — no API key needed
-  if (runtime === 'claude' && provider === 'claude-cli') {
+  if ((runtime === 'claude' || runtime === 'pi') && provider === 'claude-cli') {
     return { apiKey: null, baseUrl: null };
   }
 

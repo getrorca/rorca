@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response } from 'express';
 import { query, queryOne, execute } from '../db/index';
 import { NotFoundError } from '../lib/errors';
@@ -74,6 +81,9 @@ export async function insertAuditEntry(opts: {
  *     tags: [Integrations]
  *     summary: Get integration audit log for a workspace
  *     operationId: getIntegrationAuditLog
+ *     x-rorca-tier: paid
+ *     x-rorca-capability: grcAuditTraces
+ *     x-rorca-rationale: "Integration audit traces are part of the paid observability/GRC surface and should not be exposed to free-tier automation."
  *     description: Returns a paginated, filterable audit log of all integration actions for a workspace. Supports filtering by provider and action type.
  *     parameters:
  *       - in: path

@@ -3,6 +3,9 @@
   "version": "0.1.0",
   "description": "AI spec orchestration pipeline — turn plain-English briefs into validated, executed code",
   "type": "module",
+  "workspaces": [
+    "packages/*"
+  ],
   "bin": {
     "rorca": "./bin/rorca.js"
   },
@@ -12,16 +15,23 @@
     "dev:frontend": "vite",
     "dev:frontend-only": "vite",
     "dev:server": "cd backend && npx tsx src/server.ts",
+    "dev:server:contract": "cd backend && RORCA_DISABLE_BACKGROUND_RUNTIME=true npx tsx src/server.ts",
     "dev:worker": "cd backend && npx tsx src/worker.ts",
     "dev:worker:optional": "cd backend && RORCA_OPTIONAL_WORKER=true npx tsx src/worker.ts",
     "build": "vite build && cd backend && tsc && cd .. && npx tsc --project bin/tsconfig.json",
+    "build:contract": "npx tsx scripts/build-public-contract.ts",
+    "check:contract": "npx tsx scripts/check-contract-stability.ts",
+    "check:licenses": "npx tsx scripts/check-license-headers.ts",
+    "check:license-boundaries": "npx tsx scripts/check-license-boundaries.ts",
     "typecheck": "tsc --noEmit && cd backend && tsc --noEmit",
     "lint": "npx eslint src/",
     "lint:swagger": "npx tsx scripts/check-swagger-coverage.ts",
+    "lint:tier": "npx tsx scripts/check-rorca-tier-annotations.ts",
     "changelog": "npx tsx scripts/generate-changelog.ts",
     "self-register": "npx tsx forge/self-register.ts",
     "start": "node cli.js start",
     "postinstall": "cd backend && npm install --production --ignore-scripts 2>/dev/null || true",
+    "prepack": "npm run build",
     "prepublishOnly": "npm run build",
     "test:e2e:first-run": "npx tsx test/e2e/first-run.test.ts",
     "auth:test": "npx playwright test tests/auth.spec.ts"
@@ -44,12 +54,14 @@
     "cli.js",
     "dist/",
     "backend/dist/",
-    "backend/src/db/migrations/",
+    "backend/src/db/pg-migrations/",
     "backend/package.json",
     "backend/package-lock.json",
     "forge/run-loop.sh",
     "forge/self-register.ts",
-    "package.json"
+    "package.json",
+    "README.md",
+    "LICENSE"
   ],
   "dependencies": {
     "@dagrejs/dagre": "^3.0.0",
@@ -64,7 +76,9 @@
     "@xterm/addon-webgl": "0.20.0-beta.196",
     "@xterm/xterm": "6.1.0-beta.197",
     "ansi-to-html": "^0.7.2",
+    "commander": "^12.1.0",
     "date-fns": "^4.1.0",
+    "execa": "^9.6.1",
     "framer-motion": "^12.38.0",
     "lucide-react": "^1.11.0",
     "mermaid": "^11.14.0",

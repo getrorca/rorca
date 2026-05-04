@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * recall.ts — GET /api/recall
  *
  * Single-call context retrieval for MCP and CLI consumers.
@@ -419,6 +426,9 @@ async function fetchActiveRuns(
  *   get:
  *     operationId: getRecall
  *     summary: Semantic workspace context recall — use when asking "what do we know about X?" or bootstrapping a session
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Recall is a read-only workspace intelligence surface used by CLI and MCP flows to bootstrap context without crossing billing or admin boundaries."
+ *     x-rorca-public-api: true
  *     description: >
  *       USE THIS for semantic memory search ("find memories about deployment", "what conventions exist for auth").
  *       Pass the `query` parameter to trigger 3-tier semantic retrieval (CAG cache → RAG embeddings → Knowledge Graph)

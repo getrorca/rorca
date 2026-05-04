@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -30,6 +37,13 @@ beforeEach(() => {
     getModelInfo: jest.fn().mockReturnValue(undefined),
     SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
   }));
+  jest.mock('../../lib/pi-detector', () => ({
+    detectPi: jest.fn().mockReturnValue({
+      piInstalled: false,
+      piVersion: null,
+      piBinPath: null,
+    }),
+  }));
 
   tmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-test-'));
   const _dbPath = path.join(tmpDir, 'test.db');
@@ -55,6 +69,13 @@ describe('GET /api/health', () => {
     expect(typeof res.body.uptime).toBe('number');
     expect(res.body).toHaveProperty('db_connected', true);
     expect(res.body).toHaveProperty('active_runs', 0);
+    expect(res.body).toHaveProperty('piInstalled', false);
+    expect(res.body).toHaveProperty('piVersion', null);
+    expect(res.body).toHaveProperty('piBinPath', null);
+    expect(res.body).toHaveProperty('mcpTransport', 'http');
+    expect(res.body).toHaveProperty('mcp.enabled', true);
+    expect(res.body).toHaveProperty('mcp.status', 'healthy');
+    expect(res.body).toHaveProperty('mcp.url', 'http://localhost:3030/mcp');
   });
 
   it('returns no-cache headers', async () => {
@@ -80,6 +101,25 @@ describe('GET /api/health', () => {
 
     const res = await request(app).get('/api/health');
     expect(res.body.active_runs).toBe(2);
+  });
+
+  it('reports MCP disabled when RORCA_SERVE_MCP=false', async () => {
+    process.env.RORCA_SERVE_MCP = 'false';
+    jest.resetModules();
+    const serverMod = require('../../server');
+    const mcpDisabledApp = serverMod.default as Express;
+
+    const res = await request(mcpDisabledApp).get('/api/health');
+    expect(res.status).toBe(200);
+    expect(res.body.mcpTransport).toBe('disabled');
+    expect(res.body.mcp).toMatchObject({
+      enabled: false,
+      status: 'disabled',
+      url: 'http://localhost:3030/mcp',
+      sessions: 0,
+    });
+
+    delete process.env.RORCA_SERVE_MCP;
   });
 });
 
@@ -181,7 +221,7 @@ describe('GET /api/health (agentType=opencode)', () => {
       agentModel: 'openai/gpt-4o',
       agentConfig: { agentType: 'opencode', agentModel: 'openai/gpt-4o' },
       parseAgentConfig: jest.fn(),
-      VALID_AGENT_TYPES: ['claude', 'opencode', 'codex'],
+      VALID_AGENT_TYPES: ['claude', 'opencode', 'codex', 'pi'],
     }));
 
     // Mock opencode-detector to return a known status
@@ -198,6 +238,13 @@ describe('GET /api/health (agentType=opencode)', () => {
       }),
       MIN_OPENCODE_VERSION: '0.1.0',
       semverGte: jest.fn().mockReturnValue(true),
+    }));
+    jest.mock('../../lib/pi-detector', () => ({
+      detectPi: jest.fn().mockReturnValue({
+        piInstalled: true,
+        piVersion: '1.2.3',
+        piBinPath: '/usr/local/bin/pi',
+      }),
     }));
 
     ocTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-oc-test-'));
@@ -218,6 +265,9 @@ fs.rmSync(ocTmpDir, { recursive: true, force: true });
     expect(res.status).toBe(200);
     expect(res.body.opencodeInstalled).toBe(true);
     expect(res.body.opencodeVersion).toBe('0.2.0');
+    expect(res.body.piInstalled).toBe(true);
+    expect(res.body.piVersion).toBe('1.2.3');
+    expect(res.body.piBinPath).toBe('/usr/local/bin/pi');
   });
 
   it('includes opencode fields in detailed health too', async () => {
@@ -226,5 +276,49 @@ fs.rmSync(ocTmpDir, { recursive: true, force: true });
     expect(res.status).toBe(200);
     expect(res.body.opencodeInstalled).toBe(true);
     expect(res.body.opencodeVersion).toBe('0.2.0');
+  });
+});
+
+describe('GET /api/health (pi detector failure)', () => {
+  let failApp: Express;
+  let failTmpDir: string;
+
+  beforeEach(() => {
+    jest.resetModules();
+
+    jest.mock('../../lib/llm-client', () => ({
+      chatComplete: jest.fn(),
+      getActiveProvider: jest.fn().mockReturnValue('claude-cli'),
+      isValidModel: jest.fn().mockReturnValue(true),
+      DEFAULT_MODEL: 'claude-sonnet-4-5-20250929',
+      resolveVaultProvider: jest.fn().mockReturnValue(null),
+      getModelInfo: jest.fn().mockReturnValue(undefined),
+      SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929'],
+    }));
+    jest.mock('../../lib/pi-detector', () => ({
+      detectPi: jest.fn(() => {
+        throw new Error('pi detector failed');
+      }),
+    }));
+
+    failTmpDir = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-health-pi-fail-test-'));
+    const _dbPath = path.join(failTmpDir, 'test.db');
+process.env.NODE_ENV = 'test';
+
+    const serverMod = require('../../server');
+    failApp = serverMod.default;
+  });
+
+  afterEach(() => {
+fs.rmSync(failTmpDir, { recursive: true, force: true });
+  });
+
+  it('returns 200 and null pi fields when detectPi throws', async () => {
+    const res = await request(failApp).get('/api/health');
+
+    expect(res.status).toBe(200);
+    expect(res.body.piInstalled).toBe(false);
+    expect(res.body.piVersion).toBeNull();
+    expect(res.body.piBinPath).toBeNull();
   });
 });

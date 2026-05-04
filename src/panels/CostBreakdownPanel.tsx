@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useState, useEffect, useCallback } from 'react';
 import {
   BarChart, Bar, XAxis, YAxis, CartesianGrid,
@@ -397,10 +404,10 @@ function CostsTab({ data, loading, groupBy }: { data: CostResponse | null; loadi
                   borderRadius: '6px',
                   fontSize: '12px',
                 }}
-                formatter={(value?: number, name?: string) => [
-                  formatCost(value ?? 0),
+                formatter={((value: string | number | undefined, name: string | number | undefined) => [
+                  formatCost(typeof value === 'number' ? value : Number(value ?? 0)),
                   name === 'input_cost_usd' ? 'Input Cost' : 'Output Cost',
-                ]}
+                ]) as any}
               />
               <Legend formatter={(value: string) => value === 'input_cost_usd' ? 'Input Cost' : 'Output Cost'} />
               <Bar dataKey="input_cost_usd" fill="#6366f1" stackId="cost" radius={[0, 0, 0, 0]} />
@@ -514,10 +521,10 @@ function PeriodView({ periods }: { periods: PeriodCostRow[] }) {
                   borderRadius: '6px',
                   fontSize: '12px',
                 }}
-                formatter={(value?: number, name?: string) => [
-                  formatCost(value ?? 0),
+                formatter={((value: string | number | undefined, name: string | number | undefined) => [
+                  formatCost(typeof value === 'number' ? value : Number(value ?? 0)),
                   name === 'input_cost_usd' ? 'Input Cost' : 'Output Cost',
-                ]}
+                ]) as any}
               />
               <Legend formatter={(value: string) => value === 'input_cost_usd' ? 'Input Cost' : 'Output Cost'} />
               <Bar dataKey="input_cost_usd" fill="#6366f1" stackId="cost" />

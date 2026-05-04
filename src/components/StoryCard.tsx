@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import React, { useState, useEffect } from 'react';
 import { ChevronDown, ChevronRight, MinusCircle, PlusCircle, CheckCircle2, Circle, Pencil, AlertTriangle, Timer, GitPullRequest, GitCommit, GitBranch, ClipboardCopy, Check, MessageSquare, Sparkles, X, CheckCheck, Loader2 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';

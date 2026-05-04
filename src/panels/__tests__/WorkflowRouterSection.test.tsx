@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * QRW-016: Frontend — WorkflowRouterSection renders matrix table with interactive controls
  *
  * WorkflowRouterSection is an internal component of ProviderSettingsTab.
@@ -160,10 +167,13 @@ interface CliStatusFixture {
   claudeBin: string;
   opencodeBin: string | null;
   codexBin: string | null;
+  piBin: string | null;
   opencodeInstalled: boolean;
   opencodeVersion: string | null;
   codexInstalled: boolean;
   codexVersion: string | null;
+  piInstalled: boolean;
+  piVersion: string | null;
   copilotConnected: boolean;
   copilotUsername: null;
 }
@@ -174,10 +184,13 @@ const CLI_STATUS_ALL_INSTALLED: CliStatusFixture = {
   claudeBin: '/usr/local/bin/claude',
   opencodeBin: '/usr/local/bin/opencode',
   codexBin: '/usr/local/bin/codex',
+  piBin: '/usr/local/bin/pi',
   opencodeInstalled: true,
   opencodeVersion: '0.1.5',
   codexInstalled: true,
   codexVersion: '1.0.0',
+  piInstalled: true,
+  piVersion: '1.2.3',
   copilotConnected: false,
   copilotUsername: null,
 };
@@ -188,10 +201,13 @@ const CLI_STATUS_CLAUDE_ONLY: CliStatusFixture = {
   claudeBin: '/usr/local/bin/claude',
   opencodeBin: null,
   codexBin: null,
+  piBin: null,
   opencodeInstalled: false,
   opencodeVersion: null,
   codexInstalled: false,
   codexVersion: null,
+  piInstalled: false,
+  piVersion: null,
   copilotConnected: false,
   copilotUsername: null,
 };
@@ -317,7 +333,7 @@ describe('WorkflowRouterSection', () => {
 
   // ── Runtime segmented control (Pipeline Execution only) ────────────────────
 
-  it('renders Claude, OpenCode, Codex runtime buttons for Pipeline Execution row', async () => {
+  it('renders Claude, OpenCode, Codex, and Pi runtime buttons for Pipeline Execution row', async () => {
     mockApiFetch.mockImplementation(buildMock());
     renderWithProviders(<ProviderSettingsTab />);
 
@@ -325,6 +341,7 @@ describe('WorkflowRouterSection', () => {
       expect(screen.getByRole('button', { name: /Claude/i })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /OpenCode/i })).toBeInTheDocument();
       expect(screen.getByRole('button', { name: /Codex/i })).toBeInTheDocument();
+      expect(screen.getByRole('button', { name: /^Pi$/i })).toBeInTheDocument();
     }, { timeout: 3000 });
   });
 
@@ -334,13 +351,15 @@ describe('WorkflowRouterSection', () => {
 
     await waitFor(() => {
       // Each segment button contains a colored dot span
-      // We verify all 3 segment buttons are present (each has a dot)
+      // We verify all runtime segment buttons are present (each has a dot)
       const claudeBtn = screen.getByRole('button', { name: /Claude/i });
       const opencodeBtn = screen.getByRole('button', { name: /OpenCode/i });
       const codexBtn = screen.getByRole('button', { name: /Codex/i });
+      const piBtn = screen.getByRole('button', { name: /^Pi$/i });
       expect(claudeBtn).toBeInTheDocument();
       expect(opencodeBtn).toBeInTheDocument();
       expect(codexBtn).toBeInTheDocument();
+      expect(piBtn).toBeInTheDocument();
     }, { timeout: 3000 });
   });
 
@@ -350,22 +369,22 @@ describe('WorkflowRouterSection', () => {
     renderWithProviders(<ProviderSettingsTab />);
 
     await waitFor(() => {
-      // Count dots: Claude = emerald (green), OpenCode = amber, Codex = amber
+      // Count dots: Claude = emerald (green), OpenCode/Codex/Pi = amber
       const greenDots = document.querySelectorAll('.bg-emerald-500');
       const amberDots = document.querySelectorAll('.bg-amber-500');
       expect(greenDots.length).toBeGreaterThanOrEqual(1);
-      expect(amberDots.length).toBeGreaterThanOrEqual(2);
+      expect(amberDots.length).toBeGreaterThanOrEqual(3);
     }, { timeout: 3000 });
   });
 
-  it('shows green dots for all 3 segments when all CLIs are installed', async () => {
+  it('shows green dots for all installed runtime segments when all CLIs are installed', async () => {
     mockApiFetch.mockImplementation(buildMock({ cliStatus: CLI_STATUS_ALL_INSTALLED }));
     renderWithProviders(<ProviderSettingsTab />);
 
     await waitFor(() => {
       const greenDots = document.querySelectorAll('.bg-emerald-500');
-      // All 3 runtime segments should show green
-      expect(greenDots.length).toBeGreaterThanOrEqual(3);
+      // Claude, OpenCode, Codex, and Pi runtime segments should all show green.
+      expect(greenDots.length).toBeGreaterThanOrEqual(4);
     }, { timeout: 3000 });
   });
 

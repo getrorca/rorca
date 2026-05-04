@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useWalSSE } from '../hooks/useWalSSE';
 
@@ -346,7 +353,7 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
   const [completedPasses, setCompletedPasses] = useState<Set<string>>(new Set());
   const [totalElapsed, setTotalElapsed] = useState(0);
   const startTimeRef = useRef(Date.now());
-  const timerRef = useRef<ReturnType<typeof setInterval>>();
+  const timerRef = useRef<ReturnType<typeof setInterval> | null>(null);
   const _sseRef = useRef<EventSource | null>(null);
 
   // Attachment processing steps (populated via SSE)
@@ -435,7 +442,7 @@ export default function SpecForgeProgress({ isActive, onCancel, error, apiDone, 
         return next;
       });
     }, 200);
-    return () => clearInterval(timerRef.current);
+    return () => clearInterval(timerRef.current ?? undefined);
   }, [isActive, currentStage, stageStartTimes, completedPasses]);
 
   // Single-pass: simulated stage advancement

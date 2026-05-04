@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response } from 'express';
 import Stripe from 'stripe';
 import { query, queryOne, execute, transaction } from '../db/index';
@@ -139,14 +146,12 @@ router.get('/status', async (req: Request, res: Response) => {
   const envLicenseKey = process.env.RORCA_LICENSE_KEY;
   if (envLicenseKey) {
     selfHostedLicense.set = true;
-    try {
-      const envLicense = verifyLicense(envLicenseKey);
-      selfHostedLicense.valid = true;
-      selfHostedLicense.plan = envLicense.plan;
-      selfHostedLicense.expiresAt = envLicense.exp ? new Date(envLicense.exp * 1000).toISOString() : null;
-    } catch (err: any) {
-      selfHostedLicense.valid = false;
-      selfHostedLicense.error = err.message || 'Invalid license';
+    const envLicense = verifyLicense(envLicenseKey);
+    selfHostedLicense.valid = envLicense.valid;
+    selfHostedLicense.plan = envLicense.plan;
+    selfHostedLicense.expiresAt = envLicense.expiresAt ? envLicense.expiresAt.toISOString() : null;
+    if (envLicense.error) {
+      selfHostedLicense.error = envLicense.error;
     }
   }
 
@@ -158,7 +163,9 @@ router.get('/status', async (req: Request, res: Response) => {
     : null;
 
   res.json({
-    plan: selfHostedLicense.valid ? selfHostedLicense.plan! : plan,
+    plan: selfHostedLicense.valid && selfHostedLicense.plan && selfHostedLicense.plan !== 'free'
+      ? selfHostedLicense.plan
+      : plan,
     subscription: sub ? {
       status: sub.status,
       plan: sub.plan,
@@ -531,17 +538,14 @@ router.post('/activate-license', async (req: Request, res: Response, next) => {
     throw new ValidationError('licenseKey is required');
   }
 
-  // Verify the JWT license key
-  let payload;
-  try {
-    payload = verifyLicense(licenseKey);
-  } catch (err) {
+  const verification = verifyLicense(licenseKey);
+  if (!verification.valid || verification.plan === 'free' || !verification.payload) {
     throw new UnprocessableError('Invalid license key');
   }
 
   const userId = authReq.user.id;
-  const plan = payload.plan;
-  const expiresAt = payload.exp ? new Date(payload.exp * 1000).toISOString() : null;
+  const plan = verification.payload.plan;
+  const expiresAt = verification.expiresAt ? verification.expiresAt.toISOString() : null;
 
   // Upsert subscription row with license info
   const existing = await queryOne<{ id: string }>(

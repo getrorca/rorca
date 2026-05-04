@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response, NextFunction } from 'express';
 import { z } from 'zod';
 import { query, queryOne, execute } from '../db/index';
@@ -51,6 +58,9 @@ async function getTeamLayers(workspaceId: string): Promise<{ teamL1?: string; te
  *     tags: [Direction Stack]
  *     summary: Fetch a single direction layer
  *     operationId: getDirectionLayer
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Reading synthesized direction inputs is core CLI context access and is safe because it is read-only project metadata."
+ *     x-rorca-public-api: true
  *     parameters:
  *       - in: query
  *         name: layer
@@ -158,6 +168,9 @@ const DirectionUpsertSchema = z.object({
  *     tags: [Direction Stack]
  *     summary: Upsert a direction layer
  *     operationId: upsertDirectionLayer
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Updating local direction layers is part of the stable open-source workflow for steering spec generation and execution."
+ *     x-rorca-public-api: true
  *     description: >
  *       Creates or updates a direction layer (L1, L2, or L3) with YAML content.
  *       L1 is global and applies to all workspaces. L2 is scoped to a domain.
@@ -696,6 +709,9 @@ router.get('/preview', async (req: Request, res: Response, next: NextFunction) =
  *     tags: [Direction Stack]
  *     summary: Synthesize direction stack with L4/L5 content
  *     operationId: synthesizeDirectionStack
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Direction synthesis is the canonical context assembly endpoint used by CLI and MCP clients before generation and execution."
+ *     x-rorca-public-api: true
  *     requestBody:
  *       content:
  *         application/json:

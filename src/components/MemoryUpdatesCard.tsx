@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useState, useEffect, useCallback } from 'react';
 import { BookOpen, Check, X, Pencil, ChevronRight, ChevronDown, CheckCheck, Undo2 } from 'lucide-react';
 import { apiFetch } from '../lib/apiFetch';

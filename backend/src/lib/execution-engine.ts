@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * execution-engine.ts — Universal TypeScript execution engine for the Ralph Loop.
  *
  * Replaces both run-loop.sh and run-loop.ts. Supports three agent types:
@@ -30,10 +37,14 @@ import { spawn, execSync, type ChildProcess } from 'child_process';
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
+import type { Readable } from 'stream';
+import { StringDecoder } from 'string_decoder';
 import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
-import { detectOpenCode } from './opencode-detector';
+import { detectOpenCode, requireOpenCode } from './opencode-detector';
+import { requireCodex } from './codex-detector';
+import { requirePi } from './pi-detector';
 import { detectCapability } from './reasoning-detector';
 import {
   loadOrchestrationConfig,
@@ -57,6 +68,8 @@ import { getGraphContext, formatGraphContext } from './graph-context';
 import { logger } from './logger';
 import { autoSynthesizeMemory } from './auto-memory';
 import { writeMemoryMd } from './memory-projection';
+import { getDirectionLayers } from './context-cache';
+import { synthesize } from './direction-stack';
 // execution-engine.ts intentionally does not use withUserClient(). It runs as a
 // system child process with RORCA_PROCESS_ROLE=engine, spawned by the worker on
 // behalf of the application, so its database access must remain service-role and
@@ -116,6 +129,7 @@ interface UserStory {
 
 interface SpecJson {
   title?: string;
+  brief?: string;
   mode?: string;
   playbook?: string;
   model?: string;
@@ -145,6 +159,7 @@ interface SpecJson {
    * content (take_snapshot, take_screenshot, list_console_messages, etc.).
    */
   chromeMcp?: boolean;
+  storyAnnotations?: Record<string, unknown> | string;
 }
 
 interface EngineConfig {
@@ -256,7 +271,7 @@ function storyWantsChromeMcp(story: UserStory, spec: SpecJson): boolean {
 
 /** Resolve the effective agent type for a story. Falls back to run-level config. */
 function resolveStoryAgent(story: UserStory, runAgent: AgentType): AgentType {
-  if (story.agent && (['claude', 'opencode', 'codex'] as AgentType[]).includes(story.agent)) {
+  if (story.agent && (['claude', 'opencode', 'codex', 'pi'] as AgentType[]).includes(story.agent)) {
     return story.agent;
   }
   return runAgent;
@@ -311,6 +326,21 @@ let _chromeMcpReady = false;
 let _chromeMcpCmd: string | null = null;
 let _chromeMcpArgs: string[] = [];
 
+interface PiRpcServer {
+  process: ChildProcess;
+  requestId: number;
+  pending: Map<string, { resolve: (r: unknown) => void; reject: (e: Error) => void }>;
+  eventListeners: Array<(event: unknown) => void>;
+  stderr: string;
+  ready: boolean;
+  cwd: string;
+  model: string | null;
+  skillFile?: string;
+}
+let _piRpcServer: PiRpcServer | null = null;
+let _piRpcExitCleanupRegistered = false;
+let _piRpcStoryQueue: Promise<void> = Promise.resolve();
+
 const MAX_RETRIES = 3;
 const MAX_RATE_LIMIT_RETRIES = 4;
 const RATE_LIMIT_BACKOFF_MS = [30_000, 60_000, 120_000, 240_000];
@@ -334,6 +364,10 @@ const CODEX_BIN = process.env.CODEX_BIN ||
       return 'codex';
     }
   })();
+
+const PI_BIN = process.env.PI_BIN || (() => {
+  try { return execSync('which pi', { encoding: 'utf8' }).trim(); } catch { return 'pi'; }
+})();
 
 // Claude env vars that must be stripped to avoid nested-session detection
 const CLAUDE_ENV_VARS_TO_REMOVE = [
@@ -817,6 +851,305 @@ function buildCleanEnv(): Record<string, string> {
   return env;
 }
 
+function serializeJsonLine(value: unknown): string {
+  return JSON.stringify(value) + '\n';
+}
+
+function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
+  const decoder = new StringDecoder('utf8');
+  let buffer = '';
+
+  const handleData = (chunk: Buffer | string): void => {
+    buffer += typeof chunk === 'string' ? chunk : decoder.write(chunk);
+
+    let newlineIndex = buffer.indexOf('\n');
+    while (newlineIndex !== -1) {
+      const line = buffer.slice(0, newlineIndex);
+      buffer = buffer.slice(newlineIndex + 1);
+      onLine(line);
+      newlineIndex = buffer.indexOf('\n');
+    }
+  };
+
+  const handleEnd = (): void => {
+    buffer += decoder.end();
+    if (buffer.length > 0) {
+      onLine(buffer);
+      buffer = '';
+    }
+  };
+
+  stream.on('data', handleData);
+  stream.on('end', handleEnd);
+
+  return () => {
+    stream.off('data', handleData);
+    stream.off('end', handleEnd);
+  };
+}
+
+async function startPiRpcServer(
+  cwd: string,
+  model: string | null,
+  skillFile?: string,
+): Promise<PiRpcServer> {
+  if (
+    _piRpcServer?.ready
+    && _piRpcServer.cwd === cwd
+    && _piRpcServer.model === model
+    && _piRpcServer.skillFile === skillFile
+  ) {
+    return _piRpcServer;
+  }
+
+  if (_piRpcServer) {
+    await stopPiRpcServer();
+  }
+
+  const args = ['--mode', 'rpc', ...(model ? ['--model', model] : []), ...(skillFile ? ['--skill', skillFile] : [])];
+  const child = spawn(PI_BIN, args, {
+    cwd,
+    env: buildCleanEnv(),
+    stdio: ['pipe', 'pipe', 'pipe'],
+  });
+
+  const server: PiRpcServer = {
+    process: child,
+    requestId: 0,
+    pending: new Map(),
+    eventListeners: [],
+    stderr: '',
+    ready: false,
+    cwd,
+    model,
+    skillFile,
+  };
+
+  child.stderr?.on('data', (chunk: Buffer | string) => {
+    server.stderr += chunk.toString();
+    if (server.stderr.length > 64 * 1024) {
+      server.stderr = server.stderr.slice(-64 * 1024);
+    }
+  });
+
+  const detachStdoutReader = child.stdout
+    ? attachJsonlLineReader(child.stdout, (line) => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+
+      let data: unknown;
+      try {
+        data = JSON.parse(trimmed);
+      } catch {
+        server.stderr += `\n[pi-rpc] Invalid JSONL from stdout: ${trimmed.slice(0, 500)}`;
+        return;
+      }
+
+      if (
+        typeof data === 'object'
+        && data !== null
+        && (data as { type?: unknown }).type === 'response'
+        && typeof (data as { id?: unknown }).id === 'string'
+      ) {
+        const id = (data as { id: string }).id;
+        const pending = server.pending.get(id);
+        if (pending) {
+          server.pending.delete(id);
+          pending.resolve(data);
+        }
+        return;
+      }
+
+      for (const listener of [...server.eventListeners]) {
+        try {
+          listener(data);
+        } catch (error: unknown) {
+          const message = error instanceof Error ? error.message : String(error);
+          server.stderr += `\n[pi-rpc] Event listener error: ${message}`;
+        }
+      }
+    })
+    : () => {};
+
+  const failPending = (reason: string): void => {
+    for (const [id, pending] of server.pending.entries()) {
+      pending.reject(new Error(reason));
+      server.pending.delete(id);
+    }
+  };
+
+  child.on('error', (error) => {
+    failPending(`pi RPC server error: ${error.message}`);
+  });
+
+  child.on('exit', (code, signal) => {
+    detachStdoutReader();
+    server.ready = false;
+    if (_piRpcServer === server) {
+      _piRpcServer = null;
+    }
+    failPending(`pi RPC server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`);
+  });
+
+  await new Promise(resolve => setTimeout(resolve, 200));
+  if (child.exitCode !== null) {
+    detachStdoutReader();
+    throw new Error(`pi RPC server exited during startup (code=${child.exitCode}). stderr:\n${server.stderr.slice(-4096)}`);
+  }
+
+  server.ready = true;
+  _piRpcServer = server;
+
+  if (!_piRpcExitCleanupRegistered) {
+    _piRpcExitCleanupRegistered = true;
+    process.on('exit', () => {
+      if (_piRpcServer) {
+        try { _piRpcServer.process.kill('SIGTERM'); } catch { /* already gone */ }
+      }
+    });
+  }
+
+  return server;
+}
+
+async function stopPiRpcServer(): Promise<void> {
+  const server = _piRpcServer;
+  if (!server) return;
+
+  _piRpcServer = null;
+  server.ready = false;
+
+  const exitPromise = new Promise<void>((resolve) => {
+    if (server.process.exitCode !== null) {
+      resolve();
+      return;
+    }
+    server.process.once('exit', () => resolve());
+  });
+
+  try {
+    server.process.kill('SIGTERM');
+  } catch {
+    return;
+  }
+
+  const finished = await Promise.race([
+    exitPromise.then(() => true),
+    new Promise<boolean>(resolve => setTimeout(() => resolve(false), 3000)),
+  ]);
+
+  if (!finished) {
+    try { server.process.kill('SIGKILL'); } catch { /* already gone */ }
+    await exitPromise.catch(() => {});
+  }
+}
+
+function sendPiRpcCommand(server: PiRpcServer, command: object): Promise<unknown> {
+  return new Promise((resolve, reject) => {
+    const id = `req_${++server.requestId}`;
+    const timeout = setTimeout(() => {
+      server.pending.delete(id);
+      reject(new Error(`pi RPC command timed out after 30000ms (id=${id}). stderr tail:\n${server.stderr.slice(-4096)}`));
+    }, 30_000);
+
+    server.pending.set(id, {
+      resolve: (result) => {
+        clearTimeout(timeout);
+        resolve(result);
+      },
+      reject: (error) => {
+        clearTimeout(timeout);
+        reject(error);
+      },
+    });
+
+    try {
+      server.process.stdin?.write(serializeJsonLine({ ...command, id }));
+    } catch (error: unknown) {
+      server.pending.delete(id);
+      clearTimeout(timeout);
+      reject(error instanceof Error ? error : new Error(String(error)));
+    }
+  });
+}
+
+function extractPiSessionId(response: unknown): string | undefined {
+  if (typeof response !== 'object' || response === null) return undefined;
+  const data = (response as { data?: unknown }).data;
+  if (typeof data !== 'object' || data === null) return undefined;
+  return typeof (data as { sessionId?: unknown }).sessionId === 'string'
+    ? (data as { sessionId: string }).sessionId
+    : undefined;
+}
+
+async function preparePiRpcSession(
+  sendCommand: (command: object) => Promise<unknown>,
+  retryContext?: PiRetryContext,
+): Promise<string | undefined> {
+  const shouldClone = retryContext?.isRetry === true && retryContext.attempt > 0;
+  await sendCommand({ type: shouldClone ? 'clone' : 'new_session' });
+  const state = await sendCommand({ type: 'get_state' });
+  return extractPiSessionId(state);
+}
+
+function resolvePiSkillFile(cwd: string, override?: string): string | undefined {
+  const candidates = override
+    ? [override]
+    : [
+        path.join(cwd, '.rorca', 'skills', 'rorca.md'),
+        path.join(cwd, '.claude', 'skills', 'rorca.md'),
+      ];
+
+  return candidates.find(candidate => fs.existsSync(candidate));
+}
+
+function getStoryAnnotationText(spec: SpecJson | undefined, story: UserStory): string | undefined {
+  const annotations = spec?.storyAnnotations;
+  if (typeof annotations === 'string') return annotations.trim() || undefined;
+  if (!annotations || typeof annotations !== 'object') return undefined;
+
+  const raw = annotations[story.id];
+  if (raw == null) return undefined;
+  return typeof raw === 'string' ? raw : JSON.stringify(raw, null, 2);
+}
+
+async function buildPiSessionOptions(
+  runId: number,
+  story: UserStory,
+  workspaceId: string | null,
+  spec?: SpecJson,
+): Promise<PiSessionOptions | undefined> {
+  if (!workspaceId) return undefined;
+
+  const layers = await getDirectionLayers(workspaceId);
+  const directionText = synthesize({
+    l1: layers.l1,
+    l2: layers.l2,
+    l3: layers.l3,
+    teamL1: layers.teamL1,
+    teamL2: layers.teamL2,
+    schemaSnapshot: layers.schemaSnapshot,
+    specBrief: spec?.brief ?? spec?.title ?? story.title,
+    storyAnnotations: getStoryAnnotationText(spec, story),
+  });
+
+  const skillFile = path.join(os.tmpdir(), `rorca-direction-${runId}-${story.id}.md`);
+  fs.writeFileSync(skillFile, directionText, { encoding: 'utf8', mode: 0o600 });
+  return { skillFile };
+}
+
+async function deleteFileIfExists(filePath?: string): Promise<void> {
+  if (!filePath) return;
+  try {
+    await fs.promises.unlink(filePath);
+  } catch (error: unknown) {
+    const code = typeof error === 'object' && error !== null ? (error as NodeJS.ErrnoException).code : undefined;
+    if (code !== 'ENOENT') {
+      logger.warn(`  [pi] Failed to delete temp skill file ${filePath}: ${String(error)}`);
+    }
+  }
+}
+
 function readWorkspaceFile(cwd: string, ...segments: string[]): string {
   try {
     return fs.readFileSync(path.join(cwd, ...segments), 'utf8');
@@ -1046,10 +1379,31 @@ interface AgentResult {
   exitCode: number;
   stderrTail: string;
   elapsedMs: number;
+  piSessionId?: string;
+}
+
+interface PiRetryContext {
+  isRetry: boolean;
+  attempt: number;
+}
+
+interface PiSessionOptions {
+  /** Explicit `--skill` path override. When set, auto-lookup is skipped entirely. */
+  skillFile?: string;
+}
+
+interface TokenUpdate {
+  inputTokens: number;
+  outputTokens: number;
+  turn: number;
+  cumulativeInput: number;
+  cumulativeOutput: number;
+  costUsd?: number;
+  cumulativeCostUsd?: number;
 }
 
 /** Callback for real-time token usage updates during agent execution. */
-type TokenUpdateCallback = (update: { inputTokens: number; outputTokens: number; turn: number; cumulativeInput: number; cumulativeOutput: number }) => void;
+type TokenUpdateCallback = (update: TokenUpdate) => void;
 
 // ─── Idle Watchdog ──────────────────────────────────────────────────────────
 
@@ -1128,6 +1482,9 @@ function runAgent(
   thinkingBudget?: number,
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   mcpServers?: Record<string, string>,
+  retryContext?: PiRetryContext,
+  onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
+  piSessionOptions?: PiSessionOptions,
 ): Promise<AgentResult> {
   switch (agentType) {
     case 'claude':
@@ -1137,6 +1494,8 @@ function runAgent(
     case 'codex':
       // thinking/effort flags are not forwarded to Codex
       return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServers);
+    case 'pi':
+      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piSessionOptions);
   }
 }
 
@@ -1702,6 +2061,206 @@ function spawnCodex(
   });
 }
 
+async function spawnPiRpc(
+  prompt: string,
+  cwd: string,
+  timeoutMs: number,
+  logFile: string,
+  model: string | null,
+  onTokenUpdate?: TokenUpdateCallback,
+  retryContext?: PiRetryContext,
+  onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
+  piSessionOptions?: PiSessionOptions,
+): Promise<AgentResult> {
+  const previousStory = _piRpcStoryQueue;
+  let releaseStoryQueue!: () => void;
+  const currentStory = new Promise<void>(resolve => {
+    releaseStoryQueue = resolve;
+  });
+  _piRpcStoryQueue = currentStory;
+
+  await previousStory;
+
+  const startTime = Date.now();
+  try {
+    const skillFile = resolvePiSkillFile(cwd, piSessionOptions?.skillFile);
+    const server = await startPiRpcServer(cwd, model, skillFile);
+    const piSessionId = await preparePiRpcSession(
+      (command) => sendPiRpcCommand(server, command),
+      retryContext,
+    );
+    await onSessionReady?.(piSessionId);
+
+    const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+    let storyTimedOut = false;
+    let settled = false;
+
+    const finish = (exitCode: number): AgentResult => ({
+      exitCode,
+      stderrTail: server.stderr.slice(-4096),
+      elapsedMs: Date.now() - startTime,
+      piSessionId,
+    });
+
+    const writeOutput = (text: string): void => {
+      if (!text) return;
+      process.stdout.write(text);
+      logStream.write(text);
+    };
+
+    const summarizeArgs = (args: unknown): string => {
+      if (args === undefined) return '';
+      try {
+        const text = JSON.stringify(args);
+        return text.length > 240 ? `${text.slice(0, 237)}...` : text;
+      } catch {
+        return String(args);
+      }
+    };
+
+    let turnCount = 0;
+    let cumulativeInput = 0;
+    let cumulativeOutput = 0;
+    let cumulativeCostUsd = 0;
+    const listener = (event: unknown, resolve?: () => void, reject?: (error: Error) => void): void => {
+      const data = typeof event === 'object' && event !== null ? event as Record<string, unknown> : null;
+      if (!data) return;
+
+      const eventType = typeof data.type === 'string' ? data.type : '';
+      if (eventType === 'message_update') {
+        const assistantMessageEvent = data.assistantMessageEvent as Record<string, unknown> | undefined;
+        if (assistantMessageEvent?.type === 'text_delta' && typeof assistantMessageEvent.delta === 'string') {
+          writeOutput(assistantMessageEvent.delta);
+        }
+        return;
+      }
+
+      if (eventType === 'tool_execution_start') {
+        const toolName = typeof data.toolName === 'string'
+          ? data.toolName
+          : typeof data.name === 'string'
+            ? data.name
+            : 'unknown';
+        const argsText = summarizeArgs(data.args ?? data.input);
+        writeOutput(`[Tool] ${toolName}${argsText ? `: ${argsText}` : ''}\n`);
+        return;
+      }
+
+      if (eventType === 'tool_execution_end') {
+        const toolName = typeof data.toolName === 'string'
+          ? data.toolName
+          : typeof data.name === 'string'
+            ? data.name
+            : 'unknown';
+        const exitCode = data.exitCode ?? data.code ?? 'unknown';
+        writeOutput(`[Tool] ${toolName} done (${String(exitCode)})\n`);
+        return;
+      }
+
+      if (eventType === 'turn_end') {
+        const message = data.message as Record<string, unknown> | undefined;
+        const usage = message?.usage as Record<string, unknown> | undefined;
+        if (usage) {
+          const costInfo = (usage.cost as Record<string, unknown> | undefined);
+          const hasUsageData = usage.input != null || usage.output != null || costInfo?.total != null;
+          if (!hasUsageData) {
+            if (!settled) {
+              settled = true;
+              resolve?.();
+            }
+            return;
+          }
+
+          const input = Number(usage.input ?? 0);
+          const output = Number(usage.output ?? 0);
+          const cost = Number(costInfo?.total ?? 0);
+          const turnInput = input - cumulativeInput;
+          const turnOutput = output - cumulativeOutput;
+          const turnCostUsd = cost - cumulativeCostUsd;
+          cumulativeInput = input;
+          cumulativeOutput = output;
+          cumulativeCostUsd = cost;
+          turnCount++;
+          writeOutput(
+            `[Token] input=${turnInput > 0 ? turnInput : input} output=${turnOutput > 0 ? turnOutput : output} ` +
+            `cost=${turnCostUsd >= 0 ? turnCostUsd : cost} cumulative_input=${cumulativeInput} ` +
+            `cumulative_output=${cumulativeOutput} cumulative_cost=${cumulativeCostUsd} turn=${turnCount}\n`,
+          );
+          onTokenUpdate?.({
+            inputTokens: turnInput > 0 ? turnInput : input,
+            outputTokens: turnOutput > 0 ? turnOutput : output,
+            turn: turnCount,
+            cumulativeInput,
+            cumulativeOutput,
+            costUsd: turnCostUsd >= 0 ? turnCostUsd : cost,
+            cumulativeCostUsd,
+          });
+        }
+        if (!settled) {
+          settled = true;
+          resolve?.();
+        }
+        return;
+      }
+
+      if (eventType === 'agent_end' && !settled) {
+        settled = true;
+        resolve?.();
+        return;
+      }
+
+      if (eventType === 'error' && !settled) {
+        settled = true;
+        const message = typeof data.message === 'string' ? data.message : 'pi RPC story failed';
+        reject?.(new Error(message));
+      }
+    };
+
+    let boundListener: ((event: unknown) => void) | null = null;
+    const cleanupListener = (): void => {
+      if (!boundListener) return;
+      const idx = server.eventListeners.indexOf(boundListener);
+      if (idx !== -1) server.eventListeners.splice(idx, 1);
+      boundListener = null;
+    };
+
+    const storyDone = new Promise<void>((resolve, reject) => {
+      boundListener = (event: unknown): void => listener(event, resolve, reject);
+      server.eventListeners.push(boundListener);
+    });
+
+    const timeout = setTimeout(() => {
+      storyTimedOut = true;
+      void sendPiRpcCommand(server, { type: 'abort' }).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        writeOutput(`[System] Failed to abort pi RPC story cleanly: ${message}\n`);
+      });
+    }, timeoutMs);
+
+    try {
+      await sendPiRpcCommand(server, { type: 'prompt', message: prompt });
+      await storyDone;
+      clearTimeout(timeout);
+      cleanupListener();
+      logStream.end();
+      return finish(storyTimedOut ? 124 : 0);
+    } catch (error: unknown) {
+      clearTimeout(timeout);
+      cleanupListener();
+      logStream.end();
+      const message = error instanceof Error ? error.message : String(error);
+      return {
+        exitCode: storyTimedOut ? 124 : 1,
+        stderrTail: `${server.stderr.slice(-4096)}${message ? `\n${message}` : ''}`.trim(),
+        elapsedMs: Date.now() - startTime,
+        piSessionId,
+      };
+    }
+  } finally {
+    releaseStoryQueue();
+  }
+}
+
 // ─── OpenCode Error Classification ──────────────────────────────────────────
 
 type OpenCodeErrorCategory =
@@ -1854,7 +2413,7 @@ interface StoryTokenUsage {
  * Extract token usage from a story's log file based on agent type.
  * Reads the log file and parses tokens from the agent's output format.
  */
-function extractTokenUsage(
+export function extractTokenUsage(
   logFile: string,
   agentType: AgentType,
   agentModel: string | null,
@@ -1881,6 +2440,35 @@ function extractTokenUsage(
       const model = usage.model ?? fallbackModel;
       const costUsd = calculateCost(usage.inputTokens, usage.outputTokens, model, cwd);
       return { inputTokens: usage.inputTokens, outputTokens: usage.outputTokens, model, costUsd };
+    }
+
+    if (agentType === 'pi') {
+      let inputTokens = 0;
+      let outputTokens = 0;
+      let costUsd = 0;
+      const tokenLines = logContent.match(/^\[Token\].*$/gm) ?? [];
+
+      for (const line of tokenLines) {
+        const cumulativeInput = line.match(/\bcumulative_input=(\d+)/);
+        const cumulativeOutput = line.match(/\bcumulative_output=(\d+)/);
+        const cumulativeCost = line.match(/\bcumulative_cost=([0-9]+(?:\.[0-9]+)?)/);
+        const deltaInput = line.match(/\binput=(\d+)/);
+        const deltaOutput = line.match(/\boutput=(\d+)/);
+        const deltaCost = line.match(/\bcost=([0-9]+(?:\.[0-9]+)?)/);
+
+        if (cumulativeInput && cumulativeOutput) {
+          inputTokens = Number(cumulativeInput[1]);
+          outputTokens = Number(cumulativeOutput[1]);
+          if (cumulativeCost) costUsd = Number(cumulativeCost[1]);
+          continue;
+        }
+
+        if (deltaInput) inputTokens += Number(deltaInput[1]);
+        if (deltaOutput) outputTokens += Number(deltaOutput[1]);
+        if (deltaCost) costUsd += Number(deltaCost[1]);
+      }
+
+      return { inputTokens, outputTokens, model: agentModel ?? 'pi', costUsd: Math.round(costUsd * 1_000_000) / 1_000_000 };
     }
 
     // codex — no known token output format yet
@@ -2982,8 +3570,8 @@ async function executeStory(
   const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
   const storyLogFile = path.join(logDir, `${story.id}_${timestamp}.log`);
 
-  // Emit story_started WAL event
-  if (workspaceId) {
+  const emitStoryStarted = async (piSessionId?: string): Promise<void> => {
+    if (!workspaceId) return;
     await emitWalEvent(config.port, 'story_started', workspaceId, {
       run_id: config.runId,
       story_id: story.id,
@@ -2991,6 +3579,7 @@ async function executeStory(
       agent_type: effectiveAgent,
       log_file: storyLogFile,
       browser_mcp: wantsBrowser,
+      piSessionId: piSessionId ?? null,
       ...(waveIndex != null ? { wave_index: waveIndex } : {}),
       ...(currentModel !== config.agentModel ? { model_override: currentModel } : {}),
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
@@ -2998,6 +3587,10 @@ async function executeStory(
       ...(activeSkillNames.length > 0 ? { active_skills: activeSkillNames } : {}),
       ...(graphHits != null ? { graph_hits: graphHits } : {}),
     }, story.id);
+  };
+
+  if (effectiveAgent !== 'pi') {
+    await emitStoryStarted();
   }
 
   // US-003: Project DB memories to MEMORY.md before agent subprocess
@@ -3019,10 +3612,13 @@ async function executeStory(
 
   const rateLimitKey = `rl:${story.id}`;
   let rateLimitAttempts = retryCounts.get(rateLimitKey) ?? 0;
+  const piSessionOptions = effectiveAgent === 'pi'
+    ? await buildPiSessionOptions(config.runId, story, workspaceId, spec)
+    : undefined;
 
   // Real-time token update callback — emits WAL events as tokens stream in
   const tokenUpdateCallback: TokenUpdateCallback | undefined =
-    workspaceId && effectiveAgent === 'claude'
+    workspaceId && (effectiveAgent === 'claude' || effectiveAgent === 'pi')
       ? (update) => {
           // Fire-and-forget WAL event for live token streaming
           emitWalEvent(config.port, 'story_token_update', workspaceId, {
@@ -3032,32 +3628,43 @@ async function executeStory(
             output_tokens: update.outputTokens,
             cumulative_input: update.cumulativeInput,
             cumulative_output: update.cumulativeOutput,
+            ...(update.costUsd != null ? { cost_usd: update.costUsd } : {}),
+            ...(update.cumulativeCostUsd != null ? { cumulative_cost_usd: update.cumulativeCostUsd } : {}),
             turn: update.turn,
           }, story.id).catch(() => { /* best-effort — don't block execution */ });
         }
       : undefined;
 
   // Rate limit retry loop
-  while (true) {
-    // Build the MCP servers map — only include entries that are actually available.
-    const mcpServers: Record<string, string> = {};
-    if (browserMcpUrl) mcpServers['playwright'] = browserMcpUrl;
-    if (chromeMcpUrl) mcpServers['chrome-devtools'] = chromeMcpUrl;
+  try {
+    while (true) {
+      // Build the MCP servers map — only include entries that are actually available.
+      const mcpServers: Record<string, string> = {};
+      if (browserMcpUrl) mcpServers['playwright'] = browserMcpUrl;
+      if (chromeMcpUrl) mcpServers['chrome-devtools'] = chromeMcpUrl;
 
-    const result = await runAgent(
-      effectiveAgent,
-      prompt,
-      effectiveCwd,
-      timeoutMin * 60 * 1000,
-      storyLogFile,
-      currentModel,
-      effectiveAttach,
-      tokenUpdateCallback,
-      config.thinkingEnabled,
-      config.thinkingBudget,
-      config.effortLevel,
-      Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
-    );
+      const retryAttempt = retryCounts.get(story.id) ?? 0;
+      const piRetryContext: PiRetryContext | undefined = effectiveAgent === 'pi'
+        ? { isRetry: retryAttempt > 0, attempt: retryAttempt }
+        : undefined;
+
+      const result = await runAgent(
+        effectiveAgent,
+        prompt,
+        effectiveCwd,
+        timeoutMin * 60 * 1000,
+        storyLogFile,
+        currentModel,
+        effectiveAttach,
+        tokenUpdateCallback,
+        config.thinkingEnabled,
+        config.thinkingBudget,
+        config.effortLevel,
+        Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
+        piRetryContext,
+        effectiveAgent === 'pi' ? emitStoryStarted : undefined,
+        piSessionOptions,
+      );
 
     // Extract token usage from log file after agent exits
     const tokenUsage = extractTokenUsage(
@@ -3147,14 +3754,23 @@ async function executeStory(
           run_id: config.runId, story_id: story.id,
           attempt: rateLimitAttempts, retryAfterMs: backoffMs,
         }, story.id);
+        await emitWalEvent(config.port, 'story_retry', workspaceId, {
+          run_id: config.runId,
+          story_id: story.id,
+          story_title: story.title,
+          attempt: rateLimitAttempts + 1,
+          max_attempts: MAX_RATE_LIMIT_RETRIES + 1,
+          reason: 'rate_limit',
+        }, story.id);
       }
 
       await new Promise(resolve => setTimeout(resolve, backoffMs));
 
-      if (workspaceId) {
+      if (effectiveAgent !== 'pi' && workspaceId) {
         await emitWalEvent(config.port, 'story_started', workspaceId, {
           run_id: config.runId, story_id: story.id, story_title: story.title,
           agent_type: effectiveAgent,
+          piSessionId: null,
           ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
         }, story.id);
       }
@@ -3388,6 +4004,7 @@ async function executeStory(
           agent_type: effectiveAgent,
           input_tokens: tokenPayload.inputTokens,
           output_tokens: tokenPayload.outputTokens,
+          cost_usd: tokenPayload.costUsd,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'pass', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
@@ -3421,6 +4038,7 @@ async function executeStory(
           log_file: storyLogFile,
           input_tokens: tokenPayload.inputTokens,
           output_tokens: tokenPayload.outputTokens,
+          cost_usd: tokenPayload.costUsd,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
         }, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
@@ -3512,13 +4130,26 @@ async function executeStory(
     logger.info(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES}): ${classified.category}`);
     logger.info(`   Log: ${storyLogFile}`);
     logger.info(`   Error: ${classified.message}`);
+    if (workspaceId) {
+      await emitWalEvent(config.port, 'story_retry', workspaceId, {
+        run_id: config.runId,
+        story_id: story.id,
+        story_title: story.title,
+        attempt: currentRetries + 1,
+        max_attempts: MAX_RETRIES,
+        reason: classified.category,
+      }, story.id);
+    }
     return 'failed';
+    }
+  } finally {
+    await deleteFileIfExists(piSessionOptions?.skillFile);
   }
 }
 
 // ─── Exported helpers for pipeline.ts ────────────────────────────────────────
 
-export { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, createIdleWatchdog };
+export { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, createIdleWatchdog, preparePiRpcSession };
 export type { UserStory as EngineUserStory, RerouteInfo, IdleWatchdog };
 
 // ─── Bounded Concurrency ────────────────────────────────────────────────────
@@ -3621,6 +4252,10 @@ async function main(): Promise<void> {
   const requiredEngines = scanRequiredEngines(stories, config.agentType);
   const engineCounts = countStoriesByEngine(stories, config.agentType);
 
+  if (config.agentType === 'opencode' || requiredEngines.has('opencode')) requireOpenCode();
+  if (config.agentType === 'codex' || requiredEngines.has('codex')) requireCodex();
+  if (config.agentType === 'pi' || requiredEngines.has('pi')) requirePi();
+
   logger.info('========================================');
   logger.info(`  Rorca Engine — ${modeLabel}`);
   logger.info('========================================');
@@ -3674,7 +4309,12 @@ async function main(): Promise<void> {
   initRunState(config.cwd, specId, config.runId);
   const resumeCtx = getResumeContext(config.cwd, specId);
 
-  function cleanupBrowserServers() {
+  if (requiredEngines.has('pi')) {
+    await startPiRpcServer(config.cwd, config.agentModel);
+  }
+
+  async function cleanupBrowserServers(): Promise<void> {
+    await stopPiRpcServer();
     if (_playwrightMcpServerPid) {
       try { process.kill(_playwrightMcpServerPid, 'SIGTERM'); } catch { /* already gone */ }
     }
@@ -3691,17 +4331,22 @@ async function main(): Promise<void> {
   }
 
   process.on('SIGINT', () => {
-    logger.info('');
-    logger.info('Engine stopped by user.');
-    cleanupBrowserServers();
-    process.exit(0);
+    void (async () => {
+      logger.info('');
+      logger.info('Engine stopped by user.');
+      await cleanupBrowserServers();
+      process.exit(0);
+    })();
   });
 
   process.on('SIGTERM', () => {
-    cleanupBrowserServers();
-    process.exit(0);
+    void (async () => {
+      await cleanupBrowserServers();
+      process.exit(0);
+    })();
   });
 
+  try {
   // CA-009: Discover personas from .rorca/personas/
   const personaRegistry = new PersonaRegistry();
   const rorcaDir = path.join(config.cwd, '.rorca');
@@ -3724,7 +4369,7 @@ async function main(): Promise<void> {
 
   // ─── Parallel execution path (N > 1) ──────────────────────────────
   if (config.parallelism > 1 && !config.specificStory) {
-    await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, stories, personaRegistry);
+    process.exitCode = await runParallel(config, mode, playbook, logDir, workspaceId, retryCounts, stories, personaRegistry);
     return;
   }
 
@@ -3751,7 +4396,8 @@ async function main(): Promise<void> {
       story = currentStories.find(s => s.id === config.specificStory) ?? null;
       if (!story) {
         logger.error(`Story ${config.specificStory} not found!`);
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
     } else {
       story = getNextStory(currentStories);
@@ -3771,7 +4417,8 @@ async function main(): Promise<void> {
         }
         writeProgressTxt(config.cwd);
         archiveRunState(config.cwd, config.runId);
-        process.exit(1);
+        process.exitCode = 1;
+        return;
       }
       logger.info(`All stories complete! ${finalProgress.passed}/${finalProgress.total}`);
       // CIE-007: Archive run-state.json and write final progress.txt
@@ -3792,7 +4439,8 @@ async function main(): Promise<void> {
         }
       }
 
-      process.exit(0);
+      process.exitCode = 0;
+      return;
     }
 
     const currentProgress = getProgress(currentStories);
@@ -3810,7 +4458,8 @@ async function main(): Promise<void> {
       const ac = getAcceptance(story);
       if (ac) logger.info(`  Acceptance: ${ac}`);
       logger.info('');
-      process.exit(0);
+      process.exitCode = 0;
+      return;
     }
 
     const seqResult = await executeStory(
@@ -3822,11 +4471,15 @@ async function main(): Promise<void> {
     );
 
     if (config.specificStory) {
-      process.exit(seqResult === 'passed' ? 0 : 1);
+      process.exitCode = seqResult === 'passed' ? 0 : 1;
+      return;
     }
 
     logger.info('');
     await new Promise(resolve => setTimeout(resolve, 3000));
+  }
+  } finally {
+    await cleanupBrowserServers();
   }
 }
 
@@ -3841,7 +4494,7 @@ async function runParallel(
   retryCounts: Map<string, number>,
   stories: UserStory[],
   personaRegistry?: PersonaRegistry,
-): Promise<void> {
+): Promise<number> {
   const waveStories: WaveUserStory[] = stories.map(s => ({
     id: s.id,
     title: s.title,
@@ -3859,7 +4512,7 @@ async function runParallel(
   if (isCycleError(waveResult)) {
     logger.error(`[engine] Dependency cycle detected among stories: ${waveResult.involvedIds.join(', ')}`);
     logger.error(`[engine] Cannot run in parallel mode. Fix dependsOn fields or use --parallelism 1`);
-    process.exit(1);
+    return 1;
   }
 
   const waves: Wave[] = waveResult;
@@ -4101,7 +4754,7 @@ async function runParallel(
   // CIE-007: Archive run-state.json and write final progress.txt
   writeProgressTxt(config.cwd);
   archiveRunState(config.cwd, config.runId);
-  process.exit(failedIds.size > 0 ? 1 : 0);
+  return failedIds.size > 0 ? 1 : 0;
 }
 
 // ─── Workspace Resolver ─────────────────────────────────────────────────────

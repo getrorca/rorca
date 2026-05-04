@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * V2-094: Standardized API Error Classes
  *
  * All error responses follow: { error: string, code?: string, details?: object }
@@ -55,6 +62,24 @@ export class ForbiddenError extends AppError {
   }
 }
 
+/** 402 — paid plan or license required */
+export class PaymentRequiredError extends AppError {
+  readonly statusCode = 402 as const;
+
+  constructor(message = 'Paid plan required', details?: Record<string, unknown>) {
+    super(message, 'PLAN_REQUIRED', details);
+  }
+}
+
+/** 403 — route reserved for local/operator admin */
+export class AdminRequiredError extends AppError {
+  readonly statusCode = 403 as const;
+
+  constructor(message = 'Admin access required') {
+    super(message, 'ADMIN_REQUIRED');
+  }
+}
+
 /** 403 — invalid CSRF token or missing CSRF proof */
 export class CsrfError extends AppError {
   readonly statusCode = 403 as const;
@@ -78,6 +103,23 @@ export class NotFoundError extends AppError {
       msg = id ? `${resource} '${id}' not found` : `${resource} not found`;
     }
     super(msg, 'NOT_FOUND');
+  }
+}
+
+/** 404 — dependency or runtime capability missing */
+export class DependencyNotFoundError extends AppError {
+  readonly statusCode = 404 as const;
+
+  constructor(message: string, code = 'NOT_FOUND', details?: Record<string, unknown>) {
+    super(message, code, details);
+  }
+
+  override toJSON(): { error: string; code?: string; details?: Record<string, unknown> } & Record<string, unknown> {
+    return {
+      error: this.message,
+      ...(this.code ? { code: this.code } : {}),
+      ...(this.details ?? {}),
+    };
   }
 }
 

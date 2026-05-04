@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * wal-listener.ts — Dedicated LISTEN/NOTIFY client for wal_events
  *
  * Establishes a long-lived pg.Client connection (NOT from the pool) that
@@ -44,6 +51,7 @@ async function recordTokenUsage(
   inputTokens: number,
   outputTokens: number,
   model?: string,
+  explicitCostUsd?: number,
 ): Promise<void> {
   const run = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: string } | undefined;
   if (!run) return;
@@ -51,9 +59,10 @@ async function recordTokenUsage(
   const modelName = model || 'unknown';
   const pricing = await queryOne('SELECT * FROM model_pricing WHERE model_id = $1', [modelName]) as ModelPricingRow | undefined;
 
-  const costUsd = pricing
+  const derivedCostUsd = pricing
     ? (inputTokens / 1000) * pricing.input_cost_per_1k + (outputTokens / 1000) * pricing.output_cost_per_1k
     : 0;
+  const costUsd = explicitCostUsd ?? derivedCostUsd;
 
   await execute(
     `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd)
@@ -81,8 +90,12 @@ async function handleTokenTracking(event: WalEvent): Promise<void> {
 
     if (storyRow) {
       await execute(
-        'UPDATE story_results SET input_tokens = COALESCE($1, input_tokens), output_tokens = COALESCE($2, output_tokens) WHERE id = $3',
-        [payload.input_tokens ?? null, payload.output_tokens ?? null, storyRow.id],
+        `UPDATE story_results
+         SET input_tokens = COALESCE($1, input_tokens),
+             output_tokens = COALESCE($2, output_tokens),
+             cost_usd = COALESCE($3, cost_usd)
+         WHERE id = $4`,
+        [payload.input_tokens ?? null, payload.output_tokens ?? null, payload.cost_usd ?? null, storyRow.id],
       );
     }
 
@@ -98,6 +111,7 @@ async function handleTokenTracking(event: WalEvent): Promise<void> {
         payload.input_tokens || 0,
         payload.output_tokens || 0,
         payload.model,
+        payload.cost_usd,
       );
     }
   } catch {

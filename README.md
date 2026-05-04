@@ -57,6 +57,19 @@ The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS 
   - **Claude Code CLI** installed and authenticated (`claude --version`) — uses your Pro/Max subscription, no API key
   - **OpenCode CLI** (`npm i -g opencode`, `opencode --version` >= 0.1.0) + an API key for your chosen provider
 
+### Pi peer dependency
+
+`pi` is a peer dependency, not bundled into the Rorca package. That keeps the CLI and future standalone builds smaller and avoids auto-running remote installers without user consent.
+
+If `pi` is missing, `rorca init` and `rorca auth login` detect that and offer an install bridge:
+
+- `npm install -g @mariozechner/pi-coding-agent`
+- `pnpm add -g @mariozechner/pi-coding-agent`
+- `bun add -g @mariozechner/pi-coding-agent`
+- `curl -fsSL https://pi.mariozechner.com/install.sh | sh` after explicit confirmation
+
+For non-interactive environments, use `rorca init --auto-install-pi` to skip the prompt and run the npm install path directly.
+
 ## Local Supabase Development
 
 - Initialize local Supabase config with `supabase init` if needed
@@ -262,18 +275,48 @@ The in-app **Setup Guide** (Settings > Model & Providers > Execution Engine) wal
 
 ## MCP Integration (Claude Code)
 
-Rorca exposes 5 tools to Claude Code via the Model Context Protocol. This lets you generate and approve specs without leaving your editor.
+Rorca exposes MCP tools over HTTP at `http://localhost:3030/mcp`. Authentication is Bearer-token only.
+
+## Security
+
+Rorca uses `Authorization: Bearer <token>` for `/mcp`, with the token stored in `~/.rorca/mcp-token` and generated locally by the backend.
+
+The previous trivial OAuth shim has been removed intentionally. It did not provide real security and it created the false impression that OAuth protection existed. Removing it also avoids conflicts with the real Bearer-token enforcement on `/mcp`.
+
+Claude Desktop note: newer Claude Desktop releases expect OAuth for MCP HTTP servers. Rorca does not implement OAuth yet, so Claude Desktop HTTP MCP integration is not supported in v0. Use Claude Code CLI, VS Code, or another MCP client that can send Bearer headers.
 
 ### Setup
 
 ```bash
-claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts
+rorca mcp setup-claude
 ```
 
 Verify it connected:
 
 ```bash
 claude mcp list
+```
+
+Manual Claude Code CLI setup:
+
+```bash
+claude mcp add rorca http://localhost:3030/mcp --header "Authorization: Bearer $(cat ~/.rorca/mcp-token)"
+```
+
+VS Code / custom MCP clients:
+
+```json
+{
+  "headers": {
+    "Authorization": "Bearer <token from ~/.rorca/mcp-token>"
+  }
+}
+```
+
+If you previously configured a client against the removed OAuth probe, run:
+
+```bash
+rorca mcp diagnose-clients
 ```
 
 ### Available tools

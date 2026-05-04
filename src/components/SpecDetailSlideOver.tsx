@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * SpecDetailSlideOver — Single source of truth for spec review UI.
  *
  * Slides in from the right (480px desktop, full-width mobile).
@@ -34,6 +41,7 @@ import ContextSummaryCard from './ContextSummaryCard';
 import type { ContextSummary } from '../panels/SpecForgeOutput';
 import { SpecModelControlBar } from './SpecModelControlBar';
 import type { SpecModelFields } from './SpecModelControlBar';
+import type { EngineValue } from './EngineSelector';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -63,7 +71,7 @@ interface SpecDetailData {
   diagrams?: Record<string, { mermaid?: string; ascii?: string }>;
   mermaidDiagram?: string;
   model?: string;
-  agentOverride?: 'claude' | 'opencode' | 'codex' | null;
+  agentOverride?: EngineValue | null;
   thinkingEnabled?: boolean;
   thinkingBudget?: number;
   effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh';
@@ -1061,7 +1069,7 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
   onToggleExclude?: (storyId: string) => void;
   onStoryUpdated?: (story: Story) => void;
   specModelFields?: {
-    agentOverride?: 'claude' | 'opencode' | 'codex' | null;
+    agentOverride?: EngineValue | null;
     model?: string | null;
     thinkingEnabled?: boolean;
     thinkingBudget?: number;
