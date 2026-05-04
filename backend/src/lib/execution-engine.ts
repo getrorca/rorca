@@ -66,8 +66,8 @@ import { loadMonorepoApps, type MonorepoPackage } from './workspace-echolocation
 import { loadAgentsMd, matchRole, buildRolePromptSection, detectViolations, getLastCommitFiles } from './agents-parser';
 import { getGraphContext, formatGraphContext } from './graph-context';
 import { logger } from './logger';
-import { autoSynthesizeMemory } from './auto-memory';
 import { writeMemoryMd } from './memory-projection';
+import { runPostStoryLearning } from './post-story-learning';
 import { getDirectionLayers } from './context-cache';
 import { synthesize } from './direction-stack';
 // execution-engine.ts intentionally does not use withUserClient(). It runs as a
@@ -683,27 +683,6 @@ function getAcceptance(story: UserStory): string {
     return story.acceptanceCriteria.map(a => `- ${a}`).join('\n');
   }
   return '';
-}
-
-/** PG-020: Build story text for memory synthesis */
-function buildStoryText(story: UserStory): string {
-  const ac = getAcceptance(story);
-  return `${story.id}: ${story.title}\n${story.description}${ac ? `\nAcceptance Criteria:\n${ac}` : ''}`;
-}
-
-/** PG-020: Read last N bytes of a log file for memory synthesis context */
-function readLogTail(logPath: string, maxBytes: number = 8000): string {
-  try {
-    const stats = fs.statSync(logPath);
-    if (stats.size <= maxBytes) return fs.readFileSync(logPath, 'utf-8');
-    const fd = fs.openSync(logPath, 'r');
-    const buf = Buffer.alloc(maxBytes);
-    fs.readSync(fd, buf, 0, maxBytes, stats.size - maxBytes);
-    fs.closeSync(fd);
-    return buf.toString('utf-8');
-  } catch {
-    return '';
-  }
 }
 
 function detectMode(spec: SpecJson): 'impl' | 'qa' | 'journey' {
@@ -3737,11 +3716,24 @@ async function executeStory(
           }, story.id);
           await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
 
-          // PG-020: Auto-synthesize memory from rate-limit-exhausted failure
-          await autoSynthesizeMemory(
-            story.id, workspaceId, buildStoryText(story),
-            readLogTail(storyLogFile), 'failed', config.runId, config.port,
-          );
+          await runPostStoryLearning({
+            workspaceId,
+            workspacePath: effectiveCwd,
+            runId: config.runId,
+            port: config.port,
+            specId: path.basename(config.jsonPath, '.json'),
+            story,
+            status: 'failed',
+            stderrTail: result.stderrTail,
+            walPayload: {
+              run_id: config.runId,
+              story_id: story.id,
+              reason: 'rate_limit_exhausted',
+              attempts: rateLimitAttempts,
+              log_file: storyLogFile,
+              ...(graphHits != null ? { graph_hits: graphHits } : {}),
+            },
+          });
         }
         return 'failed';
       }
@@ -3815,12 +3807,24 @@ async function executeStory(
         if (currentRetries >= MAX_RETRIES) {
           logger.info(`${story.id} failed gate after ${MAX_RETRIES} attempts. Skipping.`);
 
-          // PG-020: Auto-synthesize memory from gate failure
           if (workspaceId) {
-            await autoSynthesizeMemory(
-              story.id, workspaceId, buildStoryText(story),
-              readLogTail(storyLogFile), 'failed', config.runId, config.port,
-            );
+            await runPostStoryLearning({
+              workspaceId,
+              workspacePath: effectiveCwd,
+              runId: config.runId,
+              port: config.port,
+              specId: path.basename(config.jsonPath, '.json'),
+              story,
+              status: 'failed',
+              stderrTail: gate.output ?? result.stderrTail,
+              walPayload: {
+                run_id: config.runId,
+                story_id: story.id,
+                reason: gate.reason,
+                log_file: storyLogFile,
+                ...(graphHits != null ? { graph_hits: graphHits } : {}),
+              },
+            });
           }
         }
         return 'failed';
@@ -3839,12 +3843,26 @@ async function executeStory(
         if (mode !== 'journey' && meaningfulChanges.length === 0) {
           logger.warn(`${story.id}: Agent exited 0 but produced no code changes — treating as failure`);
           if (workspaceId) {
-            await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            const noCodeWalPayload = {
               run_id: config.runId, story_id: story.id, reason: 'no_code_changes',
               summary: 'Agent subprocess exited successfully but did not modify any code files.',
               log_file: storyLogFile,
-            }, story.id);
+            };
+            await emitWalEvent(config.port, 'story_failed', workspaceId, noCodeWalPayload, story.id);
             await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+            if ((retryCounts.get(story.id) ?? 0) + 1 >= MAX_RETRIES) {
+              await runPostStoryLearning({
+                workspaceId,
+                workspacePath: effectiveCwd,
+                runId: config.runId,
+                port: config.port,
+                specId: path.basename(config.jsonPath, '.json'),
+                story,
+                status: 'failed',
+                stderrTail: result.stderrTail,
+                walPayload: noCodeWalPayload,
+              });
+            }
           }
           const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
           retryCounts.set(story.id, noChangeRetries);
@@ -3975,7 +3993,7 @@ async function executeStory(
             markStoryNeedsRevision(config.jsonPath, story.id);
 
             if (workspaceId) {
-              await emitWalEvent(config.port, 'story_review_blocked', workspaceId, {
+              const reviewBlockedWalPayload = {
                 run_id: config.runId,
                 story_id: story.id,
                 story_title: story.title,
@@ -3988,8 +4006,20 @@ async function executeStory(
                   file: b.file,
                   line: b.line,
                 }))),
-              }, story.id);
+              };
+              await emitWalEvent(config.port, 'story_review_blocked', workspaceId, reviewBlockedWalPayload, story.id);
               await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'needs_revision', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+              await runPostStoryLearning({
+                workspaceId,
+                workspacePath: effectiveCwd,
+                runId: config.runId,
+                port: config.port,
+                specId: path.basename(config.jsonPath, '.json'),
+                story,
+                status: 'failed',
+                stderrTail: result.stderrTail,
+                walPayload: reviewBlockedWalPayload,
+              });
             }
             return 'failed';
           }
@@ -3999,21 +4029,27 @@ async function executeStory(
       }
 
       if (workspaceId) {
-        await emitWalEvent(config.port, 'story_passed', workspaceId, {
+        const passWalPayload = {
           run_id: config.runId, story_id: story.id, story_title: story.title,
           agent_type: effectiveAgent,
           input_tokens: tokenPayload.inputTokens,
           output_tokens: tokenPayload.outputTokens,
           cost_usd: tokenPayload.costUsd,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
-        }, story.id);
+        };
+        await emitWalEvent(config.port, 'story_passed', workspaceId, passWalPayload, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'pass', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
-
-        // PG-020: Auto-synthesize memory from passed story
-        await autoSynthesizeMemory(
-          story.id, workspaceId, buildStoryText(story),
-          readLogTail(storyLogFile), 'passed', config.runId, config.port,
-        );
+        await runPostStoryLearning({
+          workspaceId,
+          workspacePath: effectiveCwd,
+          runId: config.runId,
+          port: config.port,
+          specId: path.basename(config.jsonPath, '.json'),
+          story,
+          status: 'passed',
+          stderrTail: result.stderrTail,
+          walPayload: passWalPayload,
+        });
       }
       return 'passed';
     }
@@ -4032,7 +4068,7 @@ async function executeStory(
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
-        await emitWalEvent(config.port, 'story_failed', workspaceId, {
+        const timeoutWalPayload = {
           run_id: config.runId, story_id: story.id,
           reason: 'timeout', timeout_minutes: timeoutMin,
           log_file: storyLogFile,
@@ -4040,14 +4076,20 @@ async function executeStory(
           output_tokens: tokenPayload.outputTokens,
           cost_usd: tokenPayload.costUsd,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
-        }, story.id);
+        };
+        await emitWalEvent(config.port, 'story_failed', workspaceId, timeoutWalPayload, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
-
-        // PG-020: Auto-synthesize memory from timed-out story
-        await autoSynthesizeMemory(
-          story.id, workspaceId, buildStoryText(story),
-          readLogTail(storyLogFile), 'failed', config.runId, config.port,
-        );
+        await runPostStoryLearning({
+          workspaceId,
+          workspacePath: effectiveCwd,
+          runId: config.runId,
+          port: config.port,
+          specId: path.basename(config.jsonPath, '.json'),
+          story,
+          status: 'failed',
+          stderrTail: result.stderrTail,
+          walPayload: timeoutWalPayload,
+        });
       }
       return 'failed';
     }
@@ -4071,20 +4113,26 @@ async function executeStory(
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
-        await emitWalEvent(config.port, 'story_failed', workspaceId, {
+        const nonRetryWalPayload = {
           run_id: config.runId, story_id: story.id,
           reason: classified.category, error_message: classified.message,
           agent_type: effectiveAgent, exit_code: result.exitCode,
           log_file: storyLogFile,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
-        }, story.id);
+        };
+        await emitWalEvent(config.port, 'story_failed', workspaceId, nonRetryWalPayload, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
-
-        // PG-020: Auto-synthesize memory from non-retryable failure
-        await autoSynthesizeMemory(
-          story.id, workspaceId, buildStoryText(story),
-          readLogTail(storyLogFile), 'failed', config.runId, config.port,
-        );
+        await runPostStoryLearning({
+          workspaceId,
+          workspacePath: effectiveCwd,
+          runId: config.runId,
+          port: config.port,
+          specId: path.basename(config.jsonPath, '.json'),
+          story,
+          status: 'failed',
+          stderrTail: result.stderrTail,
+          walPayload: nonRetryWalPayload,
+        });
       }
       return 'failed';
     }
@@ -4108,21 +4156,27 @@ async function executeStory(
       writeProgressTxt(effectiveCwd);
 
       if (workspaceId) {
-        await emitWalEvent(config.port, 'story_failed', workspaceId, {
+        const maxRetryWalPayload = {
           run_id: config.runId, story_id: story.id,
           reason: 'max_retries', attempts: currentRetries,
           error_category: classified.category, error_message: classified.message,
           agent_type: effectiveAgent,
           log_file: storyLogFile,
           ...(graphHits != null ? { graph_hits: graphHits } : {}),
-        }, story.id);
+        };
+        await emitWalEvent(config.port, 'story_failed', workspaceId, maxRetryWalPayload, story.id);
         await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
-
-        // PG-020: Auto-synthesize memory from max-retries failure
-        await autoSynthesizeMemory(
-          story.id, workspaceId, buildStoryText(story),
-          readLogTail(storyLogFile), 'failed', config.runId, config.port,
-        );
+        await runPostStoryLearning({
+          workspaceId,
+          workspacePath: effectiveCwd,
+          runId: config.runId,
+          port: config.port,
+          specId: path.basename(config.jsonPath, '.json'),
+          story,
+          status: 'failed',
+          stderrTail: result.stderrTail,
+          walPayload: maxRetryWalPayload,
+        });
       }
       return 'failed';
     }

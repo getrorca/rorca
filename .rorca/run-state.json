@@ -1,12 +1,34 @@
 {
   "specId": "Rorca Pi-Native Execution Runtime and Embedded TUI",
-  "runId": 20260316000270,
-  "startedAt": "2026-05-04T09:34:44.564Z",
-  "lastUpdatedAt": "2026-05-04T09:34:44.650Z",
-  "completedStories": [],
-  "failedStories": [],
+  "runId": 20260316000278,
+  "startedAt": "2026-05-04T17:31:57.103Z",
+  "lastUpdatedAt": "2026-05-04T17:45:55.516Z",
+  "completedStories": [
+    {
+      "storyId": "US-009",
+      "title": "Stale Run Reconciliation and Restart Recovery",
+      "status": "passed",
+      "startedAt": "2026-05-04T17:41:52.368Z",
+      "finishedAt": "2026-05-04T17:45:42.411Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 230043
+    }
+  ],
+  "failedStories": [
+    {
+      "storyId": "US-008",
+      "title": "Model Precedence Handling and Preflight Validation",
+      "status": "failed",
+      "startedAt": "2026-05-04T17:39:24.340Z",
+      "finishedAt": "2026-05-04T17:41:41.510Z",
+      "agentType": "codex",
+      "failReason": "no_code_changes",
+      "retries": 3
+    }
+  ],
   "skippedStories": [],
-  "currentStory": "US-005",
+  "currentStory": "US-010",
   "decisions": [],
   "resumedFromStory": null
 }

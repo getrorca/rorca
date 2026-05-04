@@ -7,6 +7,7 @@
 
 import React, { useEffect, useMemo, useRef, useState } from 'react';
 import { Box, Text, useInput, useStdout } from 'ink';
+import os from 'node:os';
 import path from 'node:path';
 import fs from 'node:fs';
 import http, { type ClientRequest, type IncomingMessage } from 'node:http';
@@ -206,6 +207,12 @@ interface MemoryCreateResponse {
     source: string;
   };
   total: number;
+}
+
+interface PendingLearningProposal {
+  proposalType?: string;
+  status?: string;
+  confidence?: number;
 }
 
 interface RecallEntry {
@@ -492,6 +499,7 @@ export function Forge(): JSX.Element {
   const [outputLines, setOutputLines] = useState<OutputEntry[]>([]);
   const [foregroundRun, setForegroundRun] = useState<ForegroundRunState | null>(null);
   const [backgroundRunsCount, setBackgroundRunsCount] = useState(0);
+  const [pendingLearningCount, setPendingLearningCount] = useState(0);
   const [phaseOverride, setPhaseOverride] = useState<OrchestrationPhase | null>(null);
   const [boardOpen, setBoardOpen] = useState(false);
   const [boardPulseOn, setBoardPulseOn] = useState(true);
@@ -888,6 +896,33 @@ export function Forge(): JSX.Element {
       setBackgroundRunsCount(Math.max(0, activeCount - foregroundAdjustment));
     } catch {
       // Best-effort only; live orchestration state remains the fallback signal.
+    }
+  };
+
+  const syncPendingLearningQueue = (): void => {
+    try {
+      const proposalPath = path.join(os.homedir(), '.rorca', 'proposed-memories.json');
+      if (!fs.existsSync(proposalPath)) {
+        setPendingLearningCount(0);
+        return;
+      }
+
+      const raw = fs.readFileSync(proposalPath, 'utf8');
+      const parsed = JSON.parse(raw) as PendingLearningProposal[];
+      if (!Array.isArray(parsed)) {
+        setPendingLearningCount(0);
+        return;
+      }
+
+      const count = parsed.filter((proposal) =>
+        proposal?.proposalType === 'memory'
+        && proposal.status === 'pending_review'
+        && typeof proposal.confidence === 'number'
+        && proposal.confidence < 0.7,
+      ).length;
+      setPendingLearningCount(count);
+    } catch {
+      setPendingLearningCount(0);
     }
   };
 
@@ -2437,12 +2472,19 @@ export function Forge(): JSX.Element {
         : disabledMessage;
   const effectiveBackgroundRunsCount = Math.max(backgroundRunsCount, orchestrationState.backgroundRunsCount);
 
+  useEffect(() => {
+    syncPendingLearningQueue();
+    const timer = setInterval(syncPendingLearningQueue, 5000);
+    return () => clearInterval(timer);
+  }, []);
+
   return (
     <Box flexDirection="column" width={stdoutWidth} height={stdoutHeight}>
       <Box borderStyle="single" paddingX={1} height={3}>
         <Text wrap="truncate-end">
           [RORCA FORGE] workspace:{workspaceName} agent:{orchestrationState.activeAgent} branch:{branchName} {formatClock(now)}
           {effectiveBackgroundRunsCount > 0 ? `  Runs in background: ${effectiveBackgroundRunsCount}` : ''}
+          {pendingLearningCount > 0 ? `  Pending learning: ${pendingLearningCount}` : ''}
         </Text>
       </Box>
 
@@ -2603,6 +2645,7 @@ export function Forge(): JSX.Element {
           <Text>tokens out: {foregroundRun?.cumulativeOutput ?? orchestrationState.cumulativeTokens.output}</Text>
           <Text>cost usd: ${(foregroundRun?.cumulativeCost ?? orchestrationState.cumulativeTokens.cost).toFixed(2)}</Text>
           <Text>direction: {foregroundRun?.directionSummary ?? orchestrationState.directionSummary ?? 'none'}</Text>
+          <Text>learning queue: {pendingLearningCount}</Text>
           <Text>background: {effectiveBackgroundRunsCount}</Text>
         </Box>
       </Box>
