@@ -12,10 +12,11 @@ import {
 } from './pg-boss-schemas';
 import { getJob, updateJobStatus } from '../db/spec-jobs';
 import { logger } from './logger';
-import { runEnrichJob, runMatchSkillsJob, runSuggestSkillsJob, type ProgressCallback } from './spec-job-handlers';
+import { runContextEnrichJob, runEnrichJob, runMatchSkillsJob, runSuggestSkillsJob, type ProgressCallback } from './spec-job-handlers';
 import { publishSpecJobSnapshot } from './spec-job-events';
 
 export const SPEC_ENRICH_QUEUE = 'spec:enrich';
+export const CONTEXT_ENRICH_QUEUE = 'context:enrich';
 export const SPEC_MATCH_SKILLS_QUEUE = 'spec:match-skills';
 export const SPEC_SUGGEST_SKILLS_QUEUE = 'spec:suggest-skills';
 const PROGRESS_THROTTLE_MS = 500;
@@ -144,6 +145,11 @@ export async function registerSpecJobHandlers(boss: PgBoss): Promise<void> {
       runEnrichJob(payload.workspaceId, payload.specId, onProgress),
     ),
   );
+  await boss.work(CONTEXT_ENRICH_QUEUE, { batchSize: 1 }, (jobs) =>
+    handleSpecJobs(jobs, CONTEXT_ENRICH_QUEUE, (payload, onProgress) =>
+      runContextEnrichJob(payload, onProgress),
+    ),
+  );
   await boss.work(SPEC_MATCH_SKILLS_QUEUE, { batchSize: 1 }, (jobs) =>
     handleSpecJobs(jobs, SPEC_MATCH_SKILLS_QUEUE, (payload, onProgress) =>
       runMatchSkillsJob(payload.workspaceId, payload.specId, onProgress),
@@ -154,5 +160,5 @@ export async function registerSpecJobHandlers(boss: PgBoss): Promise<void> {
       runSuggestSkillsJob(payload.workspaceId, payload.specId, onProgress),
     ),
   );
-  logger.info('[spec-job-worker] registered spec:enrich, spec:match-skills, spec:suggest-skills');
+  logger.info('[spec-job-worker] registered spec:enrich, context:enrich, spec:match-skills, spec:suggest-skills');
 }
