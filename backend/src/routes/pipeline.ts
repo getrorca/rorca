@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response } from 'express';
 import { spawn, execSync } from 'child_process';
 import * as path from 'path';
@@ -22,7 +29,7 @@ import { handleRouteError } from '../lib/async-handler';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { getEffectiveUser } from '../lib/get-user';
 import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
-import { agentConfig, type AgentType } from '../lib/config';
+import { activeAgent, activeModel, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { OpenCodeServer } from '../lib/opencode-server';
 import { synthesize } from '../lib/direction-stack';
@@ -37,6 +44,7 @@ import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftRepo
 import { synthesizeRunMemory } from '../lib/auto-memory';
 import { logger } from '../lib/logger';
 import { getBoss } from '../lib/pg-boss';
+import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
 import { authRequired } from '../lib/auth-utils';
 import { ConflictError, ForbiddenError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
@@ -951,7 +959,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
 
     const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf8'));
     const stories = (specJson.userStories ?? []) as CapabilityStory[];
-    const resolvedAgent = agentConfig.agentType;
+    const resolvedAgent = activeAgent;
     const report = checkSpec(stories, resolvedAgent);
     const orchConfig = loadOrchestrationConfig(workspace.path);
 
@@ -989,6 +997,9 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Trigger a pipeline run (spawn run-loop.sh)
  *     operationId: triggerPipelineRun
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Starting a local spec run is a core open-source CLI action and must remain callable via MCP and REST."
+ *     x-rorca-public-api: true
  *     description: Spawns the execution engine as a subprocess to run all stories in the specified spec, optionally in a git worktree.
  *     requestBody:
  *       required: true
@@ -1034,7 +1045,7 @@ const PipelineTriggerSchema = z.object({
   dryRun: z.boolean().optional(),
   triggerType: z.enum(['manual', 'scheduled']).optional(),
   forceSequential: z.boolean().optional(),
-  agentOverride: z.enum(['claude', 'opencode', 'codex']).optional(),
+  agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   modelOverride: z.string().optional(),
   storyId: z.string().optional(),
   queuedRunId: z.number().optional(),
@@ -1095,7 +1106,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     // 3. Resolve agent type and model.
     //    Model: ONLY from spec JSON or per-story override. No hidden DB/env fallbacks.
-    //    Agent runtime: request agentOverride > spec agentOverride > wfConfig.runtime
+    //    Agent runtime: request agentOverride > spec agentOverride > in-memory active agent
     const pipelineUser = await getEffectiveUser(req);
     const wfConfig = await resolveWorkflowConfig('pipeline_execution', pipelineUser?.id);
 
@@ -1123,10 +1134,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       && resolvedAgentModel.includes('/')
       && !resolvedAgentModel.startsWith('claude-')
       && !resolvedAgentModel.startsWith('anthropic/claude-');
-    const wfRuntime = wfConfig.runtime as AgentType;
-    const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !specLevelAgent && wfRuntime === 'claude';
-    // Priority: request agentOverride > spec-level agentOverride > auto-detect from model > wfConfig.runtime
-    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : wfRuntime);
+    const runtimeAgent = activeAgent;
+    const autoSwitchedToOpenCode = (modelNeedsOpenCode || modelIsNonClaude) && !agentOverride && !specLevelAgent && runtimeAgent === 'claude';
+    // Priority: request agentOverride > spec-level agentOverride > auto-detect from model > in-memory active agent
+    const resolvedAgentType: AgentType = (agentOverride as AgentType | undefined) ?? specLevelAgent ?? (autoSwitchedToOpenCode ? 'opencode' : runtimeAgent);
 
     // Translate model IDs for OpenCode execution.
     // OpenCode expects "provider/org/model" format (e.g. "openrouter/anthropic/claude-opus-4.6").
@@ -2303,7 +2314,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       if (openrouterVaultKey) env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
 
       // Inject Copilot token when using github/copilot model
-      const resolvedModel = agentConfig.agentModel;
+      const resolvedModel = activeModel;
       if (resolvedModel === 'github/copilot') {
         const copilotToken = await getCopilotToken(user.id);
         if (copilotToken) env['GITHUB_TOKEN'] = copilotToken;
@@ -2505,6 +2516,9 @@ router.post('/runs', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: List pipeline runs
  *     operationId: listPipelineRuns
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Run listing is read-only execution metadata that the open-source CLI and MCP tools depend on."
+ *     x-rorca-public-api: true
  *     description: Returns a paginated list of pipeline runs for the specified workspace, ordered by most recent first.
  *     parameters:
  *       - in: query
@@ -2744,6 +2758,9 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Get a pipeline run with story results
  *     operationId: getPipelineRun
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Detailed run state is core read-only execution data for CLI reattachment, monitoring, and MCP usage."
+ *     x-rorca-public-api: true
  *     description: Retrieves a single pipeline run by ID along with all its story results and spec metadata.
  *     parameters:
  *       - in: path
@@ -2928,6 +2945,9 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Retry failed stories in a pipeline run via pg-boss job queue
  *     operationId: retryPipelineRun
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Retrying failed local stories is part of the stable open-source execution workflow and has no billing or admin side effects."
+ *     x-rorca-public-api: true
  *     description: Re-executes failed stories from a completed or partially failed pipeline run, optionally filtering to specific story IDs. Enqueues a pipeline:retry pg-boss job; worker handles the actual spawn.
  *     parameters:
  *       - in: path
@@ -3157,7 +3177,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       workspacePath: z.string().min(1),
       specPath: z.string().min(1),
       retrySpecPath: z.string().min(1),
-      agent: z.enum(['claude', 'opencode', 'codex']),
+      agent: z.enum(['claude', 'opencode', 'codex', 'pi']),
       model: z.string().nullable(),
       worktreePath: z.string().nullable(),
       sequenceOffset: z.number().int().min(0),
@@ -3172,8 +3192,8 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       workspacePath: workspace.path,
       specPath: originalRun.spec_path,
       retrySpecPath,
-      agent: agentConfig.agentType,
-      model: agentConfig.agentModel ?? null,
+      agent: activeAgent,
+      model: activeModel ?? null,
       worktreePath: originalRun.worktree_path ?? null,
       sequenceOffset,
       envOverrides,
@@ -3549,6 +3569,9 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Cancel a queued or running pipeline run
  *     operationId: cancelPipelineRun
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Cancelling a local run is a core operator action required by the stable open-source CLI surface."
+ *     x-rorca-public-api: true
  *     description: >
  *       For queued runs: removes the pg-boss job and marks the run as cancelled immediately.
  *       For running runs: delivers a pipeline:cancel job to the worker (which sends SIGTERM then SIGKILL after 10s) and returns 200 immediately — DB and WAL updates happen asynchronously in the worker.
@@ -3874,16 +3897,25 @@ interface ModelPricingRow {
   output_cost_per_1k: number;
 }
 
-async function recordTokenUsage(runId: number, storyId: string, inputTokens: number, outputTokens: number, model?: string, reasoningTokens?: number) {
+async function recordTokenUsage(
+  runId: number,
+  storyId: string,
+  inputTokens: number,
+  outputTokens: number,
+  model?: string,
+  reasoningTokens?: number,
+  explicitCostUsd?: number,
+) {
   const run = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: string } | undefined;
   if (!run) return;
 
   const modelName = model || 'unknown';
   const pricing = await queryOne('SELECT * FROM model_pricing WHERE model_id = $1', [modelName]) as ModelPricingRow | undefined;
 
-  const costUsd = pricing
+  const derivedCostUsd = pricing
     ? (inputTokens / 1000) * pricing.input_cost_per_1k + (outputTokens / 1000) * pricing.output_cost_per_1k
     : 0;
+  const costUsd = explicitCostUsd ?? derivedCostUsd;
 
   await execute(`INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, reasoning_tokens, cost_usd)
      VALUES ($1, $2, $3, $4, $5, $6, $7, $8)`, [runId, storyId, run.workspace_id, modelName, inputTokens, outputTokens, reasoningTokens ?? 0, Math.round(costUsd * 1_000_000) / 1_000_000]);
@@ -3959,7 +3991,7 @@ router.post('/story-result', async (req: Request, res: Response) => {
 
     // Also record into token_usage analytics table if tokens are present
     if ((inputTokens && inputTokens > 0) || (outputTokens && outputTokens > 0)) {
-      recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, modelUsed, reasoningTokens ?? 0);
+      await recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, modelUsed, reasoningTokens ?? 0, costUsd);
     }
 
     res.status(201).json({ ok: true });
@@ -4008,7 +4040,9 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
   try {
     const runId = parseInt(String(req.params.runId), 10);
     const storyId = String(req.params.storyId);
-    const { inputTokens, outputTokens, reasoningTokens, model } = req.body as { inputTokens?: number; outputTokens?: number; reasoningTokens?: number; model?: string };
+    const { inputTokens, outputTokens, reasoningTokens, model, costUsd } = req.body as {
+      inputTokens?: number; outputTokens?: number; reasoningTokens?: number; model?: string; costUsd?: number;
+    };
 
     if (isNaN(runId)) {
       throw new ValidationError('Invalid runId');
@@ -4028,10 +4062,17 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
       return;
     }
 
-    await execute(`UPDATE story_results SET input_tokens = COALESCE($1, input_tokens), output_tokens = COALESCE($2, output_tokens) WHERE id = $3`, [inputTokens ?? null, outputTokens ?? null, row.id]);
+    await execute(
+      `UPDATE story_results
+       SET input_tokens = COALESCE($1, input_tokens),
+           output_tokens = COALESCE($2, output_tokens),
+           cost_usd = COALESCE($3, cost_usd)
+       WHERE id = $4`,
+      [inputTokens ?? null, outputTokens ?? null, costUsd ?? null, row.id],
+    );
 
     // Also record into token_usage analytics table
-    recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, model, reasoningTokens ?? 0);
+    await recordTokenUsage(runId, storyId, inputTokens || 0, outputTokens || 0, model, reasoningTokens ?? 0, costUsd);
 
     res.json({ ok: true });
   } catch (error: any) {
@@ -4712,6 +4753,9 @@ router.get('/stream', async (_req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Download raw pipeline log file
  *     operationId: downloadPipelineLog
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Raw run logs are read-only debugging output that the local CLI contract explicitly supports."
+ *     x-rorca-public-api: true
  *     description: Returns the raw log file for a completed pipeline run as a downloadable text/plain attachment.
  *     parameters:
  *       - in: path
@@ -5571,7 +5615,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
  *       Returns the health status of the standalone pg-boss worker process by
  *       querying the worker_heartbeat table and pgboss.* tables directly.
  *       No IPC with the worker is required. The worker is considered active when
- *       its last_seen timestamp is within the past 60 seconds.
+ *       its last_seen timestamp is within the past 90 seconds.
  *     responses:
  *       200:
  *         description: Worker health object with queue statistics
@@ -5644,16 +5688,8 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
 router.get('/worker/health', async (req: Request, res: Response) => {
   try {
     // ── 1. Worker heartbeat ─────────────────────────────────────────────────
-    const heartbeat = await queryOne<{
-      pid: number;
-      started_at: string;
-      last_seen: string;
-      active_jobs: number;
-    }>('SELECT pid, started_at, last_seen, active_jobs FROM worker_heartbeat ORDER BY last_seen DESC LIMIT 1');
-
-    const workerActive = heartbeat
-      ? Date.now() - new Date(heartbeat.last_seen).getTime() < 60_000
-      : false;
+    const heartbeat = await getLatestWorkerHeartbeat();
+    const workerActive = heartbeat ? !isWorkerHeartbeatStale(heartbeat.last_seen) : false;
 
     // ── 2. Active jobs (pgboss.job joined with pipeline_runs) ───────────────
     interface ActiveJobRow {

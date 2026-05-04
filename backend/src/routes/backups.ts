@@ -1,16 +1,54 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
-import jwt from 'jsonwebtoken';
 import { createBackup, listBackups, pruneOldBackups } from '../lib/backup';
 import { backfillAll, isBackfillRunning, getQueueStats, getEmbeddingCounts, getProvider } from '../lib/embedding-pipeline';
 import { isGraphAvailable, graphStats, populateFromSpec, populateFromRun } from '../lib/knowledge-graph';
-import { query } from '../db/index';
+import { query, queryOne } from '../db/index';
 import { logger } from '../lib/logger';
 import { ConflictError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { checkAge, invalidateAgeCache, requireAge } from '../lib/age-guard';
+import { resetGraphAvailability } from '../lib/knowledge-graph';
+import { parsePaginationParams, paginateQuery } from '../lib/paginate';
+import { createSignedLicense } from '../lib/license-verifier';
 
 const router = Router();
+
+interface McpAuditLogRow {
+  id: number;
+  ts: string;
+  tool_name: string;
+  token_tier: 'public' | 'admin';
+  remote_addr: string | null;
+  session_id: string | null;
+  params_hash: string | null;
+  success: boolean;
+  error_code: string | null;
+  duration_ms: number | null;
+}
+
+interface McpAuditSummaryRow {
+  tool_name: string;
+  token_tier: 'public' | 'admin';
+  total_calls: string;
+  success_count: string;
+  failure_count: string;
+}
+
+function parseBooleanFilter(value: unknown): boolean | null {
+  if (value === undefined) return null;
+  if (value === 'true' || value === true) return true;
+  if (value === 'false' || value === false) return false;
+  return null;
+}
 
 /**
  * @swagger
@@ -19,6 +57,8 @@ const router = Router();
  *     tags: [Admin]
  *     summary: Trigger an immediate database backup
  *     operationId: createBackup
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Database backup is an operator-only maintenance action and must never be exposed through CLI or MCP."
  *     description: Creates a new PostgreSQL database backup via pg_dump and prunes old backups beyond the retention limit.
  *     responses:
  *       201:
@@ -62,6 +102,8 @@ router.post('/backup', async (_req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: List available database backups
  *     operationId: listBackups
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Backup inventory is operator-only maintenance metadata and should remain outside CLI and MCP exposure."
  *     description: Returns a list of all available database backup files with their metadata.
  *     responses:
  *       200:
@@ -98,6 +140,8 @@ router.get('/backups', (_req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: Backfill embeddings for all content
  *     operationId: backfillEmbeddings
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Embedding backfill is an operator-controlled maintenance workflow and must not be exposed to MCP or the public CLI."
  *     description: Queues embedding jobs for all existing specs, stories, memory entries, and archived specs. Skips content whose hash matches existing embeddings (staleness check).
  *     requestBody:
  *       content:
@@ -142,6 +186,8 @@ router.post('/embed-all', async (req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: Get embedding backfill status
  *     operationId: getBackfillStatus
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Embedding backfill status is operator-focused maintenance telemetry and should remain admin-only."
  *     description: Returns current embedding queue depth, processed count, failed count, whether a backfill is in progress, and total embedding counts by source type.
  *     responses:
  *       200:
@@ -177,6 +223,8 @@ router.get('/embed-all/status', async (_req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: Get current embedding provider configuration
  *     operationId: getEmbeddingProvider
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Embedding provider configuration is operator-level infrastructure data and should remain admin-only."
  *     description: Returns the active embedding provider name, model identifier, and vector dimensions.
  *     responses:
  *       200:
@@ -206,6 +254,8 @@ router.get('/embedding-provider', (_req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: Backfill the knowledge graph from existing specs and runs
  *     operationId: graphBackfill
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Graph backfill is an operator-run maintenance job and must remain outside MCP and public CLI exposure."
  *     description: |
  *       Populates the Apache AGE knowledge graph from all approved spec JSONs
  *       found on disk and all completed pipeline runs in the database.
@@ -230,14 +280,8 @@ router.get('/embedding-provider', (_req: Request, res: Response) => {
  *       400:
  *         description: Apache AGE is not installed
  */
-router.post('/graph-backfill', async (_req: Request, res: Response) => {
+router.post('/graph-backfill', requireAge(), async (_req: Request, res: Response) => {
   try {
-    const available = await isGraphAvailable();
-    if (!available) {
-      throw new ValidationError('Apache AGE is not installed — graph features unavailable');
-      return;
-    }
-
     let specsProcessed = 0;
     let runsProcessed = 0;
 
@@ -315,6 +359,8 @@ router.post('/graph-backfill', async (_req: Request, res: Response) => {
  *     tags: [Admin]
  *     summary: Get knowledge graph statistics
  *     operationId: getGraphStats
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Admin graph stats are operator maintenance telemetry and should not be exposed to non-admin callers."
  *     description: Returns current vertex count, edge count, and label list from the Apache AGE knowledge graph. Returns available=false if AGE is not installed.
  *     responses:
  *       200:
@@ -331,13 +377,224 @@ router.post('/graph-backfill', async (_req: Request, res: Response) => {
  *                   type: array
  *                   items: { type: string }
  */
-router.get('/graph-stats', async (_req: Request, res: Response) => {
+router.get('/graph-stats', requireAge(), async (_req: Request, res: Response) => {
   try {
     const stats = await graphStats();
     res.json(stats);
   } catch (error: any) {
     handleRouteError(res, error, '[graph-stats]');
   }
+});
+
+/**
+ * @swagger
+ * /api/admin/age-recheck:
+ *   post:
+ *     tags: [Admin]
+ *     summary: Re-check Apache AGE availability
+ *     operationId: recheckAge
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "AGE rechecks are operator-only diagnostics and must remain admin-only."
+ *     description: Clears the cached AGE availability flag and probes the current database again. No auth gate is applied because Rorca runs as a local single-user tool.
+ *     responses:
+ *       200:
+ *         description: Re-check complete
+ */
+router.post('/age-recheck', async (_req: Request, res: Response) => {
+  try {
+    invalidateAgeCache();
+    resetGraphAvailability();
+    const age = await checkAge();
+    res.json({ ok: true, age });
+  } catch (error: any) {
+    handleRouteError(res, error, '[age-recheck]');
+  }
+});
+
+/**
+ * @swagger
+ * /api/admin/mcp-audit:
+ *   get:
+ *     tags: [Admin]
+ *     summary: List MCP audit log entries
+ *     operationId: listMcpAuditLog
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "MCP audit history contains operator forensics and must remain restricted to admin callers."
+ *     x-mcp-tier: admin
+ *     description: Returns paginated MCP audit rows with optional filters for tool, token tier, success state, and time window.
+ *     parameters:
+ *       - in: query
+ *         name: tool
+ *         schema: { type: string }
+ *         description: Filter by MCP tool name
+ *       - in: query
+ *         name: tier
+ *         schema: { type: string, enum: [public, admin] }
+ *         description: Filter by MCP token tier
+ *       - in: query
+ *         name: success
+ *         schema: { type: boolean }
+ *         description: Filter by success state
+ *       - in: query
+ *         name: since
+ *         schema: { type: string, format: date-time }
+ *         description: Inclusive lower bound for ts
+ *       - in: query
+ *         name: until
+ *         schema: { type: string, format: date-time }
+ *         description: Inclusive upper bound for ts
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: page
+ *         schema: { type: integer }
+ *       - in: query
+ *         name: offset
+ *         schema: { type: integer }
+ *     responses:
+ *       200:
+ *         description: Paginated audit log rows
+ */
+router.get('/mcp-audit', async (req: Request, res: Response) => {
+  const tool = req.query.tool ? String(req.query.tool) : null;
+  const tier = req.query.tier ? String(req.query.tier) : null;
+  const success = parseBooleanFilter(req.query.success);
+  const since = req.query.since ? String(req.query.since) : null;
+  const until = req.query.until ? String(req.query.until) : null;
+
+  if (tier && tier !== 'public' && tier !== 'admin') {
+    throw new ValidationError('tier must be public or admin');
+  }
+  if (req.query.success !== undefined && success === null) {
+    throw new ValidationError('success must be true or false');
+  }
+  if (since && Number.isNaN(Date.parse(since))) {
+    throw new ValidationError('since must be a valid ISO timestamp');
+  }
+  if (until && Number.isNaN(Date.parse(until))) {
+    throw new ValidationError('until must be a valid ISO timestamp');
+  }
+
+  const pagination = parsePaginationParams(req, { limit: 50, maxLimit: 250 });
+  const where: string[] = ['1=1'];
+  const params: unknown[] = [];
+
+  if (tool) {
+    params.push(tool);
+    where.push(`tool_name = $${params.length}`);
+  }
+  if (tier) {
+    params.push(tier);
+    where.push(`token_tier = $${params.length}`);
+  }
+  if (success !== null) {
+    params.push(success);
+    where.push(`success = $${params.length}`);
+  }
+  if (since) {
+    params.push(since);
+    where.push(`ts >= $${params.length}::timestamptz`);
+  }
+  if (until) {
+    params.push(until);
+    where.push(`ts <= $${params.length}::timestamptz`);
+  }
+
+  const baseQuery = `SELECT id, ts, tool_name, token_tier, remote_addr, session_id, params_hash, success, error_code, duration_ms
+    FROM mcp_audit_log
+    WHERE ${where.join(' AND ')}`;
+  const countQuery = `SELECT COUNT(*)::int AS total
+    FROM mcp_audit_log
+    WHERE ${where.join(' AND ')}`;
+
+  const page = await paginateQuery<McpAuditLogRow>({
+    query: baseQuery,
+    countQuery,
+    params,
+    pagination,
+    orderBy: 'ts DESC, id DESC',
+    cursorColumn: 'id',
+  });
+
+  res.json(page);
+});
+
+/**
+ * @swagger
+ * /api/admin/mcp-audit/summary:
+ *   get:
+ *     tags: [Admin]
+ *     summary: Summarize MCP audit activity
+ *     operationId: summarizeMcpAuditLog
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "MCP usage summaries are operator telemetry and should remain admin-only."
+ *     x-mcp-tier: admin
+ *     description: Returns grouped counts by tool and token tier for a time window.
+ *     parameters:
+ *       - in: query
+ *         name: since
+ *         schema: { type: string, format: date-time }
+ *       - in: query
+ *         name: until
+ *         schema: { type: string, format: date-time }
+ *     responses:
+ *       200:
+ *         description: Grouped summary rows
+ */
+router.get('/mcp-audit/summary', async (req: Request, res: Response) => {
+  const since = req.query.since ? String(req.query.since) : null;
+  const until = req.query.until ? String(req.query.until) : null;
+
+  if (since && Number.isNaN(Date.parse(since))) {
+    throw new ValidationError('since must be a valid ISO timestamp');
+  }
+  if (until && Number.isNaN(Date.parse(until))) {
+    throw new ValidationError('until must be a valid ISO timestamp');
+  }
+
+  const params: unknown[] = [];
+  const where: string[] = ['1=1'];
+  if (since) {
+    params.push(since);
+    where.push(`ts >= $${params.length}::timestamptz`);
+  }
+  if (until) {
+    params.push(until);
+    where.push(`ts <= $${params.length}::timestamptz`);
+  }
+
+  const rows = await query<McpAuditSummaryRow>(
+    `SELECT
+       tool_name,
+       token_tier,
+       COUNT(*)::text AS total_calls,
+       COUNT(*) FILTER (WHERE success = true)::text AS success_count,
+       COUNT(*) FILTER (WHERE success = false)::text AS failure_count
+     FROM mcp_audit_log
+     WHERE ${where.join(' AND ')}
+     GROUP BY tool_name, token_tier
+     ORDER BY COUNT(*) DESC, tool_name ASC, token_tier ASC`,
+    params,
+  );
+
+  const total = await queryOne<{ total: number }>(
+    `SELECT COUNT(*)::int AS total
+     FROM mcp_audit_log
+     WHERE ${where.join(' AND ')}`,
+    params,
+  );
+
+  res.json({
+    totalCalls: total?.total ?? 0,
+    items: rows.map((row) => ({
+      toolName: row.tool_name,
+      tokenTier: row.token_tier,
+      totalCalls: Number(row.total_calls),
+      successCount: Number(row.success_count),
+      failureCount: Number(row.failure_count),
+    })),
+  });
 });
 
 // ─── BL-013: Generate offline RS256 license key for self-hosted distribution ──
@@ -347,10 +604,12 @@ router.get('/graph-stats', async (_req: Request, res: Response) => {
  * /api/admin/generate-license:
  *   post:
  *     tags: [Admin]
- *     summary: Generate an offline RS256 license JWT for self-hosted distribution
+ *     summary: Generate an offline RSA-signed license key for self-hosted distribution
  *     operationId: generateLicense
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "License generation is a sensitive commercial operator action and must never be exposed through MCP or the open-source CLI."
  *     description: |
- *       Signs a license JWT with the RORCA_LICENSE_PRIVATE_KEY. Requires RORCA_ADMIN_KEY header for authentication.
+ *       Signs a detached RSA license key with the RORCA_LICENSE_PRIVATE_KEY. Requires RORCA_ADMIN_KEY header for authentication.
  *       Used by Rorca admins to generate trial or paid licenses for self-hosted users.
  *     parameters:
  *       - in: header
@@ -367,18 +626,18 @@ router.get('/graph-stats', async (_req: Request, res: Response) => {
  *             type: object
  *             required: [plan, email]
  *             properties:
- *               plan: { type: string, enum: [solo, pro, team], description: "License plan tier" }
+ *               plan: { type: string, enum: [solo, pro, team, enterprise], description: "License plan tier" }
  *               email: { type: string, description: "Licensee email address" }
  *               expiresInDays: { type: integer, description: "License validity in days (omit for perpetual)" }
  *     responses:
  *       200:
- *         description: License JWT generated
+ *         description: License key generated
  *         content:
  *           application/json:
  *             schema:
  *               type: object
  *               properties:
- *                 licenseKey: { type: string, description: "RS256-signed JWT license key" }
+ *                 licenseKey: { type: string, description: "RSA-signed detached license key" }
  *                 plan: { type: string }
  *                 email: { type: string }
  *                 expiresAt: { type: string, nullable: true }
@@ -412,13 +671,13 @@ router.post('/generate-license', async (req: Request, res: Response) => {
     }
 
     const { plan, email, expiresInDays } = req.body as {
-      plan?: string;
+      plan?: 'solo' | 'pro' | 'team' | 'enterprise';
       email?: string;
       expiresInDays?: number;
     };
 
-    if (!plan || !['solo', 'pro', 'team'].includes(plan)) {
-      res.status(400).json({ error: 'plan must be one of: solo, pro, team' });
+    if (!plan || !['solo', 'pro', 'team', 'enterprise'].includes(plan)) {
+      res.status(400).json({ error: 'plan must be one of: solo, pro, team, enterprise' });
       return;
     }
     if (!email || typeof email !== 'string') {
@@ -426,22 +685,20 @@ router.post('/generate-license', async (req: Request, res: Response) => {
       return;
     }
 
-    const payload: Record<string, unknown> = {
+    const payload = {
       sub: email,
       plan,
       iss: 'rorca',
+      issuedAt: new Date().toISOString(),
+      expiresAt: null as string | null,
     };
 
-    const signOptions: jwt.SignOptions = { algorithm: 'RS256' };
-
     if (expiresInDays && expiresInDays > 0) {
-      payload.exp = Math.floor(Date.now() / 1000) + expiresInDays * 86400;
+      payload.expiresAt = new Date(Date.now() + expiresInDays * 86400 * 1000).toISOString();
     }
 
-    const licenseKey = jwt.sign(payload, privateKey, signOptions);
-    const expiresAt = payload.exp
-      ? new Date((payload.exp as number) * 1000).toISOString()
-      : null;
+    const licenseKey = createSignedLicense(payload, privateKey);
+    const expiresAt = payload.expiresAt;
 
     logger.info({ plan, email, expiresInDays: expiresInDays || 'perpetual' }, '[Admin] License generated');
 

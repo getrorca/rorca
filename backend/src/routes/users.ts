@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -20,6 +27,8 @@ const router = Router();
  *     tags: [Users]
  *     summary: Get current user profile including plan
  *     operationId: getMe
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Current-user identity and plan metadata are user-owned account information and should require authenticated access."
  *     description: Returns the current user's profile including their plan tier (free/solo/pro/team). Falls back to the first registered user when auth is bypassed (local single-user mode).
  *     responses:
  *       200:

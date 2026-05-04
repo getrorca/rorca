@@ -1,9 +1,17 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import PgBoss from 'pg-boss';
 import { CronExpressionParser } from 'cron-parser';
 import { query, execute } from '../db/index';
 import { INTERNAL_SERVICE_TOKEN } from '../lib/auth-utils';
 import { createBackup, pruneOldBackups } from './backup';
 import { logger } from './logger';
+import { pruneExpiredMcpAuditLogs, runMcpAuditAnomalyScan } from './mcp-audit';
 
 interface ScheduleRow {
   id: number;
@@ -207,6 +215,9 @@ export async function registerSchedulesWithBoss(
 
 let lastBackupDate: string | null = null;
 let backupIntervalHandle: ReturnType<typeof setInterval> | null = null;
+let lastMcpAuditPruneDate: string | null = null;
+let mcpAuditAnomalyHandle: ReturnType<typeof setInterval> | null = null;
+let mcpAuditRetentionHandle: ReturnType<typeof setInterval> | null = null;
 
 async function checkDailyBackup(): Promise<void> {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
@@ -246,14 +257,61 @@ export function stopDailyBackupScheduler(): void {
   }
 }
 
+async function checkDailyMcpAuditRetention(): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
+  if (lastMcpAuditPruneDate === today) return;
+
+  const now = new Date();
+  // Run after backup window to reduce startup churn.
+  if (now.getHours() < 3) return;
+
+  lastMcpAuditPruneDate = today;
+  const deletedRows = await pruneExpiredMcpAuditLogs();
+  logger.info({ deletedRows }, '[Scheduler] MCP audit retention run completed');
+}
+
+export function startMcpAuditScheduler(): void {
+  if (!mcpAuditAnomalyHandle) {
+    logger.info('[Scheduler] Starting MCP audit anomaly scan — running every 5m');
+    mcpAuditAnomalyHandle = setInterval(() => {
+      // P1 only detects and logs anomalies. It does not auto-block to avoid lockouts.
+      runMcpAuditAnomalyScan().catch((err) => logger.error({ err }, '[Scheduler] MCP audit anomaly scan error'));
+    }, 5 * 60_000);
+    mcpAuditAnomalyHandle.unref();
+    runMcpAuditAnomalyScan().catch((err) => logger.error({ err }, '[Scheduler] Initial MCP audit anomaly scan error'));
+  }
+
+  if (!mcpAuditRetentionHandle) {
+    logger.info('[Scheduler] Starting MCP audit retention check — running every 60s');
+    mcpAuditRetentionHandle = setInterval(() => {
+      checkDailyMcpAuditRetention().catch((err) => logger.error({ err }, '[Scheduler] MCP audit retention check error'));
+    }, 60_000);
+    mcpAuditRetentionHandle.unref();
+    checkDailyMcpAuditRetention().catch((err) => logger.error({ err }, '[Scheduler] Initial MCP audit retention check error'));
+  }
+}
+
+export function stopMcpAuditScheduler(): void {
+  if (mcpAuditAnomalyHandle) {
+    clearInterval(mcpAuditAnomalyHandle);
+    mcpAuditAnomalyHandle = null;
+  }
+  if (mcpAuditRetentionHandle) {
+    clearInterval(mcpAuditRetentionHandle);
+    mcpAuditRetentionHandle = null;
+  }
+}
+
 // ─── Legacy API shim (used by server.ts) ────────────────────────────────────
 // The Express server no longer handles cron scheduling (that's the worker's job),
 // but it still manages the daily backup interval.
 
 export function startScheduler(): void {
   startDailyBackupScheduler();
+  startMcpAuditScheduler();
 }
 
 export function stopScheduler(): void {
   stopDailyBackupScheduler();
+  stopMcpAuditScheduler();
 }

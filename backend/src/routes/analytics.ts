@@ -1,7 +1,15 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response } from 'express';
 import path from 'path';
 import fs from 'fs';
 import { query, queryOne, execute } from '../db/index';
+import { withUserClient } from '../db/user-client';
 import { logger } from '../lib/logger';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
@@ -25,6 +33,17 @@ interface TimeSeriesRow {
   total_output_tokens: number;
   total_reasoning_tokens: number;
   total_cost_usd: number;
+}
+
+interface PiProviderRow {
+  provider: string;
+  total_runs: number;
+  total_stories: number;
+  total_input_tokens: number;
+  total_output_tokens: number;
+  total_cost: number;
+  avg_cost_per_story: number;
+  last_used: string;
 }
 
 // ─── GET /api/analytics/usage — Aggregated token usage ───────────────────────
@@ -1560,6 +1579,9 @@ interface ROITimeSeriesRow {
  *     tags: [Analytics]
  *     summary: ROI calculator — estimated developer hours saved
  *     operationId: getRoiMetrics
+ *     x-rorca-tier: paid
+ *     x-rorca-capability: finops
+ *     x-rorca-rationale: "ROI analytics are part of the commercial FinOps surface and should not be exposed through the free CLI contract."
  *     description: Calculates estimated developer hours saved based on passed stories, configurable hourly rate and hours-per-story values. Deduplicates retried stories and includes a daily time series for trend charts. Requires workspace_id.
  *     parameters:
  *       - in: query
@@ -1736,6 +1758,9 @@ router.get('/roi', async (req: Request, res: Response) => {
  *     tags: [Analytics]
  *     summary: Update ROI calculator configuration
  *     operationId: updateRoiConfig
+ *     x-rorca-tier: paid
+ *     x-rorca-capability: finops
+ *     x-rorca-rationale: "ROI configuration is part of the commercial FinOps feature set and belongs behind the paid plan boundary."
  *     description: Updates the ROI calculator configuration (hours_per_story and hourly_rate) for a specific workspace. These values are used by the ROI metrics endpoint to estimate developer hours saved and net savings.
  *     requestBody:
  *       required: true
@@ -1848,6 +1873,9 @@ function tierFromModel(model: string): string {
  *     tags: [Analytics]
  *     summary: Per-run FinOps dashboard data
  *     operationId: getFinOpsRun
+ *     x-rorca-tier: paid
+ *     x-rorca-capability: finops
+ *     x-rorca-rationale: "Per-run FinOps analytics are commercial cost visibility features and must stay outside the free CLI/MCP surface."
  *     description: Returns detailed FinOps data for a specific pipeline run, including per-story cost breakdown with model tier classification, run summary aggregated by model, savings vs all-Opus baseline, model distribution for pie charts, and escalation log from WAL events. For subscription-based agents (claude, codex), savings and cost fields are null.
  *     parameters:
  *       - in: path
@@ -2054,6 +2082,9 @@ router.get('/finops/run/:runId', async (req: Request, res: Response) => {
  *     tags: [Analytics]
  *     summary: Historical FinOps data
  *     operationId: getFinOpsHistorical
+ *     x-rorca-tier: paid
+ *     x-rorca-capability: finops
+ *     x-rorca-rationale: "Historical FinOps reporting is a commercial analytics feature and should not be part of the free contract."
  *     description: Returns cumulative cost data broken down by workspace, spec, and month, along with a daily cost trend for charts, model distribution, projected monthly cost, and savings vs all-Opus baseline. Default range is 90 days. For subscription-only runs, the savings field is null.
  *     parameters:
  *       - in: query
@@ -2282,6 +2313,99 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
   }
 });
 
+// ─── GET /api/analytics/pi-providers — Pi provider FinOps aggregation ───────
+
+/**
+ * @swagger
+ * /api/analytics/pi-providers:
+ *   get:
+ *     tags: [Analytics]
+ *     summary: Get Pi provider usage aggregates
+ *     operationId: getPiProviderAnalytics
+ *     x-rorca-tier: paid
+ *     x-rorca-capability: finops
+ *     x-rorca-rationale: "Pi provider cost analytics are part of the paid FinOps surface and should not be reachable from the free CLI contract."
+ *     description: Returns FinOps aggregates for Pi runs grouped by Pi provider. Data is derived from token_usage joined with pipeline_runs, filtered to pipeline runs where the execution agent is pi. Providers are parsed from Pi model identifiers such as pi/openai/gpt-4.1 or pi/omlx/local.
+ *     parameters:
+ *       - in: query
+ *         name: workspace_id
+ *         schema: { type: string }
+ *         description: Optional workspace filter. When omitted, returns all Pi provider aggregates visible to the authenticated user under workspace RLS.
+ *     responses:
+ *       200:
+ *         description: Pi provider aggregates
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: array
+ *               items:
+ *                 type: object
+ *                 required: [provider, totalRuns, totalStories, totalInputTokens, totalOutputTokens, totalCost, avgCostPerStory, lastUsed]
+ *                 properties:
+ *                   provider: { type: string }
+ *                   totalRuns: { type: integer }
+ *                   totalStories: { type: integer }
+ *                   totalInputTokens: { type: integer }
+ *                   totalOutputTokens: { type: integer }
+ *                   totalCost: { type: number }
+ *                   avgCostPerStory: { type: number }
+ *                   lastUsed: { type: string, format: date-time }
+ *       401:
+ *         description: Authentication required
+ *       500:
+ *         description: Internal server error
+ */
+router.get('/pi-providers', async (req: Request, res: Response) => {
+  try {
+    const workspaceId = req.query.workspace_id as string | undefined;
+
+    const providers = await withUserClient(req, async (client) => {
+      const params: string[] = [];
+      let workspaceFilter = '';
+
+      if (workspaceId) {
+        params.push(workspaceId);
+        workspaceFilter = ` AND tu.workspace_id = $${params.length}`;
+      }
+
+      const sql = `
+        SELECT
+          split_part(tu.model, '/', 2) AS provider,
+          COUNT(DISTINCT tu.run_id)::int AS total_runs,
+          COUNT(DISTINCT (tu.run_id, tu.story_id))::int AS total_stories,
+          COALESCE(SUM(tu.input_tokens), 0) AS total_input_tokens,
+          COALESCE(SUM(tu.output_tokens), 0) AS total_output_tokens,
+          COALESCE(SUM(tu.cost_usd), 0) AS total_cost,
+          COALESCE(SUM(tu.cost_usd) / NULLIF(COUNT(DISTINCT (tu.run_id, tu.story_id)), 0), 0) AS avg_cost_per_story,
+          MAX(tu.recorded_at)::text AS last_used
+        FROM token_usage tu
+        JOIN pipeline_runs pr ON pr.id = tu.run_id
+        WHERE COALESCE(pr.agent_type, pr.agent, 'claude') = 'pi'
+          AND tu.model LIKE 'pi/%'
+          ${workspaceFilter}
+        GROUP BY split_part(tu.model, '/', 2)
+        ORDER BY MAX(tu.recorded_at) DESC, provider ASC
+      `;
+
+      const result = await client.query<PiProviderRow>(sql, params);
+      return result.rows;
+    });
+
+    res.json(providers.map((row) => ({
+      provider: row.provider,
+      totalRuns: Number(row.total_runs),
+      totalStories: Number(row.total_stories),
+      totalInputTokens: Number(row.total_input_tokens),
+      totalOutputTokens: Number(row.total_output_tokens),
+      totalCost: Number(row.total_cost),
+      avgCostPerStory: Number(row.avg_cost_per_story),
+      lastUsed: row.last_used,
+    })));
+  } catch (error: any) {
+    handleRouteError(res, error, '[Analytics] Pi provider query');
+  }
+});
+
 // ─── GET /api/analytics/finops/export — CSV export of per-story cost data ────
 
 /**
@@ -2291,6 +2415,9 @@ router.get('/finops/historical', async (req: Request, res: Response) => {
  *     tags: [Analytics]
  *     summary: CSV export of per-story cost data
  *     operationId: exportFinOpsCsv
+ *     x-rorca-tier: paid
+ *     x-rorca-capability: finops
+ *     x-rorca-rationale: "FinOps export is a commercial reporting feature and should remain behind the paid plan boundary."
  *     description: Exports per-story token usage and cost data as a CSV file. Includes computed columns for model tier, Opus baseline cost, and savings vs Opus. Can be filtered by run_id, workspace_id, and date range. The CSV includes headers for run_id, story_id, spec_slug, model, tier, agent_type, input_tokens, output_tokens, cost_usd, opus_baseline_usd, savings_usd, recorded_at, and workspace_id.
  *     parameters:
  *       - in: query

@@ -1,12 +1,20 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useEffect, useState } from 'react';
 import { apiFetch } from '../lib/apiFetch';
 
-export type EngineValue = 'claude' | 'opencode' | 'codex';
+export type EngineValue = 'claude' | 'opencode' | 'codex' | 'pi';
 
 export interface EngineStatus {
   claudeAvailable?: boolean;
   opencodeAvailable?: boolean;
   codexAvailable?: boolean;
+  piAvailable?: boolean;
 }
 
 interface EngineSelectorProps {
@@ -25,6 +33,7 @@ interface HealthEngines {
   claude: { installed: boolean };
   opencode: { installed: boolean; version?: string };
   codex: { installed: boolean; version?: string };
+  pi: { installed: boolean; version?: string };
 }
 
 interface HealthResponse {
@@ -45,6 +54,7 @@ export function EngineSelector({ value, onChange, engineStatus }: EngineSelector
             claudeAvailable: data.engines.claude.installed,
             opencodeAvailable: data.engines.opencode.installed,
             codexAvailable: data.engines.codex.installed,
+            piAvailable: data.engines.pi.installed,
           });
         }
       })
@@ -70,6 +80,11 @@ export function EngineSelector({ value, onChange, engineStatus }: EngineSelector
       value: 'codex',
       label: 'Codex (Sub)',
       available: resolved.codexAvailable ?? false,
+    },
+    {
+      value: 'pi',
+      label: 'Pi',
+      available: resolved.piAvailable ?? false,
     },
   ];
 

@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * tool-capability-checker.ts — Pre-flight tool compatibility check for stories vs engines.
  *
  * OC-031: Before routing a story to an execution engine, check whether the story's
@@ -50,6 +57,7 @@ export const TOOL_CAPABILITY_MATRIX: Record<AgentType | 'ollama', Set<ToolName>>
   claude: new Set(['bash', 'edit', 'read', 'write', 'glob', 'grep', 'webfetch', 'websearch', 'task', 'todowrite']),
   opencode: new Set(['bash', 'edit', 'read', 'write', 'glob', 'grep', 'webfetch', 'websearch']),
   codex: new Set(['bash', 'edit', 'read', 'write']),
+  pi: new Set(['bash', 'edit', 'read', 'write']),
   ollama: new Set(['bash', 'edit', 'read', 'write']),
 };
 

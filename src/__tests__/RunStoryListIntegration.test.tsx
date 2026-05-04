@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { screen, waitFor, act } from '@testing-library/react';
 import { renderWithProviders, createMockWorkspace, createMockRun } from '../test/helpers';

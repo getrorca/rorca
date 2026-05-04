@@ -1,14 +1,23 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response, NextFunction } from 'express';
 import { CronExpressionParser } from 'cron-parser';
 import { execSync } from 'child_process';
 import { query, queryOne, dbHealthCheck } from '../db/index';
 import { listBackups } from '../lib/backup';
-import { agentType } from '../lib/config';
+import { activeAgent, activeModel, agentType } from '../lib/config';
 import { detectOpenCode } from '../lib/opencode-detector';
 import { detectCodex } from '../lib/codex-detector';
+import { detectPi } from '../lib/pi-detector';
 import { isTelemetryEnabled } from '../lib/telemetry-config';
 import { getQueueStats } from '../lib/embedding-pipeline';
 import { cacheStats } from '../lib/context-cache';
+import { getMcpTransportCount } from '../lib/mcp-http';
 import * as fs from 'fs';
 import * as path from 'path';
 
@@ -22,6 +31,7 @@ interface EnginesStatus {
   claude: { installed: boolean };
   opencode: { installed: boolean; version?: string };
   codex: { installed: boolean; version?: string };
+  pi: { installed: boolean; version?: string };
 }
 
 let enginesCache: EnginesStatus | null = null;
@@ -52,6 +62,7 @@ function detectEngines(): EnginesStatus {
 
   const opencode = detectOpenCode();
   const codex = detectCodex();
+  const pi = detectPi();
 
   const result: EnginesStatus = {
     claude: { installed: claudeInstalled },
@@ -62,6 +73,10 @@ function detectEngines(): EnginesStatus {
     codex: {
       installed: codex.codexInstalled,
       ...(codex.codexVersion ? { version: codex.codexVersion } : {}),
+    },
+    pi: {
+      installed: pi.piInstalled,
+      ...(pi.piVersion ? { version: pi.piVersion } : {}),
     },
   };
 
@@ -84,6 +99,23 @@ const NO_CACHE_HEADERS = {
   'Expires': '0',
 };
 
+type McpBridgeStatus = 'healthy' | 'disabled';
+
+function getMcpBridgeHealth(): {
+  enabled: boolean;
+  status: McpBridgeStatus;
+  url: string;
+  sessions: number;
+} {
+  const enabled = process.env.RORCA_SERVE_MCP !== 'false';
+  return {
+    enabled,
+    status: enabled ? 'healthy' : 'disabled',
+    url: `${process.env.RORCA_PUBLIC_URL || 'http://localhost:3030'}/mcp`,
+    sessions: enabled ? getMcpTransportCount() : 0,
+  };
+}
+
 /**
  * @swagger
  * /api/health:
@@ -91,7 +123,10 @@ const NO_CACHE_HEADERS = {
  *     tags: [Health]
  *     summary: Basic health check
  *     operationId: getHealth
- *     description: Returns basic server health status including database connectivity, uptime, active pipeline runs, MCP transport mode, and telemetry status. When agent type is opencode or codex, includes installation status. Also returns component-level health for database, worker, github, postgres, and migrations.
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Health checks are safe read-only diagnostics that external CLI clients depend on before invoking higher-level workflows."
+ *     x-rorca-public-api: true
+ *     description: Returns basic server health status including database connectivity, uptime, active pipeline runs, MCP transport mode, and telemetry status. When agent type is opencode or codex, includes installation status. Also returns unconditional Pi CLI detection status and component-level health for database, worker, github, postgres, and migrations.
  *     responses:
  *       200:
  *         description: Server is healthy
@@ -105,13 +140,29 @@ const NO_CACHE_HEADERS = {
  *                 uptime: { type: integer, description: "Uptime in seconds" }
  *                 db_connected: { type: boolean }
  *                 active_runs: { type: integer }
+ *                 agentType: { type: string }
+ *                 agentModel: { type: string, nullable: true }
  *                 mcpTransport: { type: string }
+ *                 mcp:
+ *                   type: object
+ *                   properties:
+ *                     enabled: { type: boolean }
+ *                     status: { type: string, enum: [healthy, disabled] }
+ *                     url: { type: string }
+ *                     sessions: { type: integer }
  *                 telemetryEnabled: { type: boolean }
  *                 authRequired: { type: boolean, description: "Whether AUTH_REQUIRED=true is set" }
  *                 opencodeInstalled: { type: boolean }
  *                 opencodeVersion: { type: string }
  *                 codexInstalled: { type: boolean }
  *                 codexVersion: { type: string }
+ *                 piInstalled: { type: boolean }
+ *                 piVersion:
+ *                   type: string
+ *                   nullable: true
+ *                 piBinPath:
+ *                   type: string
+ *                   nullable: true
  *                 engines:
  *                   type: object
  *                   description: "Availability status for each execution engine (cached 30s)"
@@ -203,9 +254,21 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
     const opencode = agentType === 'opencode' ? detectOpenCode() : undefined;
     // OC-024: Include codex status when agentType=codex
     const codex = agentType === 'codex' ? detectCodex() : undefined;
+    const pi = (() => {
+      try {
+        return detectPi();
+      } catch {
+        return {
+          piInstalled: false,
+          piVersion: null,
+          piBinPath: null,
+        };
+      }
+    })();
 
     // MP-009: Detect all engines (cached 30s) for EngineSelector availability dots
     const engines = detectEngines();
+    const mcp = getMcpBridgeHealth();
 
     // Reconstruct dbHealthCheck fields from our component check
     const rawDbHealth = (dbHealth as ComponentDatabaseHealth);
@@ -217,6 +280,8 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       database: 'postgresql',
       db_connected: dbConnected,
       active_runs: activeRuns,
+      agentType: activeAgent,
+      agentModel: activeModel,
       db: rawDbHealth.poolStats,
       ...(rawDbHealth.pgVersion ? { pgVersion: rawDbHealth.pgVersion } : {}),
       ...(rawDbHealth.extensions ? { extensions: rawDbHealth.extensions } : {}),
@@ -225,8 +290,9 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
       provider: rawDbHealth.provider,
       ...(rawDbHealth.extensionStatus ? { extensionStatus: rawDbHealth.extensionStatus } : {}),
       ...(rawDbHealth.connectionLimit ? { connectionLimit: rawDbHealth.connectionLimit } : {}),
-      // CA-021: Report MCP transport mode
-      mcpTransport: 'http',
+      // CA-021: Report MCP transport mode + bridge health
+      mcpTransport: mcp.enabled ? 'http' : 'disabled',
+      mcp,
       // PR-005: Report telemetry status
       telemetryEnabled: isTelemetryEnabled(),
       // PR-009: Report auth enforcement status
@@ -239,6 +305,9 @@ router.get('/', async (_req: Request, res: Response, next: NextFunction) => {
         codexInstalled: codex.codexInstalled,
         codexVersion: codex.codexVersion,
       } : {}),
+      piInstalled: pi.piInstalled,
+      piVersion: pi.piVersion,
+      piBinPath: pi.piBinPath,
       // MP-009: Engine availability for EngineSelector (all three engines, cached 30s)
       engines,
       embeddings: getQueueStats(),

@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import request from 'supertest';
 import app from '../../server';
 
@@ -17,10 +24,8 @@ describe('security audit regressions', () => {
       .get('/api/workspaces')
       .set('Authorization', 'Bearer forged.invalid.token');
 
-    expect([401, 200]).toContain(res.status);
-    if (res.status === 401) {
-      expect(res.body.code).toBe('AUTH_ERROR');
-      expect(JSON.stringify(res.body)).not.toMatch(/forged\.invalid\.token/);
-    }
+    expect(res.status).toBe(401);
+    expect(res.body.code).toBe('AUTH_ERROR');
+    expect(JSON.stringify(res.body)).not.toMatch(/forged\.invalid\.token/);
   });
 });

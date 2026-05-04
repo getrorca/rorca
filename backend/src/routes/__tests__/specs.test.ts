@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -1423,6 +1430,51 @@ describe('V2-083: Story exclusion', () => {
   });
 });
 
+describe('PUT /api/specs/:specId/stories/:storyId', () => {
+  function seedEditableSpec(dir: string, slug: string) {
+    fs.mkdirSync(dir, { recursive: true });
+    const spec = {
+      title: slug,
+      userStories: [
+        {
+          id: 'US-001',
+          title: 'Original title',
+          description: 'Original description',
+          acceptanceCriteria: ['AC1'],
+          complexity: 2,
+          dependsOn: [],
+          passes: false,
+        },
+      ],
+      generatedAt: '2026-03-12T00:00:00.000Z',
+    };
+    fs.writeFileSync(path.join(dir, `${slug}.json`), JSON.stringify(spec, null, 2), 'utf8');
+  }
+
+  test('updates title and complexity for a single story', async () => {
+    const pendingDir = path.join(os.tmpdir(), 'forge', 'specs', 'pending');
+    seedEditableSpec(pendingDir, 'story-edit-test');
+
+    const res = await request(app)
+      .put('/api/specs/story-edit-test/stories/US-001')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Edited title',
+        complexity: 5,
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.story.title).toBe('Edited title');
+    expect(res.body.story.complexity).toBe(5);
+
+    const content = JSON.parse(fs.readFileSync(path.join(pendingDir, 'story-edit-test.json'), 'utf8'));
+    expect(content.userStories[0].title).toBe('Edited title');
+    expect(content.userStories[0].complexity).toBe(5);
+  });
+});
+
 // ─── SV-001: GET /:specId/check — Structural spec validation ──────────────────
 
 describe('GET /api/specs/:id/check', () => {
@@ -1578,6 +1630,12 @@ describe('POST /api/specs/:id/assign-models', () => {
   });
 
   function makeSpecFile(stories: object[], dir: 'pending' | 'approved') {
+    for (const existingDir of ['pending', 'approved'] as const) {
+      const existingPath = path.join(os.tmpdir(), 'forge', 'specs', existingDir, `${specId}.json`);
+      if (fs.existsSync(existingPath)) {
+        fs.rmSync(existingPath, { force: true });
+      }
+    }
     const specsDir = path.join(os.tmpdir(), 'forge', 'specs', dir);
     fs.mkdirSync(specsDir, { recursive: true });
     const specContent = {
@@ -1622,7 +1680,7 @@ describe('POST /api/specs/:id/assign-models', () => {
     expect(res.body.breakdown).toEqual([]);
   });
 
-  test('RORCA_AGENT=claude: assigns claude model tiers, each breakdown entry has required fields', async () => {
+  test('RORCA_AGENT=claude: returns complexity breakdown using the configured model', async () => {
     makeSpecFile([
       {
         id: 'US-001',
@@ -1658,7 +1716,7 @@ describe('POST /api/specs/:id/assign-models', () => {
       expect(entry).toHaveProperty('complexity');
       expect(['low', 'medium', 'high']).toContain(entry.complexity);
       expect(entry).toHaveProperty('model');
-      expect(['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-6']).toContain(entry.model);
+      expect(entry.model).toBe('(user-configured)');
       expect(entry).toHaveProperty('reason');
       expect(typeof entry.reason).toBe('string');
     }
@@ -1725,7 +1783,7 @@ describe('POST /api/specs/:id/assign-models', () => {
     expect(afterContent.userStories[0].model).toBeUndefined();
   });
 
-  test('dryRun=false (default): writes story.model to spec file', async () => {
+  test('dryRun=false (default): does not write per-story model overrides to spec file', async () => {
     makeSpecFile([
       {
         id: 'US-001',
@@ -1746,14 +1804,13 @@ describe('POST /api/specs/:id/assign-models', () => {
     expect(res.status).toBe(200);
     expect(res.body.storiesAssigned).toBe(1);
 
-    // File must have story.model written
+    // Per-story model cascading was removed — the configured run model is used.
     const specFile = path.join(os.tmpdir(), 'forge', 'specs', 'pending', `${specId}.json`);
     const afterContent = JSON.parse(fs.readFileSync(specFile, 'utf8'));
-    expect(afterContent.userStories[0].model).toBeDefined();
-    expect(typeof afterContent.userStories[0].model).toBe('string');
+    expect(afterContent.userStories[0].model).toBeUndefined();
   });
 
-  test('RORCA_AGENT=opencode with openai/gpt-4o: low stories get gpt-4o-mini, high get o3', async () => {
+  test('RORCA_AGENT=opencode with openai/gpt-4o: all stories use the configured model', async () => {
     makeSpecFile([
       {
         id: 'US-001',
@@ -1789,10 +1846,8 @@ describe('POST /api/specs/:id/assign-models', () => {
 
     expect(lowStory).toBeDefined();
     expect(highStory).toBeDefined();
-    // Low complexity openai cascade → gpt-4o-mini
-    expect(lowStory.model).toBe('gpt-4o-mini');
-    // High complexity openai cascade → o3
-    expect(highStory.model).toBe('o3');
+    expect(lowStory.model).toBe('openai/gpt-4o');
+    expect(highStory.model).toBe('openai/gpt-4o');
   });
 
   test('keywords architecture/security/payments/migration in title+description score high; copy/config/CRUD/label score low', async () => {
@@ -1830,7 +1885,7 @@ describe('POST /api/specs/:id/assign-models', () => {
     expect(lowStory.complexity).toBe('low');
   });
 
-  test('reads RORCA_AGENT from workspace_env_vars over process.env', async () => {
+  test('falls back to process.env when workspace_env_vars do not override agent config', async () => {
     makeSpecFile([
       {
         id: 'US-001',
@@ -1854,7 +1909,7 @@ describe('POST /api/specs/:id/assign-models', () => {
     expect(res.status).toBe(200);
     expect(res.body.skipped).toBe(false);
     for (const entry of res.body.breakdown) {
-      expect(['claude-haiku-4-5-20251001', 'claude-sonnet-4-6', 'claude-opus-4-6']).toContain(entry.model);
+      expect(entry.model).toBe('(user-configured)');
     }
   });
 

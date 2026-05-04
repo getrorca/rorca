@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * pg-index.ts — PostgreSQL migration runner for Rorca
  *
  * Connects via `pg` Pool, creates a `schema_migrations` tracking table,
@@ -24,6 +31,10 @@ const DATABASE_URL = process.env.DATABASE_URL || 'postgres://localhost:5432/rorc
 
 export function createPool(): Pool {
   return new Pool({ connectionString: DATABASE_URL });
+}
+
+export function createPoolForConnectionString(connectionString: string): Pool {
+  return new Pool({ connectionString });
 }
 
 // ── Duplicate-prefix guard ────────────────────────────────────────────────
@@ -95,16 +106,22 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
       CREATE TABLE IF NOT EXISTS public.schema_migrations (
         version BIGINT PRIMARY KEY,
         applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
-        filename TEXT NOT NULL
+        filename TEXT NOT NULL,
+        skipped_in_lite_mode BOOLEAN NOT NULL DEFAULT FALSE
       )
+    `);
+
+    await client.query(`
+      ALTER TABLE public.schema_migrations
+      ADD COLUMN IF NOT EXISTS skipped_in_lite_mode BOOLEAN NOT NULL DEFAULT FALSE
     `);
 
     await client.query(`
       DO $$
       BEGIN
         IF to_regclass('rorca.schema_migrations') IS NOT NULL THEN
-          INSERT INTO public.schema_migrations (version, applied_at, filename)
-          SELECT version, applied_at, filename
+          INSERT INTO public.schema_migrations (version, applied_at, filename, skipped_in_lite_mode)
+          SELECT version, applied_at, filename, FALSE
           FROM rorca.schema_migrations
           ON CONFLICT (version) DO NOTHING;
         END IF;
@@ -151,7 +168,7 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     // PG-019: Migrations that create extensions may fail on managed services
     // (e.g., Supabase pre-installs pgvector, Neon doesn't support AGE).
     // Extension migration filenames contain these keywords for detection.
-    const EXTENSION_MIGRATION_PATTERNS = ['pgvector', 'pgcrypto', 'knowledge_graph', 'age', 'vector', 'enrich_spec_logs', 'memories', 'embedding_dimensions'];
+    const EXTENSION_MIGRATION_PATTERNS = ['048_pgcrypto', '049_pgvector_embeddings', '050_knowledge_graph'];
 
     function isExtensionMigration(filename: string): boolean {
       const lower = filename.toLowerCase();
@@ -214,15 +231,17 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
           console.warn(`[pg-migrate] Extension migration failed (non-fatal): ${file}`);
           console.warn(`[pg-migrate] Reason: ${(err as Error).message || err}`);
 
-          // The connection may be dead (LOAD 'age' crash). Get a fresh one.
-          try { client.release(); } catch { /* already released or dead */ }
+          // AGE's LOAD can leave the backend session poisoned even when the SQL
+          // error is non-fatal. Destroy the pooled connection so later DDL runs
+          // on a fresh backend instead of inheriting AGE hooks.
+          try { client.release(true); } catch { /* already released or dead */ }
           client = await pool.connect();
-          await client.query('SET search_path TO public');
+          await client.query('SET search_path TO rorca, public');
 
           // Record as applied to prevent retries
           try {
             await client.query(
-              'INSERT INTO public.schema_migrations (version, filename) VALUES ($1, $2)',
+              'INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode) VALUES ($1, $2, TRUE)',
               [version, `${file} [skipped: extension unavailable]`]
             );
           } catch {
@@ -247,6 +266,40 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
     if (advisoryLockHeld) {
       try { await client.query('SELECT pg_advisory_unlock($1)', [MIGRATIONS_ADVISORY_LOCK_KEY]); } catch { /* best-effort */ }
     }
+    client.release();
+    if (ownPool) await pool.end();
+  }
+}
+
+export async function prepareLiteSkippedMigrationsForReplay(pool?: Pool): Promise<number[]> {
+  const ownPool = !pool;
+  if (!pool) pool = createPool();
+
+  const client = await pool.connect();
+  try {
+    await client.query(`
+      ALTER TABLE public.schema_migrations
+      ADD COLUMN IF NOT EXISTS skipped_in_lite_mode BOOLEAN NOT NULL DEFAULT FALSE
+    `);
+
+    const { rows } = await client.query<{ version: string }>(`
+      SELECT version::text
+      FROM public.schema_migrations
+      WHERE skipped_in_lite_mode = TRUE
+         OR filename LIKE '%[skipped: extension unavailable]%'
+      ORDER BY version ASC
+    `);
+
+    const versions = rows.map((row) => Number(row.version));
+    if (versions.length === 0) return [];
+
+    await client.query(
+      'DELETE FROM public.schema_migrations WHERE version = ANY($1::bigint[])',
+      [versions]
+    );
+
+    return versions;
+  } finally {
     client.release();
     if (ownPool) await pool.end();
   }

@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * PG-017: Workspace drift routes — graph-powered convention drift detection.
  *
  * GET  /api/workspaces/:id/drift       — latest drift report (optional ?specId= filter)
@@ -13,6 +20,7 @@ import { broadcastAll, type WalEvent } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 import { NotFoundError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { requireAge } from '../lib/age-guard';
 
 const router = Router({ mergeParams: true });
 
@@ -183,7 +191,7 @@ router.get('/:id/drift', async (req: Request, res: Response) => {
  *       404: { description: Workspace not found or no completed specs }
  *       500: { description: Drift detection failed }
  */
-router.post('/:id/drift/check', async (req: Request, res: Response) => {
+router.post('/:id/drift/check', requireAge(), async (req: Request, res: Response) => {
   const workspaceId = String(req.params.id);
   const requestSpecId = req.body?.specId ? String(req.body.specId) : undefined;
 

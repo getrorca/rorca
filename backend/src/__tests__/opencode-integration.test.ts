@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * OC-018: Integration tests for the OpenCode execution path.
  *
  * Uses a mock opencode binary (shell script) to test the full pipeline

@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * QRW-014: Backend integration — spec generation writes reasoning field to spec JSON
  *
  * Verifies that POST /api/specs/generate:

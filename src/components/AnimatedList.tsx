@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * AnimatedList: Renders list items with staggered entrance animation
  * Used for: search results, spec cards, story cards, activity feeds
  * Stagger delay: 30ms between items

@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * pg-boss.ts — Singleton wrapper for the pg-boss job queue.
  *
  * Usage:
@@ -86,7 +93,10 @@ export async function ensureQueues(boss: PgBoss): Promise<void> {
   await boss.createQueue('pipeline:cancel');
   await boss.createQueue('pipeline:cron');
   await boss.createQueue('pipeline:merge');
-  logger.debug('[pg-boss] ensureQueues — pipeline:run, pipeline:retry, pipeline:cancel, pipeline:cron, pipeline:merge created');
+  await boss.createQueue('spec:enrich');
+  await boss.createQueue('spec:match-skills');
+  await boss.createQueue('spec:suggest-skills');
+  logger.debug('[pg-boss] ensureQueues — pipeline and spec job queues created');
 }
 
 /**

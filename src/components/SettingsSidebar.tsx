@@ -1,9 +1,17 @@
-import { useState } from 'react';
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+import { useState, type ComponentType } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import {
   Settings2, Layers, Route, Zap, Variable, Play, Webhook, Users,
   User, CreditCard, Keyboard, ArrowLeft, ChevronRight,
   Key, Code2, Bell, Plug, Rss, LayoutGrid, ScrollText,
+  type LucideIcon,
 } from 'lucide-react';
 import { Github } from './icons/GithubIcon';
 import type { PanelId } from './Sidebar';
@@ -16,7 +24,7 @@ interface SettingsSidebarProps {
 interface SidebarItem {
   id: SettingsTab;
   label: string;
-  icon: typeof User;
+  icon: LucideIcon | ComponentType<{ size?: number; className?: string }>;
   badge?: string;
 }
 

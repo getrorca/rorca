@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * pg-boss-schemas.ts — Zod schemas for pg-boss job payloads.
  *
  * All schemas use .strict() to reject extra fields, ensuring that callers
@@ -32,7 +39,7 @@ export const PipelineRunJobPayload = z.object({
   runId: z.coerce.number().int().positive(),
   specPath: z.string().min(1),
   workspacePath: z.string().min(1),
-  agent: z.enum(['claude', 'opencode', 'codex']),
+  agent: z.enum(['claude', 'opencode', 'codex', 'pi']),
   model: z.string().nullable(),
   worktreePath: z.string().nullable(),
   branchName: z.string().nullable(),
@@ -43,7 +50,7 @@ export const PipelineRunJobPayload = z.object({
   startFromStoryId: z.string().optional(),
   triggeredVia: z.enum(['queue', 'run_now']).default('run_now'),
   includeGraph: z.boolean().optional().default(false),
-  agentOverride: z.enum(['claude', 'opencode', 'codex']).optional(),
+  agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().int().positive().optional(),
   effortLevel: z.enum(['low', 'medium', 'high', 'max']).optional(),
@@ -65,7 +72,7 @@ export const PipelineRetryJobPayload = z.object({
   workspacePath: z.string().min(1),
   specPath: z.string().min(1),
   retrySpecPath: z.string().min(1),
-  agent: z.enum(['claude', 'opencode', 'codex']),
+  agent: z.enum(['claude', 'opencode', 'codex', 'pi']),
   model: z.string().nullable(),
   worktreePath: z.string().nullable(),
   sequenceOffset: z.number().int().min(0),
@@ -100,3 +107,13 @@ export const PipelineMergeJobPayload = z.object({
 }).strict();
 
 export type PipelineMergeJobPayloadType = z.infer<typeof PipelineMergeJobPayload>;
+
+// ── spec jobs ────────────────────────────────────────────────────────────────
+
+export const SpecJobPayload = z.object({
+  jobId: z.string().uuid(),
+  specId: z.string().min(1),
+  workspaceId: z.string().min(1),
+}).strict();
+
+export type SpecJobPayloadType = z.infer<typeof SpecJobPayload>;

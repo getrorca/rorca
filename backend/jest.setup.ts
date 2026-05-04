@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * jest.setup.ts — Jest globalSetup for PostgreSQL test database
  *
  * Connects to the Postgres test database, creates it if it doesn't exist,
@@ -72,6 +79,17 @@ export default async function globalSetup(): Promise<void> {
     await adminPool.end();
   }
 
+  // Install AGE on a short-lived bootstrap connection so the main test pool
+  // doesn't inherit any extension setup instability during migrations.
+  const agePool = new Pool({ connectionString: TEST_DB_URL, max: 1 });
+  try {
+    await agePool.query('CREATE EXTENSION IF NOT EXISTS age');
+  } catch {
+    /* AGE may be unavailable on some hosts, non-fatal */
+  } finally {
+    await agePool.end();
+  }
+
   // 2. Connect to the test DB and enable extensions + run migrations
   //    Pool size 1 prevents AGE LOAD 'age' from poisoning idle connections
   const testPool = new Pool({ connectionString: TEST_DB_URL, max: 1 });
@@ -116,12 +134,34 @@ export default async function globalSetup(): Promise<void> {
     try {
       await testPool.query('CREATE EXTENSION IF NOT EXISTS vector');
     } catch { /* pgvector may not be installed, non-fatal */ }
-    // Skip AGE extension in test setup — it causes flaky connection crashes
-    // (LOAD 'age' can segfault the pg backend). Migration 050 (knowledge_graph)
-    // will be handled as a non-fatal extension migration by pg-index.ts.
+    // Tests run in lite-mode semantics. Pre-mark the AGE graph migration as
+    // skipped so globalSetup never executes LOAD 'age', which poisons later DDL
+    // in this local harness even when the migration is rolled back.
+    await testPool.query(`
+      CREATE TABLE IF NOT EXISTS public.schema_migrations (
+        version BIGINT PRIMARY KEY,
+        applied_at TIMESTAMPTZ NOT NULL DEFAULT NOW(),
+        filename TEXT NOT NULL,
+        skipped_in_lite_mode BOOLEAN NOT NULL DEFAULT FALSE
+      )
+    `);
+    await testPool.query(`
+      INSERT INTO public.schema_migrations (version, filename, skipped_in_lite_mode)
+      VALUES (50, '050_knowledge_graph.sql [skipped: test lite mode]', TRUE)
+      ON CONFLICT (version) DO NOTHING
+    `);
 
     // 3. Run all pg-migrations
     await runPgMigrations(testPool);
+    await testPool.query('SET search_path TO rorca, public');
+
+    // Test-compatibility shim: many legacy tests still insert password_hash even
+    // though the migrated local schema drops it. Re-add a harmless column in the
+    // test database only so older fixtures keep working.
+    await testPool.query(`
+      ALTER TABLE rorca.users
+      ADD COLUMN IF NOT EXISTS password_hash TEXT NOT NULL DEFAULT 'x'
+    `);
 
     // Test-only grant shim so RLS tests exercise policies instead of failing on SQL GRANTs.
     await testPool.query(`GRANT USAGE ON SCHEMA public, rorca, auth TO authenticated`);
