@@ -1042,7 +1042,7 @@ const PipelineTriggerSchema = z.object({
   includeGraph: z.boolean().optional(),
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().int().positive().optional(),
-  effortLevel: z.enum(['low', 'medium', 'high']).optional(),
+  effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
   reasoningEffort: z.string().optional(),
   forceRerun: z.boolean().optional(),
 });

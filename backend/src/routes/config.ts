@@ -1347,12 +1347,17 @@ router.get('/codex-models', (_req: Request, res: Response) => {
   }
   interface CodexCache { models: CodexModelRaw[] }
 
-  // Hardcoded fallback if cache file is missing
+  // Hardcoded fallback if cache file is missing.
+  // Mirrors current ~/.codex/models_cache.json (fetched 2026-05-01); refresh as
+  // OpenAI ships new Codex GPT-5.x models. Codex auto-fetches fresh metadata at
+  // runtime, so this list is only used in headless/offline/fresh-install cases.
   const FALLBACK = [
-    { id: 'gpt-5.4', label: 'GPT-5.4', reasoningLevels: ['low', 'medium', 'high', 'xhigh'], recommended: true },
+    { id: 'gpt-5.5', label: 'GPT-5.5', reasoningLevels: ['low', 'medium', 'high', 'xhigh'], recommended: true },
+    { id: 'gpt-5.4', label: 'GPT-5.4', reasoningLevels: ['low', 'medium', 'high', 'xhigh'], recommended: false },
     { id: 'gpt-5.4-mini', label: 'GPT-5.4-Mini', reasoningLevels: ['low', 'medium', 'high', 'xhigh'], recommended: false },
     { id: 'gpt-5.3-codex', label: 'GPT-5.3-Codex', reasoningLevels: ['low', 'medium', 'high', 'xhigh'], recommended: false },
-    { id: 'gpt-5.1-codex-mini', label: 'GPT-5.1-Codex-Mini', reasoningLevels: ['medium', 'high'], recommended: false },
+    { id: 'gpt-5.3-codex-spark', label: 'GPT-5.3-Codex-Spark', reasoningLevels: ['low', 'medium', 'high', 'xhigh'], recommended: false },
+    { id: 'gpt-5.2', label: 'GPT-5.2', reasoningLevels: ['low', 'medium', 'high', 'xhigh'], recommended: false },
   ];
 
   try {
