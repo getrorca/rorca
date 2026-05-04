@@ -32,6 +32,7 @@ rorca v${pkg.version} — AI spec orchestration pipeline
 Usage:
   rorca start [options]    Start the Rorca server
   rorca init               Register Rorca as an MCP server with claude CLI
+  rorca mcp <subcommand>   Manage the MCP Bearer token (Project Aegis)
   rorca --version          Print version
   rorca --help             Show this help message
 
@@ -41,13 +42,17 @@ Options for start:
   --no-postgres            Skip managed Postgres; requires DATABASE_URL to be set
   --dry-run                Validate config and exit without starting servers
 
+MCP subcommands:
+  rorca mcp token          Print the MCP Bearer token (for piping to clipboard)
+  rorca mcp setup-claude   Configure 'claude' CLI to use Rorca MCP with auth
+  rorca mcp rotate-token   Generate a new token (existing clients must re-setup)
+  rorca mcp status         Show MCP token + reachability status
+
 Examples:
   rorca start
   rorca start --port 4040
-  rorca start --no-open
-  rorca start --no-postgres
-  rorca start --dry-run
   rorca init
+  rorca mcp setup-claude
 `);
   process.exit(0);
 }
@@ -57,6 +62,12 @@ const command = args[0];
 // ─── Command: init ───
 if (command === 'init') {
   runInit();
+  process.exit(0);
+}
+
+// ─── Command: mcp <subcommand> (CLI-045 Project Aegis) ───
+if (command === 'mcp') {
+  runMcp(args.slice(1));
   process.exit(0);
 }
 
@@ -911,4 +922,204 @@ function openBrowser(url: string): void {
   } catch {
     console.log(`Open ${url} in your browser.`);
   }
+}
+
+// ────────────────────────────────────────────────────────────────
+// CLI-045 (Project Aegis): rorca mcp <subcommand>
+// ────────────────────────────────────────────────────────────────
+
+const MCP_TOKEN_PATH = join(homedir(), '.rorca', 'mcp-token');
+const RORCA_DIR = join(homedir(), '.rorca');
+
+function readMcpTokenFromDisk(): string | null {
+  if (!existsSync(MCP_TOKEN_PATH)) return null;
+  const t = readFileSync(MCP_TOKEN_PATH, 'utf8').trim();
+  return t.length > 0 ? t : null;
+}
+
+function ensureRorcaDir(): void {
+  if (!existsSync(RORCA_DIR)) {
+    mkdirSync(RORCA_DIR, { recursive: true, mode: 0o700 });
+  }
+}
+
+function generateLocalToken(): string {
+  // 32 bytes = 64 hex chars — same shape the backend generates.
+  const bytes = new Uint8Array(32);
+  for (let i = 0; i < 32; i++) bytes[i] = Math.floor(Math.random() * 256);
+  // Use crypto.getRandomValues if available (Node 19+)
+  try {
+    const { randomBytes } = require('crypto');
+    return (randomBytes(32) as Buffer).toString('hex');
+  } catch {
+    return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
+  }
+}
+
+function runMcp(mcpArgs: string[]): void {
+  const sub = mcpArgs[0];
+  switch (sub) {
+    case 'token':
+      runMcpToken();
+      return;
+    case 'setup-claude':
+      runMcpSetupClaude();
+      return;
+    case 'rotate-token':
+      runMcpRotateToken(mcpArgs.slice(1));
+      return;
+    case 'status':
+      runMcpStatus();
+      return;
+    default:
+      console.error(`Unknown 'rorca mcp' subcommand: ${sub ?? '(none)'}`);
+      console.error(`Available: token, setup-claude, rotate-token, status`);
+      process.exit(1);
+  }
+}
+
+function runMcpToken(): void {
+  const token = readMcpTokenFromDisk();
+  if (!token) {
+    console.error('MCP token not found at ' + MCP_TOKEN_PATH);
+    console.error('Start the server once with `rorca start` to generate it.');
+    process.exit(1);
+  }
+  // Print to stdout, no labels — pipeable to clipboard tools (pbcopy, xclip).
+  process.stdout.write(token + '\n');
+}
+
+function runMcpSetupClaude(): void {
+  const token = readMcpTokenFromDisk();
+  if (!token) {
+    console.error('MCP token not found at ' + MCP_TOKEN_PATH);
+    console.error('Start the server once with `rorca start` to generate it.');
+    process.exit(1);
+  }
+
+  // Resolve the `claude` binary
+  let claudeBin: string;
+  try {
+    claudeBin = execSync('which claude', { encoding: 'utf8' }).trim();
+  } catch {
+    console.error('`claude` CLI not found on PATH.');
+    console.error('Install it: https://docs.claude.com/claude-code');
+    process.exit(1);
+  }
+
+  // Best-effort remove any prior 'rorca' MCP entry. Tolerates "not found".
+  try {
+    spawnSync(claudeBin, ['mcp', 'remove', 'rorca'], { stdio: 'ignore' });
+  } catch {
+    /* swallow — first-time setup */
+  }
+
+  const url = 'http://localhost:3030/mcp';
+  const headerArg = `Authorization: Bearer ${token}`;
+  const result = spawnSync(claudeBin, ['mcp', 'add', 'rorca', url, '--header', headerArg], {
+    stdio: 'inherit',
+  });
+
+  if (result.status === 0) {
+    console.log('');
+    console.log('✓ Rorca MCP configured for Claude Code with Bearer auth.');
+    console.log('  URL:    ' + url);
+    console.log('  Token:  ~/.rorca/mcp-token (mode 0600)');
+  } else {
+    console.error('claude mcp add failed (exit ' + result.status + ')');
+    process.exit(result.status ?? 1);
+  }
+}
+
+function runMcpRotateToken(rotateArgs: string[]): void {
+  const force = rotateArgs.includes('--force') || rotateArgs.includes('-f');
+
+  if (!force) {
+    process.stdout.write('Rotate the MCP token? Existing MCP clients will need re-setup. [y/N]: ');
+    // Synchronous prompt via spawnSync stdin trick is awkward; require --force flag for non-TTY.
+    // For interactive use, accept the warning and ask for explicit confirmation:
+    const buf = Buffer.alloc(8);
+    let answer: string;
+    try {
+      const fd = (process.stdin as { fd?: number }).fd ?? 0;
+      const fs = require('fs');
+      const n = fs.readSync(fd, buf, 0, 8, null);
+      answer = buf.slice(0, n).toString('utf8').trim().toLowerCase();
+    } catch {
+      console.error('\nNon-interactive shell detected. Re-run with --force to skip confirmation.');
+      process.exit(1);
+    }
+    if (answer !== 'y' && answer !== 'yes') {
+      console.log('Aborted.');
+      return;
+    }
+  }
+
+  ensureRorcaDir();
+  const newToken = generateLocalToken();
+  const tmpPath = MCP_TOKEN_PATH + '.tmp.' + process.pid;
+  writeFileSync(tmpPath, newToken, { mode: 0o600 });
+  renameSync(tmpPath, MCP_TOKEN_PATH);
+
+  // Verify mode (umask defense)
+  const stat = statSync(MCP_TOKEN_PATH);
+  const mode = stat.mode & 0o777;
+  if (mode !== 0o600) {
+    console.error('Warning: token file mode is ' + mode.toString(8) + ' (expected 600).');
+    console.error('Run: chmod 600 ' + MCP_TOKEN_PATH);
+  }
+
+  console.log('✓ MCP token rotated.');
+  console.log('  Run `rorca mcp setup-claude` to re-link your Claude Code MCP client.');
+}
+
+function runMcpStatus(): void {
+  const token = readMcpTokenFromDisk();
+
+  console.log('MCP Status');
+  console.log('────────────');
+
+  // Token presence + mode
+  if (!token) {
+    console.log('  Token:        ✗ missing (' + MCP_TOKEN_PATH + ')');
+    console.log('                Run `rorca start` to generate.');
+  } else {
+    let modeOk = true;
+    try {
+      const stat = statSync(MCP_TOKEN_PATH);
+      const mode = stat.mode & 0o777;
+      modeOk = mode === 0o600;
+      const tag = modeOk ? '✓' : '⚠';
+      console.log('  Token:        ' + tag + ' present (mode ' + mode.toString(8) + ')');
+      if (!modeOk) console.log('                Expected mode 600. Run: chmod 600 ' + MCP_TOKEN_PATH);
+    } catch {
+      console.log('  Token:        ⚠ stat failed');
+    }
+  }
+
+  // Server reachability
+  const checkPort = 3030;
+  const reachable = isPortInUse(checkPort);
+  console.log('  Server :' + checkPort + ':  ' + (reachable ? '✓ reachable' : '✗ not running'));
+
+  if (!reachable) {
+    console.log('                Run `rorca start` to launch the backend.');
+  }
+}
+
+// Lightweight TCP probe; mirrors the helper used by runStart for port discovery.
+function isPortInUse(port: number): boolean {
+  let inUse = false;
+  try {
+    const result = execSync(
+      process.platform === 'darwin' || process.platform === 'linux'
+        ? `lsof -ti:${port} >/dev/null 2>&1 && echo yes || echo no`
+        : `netstat -an | findstr :${port} >nul && echo yes || echo no`,
+      { encoding: 'utf8', shell: '/bin/sh' as any }
+    ).trim();
+    inUse = result === 'yes';
+  } catch {
+    inUse = false;
+  }
+  return inUse;
 }

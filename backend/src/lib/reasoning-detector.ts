@@ -67,6 +67,16 @@ function isOpenAIReasoningModel(modelId: string): boolean {
 }
 
 /**
+ * Returns true if the model ID is a Codex GPT-5.x model (gpt-5.2, gpt-5.3-codex,
+ * gpt-5.4, gpt-5.4-mini, gpt-5.5, codex-auto-review, etc.). These ship via the
+ * Codex CLI with four reasoning levels: low / medium / high / xhigh.
+ */
+function isCodexGpt5Model(modelId: string): boolean {
+  const bare = modelId.includes('/') ? modelId.split('/').pop()! : modelId;
+  return /^gpt-5(\.|-)/i.test(bare) || /^codex-/i.test(bare);
+}
+
+/**
  * Returns true if the model ID contains keywords that indicate native chain-of-thought reasoning.
  */
 function hasNativeCoTKeyword(modelId: string): boolean {
@@ -242,6 +252,20 @@ export function detectCapability(
       budgetTokensSupported: false,
       budgetRange: null,
       costMultiplier: { low: 1.0, medium: 1.5, high: 2.5 },
+    };
+  }
+
+  // ── 2b. Codex GPT-5.x → effort-levels (low/medium/high/xhigh) ───────────
+  // Source of truth: ~/.codex/models_cache.json supported_reasoning_levels.
+  if (isCodexGpt5Model(modelId)) {
+    return {
+      supportsReasoning: true,
+      reasoningType: 'effort-levels',
+      effortLevels: ['low', 'medium', 'high', 'xhigh'],
+      defaultEffort: 'medium',
+      budgetTokensSupported: false,
+      budgetRange: null,
+      costMultiplier: { low: 1.0, medium: 1.5, high: 2.5, xhigh: 4.0 },
     };
   }
 

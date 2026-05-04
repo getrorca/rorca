@@ -62,9 +62,14 @@ function mkError(toolName: string, fields: Record<string, unknown>) {
 /**
  * Make a fetch call with a configurable AbortController timeout.
  * Default: 5 minutes (covers Opus spec generation at 40-90s + overhead).
+ * Pass timeoutMs = 0 to disable the timeout entirely (for slow paths like enrich,
+ * match-skills, suggest-skills — long-term fix is async jobs, see MCP-A* stories).
  * Throws on ECONNREFUSED, fetch failure, or timeout.
  */
 async function timedFetch(url: string, init?: RequestInit, timeoutMs = 300_000): Promise<Response> {
+  if (timeoutMs <= 0) {
+    return fetch(url, init);
+  }
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
@@ -312,7 +317,7 @@ server.registerTool(
           ...(model ? { model } : {}),
           ...reasoningPayload,
         }),
-      }, 600_000); // 10 min — Opus with 20+ stories can take 90s+
+      }, 0); // unbounded — Opus with 50+ stories can take 10+ min; rely on upstream MCP client timeout
       if (!res.ok) return httpError('rorca_generate_spec', res);
       const spec = await res.json() as { slug?: string; id?: string; title?: string; model?: string; usage?: { inputTokens?: number; outputTokens?: number } };
 
@@ -880,7 +885,7 @@ server.registerTool(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
-      });
+      }, 0); // unbounded — LLM call can be long
       if (!res.ok) return httpError('rorca_add_stories', res);
       const data = await res.json() as { added: number; totalStories: number; newStories: Array<{ id: string; title: string }> };
       return { content: [{ type: 'text' as const, text: JSON.stringify({ ok: true, specId, added: data.added, totalStories: data.totalStories, newStories: data.newStories }, null, 2) }] };
@@ -3203,7 +3208,7 @@ server.registerTool(
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ workspaceId }),
-      });
+      }, 0); // unbounded — 53-story enrichment can take 10+ min
       if (!res.ok) return httpError('rorca_enrich_spec', res);
       const data = await res.json() as {
         retrieval_method: string;
