@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-04T00:00:25.902Z",
+  "lastUpdatedAt": "2026-05-04T00:02:46.527Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -533,6 +533,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 221791
+    },
+    {
+      "storyId": "CLI-057",
+      "title": "MCP ASYNC P0: spec_jobs table + JobStatus state machine for long-running operations",
+      "status": "passed",
+      "startedAt": "2026-05-04T00:00:46.024Z",
+      "finishedAt": "2026-05-04T00:02:46.527Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 120503
     }
   ],
   "failedStories": [],
