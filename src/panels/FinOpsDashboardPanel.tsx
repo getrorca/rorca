@@ -1,9 +1,17 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useState, useEffect, useCallback, useMemo } from 'react';
 import { Download, TrendingDown, Info, Calendar, DollarSign } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import { ProBadge } from '../components/UpgradePrompt';
 import { useAuth } from '../contexts/AuthContext';
+import { formatPiProviderCostLabel } from './finops/piProviderCost';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid, Tooltip, ResponsiveContainer,
   PieChart, Pie, Cell, BarChart, Bar, Legend,
@@ -74,6 +82,17 @@ interface HistoricalData {
   dateRange: { from: string; to: string };
 }
 
+interface PiProviderUsage {
+  provider: string;
+  totalRuns: number;
+  totalStories: number;
+  totalInputTokens: number;
+  totalOutputTokens: number;
+  totalCost: number;
+  avgCostPerStory: number;
+  lastUsed: string;
+}
+
 // ─── Helpers ────────────────────────────────────────────────────────────────
 
 function formatCost(n: number): string {
@@ -113,6 +132,9 @@ export default function FinOpsDashboardPanel() {
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
   const [dateRange, setDateRange] = useState<DateRange>('90d');
+  const [piProviders, setPiProviders] = useState<PiProviderUsage[]>([]);
+  const [piProvidersLoading, setPiProvidersLoading] = useState(true);
+  const [piProvidersError, setPiProvidersError] = useState<string | null>(null);
 
   const fetchData = useCallback(async () => {
     setLoading(true);
@@ -134,6 +156,26 @@ export default function FinOpsDashboardPanel() {
   }, [workspaceId, dateRange]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
+
+  const fetchPiProviders = useCallback(async () => {
+    setPiProvidersLoading(true);
+    setPiProvidersError(null);
+    try {
+      const params = new URLSearchParams();
+      if (workspaceId) params.set('workspace_id', workspaceId);
+      const result = await apiFetch<PiProviderUsage[]>(
+        `/api/analytics/pi-providers${params.toString() ? `?${params.toString()}` : ''}`,
+      );
+      setPiProviders(result);
+    } catch (err: any) {
+      setPiProviders([]);
+      setPiProvidersError(err.message || 'Failed to load Pi providers');
+    } finally {
+      setPiProvidersLoading(false);
+    }
+  }, [workspaceId]);
+
+  useEffect(() => { fetchPiProviders(); }, [fetchPiProviders]);
 
   // Aggregate totals
   const totals = useMemo(() => {
@@ -331,11 +373,11 @@ export default function FinOpsDashboardPanel() {
                         borderRadius: 8,
                         fontSize: 12,
                       }}
-                      formatter={(value: number | undefined, name: string | undefined) => {
-                        const v = value ?? 0;
+                      formatter={((value: string | number | undefined, name: string | number | undefined) => {
+                        const v = typeof value === 'number' ? value : Number(value ?? 0);
                         if (name === 'cost') return [formatCost(v), 'Cost'];
                         return [formatTokens(v), name === 'inputTokens' ? 'Input' : 'Output'];
-                      }}
+                      }) as any}
                     />
                     {data.allSubscription ? (
                       <>
@@ -395,10 +437,10 @@ export default function FinOpsDashboardPanel() {
                         borderRadius: 8,
                         fontSize: 12,
                       }}
-                      formatter={(value: number | undefined, name: string | undefined) => [
-                        `${value ?? 0} stories`,
-                        (name ?? '').charAt(0).toUpperCase() + (name ?? '').slice(1),
-                      ]}
+                      formatter={((value: string | number | undefined, name: string | number | undefined) => [
+                        `${typeof value === 'number' ? value : Number(value ?? 0)} stories`,
+                        String(name ?? '').charAt(0).toUpperCase() + String(name ?? '').slice(1),
+                      ]) as any}
                     />
                   </PieChart>
                 </ResponsiveContainer>
@@ -434,13 +476,13 @@ export default function FinOpsDashboardPanel() {
                       borderRadius: 8,
                       fontSize: 12,
                     }}
-                    formatter={(value: number | undefined, name: string | undefined) => {
-                      const v = value ?? 0;
+                    formatter={((value: string | number | undefined, name: string | number | undefined) => {
+                      const v = typeof value === 'number' ? value : Number(value ?? 0);
                       if (name === 'totalCost') return [formatCost(v), 'Cost'];
                       if (name === 'inputTokens') return [formatTokens(v), 'Input Tokens'];
                       if (name === 'reasoningTokens') return [formatTokens(v), 'Thinking Tokens'];
                       return [formatTokens(v), 'Output Tokens'];
-                    }}
+                    }) as any}
                   />
                   {data.allSubscription ? (
                     <>
@@ -572,7 +614,117 @@ export default function FinOpsDashboardPanel() {
             </table>
           </div>
         )}
+
+        {(piProvidersLoading || piProvidersError || piProviders.length > 0) && (
+          <div className="rounded-lg bg-[var(--surface)] border border-[var(--border)] overflow-hidden">
+            <div className="px-3 py-2 border-b border-[var(--border)] flex items-center justify-between gap-3">
+              <div>
+                <div className="text-xs font-medium text-[var(--text-muted)] uppercase tracking-wide">
+                  Pi Providers
+                </div>
+                <div className="text-xs text-[var(--text-muted)] mt-0.5">
+                  Provider-level usage and marginal cost for Pi runs
+                </div>
+              </div>
+              {piProvidersLoading && (
+                <div className="text-xs text-[var(--text-muted)]">Loading...</div>
+              )}
+            </div>
+
+            {piProvidersError ? (
+              <div className="px-4 py-6 flex items-center justify-between gap-3">
+                <span className="text-sm text-red-400">{piProvidersError}</span>
+                <button onClick={fetchPiProviders} className="text-xs text-[var(--accent)] hover:underline">Retry</button>
+              </div>
+            ) : piProvidersLoading ? (
+              <div className="px-4 py-6 text-sm text-[var(--text-muted)]">
+                Loading Pi provider aggregates...
+              </div>
+            ) : (
+              <>
+                <div className="hidden md:block overflow-x-auto">
+                  <table className="w-full text-xs">
+                    <thead>
+                      <tr className="border-b border-[var(--border)]">
+                        <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">Provider</th>
+                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Runs</th>
+                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Stories</th>
+                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Input</th>
+                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Output</th>
+                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Total Cost</th>
+                        <th className="text-right px-3 py-1.5 text-[var(--text-muted)] font-medium">Avg/Story</th>
+                        <th className="text-left px-3 py-1.5 text-[var(--text-muted)] font-medium">Last Used</th>
+                      </tr>
+                    </thead>
+                    <tbody>
+                      {piProviders.map((row) => (
+                        <tr key={row.provider} className="border-b border-[var(--border)] last:border-0">
+                          <td className="px-3 py-1.5 font-mono">{row.provider}</td>
+                          <td className="px-3 py-1.5 text-right font-mono">{row.totalRuns}</td>
+                          <td className="px-3 py-1.5 text-right font-mono">{row.totalStories}</td>
+                          <td className="px-3 py-1.5 text-right font-mono">{formatTokens(row.totalInputTokens)}</td>
+                          <td className="px-3 py-1.5 text-right font-mono">{formatTokens(row.totalOutputTokens)}</td>
+                          <td className="px-3 py-1.5 text-right"><PiProviderCostCell provider={row.provider} cost={row.totalCost} /></td>
+                          <td className="px-3 py-1.5 text-right font-mono">{formatPiProviderCostLabel(row.provider, row.avgCostPerStory)}</td>
+                          <td className="px-3 py-1.5 text-[var(--text-muted)]">{formatPiProviderLastUsed(row.lastUsed)}</td>
+                        </tr>
+                      ))}
+                    </tbody>
+                  </table>
+                </div>
+
+                <div className="md:hidden divide-y divide-[var(--border)]">
+                  {piProviders.map((row) => (
+                    <div key={row.provider} className="p-4 space-y-3">
+                      <div className="flex items-center justify-between gap-3">
+                        <span className="font-mono text-sm">{row.provider}</span>
+                        <PiProviderCostCell provider={row.provider} cost={row.totalCost} />
+                      </div>
+                      <div className="grid grid-cols-2 gap-3">
+                        <MetricCard label="Runs" value={String(row.totalRuns)} />
+                        <MetricCard label="Stories" value={String(row.totalStories)} />
+                        <MetricCard label="Input" value={formatTokens(row.totalInputTokens)} />
+                        <MetricCard label="Output" value={formatTokens(row.totalOutputTokens)} />
+                        <MetricCard label="Avg/Story" value={formatPiProviderCostLabel(row.provider, row.avgCostPerStory)} />
+                        <MetricCard label="Last Used" value={formatPiProviderLastUsed(row.lastUsed)} />
+                      </div>
+                    </div>
+                  ))}
+                </div>
+              </>
+            )}
+          </div>
+        )}
       </div>
     </div>
   );
+}
+
+function PiProviderCostCell({ provider, cost }: { provider: string; cost: number }) {
+  const label = formatPiProviderCostLabel(provider, cost);
+
+  if (label === 'Sub') {
+    return (
+      <span className="inline-flex items-center rounded-full bg-blue-500/10 px-2 py-0.5 text-[10px] font-medium text-blue-400">
+        Sub
+      </span>
+    );
+  }
+
+  return <span className="font-mono">{label}</span>;
+}
+
+function MetricCard({ label, value }: { label: string; value: string }) {
+  return (
+    <div className="rounded-lg border border-[var(--border)] bg-[var(--surface-2)] px-3 py-2">
+      <div className="text-[10px] uppercase tracking-wide text-[var(--text-muted)]">{label}</div>
+      <div className="mt-1 font-mono text-[var(--text)]">{value}</div>
+    </div>
+  );
+}
+
+function formatPiProviderLastUsed(value: string): string {
+  const date = new Date(value);
+  if (Number.isNaN(date.getTime())) return value;
+  return date.toLocaleString();
 }

@@ -1,12 +1,21 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useEffect } from 'react';
 import { Brain } from 'lucide-react';
 
 export type EffortLevel = 'low' | 'medium' | 'high' | 'max' | 'xhigh';
 
+import type { EngineValue } from './EngineSelector';
+
 export interface ThinkingControlsProps {
   /** Current agent engine type */
-  engine: 'claude' | 'opencode' | 'codex' | null;
-  /** Current model string (e.g. 'claude-opus-4-6', 'gpt-5.5', 'gpt-5.4') */
+  engine: EngineValue | null;
+  /** Current model string (e.g. 'claude-opus-4-6', 'claude-sonnet-4-5-...') */
   model: string | null;
   /** Effort level selection */
   effortLevel: EffortLevel;

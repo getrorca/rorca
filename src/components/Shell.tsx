@@ -1,5 +1,12 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useState, useEffect, useRef } from 'react';
-import { HelpCircle, Settings, Zap, Check } from 'lucide-react';
+import { HelpCircle, Settings, Zap, Check, Network, X } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { useAuth } from '../contexts/AuthContext';
 import PricingModal from './PricingModal';
@@ -8,6 +15,7 @@ import { useNetworkOffline, NetworkIndicator } from './NetworkBanner';
 import { apiFetch } from '../lib/apiFetch';
 import { usePipelineSSE } from '../hooks/usePipelineSSE';
 import type { PanelId } from './Sidebar';
+import { useCapabilities } from '../contexts/CapabilitiesContext';
 
 // ─── Run Pill ────────────────────────────────────────────────────────────────
 
@@ -261,6 +269,143 @@ interface ShellProps {
   onNavigate?: (panel: PanelId) => void;
 }
 
+const AGE_BANNER_DISMISS_KEY = 'rorca_age_banner_dismissed';
+
+function LiteModeBanner() {
+  const { capabilities, mode, recheckAge } = useCapabilities();
+  const [dismissed, setDismissed] = useState(() => sessionStorage.getItem(AGE_BANNER_DISMISS_KEY) === '1');
+  const [open, setOpen] = useState(false);
+  const [rechecking, setRechecking] = useState(false);
+  const [copied, setCopied] = useState(false);
+
+  useEffect(() => {
+    if (capabilities?.age) {
+      setDismissed(false);
+      sessionStorage.removeItem(AGE_BANNER_DISMISS_KEY);
+    }
+  }, [capabilities?.age]);
+
+  if (capabilities?.age !== false || dismissed) {
+    return null;
+  }
+
+  const handleDismiss = () => {
+    sessionStorage.setItem(AGE_BANNER_DISMISS_KEY, '1');
+    setDismissed(true);
+    setOpen(false);
+  };
+
+  const handleCopyCommand = async () => {
+    try {
+      await navigator.clipboard.writeText('rorca db start');
+      setCopied(true);
+      setTimeout(() => setCopied(false), 1500);
+    } catch {
+      setCopied(false);
+    }
+  };
+
+  const handleRecheck = async () => {
+    setRechecking(true);
+    try {
+      const ageEnabled = await recheckAge();
+      if (ageEnabled) {
+        setOpen(false);
+      }
+    } finally {
+      setRechecking(false);
+    }
+  };
+
+  return (
+    <>
+      <div role="alert" className="flex items-center justify-between gap-3 px-4 py-2.5 bg-amber-500/10 border-b border-amber-500/20">
+        <div className="flex min-w-0 items-center gap-2.5">
+          <Network size={14} className="text-amber-500 shrink-0" />
+          <p className="truncate text-sm text-[var(--text)]">
+            Graph memory disabled (Lite Mode).
+          </p>
+          <button
+            onClick={() => setOpen(true)}
+            className="shrink-0 text-xs font-medium text-amber-600 hover:text-amber-700"
+          >
+            Enable →
+          </button>
+        </div>
+        <button
+          onClick={handleDismiss}
+          className="shrink-0 rounded p-1 text-muted transition-colors hover:bg-amber-500/10 hover:text-[var(--text)]"
+          aria-label="Dismiss Lite Mode banner"
+        >
+          <X size={14} />
+        </button>
+      </div>
+
+      {open && (
+        <>
+          <div className="fixed inset-0 z-40 bg-black/45" onClick={() => setOpen(false)} />
+          <div className="fixed inset-0 z-50 flex items-center justify-center px-4">
+            <div role="dialog" aria-modal="true" aria-labelledby="age-enable-title" className="w-full max-w-lg rounded-2xl border border-border bg-panel p-6 shadow-2xl">
+              <div className="flex items-start justify-between gap-4">
+                <div>
+                  <h2 id="age-enable-title" className="text-base font-semibold text-[var(--text)]">
+                    Enable Apache AGE for graph memory features?
+                  </h2>
+                  <p className="mt-2 text-sm text-muted">
+                    Lite Mode is active because Apache AGE is unavailable in {mode ?? 'this database mode'}.
+                    Run <code className="mx-1 rounded bg-bg px-1.5 py-0.5 text-xs text-[var(--text)]">rorca db start</code>
+                    in your terminal yourself. The frontend cannot execute shell commands.
+                  </p>
+                </div>
+                <button
+                  onClick={() => setOpen(false)}
+                  className="rounded p-1 text-muted transition-colors hover:bg-bg hover:text-[var(--text)]"
+                  aria-label="Close AGE enable modal"
+                >
+                  <X size={16} />
+                </button>
+              </div>
+
+              <div className="mt-4 rounded-xl border border-border bg-bg/60 p-4 text-sm text-muted">
+                <p>Enabling AGE requires Docker, adds roughly a 200MB image, and unlocks:</p>
+                <ul className="mt-2 list-disc pl-5">
+                  <li><code>/api/specs/:id/knowledge-graph</code> for graph memory in spec review</li>
+                  <li><code>/api/admin/graph-backfill</code> and <code>/api/admin/graph-stats</code></li>
+                  <li>Graph-powered drift detection via <code>/api/workspaces/:id/drift/check</code></li>
+                  <li>Related-context expansion in story prompts</li>
+                </ul>
+              </div>
+
+              <div className="mt-5 flex flex-wrap items-center gap-2">
+                <button
+                  onClick={() => { void handleCopyCommand(); }}
+                  className="inline-flex items-center rounded-md bg-accent px-3 py-2 text-sm font-medium text-white transition-colors hover:opacity-90"
+                >
+                  Run rorca db start
+                </button>
+                <button
+                  onClick={() => { void handleRecheck(); }}
+                  disabled={rechecking}
+                  className="inline-flex items-center rounded-md border border-border px-3 py-2 text-sm text-[var(--text)] transition-colors hover:bg-bg disabled:cursor-not-allowed disabled:opacity-60"
+                >
+                  {rechecking ? 'Rechecking…' : 'Recheck availability'}
+                </button>
+                <button
+                  onClick={handleDismiss}
+                  className="inline-flex items-center rounded-md px-3 py-2 text-sm text-muted transition-colors hover:bg-bg hover:text-[var(--text)]"
+                >
+                  Dismiss for session
+                </button>
+                {copied && <span className="text-xs text-muted">Command copied.</span>}
+              </div>
+            </div>
+          </div>
+        </>
+      )}
+    </>
+  );
+}
+
 export default function Shell({ sidebar, header, children, onMenuToggle: _onMenuToggle, showMenuButton: _showMenuButton, onNavigate: _onNavigate }: ShellProps) {
   const offline = useNetworkOffline();
 
@@ -285,6 +430,8 @@ export default function Shell({ sidebar, header, children, onMenuToggle: _onMenu
             <span>Connection lost — retrying…</span>
           </div>
         )}
+
+        <LiteModeBanner />
 
         {/* Body Main Canvas — pb-16 on mobile for bottom tab bar clearance */}
         <main id="main-content" className="flex-1 min-h-0 min-w-0 overflow-y-auto contain-layout bg-bg relative pb-16 sm:pb-0">

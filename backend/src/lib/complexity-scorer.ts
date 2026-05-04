@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * complexity-scorer.ts — Story Complexity Scorer for Model Tier Assignment.
  *
  * OC-019: Analyzes each story before subprocess spawn and assigns a ModelTier
@@ -55,7 +62,7 @@ export interface OrchestrationConfig {
   taskCascades: Record<TaskType, string>;
   tokenBudgetPerStory: number;
   /** Secondary engine for rate limit overflow rerouting. null = disabled. */
-  fallbackEngine: 'claude' | 'opencode' | 'codex' | null;
+  fallbackEngine: 'claude' | 'opencode' | 'codex' | 'pi' | null;
   /** How to handle stories requiring tools the engine doesn't support. */
   capabilityMismatch: CapabilityMismatchMode;
 }
@@ -390,4 +397,3 @@ export function score(
 
   return { tier, score: totalScore, signals };
 }
-

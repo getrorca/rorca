@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * memory.ts — API routes for the Episodic MEMORY.md Ledger (CIE-005)
  *
  * CRUD operations on structured memory entries, approval/rejection flow

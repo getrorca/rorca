@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useState, useEffect, useRef, useCallback, useMemo, useDeferredValue } from 'react';
 import { Search, ArrowRight, Clock, Command, Hammer, Trash2, Menu, Bot, Plus } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';

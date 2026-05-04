@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * rorca-config.ts — Typed config loader for .rorca/config.json.
  *
  * CIE-003: Canonical config with zod validation. Loads, validates, and caches
@@ -103,7 +110,7 @@ const OrchestrationSchema = z.object({
   taskCascades: TaskCascadesSchema.optional(),
   escalation: EscalationSchema.default(() => EscalationSchema.parse({})),
   tokenBudgetPerStory: z.number().min(1000).default(50000),
-  fallbackEngine: z.enum(['claude', 'opencode', 'codex']).nullable().default(null),
+  fallbackEngine: z.enum(['claude', 'opencode', 'codex', 'pi']).nullable().default(null),
   capabilityMismatch: z.enum(['warn', 'reroute', 'block']).default('warn'),
 });
 

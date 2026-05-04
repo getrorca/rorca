@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * integration-setup.ts — Shared setup for route integration tests
  *
  * Replaces the per-test SQLite tmpDir pattern with a shared Postgres pool.

@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * CA-021: MCP Streamable HTTP Transport — auto-generated from OpenAPI spec.
  *
  * Generates MCP tools from the OpenAPI spec at /api/docs/openapi.json and serves
@@ -18,7 +25,12 @@ import type { Request, Response } from 'express';
 import * as fs from 'node:fs';
 import * as os from 'node:os';
 import * as path from 'node:path';
+import type { SpecJobState } from '../db/spec-jobs';
+import { pollSpecJob } from '../mcp/spec-job-poller';
+import type { McpTier } from './mcp-auth';
+import { consumeMcpRateLimit, extractErrorCode, paramsHash, recordMcpCall } from './mcp-audit';
 import { logger } from './logger';
+import { getRorcaTier, tierAllowedFromMcp } from './tier-auth';
 
 // Claude Code truncates tool results over ~25k tokens (~100k chars).
 // When a response is too large, we spill it to disk and return a summary
@@ -98,6 +110,10 @@ interface OpenAPIOperation {
   description?: string;
   operationId?: string;
   tags?: string[];
+  'x-rorca-tier'?: string;
+  'x-rorca-rationale'?: string;
+  'x-rorca-public-api'?: boolean;
+  'x-mcp-tier'?: string;
   parameters?: OpenAPIParameter[];
   requestBody?: {
     required?: boolean;
@@ -116,6 +132,59 @@ interface OpenAPIOperation {
 
 interface OpenAPISpec {
   paths: Record<string, Record<string, OpenAPIOperation>>;
+}
+
+interface McpToolDefinition {
+  toolName: string;
+  description: string;
+  zodShape: Record<string, z.ZodType>;
+  capturedMethod: string;
+  capturedPath: string;
+  capturedOperation: OpenAPIOperation;
+}
+
+interface McpHttpServerOptions {
+  resolveSessionTier?: (sessionId: string | undefined) => McpTier | undefined;
+  getSessionRemoteAddr?: (sessionId: string | undefined) => string | undefined;
+}
+
+function getMcpExposureOverride(operation: OpenAPIOperation): McpTier | null {
+  const raw = operation['x-mcp-tier'];
+  if (raw === 'public' || raw === 'admin') {
+    return raw;
+  }
+  return null;
+}
+
+const PUBLIC_TOOL_RULES: Array<{ method: string; pattern: RegExp }> = [
+  { method: 'GET', pattern: /^\/api\/specs(?:\/[^/]+(?:\/versions(?:\/[^/]+\/diff)?)?)?$/ },
+  { method: 'GET', pattern: /^\/api\/specs\/archive$/ },
+  { method: 'GET', pattern: /^\/api\/specs\/kanban$/ },
+  { method: 'GET', pattern: /^\/api\/specs\/[^/]+\/graph$/ },
+  { method: 'GET', pattern: /^\/api\/pipeline\/runs(?:\/[^/]+)?$/ },
+  { method: 'GET', pattern: /^\/api\/pipeline\/worker\/health$/ },
+  { method: 'GET', pattern: /^\/api\/analytics$/ },
+  { method: 'GET', pattern: /^\/api\/activity$/ },
+  { method: 'GET', pattern: /^\/api\/wal$/ },
+  { method: 'GET', pattern: /^\/api\/skills(?:\/top|\/suggestions|\/[^/]+\/content)?$/ },
+  { method: 'GET', pattern: /^\/api\/templates$/ },
+  { method: 'GET', pattern: /^\/api\/graph\/stats$/ },
+  { method: 'POST', pattern: /^\/api\/direction\/synthesize$/ },
+];
+
+function isPublicTool(definition: Pick<McpToolDefinition, 'capturedMethod' | 'capturedPath'>): boolean {
+  return PUBLIC_TOOL_RULES.some((rule) =>
+    rule.method === definition.capturedMethod && rule.pattern.test(definition.capturedPath));
+}
+
+export function getMcpToolTier(definition: Pick<McpToolDefinition, 'capturedMethod' | 'capturedPath'>): McpTier {
+  return isPublicTool(definition) ? 'public' : 'admin';
+}
+
+export function buildMcpToolTierResolver(spec: OpenAPISpec): (toolName: string) => McpTier {
+  const definitions = getMcpToolDefinitions(spec);
+  const toolTierMap = new Map(definitions.map((definition) => [definition.toolName, getMcpToolTier(definition)]));
+  return (toolName: string) => toolTierMap.get(toolName) ?? 'admin';
 }
 
 // ─── Tool name generation ───────────────────────────────────────────────────
@@ -279,6 +348,66 @@ async function getDefaultWorkspaceId(): Promise<string | null> {
   } catch { return null; }
 }
 
+const ASYNC_SPEC_JOB_SUFFIXES = ['/enrich', '/match-skills', '/suggest-skills'] as const;
+const SLOW_PREFIXES = ['/api/specs/generate', '/api/specs/generate-batch', '/api/workspaces/', '/api/admin/embed-all'];
+const SLOW_SUFFIXES = ['/enrich', '/match-skills', '/suggest-skills', '/add-stories', '/knowledge-graph', '/hydrate', '/scan-direction', '/echolocate', '/discover', '/import', '/detect-dependencies', '/assign-models', '/suggest-models'];
+
+function isSlowPath(resolvedPath: string): boolean {
+  return (
+    SLOW_PREFIXES.some(p => resolvedPath.startsWith(p)) ||
+    SLOW_SUFFIXES.some(s => resolvedPath.endsWith(s) || resolvedPath.includes(`${s}?`) || resolvedPath.includes(`${s}/`))
+  );
+}
+
+function shouldUseAsyncSpecJob(method: string, resolvedPath: string): boolean {
+  return method === 'POST'
+    && !resolvedPath.endsWith('/async')
+    && ASYNC_SPEC_JOB_SUFFIXES.some(suffix => resolvedPath.endsWith(suffix));
+}
+
+async function readFetchBody(fetchRes: Awaited<ReturnType<typeof fetch>>): Promise<unknown> {
+  const contentType = fetchRes.headers.get('content-type') || '';
+  return contentType.includes('application/json')
+    ? await fetchRes.json()
+    : await fetchRes.text();
+}
+
+async function fetchJsonWithTimeout(
+  url: string,
+  options: RequestInit,
+  timeoutMs: number,
+): Promise<{ status: number; body: unknown }> {
+  const controller = new AbortController();
+  const timeoutId = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const fetchRes = await fetch(url, { ...options, signal: controller.signal });
+    return {
+      status: fetchRes.status,
+      body: await readFetchBody(fetchRes),
+    };
+  } finally {
+    clearTimeout(timeoutId);
+  }
+}
+
+function mapTerminalSpecJobState(job: SpecJobState): { status: number; body: unknown } {
+  if (job.status === 'completed') {
+    return { status: 200, body: job.result };
+  }
+
+  const message = job.error || `Spec job ${job.id} ${job.status}`;
+  return {
+    status: job.status === 'cancelled' ? 409 : 500,
+    body: {
+      error: message,
+      code: job.status === 'cancelled' ? 'SPEC_JOB_CANCELLED' : 'SPEC_JOB_FAILED',
+      jobId: job.id,
+      status: job.status,
+    },
+  };
+}
+
 async function executeApiCall(
   method: string,
   pathTemplate: string,
@@ -317,133 +446,254 @@ async function executeApiCall(
   if (qsEntries.length > 0) {
     url += `?${new URLSearchParams(qsEntries).toString()}`;
   }
-
-  // Slow paths run unbounded — server-side timeout removed entirely. The upstream
-  // Anthropic MCP client has its own (lower) timeout, but we no longer add a ceiling
-  // on top of it. For enrich/match-skills/suggest-skills/etc., the long-term fix is
-  // async job IDs (tracked in spec rorca-cli-tui-and-mcp-hardening, MCP-A* stories).
-  // Fast paths still get 30s as a sanity bound.
-  const SLOW_PREFIXES = ['/api/specs/generate', '/api/specs/generate-batch', '/api/workspaces/', '/api/admin/embed-all'];
-  const SLOW_SUFFIXES = ['/enrich', '/match-skills', '/suggest-skills', '/add-stories', '/knowledge-graph', '/hydrate', '/scan-direction', '/echolocate', '/discover', '/import', '/detect-dependencies', '/assign-models', '/suggest-models'];
-  const isSlowPath =
-    SLOW_PREFIXES.some(p => resolvedPath.startsWith(p)) ||
-    SLOW_SUFFIXES.some(s => resolvedPath.endsWith(s) || resolvedPath.includes(`${s}?`) || resolvedPath.includes(`${s}/`));
+  const asyncUrl = `${RORCA_API}${resolvedPath}/async${qsEntries.length > 0 ? `?${new URLSearchParams(qsEntries).toString()}` : ''}`;
 
   const fetchOptions: RequestInit = {
     method,
     headers: { 'Content-Type': 'application/json' },
   };
 
-  // Only attach AbortController for fast paths. Slow paths run without an internal timeout.
-  let timeoutId: NodeJS.Timeout | undefined;
-  if (!isSlowPath) {
-    const controller = new AbortController();
-    timeoutId = setTimeout(() => controller.abort(), 30_000);
-    fetchOptions.signal = controller.signal;
-  }
-
   if (method !== 'GET' && method !== 'DELETE' && Object.keys(bodyParams).length > 0) {
     fetchOptions.body = JSON.stringify(bodyParams);
   }
 
-  let fetchRes: Awaited<ReturnType<typeof fetch>>;
-  try {
-    fetchRes = await fetch(url, fetchOptions);
-  } finally {
-    if (timeoutId) clearTimeout(timeoutId);
-  }
-  const contentType = fetchRes.headers.get('content-type') || '';
-  const body = contentType.includes('application/json')
-    ? await fetchRes.json()
-    : await fetchRes.text();
+  if (shouldUseAsyncSpecJob(method, resolvedPath)) {
+    const enqueue = await fetchJsonWithTimeout(asyncUrl, fetchOptions, 30_000);
+    const enqueueBody = enqueue.body as { jobId?: string };
+    if (enqueue.status < 200 || enqueue.status >= 300 || !enqueueBody?.jobId) {
+      return enqueue;
+    }
 
-  return { status: fetchRes.status, body };
+    const finalState = await pollSpecJob(enqueueBody.jobId, {
+      intervalMs: 2_000,
+      maxWaitMs: 1_800_000,
+    });
+    return mapTerminalSpecJobState(finalState);
+  }
+
+  // Slow paths run with a generous timeout (10 min). Fast paths get 30s.
+  // For enrich/match-skills/suggest-skills, the async spec-job bridge above
+  // handles those via the /async endpoint — this fallback covers any other slow ops.
+  const timeoutMs = isSlowPath(resolvedPath) ? 10 * 60 * 1000 : 30_000;
+  return fetchJsonWithTimeout(url, fetchOptions, timeoutMs);
 }
 
 // ─── Create MCP server with auto-generated tools ────────────────────────────
 
-export function createMcpHttpServer(spec: OpenAPISpec): McpServer {
-  const server = new McpServer({
-    name: 'rorca-http',
-    version: '2.0.0',
-  });
-
+export function getMcpToolDefinitions(spec: OpenAPISpec): McpToolDefinition[] {
   const allPaths = new Map<string, string[]>();
   for (const [pathStr, methods] of Object.entries(spec.paths)) {
     allPaths.set(pathStr, Object.keys(methods).map(m => m.toUpperCase()));
   }
 
-  let toolCount = 0;
+  const definitions: McpToolDefinition[] = [];
 
   for (const [pathStr, methods] of Object.entries(spec.paths)) {
     for (const [method, operation] of Object.entries(methods)) {
-      const httpMethod = method.toUpperCase();
+      const { tier } = getRorcaTier(operation);
+      const mcpOverride = getMcpExposureOverride(operation);
+      if (!tierAllowedFromMcp(tier) && !mcpOverride) continue;
 
+      const httpMethod = method.toUpperCase();
       if (shouldSkipRoute(httpMethod, pathStr)) continue;
 
-      const toolName = generateToolName(httpMethod, pathStr, allPaths);
-      const description = operation.summary || operation.description || `${httpMethod} ${pathStr}`;
-      const zodShape = buildZodInputShape(operation);
-      const hasParams = Object.keys(zodShape).length > 0;
-
-      // Capture for closure
-      const capturedMethod = httpMethod;
-      const capturedPath = pathStr;
-
-      // Capture operation for default-param injection
-      const capturedOperation = operation;
-
-      const handler = async (params: Record<string, unknown>) => {
-        try {
-          const { status, body } = await executeApiCall(capturedMethod, capturedPath, params, capturedOperation);
-
-          if (status >= 400) {
-            const errorText = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
-            const safeError = errorText.length > MAX_INLINE_CHARS
-              ? spillLargeResult(toolName, body, errorText)
-              : errorText;
-            return {
-              content: [{ type: 'text' as const, text: `Error (${status}): ${safeError}` }],
-              isError: true,
-            };
-          }
-
-          const resultText = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
-          const safeResult = resultText.length > MAX_INLINE_CHARS
-            ? spillLargeResult(toolName, body, resultText)
-            : resultText;
-          return {
-            content: [{ type: 'text' as const, text: safeResult }],
-          };
-        } catch (err: unknown) {
-          const isAbort = err instanceof Error && err.name === 'AbortError';
-          const message = isAbort
-            ? `Tool timed out. This is a long-running operation — the backend is still processing. Check results via the relevant list/get tool after a moment.`
-            : err instanceof Error ? err.message : String(err);
-          return {
-            content: [{ type: 'text' as const, text: `MCP tool error: ${message}` }],
-            isError: true,
-          };
-        }
-      };
-
-      if (hasParams) {
-        server.tool(toolName, description, zodShape, handler);
-      } else {
-        server.tool(toolName, description, handler);
-      }
-
-      toolCount++;
+      definitions.push({
+        toolName: generateToolName(httpMethod, pathStr, allPaths),
+        description: operation.summary || operation.description || `${httpMethod} ${pathStr}`,
+        zodShape: buildZodInputShape(operation),
+        capturedMethod: httpMethod,
+        capturedPath: pathStr,
+        capturedOperation: operation,
+      });
     }
   }
 
-  logger.info(`[MCP-HTTP] Registered ${toolCount} tools from OpenAPI spec`);
+  return definitions;
+}
+
+export function createMcpHttpServer(spec: OpenAPISpec, options: McpHttpServerOptions = {}): McpServer {
+  const server = new McpServer({
+    name: 'rorca-http',
+    version: '2.0.0',
+  });
+
+  const definitions = getMcpToolDefinitions(spec);
+  const registerDefinition = (
+    definition: McpToolDefinition,
+    overrides?: { toolName?: string; description?: string },
+  ) => {
+    const toolName = overrides?.toolName ?? definition.toolName;
+    const description = overrides?.description ?? definition.description;
+    const { zodShape, capturedMethod, capturedPath, capturedOperation } = definition;
+    const hasParams = Object.keys(zodShape).length > 0;
+    const handler = async (params: Record<string, unknown>, extra?: { requestId?: string | number; sessionId?: string }) => {
+      const requiredTier = getMcpToolTier(definition);
+      const tokenTier = options.resolveSessionTier?.(extra?.sessionId);
+      const remoteAddr = options.getSessionRemoteAddr?.(extra?.sessionId);
+      if (requiredTier === 'admin' && tokenTier !== 'admin') {
+        return {
+          content: [{ type: 'text' as const, text: 'Error: This tool requires admin tier' }],
+          isError: true,
+        };
+      }
+
+      const effectiveTokenTier = tokenTier ?? 'public';
+      const startMs = Date.now();
+      const hashedParams = paramsHash(params);
+      const rateLimit = consumeMcpRateLimit(toolName, effectiveTokenTier);
+      if (!rateLimit.allowed) {
+        const retryAfterSeconds = rateLimit.retryAfterSeconds ?? 60;
+        recordMcpCall({
+          toolName,
+          tokenTier: effectiveTokenTier,
+          remoteAddr,
+          sessionId: extra?.sessionId,
+          paramsHash: hashedParams,
+          params,
+          success: false,
+          errorCode: 'MCP_RATE_LIMITED',
+          durationMs: Date.now() - startMs,
+        }).catch((err) => logger.warn({ err }, '[MCP Audit] Failed to record call'));
+
+        return {
+          content: [{
+            type: 'text' as const,
+            text: `Error (429): ${JSON.stringify({
+              error: 'MCP tool rate limit exceeded',
+              code: 'MCP_RATE_LIMITED',
+              retryAfterSeconds,
+            }, null, 2)}`,
+          }],
+          isError: true,
+          _meta: {
+            httpStatus: 429,
+            headers: {
+              'Retry-After': String(retryAfterSeconds),
+            },
+          },
+        };
+      }
+
+      try {
+        const { status, body } = await executeApiCall(capturedMethod, capturedPath, params, capturedOperation);
+        recordMcpCall({
+          toolName,
+          tokenTier: effectiveTokenTier,
+          remoteAddr,
+          sessionId: extra?.sessionId,
+          paramsHash: hashedParams,
+          params,
+          success: status < 400,
+          errorCode: status >= 400 ? extractErrorCode(body) : null,
+          durationMs: Date.now() - startMs,
+        }).catch((err) => logger.warn({ err }, '[MCP Audit] Failed to record call'));
+
+        if (status >= 400) {
+          const errorText = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+          const safeError = errorText.length > MAX_INLINE_CHARS
+            ? spillLargeResult(toolName, body, errorText)
+            : errorText;
+          return {
+            content: [{ type: 'text' as const, text: `Error (${status}): ${safeError}` }],
+            isError: true,
+          };
+        }
+
+        const resultText = typeof body === 'string' ? body : JSON.stringify(body, null, 2);
+        const safeResult = resultText.length > MAX_INLINE_CHARS
+          ? spillLargeResult(toolName, body, resultText)
+          : resultText;
+        logger.info({
+          timestamp: new Date().toISOString(),
+          toolName,
+          tokenTier: effectiveTokenTier,
+          success: true,
+          ...(effectiveTokenTier === 'admin'
+            ? {
+                sessionId: extra?.sessionId,
+                requestId: extra?.requestId,
+                method: capturedMethod,
+                path: capturedPath,
+              }
+            : {}),
+        }, '[MCP Audit] Tool call succeeded');
+        return {
+          content: [{ type: 'text' as const, text: safeResult }],
+        };
+      } catch (err: unknown) {
+        const isAbort = err instanceof Error && err.name === 'AbortError';
+        const message = isAbort
+          ? `Tool timed out. This is a long-running operation — the backend is still processing. Check results via the relevant list/get tool after a moment.`
+          : err instanceof Error ? err.message : String(err);
+        recordMcpCall({
+          toolName,
+          tokenTier: effectiveTokenTier,
+          remoteAddr,
+          sessionId: extra?.sessionId,
+          paramsHash: hashedParams,
+          params,
+          success: false,
+          errorCode: isAbort ? 'MCP_TOOL_TIMEOUT' : 'MCP_TOOL_ERROR',
+          durationMs: Date.now() - startMs,
+        }).catch((auditErr) => logger.warn({ err: auditErr }, '[MCP Audit] Failed to record call'));
+        return {
+          content: [{ type: 'text' as const, text: `MCP tool error: ${message}` }],
+          isError: true,
+        };
+      }
+    };
+
+    if (hasParams) {
+      server.tool(toolName, description, zodShape, handler);
+    } else {
+      server.tool(toolName, description, handler);
+    }
+  };
+
+  for (const definition of definitions) {
+    registerDefinition(definition);
+  }
+
+  const definitionByPath = new Map(definitions.map((definition) => [definition.capturedPath, definition]));
+  const legacyAliases = [
+    {
+      toolName: 'rorca_enrich_spec',
+      description: 'Legacy alias for spec enrichment via the async spec-job bridge.',
+      path: '/api/specs/{specId}/enrich',
+    },
+    {
+      toolName: 'rorca_match_skills',
+      description: 'Legacy alias for spec skill matching via the async spec-job bridge.',
+      path: '/api/specs/{specId}/match-skills',
+    },
+    {
+      toolName: 'rorca_suggest_skills',
+      description: 'Legacy alias for spec skill suggestions via the async spec-job bridge.',
+      path: '/api/specs/{specId}/suggest-skills',
+    },
+  ] as const;
+
+  let aliasCount = 0;
+  for (const alias of legacyAliases) {
+    const definition = definitionByPath.get(alias.path);
+    if (definition) {
+      registerDefinition(definition, {
+        toolName: alias.toolName,
+        description: alias.description,
+      });
+      aliasCount += 1;
+    }
+  }
+
+  logger.info(`[MCP-HTTP] Registered ${definitions.length} OpenAPI tools and ${aliasCount} legacy aliases`);
   return server;
 }
 
 // ─── Transport session management ───────────────────────────────────────────
 
 const transports = new Map<string, StreamableHTTPServerTransport>();
+const transportTiers = new Map<string, McpTier>();
+const transportRemoteAddrs = new Map<string, string>();
 
 export function getMcpTransportCount(): number {
   return transports.size;
@@ -456,17 +706,35 @@ export function getMcpTransportCount(): number {
 export function createMcpRequestHandler(spec: OpenAPISpec) {
   async function handlePost(req: Request, res: Response) {
     const sessionId = req.headers['mcp-session-id'] as string | undefined;
+    const remoteAddr = req.ip || req.socket.remoteAddress || 'unknown';
     let transport: StreamableHTTPServerTransport;
 
     if (sessionId && transports.has(sessionId)) {
       transport = transports.get(sessionId)!;
+      transportRemoteAddrs.set(sessionId, remoteAddr);
     } else if (!sessionId && isInitializeRequest(req.body)) {
-      const mcpServer = createMcpHttpServer(spec);
+      const requestTier = (req as Request & { mcpTier?: McpTier }).mcpTier;
+      const mcpServer = createMcpHttpServer(spec, {
+        resolveSessionTier: (sid) => {
+          if (sid) {
+            return transportTiers.get(sid);
+          }
+          return requestTier;
+        },
+        getSessionRemoteAddr: (sid) => {
+          if (!sid) return remoteAddr;
+          return transportRemoteAddrs.get(sid) ?? remoteAddr;
+        },
+      });
 
       transport = new StreamableHTTPServerTransport({
         sessionIdGenerator: () => randomUUID(),
         onsessioninitialized: (sid: string) => {
           transports.set(sid, transport);
+          if (requestTier) {
+            transportTiers.set(sid, requestTier);
+          }
+          transportRemoteAddrs.set(sid, remoteAddr);
         },
         enableJsonResponse: true,
       });
@@ -474,6 +742,8 @@ export function createMcpRequestHandler(spec: OpenAPISpec) {
       transport.onclose = () => {
         if (transport.sessionId) {
           transports.delete(transport.sessionId);
+          transportTiers.delete(transport.sessionId);
+          transportRemoteAddrs.delete(transport.sessionId);
         }
       };
 
@@ -504,6 +774,8 @@ export function createMcpRequestHandler(spec: OpenAPISpec) {
     const transport = transports.get(sessionId)!;
     await transport.handleRequest(req, res);
     transports.delete(sessionId);
+    transportTiers.delete(sessionId);
+    transportRemoteAddrs.delete(sessionId);
   }
 
   return { handlePost, handleGet, handleDelete };

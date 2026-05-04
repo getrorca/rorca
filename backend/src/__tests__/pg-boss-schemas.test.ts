@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * pg-boss-schemas.test.ts — Unit tests for Zod schemas used in pg-boss job payloads.
  *
  * Coverage:
@@ -153,8 +160,8 @@ describe('PipelineRunJobPayload', () => {
     expect(() => PipelineRunJobPayload.parse(withBadEnv)).toThrow(z.ZodError);
   });
 
-  test('all three agent enum values are accepted', () => {
-    for (const agent of ['claude', 'opencode', 'codex'] as const) {
+  test('all four agent enum values are accepted', () => {
+    for (const agent of ['claude', 'opencode', 'codex', 'pi'] as const) {
       expect(() => PipelineRunJobPayload.parse({ ...validRunPayload, agent })).not.toThrow();
     }
   });
@@ -167,7 +174,7 @@ describe('PipelineRunJobPayload', () => {
     const runId = 42;
     const specPath = 'forge/specs/approved/my-spec.json';
     const workspacePath = '/home/user/project';
-    const resolvedAgentType: 'claude' | 'opencode' | 'codex' = 'claude';
+    const resolvedAgentType: 'claude' | 'opencode' | 'codex' | 'pi' = 'claude';
     const resolvedAgentModel: string | null = null;
     const worktreePath: string | null = null;
     const branchName: string | null = null;

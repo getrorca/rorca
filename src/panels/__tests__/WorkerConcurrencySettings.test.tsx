@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * US-004: Worker concurrency Settings UI — Vitest unit tests
  *
  * Tests cover:
@@ -55,10 +62,13 @@ const MOCK_AGENT_CONFIG = {
   claudeBin: '/usr/local/bin/claude',
   opencodeBin: null,
   codexBin: null,
+  piBin: null,
   opencodeInstalled: false,
   opencodeVersion: null,
   codexInstalled: false,
   codexVersion: null,
+  piInstalled: false,
+  piVersion: null,
 };
 
 const MOCK_OPENCODE_MODELS = {

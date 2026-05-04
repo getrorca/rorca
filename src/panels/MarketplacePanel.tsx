@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useState, useRef, useEffect, useCallback, useMemo } from 'react';
 import { Wrench, FileText, Package, Search, Loader2, Download, AlertTriangle, Trash2, Check, TrendingUp, X, ExternalLink } from 'lucide-react';
 import type { PanelId } from '../components/Sidebar';
@@ -317,7 +324,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
   useEffect(() => { fetchInstalled(); }, [fetchInstalled]);
 
   // Debounced live search for skills.sh + workspace suggestions fallback
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   useEffect(() => {
     if (activeTab !== 'skills' || activeSource !== 'skills.sh') {
@@ -326,7 +333,7 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
       return;
     }
 
-    clearTimeout(debounceRef.current);
+    clearTimeout(debounceRef.current ?? undefined);
 
     const trimmed = searchQuery.trim();
 
@@ -363,12 +370,12 @@ export default function MarketplacePanel({ onNavigate: _onNavigate }: Marketplac
         });
     }
 
-    return () => clearTimeout(debounceRef.current);
+    return () => clearTimeout(debounceRef.current ?? undefined);
   }, [searchQuery, activeTab, activeSource]);
 
   // Cleanup debounce on unmount
   useEffect(() => {
-    return () => clearTimeout(debounceRef.current);
+    return () => clearTimeout(debounceRef.current ?? undefined);
   }, []);
 
   // Install handler

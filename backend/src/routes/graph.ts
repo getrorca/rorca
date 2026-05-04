@@ -1,8 +1,16 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response, NextFunction } from 'express';
 import { graphStats, isGraphAvailable, populateFromRun, populateFromSpec } from '../lib/knowledge-graph';
 import { query, queryOne } from '../db/index';
 import { broadcastAll } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
+import { requireAge } from '../lib/age-guard';
 
 const router = Router();
 
@@ -125,6 +133,8 @@ async function emitWal(
  *     tags: [Graph]
  *     summary: Populate the knowledge graph for a workspace
  *     operationId: populateGraph
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Graph population is an operator-controlled maintenance workflow and should remain admin-only."
  *     description: |
  *       Triggers a full graph population for a workspace by iterating all completed
  *       pipeline runs and approved specs. Returns 202 immediately; progress is reported
@@ -156,16 +166,12 @@ async function emitWal(
  *       409:
  *         description: Population already in progress for this workspace
  */
-router.post('/populate', async (req: Request, res: Response, next: NextFunction) => {
+router.post('/populate', requireAge(), async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { workspaceId } = req.body;
 
     if (!workspaceId || typeof workspaceId !== 'string') {
       return res.status(400).json({ error: 'workspaceId is required' });
-    }
-
-    if (!(await isGraphAvailable())) {
-      return res.status(400).json({ error: 'Knowledge graph is not available — Apache AGE extension required' });
     }
 
     if (activePopulations.has(workspaceId)) {

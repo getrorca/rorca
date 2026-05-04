@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -124,6 +131,9 @@ router.post('/preview-sanitize', (req: Request, res: Response) => {
  *     tags: [Marketplace]
  *     summary: Publish a spec to the community marketplace
  *     operationId: publishSpec
+ *     x-rorca-tier: paid
+ *     x-rorca-capability: marketplacePublish
+ *     x-rorca-rationale: "Marketplace publishing is a commercial distribution feature and should not be part of the free CLI contract."
  *     requestBody:
  *       required: true
  *       content:
@@ -247,6 +257,9 @@ router.post('/publish', requirePlan('marketplace_publish'), async (req: Request,
  *     tags: [Marketplace]
  *     summary: Fork a published spec into a workspace
  *     operationId: forkSpec
+ *     x-rorca-tier: paid
+ *     x-rorca-capability: marketplacePublish
+ *     x-rorca-rationale: "Marketplace forking is part of the commercial marketplace surface and belongs behind the paid plan boundary."
  *     parameters:
  *       - in: path
  *         name: id

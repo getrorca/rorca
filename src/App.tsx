@@ -1,4 +1,11 @@
-import { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy } from 'react';
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+import { useState, useMemo, useEffect, useRef, useCallback, Suspense, lazy, type ReactElement } from 'react';
 import { Routes, Route, Navigate, Outlet, useLocation, useNavigate as useRouterNavigate } from 'react-router-dom';
 import { AuthProvider, useAuth } from './contexts/AuthContext';
 import { ThemeProvider } from './contexts/ThemeContext';
@@ -6,6 +13,7 @@ import { HelpTipsProvider } from './contexts/HelpTipsContext';
 import { ToastProvider, useGlobalToast } from './contexts/ToastContext';
 import { WorkspaceProvider, useWorkspace } from './contexts/WorkspaceContext';
 import { NotificationProvider } from './contexts/NotificationContext';
+import { CapabilitiesProvider } from './contexts/CapabilitiesContext';
 import Shell from './components/Shell';
 import RequireAuth from './components/RequireAuth';
 import Sidebar, { type PanelId } from './components/Sidebar';
@@ -60,7 +68,7 @@ const TerminalPanel = lazy(() => import('./panels/TerminalPanel'));
 // SettingsTab type — imported from SettingsPanel module
 type SettingsTab = import('./panels/SettingsPanel').SettingsTab;
 
-function PublicOnlyRoute({ children }: { children: JSX.Element }) {
+function PublicOnlyRoute({ children }: { children: ReactElement }) {
   const { isAuthenticated, isLoading } = useAuth();
 
   if (isLoading) {
@@ -614,12 +622,14 @@ function App() {
         <ToastProvider>
           <TerminalDrawerProvider>
             <AuthProvider>
-              <WorkspaceProvider>
-                <NotificationProvider>
-                  <GlobalErrorWiring />
-                  <AppRoutes />
-                </NotificationProvider>
-              </WorkspaceProvider>
+              <CapabilitiesProvider>
+                <WorkspaceProvider>
+                  <NotificationProvider>
+                    <GlobalErrorWiring />
+                    <AppRoutes />
+                  </NotificationProvider>
+                </WorkspaceProvider>
+              </CapabilitiesProvider>
             </AuthProvider>
           </TerminalDrawerProvider>
         </ToastProvider>

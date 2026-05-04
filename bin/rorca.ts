@@ -1,1125 +1,3111 @@
 #!/usr/bin/env node
 
-import { readFileSync, existsSync, mkdirSync, writeFileSync, createWriteStream, unlinkSync, rmSync, readdirSync, renameSync, statSync } from 'fs';
-import { join, dirname } from 'path';
-import { fileURLToPath } from 'url';
-import { execSync, spawnSync, fork, spawn } from 'child_process';
-import { homedir, platform, arch } from 'os';
-import { get as httpsGet } from 'https';
-import { get as httpGet, type IncomingMessage } from 'http';
-import { createConnection } from 'net';
+import { Command } from 'commander';
+import { mkdirSync, existsSync, writeFileSync, readFileSync, unlinkSync, statSync, readdirSync } from 'node:fs';
+import { homedir, tmpdir } from 'node:os';
+import path from 'node:path';
+import process from 'node:process';
+import { execSync, spawn, spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
+import net from 'node:net';
+import readline from 'node:readline/promises';
+import { execa } from 'execa';
+import {
+  ensureMcpToken,
+  getMcpAdminToken,
+  getMcpAdminTokenPath,
+  getMcpPublicToken,
+  getMcpPublicTokenPath,
+  rotateMcpToken,
+} from '../backend/src/lib/mcp-auth';
+import { detectDbMode, isAgeAvailable, type DbMode } from '../backend/src/lib/db-strategy';
+import { dbStart, dbStatus } from '../backend/src/lib/db-sidecar';
+import { MIN_PI_VERSION, detectPi as detectPiShared } from '../backend/src/lib/pi-detector';
+import { checkDuplicatePrefixes } from '../backend/src/db/pg-index';
+import { checkVersion as checkVersionShared, MIN_BACKEND_VERSION as SHARED_MIN_BACKEND_VERSION } from '../packages/rorca-cli/src/version-check';
 
 const __filename = fileURLToPath(import.meta.url);
-const __dirname = dirname(__filename);
+const __dirname = path.dirname(__filename);
+const ROOT_DIR = path.resolve(__dirname, '..');
+const BACKEND_DIR = path.join(ROOT_DIR, 'backend');
+const DIST_DIR = path.join(ROOT_DIR, 'dist');
+const API_BASE = (process.env.RORCA_API_URL || 'http://127.0.0.1:3030').replace(/\/$/, '');
+const DB_CONTAINER = 'rorca-db';
+const DB_VOLUME = 'rorca-db-data';
+const DB_IMAGE = 'apache/age:latest';
 
-const pkg = JSON.parse(readFileSync(join(__dirname, '..', 'package.json'), 'utf8')) as {
-  version: string;
+const pkg = JSON.parse(readFileSync(path.join(ROOT_DIR, 'package.json'), 'utf8')) as {
   name: string;
+  version: string;
 };
 
-// ─── --version / --help ───
-const args = process.argv.slice(2);
+type Workspace = {
+  id: string;
+  label: string;
+  path: string;
+};
 
-if (args.includes('--version') || args.includes('-v')) {
-  console.log(pkg.version);
-  process.exit(0);
+type PaginatedResponse<T> = {
+  items: T[];
+  total: number;
+  hasMore?: boolean;
+  cursor?: string;
+};
+
+type ArchiveSpec = {
+  id: string;
+  specName: string;
+  status: string;
+  storyCount: number;
+};
+
+type TriggerResponse =
+  | { ok: true; runId: number; queued?: boolean; position?: number }
+  | { queued: true; runId: number; position?: number }
+  | { conflict: true; activeRunId: number }
+  | { dryRun: true; estimate: unknown };
+
+type PipelineRun = {
+  id: number;
+  spec_path: string;
+  workspace_id: string;
+  status: string;
+  started_at: string;
+  finished_at: string | null;
+};
+
+type StoryResult = {
+  story_id: string;
+  status: 'pass' | 'fail' | 'skip' | 'retry';
+};
+
+type RunDetails = {
+  run: PipelineRun;
+  stories: StoryResult[];
+  specStories?: Array<{ id: string }>;
+};
+
+type RunControlMode = 'attached' | 'detaching' | 'cancelling';
+
+type WalEvent = {
+  id: number;
+  event_type: string;
+  workspace_id: string | null;
+  spec_id: string | null;
+  story_id: string | null;
+  payload: string | null;
+};
+
+type DoctorStatus = 'pass' | 'warn' | 'fail';
+
+type DoctorCheckId =
+  | 'node-version'
+  | 'pi-binary'
+  | 'pi-version'
+  | 'db-mode'
+  | 'native-pg'
+  | 'docker-daemon'
+  | 'db-container'
+  | 'age-extension'
+  | 'backend-port'
+  | 'backend-version'
+  | 'schema-migrations'
+  | 'worker-heartbeat'
+  | 'mcp-public-token'
+  | 'mcp-admin-token'
+  | 'mcp-bridge'
+  | 'workspace-files';
+
+type DoctorCheckResult = {
+  id: DoctorCheckId;
+  name: string;
+  status: DoctorStatus;
+  detail: string;
+  hint?: string;
+};
+
+type DoctorJsonResponse = {
+  checks: Array<{
+    name: string;
+    status: DoctorStatus;
+    detail: string;
+    hint?: string;
+  }>;
+  exitCode: number;
+};
+
+type McpClientFinding = {
+  client: string;
+  configPath: string;
+  serverName: string;
+  issue: string;
+  fix: string;
+};
+
+type VersionResponse = {
+  version: string;
+  apiVersion: string;
+  schemaVersion: string | null;
+  minCliVersion: string;
+  capabilities: {
+    pi: boolean;
+    docker: boolean;
+    age: boolean;
+    [key: string]: unknown;
+  };
+  [key: string]: unknown;
+};
+
+type VersionCheckResult = {
+  ok: boolean;
+  reason?: string;
+  backend?: VersionResponse;
+};
+
+type HealthResponse = {
+  status?: string;
+  version?: string;
+  piInstalled?: boolean;
+  piVersion?: string | null;
+  piBinPath?: string | null;
+  mcpTransport?: string;
+  mcp?: {
+    enabled: boolean;
+    status: 'healthy' | 'disabled';
+    url: string;
+    sessions: number;
+  };
+  components?: {
+    worker?: {
+      status?: 'ok' | 'stale' | 'not_running' | 'down' | 'unknown';
+      lastHeartbeat?: string;
+      activePid?: number | null;
+    };
+    migrations?: {
+      status?: 'ok' | 'degraded' | 'unknown';
+      applied?: number;
+      pending?: number;
+    };
+  };
+};
+
+type McpToolsResponse = {
+  tools: Array<{ name: string }>;
+};
+
+type PiModel = {
+  provider: string;
+  model: string;
+  contextTokens: number;
+  maxOutTokens: number;
+  thinking: boolean;
+  images: boolean;
+};
+
+type PiModelsResponse = {
+  models: PiModel[];
+  count: number;
+  piBinPath: string;
+};
+
+type PiStatus = {
+  piInstalled: boolean;
+  piVersion: string | null;
+  piBinPath: string | null;
+};
+
+type DirectionSynthesizeResponse = {
+  synthesized: string;
+};
+
+const PI_INSTALL_METHODS = {
+  npm: 'npm install -g @mariozechner/pi-coding-agent',
+  pnpm: 'pnpm add -g @mariozechner/pi-coding-agent',
+  bun: 'bun add -g @mariozechner/pi-coding-agent',
+  curl: 'curl -fsSL https://pi.mariozechner.com/install.sh | sh',
+} as const;
+
+const PI_INSTALL_SCRIPT_URL = 'https://pi.mariozechner.com/install.sh';
+
+const PI_PROVIDER_LABELS: Record<string, string> = {
+  openai: 'ChatGPT Plus/Pro',
+  chatgpt: 'ChatGPT Plus/Pro',
+  codex: 'ChatGPT Plus/Pro',
+  anthropic: 'Claude',
+  claude: 'Claude',
+  github: 'GitHub Copilot',
+  copilot: 'GitHub Copilot',
+  'github copilot': 'GitHub Copilot',
+  google: 'Gemini',
+  gemini: 'Gemini',
+  openrouter: 'OpenRouter',
+};
+
+const PI_PROVIDER_ORDER = [
+  'ChatGPT Plus/Pro',
+  'Claude',
+  'GitHub Copilot',
+  'Gemini',
+  'OpenRouter',
+] as const;
+
+const MIN_BACKEND_VERSION = SHARED_MIN_BACKEND_VERSION;
+const MIN_BACKEND_API_VERSION = '1.0';
+const MIN_NODE_VERSION = '20.0.0';
+const NATIVE_PG_PORT = 5433;
+const BACKEND_DEPENDENT_CHECKS: DoctorCheckId[] = [
+  'backend-version',
+  'schema-migrations',
+  'worker-heartbeat',
+  'mcp-bridge',
+];
+
+function red(text: string): string {
+  return `\x1b[31m${text}\x1b[0m`;
 }
 
-if (args.includes('--help') || args.includes('-h') || args.length === 0) {
-  console.log(`
-rorca v${pkg.version} — AI spec orchestration pipeline
-
-Usage:
-  rorca start [options]    Start the Rorca server
-  rorca init               Register Rorca as an MCP server with claude CLI
-  rorca mcp <subcommand>   Manage the MCP Bearer token (Project Aegis)
-  rorca --version          Print version
-  rorca --help             Show this help message
-
-Options for start:
-  --port <port>            Server port (default: 3030)
-  --no-open                Don't open browser on start
-  --no-postgres            Skip managed Postgres; requires DATABASE_URL to be set
-  --dry-run                Validate config and exit without starting servers
-
-MCP subcommands:
-  rorca mcp token          Print the MCP Bearer token (for piping to clipboard)
-  rorca mcp setup-claude   Configure 'claude' CLI to use Rorca MCP with auth
-  rorca mcp rotate-token   Generate a new token (existing clients must re-setup)
-  rorca mcp status         Show MCP token + reachability status
-
-Examples:
-  rorca start
-  rorca start --port 4040
-  rorca init
-  rorca mcp setup-claude
-`);
-  process.exit(0);
+function green(text: string): string {
+  return `\x1b[32m${text}\x1b[0m`;
 }
 
-const command = args[0];
-
-// ─── Command: init ───
-if (command === 'init') {
-  runInit();
-  process.exit(0);
+function yellow(text: string): string {
+  return `\x1b[33m${text}\x1b[0m`;
 }
 
-// ─── Command: mcp <subcommand> (CLI-045 Project Aegis) ───
-if (command === 'mcp') {
-  runMcp(args.slice(1));
-  process.exit(0);
+function cyan(text: string): string {
+  return `\x1b[36m${text}\x1b[0m`;
 }
 
-// ─── Command: start ───
-if (command === 'start') {
-  runStart(args.slice(1));
-  // runStart sets up async process management — don't exit here
-} else {
-  console.error(`Unknown command: ${command}\nRun "rorca --help" for usage.`);
-  process.exit(1);
+function dim(text: string): string {
+  return `\x1b[2m${text}\x1b[0m`;
 }
 
-// ────────────────────────────────────────────────────────────────
-// init: register MCP server with claude CLI
-// ────────────────────────────────────────────────────────────────
+function bold(text: string): string {
+  return `\x1b[1m${text}\x1b[0m`;
+}
 
-function runInit(): void {
-  console.log('Initializing Rorca MCP integration...\n');
-
-  const claudeBin = findBinary('claude');
-
-  if (!claudeBin) {
-    console.log('Claude CLI not found in PATH.\n');
-    console.log('To register Rorca as an MCP server manually, run:');
-    console.log(
-      '  claude mcp add --global rorca --transport http http://localhost:3030/mcp\n'
-    );
-    console.log('Install Claude CLI: https://claude.ai/download');
-    return;
+class PrintedCliError extends Error {
+  constructor() {
+    super('printed-cli-error');
   }
+}
 
-  console.log(`Found claude at: ${claudeBin}`);
+function sleep(ms: number): Promise<void> {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
 
-  // Check if already registered
-  try {
-    const listOutput = execSync(`${claudeBin} mcp list 2>&1`, { encoding: 'utf8' });
-    if (listOutput.includes('rorca')) {
-      console.log('Rorca is already registered as an MCP server.');
-      console.log(
-        'To update the registration, remove it first: claude mcp remove rorca'
-      );
+function formatSpecFromPath(specPath: string): string {
+  return path.basename(specPath, '.json');
+}
+
+function formatDate(iso: string | null): string {
+  if (!iso) return '-';
+  return new Date(iso).toLocaleString('en-US', {
+    month: '2-digit',
+    day: '2-digit',
+    hour: '2-digit',
+    minute: '2-digit',
+    hour12: false,
+  });
+}
+
+function printTable(headers: string[], rows: string[][]): void {
+  const widths = headers.map((header, index) =>
+    Math.max(header.length, ...rows.map((row) => (row[index] || '').length)),
+  );
+  const render = (cells: string[]) =>
+    cells.map((cell, index) => (cell || '').padEnd(widths[index])).join('  ');
+
+  console.log(render(headers.map((header) => bold(header))));
+  console.log(render(widths.map((width) => '-'.repeat(width))));
+  for (const row of rows) {
+    console.log(render(row));
+  }
+}
+
+function spawnLogged(
+  label: string,
+  command: string,
+  args: string[],
+  options: { cwd?: string; env?: NodeJS.ProcessEnv },
+) {
+  const child = spawn(command, args, {
+    cwd: options.cwd,
+    env: options.env,
+    stdio: ['ignore', 'pipe', 'pipe'],
+    shell: process.platform === 'win32',
+  });
+
+  const prefix = `[${label}] `;
+  const pipe = (stream: NodeJS.ReadableStream | null, target: NodeJS.WriteStream) => {
+    if (!stream) return;
+    let buffer = '';
+    stream.on('data', (chunk: Buffer | string) => {
+      buffer += chunk.toString();
+      const lines = buffer.split('\n');
+      buffer = lines.pop() ?? '';
+      for (const line of lines) {
+        target.write(`${prefix}${line}\n`);
+      }
+    });
+    stream.on('end', () => {
+      if (buffer.length > 0) {
+        target.write(`${prefix}${buffer}\n`);
+      }
+    });
+  };
+
+  pipe(child.stdout, process.stdout);
+  pipe(child.stderr, process.stderr);
+  return child;
+}
+
+function runCommand(
+  command: string,
+  args: string[],
+  options: {
+    cwd?: string;
+    env?: NodeJS.ProcessEnv;
+    stdio?: 'inherit' | 'pipe';
+  } = {},
+): Promise<{ code: number; stdout: string; stderr: string }> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(command, args, {
+      cwd: options.cwd,
+      env: options.env,
+      stdio: options.stdio === 'inherit' ? 'inherit' : ['ignore', 'pipe', 'pipe'],
+      shell: process.platform === 'win32',
+    });
+
+    let stdout = '';
+    let stderr = '';
+    if (options.stdio !== 'inherit') {
+      child.stdout?.on('data', (chunk: Buffer | string) => {
+        stdout += chunk.toString();
+      });
+      child.stderr?.on('data', (chunk: Buffer | string) => {
+        stderr += chunk.toString();
+      });
+    }
+
+    child.on('error', reject);
+    child.on('close', (code: number | null) => {
+      resolve({ code: code ?? 1, stdout: stdout.trim(), stderr: stderr.trim() });
+    });
+  });
+}
+
+async function docker(args: string[], stdio: 'inherit' | 'pipe' = 'pipe') {
+  return runCommand('docker', args, { stdio });
+}
+
+async function requireDocker(): Promise<void> {
+  const result = await docker(['info']);
+  if (result.code !== 0) {
+    throw new Error('Docker is required. Start Docker Desktop or OrbStack first.');
+  }
+}
+
+async function inspectDbContainer(): Promise<{ exists: boolean; running: boolean }> {
+  const result = await docker(['inspect', DB_CONTAINER, '--format', '{{.State.Running}}']);
+  if (result.code !== 0) {
+    return { exists: false, running: false };
+  }
+  return { exists: true, running: result.stdout === 'true' };
+}
+
+async function waitForDatabaseReady(): Promise<void> {
+  for (let attempt = 0; attempt < 30; attempt += 1) {
+    const result = await docker(['exec', DB_CONTAINER, 'pg_isready', '-U', 'rorca', '-d', 'rorca']);
+    if (result.code === 0) {
       return;
     }
-  } catch {
-    // mcp list may not exist in older versions — proceed anyway
+    await sleep(1000);
+  }
+  throw new Error('Database container did not become ready within 30s.');
+}
+
+async function enableDbExtensions(): Promise<void> {
+  const result = await docker([
+    'exec',
+    DB_CONTAINER,
+    'psql',
+    '-U',
+    'rorca',
+    '-d',
+    'rorca',
+    '-c',
+    'CREATE EXTENSION IF NOT EXISTS age; CREATE EXTENSION IF NOT EXISTS vector;',
+  ]);
+  if (result.code !== 0) {
+    throw new Error(result.stderr || result.stdout || 'Failed to enable AGE/vector extensions.');
+  }
+}
+
+async function handleDbCommand(
+  action: 'start' | 'stop' | 'status' | 'reset' | 'logs',
+  options: { tail?: number; yes?: boolean; quiet?: boolean } = {},
+): Promise<void> {
+  if (action === 'start') {
+    await requireDocker();
+    const state = await inspectDbContainer();
+    if (!state.exists) {
+      if (!options.quiet) console.log('Starting Docker Postgres sidecar...');
+      const result = await docker([
+        'run',
+        '-d',
+        '--name',
+        DB_CONTAINER,
+        '-p',
+        '5432:5432',
+        '-v',
+        `${DB_VOLUME}:/var/lib/postgresql/data`,
+        '-e',
+        'POSTGRES_DB=rorca',
+        '-e',
+        'POSTGRES_USER=rorca',
+        '-e',
+        'POSTGRES_PASSWORD=rorca',
+        DB_IMAGE,
+      ]);
+      if (result.code !== 0) {
+        throw new Error(result.stderr || result.stdout || 'Failed to start database container.');
+      }
+    } else if (!state.running) {
+      if (!options.quiet) console.log('Starting existing database container...');
+      const result = await docker(['start', DB_CONTAINER]);
+      if (result.code !== 0) {
+        throw new Error(result.stderr || result.stdout || 'Failed to start existing database container.');
+      }
+    } else if (!options.quiet) {
+      console.log('Database container already running.');
+    }
+
+    await waitForDatabaseReady();
+    await enableDbExtensions();
+    if (!options.quiet) {
+      console.log(green('Database ready at postgres://rorca:rorca@127.0.0.1:5432/rorca'));
+    }
+    return;
   }
 
+  if (action === 'stop') {
+    const result = await docker(['stop', DB_CONTAINER], 'inherit');
+    if (result.code !== 0) {
+      throw new Error('Failed to stop database container.');
+    }
+    return;
+  }
+
+  if (action === 'status') {
+    const state = await inspectDbContainer();
+    if (!state.exists) {
+      console.log('Database container: not created');
+      return;
+    }
+    console.log(`Database container: ${state.running ? green('running') : yellow('stopped')}`);
+    if (state.running) {
+      const ageResult = await docker([
+        'exec',
+        DB_CONTAINER,
+        'psql',
+        '-U',
+        'rorca',
+        '-d',
+        'rorca',
+        '-tAc',
+        "SELECT 1 FROM pg_extension WHERE extname = 'age'",
+      ]);
+      console.log(`AGE extension: ${ageResult.code === 0 && ageResult.stdout === '1' ? green('enabled') : yellow('disabled')}`);
+    }
+    return;
+  }
+
+  if (action === 'reset') {
+    if (!options.yes) {
+      const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+      const answer = await rl.question('Reset Docker Postgres and delete all data? [y/N] ');
+      rl.close();
+      if (answer.trim().toLowerCase() !== 'y') {
+        console.log('Reset cancelled.');
+        return;
+      }
+    }
+
+    await docker(['rm', '-f', DB_CONTAINER], 'pipe');
+    await docker(['volume', 'rm', DB_VOLUME], 'pipe');
+    await handleDbCommand('start');
+    return;
+  }
+
+  const tail = options.tail ?? 100;
+  const result = await docker(['logs', '--tail', String(tail), '--follow', DB_CONTAINER], 'inherit');
+  if (result.code !== 0) {
+    throw new Error('Failed to stream database logs.');
+  }
+}
+
+function parseSemver(input: string): [number, number, number] | null {
+  const match = input.trim().match(/^v?(\d+)\.(\d+)\.(\d+)(?:[-+].*)?$/);
+  if (!match) return null;
+  return [
+    Number.parseInt(match[1], 10),
+    Number.parseInt(match[2], 10),
+    Number.parseInt(match[3], 10),
+  ];
+}
+
+function semverGte(left: string, right: string): boolean {
+  const a = parseSemver(left);
+  const b = parseSemver(right);
+  if (!a || !b) return left === right;
+  for (let index = 0; index < 3; index += 1) {
+    if (a[index] > b[index]) return true;
+    if (a[index] < b[index]) return false;
+  }
+  return true;
+}
+
+async function checkVersion(backendUrl: string): Promise<VersionCheckResult> {
+  const baseUrl = backendUrl.replace(/\/$/, '');
+
   try {
-    execSync(
-      `${claudeBin} mcp add --global rorca --transport http http://localhost:3030/mcp`,
-      { stdio: 'inherit' }
-    );
-    console.log('\nRorca MCP server registered successfully.');
-    console.log('Start Rorca with "rorca start", then use Claude with full Rorca access.');
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    // Already registered — not an error
-    if (msg.includes('already') || msg.includes('exists')) {
-      console.log('Rorca MCP server is already registered.');
-    } else {
-      console.error('Failed to register MCP server:', msg);
-      console.log('\nTo register manually, run:');
-      console.log(
-        '  claude mcp add --global rorca --transport http http://localhost:3030/mcp'
-      );
+    const response = await fetch(`${baseUrl}/api/version`, {
+      headers: { Accept: 'application/json' },
+      signal: AbortSignal.timeout(3_000),
+    });
+
+    if (!response.ok) {
+      return { ok: false, reason: `Backend health check failed (${response.status})` };
+    }
+
+    const backend = await response.json() as VersionResponse;
+
+    if (!semverGte(backend.version, MIN_BACKEND_VERSION)) {
+      return {
+        ok: false,
+        reason: `Backend ${backend.version} < required ${MIN_BACKEND_VERSION}`,
+        backend,
+      };
+    }
+
+    if (backend.apiVersion !== MIN_BACKEND_API_VERSION) {
+      return {
+        ok: false,
+        reason: `API version ${backend.apiVersion} != ${MIN_BACKEND_API_VERSION}`,
+        backend,
+      };
+    }
+
+    if (!semverGte(pkg.version, backend.minCliVersion)) {
+      return {
+        ok: false,
+        reason: `CLI ${pkg.version} < backend minimum ${backend.minCliVersion}`,
+        backend,
+      };
+    }
+
+    return { ok: true, backend };
+  } catch {
+    return { ok: false, reason: `Cannot reach backend at ${baseUrl}` };
+  }
+}
+
+function printVersionMismatch(result: VersionCheckResult): void {
+  const backendVersion = result.backend?.version ?? 'unknown';
+  let requirement = `need >= ${MIN_BACKEND_VERSION}`;
+
+  if (result.backend && result.backend.apiVersion !== MIN_BACKEND_API_VERSION) {
+    requirement = `API ${result.backend.apiVersion}, need ${MIN_BACKEND_API_VERSION}`;
+  } else if (result.backend && !semverGte(pkg.version, result.backend.minCliVersion)) {
+    requirement = `requires CLI >= ${result.backend.minCliVersion}`;
+  }
+
+  console.error(`${red('✗')} Version mismatch:`);
+  console.error(`   CLI:     ${pkg.version}`);
+  console.error(`   Backend: ${backendVersion} (${requirement})`);
+  console.error('');
+  console.error('Upgrade:  npm install -g rorca@latest');
+  console.error(`Downgrade: npm install -g rorca@${backendVersion}`);
+}
+
+function printBackendUnavailable(reason: string): void {
+  console.error(`${red('✗')} ${reason}`);
+  console.error('Hint: run `rorca start`');
+}
+
+let versionCheckPromise: Promise<VersionCheckResult> | null = null;
+
+async function ensureBackendVersionCompatible(): Promise<void> {
+  if (!versionCheckPromise) {
+    versionCheckPromise = checkVersion(API_BASE);
+  }
+
+  const result = await versionCheckPromise;
+  if (result.ok) return;
+
+  if (result.reason?.startsWith('Cannot reach backend at ')) {
+    printBackendUnavailable(result.reason);
+    throw new PrintedCliError();
+  }
+
+  printVersionMismatch(result);
+  throw new PrintedCliError();
+}
+
+async function fetchJson<T>(
+  pathname: string,
+  init?: RequestInit,
+  timeoutMs = 30_000,
+  options?: { skipVersionCheck?: boolean },
+): Promise<T> {
+  if (!options?.skipVersionCheck && pathname !== '/api/version') {
+    await ensureBackendVersionCompatible();
+  }
+
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), timeoutMs);
+
+  try {
+    const response = await fetch(`${API_BASE}${pathname}`, {
+      ...init,
+      signal: controller.signal,
+      headers: {
+        Accept: 'application/json',
+        ...(init?.body ? { 'Content-Type': 'application/json' } : {}),
+        ...(init?.headers ?? {}),
+      },
+    });
+
+    if (!response.ok) {
+      const text = await response.text();
+      let message = text || `HTTP ${response.status}`;
+      try {
+        const parsed = JSON.parse(text) as { error?: string };
+        message = parsed.error || message;
+      } catch {
+        // Keep raw text message.
+      }
+      throw new Error(message);
+    }
+
+    return (await response.json()) as T;
+  } finally {
+    clearTimeout(timeout);
+  }
+}
+
+function parseWalPayload(event: WalEvent): Record<string, unknown> {
+  if (!event.payload) return {};
+  try {
+    return JSON.parse(event.payload) as Record<string, unknown>;
+  } catch {
+    return {};
+  }
+}
+
+async function readSse(
+  pathname: string,
+  onEvent: (eventName: string, data: string) => Promise<void> | void,
+  signal?: AbortSignal,
+): Promise<void> {
+  const response = await fetch(`${API_BASE}${pathname}`, {
+    headers: { Accept: 'text/event-stream' },
+    signal,
+  });
+
+  if (!response.ok || !response.body) {
+    throw new Error(`Failed to open SSE stream: ${response.status}`);
+  }
+
+  const reader = response.body.getReader();
+  const decoder = new TextDecoder();
+  let buffer = '';
+
+  while (true) {
+    const { done, value } = await reader.read();
+    if (done) break;
+    buffer += decoder.decode(value, { stream: true });
+
+    let boundary = buffer.indexOf('\n\n');
+    while (boundary !== -1) {
+      const block = buffer.slice(0, boundary);
+      buffer = buffer.slice(boundary + 2);
+      boundary = buffer.indexOf('\n\n');
+
+      if (!block || block.startsWith(':')) {
+        continue;
+      }
+
+      const lines = block.split('\n');
+      let eventName = 'message';
+      const dataLines: string[] = [];
+      for (const line of lines) {
+        if (line.startsWith('event:')) {
+          eventName = line.slice(6).trim();
+        } else if (line.startsWith('data:')) {
+          dataLines.push(line.slice(5).trimStart());
+        }
+      }
+
+      await onEvent(eventName, dataLines.join('\n'));
     }
   }
 }
 
-// ────────────────────────────────────────────────────────────────
-// start: launch Express backend + open browser
-// ────────────────────────────────────────────────────────────────
+async function getWorkspaces(): Promise<Workspace[]> {
+  const response = await fetchJson<PaginatedResponse<Workspace>>('/api/workspaces');
+  return response.items;
+}
 
-async function runStart(startArgs: string[]): Promise<void> {
-  // Parse options
-  const portIdx = startArgs.indexOf('--port');
-  const port = portIdx !== -1 && startArgs[portIdx + 1] ? startArgs[portIdx + 1] : '3030';
-  const noOpen = startArgs.includes('--no-open');
-  const noPostgres = startArgs.includes('--no-postgres');
-  const dryRun = startArgs.includes('--dry-run');
+async function getDefaultWorkspace(): Promise<Workspace> {
+  const workspaces = await getWorkspaces();
+  if (workspaces.length === 0) {
+    throw new Error('No workspaces registered. Add one in the UI first.');
+  }
+  return workspaces[0];
+}
 
-  const portNum = parseInt(port, 10);
-  if (isNaN(portNum) || portNum < 1 || portNum > 65535) {
-    console.error(`Invalid port: ${port}`);
-    process.exit(1);
+async function getWorkspaceById(workspaceId: string): Promise<Workspace> {
+  const workspaces = await getWorkspaces();
+  const workspace = workspaces.find((item) => item.id === workspaceId);
+  if (!workspace) {
+    throw new Error(`Workspace "${workspaceId}" not found.`);
+  }
+  return workspace;
+}
+
+function isBackendUnavailableError(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  const message = error.message.toLowerCase();
+  return (
+    message.includes('fetch failed')
+    || message.includes('networkerror')
+    || message.includes('econnrefused')
+    || message.includes('enotfound')
+    || message.includes('failed to fetch')
+    || message.includes('this operation was aborted')
+  );
+}
+
+function cleanupTempFile(filePath: string | null): void {
+  if (!filePath) return;
+  try {
+    unlinkSync(filePath);
+  } catch {
+    // Best-effort cleanup for temp context files.
+  }
+}
+
+function resolvePiBinPathLocal(): string | null {
+  const envBin = process.env.PI_BIN?.trim();
+  if (envBin) return envBin;
+
+  const whichCommand = process.platform === 'win32' ? 'where' : 'which';
+  const result = spawnSync(whichCommand, ['pi'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+  });
+
+  if (result.status !== 0) return null;
+  const output = result.stdout.trim().split(/\r?\n/).find(Boolean);
+  return output || null;
+}
+
+function resolvePiBinPath(preferred?: string | null): string {
+  return preferred || resolvePiBinPathLocal() || 'pi';
+}
+
+function parsePiVersion(output: string): string | null {
+  const match = output.match(/(\d+\.\d+\.\d+)/);
+  return match ? match[1] : null;
+}
+
+function detectPi(): PiStatus {
+  const binPath = resolvePiBinPathLocal();
+  if (!binPath) {
+    return { piInstalled: false, piVersion: null, piBinPath: null };
   }
 
-  // --no-postgres: skip managed Postgres, require DATABASE_URL
-  if (noPostgres && !process.env.DATABASE_URL) {
-    console.error('DATABASE_URL required when --no-postgres is set');
-    process.exit(1);
+  const result = spawnSync(binPath, ['--version'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+  });
+
+  if (result.status !== 0) {
+    return { piInstalled: false, piVersion: null, piBinPath: null };
   }
 
-  // --dry-run: validate config and exit without starting servers
-  if (dryRun) {
-    console.log(`rorca v${pkg.version} — dry-run mode`);
-    console.log(`  Port: ${portNum}`);
-    const dbUrl = process.env.DATABASE_URL || '(managed Postgres will be provisioned)';
-    console.log(`  DATABASE_URL: ${dbUrl.replace(/\/\/[^@]*@/, '//***@')}`);
-    const rorcaHome = join(homedir(), '.rorca');
-    console.log(`  Config dir: ${rorcaHome}`);
-    console.log('Config OK — dry-run complete.');
-    process.exit(0);
+  return {
+    piInstalled: true,
+    piVersion: parsePiVersion(result.stdout),
+    piBinPath: binPath,
+  };
+}
+
+function resolveClaudeBinPathLocal(): string | null {
+  const envBin = process.env.CLAUDE_BIN?.trim();
+  if (envBin) return envBin;
+
+  const whichCommand = process.platform === 'win32' ? 'where' : 'which';
+  const result = spawnSync(whichCommand, ['claude'], {
+    stdio: ['ignore', 'pipe', 'ignore'],
+    encoding: 'utf8',
+    shell: process.platform === 'win32',
+  });
+
+  if (result.status !== 0) return null;
+  const output = result.stdout.trim().split(/\r?\n/).find(Boolean);
+  return output || null;
+}
+
+function checkMcpTokenFile(tokenPath: string): { exists: boolean; modeOk: boolean; mode: string | null } {
+  if (!existsSync(tokenPath)) {
+    return { exists: false, modeOk: false, mode: null };
+  }
+
+  if (process.platform === 'win32') {
+    return { exists: true, modeOk: true, mode: null };
+  }
+
+  const mode = (statSync(tokenPath).mode & 0o777).toString(8).padStart(3, '0');
+  return { exists: true, modeOk: mode === '600', mode };
+}
+
+function hasInteractiveTty(): boolean {
+  return Boolean(process.stdout.isTTY && process.stdin.isTTY);
+}
+
+function detectPreferredPiInstallMethod(): keyof typeof PI_INSTALL_METHODS {
+  const userAgent = process.env.npm_config_user_agent?.toLowerCase() ?? '';
+  if (userAgent.startsWith('bun/')) return 'bun';
+  if (userAgent.startsWith('pnpm/')) return 'pnpm';
+  return 'npm';
+}
+
+function getShellRcPath(): string {
+  const shell = process.env.SHELL ?? '';
+  if (shell.includes('fish')) return '~/.config/fish/config.fish';
+  if (shell.includes('bash')) return '~/.bashrc';
+  return '~/.zshrc';
+}
+
+function printPiPathTroubleshooting(): void {
+  const shellRcPath = getShellRcPath();
+  console.error(red('✗ Pi installation completed but binary not on PATH.'));
+  console.error('');
+  console.error("This usually means npm's global bin directory is not in your PATH.");
+  console.error('Try:');
+  console.error('  npm config get prefix');
+  if (shellRcPath.endsWith('config.fish')) {
+    console.error(`  echo 'fish_add_path \"<prefix>/bin\"' >> ${shellRcPath}`);
+  } else {
+    console.error(`  echo 'export PATH=\"<prefix>/bin:$PATH\"' >> ${shellRcPath}`);
+  }
+  console.error(`  source ${shellRcPath}`);
+}
+
+function printPiMissingInstructions(extra?: { includeAutoInstallHint?: boolean }): void {
+  console.error('Pi binary not found.');
+  console.error('');
+  console.error('Rorca uses pi (https://github.com/mariozechner/pi) as its execution engine.');
+  console.error('');
+  printPiInstallMethods();
+  if (extra?.includeAutoInstallHint) {
+    console.error('');
+    console.error('Non-interactive shell detected. Re-run with --auto-install-pi to install automatically.');
+  }
+}
+
+function splitInstallCommand(command: string): { cmd: string; args: string[] } {
+  if (command === PI_INSTALL_METHODS.npm) {
+    return { cmd: 'npm', args: ['install', '-g', '@mariozechner/pi-coding-agent'] };
+  }
+  if (command === PI_INSTALL_METHODS.pnpm) {
+    return { cmd: 'pnpm', args: ['add', '-g', '@mariozechner/pi-coding-agent'] };
+  }
+  if (command === PI_INSTALL_METHODS.bun) {
+    return { cmd: 'bun', args: ['add', '-g', '@mariozechner/pi-coding-agent'] };
+  }
+  if (command === PI_INSTALL_METHODS.curl) {
+    return { cmd: 'sh', args: ['-c', command] };
+  }
+  throw new Error(`Unsupported pi install command: ${command}`);
+}
+
+async function promptForPiInstallMethod(): Promise<keyof typeof PI_INSTALL_METHODS | 'skip'> {
+  const defaultMethod = detectPreferredPiInstallMethod();
+  const defaultChoice = defaultMethod === 'npm' ? '1' : defaultMethod === 'pnpm' ? '2' : '3';
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  try {
+    console.log('Pi binary not found.');
+    console.log('');
+    console.log('Rorca uses pi (https://github.com/mariozechner/pi) as its execution engine.');
+    console.log('');
+    console.log('Install pi now?');
+    console.log(`  [1] ${PI_INSTALL_METHODS.npm}${defaultChoice === '1' ? ' (default)' : ''}`);
+    console.log(`  [2] ${PI_INSTALL_METHODS.pnpm}${defaultChoice === '2' ? ' (default)' : ''}`);
+    console.log(`  [3] ${PI_INSTALL_METHODS.bun}${defaultChoice === '3' ? ' (default)' : ''}`);
+    console.log(`  [4] ${PI_INSTALL_METHODS.curl}`);
+    console.log("  [5] Skip — I'll install it manually");
+    console.log('');
+
+    const rawChoice = await rl.question(`Choice [1-5] (default ${defaultChoice}): `);
+    const choice = rawChoice.trim() || defaultChoice;
+
+    if (choice === '1') return 'npm';
+    if (choice === '2') return 'pnpm';
+    if (choice === '3') return 'bun';
+    if (choice === '4') return 'curl';
+    if (choice === '5') return 'skip';
+
+    console.log(yellow(`Unrecognized choice "${choice}". Using default option ${defaultChoice}.`));
+    return defaultMethod;
+  } finally {
+    rl.close();
+  }
+}
+
+async function confirmCurlInstall(): Promise<boolean> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  try {
+    console.log(PI_INSTALL_SCRIPT_URL);
+    const answer = await rl.question(`Run curl install script from pi.mariozechner.com? [y/N]: `);
+    return answer.trim().toLowerCase() === 'y';
+  } finally {
+    rl.close();
+  }
+}
+
+async function executePiInstall(
+  method: keyof typeof PI_INSTALL_METHODS,
+): Promise<{ ok: boolean; skipped?: boolean }> {
+  const command = PI_INSTALL_METHODS[method];
+  const { cmd, args } = splitInstallCommand(command);
+
+  if (method === 'curl') {
+    const confirmed = await confirmCurlInstall();
+    if (!confirmed) {
+      console.log(yellow(`Skipped pi install. Runs will fail until pi is installed: ${PI_INSTALL_SCRIPT_URL}`));
+      return { ok: true, skipped: true };
+    }
+  }
+
+  try {
+    await execa(cmd, args, { stdio: 'inherit', shell: process.platform === 'win32' });
+  } catch (error: unknown) {
+    const timestamp = new Date().toISOString();
+    const exitCode = typeof error === 'object' && error !== null && 'exitCode' in error
+      ? String((error as { exitCode?: number }).exitCode ?? 'unknown')
+      : 'unknown';
+    const shortMessage = error instanceof Error
+      ? error.message.split('\n')[0]
+      : 'Unknown error';
+
+    console.error(red(`Pi installation failed: ${shortMessage}. See output above.`));
+    console.error(dim(`[debug ${timestamp}] command="${cmd} ${args.join(' ')}" exitCode=${exitCode}`));
+    return { ok: false };
+  }
+
+  const status = detectPi();
+  if (!status.piInstalled) {
+    printPiPathTroubleshooting();
+    return { ok: false };
+  }
+
+  return { ok: true };
+}
+
+async function ensurePiInstalled(options?: { autoInstall?: boolean }): Promise<{ ok: boolean; skipped?: boolean }> {
+  const status = detectPi();
+  if (status.piInstalled) {
+    return { ok: true };
+  }
+
+  if (options?.autoInstall) {
+    return executePiInstall('npm');
+  }
+
+  if (!hasInteractiveTty()) {
+    printPiMissingInstructions({ includeAutoInstallHint: true });
+    return { ok: false };
+  }
+
+  const method = await promptForPiInstallMethod();
+  if (method === 'skip') {
+    console.log(yellow(`Runs will fail until pi is installed: ${PI_INSTALL_SCRIPT_URL}`));
+    return { ok: true, skipped: true };
+  }
+
+  return executePiInstall(method);
+}
+
+function buildRorcaPiMcpExtension(mcpUrl: string): string {
+  const escapedUrl = JSON.stringify(mcpUrl);
+  return `import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
+
+type JsonSchema = {
+  type?: string;
+  description?: string;
+  properties?: Record<string, JsonSchema>;
+  required?: string[];
+  items?: JsonSchema;
+  enum?: unknown[];
+  anyOf?: JsonSchema[];
+  oneOf?: JsonSchema[];
+};
+
+type McpTool = {
+  name: string;
+  description?: string;
+  inputSchema?: JsonSchema;
+};
+
+const MCP_URL = process.env.RORCA_PI_MCP_URL || ${escapedUrl};
+const MCP_TOKEN = process.env.RORCA_PI_MCP_TOKEN || "";
+const PROTOCOL_VERSION = "2024-11-05";
+let requestId = 0;
+
+function nextId(): number {
+  requestId += 1;
+  return requestId;
+}
+
+async function mcpPost(method: string, params: Record<string, unknown>, sessionId?: string, signal?: AbortSignal) {
+  const response = await fetch(MCP_URL, {
+    method: "POST",
+    headers: {
+      "Content-Type": "application/json",
+      "Accept": "application/json",
+      ...(MCP_TOKEN ? { "Authorization": \`Bearer \${MCP_TOKEN}\` } : {}),
+      ...(sessionId ? { "mcp-session-id": sessionId } : {}),
+    },
+    body: JSON.stringify({
+      jsonrpc: "2.0",
+      id: nextId(),
+      method,
+      params,
+    }),
+    signal,
+  });
+
+  if (!response.ok) {
+    const body = await response.text();
+    throw new Error(\`\${method} failed (\${response.status}): \${body}\`);
+  }
+
+  const payload = await response.json() as {
+    result?: Record<string, unknown>;
+    error?: { message?: string };
+  };
+
+  if (payload.error?.message) {
+    throw new Error(payload.error.message);
+  }
+
+  return {
+    sessionId: response.headers.get("mcp-session-id") || sessionId || "",
+    result: payload.result || {},
+  };
+}
+
+async function initializeBridge(signal?: AbortSignal): Promise<{ sessionId: string; tools: McpTool[] }> {
+  const init = await mcpPost("initialize", {
+    protocolVersion: PROTOCOL_VERSION,
+    capabilities: {},
+    clientInfo: {
+      name: "rorca-pi-bridge",
+      version: "0.1.0",
+    },
+  }, undefined, signal);
+
+  if (!init.sessionId) {
+    throw new Error("MCP server did not return a session id");
+  }
+
+  const tools: McpTool[] = [];
+  let cursor: string | undefined;
+  for (;;) {
+    const listed = await mcpPost("tools/list", cursor ? { cursor } : {}, init.sessionId, signal);
+    const pageTools = Array.isArray(listed.result.tools) ? listed.result.tools as McpTool[] : [];
+    tools.push(...pageTools);
+    const nextCursor = typeof listed.result.nextCursor === "string" ? listed.result.nextCursor : undefined;
+    if (!nextCursor) break;
+    cursor = nextCursor;
+  }
+
+  return {
+    sessionId: init.sessionId,
+    tools,
+  };
+}
+
+function schemaToType(schema: JsonSchema | undefined, required: boolean) {
+  const value = (() => {
+    if (!schema) {
+      return Type.Any();
+    }
+
+    if (Array.isArray(schema.anyOf) && schema.anyOf.length > 0) {
+      return Type.Any({ description: schema.description });
+    }
+
+    if (Array.isArray(schema.oneOf) && schema.oneOf.length > 0) {
+      return Type.Any({ description: schema.description });
+    }
+
+    if (Array.isArray(schema.enum) && schema.enum.length === 1) {
+      return Type.Literal(typeof schema.enum[0] === "string" ? schema.enum[0] : String(schema.enum[0]), schema.description ? { description: schema.description } : {});
+    }
+
+    if (Array.isArray(schema.enum) && schema.enum.length > 1) {
+      return Type.Union(
+        schema.enum.map((entry) => Type.Literal(typeof entry === "string" ? entry : String(entry))),
+        schema.description ? { description: schema.description } : {},
+      );
+    }
+
+    if (schema.type === "number" || schema.type === "integer") {
+      return Type.Number(schema.description ? { description: schema.description } : {});
+    }
+
+    if (schema.type === "boolean") {
+      return Type.Boolean(schema.description ? { description: schema.description } : {});
+    }
+
+    if (schema.type === "array") {
+      return Type.Array(schemaToType(schema.items, true), schema.description ? { description: schema.description } : {});
+    }
+
+    if (schema.type === "object" || schema.properties) {
+      const requiredKeys = new Set(schema.required || []);
+      const properties = Object.fromEntries(
+        Object.entries(schema.properties || {}).map(([key, child]) => [key, schemaToType(child, requiredKeys.has(key))]),
+      );
+      return Type.Object(properties, schema.description ? { description: schema.description } : {});
+    }
+
+    return Type.String(schema.description ? { description: schema.description } : {});
+  })();
+
+  return required ? value : Type.Optional(value);
+}
+
+function buildParametersSchema(tool: McpTool) {
+  const schema = tool.inputSchema;
+  const requiredKeys = new Set(schema?.required || []);
+  const properties = Object.fromEntries(
+    Object.entries(schema?.properties || {}).map(([key, child]) => [key, schemaToType(child, requiredKeys.has(key))]),
+  );
+  return Type.Object(properties);
+}
+
+function formatToolResult(result: Record<string, unknown>): string {
+  const content = Array.isArray(result.content) ? result.content : [];
+  const textParts = content
+    .filter((item): item is { type: string; text?: string } => Boolean(item) && typeof item === "object")
+    .map((item) => item.type === "text" && typeof item.text === "string" ? item.text : JSON.stringify(item, null, 2))
+    .filter(Boolean);
+
+  if (textParts.length > 0) {
+    return textParts.join("\\n\\n");
+  }
+
+  return JSON.stringify(result, null, 2);
+}
+
+export default function rorcaPiBridge(pi: ExtensionAPI) {
+  let bridgePromise: Promise<{ sessionId: string; tools: McpTool[] }> | null = null;
+  let sessionId: string | null = null;
+  const registeredTools = new Set<string>();
+
+  async function getBridge(signal?: AbortSignal) {
+    if (!bridgePromise) {
+      bridgePromise = initializeBridge(signal);
+    }
+    const bridge = await bridgePromise;
+    sessionId = bridge.sessionId;
+    return bridge;
+  }
+
+  function registerBridgeTool(tool: McpTool) {
+    if (registeredTools.has(tool.name)) return;
+    registeredTools.add(tool.name);
+
+    pi.registerTool({
+      name: tool.name,
+      label: tool.name,
+      description: tool.description || \`Rorca MCP tool: \${tool.name}\`,
+      parameters: buildParametersSchema(tool),
+      async execute(_toolCallId, params, signal) {
+        const bridge = await getBridge(signal);
+        const response = await mcpPost("tools/call", {
+          name: tool.name,
+          arguments: params,
+        }, bridge.sessionId, signal);
+
+        const result = response.result as Record<string, unknown>;
+        return {
+          content: [{ type: "text", text: formatToolResult(result) }],
+          details: {
+            bridge: "rorca-mcp",
+            tool: tool.name,
+          },
+        };
+      },
+    });
+  }
+
+  pi.on("session_start", async (_event, ctx) => {
+    try {
+      const bridge = await getBridge();
+      for (const tool of bridge.tools) {
+        registerBridgeTool(tool);
+      }
+      ctx.ui.setStatus("rorca-mcp", \`Rorca MCP: \${bridge.tools.length} tools\`);
+      ctx.ui.notify(\`Loaded \${bridge.tools.length} Rorca MCP tools from \${MCP_URL}\`, "success");
+    } catch (error) {
+      const message = error instanceof Error ? error.message : String(error);
+      ctx.ui.setStatus("rorca-mcp", "Rorca MCP: unavailable");
+      ctx.ui.notify(\`Failed to load Rorca MCP bridge: \${message}\`, "error");
+    }
+  });
+
+  pi.registerCommand("rorca-mcp-status", {
+    description: "Show Rorca MCP bridge status",
+    handler: async (_args, ctx) => {
+      try {
+        const bridge = await getBridge();
+        for (const tool of bridge.tools) {
+          registerBridgeTool(tool);
+        }
+        ctx.ui.notify(\`Rorca MCP bridge healthy: \${bridge.tools.length} tools from \${MCP_URL}\`, "success");
+      } catch (error) {
+        const message = error instanceof Error ? error.message : String(error);
+        ctx.ui.notify(\`Rorca MCP bridge unavailable: \${message}\`, "error");
+      }
+    },
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (!sessionId) return;
+    try {
+      await fetch(MCP_URL, {
+        method: "DELETE",
+        headers: { "mcp-session-id": sessionId },
+      });
+    } catch {
+      // Best effort cleanup for server-side MCP sessions.
+    }
+  });
+}
+`;
+}
+
+async function fetchBackendHealth(options?: { skipVersionCheck?: boolean }): Promise<HealthResponse> {
+  return fetchJson<HealthResponse>('/api/health', undefined, 30_000, options);
+}
+
+async function runMcpToken(options: { admin?: boolean } = {}): Promise<number> {
+  const tokens = ensureMcpToken();
+  console.log(options.admin ? tokens.adminToken : tokens.publicToken);
+  return 0;
+}
+
+async function runMcpStatus(): Promise<number> {
+  const publicTokenStatus = checkMcpTokenFile(getMcpPublicTokenPath());
+  const adminTokenStatus = checkMcpTokenFile(getMcpAdminTokenPath());
+  const backendHealth = await fetchBackendHealth({ skipVersionCheck: true }).catch(() => null);
+  const toolCount = await fetchJson<McpToolsResponse>('/api/mcp/tools')
+    .then((data) => data.tools.length)
+    .catch(() => null);
+
+  if (!publicTokenStatus.exists) {
+    console.log(`${red('ERR')} MCP public token file: missing`);
+  } else if (!publicTokenStatus.modeOk) {
+    console.log(`${yellow('WARN')} MCP public token file: mode ${publicTokenStatus.mode}, expected 600`);
+  } else {
+    console.log(`${green('OK')} MCP public token file: ~/.rorca/mcp-token (mode 600)`);
+  }
+
+  if (!adminTokenStatus.exists) {
+    console.log(`${red('ERR')} MCP admin token file: missing`);
+  } else if (!adminTokenStatus.modeOk) {
+    console.log(`${yellow('WARN')} MCP admin token file: mode ${adminTokenStatus.mode}, expected 600`);
+  } else {
+    console.log(`${green('OK')} MCP admin token file: ~/.rorca/mcp-admin-token (mode 600)`);
+  }
+
+  if (!backendHealth) {
+    console.log(`${red('ERR')} MCP server: unreachable at ${API_BASE}/mcp`);
+  } else if (backendHealth.mcp?.enabled) {
+    console.log(`${green('OK')} MCP server: ${backendHealth.mcp.url}`);
+  } else {
+    console.log(`${yellow('WARN')} MCP server: disabled`);
+  }
+
+  if (toolCount == null) {
+    console.log(`${yellow('WARN')} MCP tools: unavailable`);
+  } else {
+    console.log(`${green('OK')} MCP tools: ${toolCount} registered`);
+  }
+
+  return !publicTokenStatus.exists || !adminTokenStatus.exists || !backendHealth ? 1 : 0;
+}
+
+async function runMcpSetupClaude(options: { admin?: boolean } = {}): Promise<number> {
+  const claudeBin = resolveClaudeBinPathLocal();
+  if (!claudeBin) {
+    throw new Error('Claude CLI not found. Set CLAUDE_BIN or install `claude` first.');
+  }
+
+  const tokens = ensureMcpToken();
+  const token = options.admin ? tokens.adminToken : tokens.publicToken;
+  await runCommand(claudeBin, ['mcp', 'remove', 'rorca'], { stdio: 'pipe' });
+  const add = await runCommand(claudeBin, [
+    'mcp',
+    'add',
+    'rorca',
+    'http://localhost:3030/mcp',
+    '--header',
+    `Authorization: Bearer ${token}`,
+  ], { stdio: 'inherit' });
+
+  if (add.code !== 0) {
+    return add.code;
+  }
+
+  console.log(`Claude MCP configured for Rorca (${options.admin ? 'admin' : 'public'} token).`);
+  return 0;
+}
+
+async function runMcpRotateToken(options: { public?: boolean; admin?: boolean; all?: boolean } = {}): Promise<number> {
+  if (!hasInteractiveTty()) {
+    console.error('Rotate token requires an interactive TTY confirmation.');
+    return 1;
+  }
+
+  const selectedModes = [options.public, options.admin, options.all].filter(Boolean).length;
+  if (selectedModes > 1) {
+    console.error('Choose only one of --public, --admin, or --all.');
+    return 1;
+  }
+
+  const rotateTarget = options.all ? 'all' : options.admin ? 'admin' : 'public';
+
+  const rl = readline.createInterface({
+    input: process.stdin,
+    output: process.stdout,
+  });
+
+  try {
+    const answer = (await rl.question(`Rotate ${rotateTarget} token${rotateTarget === 'all' ? 's' : ''}? Existing MCP clients will need re-setup. [y/N] `)).trim().toLowerCase();
+    if (answer !== 'y' && answer !== 'yes') {
+      console.log('Token rotation cancelled.');
+      return 1;
+    }
+  } finally {
+    rl.close();
+  }
+
+  const rotated = rotateTarget === 'all'
+    ? rotateMcpToken('all')
+    : rotateTarget === 'admin'
+      ? rotateMcpToken('admin')
+      : rotateMcpToken('public');
+  if (typeof rotated === 'string') {
+    console.log(rotated);
+  } else {
+    console.log(JSON.stringify(rotated, null, 2));
+  }
+  if (rotateTarget === 'public') {
+    console.log('Public token rotated. Existing ~/.rorca/mcp-token consumers keep public-tier access only.');
+    console.log('Run `rorca mcp setup-claude` to re-link Claude to the new public token.');
+  } else if (rotateTarget === 'admin') {
+    console.log('Admin token rotated.');
+    console.log('Run `rorca mcp setup-claude --admin` to re-link Claude to the new admin token.');
+  } else {
+    console.log('Public and admin tokens rotated. Existing ~/.rorca/mcp-token consumers remain public-tier only.');
+    console.log('Run `rorca mcp setup-claude` and/or `rorca mcp setup-claude --admin` to re-link clients.');
+  }
+  return 0;
+}
+
+function appendUniquePath(paths: string[], candidate: string | undefined): void {
+  if (!candidate) return;
+  if (!paths.includes(candidate)) {
+    paths.push(candidate);
+  }
+}
+
+function getClaudeDesktopConfigPaths(): string[] {
+  const paths: string[] = [];
+  appendUniquePath(paths, path.join(homedir(), 'Library', 'Application Support', 'Claude', 'claude_desktop_config.json'));
+  appendUniquePath(paths, path.join(homedir(), '.config', 'Claude', 'claude_desktop_config.json'));
+  if (process.env.APPDATA) {
+    appendUniquePath(paths, path.join(process.env.APPDATA, 'Claude', 'claude_desktop_config.json'));
+  }
+  return paths;
+}
+
+function getVsCodeSettingsPaths(): string[] {
+  const paths: string[] = [];
+  appendUniquePath(paths, path.join(homedir(), 'Library', 'Application Support', 'Code', 'User', 'settings.json'));
+  appendUniquePath(paths, path.join(homedir(), '.config', 'Code', 'User', 'settings.json'));
+  if (process.env.APPDATA) {
+    appendUniquePath(paths, path.join(process.env.APPDATA, 'Code', 'User', 'settings.json'));
+  }
+  return paths;
+}
+
+function configTargetsRorcaMcp(serverConfig: unknown): boolean {
+  if (!serverConfig || typeof serverConfig !== 'object') {
+    return false;
+  }
+
+  const serialized = JSON.stringify(serverConfig).toLowerCase();
+  return serialized.includes('/mcp')
+    && (
+      serialized.includes('localhost:3030')
+      || serialized.includes('127.0.0.1:3030')
+      || serialized.includes('rorca_api_url')
+    );
+}
+
+function configHasBearerHeader(serverConfig: unknown): boolean {
+  if (!serverConfig || typeof serverConfig !== 'object') {
+    return false;
+  }
+
+  const serialized = JSON.stringify(serverConfig);
+  return serialized.includes('Authorization: Bearer')
+    || serialized.includes('"Authorization":"Bearer ')
+    || serialized.includes('"authorization":"Bearer ');
+}
+
+function collectSectionFindings(
+  section: unknown,
+  client: string,
+  configPath: string,
+  issue: string,
+  fix: string,
+): McpClientFinding[] {
+  if (!section || typeof section !== 'object') {
+    return [];
+  }
+
+  const findings: McpClientFinding[] = [];
+  for (const [serverName, serverConfig] of Object.entries(section as Record<string, unknown>)) {
+    if (!configTargetsRorcaMcp(serverConfig)) {
+      continue;
+    }
+    if (configHasBearerHeader(serverConfig)) {
+      continue;
+    }
+    findings.push({
+      client,
+      configPath,
+      serverName,
+      issue,
+      fix,
+    });
+  }
+
+  return findings;
+}
+
+function inspectJsonConfig(
+  filePath: string,
+  inspector: (parsed: unknown, filePath: string) => McpClientFinding[],
+): { findings: McpClientFinding[]; parseError?: string } {
+  try {
+    const raw = readFileSync(filePath, 'utf8');
+    const parsed = JSON.parse(raw) as unknown;
+    return { findings: inspector(parsed, filePath) };
+  } catch (error) {
+    const message = error instanceof Error ? error.message : String(error);
+    return { findings: [], parseError: message };
+  }
+}
+
+async function runMcpDiagnoseClients(): Promise<number> {
+  const findings: McpClientFinding[] = [];
+  const parseWarnings: string[] = [];
+
+  for (const configPath of getClaudeDesktopConfigPaths()) {
+    if (!existsSync(configPath)) continue;
+    const result = inspectJsonConfig(configPath, (parsed, filePath) => collectSectionFindings(
+      (parsed as { mcpServers?: unknown }).mcpServers,
+      'Claude Desktop',
+      filePath,
+      'Claude Desktop MCP HTTP configs that relied on the removed OAuth probe will fail. Rorca is Bearer-only now.',
+      'Use Claude Code CLI instead: `rorca mcp setup-claude` or `claude mcp add rorca http://localhost:3030/mcp --header \'Authorization: Bearer <token>\'`.',
+    ));
+    findings.push(...result.findings);
+    if (result.parseError) {
+      parseWarnings.push(`Claude Desktop config unreadable: ${configPath} (${result.parseError})`);
+    }
+  }
+
+  for (const configPath of getVsCodeSettingsPaths()) {
+    if (!existsSync(configPath)) continue;
+    const result = inspectJsonConfig(configPath, (parsed, filePath) => collectSectionFindings(
+      (parsed as { ['mcp.servers']?: unknown })['mcp.servers'],
+      'VS Code',
+      filePath,
+      'This VS Code MCP server points at Rorca /mcp without an Authorization Bearer header.',
+      'Add an `Authorization: Bearer <token>` header to that server entry. Use `rorca mcp token` for public access or `rorca mcp token --admin` for admin access.',
+    ));
+    findings.push(...result.findings);
+    if (result.parseError) {
+      parseWarnings.push(`VS Code settings unreadable: ${configPath} (${result.parseError})`);
+    }
+  }
+
+  if (findings.length === 0 && parseWarnings.length === 0) {
+    console.log('No broken MCP client configs detected.');
+    console.log('Rorca MCP is Bearer-only. Use `rorca mcp setup-claude` for Claude Code CLI.');
+    return 0;
+  }
+
+  if (findings.length > 0) {
+    console.log('Potentially broken MCP client configs:');
+    for (const finding of findings) {
+      console.log('');
+      console.log(`[${finding.client}] ${finding.serverName}`);
+      console.log(`Config: ${finding.configPath}`);
+      console.log(`Issue: ${finding.issue}`);
+      console.log(`Fix: ${finding.fix}`);
+    }
+  }
+
+  if (parseWarnings.length > 0) {
+    console.log('');
+    console.log('Unreadable config files:');
+    for (const warning of parseWarnings) {
+      console.log(`- ${warning}`);
+    }
+  }
+
+  return findings.length > 0 ? 1 : 0;
+}
+
+async function spawnInteractivePi(piBinPath: string, args: string[], env?: NodeJS.ProcessEnv): Promise<number> {
+  return new Promise((resolve, reject) => {
+    const child = spawn(piBinPath, args, {
+      env: env ? { ...process.env, ...env } : process.env,
+      stdio: 'inherit',
+      shell: process.platform === 'win32',
+    });
+
+    const forwardSignal = (signal: NodeJS.Signals) => {
+      if (!child.killed) {
+        child.kill(signal);
+      }
+    };
+
+    process.on('SIGINT', forwardSignal);
+    process.on('SIGTERM', forwardSignal);
+
+    child.on('error', (error) => {
+      process.removeListener('SIGINT', forwardSignal);
+      process.removeListener('SIGTERM', forwardSignal);
+      reject(error);
+    });
+
+    child.on('close', (code: number | null) => {
+      process.removeListener('SIGINT', forwardSignal);
+      process.removeListener('SIGTERM', forwardSignal);
+      resolve(code ?? 1);
+    });
+  });
+}
+
+async function runChat(options: { model?: string; workspaceId?: string }): Promise<number> {
+  let workspaceName = options.workspaceId ?? 'default';
+  let tempSkillFile: string | null = null;
+  let tempExtensionFile: string | null = null;
+  const tokens = ensureMcpToken();
+  const health = await fetchBackendHealth().catch((error) => {
+    const message = error instanceof Error ? error.message : String(error);
+    throw new Error(`Rorca backend is required for pi MCP bridge. Start \`npm run dev\` or \`rorca start\` first. (${message})`);
+  });
+
+  if (!health.piInstalled) {
+    printPiInstallMethods();
+    throw new Error('Pi CLI is not installed.');
+  }
+
+  if (!health.piBinPath && !resolvePiBinPathLocal()) {
+    printPiInstallMethods();
+    throw new Error('Pi CLI binary path could not be resolved.');
+  }
+
+  if (!health.mcp?.enabled || health.mcp.status !== 'healthy' || !health.mcp.url) {
+    const detail = health.mcp?.status === 'disabled'
+      ? 'MCP is disabled in the backend (`RORCA_SERVE_MCP=false`).'
+      : 'MCP bridge is not reachable from the backend.';
+    throw new Error(`Rorca MCP bridge is required for \`rorca chat\`. ${detail} Start \`npm run dev\` or \`rorca start\` with MCP enabled first.`);
+  }
+
+  try {
+    const workspace = options.workspaceId
+      ? await getWorkspaceById(options.workspaceId)
+      : await getDefaultWorkspace();
+    workspaceName = workspace.label || workspace.id;
+
+    const direction = await fetchJson<DirectionSynthesizeResponse>('/api/direction/synthesize', {
+      method: 'POST',
+      body: JSON.stringify({
+        workspaceId: workspace.id,
+      }),
+    });
+
+    tempSkillFile = path.join(tmpdir(), `rorca-chat-context-${Date.now()}-${process.pid}.md`);
+    writeFileSync(tempSkillFile, `${direction.synthesized.trim()}\n`, 'utf8');
+    tempExtensionFile = path.join(tmpdir(), `rorca-pi-mcp-bridge-${Date.now()}-${process.pid}.ts`);
+    writeFileSync(tempExtensionFile, buildRorcaPiMcpExtension(health.mcp.url), 'utf8');
+  } catch (error) {
+    if (isBackendUnavailableError(error)) {
+      throw new Error('Rorca backend is required for `rorca chat`. Start `npm run dev` or `rorca start` first.');
+    }
+    throw error;
+  }
+
+  const args = [
+    ...(tempSkillFile ? ['--skill', tempSkillFile] : []),
+    ...(tempExtensionFile ? ['--extension', tempExtensionFile] : []),
+    ...(options.model ? ['--model', options.model] : []),
+  ];
+
+  console.log('─── Rorca Chat ───────────────────────────────────────────────');
+  console.log(
+    `Workspace: ${workspaceName}  Agent: pi  Model: ${options.model ?? 'default'}  Context: ${tempSkillFile ? 'L1-L5 injected' : 'not injected'}  MCP: ${health.mcp.url}`,
+  );
+  console.log('─────────────────────────────────────────────────────────────');
+
+  try {
+    return await spawnInteractivePi(resolvePiBinPath(health.piBinPath), args, {
+      RORCA_PI_MCP_TOKEN: tokens.adminToken,
+    });
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === 'ENOENT') {
+      printPiInstallMethods();
+    }
+    throw error;
+  } finally {
+    cleanupTempFile(tempSkillFile);
+    cleanupTempFile(tempExtensionFile);
+    console.log('Chat session ended');
+  }
+}
+
+async function resolveApprovedSpec(specSlug: string): Promise<{ workspace: Workspace; spec: ArchiveSpec }> {
+  const workspaces = await getWorkspaces();
+  if (workspaces.length === 0) {
+    throw new Error('No workspaces registered. Add one in the UI first.');
+  }
+
+  const matches: Array<{ workspace: Workspace; spec: ArchiveSpec }> = [];
+  for (const workspace of workspaces) {
+    const specs = await fetchJson<PaginatedResponse<ArchiveSpec>>(
+      `/api/specs?workspaceId=${encodeURIComponent(workspace.id)}&status=approved`,
+    );
+    const match = specs.items.find((spec) => spec.id === specSlug);
+    if (match) {
+      matches.push({ workspace, spec: match });
+    }
+  }
+
+  if (matches.length === 0) {
+    throw new Error(`Approved spec "${specSlug}" not found.`);
+  }
+
+  if (matches.length > 1) {
+    throw new Error(
+      `Spec slug "${specSlug}" exists in multiple workspaces: ${matches.map((match) => match.workspace.id).join(', ')}.`,
+    );
+  }
+
+  return matches[0];
+}
+
+async function ensureFrontendBuild(): Promise<void> {
+  if (existsSync(path.join(DIST_DIR, 'index.html'))) {
     return;
   }
 
-  // Ensure ~/.rorca/ config directory exists
-  const rorcaHome = join(homedir(), '.rorca');
-  if (!existsSync(rorcaHome)) {
-    mkdirSync(rorcaHome, { recursive: true });
-    console.log(`Created config directory: ${rorcaHome}`);
+  console.log('Building frontend bundle...');
+  const result = await runCommand('npm', ['run', 'build'], {
+    cwd: ROOT_DIR,
+    stdio: 'inherit',
+  });
+  if (result.code !== 0) {
+    throw new Error('Build failed.');
   }
+}
 
-  // ── Postgres provisioning ──
-  // If DATABASE_URL is already set and reachable, use it as-is (user-provided).
-  // Otherwise, provision and start a managed Postgres instance.
-  // --no-postgres skips provisioning entirely.
-  let managedPostgresStarted = false;
-  let databaseUrl = process.env.DATABASE_URL || '';
-
-  if (noPostgres || databaseUrl) {
-    // User provided DATABASE_URL (or --no-postgres requires it) — check if it's reachable
-    const urlObj = parsePostgresUrl(databaseUrl);
-    if (urlObj && await tcpReachable(urlObj.host, urlObj.port, 3000)) {
-      console.log(`Using user-provided DATABASE_URL (${urlObj.host}:${urlObj.port})`);
-    } else {
-      console.error(`Cannot reach Postgres at user-provided DATABASE_URL`);
-      console.error(`  DATABASE_URL: ${databaseUrl.replace(/\/\/[^@]*@/, '//***@')}`);
-      process.exit(1);
-    }
+async function startServer(options: { port: number; host: string; noDb: boolean }): Promise<void> {
+  if (!options.noDb) {
+    await handleDbCommand('start', { quiet: true });
   } else {
-    // No DATABASE_URL — provision managed Postgres
-    const pgDir = await ensurePostgres();
-    await startPostgres(pgDir);
-    managedPostgresStarted = true;
-    databaseUrl = `postgres://rorca:rorca@127.0.0.1:${MANAGED_PG_PORT}/rorca`;
-    process.env.DATABASE_URL = databaseUrl;
-    console.log(`Managed Postgres ready at 127.0.0.1:${MANAGED_PG_PORT}`);
+    console.log('Skipping Docker database sidecar.');
   }
 
-  // Auto-build frontend if dist/ is missing
-  const rootDir = join(__dirname, '..');
-  const distDir = join(rootDir, 'dist');
-  if (!existsSync(join(distDir, 'index.html'))) {
-    console.log('Frontend not built yet — building...');
-    try {
-      execSync('npm run build', { cwd: rootDir, stdio: 'inherit' });
-    } catch {
-      console.error('Build failed. Please run "npm run build" manually and try again.');
-      process.exit(1);
-    }
-  }
+  await ensureFrontendBuild();
 
   const env: NodeJS.ProcessEnv = {
     ...process.env,
-    PORT: String(portNum),
-    DATABASE_URL: databaseUrl,
+    PORT: String(options.port),
+    RORCA_BIND_HOST: options.host,
     RORCA_SERVE_STATIC: '1',
-    RORCA_STATIC_DIR: distDir,
-    RORCA_HOME: rorcaHome,
+    RORCA_STATIC_DIR: DIST_DIR,
     NODE_ENV: process.env.NODE_ENV || 'production',
   };
 
-  const backendDir = join(rootDir, 'backend');
-  const backendEntry = join(backendDir, 'dist', 'server.js');
-  const workerEntry = join(backendDir, 'dist', 'worker.js');
-  const backendTsEntry = join(backendDir, 'src', 'server.ts');
-  const workerTsEntry = join(backendDir, 'src', 'worker.ts');
+  const serverJs = path.join(BACKEND_DIR, 'dist', 'server.js');
+  const workerJs = path.join(BACKEND_DIR, 'dist', 'worker.js');
+  const serverTs = path.join(BACKEND_DIR, 'src', 'server.ts');
+  const workerTs = path.join(BACKEND_DIR, 'src', 'worker.ts');
 
-  type Child = ReturnType<typeof fork> | ReturnType<typeof spawn>;
+  const server = existsSync(serverJs)
+    ? spawnLogged('server', process.execPath, [serverJs], { cwd: BACKEND_DIR, env })
+    : spawnLogged('server', 'npx', ['tsx', serverTs], { cwd: BACKEND_DIR, env });
 
-  /** Spawn a process and prefix each line of its stdout/stderr with a label. */
-  function spawnLabeled(label: string, cmd: string, args: string[], opts: Parameters<typeof spawn>[2]): ReturnType<typeof spawn> {
-    const child = spawn(cmd, args, { ...opts, stdio: ['ignore', 'pipe', 'pipe'] });
-    const prefix = `[${label}] `;
-    const printLine = (stream: NodeJS.WriteStream, line: string) => stream.write(prefix + line + '\n');
-    let buf = '';
-    const onData = (stream: NodeJS.WriteStream) => (chunk: Buffer) => {
-      buf += chunk.toString();
-      const lines = buf.split('\n');
-      buf = lines.pop() ?? '';
-      for (const line of lines) printLine(stream, line);
-    };
-    child.stdout?.on('data', onData(process.stdout));
-    child.stderr?.on('data', onData(process.stderr));
-    child.on('close', () => {
-      if (buf.length > 0) { process.stdout.write(prefix + buf + '\n'); buf = ''; }
-    });
-    return child;
-  }
+  const worker = existsSync(workerJs)
+    ? spawnLogged('worker', process.execPath, [workerJs], { cwd: BACKEND_DIR, env })
+    : spawnLogged('worker', 'npx', ['tsx', workerTs], { cwd: BACKEND_DIR, env });
 
-  let serverChild: Child;
-  let workerChild: Child | null = null;
+  console.log(`Rorca running at http://${options.host}:${options.port}`);
 
-  if (existsSync(backendEntry)) {
-    // Production: compiled JS — server
-    serverChild = fork(backendEntry, [], { env, cwd: backendDir, stdio: 'inherit' });
-  } else if (existsSync(backendTsEntry)) {
-    // Development: run TypeScript source via tsx — server
-    serverChild = spawnLabeled('server', 'npx', ['tsx', backendTsEntry], {
-      env,
-      cwd: backendDir,
-      shell: true,
-    });
-  } else {
-    console.error('Could not find backend entry point. Run "npm run build" first.');
-    if (managedPostgresStarted) stopManagedPostgres();
-    process.exit(1);
-    return; // unreachable — satisfies TypeScript
-  }
-
-  // Spawn worker sibling process
-  if (existsSync(workerEntry)) {
-    // Production: compiled JS — worker
-    workerChild = fork(workerEntry, [], { env, cwd: backendDir, stdio: 'inherit' });
-  } else if (existsSync(workerTsEntry)) {
-    // Development: run TypeScript source via tsx — worker
-    workerChild = spawnLabeled('worker', 'npx', ['tsx', workerTsEntry], {
-      env,
-      cwd: backendDir,
-      shell: true,
-    });
-  } else {
-    console.warn('[startup] worker.ts not found — worker will not start. Pipeline jobs will not be processed.');
-  }
-
-  console.log(`Rorca running at http://localhost:${portNum}`);
-
-  const killAll = (sig: NodeJS.Signals) => {
-    serverChild.kill(sig);
-    workerChild?.kill(sig);
-    if (managedPostgresStarted) stopManagedPostgres();
+  const shutdown = (signal: NodeJS.Signals) => {
+    server.kill(signal);
+    worker.kill(signal);
   };
 
-  serverChild.on('error', (err: Error) => {
-    console.error('[server] Failed to start:', err.message);
-    killAll('SIGTERM');
-    process.exit(1);
+  process.once('SIGINT', () => {
+    shutdown('SIGTERM');
+    process.exit(0);
   });
 
-  serverChild.on('exit', (code: number | null) => {
-    if (code !== 0 && code !== null) {
-      console.error(`[server] exited with code ${code}`);
-    }
-    workerChild?.kill('SIGTERM');
-    if (managedPostgresStarted) stopManagedPostgres();
-    process.exit(code ?? 1);
+  process.once('SIGTERM', () => {
+    shutdown('SIGTERM');
+    process.exit(0);
   });
 
-  workerChild?.on('error', (err: Error) => {
-    console.error('[worker] Failed to start:', err.message);
-    // Worker failure is non-fatal — server keeps running but warn the operator
-    console.error('[worker] Pipeline jobs will not be processed until worker is restarted.');
-  });
-
-  workerChild?.on('exit', (code: number | null) => {
-    if (code !== 0 && code !== null) {
-      console.error(`[worker] exited with code ${code} — pipeline jobs will not be processed`);
-    }
-  });
-
-  // Open browser after short delay to let server bind
-  if (!noOpen) {
-    setTimeout(() => {
-      const url = `http://localhost:${portNum}`;
-      openBrowser(url);
-    }, 1500);
-  }
-
-  // Worker health check: warn once if worker hasn't registered a heartbeat after 10 s
-  setTimeout(() => {
-    void (async () => {
-      try {
-        const res = await fetch(`http://localhost:${portNum}/api/pipeline/worker/health`);
-        if (res.ok) {
-          const data = await res.json() as { workerActive?: boolean };
-          if (!data.workerActive) {
-            console.warn('[startup] Warning: worker not yet active — pipeline jobs may be delayed');
-          }
-        }
-      } catch {
-        // Server may not be ready yet — not an error worth surfacing
-      }
-    })();
-  }, 10_000);
-
-  // Graceful shutdown: stop all child processes + managed Postgres
-  for (const sig of ['SIGINT', 'SIGTERM'] as const) {
-    process.on(sig, () => {
-      killAll(sig);
-      process.exit(0);
-    });
-  }
-}
-
-// ────────────────────────────────────────────────────────────────
-// Embedded Postgres: detect, download, extract
-// ────────────────────────────────────────────────────────────────
-
-const PG_VERSION = '16.6.0';
-
-/** Maps Node.js os.platform()/os.arch() to the Maven artifact platform suffix */
-const PLATFORM_MAP: Record<string, string> = {
-  'darwin-arm64':  'darwin-arm64v8',
-  'darwin-x64':    'darwin-amd64',
-  'linux-x64':     'linux-amd64',
-  'linux-arm64':   'linux-arm64v8',
-  'win32-x64':     'windows-amd64',
-};
-
-type SupportedPlatform = 'darwin-arm64' | 'darwin-x64' | 'linux-x64' | 'linux-arm64' | 'win32-x64';
-
-/**
- * Detect current OS/arch and return the platform key.
- * Throws for unsupported combinations.
- */
-function detectPlatform(): SupportedPlatform {
-  const key = `${platform()}-${arch()}`;
-  if (!(key in PLATFORM_MAP)) {
-    throw new Error(
-      `Unsupported platform: ${key}. ` +
-      `Supported platforms: ${Object.keys(PLATFORM_MAP).join(', ')}`
-    );
-  }
-  return key as SupportedPlatform;
-}
-
-/**
- * Build the Maven Central download URL for the embedded-postgres-binaries jar.
- */
-function buildDownloadUrl(platformKey: SupportedPlatform, version: string): string {
-  const mavenPlatform = PLATFORM_MAP[platformKey];
-  const artifact = `embedded-postgres-binaries-${mavenPlatform}`;
-  return `https://repo1.maven.org/maven2/io/zonky/test/postgres/${artifact}/${version}/${artifact}-${version}.jar`;
-}
-
-function formatBytes(bytes: number): string {
-  if (bytes < 1024) return `${bytes} B`;
-  if (bytes < 1024 * 1024) return `${(bytes / 1024).toFixed(1)} KB`;
-  return `${(bytes / (1024 * 1024)).toFixed(1)} MB`;
-}
-
-const DOWNLOAD_TIMEOUT_MS = 60_000; // 60s with no data = timeout
-
-/**
- * Download a URL to a local file, following redirects, showing progress via \r spinner.
- * Uses only Node.js built-in https/http modules.
- * Times out if no data is received for DOWNLOAD_TIMEOUT_MS.
- */
-function downloadFile(url: string, dest: string): Promise<void> {
-  return new Promise((resolve, reject) => {
-    let rejected = false;
-    const fail = (err: Error) => {
-      if (rejected) return;
-      rejected = true;
-      try { unlinkSync(dest); } catch { /* ignore */ }
-      reject(err);
-    };
-
-    const doRequest = (requestUrl: string, redirectCount: number) => {
-      if (redirectCount > 10) {
-        fail(new Error('Too many redirects'));
+  await new Promise<void>((resolve, reject) => {
+    server.once('error', reject);
+    worker.once('error', reject);
+    server.once('exit', (code: number | null) => {
+      if ((code ?? 1) !== 0) {
+        reject(new Error(`Server exited with code ${code}`));
         return;
       }
-
-      const getter = requestUrl.startsWith('https://') ? httpsGet : httpGet;
-      const req = getter(requestUrl, (res: IncomingMessage) => {
-        // Handle redirects
-        if (res.statusCode && res.statusCode >= 300 && res.statusCode < 400 && res.headers.location) {
-          res.resume(); // Drain the response
-          doRequest(res.headers.location, redirectCount + 1);
-          return;
-        }
-
-        if (!res.statusCode || res.statusCode !== 200) {
-          res.resume();
-          fail(new Error(`Download failed: HTTP ${res.statusCode}`));
-          return;
-        }
-
-        const totalBytes = res.headers['content-length'] ? parseInt(res.headers['content-length'], 10) : 0;
-        let downloadedBytes = 0;
-
-        // Inactivity timeout — fires if no data chunk arrives within 60s
-        let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
-        const resetTimer = () => {
-          if (inactivityTimer) clearTimeout(inactivityTimer);
-          inactivityTimer = setTimeout(() => {
-            res.destroy();
-            file.close();
-            fail(new Error('Postgres download timed out'));
-          }, DOWNLOAD_TIMEOUT_MS);
-        };
-
-        const file = createWriteStream(dest);
-        resetTimer();
-
-        res.on('data', (chunk: Buffer) => {
-          downloadedBytes += chunk.length;
-          resetTimer();
-          const progress = totalBytes
-            ? `${formatBytes(downloadedBytes)} / ${formatBytes(totalBytes)}`
-            : formatBytes(downloadedBytes);
-          process.stdout.write(`\r  Downloading Postgres ${PG_VERSION}... ${progress}`);
-        });
-
-        res.pipe(file);
-
-        file.on('finish', () => {
-          if (inactivityTimer) clearTimeout(inactivityTimer);
-          file.close();
-          if (!rejected) {
-            process.stdout.write('\n');
-            resolve();
-          }
-        });
-
-        file.on('error', (err) => {
-          if (inactivityTimer) clearTimeout(inactivityTimer);
-          file.close();
-          fail(err);
-        });
-
-        res.on('error', (err) => {
-          if (inactivityTimer) clearTimeout(inactivityTimer);
-          file.close();
-          fail(err);
-        });
-      });
-      req.on('error', (err) => fail(err));
-    };
-
-    doRequest(url, 0);
-  });
-}
-
-/** Required binaries that must exist after extraction */
-const REQUIRED_BINARIES = ['postgres', 'initdb', 'pg_ctl', 'createuser'];
-
-/**
- * Ensure Postgres binaries are installed at ~/.rorca/postgres/.
- * Downloads from Maven Central if not already present at the correct version.
- * After extraction, verifies binaries and runs initdb if data dir is missing.
- */
-async function ensurePostgres(): Promise<string> {
-  const pgDir = join(homedir(), '.rorca', 'postgres');
-  const binDir = join(pgDir, 'bin');
-  const dataDir = join(pgDir, 'data');
-  const versionFile = join(pgDir, '.version');
-
-  // Check for corrupt install: bin/ exists but required binaries are missing
-  if (existsSync(binDir)) {
-    const ext = platform() === 'win32' ? '.exe' : '';
-    const missing = REQUIRED_BINARIES.filter(
-      name => !existsSync(join(binDir, `${name}${ext}`))
-    );
-    if (missing.length > 0) {
-      throw new Error(
-        'Postgres install appears corrupt — delete ~/.rorca/postgres and retry'
-      );
-    }
-  }
-
-  // Skip download if already installed at correct version
-  if (existsSync(versionFile)) {
-    const installed = readFileSync(versionFile, 'utf8').trim();
-    if (installed === PG_VERSION) {
-      console.log(`Postgres ${PG_VERSION} already installed`);
-      // Still ensure data directory is initialized (idempotent)
-      await initDataDir(binDir, dataDir);
-      return pgDir;
-    }
-  }
-
-  const platformKey = detectPlatform();
-  const url = buildDownloadUrl(platformKey, PG_VERSION);
-
-  console.log(`Installing Postgres ${PG_VERSION} for ${platformKey}...`);
-
-  // Ensure directories exist
-  mkdirSync(pgDir, { recursive: true });
-
-  const jarPath = join(pgDir, 'postgres.jar');
-  const extractDir = join(pgDir, '_extract');
-
-  try {
-    // Download the .jar (which is a zip containing a .txz)
-    await downloadFile(url, jarPath);
-
-    // Clean previous extraction
-    if (existsSync(extractDir)) {
-      rmSync(extractDir, { recursive: true });
-    }
-    mkdirSync(extractDir, { recursive: true });
-
-    // Extract the .txz from the jar (jar is a zip)
-    console.log('  Extracting jar archive...');
-    try {
-      if (platform() === 'win32') {
-        execSync(`tar -xf "${jarPath}" -C "${extractDir}"`, { stdio: 'pipe' });
-      } else {
-        execSync(`unzip -o -q "${jarPath}" -d "${extractDir}"`, { stdio: 'pipe' });
-      }
-    } catch (err: unknown) {
-      const stderr = (err as { stderr?: string }).stderr || (err instanceof Error ? err.message : String(err));
-      throw new Error(`Postgres extraction failed (jar → txz). Check disk space.\n${stderr}`);
-    }
-
-    // Find the .txz inside
-    const extractedFiles = readdirSync(extractDir);
-    const txzFile = extractedFiles.find(f => f.endsWith('.txz'));
-    if (!txzFile) {
-      throw new Error('No .txz archive found inside downloaded jar');
-    }
-
-    // Extract the .txz to a staging area first
-    const stageDir = join(pgDir, '_stage');
-    if (existsSync(stageDir)) {
-      rmSync(stageDir, { recursive: true });
-    }
-    mkdirSync(stageDir, { recursive: true });
-
-    const txzPath = join(extractDir, txzFile);
-    console.log('  Extracting Postgres binaries...');
-    try {
-      if (platform() === 'win32') {
-        // Windows 10+ tar supports xz via auto-detect when -a is not specified
-        // Use -xf (auto-detect compression) which works for both .txz and .tar.gz
-        execSync(`tar -xf "${txzPath}" -C "${stageDir}"`, { stdio: 'pipe' });
-      } else {
-        // Unix: explicit xz decompression flag
-        execSync(`tar xJf "${txzPath}" -C "${stageDir}"`, { stdio: 'pipe' });
-      }
-    } catch (err: unknown) {
-      const stderr = (err as { stderr?: string }).stderr || (err instanceof Error ? err.message : String(err));
-      throw new Error(`Postgres extraction failed (txz → binaries). Check disk space.\n${stderr}`);
-    }
-
-    // Locate the bin/ directory — may be at stage root or nested (e.g., pgsql/bin/)
-    relocateBinaries(stageDir, pgDir);
-
-    // Clean staging area
-    try { rmSync(stageDir, { recursive: true }); } catch { /* ignore */ }
-
-    // Verify required binaries exist
-    verifyBinaries(binDir);
-
-    // Write version marker
-    writeFileSync(versionFile, PG_VERSION);
-    console.log(`  Postgres ${PG_VERSION} installed to ${pgDir}`);
-
-    // Initialize data directory
-    await initDataDir(binDir, dataDir);
-
-    return pgDir;
-  } finally {
-    // Cleanup temp files
-    try { unlinkSync(jarPath); } catch { /* ignore */ }
-    try { rmSync(extractDir, { recursive: true }); } catch { /* ignore */ }
-  }
-}
-
-/**
- * Relocate extracted Postgres files to pgDir.
- * The .txz may extract with bin/ at the top level, or nested under a subdirectory
- * (e.g., pgsql/). This function finds the bin/ directory and moves everything
- * to the correct location.
- */
-function relocateBinaries(stageDir: string, pgDir: string): void {
-  const stageBin = join(stageDir, 'bin');
-
-  if (existsSync(stageBin) && statSync(stageBin).isDirectory()) {
-    // bin/ is at stage root — move all top-level dirs (bin, lib, share, etc.)
-    moveContents(stageDir, pgDir);
-    return;
-  }
-
-  // Search one level deep for a directory containing bin/
-  const entries = readdirSync(stageDir);
-  for (const entry of entries) {
-    const nestedPath = join(stageDir, entry);
-    if (statSync(nestedPath).isDirectory()) {
-      const nestedBin = join(nestedPath, 'bin');
-      if (existsSync(nestedBin) && statSync(nestedBin).isDirectory()) {
-        moveContents(nestedPath, pgDir);
-        return;
-      }
-    }
-  }
-
-  throw new Error(
-    `Could not locate bin/ directory in extracted archive. Contents: ${entries.join(', ')}`
-  );
-}
-
-/**
- * Move all items from srcDir into destDir, overwriting existing.
- */
-function moveContents(srcDir: string, destDir: string): void {
-  const items = readdirSync(srcDir);
-  for (const item of items) {
-    const src = join(srcDir, item);
-    const dest = join(destDir, item);
-    // Remove existing destination to allow overwrite
-    if (existsSync(dest)) {
-      rmSync(dest, { recursive: true });
-    }
-    renameSync(src, dest);
-  }
-}
-
-/**
- * Verify that all required Postgres binaries exist at binDir.
- * Throws with a clear message listing missing binaries.
- */
-function verifyBinaries(binDir: string): void {
-  const ext = platform() === 'win32' ? '.exe' : '';
-  const missing: string[] = [];
-
-  for (const name of REQUIRED_BINARIES) {
-    const binPath = join(binDir, `${name}${ext}`);
-    if (!existsSync(binPath)) {
-      missing.push(binPath);
-    }
-  }
-
-  if (missing.length > 0) {
-    throw new Error(
-      `Postgres extraction incomplete — missing binaries:\n  ${missing.join('\n  ')}`
-    );
-  }
-
-  console.log(`  Verified ${REQUIRED_BINARIES.length} binaries in ${binDir}`);
-}
-
-/**
- * Initialize a Postgres data directory using initdb.
- * Only runs if the data directory does not already exist (idempotent).
- * Uses --no-locale --encoding=UTF8 --username=rorca.
- */
-async function initDataDir(binDir: string, dataDir: string): Promise<void> {
-  if (existsSync(dataDir)) {
-    console.log(`  Data directory already exists: ${dataDir}`);
-    return;
-  }
-
-  const ext = platform() === 'win32' ? '.exe' : '';
-  const initdbBin = join(binDir, `initdb${ext}`);
-
-  if (!existsSync(initdbBin)) {
-    throw new Error(`initdb not found at ${initdbBin}`);
-  }
-
-  console.log('  Initializing Postgres data directory...');
-
-  try {
-    execSync(
-      `"${initdbBin}" --no-locale --encoding=UTF8 --username=rorca -D "${dataDir}"`,
-      { stdio: 'pipe', encoding: 'utf8' }
-    );
-    console.log(`  Data directory initialized: ${dataDir}`);
-  } catch (err: unknown) {
-    const stderr = (err as { stderr?: string }).stderr || (err instanceof Error ? err.message : String(err));
-    throw new Error(`initdb failed:\n${stderr}`);
-  }
-}
-
-/**
- * Check if a TCP host:port is reachable within timeoutMs.
- */
-function tcpReachable(host: string, port: number, timeoutMs = 3000): Promise<boolean> {
-  return new Promise((resolve) => {
-    const sock = createConnection({ host, port });
-    sock.setTimeout(timeoutMs);
-    sock.on('connect', () => { sock.destroy(); resolve(true); });
-    sock.on('timeout', () => { sock.destroy(); resolve(false); });
-    sock.on('error', () => { sock.destroy(); resolve(false); });
-  });
-}
-
-const MANAGED_PG_PORT = 5433;
-
-/**
- * Start the managed Postgres instance via pg_ctl on port MANAGED_PG_PORT.
- * Creates the 'rorca' database if it doesn't exist.
- * Returns true if Postgres was started successfully.
- */
-async function startPostgres(pgDir: string): Promise<void> {
-  const ext = platform() === 'win32' ? '.exe' : '';
-  const binDir = join(pgDir, 'bin');
-  const dataDir = join(pgDir, 'data');
-  const pgCtl = join(binDir, `pg_ctl${ext}`);
-  const logFile = join(pgDir, 'postgres.log');
-
-  // Check if already running on our port
-  if (await tcpReachable('127.0.0.1', MANAGED_PG_PORT, 1000)) {
-    // Verify it's actually our managed Postgres by checking pg_ctl status
-    const statusResult = spawnSync(pgCtl, ['status', '-D', dataDir], {
-      encoding: 'utf8',
-      timeout: 5000,
+      resolve();
     });
-    if (statusResult.status === 0) {
-      console.log(`Managed Postgres already running on port ${MANAGED_PG_PORT}`);
-      return;
-    }
-    // Port is occupied but it's NOT our managed Postgres
-    throw new Error(
-      `Port ${MANAGED_PG_PORT} is already in use by another process`
-    );
-  }
+  });
+}
 
-  // Configure port in postgresql.conf if not already set
-  const confPath = join(dataDir, 'postgresql.conf');
-  if (existsSync(confPath)) {
-    const conf = readFileSync(confPath, 'utf8');
-    if (!conf.includes(`port = ${MANAGED_PG_PORT}`)) {
-      writeFileSync(confPath, conf + `\nport = ${MANAGED_PG_PORT}\n`);
-    }
-  }
+function printInitDockerInstallInstructions(): void {
+  console.error('Docker is required for `rorca init`.');
+  console.error('Install one of:');
+  console.error('  OrbStack: https://orbstack.dev/');
+  console.error('  Docker Desktop: https://www.docker.com/products/docker-desktop/');
+}
 
-  console.log(`  Starting Postgres on port ${MANAGED_PG_PORT}...`);
-  const startResult = spawnSync(
-    pgCtl,
-    ['start', '-D', dataDir, '-l', logFile, '-w', '-o', `-p ${MANAGED_PG_PORT}`],
-    { encoding: 'utf8', timeout: 30000 }
-  );
-
-  if (startResult.status !== 0) {
-    const errMsg = (startResult.stderr || '') + (startResult.stdout || '');
-    if (errMsg.includes('address already in use') || errMsg.includes('Address already in use')) {
-      throw new Error(
-        `Port ${MANAGED_PG_PORT} is already in use by another process`
-      );
-    }
-    throw new Error(`pg_ctl start failed:\n${errMsg || 'unknown error'}`);
-  }
-
-  console.log(`  Postgres started (port ${MANAGED_PG_PORT}, log: ${logFile})`);
-
-  // Create the 'rorca' database if it doesn't exist
-  const createdbBin = join(binDir, `createdb${ext}`);
-  if (existsSync(createdbBin)) {
-    const dbResult = spawnSync(
-      createdbBin,
-      ['-h', '127.0.0.1', '-p', String(MANAGED_PG_PORT), '-U', 'rorca', 'rorca'],
-      { encoding: 'utf8', timeout: 10000 }
-    );
-    // Exit code 0 = created, non-zero with "already exists" = fine
-    if (dbResult.status === 0) {
-      console.log('  Created database: rorca');
-    } else if (dbResult.stderr?.includes('already exists')) {
-      // Database already exists — nothing to do
-    } else if (dbResult.status !== 0) {
-      console.warn(`  Warning: createdb returned code ${dbResult.status}: ${dbResult.stderr}`);
-    }
-  } else {
-    // Fallback: use psql to create database
-    const psqlBin = join(binDir, `psql${ext}`);
-    if (existsSync(psqlBin)) {
-      spawnSync(
-        psqlBin,
-        ['-h', '127.0.0.1', '-p', String(MANAGED_PG_PORT), '-U', 'rorca', '-c',
-         "SELECT 'exists' FROM pg_database WHERE datname='rorca'" +
-         " UNION ALL SELECT 'create' WHERE NOT EXISTS (SELECT 1 FROM pg_database WHERE datname='rorca');"],
-        { encoding: 'utf8', timeout: 10000 }
-      );
-      // Simple attempt — if it fails, the backend migration runner will report the error
-      spawnSync(
-        psqlBin,
-        ['-h', '127.0.0.1', '-p', String(MANAGED_PG_PORT), '-U', 'rorca', '-tc',
-         "CREATE DATABASE rorca;"],
-        { encoding: 'utf8', timeout: 10000 }
-      );
-    }
+async function pullInitDatabaseImage(): Promise<void> {
+  console.log('Pulling Rorca database image (~200MB, first run only)...');
+  const result = await docker(['pull', DB_IMAGE], 'inherit');
+  if (result.code !== 0) {
+    throw new Error('Failed to pull the Rorca database image.');
   }
 }
 
-/**
- * Stop the managed Postgres instance via pg_ctl.
- * Uses spawnSync to ensure the stop completes before process exits.
- */
-function stopManagedPostgres(): void {
-  const pgDir = join(homedir(), '.rorca', 'postgres');
-  const dataDir = join(pgDir, 'data');
-  const ext = platform() === 'win32' ? '.exe' : '';
-  const pgCtl = join(pgDir, 'bin', `pg_ctl${ext}`);
+async function enableInitExtensions(): Promise<void> {
+  const result = await docker([
+    'exec',
+    DB_CONTAINER,
+    'psql',
+    '-U',
+    'rorca',
+    '-d',
+    'rorca',
+    '-c',
+    'CREATE EXTENSION IF NOT EXISTS age; CREATE EXTENSION IF NOT EXISTS vector;',
+  ]);
+  if (result.code !== 0) {
+    throw new Error(result.stderr || result.stdout || 'Failed to enable AGE/vector extensions.');
+  }
+}
 
-  if (!existsSync(pgCtl) || !existsSync(dataDir)) {
+function writeInitFileIfMissing(root: string, relativePath: string, content: string): void {
+  const filePath = path.join(root, relativePath);
+  if (existsSync(filePath)) {
+    console.log(`Already exists: ${relativePath}`);
     return;
   }
+  writeFileSync(filePath, content);
+  console.log(`Created: ${relativePath}`);
+}
 
-  console.log('\nStopping managed Postgres...');
-  const result = spawnSync(pgCtl, ['stop', '-D', dataDir, '-m', 'fast'], {
-    encoding: 'utf8',
-    timeout: 15000,
-  });
+function ensureInitDirectory(root: string, relativePath: string): void {
+  const dirPath = path.join(root, relativePath);
+  if (existsSync(dirPath)) {
+    console.log(`Already exists: ${relativePath}/`);
+    return;
+  }
+  mkdirSync(dirPath, { recursive: true });
+  console.log(`Created: ${relativePath}/`);
+}
 
-  if (result.status === 0) {
-    console.log('Managed Postgres stopped.');
+async function runInit(targetPath: string, options?: { autoInstallPi?: boolean; skipDocker?: boolean }): Promise<number> {
+  const root = path.resolve(process.cwd(), targetPath);
+  mkdirSync(root, { recursive: true });
+
+  if (options?.skipDocker) {
+    console.log('Skipping Docker setup — ensure AGE + pgvector are enabled: CREATE EXTENSION IF NOT EXISTS age; CREATE EXTENSION IF NOT EXISTS vector;');
   } else {
-    // pg_ctl stop returns non-zero if server wasn't running — not an error
-    const msg = result.stderr || result.stdout || '';
-    if (!msg.includes('not running')) {
-      console.warn(`pg_ctl stop warning: ${msg.trim()}`);
+    console.log('Checking Docker...');
+    const status = await dbStatus();
+    let dockerReady = false;
+    try {
+      const dockerInfo = await docker(['info']);
+      dockerReady = dockerInfo.code === 0;
+    } catch {
+      dockerReady = false;
     }
-  }
-}
+    if (!dockerReady) {
+      printInitDockerInstallInstructions();
+      return 1;
+    }
+    console.log('✓ Docker is available');
 
-// ────────────────────────────────────────────────────────────────
-// Helpers
-// ────────────────────────────────────────────────────────────────
-
-/**
- * Parse a postgres:// URL into host and port.
- * Returns null if the URL is not parseable.
- */
-function parsePostgresUrl(url: string): { host: string; port: number } | null {
-  try {
-    // Replace postgres:// with http:// for URL parsing
-    const normalized = url.replace(/^postgres(ql)?:\/\//, 'http://');
-    const parsed = new URL(normalized);
-    return {
-      host: parsed.hostname || '127.0.0.1',
-      port: parsed.port ? parseInt(parsed.port, 10) : 5432,
-    };
-  } catch {
-    return null;
-  }
-}
-
-function findBinary(name: string): string | null {
-  try {
-    const result = execSync(
-      process.platform === 'win32' ? `where ${name}` : `which ${name}`,
-      { encoding: 'utf8' }
-    ).trim();
-    return result.split('\n')[0].trim() || null;
-  } catch {
-    return null;
-  }
-}
-
-function openBrowser(url: string): void {
-  try {
-    if (process.platform === 'darwin') {
-      execSync(`open "${url}"`);
-    } else if (process.platform === 'win32') {
-      execSync(`start "" "${url}"`);
+    if (!status.containerExists) {
+      await pullInitDatabaseImage();
     } else {
-      execSync(`xdg-open "${url}"`);
+      console.log('Database container already exists; skipping image pull.');
     }
-  } catch {
-    console.log(`Open ${url} in your browser.`);
+
+    console.log('Starting database...');
+    await dbStart();
+    console.log('✓ Database ready at localhost:5432');
+
+    console.log('Enabling AGE + pgvector extensions...');
+    await enableInitExtensions();
+    console.log('✓ Graph + vector extensions enabled');
   }
+
+  console.log(`Scaffolding workspace at ${root}...`);
+  ensureInitDirectory(root, '.rorca');
+  ensureInitDirectory(root, '.rorca/skills');
+  writeInitFileIfMissing(root, '.rorca/config.json', '{}\n');
+  writeInitFileIfMissing(root, 'AGENTS.md', '# AGENTS.md\n\nAdd your file governance rules here.\n');
+  writeInitFileIfMissing(root, 'MEMORY.md', '# Memory\n\n_No entries yet._\n');
+
+  console.log(`Rorca is ready! Next steps:
+  1. rorca start          # Start backend + worker
+  2. rorca doctor         # Verify all systems  
+  3. rorca auth login     # Connect pi to a provider
+  4. rorca forge <brief>  # Generate your first spec`);
+  return 0;
 }
 
-// ────────────────────────────────────────────────────────────────
-// CLI-045 (Project Aegis): rorca mcp <subcommand>
-// ────────────────────────────────────────────────────────────────
+function formatWalLine(event: WalEvent): string | null {
+  const payload = parseWalPayload(event);
+  const storyId = typeof payload.story_id === 'string' ? payload.story_id : event.story_id;
+  const storyTitle = typeof payload.story_title === 'string' ? payload.story_title : '';
 
-const MCP_TOKEN_PATH = join(homedir(), '.rorca', 'mcp-token');
-const RORCA_DIR = join(homedir(), '.rorca');
-
-function readMcpTokenFromDisk(): string | null {
-  if (!existsSync(MCP_TOKEN_PATH)) return null;
-  const t = readFileSync(MCP_TOKEN_PATH, 'utf8').trim();
-  return t.length > 0 ? t : null;
-}
-
-function ensureRorcaDir(): void {
-  if (!existsSync(RORCA_DIR)) {
-    mkdirSync(RORCA_DIR, { recursive: true, mode: 0o700 });
-  }
-}
-
-function generateLocalToken(): string {
-  // 32 bytes = 64 hex chars — same shape the backend generates.
-  const bytes = new Uint8Array(32);
-  for (let i = 0; i < 32; i++) bytes[i] = Math.floor(Math.random() * 256);
-  // Use crypto.getRandomValues if available (Node 19+)
-  try {
-    const { randomBytes } = require('crypto');
-    return (randomBytes(32) as Buffer).toString('hex');
-  } catch {
-    return Array.from(bytes).map(b => b.toString(16).padStart(2, '0')).join('');
-  }
-}
-
-function runMcp(mcpArgs: string[]): void {
-  const sub = mcpArgs[0];
-  switch (sub) {
-    case 'token':
-      runMcpToken();
-      return;
-    case 'setup-claude':
-      runMcpSetupClaude();
-      return;
-    case 'rotate-token':
-      runMcpRotateToken(mcpArgs.slice(1));
-      return;
-    case 'status':
-      runMcpStatus();
-      return;
+  switch (event.event_type) {
+    case 'story_started':
+      return yellow(`▶ FORGE ${storyId ?? ''}${storyTitle ? `  ${storyTitle}` : ''}`.trim());
+    case 'story_passed':
+      return green(`✓ PASS  ${storyId ?? ''}`.trim());
+    case 'story_failed':
+      return red(`✗ FAIL  ${storyId ?? ''}${typeof payload.reason === 'string' ? `  ${payload.reason}` : ''}`.trim());
+    case 'story_retry':
+      return yellow(`↻ RETRY ${storyId ?? ''}`.trim());
+    case 'run_started':
+      return cyan(`Run ${payload.run_id ?? ''} started`);
+    case 'run_finished':
+      return cyan(`Run ${payload.run_id ?? ''} finished with status ${String(payload.status ?? 'unknown')}`);
+    case 'run_cancelled':
+      return yellow(`Run ${payload.run_id ?? ''} cancelled`);
     default:
-      console.error(`Unknown 'rorca mcp' subcommand: ${sub ?? '(none)'}`);
-      console.error(`Available: token, setup-claude, rotate-token, status`);
-      process.exit(1);
+      return null;
   }
 }
 
-function runMcpToken(): void {
-  const token = readMcpTokenFromDisk();
-  if (!token) {
-    console.error('MCP token not found at ' + MCP_TOKEN_PATH);
-    console.error('Start the server once with `rorca start` to generate it.');
-    process.exit(1);
-  }
-  // Print to stdout, no labels — pipeable to clipboard tools (pbcopy, xclip).
-  process.stdout.write(token + '\n');
+function isActiveRunStatus(status: string | null | undefined): boolean {
+  return status === 'queued' || status === 'running' || status === 'paused';
 }
 
-function runMcpSetupClaude(): void {
-  const token = readMcpTokenFromDisk();
+async function promptCancelDecision(): Promise<'cancel' | 'detach'> {
+  const rl = readline.createInterface({ input: process.stdin, output: process.stdout });
+
+  try {
+    const answer = await Promise.race<string>([
+      rl.question('Cancel run? [y/N] '),
+      new Promise<string>((resolve) => setTimeout(() => resolve(''), 3000)),
+    ]);
+
+    return answer.trim().toLowerCase() === 'y' ? 'cancel' : 'detach';
+  } finally {
+    rl.close();
+  }
+}
+
+async function streamWal(runId: number, signal: AbortSignal): Promise<{ finalEvent: WalEvent | null }> {
+  let finalEvent: WalEvent | null = null;
+
+  await readSse(
+    '/api/pipeline/stream',
+    async (eventName, data) => {
+      if (eventName !== 'wal_event') return;
+
+      const event = JSON.parse(data) as WalEvent;
+      const payload = parseWalPayload(event);
+      if (Number(payload.run_id) !== runId) return;
+
+      const line = formatWalLine(event);
+      if (line) console.log(line);
+
+      if (event.event_type === 'run_finished' || event.event_type === 'run_cancelled') {
+        finalEvent = event;
+        throw new Error('__RORCA_RUN_COMPLETE__');
+      }
+    },
+    signal,
+  ).catch((error: unknown) => {
+    if (error instanceof Error && error.message === '__RORCA_RUN_COMPLETE__') {
+      return;
+    }
+    if (signal.aborted) {
+      return;
+    }
+    throw error;
+  });
+
+  return { finalEvent };
+}
+
+async function streamRawOutput(runId: number, signal: AbortSignal): Promise<void> {
+  await readSse(
+    `/api/pipeline/runs/${runId}/output`,
+    async (eventName, data) => {
+      if (eventName !== 'chunk') return;
+      const text = Buffer.from(data, 'base64').toString('utf8');
+      const lines = text.split('\n');
+      for (const line of lines) {
+        if (!line.trim()) continue;
+        console.log(dim(`│ ${line}`));
+      }
+    },
+    signal,
+  ).catch((error: unknown) => {
+    if (signal.aborted) {
+      return;
+    }
+    throw error;
+  });
+}
+
+async function attachLiveRun(runId: number): Promise<number> {
+  let details: RunDetails;
+  try {
+    details = await fetchJson<RunDetails>(`/api/pipeline/runs/${runId}`);
+  } catch {
+    console.log(`No active run with ID ${runId}`);
+    return 1;
+  }
+
+  if (!isActiveRunStatus(details.run.status)) {
+    console.log(`No active run with ID ${runId}`);
+    return 1;
+  }
+
+  console.log(`Attached to run ${runId}`);
+  const walController = new AbortController();
+  const outputController = new AbortController();
+  let mode: RunControlMode = 'attached';
+  let prompting = false;
+
+  const onSigint = () => {
+    if (prompting || mode === 'cancelling' || mode === 'detaching') {
+      return;
+    }
+
+    prompting = true;
+    void (async () => {
+      const decision = await promptCancelDecision();
+      prompting = false;
+
+      if (decision === 'cancel') {
+        mode = 'cancelling';
+        console.log('Cancelling run...');
+        try {
+          await fetchJson(`/api/pipeline/runs/${runId}/cancel`, { method: 'POST' });
+        } catch (error) {
+          mode = 'attached';
+          const message = error instanceof Error ? error.message : String(error);
+          console.error(message);
+        }
+        return;
+      }
+
+      mode = 'detaching';
+      walController.abort();
+      outputController.abort();
+    })();
+  };
+  process.on('SIGINT', onSigint);
+
+  try {
+    const walPromise = streamWal(runId, walController.signal);
+    const outputPromise = streamRawOutput(runId, outputController.signal);
+    const { finalEvent } = await walPromise;
+
+    if ((mode as RunControlMode) === 'detaching') {
+      return 0;
+    }
+
+    outputController.abort();
+    await Promise.race([outputPromise, sleep(200)]);
+
+    details = await fetchJson<RunDetails>(`/api/pipeline/runs/${runId}`);
+    if (
+      (mode as RunControlMode) === 'cancelling'
+      && (details.run.status === 'cancelled' || finalEvent?.event_type === 'run_cancelled')
+    ) {
+      console.log('Run cancelled');
+    }
+
+    const failed = details.run.status === 'failed'
+      || details.run.status === 'cancelled'
+      || details.run.status === 'partial_failure'
+      || details.stories.some((story) => story.status === 'fail');
+
+    return failed ? 1 : 0;
+  } finally {
+    process.removeListener('SIGINT', onSigint);
+    walController.abort();
+    outputController.abort();
+  }
+}
+
+async function runSpec(options: {
+  specSlug: string;
+  story?: string;
+  dryRun?: boolean;
+  agent?: 'claude' | 'opencode' | 'codex' | 'pi';
+  model?: string;
+  tail?: boolean;
+}): Promise<number> {
+  const { workspace } = await resolveApprovedSpec(options.specSlug);
+  const trigger = await fetchJson<TriggerResponse>('/api/pipeline/trigger', {
+    method: 'POST',
+    body: JSON.stringify({
+      specPath: `forge/specs/approved/${options.specSlug}.json`,
+      workspaceId: workspace.id,
+      storyId: options.story,
+      dryRun: Boolean(options.dryRun),
+      agentOverride: options.agent,
+      modelOverride: options.model,
+    }),
+  });
+
+  if ('dryRun' in trigger) {
+    console.log(JSON.stringify(trigger.estimate, null, 2));
+    return 0;
+  }
+
+  if ('conflict' in trigger) {
+    console.error(`Workspace busy. Active run: ${trigger.activeRunId}`);
+    return 1;
+  }
+
+  const runId = trigger.runId;
+  console.log(`Triggered run ${runId} for ${options.specSlug} in workspace ${workspace.id}`);
+  if ('queued' in trigger && trigger.queued) {
+    console.log(`Queued at position ${trigger.position ?? '?'}`);
+  }
+
+  return attachLiveRun(runId);
+}
+
+async function runStatus(runId?: number): Promise<void> {
+  if (runId) {
+    const details = await fetchJson<RunDetails>(`/api/pipeline/runs/${runId}`);
+    console.log(`Run ${details.run.id}`);
+    console.log(`Status: ${details.run.status}`);
+    console.log(`Spec: ${formatSpecFromPath(details.run.spec_path)}`);
+    console.log(`Started: ${formatDate(details.run.started_at)}`);
+    console.log(`Finished: ${formatDate(details.run.finished_at)}`);
+    console.log('');
+
+    const rows = details.stories.map((story) => [story.story_id, story.status]);
+    if (rows.length > 0) {
+      printTable(['Story', 'Status'], rows);
+    } else {
+      console.log('No story results yet.');
+    }
+    return;
+  }
+
+  const workspaces = await getWorkspaces();
+  const runs: Array<PipelineRun & { workspaceLabel: string }> = [];
+
+  for (const workspace of workspaces) {
+    const response = await fetchJson<PaginatedResponse<PipelineRun>>(
+      `/api/pipeline/runs?workspaceId=${encodeURIComponent(workspace.id)}&limit=10`,
+    );
+    for (const run of response.items) {
+      runs.push({ ...run, workspaceLabel: workspace.id });
+    }
+  }
+
+  runs.sort((a, b) => b.id - a.id);
+
+  const topRuns = runs.slice(0, 10);
+  const rows: string[][] = [];
+  for (const run of topRuns) {
+    const details = await fetchJson<RunDetails>(`/api/pipeline/runs/${run.id}`);
+    const passCount = details.stories.filter((story) => story.status === 'pass').length;
+    const failCount = details.stories.filter((story) => story.status === 'fail').length;
+    rows.push([
+      String(run.id),
+      run.workspaceLabel,
+      run.status,
+      formatSpecFromPath(run.spec_path),
+      `${details.stories.length}`,
+      `${passCount}`,
+      `${failCount}`,
+      formatDate(run.started_at),
+    ]);
+  }
+
+  if (rows.length === 0) {
+    console.log('No pipeline runs found.');
+    return;
+  }
+
+  printTable(['Run', 'Workspace', 'Status', 'Spec', 'Stories', 'Pass', 'Fail', 'Started'], rows);
+}
+
+function parseApiAddress(): { host: string; port: number; label: string } {
+  const url = new URL(API_BASE);
+  const port = url.port ? Number(url.port) : (url.protocol === 'https:' ? 443 : 80);
+  return { host: url.hostname, port, label: `:${port}` };
+}
+
+function normalizeDoctorStatus(status: DoctorStatus): string {
+  if (status === 'pass') return green('✓');
+  if (status === 'warn') return yellow('⚠');
+  return red('✗');
+}
+
+function resolveDoctorSelection(input?: string): Set<DoctorCheckId> | null {
+  if (!input) return null;
+  const normalized = input.trim().toLowerCase();
+  const map: Record<string, DoctorCheckId[]> = {
+    node: ['node-version'],
+    'node-version': ['node-version'],
+    pi: ['pi-binary', 'pi-version'],
+    'pi-binary': ['pi-binary'],
+    'pi-version': ['pi-version'],
+    db: ['db-mode'],
+    'db-mode': ['db-mode'],
+    native: ['native-pg'],
+    'native-pg': ['native-pg'],
+    docker: ['docker-daemon', 'db-container', 'age-extension'],
+    'docker-daemon': ['docker-daemon'],
+    'db-container': ['db-container'],
+    age: ['age-extension'],
+    'age-extension': ['age-extension'],
+    backend: ['backend-port', 'backend-version'],
+    'backend-port': ['backend-port'],
+    'backend-version': ['backend-version'],
+    migrations: ['schema-migrations'],
+    'schema-migrations': ['schema-migrations'],
+    worker: ['worker-heartbeat'],
+    'worker-heartbeat': ['worker-heartbeat'],
+    mcp: ['mcp-public-token', 'mcp-admin-token', 'mcp-bridge'],
+    'mcp-public-token': ['mcp-public-token'],
+    'mcp-admin-token': ['mcp-admin-token'],
+    'mcp-bridge': ['mcp-bridge'],
+    workspace: ['workspace-files'],
+    'workspace-files': ['workspace-files'],
+  };
+  return map[normalized] ? new Set(map[normalized]) : null;
+}
+
+function shouldRunDoctorCheck(selected: Set<DoctorCheckId> | null, id: DoctorCheckId): boolean {
+  return selected === null || selected.has(id);
+}
+
+function doctorPass(id: DoctorCheckId, name: string, detail: string): DoctorCheckResult {
+  return { id, name, status: 'pass', detail };
+}
+
+function doctorWarn(id: DoctorCheckId, name: string, detail: string, hint?: string): DoctorCheckResult {
+  return { id, name, status: 'warn', detail, hint };
+}
+
+function doctorFail(id: DoctorCheckId, name: string, detail: string, hint?: string): DoctorCheckResult {
+  return { id, name, status: 'fail', detail, hint };
+}
+
+function doctorExitCode(checks: DoctorCheckResult[]): number {
+  if (checks.some((check) => check.status === 'fail')) return 1;
+  if (checks.some((check) => check.status === 'warn')) return 2;
+  return 0;
+}
+
+function formatAgeSeconds(ageSeconds: number): string {
+  return `${Math.round(ageSeconds)}s ago`;
+}
+
+function getMigrationFiles(): string[] {
+  const migrationsDir = path.join(BACKEND_DIR, 'src', 'db', 'pg-migrations');
+  return readdirSync(migrationsDir).filter((file) => file.endsWith('.sql'));
+}
+
+function readMcpToken(tier: 'public' | 'admin' = 'public'): string | null {
+  return tier === 'admin' ? getMcpAdminToken() : getMcpPublicToken();
+}
+
+function checkMcpToken(tier: 'public' | 'admin'): DoctorCheckResult {
+  const tokenPath = tier === 'admin' ? getMcpAdminTokenPath() : getMcpPublicTokenPath();
+  const label = tier === 'admin' ? 'MCP admin token' : 'MCP public token';
+  const id: DoctorCheckId = tier === 'admin' ? 'mcp-admin-token' : 'mcp-public-token';
+  const status = checkMcpTokenFile(tokenPath);
+
+  if (!status.exists) {
+    return doctorWarn(id, label, 'missing', `Run: rorca mcp token${tier === 'admin' ? ' --admin' : ''}`);
+  }
+  if (!status.modeOk) {
+    return doctorWarn(id, label, `mode ${status.mode}, expected 600`, `Run: chmod 600 ${tokenPath}`);
+  }
+  return doctorPass(id, label, `${tokenPath.replace(homedir(), '~')} (mode 0600)`);
+}
+
+async function isTcpReachable(host: string, port: number, timeoutMs: number): Promise<boolean> {
+  return new Promise((resolve) => {
+    const socket = net.connect({ host, port });
+    const finish = (result: boolean) => {
+      socket.destroy();
+      resolve(result);
+    };
+    socket.setTimeout(timeoutMs);
+    socket.once('connect', () => finish(true));
+    socket.once('timeout', () => finish(false));
+    socket.once('error', () => finish(false));
+  });
+}
+
+async function fetchRawJson<T>(
+  pathname: string,
+  timeoutMs = 3_000,
+  init?: RequestInit,
+): Promise<{ ok: boolean; status: number; data: T | null }> {
+  try {
+    const response = await fetch(`${API_BASE}${pathname}`, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs),
+      headers: {
+        Accept: 'application/json',
+        ...(init?.headers ?? {}),
+      },
+    });
+    const text = await response.text();
+    const data = text ? JSON.parse(text) as T : null;
+    return { ok: response.ok, status: response.status, data };
+  } catch {
+    return { ok: false, status: 0, data: null };
+  }
+}
+
+async function fetchStatus(pathname: string, timeoutMs = 3_000, init?: RequestInit): Promise<boolean> {
+  try {
+    const response = await fetch(`${API_BASE}${pathname}`, {
+      ...init,
+      signal: AbortSignal.timeout(timeoutMs),
+    });
+    return response.ok;
+  } catch {
+    return false;
+  }
+}
+
+function checkNodeVersion(): DoctorCheckResult {
+  if (semverGte(process.version, MIN_NODE_VERSION)) {
+    return doctorPass('node-version', 'Node version', process.version);
+  }
+  return doctorFail(
+    'node-version',
+    'Node version',
+    `${process.version} < required v${MIN_NODE_VERSION}`,
+    'Install Node 20 or newer',
+  );
+}
+
+function checkPiBinary(): { check: DoctorCheckResult; piStatus: PiStatus } {
+  const piStatus = detectPiShared();
+  if (piStatus.piInstalled) {
+    const version = piStatus.piVersion ? ` (v${piStatus.piVersion})` : '';
+    return {
+      piStatus,
+      check: doctorPass('pi-binary', 'Pi binary', `${piStatus.piBinPath ?? 'pi'}${version}`),
+    };
+  }
+  return {
+    piStatus,
+    check: doctorWarn('pi-binary', 'Pi binary', 'not installed', 'Run: rorca auth login'),
+  };
+}
+
+function checkPiVersion(piStatus: PiStatus): DoctorCheckResult {
+  if (!piStatus.piInstalled) {
+    return doctorWarn('pi-version', 'Pi version', 'skipped (pi missing)');
+  }
+  if (!piStatus.piVersion) {
+    return doctorWarn('pi-version', 'Pi version', 'unknown version', `Need >= ${MIN_PI_VERSION}`);
+  }
+  if (semverGte(piStatus.piVersion, MIN_PI_VERSION)) {
+    return doctorPass('pi-version', 'Pi version', `v${piStatus.piVersion}`);
+  }
+  return doctorWarn(
+    'pi-version',
+    'Pi version',
+    `v${piStatus.piVersion} < required ${MIN_PI_VERSION}`,
+    'Upgrade pi to a newer version',
+  );
+}
+
+function checkDbModeLocal(): { check: DoctorCheckResult; mode: DbMode } {
+  const mode = detectDbMode();
+  const detail = mode === 'native' ? 'native (default)' : mode === 'docker' ? 'docker (sidecar)' : 'byop (DATABASE_URL)';
+  return { mode, check: doctorPass('db-mode', 'DB mode', detail) };
+}
+
+async function checkNativePg(): Promise<DoctorCheckResult> {
+  const dataDir = path.join(homedir(), '.rorca', 'postgres');
+  if (!existsSync(dataDir)) {
+    return doctorFail('native-pg', 'Native PG', '~/.rorca/postgres missing', 'Run: rorca start');
+  }
+  const ready = await isTcpReachable('127.0.0.1', NATIVE_PG_PORT, 1_500);
+  if (ready) {
+    return doctorPass('native-pg', 'Native PG', `:${NATIVE_PG_PORT} ready`);
+  }
+  return doctorFail('native-pg', 'Native PG', `:${NATIVE_PG_PORT} unreachable`, 'Run: rorca start');
+}
+
+async function checkDockerDaemon(): Promise<DoctorCheckResult> {
+  try {
+    execSync('docker info', { stdio: 'ignore', timeout: 3_000 });
+    return doctorPass('docker-daemon', 'Docker daemon', 'running');
+  } catch {
+    return doctorFail('docker-daemon', 'Docker daemon', 'unavailable', 'Start Docker Desktop or OrbStack');
+  }
+}
+
+async function checkDbContainer(): Promise<DoctorCheckResult> {
+  const status = await dbStatus();
+  if (status.running) {
+    return doctorPass('db-container', 'DB container', 'running');
+  }
+  if (status.containerExists) {
+    return doctorFail('db-container', 'DB container', 'stopped', 'Run: rorca db start');
+  }
+  return doctorFail('db-container', 'DB container', 'not created', 'Run: rorca db start');
+}
+
+async function checkAgeExtensionLocal(): Promise<DoctorCheckResult> {
+  try {
+    const available = await isAgeAvailable();
+    if (available) {
+      return doctorPass('age-extension', 'AGE extension', 'enabled');
+    }
+    return doctorWarn('age-extension', 'AGE extension', 'not installed (graph features disabled)');
+  } catch {
+    return doctorWarn('age-extension', 'AGE extension', 'unable to verify');
+  }
+}
+
+async function checkBackendPort(): Promise<{ check: DoctorCheckResult; reachable: boolean }> {
+  const address = parseApiAddress();
+  const reachable = await isTcpReachable(address.host, address.port, 1_500);
+  if (reachable) {
+    return { reachable, check: doctorPass('backend-port', 'Backend port', `${address.label} reachable`) };
+  }
+  return {
+    reachable,
+    check: doctorFail('backend-port', 'Backend port', `${address.label} unreachable`, 'Run: rorca start'),
+  };
+}
+
+async function checkBackendVersionLocal(): Promise<{ check: DoctorCheckResult; result: VersionCheckResult }> {
+  const result = await checkVersionShared(API_BASE);
+  if (result.ok) {
+    return {
+      result,
+      check: doctorPass('backend-version', 'Backend version', result.backend?.version ?? 'unknown'),
+    };
+  }
+  return {
+    result,
+    check: doctorFail(
+      'backend-version',
+      'Backend version',
+      result.reason ?? `need >= ${MIN_BACKEND_VERSION}`,
+      'Upgrade: npm install -g rorca@latest',
+    ),
+  };
+}
+
+async function checkSchemaMigrations(backend: VersionResponse | undefined): Promise<DoctorCheckResult> {
+  try {
+    const files = getMigrationFiles();
+    checkDuplicatePrefixes(files);
+    const expected = files.length;
+    const response = await fetchRawJson<HealthResponse>('/api/health');
+    const applied = response.data?.components?.migrations?.applied;
+    if (!response.ok || typeof applied !== 'number') {
+      return doctorFail('schema-migrations', 'Schema migrations', 'unable to verify');
+    }
+    if (applied >= expected) {
+      const suffix = backend?.schemaVersion ? ` (latest ${backend.schemaVersion})` : '';
+      return doctorPass('schema-migrations', 'Schema migrations', `${applied}/${expected} applied${suffix}`);
+    }
+    const latest = backend?.schemaVersion ? `, latest ${backend.schemaVersion}` : '';
+    return doctorFail('schema-migrations', 'Schema migrations', `${applied}/${expected} applied${latest}`);
+  } catch (error: unknown) {
+    const message = error instanceof Error ? error.message : 'unable to verify';
+    return doctorFail('schema-migrations', 'Schema migrations', message);
+  }
+}
+
+async function checkWorkerHeartbeat(): Promise<DoctorCheckResult> {
+  const [workerResponse, healthResponse] = await Promise.all([
+    fetchRawJson<{ workerActive: boolean; workerPid: number | null }>('/api/pipeline/worker/health'),
+    fetchRawJson<HealthResponse>('/api/health'),
+  ]);
+  const worker = workerResponse.data;
+  if (!workerResponse.ok || !worker) {
+    return doctorFail('worker-heartbeat', 'Worker heartbeat', 'unable to verify');
+  }
+  const lastHeartbeat = healthResponse.data?.components?.worker?.lastHeartbeat;
+  if (worker.workerActive) {
+    if (lastHeartbeat) {
+      const ageSeconds = (Date.now() - new Date(lastHeartbeat).getTime()) / 1000;
+      return doctorPass('worker-heartbeat', 'Worker heartbeat', `healthy ${formatAgeSeconds(ageSeconds)}`);
+    }
+    return doctorPass('worker-heartbeat', 'Worker heartbeat', 'healthy');
+  }
+  if (worker.workerPid === null) {
+    return doctorFail('worker-heartbeat', 'Worker heartbeat', 'no heartbeat');
+  }
+  if (lastHeartbeat) {
+    const ageSeconds = (Date.now() - new Date(lastHeartbeat).getTime()) / 1000;
+    return doctorWarn('worker-heartbeat', 'Worker heartbeat', `stale ${formatAgeSeconds(ageSeconds)}`);
+  }
+  return doctorWarn('worker-heartbeat', 'Worker heartbeat', 'stale');
+}
+
+async function checkMcpBridge(): Promise<DoctorCheckResult> {
+  const token = readMcpToken('public');
+  const toolsResponse = await fetchRawJson<McpToolsResponse>('/api/mcp/tools');
   if (!token) {
-    console.error('MCP token not found at ' + MCP_TOKEN_PATH);
-    console.error('Start the server once with `rorca start` to generate it.');
-    process.exit(1);
+    return doctorWarn('mcp-bridge', 'MCP bridge', 'token missing');
+  }
+  const reachable = await fetchStatus('/mcp', 3_000, {
+    headers: { Authorization: `Bearer ${token}` },
+  });
+  if (!reachable) {
+    return doctorWarn('mcp-bridge', 'MCP bridge', 'unreachable');
+  }
+  const toolCount = Array.isArray(toolsResponse.data?.tools) ? toolsResponse.data.tools.length : 0;
+  return doctorPass('mcp-bridge', 'MCP bridge', `${toolCount} tools`);
+}
+
+function checkWorkspaceFiles(): DoctorCheckResult {
+  const required = [
+    path.join(process.cwd(), '.rorca', 'config.json'),
+    path.join(process.cwd(), 'MEMORY.md'),
+    path.join(process.cwd(), 'AGENTS.md'),
+  ];
+  const missing = required
+    .filter((target) => !existsSync(target))
+    .map((target) => path.relative(process.cwd(), target) || path.basename(target));
+  if (missing.length === 0) {
+    return doctorPass('workspace-files', 'Workspace files', 'all present');
+  }
+  return doctorWarn('workspace-files', 'Workspace files', `missing ${missing.join(', ')}`);
+}
+
+function skippedBackendCheck(id: DoctorCheckId): DoctorCheckResult {
+  const names: Record<DoctorCheckId, string> = {
+    'node-version': 'Node version',
+    'pi-binary': 'Pi binary',
+    'pi-version': 'Pi version',
+    'db-mode': 'DB mode',
+    'native-pg': 'Native PG',
+    'docker-daemon': 'Docker daemon',
+    'db-container': 'DB container',
+    'age-extension': 'AGE extension',
+    'backend-port': 'Backend port',
+    'backend-version': 'Backend version',
+    'schema-migrations': 'Schema migrations',
+    'worker-heartbeat': 'Worker heartbeat',
+    'mcp-public-token': 'MCP public token',
+    'mcp-admin-token': 'MCP admin token',
+    'mcp-bridge': 'MCP bridge',
+    'workspace-files': 'Workspace files',
+  };
+  return doctorFail(id, names[id], 'skipped (backend down)');
+}
+
+function printDoctorChecks(checks: DoctorCheckResult[], verbose = false): void {
+  const width = Math.max(...checks.map((check) => check.name.length), 16);
+  for (const check of checks) {
+    console.log(`  ${normalizeDoctorStatus(check.status)} ${check.name.padEnd(width)} ${check.detail}`);
+    if (verbose) {
+      console.log(`      → check=${check.id} status=${check.status}`);
+    }
+    if (check.hint) {
+      console.log(`      → ${check.hint}`);
+    }
+  }
+}
+
+async function runDoctor(options: { json?: boolean; check?: string; verbose?: boolean } = {}): Promise<number> {
+  const selected = resolveDoctorSelection(options.check);
+  if (options.check && !selected) {
+    console.error(`Unknown doctor check: ${options.check}`);
+    return 1;
   }
 
-  // Resolve the `claude` binary
-  let claudeBin: string;
-  try {
-    claudeBin = execSync('which claude', { encoding: 'utf8' }).trim();
-  } catch {
-    console.error('`claude` CLI not found on PATH.');
-    console.error('Install it: https://docs.claude.com/claude-code');
-    process.exit(1);
+  const checks: DoctorCheckResult[] = [];
+  const wants = (id: DoctorCheckId) => shouldRunDoctorCheck(selected, id);
+
+  let piStatus: PiStatus | null = null;
+  let dbMode: DbMode | null = null;
+  let backendUp = false;
+  let backendVersion: VersionResponse | undefined;
+
+  if (wants('node-version')) {
+    checks.push(checkNodeVersion());
   }
 
-  // Best-effort remove any prior 'rorca' MCP entry. Tolerates "not found".
-  try {
-    spawnSync(claudeBin, ['mcp', 'remove', 'rorca'], { stdio: 'ignore' });
-  } catch {
-    /* swallow — first-time setup */
+  if (wants('pi-binary') || wants('pi-version')) {
+    const piBinary = checkPiBinary();
+    piStatus = piBinary.piStatus;
+    if (wants('pi-binary')) checks.push(piBinary.check);
+    if (wants('pi-version')) checks.push(checkPiVersion(piStatus));
   }
 
-  const url = 'http://localhost:3030/mcp';
-  const headerArg = `Authorization: Bearer ${token}`;
-  const result = spawnSync(claudeBin, ['mcp', 'add', 'rorca', url, '--header', headerArg], {
+  if (wants('db-mode')) {
+    const dbModeCheck = checkDbModeLocal();
+    dbMode = dbModeCheck.mode;
+    checks.push(dbModeCheck.check);
+  } else {
+    dbMode = detectDbMode();
+  }
+
+  if (wants('native-pg') && dbMode === 'native') {
+    checks.push(await checkNativePg());
+  }
+
+  if (dbMode === 'docker') {
+    let dockerFailed = false;
+    if (wants('docker-daemon')) {
+      const dockerCheck = await checkDockerDaemon();
+      checks.push(dockerCheck);
+      dockerFailed = dockerCheck.status === 'fail';
+    }
+    if (wants('db-container')) {
+      checks.push(selected === null && dockerFailed
+        ? doctorFail('db-container', 'DB container', 'skipped (docker unavailable)')
+        : await checkDbContainer());
+    }
+    if (wants('age-extension')) {
+      checks.push(selected === null && dockerFailed
+        ? doctorWarn('age-extension', 'AGE extension', 'skipped (docker unavailable)')
+        : await checkAgeExtensionLocal());
+    }
+  }
+
+  if (wants('backend-port')) {
+    const backendPort = await checkBackendPort();
+    backendUp = backendPort.reachable;
+    checks.push(backendPort.check);
+  } else if (selected === null || BACKEND_DEPENDENT_CHECKS.some((id) => selected.has(id))) {
+    backendUp = (await checkBackendPort()).reachable;
+  }
+
+  if (wants('backend-version')) {
+    if (selected === null && !backendUp) {
+      checks.push(skippedBackendCheck('backend-version'));
+    } else {
+      const versionCheck = await checkBackendVersionLocal();
+      backendVersion = versionCheck.result.backend;
+      checks.push(versionCheck.check);
+    }
+  }
+
+  if (wants('schema-migrations')) {
+    checks.push(selected === null && !backendUp
+      ? skippedBackendCheck('schema-migrations')
+      : await checkSchemaMigrations(backendVersion));
+  }
+
+  if (wants('worker-heartbeat')) {
+    checks.push(selected === null && !backendUp
+      ? skippedBackendCheck('worker-heartbeat')
+      : await checkWorkerHeartbeat());
+  }
+
+  if (wants('mcp-public-token')) {
+    checks.push(checkMcpToken('public'));
+  }
+
+  if (wants('mcp-admin-token')) {
+    checks.push(checkMcpToken('admin'));
+  }
+
+  if (wants('mcp-bridge')) {
+    checks.push(selected === null && !backendUp
+      ? skippedBackendCheck('mcp-bridge')
+      : await checkMcpBridge());
+  }
+
+  if (wants('workspace-files')) {
+    checks.push(checkWorkspaceFiles());
+  }
+
+  const exitCode = doctorExitCode(checks);
+  if (options.json) {
+    const payload: DoctorJsonResponse = {
+      checks: checks.map(({ name, status, detail, hint }) => ({ name, status, detail, ...(hint ? { hint } : {}) })),
+      exitCode,
+    };
+    console.log(JSON.stringify(payload, null, 2));
+    return exitCode;
+  }
+
+  printDoctorChecks(checks, Boolean(options.verbose));
+  return exitCode;
+}
+
+function titleCase(input: string): string {
+  return input
+    .split(/[\s/_-]+/)
+    .filter(Boolean)
+    .map((chunk) => chunk.charAt(0).toUpperCase() + chunk.slice(1))
+    .join(' ');
+}
+
+function getPiProviderLabel(provider: string): string {
+  const normalized = provider.trim().toLowerCase();
+  return PI_PROVIDER_LABELS[normalized] ?? titleCase(provider);
+}
+
+function printPiInstallMethods(): void {
+  console.log('Install Pi CLI with one of:');
+  console.log(`NPM   ${PI_INSTALL_METHODS.npm}`);
+  console.log(`PNPM  ${PI_INSTALL_METHODS.pnpm}`);
+  console.log(`BUN   ${PI_INSTALL_METHODS.bun}`);
+  console.log(`CURL  ${PI_INSTALL_METHODS.curl}`);
+}
+
+async function fetchPiHealth(): Promise<HealthResponse> {
+  return fetchBackendHealth();
+}
+
+async function fetchPiModels(): Promise<PiModelsResponse> {
+  return fetchJson<PiModelsResponse>('/api/config/pi-models');
+}
+
+function buildPiProviderCounts(models: PiModel[]): Array<{ label: string; count: number }> {
+  const counts = new Map<string, number>();
+
+  for (const model of models) {
+    const label = getPiProviderLabel(model.provider);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+
+  for (const label of PI_PROVIDER_ORDER) {
+    if (!counts.has(label)) {
+      counts.set(label, 0);
+    }
+  }
+
+  return [...counts.entries()]
+    .map(([label, count]) => ({ label, count }))
+    .sort((a, b) => {
+      const aIndex = PI_PROVIDER_ORDER.indexOf(a.label as typeof PI_PROVIDER_ORDER[number]);
+      const bIndex = PI_PROVIDER_ORDER.indexOf(b.label as typeof PI_PROVIDER_ORDER[number]);
+      if (aIndex >= 0 && bIndex >= 0) return aIndex - bIndex;
+      if (aIndex >= 0) return -1;
+      if (bIndex >= 0) return 1;
+      return a.label.localeCompare(b.label);
+    });
+}
+
+async function runPiAuthStatus(): Promise<number> {
+  const health = await fetchPiHealth();
+
+  console.log(`Pi CLI: ${health.piInstalled ? health.piVersion ?? 'installed' : 'Not installed'}`);
+
+  if (!health.piInstalled) {
+    printPiInstallMethods();
+    return 1;
+  }
+
+  const { models } = await fetchPiModels();
+  const providers = buildPiProviderCounts(models);
+
+  console.log('');
+  console.log('Providers:');
+  for (const provider of providers) {
+    if (provider.count > 0) {
+      const noun = provider.count === 1 ? 'model' : 'models';
+      console.log(`  ${provider.label}: ${provider.count} ${noun} ${green('✓')}`);
+    } else {
+      console.log(`  ${provider.label}: Not authenticated`);
+    }
+  }
+
+  console.log('');
+  console.log('To authenticate a provider: rorca auth login <provider>');
+  return 0;
+}
+
+async function runPiAuthCommand(action: 'login' | 'logout', provider?: string): Promise<number> {
+  if (action === 'login') {
+    const pi = await ensurePiInstalled();
+    if (!pi.ok) {
+      return 1;
+    }
+    if (pi.skipped) {
+      return 0;
+    }
+  }
+
+  const health = await fetchPiHealth().catch(() => null);
+  if (!health?.piInstalled) {
+    if (action === 'logout') {
+      printPiInstallMethods();
+      return 1;
+    }
+
+    const detected = detectPi();
+    if (!detected.piInstalled) {
+      printPiInstallMethods();
+      return 1;
+    }
+  }
+
+  const args = ['auth', action];
+  if (provider) {
+    args.push(provider);
+  }
+
+  const result = await runCommand(resolvePiBinPath(health?.piBinPath), args, { stdio: 'inherit' });
+  if (result.code !== 0) {
+    return result.code;
+  }
+
+  if (action === 'login') {
+    console.log('Auth complete — run rorca auth status to verify');
+  }
+
+  return 0;
+}
+
+async function waitForGeneratedSpec(jobId: string): Promise<{ slug?: string }> {
+  for (;;) {
+    const status = await fetchJson<{
+      jobId: string;
+      status: string;
+      slug?: string;
+      error?: string;
+    }>(`/api/specs/generate/job/${encodeURIComponent(jobId)}`);
+
+    if (status.status === 'done') {
+      return status;
+    }
+    if (status.status === 'failed') {
+      throw new Error(status.error || 'Spec generation failed.');
+    }
+    await sleep(2000);
+  }
+}
+
+async function runForge(brief: string, options: { approve?: boolean; run?: boolean }): Promise<number> {
+  const workspace = await getDefaultWorkspace();
+  const generated = await fetchJson<Record<string, unknown>>('/api/specs/generate', {
+    method: 'POST',
+    body: JSON.stringify({
+      brief,
+      workspaceId: workspace.id,
+    }),
+  }, 120_000);
+
+  let specSlug = typeof generated.slug === 'string' ? generated.slug : undefined;
+  if (!specSlug && typeof generated.jobId === 'string') {
+    const completed = await waitForGeneratedSpec(generated.jobId);
+    specSlug = completed.slug;
+  }
+
+  if (!specSlug) {
+    throw new Error('Spec generation completed without a slug.');
+  }
+
+  const spec = await fetchJson<Record<string, unknown>>(`/api/specs/${encodeURIComponent(specSlug)}?workspaceId=${encodeURIComponent(workspace.id)}`);
+  const stories = (Array.isArray(spec.userStories) ? spec.userStories : Array.isArray(spec.stories) ? spec.stories : []) as Array<{
+    id: string;
+    title: string;
+  }>;
+
+  console.log(`${bold(specSlug)} in workspace ${workspace.id}`);
+  if (stories.length > 0) {
+    printTable(['Story', 'Title'], stories.map((story) => [story.id, story.title]));
+  }
+
+  if (options.approve || options.run) {
+    await fetchJson(`/api/specs/${encodeURIComponent(specSlug)}/approve`, {
+      method: 'POST',
+      body: JSON.stringify({ workspaceId: workspace.id }),
+    });
+    console.log(green(`Approved ${specSlug}`));
+  }
+
+  if (options.run) {
+    return runSpec({ specSlug, tail: true });
+  }
+
+  return 0;
+}
+
+async function runTui(): Promise<number> {
+  const entry = path.join(BACKEND_DIR, 'bin', 'forge.ts');
+  const result = await runCommand('npx', ['tsx', entry], {
+    cwd: ROOT_DIR,
     stdio: 'inherit',
   });
-
-  if (result.status === 0) {
-    console.log('');
-    console.log('✓ Rorca MCP configured for Claude Code with Bearer auth.');
-    console.log('  URL:    ' + url);
-    console.log('  Token:  ~/.rorca/mcp-token (mode 0600)');
-  } else {
-    console.error('claude mcp add failed (exit ' + result.status + ')');
-    process.exit(result.status ?? 1);
-  }
+  return result.code;
 }
 
-function runMcpRotateToken(rotateArgs: string[]): void {
-  const force = rotateArgs.includes('--force') || rotateArgs.includes('-f');
+const program = new Command();
 
-  if (!force) {
-    process.stdout.write('Rotate the MCP token? Existing MCP clients will need re-setup. [y/N]: ');
-    // Synchronous prompt via spawnSync stdin trick is awkward; require --force flag for non-TTY.
-    // For interactive use, accept the warning and ask for explicit confirmation:
-    const buf = Buffer.alloc(8);
-    let answer: string;
-    try {
-      const fd = (process.stdin as { fd?: number }).fd ?? 0;
-      const fs = require('fs');
-      const n = fs.readSync(fd, buf, 0, 8, null);
-      answer = buf.slice(0, n).toString('utf8').trim().toLowerCase();
-    } catch {
-      console.error('\nNon-interactive shell detected. Re-run with --force to skip confirmation.');
-      process.exit(1);
+program
+  .name('rorca')
+  .description('Rorca CLI')
+  .version(pkg.version);
+
+program
+  .command('start')
+  .option('--port <port>', 'Port to bind', '3030')
+  .option('--host <host>', 'Host to bind', '127.0.0.1')
+  .option('--no-db', 'Skip Docker sidecar management')
+  .action(async (options: { port: string; host: string; db: boolean }) => {
+    const port = Number(options.port);
+    if (!Number.isInteger(port) || port < 1 || port > 65535) {
+      throw new Error(`Invalid port: ${options.port}`);
     }
-    if (answer !== 'y' && answer !== 'yes') {
-      console.log('Aborted.');
+    await startServer({ port, host: options.host, noDb: options.db === false });
+  });
+
+program
+  .command('init')
+  .option('--path <dir>', 'Target directory', process.cwd())
+  .option('--auto-install-pi', 'Install pi automatically with npm in non-interactive environments')
+  .option('--skip-docker', 'Skip Docker database setup')
+  .action(async (options: { path: string; autoInstallPi?: boolean; skipDocker?: boolean }) => {
+    process.exitCode = await runInit(options.path, {
+      autoInstallPi: Boolean(options.autoInstallPi),
+      skipDocker: Boolean(options.skipDocker),
+    });
+  });
+
+program
+  .command('chat')
+  .option('--model <model>', 'Pi model override')
+  .option('--workspace-id <id>', 'Workspace to inject context from')
+  .action(async (options: { model?: string; workspaceId?: string }) => {
+    process.exitCode = await runChat(options);
+  });
+
+program
+  .command('run <specSlug>')
+  .option('--story <id>', 'Run a single story')
+  .option('--dry-run', 'Return dry-run estimate only')
+  .option('--agent <agent>', 'Execution agent override')
+  .option('--model <model>', 'Model override')
+  .option('--tail', 'Tail raw run output alongside WAL lifecycle events')
+  .action(async (specSlug: string, options: { story?: string; dryRun?: boolean; agent?: 'claude' | 'opencode' | 'codex' | 'pi'; model?: string; tail?: boolean }) => {
+    const code = await runSpec({
+      specSlug,
+      story: options.story,
+      dryRun: options.dryRun,
+      agent: options.agent,
+      model: options.model,
+      tail: options.tail,
+    });
+    process.exitCode = code;
+  });
+
+program
+  .command('status')
+  .option('--run-id <id>', 'Show one run in detail')
+  .action(async (options: { runId?: string }) => {
+    await runStatus(options.runId ? Number(options.runId) : undefined);
+  });
+
+program
+  .command('attach <runId>')
+  .description('Attach to an active run')
+  .action(async (runId: string) => {
+    const parsedRunId = Number(runId);
+    if (!Number.isInteger(parsedRunId) || parsedRunId < 1) {
+      console.log(`No active run with ID ${runId}`);
+      process.exitCode = 1;
       return;
     }
+
+    process.exitCode = await attachLiveRun(parsedRunId);
+  });
+
+program
+  .command('doctor')
+  .option('--json', 'Emit JSON output')
+  .option('--check <name>', 'Run a single named check')
+  .option('--verbose', 'Show verbose detail output')
+  .action(async (options: { json?: boolean; check?: string; verbose?: boolean }) => {
+    process.exitCode = await runDoctor(options);
+  });
+
+const auth = program.command('auth').description('Manage Pi authentication');
+
+auth
+  .action(async () => {
+    process.exitCode = await runPiAuthStatus();
+  });
+
+auth
+  .command('status')
+  .action(async () => {
+    process.exitCode = await runPiAuthStatus();
+  });
+
+auth
+  .command('login [provider]')
+  .action(async (provider?: string) => {
+    process.exitCode = await runPiAuthCommand('login', provider);
+  });
+
+auth
+  .command('logout [provider]')
+  .action(async (provider?: string) => {
+    process.exitCode = await runPiAuthCommand('logout', provider);
+  });
+
+auth
+  .command('install')
+  .action(() => {
+    printPiInstallMethods();
+  });
+
+program
+  .command('forge <brief...>')
+  .option('--approve', 'Approve generated spec')
+  .option('--run', 'Approve and immediately trigger the run')
+  .action(async (briefParts: string[], options: { approve?: boolean; run?: boolean }) => {
+    process.exitCode = await runForge(briefParts.join(' '), options);
+  });
+
+program
+  .command('tui')
+  .action(async () => {
+    process.exitCode = await runTui();
+  });
+
+const mcp = program.command('mcp').description('Manage MCP HTTP authentication');
+
+mcp
+  .command('token')
+  .option('--admin', 'Print the admin token instead of the public token')
+  .action(async (options: { admin?: boolean }) => {
+    process.exitCode = await runMcpToken(options);
+  });
+
+mcp
+  .command('setup-claude')
+  .option('--admin', 'Configure Claude to use the admin token instead of the public token')
+  .action(async (options: { admin?: boolean }) => {
+    process.exitCode = await runMcpSetupClaude(options);
+  });
+
+mcp
+  .command('rotate-token')
+  .option('--public', 'Rotate only the public token (default)')
+  .option('--admin', 'Rotate only the admin token')
+  .option('--all', 'Rotate both public and admin tokens')
+  .action(async (options: { public?: boolean; admin?: boolean; all?: boolean }) => {
+    process.exitCode = await runMcpRotateToken(options);
+  });
+
+mcp
+  .command('status')
+  .action(async () => {
+    process.exitCode = await runMcpStatus();
+  });
+
+mcp
+  .command('diagnose-clients')
+  .description('Scan known MCP client configs for broken Rorca OAuth-era entries')
+  .action(async () => {
+    process.exitCode = await runMcpDiagnoseClients();
+  });
+
+const db = program.command('db').description('Manage the Docker Postgres sidecar');
+
+db.command('start').action(async () => {
+  await handleDbCommand('start');
+});
+
+db.command('stop').action(async () => {
+  await handleDbCommand('stop');
+});
+
+db.command('status').action(async () => {
+  await handleDbCommand('status');
+});
+
+db.command('reset')
+  .option('-y, --yes', 'Skip confirmation')
+  .action(async (options: { yes?: boolean }) => {
+    await handleDbCommand('reset', { yes: Boolean(options.yes) });
+  });
+
+db.command('logs')
+  .option('--tail <lines>', 'Tail line count', '100')
+  .action(async (options: { tail: string }) => {
+    await handleDbCommand('logs', { tail: Number(options.tail) || 100 });
+  });
+
+program.showHelpAfterError();
+
+program.parseAsync(process.argv).catch((error: unknown) => {
+  if (error instanceof PrintedCliError) {
+    process.exit(1);
   }
-
-  ensureRorcaDir();
-  const newToken = generateLocalToken();
-  const tmpPath = MCP_TOKEN_PATH + '.tmp.' + process.pid;
-  writeFileSync(tmpPath, newToken, { mode: 0o600 });
-  renameSync(tmpPath, MCP_TOKEN_PATH);
-
-  // Verify mode (umask defense)
-  const stat = statSync(MCP_TOKEN_PATH);
-  const mode = stat.mode & 0o777;
-  if (mode !== 0o600) {
-    console.error('Warning: token file mode is ' + mode.toString(8) + ' (expected 600).');
-    console.error('Run: chmod 600 ' + MCP_TOKEN_PATH);
-  }
-
-  console.log('✓ MCP token rotated.');
-  console.log('  Run `rorca mcp setup-claude` to re-link your Claude Code MCP client.');
-}
-
-function runMcpStatus(): void {
-  const token = readMcpTokenFromDisk();
-
-  console.log('MCP Status');
-  console.log('────────────');
-
-  // Token presence + mode
-  if (!token) {
-    console.log('  Token:        ✗ missing (' + MCP_TOKEN_PATH + ')');
-    console.log('                Run `rorca start` to generate.');
-  } else {
-    let modeOk = true;
-    try {
-      const stat = statSync(MCP_TOKEN_PATH);
-      const mode = stat.mode & 0o777;
-      modeOk = mode === 0o600;
-      const tag = modeOk ? '✓' : '⚠';
-      console.log('  Token:        ' + tag + ' present (mode ' + mode.toString(8) + ')');
-      if (!modeOk) console.log('                Expected mode 600. Run: chmod 600 ' + MCP_TOKEN_PATH);
-    } catch {
-      console.log('  Token:        ⚠ stat failed');
-    }
-  }
-
-  // Server reachability
-  const checkPort = 3030;
-  const reachable = isPortInUse(checkPort);
-  console.log('  Server :' + checkPort + ':  ' + (reachable ? '✓ reachable' : '✗ not running'));
-
-  if (!reachable) {
-    console.log('                Run `rorca start` to launch the backend.');
-  }
-}
-
-// Lightweight TCP probe; mirrors the helper used by runStart for port discovery.
-function isPortInUse(port: number): boolean {
-  let inUse = false;
-  try {
-    const result = execSync(
-      process.platform === 'darwin' || process.platform === 'linux'
-        ? `lsof -ti:${port} >/dev/null 2>&1 && echo yes || echo no`
-        : `netstat -an | findstr :${port} >nul && echo yes || echo no`,
-      { encoding: 'utf8', shell: '/bin/sh' as any }
-    ).trim();
-    inUse = result === 'yes';
-  } catch {
-    inUse = false;
-  }
-  return inUse;
-}
+  const message = error instanceof Error ? error.message : String(error);
+  console.error(message);
+  process.exit(1);
+});

@@ -1,7 +1,14 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 // ─── Agent Configuration ─────────────────────────────────────────────────────
 // OC-001: RORCA_AGENT and RORCA_MODEL env var support for multi-agent execution.
 
-export const VALID_AGENT_TYPES = ['claude', 'opencode', 'codex'] as const;
+export const VALID_AGENT_TYPES = ['claude', 'opencode', 'codex', 'pi'] as const;
 export type AgentType = typeof VALID_AGENT_TYPES[number];
 
 export interface AgentConfig {
@@ -37,6 +44,15 @@ export const agentConfig: AgentConfig = parseAgentConfig();
 
 export const agentType: AgentType = agentConfig.agentType;
 export const agentModel: string | null = agentConfig.agentModel;
+export let activeAgent: AgentType = agentConfig.agentType;
+export let activeModel: string | null = agentConfig.agentModel;
+
+export function setActiveAgentConfig(next: { agent: AgentType; model?: string | null }): void {
+  activeAgent = next.agent;
+  if (Object.prototype.hasOwnProperty.call(next, 'model')) {
+    activeModel = next.model?.trim() || null;
+  }
+}
 
 // ─── Orchestration Config Validation (OC-021) ────────────────────────────────
 

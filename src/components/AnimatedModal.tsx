@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * AnimatedModal: Animated backdrop + modal entry with scaleIn + fadeIn
  * Used for: modals, dialogs, confirmation screens
  * Animation: scale from 95% to 100% + fadeIn (150ms)

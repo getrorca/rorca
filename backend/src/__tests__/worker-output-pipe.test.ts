@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * US-007: Worker stdout → run_output_chunks pipeline tests
  *
  * Root cause: The worker was using the 'exit' event to flush the pending buffer,

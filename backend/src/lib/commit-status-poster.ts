@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * US-027: Post GitHub commit status checks for each story as it progresses through the pipeline.
  *
  * Subscribes to WAL events (story_started, story_passed, story_failed) and posts

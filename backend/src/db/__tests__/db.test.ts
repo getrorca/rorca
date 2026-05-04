@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Pool } from 'pg';
 import { getTestPool, closeTestPool, truncateAll } from '../../__tests__/helpers/pg-test-utils';
 
@@ -116,8 +123,41 @@ test('schema_migrations has applied versions', async () => {
   expect(rows[0].filename).toContain('001');
 });
 
+test('schema_migrations tracks lite-skipped migrations explicitly', async () => {
+  const { rows } = await pool.query(`
+    SELECT column_name
+    FROM information_schema.columns
+    WHERE table_schema = 'public'
+      AND table_name = 'schema_migrations'
+      AND column_name = 'skipped_in_lite_mode'
+  `);
+  expect(rows).toHaveLength(1);
+});
+
 test('running migrations again is idempotent', async () => {
   // Import and re-run — should not throw
   const { runPgMigrations } = require('../pg-index');
   await expect(runPgMigrations(pool)).resolves.not.toThrow();
+});
+
+test('prepareLiteSkippedMigrationsForReplay removes lite-skipped rows so they can be replayed', async () => {
+  const version = 99999999999999;
+  await pool.query(
+    `INSERT INTO schema_migrations (version, filename, skipped_in_lite_mode)
+     VALUES ($1, $2, TRUE)
+     ON CONFLICT (version) DO UPDATE
+       SET filename = EXCLUDED.filename,
+           skipped_in_lite_mode = EXCLUDED.skipped_in_lite_mode`,
+    [version, '050_knowledge_graph.sql [skipped: extension unavailable]']
+  );
+
+  const { prepareLiteSkippedMigrationsForReplay } = require('../pg-index');
+  const versions = await prepareLiteSkippedMigrationsForReplay(pool);
+  expect(versions).toContain(version);
+
+  const { rows } = await pool.query(
+    'SELECT version FROM schema_migrations WHERE version = $1',
+    [version]
+  );
+  expect(rows).toHaveLength(0);
 });

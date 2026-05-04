@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * SkeletonFadeWrapper — wraps real content with a fade-in transition.
  * When `loading` is true, renders the skeleton. When false, fades in the children
  * over 200ms (opacity transition) with no white flash.

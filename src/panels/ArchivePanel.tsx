@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useState, useEffect, useCallback, useRef } from 'react';
 import {
   Search,
@@ -172,15 +179,15 @@ export default function ArchivePanel({ onNavigate }: { onNavigate: (panel: Panel
   const [specDetail, setSpecDetail] = useState<SpecDetail | null>(null);
   const [detailLoading, setDetailLoading] = useState(false);
 
-  const debounceRef = useRef<ReturnType<typeof setTimeout>>();
+  const debounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
 
   // ─── Debounce search ────────────────────────────────────────────
   useEffect(() => {
-    clearTimeout(debounceRef.current);
+    clearTimeout(debounceRef.current ?? undefined);
     debounceRef.current = setTimeout(() => {
       setDebouncedSearch(searchText);
     }, 300);
-    return () => clearTimeout(debounceRef.current);
+    return () => clearTimeout(debounceRef.current ?? undefined);
   }, [searchText]);
 
   // ─── Fetch specs ────────────────────────────────────────────────

@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response } from 'express';
 import * as fs from 'fs';
 import * as path from 'path';
@@ -27,6 +34,7 @@ import { SkillRegistry } from '../lib/skill-registry';
 import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
 import { querySkillEffectiveness, querySkillPathAffinity, isGraphAvailable, graphStats, querySpecKnowledgeGraph, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
+import { requireAge } from '../lib/age-guard';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
 import { matchSkills } from '../lib/skill-matcher';
 import { route as routeContext } from '../lib/context-router';
@@ -38,6 +46,13 @@ import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import { handleRouteError } from '../lib/async-handler';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
+import { createJob, updateJobStatus } from '../db/spec-jobs';
+import { getBoss } from '../lib/pg-boss';
+import {
+  SPEC_ENRICH_QUEUE,
+  SPEC_MATCH_SKILLS_QUEUE,
+  SPEC_SUGGEST_SKILLS_QUEUE,
+} from '../lib/spec-job-worker';
 
 /* hydrateGitMemory removed — git_memory column dropped in migration 075.
    Git-derived knowledge is now served via the memories table + memory-router.ts. */
@@ -67,6 +82,11 @@ function briefToSlug(text: string): string {
 
 const MAX_ATTACHMENT_TOKENS = 2000;
 const IMAGE_CONTENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
+const ASYNC_SPEC_JOB_QUEUE = {
+  enrich: SPEC_ENRICH_QUEUE,
+  'match-skills': SPEC_MATCH_SKILLS_QUEUE,
+  'suggest-skills': SPEC_SUGGEST_SKILLS_QUEUE,
+} as const;
 
 /**
  * Extract text content from an attachment's binary data based on MIME type.
@@ -273,6 +293,39 @@ import { ConflictError, ForbiddenError, NotFoundError, PayloadTooLargeError, Unp
 import { githubRateLimiter } from '../lib/github-rate-limiter';
 
 const router = Router();
+
+async function enqueueAsyncSpecJob(
+  specId: string,
+  workspaceId: string,
+  jobType: keyof typeof ASYNC_SPEC_JOB_QUEUE,
+): Promise<{ jobId: string; status: 'pending'; pollUrl: string; streamUrl: string }> {
+  const job = await createJob(workspaceId, specId, jobType, null);
+  const bossJobId = await getBoss().send(ASYNC_SPEC_JOB_QUEUE[jobType], {
+    jobId: job.id,
+    specId,
+    workspaceId,
+  });
+
+  if (!bossJobId) {
+    await updateJobStatus(job.id, 'failed', {
+      errorMessage: `boss.send() returned null for ${jobType}`,
+      finishedAt: new Date(),
+    });
+    throw new UnprocessableError(`Failed to enqueue ${jobType} job`);
+  }
+
+  await updateJobStatus(job.id, 'pending', {
+    bossJobId,
+    progressMessage: `Queued ${jobType} job`,
+  });
+
+  return {
+    jobId: job.id,
+    status: 'pending',
+    pollUrl: `/api/spec-jobs/${job.id}`,
+    streamUrl: `/api/spec-jobs/${job.id}/stream`,
+  };
+}
 
 // ─── Batch Queue Types ────────────────────────────────────────────────────────
 
@@ -828,6 +881,9 @@ const GenerateSpecSchema = z.object({
  *     tags: [Specs]
  *     summary: Generate a spec from a plain-English brief
  *     operationId: generateSpec
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Spec generation is a core open-source CLI workflow and intentionally part of the stable MCP-exposed contract."
+ *     x-rorca-public-api: true
  *     description: >
  *       Generates a structured spec (JSON with userStories array) from a plain-English
  *       brief using LLM with the synthesized direction stack (L1-L5) as context.
@@ -3019,6 +3075,9 @@ router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
  *     summary: List specs (pending/approved/all)
  *     operationId: listSpecs
  *     description: Lists specs for a workspace filtered by status, tags, review status, and assignee. Returns paginated results sorted by generatedAt descending.
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only spec listing for local CLI, MCP, and web clients. Stable open-core surface with no billing or admin action."
+ *     x-rorca-public-api: true
  *     parameters:
  *       - in: query
  *         name: workspaceId
@@ -3171,6 +3230,9 @@ interface KanbanSpec {
  *     tags: [Specs]
  *     summary: Get kanban board data for a workspace
  *     operationId: getSpecsKanban
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Kanban state is core spec review/read visibility for the local CLI and MCP with no billing or operator side effects."
+ *     x-rorca-public-api: true
  *     description: >
  *       Returns specs organized into kanban columns: draft (pending), inProgress (approved,
  *       queued, or actively running), custom columns, and done (passed or manually marked done).
@@ -4295,6 +4357,9 @@ function computeRelevanceScore(snippets: MatchSnippet[]): number {
  *     tags: [Specs]
  *     summary: Search spec archive with pagination
  *     operationId: searchSpecArchive
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Archive search is part of the stable read surface for specs and does not mutate state or cross a billing boundary."
+ *     x-rorca-public-api: true
  *     description: Full-text searchable spec archive with pagination, date range filtering, tag filtering, and agent type filtering. Rebuilds FTS index on each call. Returns relevance-ranked results with match snippets when a search query is provided.
  *     parameters:
  *       - in: query
@@ -4565,6 +4630,9 @@ router.get('/archive', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Cross-spec story search
  *     operationId: searchStories
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Story search is a core discovery capability for CLI and MCP clients and is safe because it is read-only."
+ *     x-rorca-public-api: true
  *     description: Searches across all specs in a workspace for stories matching the query text. Matches against story ID, title, description, and acceptance criteria. Returns paginated results with match field indicators.
  *     parameters:
  *       - in: query
@@ -4670,6 +4738,9 @@ router.get('/search/stories', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Generate additional stories for an existing spec
  *     operationId: addStories
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Appending stories to a local spec is part of the open-source spec-authoring workflow and does not touch billing or admin controls."
+ *     x-rorca-public-api: true
  *     description: Uses LLM to generate new user stories and append them to an existing spec. Automatically continues the story ID sequence and regenerates the mermaid dependency diagram.
  *     parameters:
  *       - in: path
@@ -4888,6 +4959,9 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: List all versions for a spec
  *     operationId: listSpecVersions
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Version history is read-only spec metadata needed by external CLI consumers and safe to keep in the stable contract."
+ *     x-rorca-public-api: true
  *     description: Returns all versioned snapshots of a spec, ordered by version ascending. Each version includes status, rejection reason (if rejected), creation timestamp, title, and story count.
  *     parameters:
  *       - in: path
@@ -4984,6 +5058,9 @@ router.get('/:specId/versions', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Structured diff between two spec versions
  *     operationId: diffSpecVersions
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Spec diffs are read-only comparison data for CLI and MCP review flows with no privileged side effects."
+ *     x-rorca-public-api: true
  *     description: Computes a structured diff between two historical versions of a spec. Shows added, removed, modified, and unchanged stories along with field-level deltas for modified stories.
  *     parameters:
  *       - in: path
@@ -5194,6 +5271,9 @@ router.post('/:specId/versions/:version/restore', async (req: Request, res: Resp
  *     tags: [Specs]
  *     summary: Toggle story excluded flag or edit story fields
  *     operationId: patchStory
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Scoped story edits are part of the core open-source spec editing workflow and are intentionally exposed to CLI and MCP clients."
+ *     x-rorca-public-api: true
  *     description: Either toggles the excluded flag on a story (for approved or pending specs), or edits story fields (title, description, acceptanceCriteria) on pending specs only. Field edits create a version snapshot before applying changes.
  *     parameters:
  *       - in: path
@@ -5504,6 +5584,9 @@ router.put('/:specId/stories/:storyId', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Remove a single story from a spec
  *     operationId: deleteStory
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Deleting a story is a core local spec-authoring action and is part of the stable open-source CLI contract."
+ *     x-rorca-public-api: true
  *     description: Removes a story from a spec, creates a version snapshot before deletion, reindexes remaining story IDs sequentially, and updates dependsOn references. Emits a story_deleted WAL event.
  *     parameters:
  *       - in: path
@@ -5837,6 +5920,9 @@ router.get('/tags/autocomplete', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Get full spec detail
  *     operationId: getSpec
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Full spec detail is a canonical read endpoint for the open-source CLI contract and carries no billing or admin action."
+ *     x-rorca-public-api: true
  *     description: Retrieves the full spec JSON including all user stories, metadata, and computed readiness percentage. Looks in both pending and approved directories.
  *     parameters:
  *       - in: path
@@ -6042,6 +6128,9 @@ router.post('/:specId/fork', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Approve a spec (move to approved/)
  *     operationId: approveSpec
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Approving a local spec is part of the core spec lifecycle that the open-source CLI must be able to drive."
+ *     x-rorca-public-api: true
  *     description: Moves a spec from pending/ to approved/ directory, making it eligible for pipeline execution. Emits a spec_approved WAL event.
  *     parameters:
  *       - in: path
@@ -6114,6 +6203,9 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Reject a spec (delete + preserve in WAL)
  *     operationId: rejectSpec
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Rejecting a local spec is part of the stable review lifecycle for CLI and MCP clients and has no billing or admin implications."
+ *     x-rorca-public-api: true
  *     description: Rejects a pending spec by deleting the file and preserving the content in spec_versions with rejection reason. Emits a spec_rejected WAL event.
  *     parameters:
  *       - in: path
@@ -7155,6 +7247,9 @@ router.post('/:specId/stories/bulk', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: Get story dependency DAG
  *     operationId: getSpecGraph
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Dependency graph data is read-only planning context for execution and review flows and is safe for the stable public contract."
+ *     x-rorca-public-api: true
  *     description: Returns a directed acyclic graph (DAG) representation of story dependencies including nodes with status, edges, and parallel execution groups (waves). If a runId is provided, node statuses are populated from story_results.
  *     parameters:
  *       - in: path
@@ -7354,15 +7449,9 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
  *                       title: { type: string }
  *                       relationship: { type: string }
  */
-router.get('/:specId/knowledge-graph', async (req: Request, res: Response) => {
+router.get('/:specId/knowledge-graph', requireAge(), async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
-
-    const stats = await graphStats();
-    if (!stats.available) {
-      res.json({ available: false, memories: [], conventions: [], relatedStories: [] });
-      return;
-    }
 
     const result = await querySpecKnowledgeGraph(specId);
     res.json({ available: true, ...result });
@@ -10146,6 +10235,59 @@ ${storyList}`;
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/match-skills/async:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Queue an async skill-matching job for a spec
+ *     operationId: rorca_specs_by_id_match_skills_async
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Queues local background skill matching for UI and MCP polling without privileged side effects."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       202:
+ *         description: Async skill matching queued
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 jobId: { type: string, format: uuid }
+ *                 status: { type: string, enum: [pending] }
+ *                 pollUrl: { type: string }
+ *                 streamUrl: { type: string }
+ */
+router.post('/:specId/match-skills/async', async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const { workspaceId } = req.body as { workspaceId?: string };
+
+    if (!workspaceId) {
+      throw new ValidationError('workspaceId is required');
+    }
+
+    const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'match-skills');
+    res.status(202).json(payload);
+  } catch (error) {
+    handleRouteError(res, error, '[Specs] match-skills async');
+  }
+});
+
 // ─── POST /:specId/suggest-models — LLM-driven model suggestion ────────────
 
 /**
@@ -10644,6 +10786,59 @@ router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
 
 /**
  * @swagger
+ * /api/specs/{specId}/suggest-skills/async:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Queue an async skill-suggestion job for a spec
+ *     operationId: rorca_specs_by_id_suggest_skills_async
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Queues local background skill suggestion for UI and MCP polling without privileged side effects."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       202:
+ *         description: Async skill suggestion queued
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 jobId: { type: string, format: uuid }
+ *                 status: { type: string, enum: [pending] }
+ *                 pollUrl: { type: string }
+ *                 streamUrl: { type: string }
+ */
+router.post('/:specId/suggest-skills/async', async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const { workspaceId } = req.body as { workspaceId?: string };
+
+    if (!workspaceId) {
+      throw new ValidationError('workspaceId is required');
+    }
+
+    const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'suggest-skills');
+    res.status(202).json(payload);
+  } catch (error) {
+    handleRouteError(res, error, '[Specs] suggest-skills async');
+  }
+});
+
+/**
+ * @swagger
  * /api/specs/{specId}/fix:
  *   post:
  *     tags: [Specs]
@@ -11133,7 +11328,7 @@ const UpdateSpecSchema = z.object({
   title: z.string().optional(),
   _notes: z.string().optional(),
   autoWorktree: z.boolean().optional(),
-  agentOverride: z.enum(['claude', 'opencode', 'codex']).optional(),
+  agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
   thinkingEnabled: z.boolean().optional(),
   thinkingBudget: z.number().optional(),
   effortLevel: z.enum(['low', 'medium', 'high']).optional(),
@@ -11144,6 +11339,9 @@ const UpdateSpecSchema = z.object({
  * /api/specs/{specId}:
  *   put:
  *     summary: Update spec-level metadata
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Spec-level metadata edits are part of the core local authoring workflow that the open-source CLI relies on."
+ *     x-rorca-public-api: true
  *     description: Updates top-level metadata fields (model, title, _notes, agentOverride, thinkingEnabled, thinkingBudget, effortLevel) without touching userStories.
  *     tags: [Specs]
  *     parameters:
@@ -11590,6 +11788,59 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     res.json({ success: true, retrieval_method: highestTier, storiesEnriched });
   } catch (error: unknown) {
     handleRouteError(res, error, '[Specs] Enrich context');
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/{specId}/enrich/async:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Queue an async enrichment job for a spec
+ *     operationId: rorca_specs_by_id_enrich_async
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Queues local background spec enrichment for UI and MCP polling without privileged side effects."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       202:
+ *         description: Async enrichment queued
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 jobId: { type: string, format: uuid }
+ *                 status: { type: string, enum: [pending] }
+ *                 pollUrl: { type: string }
+ *                 streamUrl: { type: string }
+ */
+router.post('/:specId/enrich/async', async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const { workspaceId } = req.body as { workspaceId?: string };
+
+    if (!workspaceId) {
+      throw new ValidationError('workspaceId is required');
+    }
+
+    const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'enrich');
+    res.status(202).json(payload);
+  } catch (error) {
+    handleRouteError(res, error, '[Specs] enrich async');
   }
 });
 
