@@ -2,7 +2,7 @@
   "specId": "Rorca Pi-Native Execution Runtime and Embedded TUI",
   "runId": 20260316000266,
   "startedAt": "2026-05-04T08:33:31.901Z",
-  "lastUpdatedAt": "2026-05-04T09:06:06.519Z",
+  "lastUpdatedAt": "2026-05-04T09:17:01.938Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -223,6 +223,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 604718
+    },
+    {
+      "storyId": "US-017",
+      "title": "Backend MCP Tier Annotations for Memory, Workspace, and Pi-Lifecycle Routes",
+      "status": "passed",
+      "startedAt": "2026-05-04T09:06:13.550Z",
+      "finishedAt": "2026-05-04T09:16:48.852Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 635302
     }
   ],
   "failedStories": [
@@ -238,7 +248,7 @@
     }
   ],
   "skippedStories": [],
-  "currentStory": "US-017",
+  "currentStory": "US-020",
   "decisions": [],
   "resumedFromStory": "US-005"
 }

@@ -117,6 +117,13 @@ function extractDiagramText(spec: SpecDetailData): { text: string; type: 'mermai
   return null;
 }
 
+function getEnrichmentErrorMessage(error: unknown): string {
+  if (error instanceof Error && error.message) {
+    return error.message;
+  }
+  return 'Context enrichment failed. Try again in a moment.';
+}
+
 /* ─── Props ───────────────────────────────────────────────────────── */
 
 export interface SpecDetailSlideOverProps {
@@ -421,6 +428,7 @@ function SpecDetailContent({
 
   // Enrich
   const [enrichState, setEnrichState] = useState<'idle' | 'enriching'>('idle');
+  const [enrichSlow, setEnrichSlow] = useState(false);
   const [enrichRefreshKey, setEnrichRefreshKey] = useState(0);
 
   // Approve/Reject
@@ -434,17 +442,52 @@ function SpecDetailContent({
     firstFocusRef.current?.focus();
   }, [specId]);
 
+  const refreshSpecDetail = useCallback(async (opts?: { skipSpinner?: boolean }) => {
+    if (!specId || !workspaceId) return null;
+    if (!opts?.skipSpinner) {
+      setDetailLoading(true);
+      storiesInitialized.current = false;
+    }
+
+    try {
+      const nextDetail = await apiFetch<SpecDetailData>(`/api/specs/${specId}?workspaceId=${workspaceId}`);
+      setDetail(nextDetail);
+      if (opts?.skipSpinner) {
+        setLocalStories(nextDetail.userStories ?? nextDetail.stories ?? []);
+        storiesInitialized.current = true;
+      }
+      return nextDetail;
+    } catch {
+      if (!opts?.skipSpinner) {
+        setDetail(null);
+      }
+      return null;
+    } finally {
+      if (!opts?.skipSpinner) {
+        setDetailLoading(false);
+      }
+    }
+  }, [specId, workspaceId]);
+
   // Fetch detail + summary
   useEffect(() => {
     if (!specId || !workspaceId) return;
     let cancelled = false;
+
     setDetailLoading(true);
     storiesInitialized.current = false; // reset so fresh fetch re-populates stories
 
     apiFetch<SpecDetailData>(`/api/specs/${specId}?workspaceId=${workspaceId}`)
-      .then(d => { if (!cancelled) setDetail(d); })
-      .catch(() => { if (!cancelled) setDetail(null); })
-      .finally(() => { if (!cancelled) setDetailLoading(false); });
+      .then(d => {
+        if (cancelled) return;
+        setDetail(d);
+      })
+      .catch(() => {
+        if (!cancelled) setDetail(null);
+      })
+      .finally(() => {
+        if (!cancelled) setDetailLoading(false);
+      });
 
     // If no initial summary, fetch from archive
     if (!initialSummary) {
@@ -479,6 +522,16 @@ function SpecDetailContent({
       .then(res => setHasActiveRun(res.items?.some(r => r.status === 'running' || r.status === 'paused') ?? false))
       .catch(() => { /* ignore */ });
   }, [workspaceId]);
+
+  useEffect(() => {
+    if (enrichState !== 'enriching') {
+      setEnrichSlow(false);
+      return;
+    }
+
+    const timer = window.setTimeout(() => setEnrichSlow(true), 8000);
+    return () => window.clearTimeout(timer);
+  }, [enrichState]);
 
   /* ─── Actions ─────────────────────────────────────────────────────── */
 
@@ -592,17 +645,19 @@ function SpecDetailContent({
   const handleEnrich = async () => {
     if (!workspaceId) return;
     setEnrichState('enriching');
+    setEnrichSlow(false);
     try {
       const res = await apiFetch<{ ok: boolean; retrieval_method?: string }>(`/api/specs/${specId}/enrich`, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify({ workspaceId }),
       });
-      const method = res.retrieval_method ?? 'direction-only';
+      await refreshSpecDetail({ skipSpinner: true });
+      const method = res.retrieval_method ?? 'direction_only';
       toast.show(`Spec enriched via ${method}`, 'success');
       setEnrichRefreshKey(k => k + 1);
     } catch (err: unknown) {
-      toast.show(err instanceof Error ? err.message : 'Enrichment failed', 'error');
+      toast.show(getEnrichmentErrorMessage(err), 'error');
     } finally {
       setEnrichState('idle');
     }
@@ -758,7 +813,18 @@ function SpecDetailContent({
                 onSpecModelUpdated={(fields) => setDetail(prev => prev ? { ...prev, ...fields, model: fields.model ?? undefined } : prev)} />
             )}
             {activeTab === 'history' && workspaceId && <SpecVersionHistory specId={specId} workspaceId={workspaceId} />}
-            {activeTab === 'context' && <GenerationLogTab specId={specId} stories={stories} refreshKey={enrichRefreshKey} />}
+            {activeTab === 'context' && (
+              <GenerationLogTab
+                specId={specId}
+                workspaceId={workspaceId}
+                stories={stories}
+                refreshKey={enrichRefreshKey}
+                enrichState={enrichState}
+                enrichSlow={enrichSlow}
+                activeRunStatus={activeRunStatus}
+                onEnrich={handleEnrich}
+              />
+            )}
             {activeTab === 'skills' && <SpecSkillsTab stories={stories} workspaceId={workspaceId ?? ''} />}
             {activeTab === 'graph' && workspaceId && <GraphTabWithSubTabs specId={specId} workspaceId={workspaceId} />}
             {activeTab === 'diagram' && <MermaidDiagram diagram={diagram} idPrefix="mermaid-slideover" />}
@@ -926,7 +992,7 @@ function SpecDetailContent({
                 className={`flex items-center justify-center gap-1.5 w-full py-2 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors ${enrichDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
               >
                 {enrichState === 'enriching'
-                  ? <><Loader2 size={14} className="animate-spin" /> Enriching…</>
+                  ? <><Loader2 size={14} className="animate-spin" /> Enriching context…</>
                   : <><Sparkles size={14} /> Enrich with Context</>}
               </button>
             );
@@ -1283,6 +1349,14 @@ function parseContextSummary(log: GenerationLog): ContextSummary | null {
       const found = (parsed.directionLayers as any[]).find((d: any) => d.layer === lyr);
       return found?.present ?? false;
     };
+    const rawTier = String(mem.tier ?? 'direction_only');
+    const normalizedTier =
+      rawTier === 'cag' || rawTier === 'direction_only'
+        ? 'cache'
+        : rawTier === 'rag'
+          ? 'search'
+          : 'hybrid';
+
     const normalized: ContextSummary = {
       directionLayers: {
         l1: layerPresent('L1'),
@@ -1301,7 +1375,7 @@ function parseContextSummary(log: GenerationLog): ContextSummary | null {
         cagHits: mem.cagHits ?? 0,
         ragHits: mem.ragHits ?? 0,
         graphHits: mem.graphHits ?? 0,
-        tier: (mem.tier as 'cache' | 'search' | 'hybrid') ?? 'cache',
+        tier: normalizedTier,
         latencyMs: mem.latencyMs ?? 0,
       },
     };
@@ -1351,10 +1425,29 @@ function StoryAnnotationPreview({ preview, hasMore, fullText }: { preview: strin
   );
 }
 
-function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; stories: Story[]; refreshKey?: number }) {
+function GenerationLogTab({
+  specId,
+  workspaceId,
+  stories,
+  refreshKey,
+  enrichState,
+  enrichSlow,
+  activeRunStatus,
+  onEnrich,
+}: {
+  specId: string;
+  workspaceId: string | null;
+  stories: Story[];
+  refreshKey?: number;
+  enrichState: 'idle' | 'enriching';
+  enrichSlow: boolean;
+  activeRunStatus?: 'running' | 'queued';
+  onEnrich: () => Promise<void>;
+}) {
   const [logs, setLogs] = useState<GenerationLog[]>([]);
   const [loading, setLoading] = useState(true);
   const [showAll, setShowAll] = useState(false);
+  const [reloadKey, setReloadKey] = useState(0);
 
   // Aggregate skillDetails from all stories' suggestedSkills, taking max relevance per unique name
   const skillDetails = useMemo(() => {
@@ -1377,11 +1470,15 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
     let cancelled = false;
     setLoading(true);
 
-    apiFetch<GenerationLog | { logs: GenerationLog[] }>(
+    apiFetch<GenerationLog | { logs: GenerationLog[] } | null>(
       `/api/specs/${specId}/generation-log${showAll ? '?all=true' : ''}`
     )
       .then(res => {
         if (cancelled) return;
+        if (!res) {
+          setLogs([]);
+          return;
+        }
         if ('logs' in res) setLogs(res.logs);
         else setLogs([res]);
       })
@@ -1389,7 +1486,7 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
       .finally(() => { if (!cancelled) setLoading(false); });
 
     return () => { cancelled = true; };
-  }, [specId, showAll, refreshKey]);
+  }, [specId, showAll, refreshKey, reloadKey]);
 
   if (loading) {
     return (
@@ -1400,10 +1497,38 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
   }
 
   if (logs.length === 0) {
+    const enrichDisabled = !workspaceId || activeRunStatus === 'running' || activeRunStatus === 'queued' || enrichState === 'enriching';
     return (
-      <div className="flex items-center justify-center py-12">
+      <div className="flex flex-col items-center justify-center py-12 px-6 text-center">
         <p className="text-sm text-muted">No generation data available</p>
-          <p className="text-xs text-muted/60 mt-1 text-center max-w-[280px]">Context logging was introduced in a recent update. Specs generated after that point will show direction layers, token usage, and model details here.</p>
+        <p className="text-xs text-muted/60 mt-1 max-w-[320px]">
+          Context logging was added later, so older specs can start empty until you enrich them.
+        </p>
+        <div className="flex items-center gap-2 mt-4">
+          <button
+            onClick={() => { void onEnrich(); }}
+            disabled={enrichDisabled}
+            title={activeRunStatus === 'running' || activeRunStatus === 'queued' ? 'Cannot enrich while a run is active' : 'Backfill context for this spec'}
+            className={`inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium bg-accent text-white hover:opacity-90 transition-opacity ${enrichDisabled ? 'opacity-50 cursor-not-allowed' : ''}`}
+          >
+            {enrichState === 'enriching'
+              ? <><Loader2 size={14} className="animate-spin" /> Enriching context…</>
+              : <><Sparkles size={14} /> Enrich with Context</>}
+          </button>
+          <button
+            onClick={() => setReloadKey(key => key + 1)}
+            disabled={loading}
+            className="inline-flex items-center gap-1.5 px-3 py-1.5 rounded text-sm font-medium bg-panel border border-border text-text hover:bg-accent/10 transition-colors disabled:opacity-50"
+          >
+            <RotateCcw size={14} />
+            Refresh
+          </button>
+        </div>
+        {enrichSlow && (
+          <p className="text-xs text-muted/70 mt-3 max-w-[360px]">
+            Enrichment is still running. Leave this tab open and use Refresh to check for the backfilled context log.
+          </p>
+        )}
       </div>
     );
   }
@@ -1507,12 +1632,21 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
             {/* Retrieval method badge + per-story annotation preview (enriched entries) */}
             {log.enriched && log.retrieval_method && (() => {
               const methodColors: Record<string, string> = {
-                pgvector: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
+                cag: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
+                rag: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
                 graph: 'bg-purple-500/15 text-purple-400 border-purple-500/30',
-                fulltext: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
+                direction_only: 'bg-gray-500/15 text-gray-400 border-gray-500/30',
                 'direction-only': 'bg-gray-500/15 text-gray-400 border-gray-500/30',
               };
-              const colorClass = methodColors[log.retrieval_method] ?? methodColors['direction-only'];
+              const methodLabels: Record<string, string> = {
+                cag: 'CAG',
+                rag: 'RAG',
+                graph: 'Knowledge Graph',
+                direction_only: 'Direction Only',
+                'direction-only': 'Direction Only',
+              };
+              const colorClass = methodColors[log.retrieval_method] ?? methodColors.direction_only;
+              const methodLabel = methodLabels[log.retrieval_method] ?? log.retrieval_method;
 
               // Collect stories that have a ## Context section in their description
               const annotatedStories = stories.filter(s => {
@@ -1524,7 +1658,7 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
                 <div className="px-4 py-3 border-t border-border/50">
                   <div className="flex items-center gap-2 mb-2">
                     <span className={`inline-flex items-center px-2 py-0.5 text-[10px] font-semibold rounded border ${colorClass}`}>
-                      {log.retrieval_method}
+                      {methodLabel}
                     </span>
                     <span className="text-[10px] text-muted">retrieval method</span>
                   </div>
