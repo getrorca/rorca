@@ -114,6 +114,12 @@ export const SpecJobPayload = z.object({
   jobId: z.string().uuid(),
   specId: z.string().min(1),
   workspaceId: z.string().min(1),
+  storyId: z.string().min(1).nullable().optional(),
+  mode: z.enum(['fetchAll', 'recent', 'semantic']).optional(),
+  currentTask: z.string().min(1).optional(),
+  storyText: z.string().min(1).optional(),
+  maxTokens: z.number().int().positive().optional(),
+  includeGraph: z.boolean().optional(),
 }).strict();
 
 export type SpecJobPayloadType = z.infer<typeof SpecJobPayload>;
