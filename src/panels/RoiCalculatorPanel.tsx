@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useState, useEffect, useCallback } from 'react';
 import {
   LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -299,13 +306,13 @@ export default function RoiCalculatorPanel() {
                           borderRadius: '6px',
                           fontSize: '12px',
                         }}
-                        formatter={(value?: number, name?: string) => {
-                          const v = value ?? 0;
+                        formatter={((value: string | number | undefined, name: string | number | undefined) => {
+                          const v = typeof value === 'number' ? value : Number(value ?? 0);
                           if (name === 'net_savings') return [formatCurrency(v), 'Net Savings'];
                           if (name === 'llm_cost') return [formatCurrency(v), 'LLM Cost'];
                           if (name === 'hours_saved') return [`${v}h`, 'Hours Saved'];
-                          return [String(v), name ?? ''];
-                        }}
+                          return [String(v), String(name ?? '')];
+                        }) as any}
                       />
                       <Legend
                         formatter={(value: string) => {

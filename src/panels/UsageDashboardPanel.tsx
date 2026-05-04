@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { useState, useEffect, useCallback } from 'react';
 import {
   BarChart, Bar, LineChart, Line, XAxis, YAxis, CartesianGrid,
@@ -272,10 +279,10 @@ export default function UsageDashboardPanel() {
                         borderRadius: '6px',
                         fontSize: '12px',
                       }}
-                      formatter={(value?: number, name?: string) => [
-                        formatTokens(value ?? 0),
+                      formatter={((value: string | number | undefined, name: string | number | undefined) => [
+                        formatTokens(typeof value === 'number' ? value : Number(value ?? 0)),
                         name === 'total_input_tokens' ? 'Input' : name === 'total_reasoning_tokens' ? 'Reasoning' : 'Output',
-                      ]}
+                      ]) as any}
                     />
                     <Legend
                       formatter={(value: string) =>
@@ -352,12 +359,12 @@ export default function UsageDashboardPanel() {
                           borderRadius: '6px',
                           fontSize: '12px',
                         }}
-                        formatter={(value?: number, name?: string) => {
-                          const v = value ?? 0;
+                        formatter={((value: string | number | undefined, name: string | number | undefined) => {
+                          const v = typeof value === 'number' ? value : Number(value ?? 0);
                           if (name === 'total_cost_usd') return [formatCost(v), 'Cost'];
                           if (name === 'total_reasoning_tokens') return [formatTokens(v), 'Reasoning'];
                           return [formatTokens(v), name === 'total_input_tokens' ? 'Input' : 'Output'];
-                        }}
+                        }) as any}
                       />
                       <Legend
                         formatter={(value: string) => {

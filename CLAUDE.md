@@ -43,6 +43,18 @@ lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev
 npm run self-register
 ```
 
+### CLI Commands
+
+| Command | Purpose |
+|---------|---------|
+| `rorca start` | Serve the built frontend and backend from one local process on `:3030`. |
+| `rorca doctor` | Verify local prerequisites, binary discovery, runtime health, and MCP token file permissions before running specs. |
+| `rorca auth` | Manage local CLI authentication flows and provider sign-in state. |
+| `rorca chat` | Open the interactive chat control surface for live operator-driven work. |
+| `rorca forge` | Launch the Forge TUI for spec review, orchestration, and command-center control. |
+| `rorca attach` | Reattach to an existing run, session, or control surface without starting a new one. |
+| `npm run self-register` | Register the local `rorca/` repo as a workspace for self-hosting. |
+
 ## Supabase Local Development
 
 - Install the Supabase CLI first: `brew install supabase/tap/supabase`
@@ -68,15 +80,108 @@ Browser (React :5210)  ←→  Express API (:3030)  ←→  PostgreSQL 16
                                                    execution-engine subprocesses
                                                    ├── claude --print
                                                    ├── opencode run
-                                                   └── codex
+                                                   ├── codex
+                                                   └── pi run --jsonl
 
 Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 ```
 
+## Security Model (Project Aegis)
+
+### Threat Model
+
+Rorca runs on localhost as a single-user developer tool. Project Aegis exists so future refactors do not silently undo the localhost-only and explicit-exposure guardrails.
+
+1. **Drive-by browser attack** — User visits `evil.com` in a tab while Rorca is running and the page attempts `fetch('http://localhost:3030/mcp', ...)`. Defense: browser-origin allow-list on `/mcp` plus Bearer token auth.
+2. **LAN attacker** — User is on shared Wi-Fi and an attacker can route traffic to `:3030`. Defense: `/mcp` loopback-only gate unless `RORCA_MCP_ALLOW_REMOTE=true`.
+3. **Compromised MCP client** — User installs or connects a malicious MCP client. Defense: separate public/admin tokens, tier enforcement per tool, and `mcp_audit_log`.
+4. **Token leak** — User pastes a token into chat, Discord, or logs. Defense: token tiering limits blast radius and `rorca mcp rotate-token` supports fast revocation.
+5. **Privilege escalation via auto-exposed routes** — Future `@swagger` work accidentally exposes a dangerous route to MCP. Defense: routes are MCP-denied by default unless they are `x-rorca-tier: public|auth` or explicitly overridden with `x-mcp-tier: admin`.
+6. **Insider abuse** — A valid client hammers expensive tools such as spec generation or pipeline trigger. Defense: per-tool/per-tier MCP rate limits plus audit anomaly scans.
+
+### Defense Layers
+
+1. **Origin lockdown** (CLI-046) — `/mcp` is meant for localhost browser origins only: `http://localhost:3030` and `http://127.0.0.1:3030`.
+2. **Localhost binding** (CLI-046) — `/mcp` rejects non-loopback socket addresses unless `RORCA_MCP_ALLOW_REMOTE=true`.
+3. **Bearer token authentication** (CLI-045) — missing or invalid MCP tokens fail closed at the HTTP layer.
+4. **Opt-in route annotations** (CLI-047) — unannotated routes are denied by default.
+5. **Curated allow-list** (CLI-048) — verified on May 3, 2026: `44` of `423` OpenAPI operations are MCP-exposed today (`27` public, `15` auth, `2` explicit admin overrides).
+6. **Scoped tier authorization** (CLI-049) — public tokens cannot call admin-tier MCP tools even if the tool is visible in `tools/list`.
+7. **Audit log + rate limit** (CLI-051) — every MCP call is recorded in `mcp_audit_log`, and high-risk tools have tighter per-minute caps.
+
+### Default Stance
+
+- Browser/web UI: soft-auth can inject `LOCAL_ADMIN` for normal `/api/*` requests in local single-user mode. See **Critical Gotchas → Auth Middleware — Intentionally Bypassed**.
+- LOCAL_ADMIN carries `role: 'admin'` and `plan: 'pro'`, so local single-user development continues to pass auth-tier, paid-tier, and admin-tier HTTP checks without requiring Stripe or a cloud-issued subscription record.
+- MCP HTTP: Bearer token is always required. Missing tokens return `401 MCP_AUTH_REQUIRED`, invalid tokens return `401 MCP_AUTH_INVALID`, and neither case may ever fall through to `LOCAL_ADMIN`.
+- MCP admin tools: public tokens fail with `403 MCP_AUTH_INSUFFICIENT_TIER`.
+- Production deployments: set `AUTH_REQUIRED=true` to force full JWT auth for regular API routes.
+
+### Open-Core Trust Boundary
+
+- The CLI is open-source and untrusted. Users can fork it, remove UI checks, or fabricate headers.
+- The backend is authoritative. Authorization is enforced server-side with `402 PLAN_REQUIRED` and `403 ADMIN_REQUIRED`.
+- Plan resolution comes from `users.plan` at request time or a cryptographically signed self-hosted license key, never from request headers or JWT plan claims.
+- License keys are RSA-signed. The private key is never shipped in the OSS CLI; only the backend verifier carries the public key.
+- Forking the CLI must not unlock paid features. If a feature is paid, the backend must reject unauthorized requests even when the client lies.
+
+### Adding a New MCP Tool
+
+1. Add the `@swagger` annotation as usual.
+2. Set `x-rorca-tier` and `x-rorca-rationale`.
+3. If and only if an admin route must be reachable from MCP, add `x-mcp-tier: admin`. Do not invent `x-mcp-tier: public`; `public` and `auth` already opt in through `x-rorca-tier`.
+4. Run `npm run lint:tier` for route-tier drift. There is currently no dedicated `npm run lint:mcp`; the source-backed MCP exposure check is the backend startup log (`[Rorca Tier] MCP exposure: 44 tools`) plus `backend/src/__tests__/mcp-tier.test.ts`. Note: as of May 3, 2026, `lint:tier` still has a stale baseline for the two explicit admin MCP overrides.
+5. Expect extra scrutiny for anything touching filesystem writes, env vars, credentials, code execution, billing, or outbound network side effects.
+
+### What's Permanently Denied (and Why)
+
+- `/api/terminal/*` — PTY spawn is arbitrary code execution.
+- `/api/vault/*` — credential read/write surface.
+- `/api/billing/*` — Stripe and subscription side effects.
+- `/api/admin/*` by default — backups, license generation, embed-all, and other operator actions stay out of MCP unless explicitly overridden for forensics.
+- `/api/skills/install*` — skill install is a prompt-injection supply-chain surface.
+- `/api/workspaces/{id}/env-vars` mutations — environment injection surface.
+- `/api/webhooks/*` — signature spoofing and replay risk.
+- Most `DELETE` routes — destructive operations stay denied except narrow story/comment maintenance paths that are deliberately reviewed.
+
+### Token Management
+
+- Public token path: `~/.rorca/mcp-token` with mode `0600`
+- Admin token path: `~/.rorca/mcp-admin-token` with mode `0600`
+- Tokens are generated locally and must never be logged or committed.
+- Rotate with `rorca mcp rotate-token --public`, `--admin`, or `--all`.
+- Configure clients with `rorca mcp setup-claude` or `rorca mcp setup-claude --admin`.
+
+### Plan Resolution
+
+- Route-tier plan gating reads the effective user plan from `users.plan`.
+- Self-hosted instances can override paid capability checks with `RORCA_LICENSE_KEY`; valid licenses are decoded locally and can grant `pro`, `team`, or `enterprise`.
+- Cloud deployments keep `users.plan` in sync from Stripe webhooks.
+- Manual recovery or operator overrides are still valid: `UPDATE users SET plan='pro' WHERE id='...'`.
+
+## Lite Mode
+
+When DB mode is `native`, Apache AGE is not installed. Rorca still works, but graph-backed features are explicitly disabled and surface `503` with:
+`{ error, code: 'AGE_NOT_INSTALLED', mode: 'lite', hint }`
+
+Disabled in Lite Mode:
+- `GET /api/specs/:specId/knowledge-graph` — spec review graph memory payload is unavailable.
+- `POST /api/graph/populate` — graph population job cannot run without AGE.
+- `POST /api/admin/graph-backfill` — admin graph backfill is unavailable.
+- `GET /api/admin/graph-stats` — admin graph statistics are unavailable.
+- `POST /api/workspaces/:id/drift/check` — graph-powered drift detection cannot run.
+- Related-context expansion in story prompts — `graph-context.ts` returns no graph enrichment when AGE is unavailable.
+
+Still available in Lite Mode:
+- `GET /api/graph/stats` — returns `available: false` for lightweight capability/status checks.
+- `GET /api/workspaces/:id/drift` — reads previously stored drift reports from PostgreSQL.
+- `GET /api/specs/:specId/graph` — this is the story dependency DAG from spec JSON, not Apache AGE.
+- Specs CRUD, runs, analytics, direction stack, and non-graph memory/search flows continue to work.
+
 **Stack**:
 - Frontend: React 18 + TypeScript + Vite + Tailwind CSS + xterm.js
 - Backend: Express.js + TypeScript + PostgreSQL 16 (`pg` Pool, async, connection pooling, pgvector, Apache AGE)
-- Execution: `claude --print` (Claude sub) OR `opencode run --format json --attach` (OpenCode, any provider) OR `codex exec --dangerously-bypass-approvals-and-sandbox` (ChatGPT sub)
+- Execution: `claude --print` (Claude sub) OR `opencode run --format json --attach` (OpenCode, any provider) OR `codex exec --dangerously-bypass-approvals-and-sandbox` (ChatGPT sub) OR `pi run --jsonl` (pi subprocess)
 - Spec generation: OpenCode (autonomous codebase exploration) OR SDK fallback (`SPEC_PROVIDER` env var)
 - MCP: API-first (OpenAPI spec → auto-generated MCP tools via HTTP transport on :3030)
 
@@ -93,7 +198,28 @@ Spec (N stories)
   └── Story N  →  ...
 ```
 
-### Three execution paths — all first-class
+## Command Center Architecture
+
+Rorca's command center is split into four layers so interactive control, orchestration state, headless execution, and observability stay decoupled:
+
+| Layer | Role |
+|-------|------|
+| Forge TUI | Local control surface for `rorca forge`, `rorca chat`, approvals, and operator commands. |
+| Engine `:3030` | Orchestration state machine: API, WAL, pg-boss queue, worker coordination, and persistence. |
+| Muscle | Headless `pi` subprocesses that execute stories and chat tasks with the full tool set. |
+| Observatory | Web UI for run state, logs, analytics, and architecture audit views. |
+
+**BYOA model**: pi is bring-your-own-auth. `pi` manages provider auth locally, Rorca never stores pi API keys, and users run `pi auth login <provider>` once per provider on the machine that will execute runs.
+
+### Dual-Mode Vision
+
+| Mode | Entry Point | Purpose |
+|------|-------------|---------|
+| Interactive Chat | `rorca chat` | Operator-driven live sessions against the same local workspace context. |
+| Autonomous Spec | `rorca run` | Queue and execute approved specs through the orchestration engine. |
+| Architecture Audit | web Observatory | Inspect system state, traces, and architecture-level health from the browser UI. |
+
+### Four execution paths — all first-class
 
 **Claude subscription** (Pro / Max / Max 5x):
 - Binary: `claude --print`
@@ -115,7 +241,33 @@ Spec (N stories)
 - No model cascading — single model tied to ChatGPT subscription
 - Configured via `RORCA_AGENT=codex`
 
-**No raw SDK agent path for execution.** OpenCode IS the multi-model execution path. A raw `openai.chat.completions.create()` call cannot replace it — no persistent bash state, no surgical edits, no CLAUDE.md injection.
+**pi CLI** (provider auth handled locally by pi):
+- Package: `@mariozechner/pi-coding-agent`
+- Install:
+```bash
+npm i -g @mariozechner/pi-coding-agent
+pnpm add -g @mariozechner/pi-coding-agent
+bun add -g @mariozechner/pi-coding-agent
+curl -fsSL https://pi.run/install.sh | sh
+```
+- Binary invocation: `pi run --jsonl --skill <direction-file>`
+- JSON-L events stream to stdout for engine ingestion
+- Session controls: `--session`, `--fork`, and `--continue`
+- Direction injection: `--skill` is the direction-stack injection path for pi runs
+- Auth model: BYOA. Users run `pi auth login <provider>` once per provider; Rorca never stores pi API keys
+- Recommended for: Headless provider-flexible runs with pi-managed auth and resumable session/fork workflows
+
+### Pi peer dependency
+
+`pi` is intentionally a peer dependency, not bundled with Rorca. Rationale: bundling adds unnecessary 50-100MB tarball weight, and silent auto-download would remove user agency around what gets installed on the machine.
+
+The install bridge is detect + prompt:
+- `rorca init` checks for `pi` first and offers npm/pnpm/bun/curl install options
+- `rorca auth login` does the same before attempting provider login
+- `rorca init --auto-install-pi` exists for CI and other non-interactive environments
+- The curl path always requires an explicit confirmation prompt before execution
+
+**No raw SDK agent path for execution.** Claude, OpenCode, Codex, and pi are the supported execution harnesses. A raw SDK call cannot replace them — no persistent bash state, no surgical edits, no harness-native context injection.
 
 ### OpenCode for spec generation
 OpenCode also handles spec generation (not just execution). Spec gen benefits from tools: `glob` existing specs, `read` CLAUDE.md, `grep` codebase patterns, `webfetch` library docs. This makes specs dramatically more context-aware than a blind API call and replaces the manual context extraction step.
@@ -190,9 +342,9 @@ Pipeline runs are no longer spawned synchronously by `pipeline.ts`. The flow is:
 - `GET /api/pipeline/runs/:runId/output` SSE endpoint replays all chunks since sequence 0, then streams live
 
 ### The Ralph Loop (`backend/src/lib/execution-engine.ts`)
-The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by the **Worker process** (not directly by `pipeline.ts`). The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — only used if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all three agent types. **Always edit `execution-engine.ts` for all execution behavior.**
+The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by the **Worker process** (not directly by `pipeline.ts`). The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — only used if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all four agent types. **Always edit `execution-engine.ts` for all execution behavior.**
 
-**Flags**: `--json <path>` (spec file), `--cwd <path>` (workspace root), `--run-id <number>` (required for WAL events), `--story <ID>` (single story), `--dry-run` (preview only), `--port <number>` (default 3030), `--agent <claude|opencode|codex>`, `--model <model>`
+**Flags**: `--json <path>` (spec file), `--cwd <path>` (workspace root), `--run-id <number>` (required for WAL events), `--story <ID>` (single story), `--dry-run` (preview only), `--port <number>` (default 3030), `--agent <claude|opencode|codex|pi>`, `--model <model>`
 
 **Modes** (auto-detected from JSON structure):
 - Implementation (`impl`): `{ userStories: [...] }` — injects `.claude/skills/rorca.md`, `feat:` commits
@@ -201,7 +353,7 @@ The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScrip
 
 **What `execution-engine.ts` does per story**:
 1. `emitWalEvent('story_started')` via `fetch` to `/api/wal`
-2. Spawns agent subprocess (`claude --print`, `opencode run`, or `codex`) with clean env
+2. Spawns agent subprocess (`claude --print`, `opencode run`, `codex`, or `pi`) with clean env
 3. Timeout via SIGTERM → SIGKILL after 10s
 4. On exit 0: `markStoryPassed()` (writes spec JSON), `gitCommitStory()`, `emitWalEvent('story_passed')`, POST to `/api/pipeline/story-result`
 5. On exit 124 (timeout): `markStorySkipped()`, `emitWalEvent('story_failed', { reason: 'timeout' })`
@@ -235,6 +387,7 @@ rorca/
 │       │                     # errors, scheduler, agent-hook-runner, etc.)
 │       ├── worker.ts         # pg-boss worker process (pipeline job consumer)
 │       ├── mcp/              # MCP stdio server (5 tools)
+│       ├── tui/              # Forge TUI control surface
 │       └── db/
 │           ├── index.ts      # PostgreSQL Pool + async query helpers
 │           ├── pg-index.ts   # Migration runner (schema_migrations tracking)
@@ -422,7 +575,7 @@ Key `backend/src/lib/` modules beyond `llm-client` and `direction-stack`:
 - **`workspace-echolocation.ts`** — Workspace intelligence scanner. `echolocate(path)` → `EcholocationReport` detects stack (80+ npm packages, Cargo.toml, requirements.txt, go.mod, Dockerfile), context files, monorepo structure, and computes weighted health score (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt). `discoverMonorepo()` scans `apps/`, `packages/`, `libs/`, `services/`, `modules/` for manifests. `inferSkillsFromStack()` maps detected tech names to skill filenames via `STACK_TO_SKILLS` lookup. Health penalty: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit.
 
 ### Static Serving (Self-Hosted)
-When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the built frontend and handles SPA fallback. This is the `rorca start` CLI mode — frontend and backend served from the same process on port 3030.
+When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the built frontend and handles SPA fallback. This is the `rorca start` CLI mode — frontend and backend served from the same process on port 3030. MCP HTTP transport is enabled by default on the same process at `http://localhost:3030/mcp`; set `RORCA_SERVE_MCP=false` to disable the MCP bridge entirely.
 
 ## Critical Gotchas
 
@@ -594,7 +747,58 @@ Express API routes → @swagger JSDoc annotations → OpenAPI spec (/api/docs/op
 
 **Current state**: 24 hand-written stdio MCP tools in `backend/src/mcp/server.ts`.
 
-Setup (stdio): `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
+**Bridge URL**: HTTP MCP transport is mounted at `http://localhost:3030/mcp` when `RORCA_SERVE_MCP` is unset or not equal to `false`. `RORCA_SERVE_MCP=false` disables the HTTP bridge; Pi chat sessions then run without Rorca MCP tools.
+
+Security: `/mcp` now requires `Authorization: Bearer <token>` where the token is stored at `~/.rorca/mcp-token` with mode `0600`. The backend generates this token at startup. Never log or commit it.
+
+### MCP Auth Contract
+Rorca does not support OAuth on `/mcp`. The previous trivial OAuth shim was removed because it provided no real security and could mislead readers into thinking OAuth protection existed. This also avoids ambiguity with the real Bearer-token enforcement introduced for MCP HTTP.
+
+Use Bearer-token clients only:
+- Claude Code CLI: `rorca mcp setup-claude`
+- Manual Claude Code CLI: `claude mcp add rorca http://localhost:3030/mcp --header "Authorization: Bearer $(cat ~/.rorca/mcp-token)"`
+- VS Code/custom clients: configure an `Authorization: Bearer <token>` header explicitly
+
+Claude Desktop limitation: newer Claude Desktop builds require OAuth for MCP HTTP servers. Rorca cannot connect there in v0 without a real OAuth 2.1 + PKCE implementation. Use Claude Code CLI instead.
+
+### MCP Security Model (CLI-046)
+By default, MCP is **localhost-only** even when the main API is intentionally bound to `0.0.0.0` via `RORCA_BIND_HOST`. The `/mcp` routes enforce two layers:
+1. **CORS lockdown** — browser requests are allowed only from `http://localhost:3030` and `http://127.0.0.1:3030`. Server-to-server clients like Claude Code, curl, and stdio bridges typically send no `Origin` header and are allowed. Drive-by browser requests from `https://evil.com` are rejected at the CORS layer before auth runs.
+2. **Loopback gate** — `/mcp` rejects any non-local socket address unless `RORCA_MCP_ALLOW_REMOTE=true`. Accepted loopback forms are `127.0.0.1`, `::1`, and `::ffff:127.0.0.1`.
+
+Remote MCP is an explicit escape hatch:
+- Set `RORCA_MCP_ALLOW_REMOTE=true` only behind a trusted TLS terminator or auth proxy.
+- That proxy must validate and sanitize `Authorization` header forwarding to prevent header smuggling or accidental token passthrough from untrusted clients.
+- If remote MCP is enabled, configure Express `trust proxy` only in that trusted deployment shape so forwarded client IPs are meaningful.
+- Rotate the MCP bearer token regularly with `rorca mcp rotate-token`.
+- Review `mcp_audit_log` entries from CLI-051 as part of ongoing security monitoring.
+
+Asymmetry note: a localhost-gate failure returns structured JSON (`403 MCP_REMOTE_FORBIDDEN`), but a CORS denial comes from the `cors` middleware callback and surfaces as a generic CORS/network failure in browsers rather than the standard API JSON schema.
+
+### Route Tier Model (CLI-047)
+OpenAPI route annotations now define a unified `x-rorca-tier` boundary for MCP exposure, the open-source CLI surface, and future plan-gating.
+
+| Tier | Who can call | MCP exposure | Typical examples |
+|------|--------------|--------------|------------------|
+| `public` | CLI/MCP/web without paid gating | Yes | Spec CRUD, local memory, recall, search, story execution |
+| `auth` | Logged-in user only | Yes | Personal profile, owned workspace settings, user preferences |
+| `paid` | Paid subscription only | No | Team RBAC, federated memory, GRC audit traces, FinOps |
+| `admin` | Local single-user admin only | No | Backups, license generation, embed-all, migrations |
+| unset | Default denied | No | Route stays out of MCP and future opt-in enforcement can 404 it |
+
+Rules:
+- `x-rorca-rationale` is required for any non-denied tier.
+- `x-rorca-public-api: true` is allowed only on `public` routes and marks stable open-source CLI contract surface.
+- `paid` and `admin` are never MCP-callable, even with admin tokens. This is defense-in-depth: LLMs must not trigger billing, backup, or other privileged operations.
+- V0 compatibility: unannotated routes still serve the web app normally, but they are excluded from MCP exposure by default.
+
+Setup (Claude HTTP): `rorca mcp setup-claude`
+
+Manual token access: `rorca mcp token`
+
+Token rotation: `rorca mcp rotate-token`
+
+Legacy stdio fallback: `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
 
 **Specs & Pipeline**
 | Tool | Purpose |
@@ -669,10 +873,11 @@ PORT=3030                     # Optional override
 DATABASE_URL=postgres://rorca:rorca@localhost:5432/rorca  # PostgreSQL connection string
 
 # Execution engine
-RORCA_AGENT=claude           # Options: claude (default), opencode, codex
+RORCA_AGENT=claude           # Options: claude (default), opencode, codex, pi
 RORCA_MODEL=openai/gpt-4o   # OpenCode model string (provider/model) — ignored for codex
 OPENCODE_BIN=/path/to/opencode  # Auto-detected if in PATH
 CODEX_BIN=/path/to/codex        # Auto-detected if in PATH
+PI_BIN=/path/to/pi              # Auto-detected if in PATH
 
 # Spec generation providers (used when RORCA_AGENT=claude or as SDK fallback)
 SPEC_PROVIDER=claude          # Options: claude (default), anthropic, openrouter
@@ -683,9 +888,9 @@ OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
 RORCA_PROCESS_ROLE=engine     # Set to 'engine' by worker.ts when spawning execution-engine subprocesses
 ```
 
-### Execution Engine: Claude vs OpenCode vs Codex
+### Execution Engine: Claude vs OpenCode vs Codex vs pi
 
-Rorca supports three first-class execution paths. All use the same tool set (edit, bash, read, write, glob, grep, webfetch, websearch) and produce the same output.
+Rorca supports four first-class execution paths. All use the same tool set (edit, bash, read, write, glob, grep, webfetch, websearch) and produce the same output contract.
 
 **Claude subscription** (`RORCA_AGENT=claude`, default):
 - Binary: `claude --print --dangerously-skip-permissions --output-format stream-json`
@@ -725,6 +930,16 @@ Rorca supports three first-class execution paths. All use the same tool set (edi
   - **No structured JSON output** — stdout/stderr captured raw (like `claude --print`)
   - FinOps shows token counts only (no dollar cost — flat-rate subscription)
 - Recommended for: Teams with ChatGPT Plus/Pro subscriptions who prefer OpenAI models
+
+**pi CLI** (`RORCA_AGENT=pi`):
+- Binary: `pi run --jsonl --skill <direction-file>`
+- Auth: BYOA via local pi auth state. Users run `pi auth login <provider>` once per provider; Rorca never stores pi API keys
+- Advantages:
+  - **JSON-L events** — structured stdout stream for orchestration, logs, and replay
+  - **Session branching** — `--session`, `--fork`, and `--continue` support resumable and branchable runs
+  - **Skill injection** — `--skill` maps cleanly to synthesized direction-stack context
+  - **Provider-local auth** — provider credentials stay in pi's local auth store instead of the Rorca vault
+- Recommended for: Local-first headless execution with pi-managed sessions and provider auth
 
 ### OpenCode Setup (Step-by-Step)
 

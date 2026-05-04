@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import * as fs from 'fs';
 import * as os from 'os';
 import * as path from 'path';
@@ -20,6 +27,7 @@ let app: Express;
 let tmpDir: string;
 let wsDir: string;
 let authToken: string;
+let authId: string;
 
 const WS_ID = 'ws-analytics';
 
@@ -43,7 +51,8 @@ process.env.AUTH_REQUIRED = 'true';
 
   const serverMod = require('../../server');
   app = serverMod.default;
-authToken = await getAuthToken(app);
+  authId = `00000000-0000-4000-8000-${Math.floor(Math.random() * 1_000_000_000_000).toString().padStart(12, '0')}`;
+  authToken = await getAuthToken(app, { authId });
 
   // Create workspace directory and DB record
   wsDir = path.join(tmpDir, 'workspace');
@@ -53,13 +62,19 @@ authToken = await getAuthToken(app);
   await execute(`DELETE FROM story_results WHERE run_id IN (SELECT id FROM pipeline_runs WHERE workspace_id = $1)`, [WS_ID]);
   await execute(`DELETE FROM pipeline_runs WHERE workspace_id = $1`, [WS_ID]);
   await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, 'Analytics WS', $2) ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`, [WS_ID, wsDir]);
+  await execute(
+    `INSERT INTO workspace_members (workspace_id, user_auth_id, role)
+     VALUES ($1, $2::uuid, 'owner')
+     ON CONFLICT (workspace_id, user_auth_id) DO NOTHING`,
+    [WS_ID, authId],
+  );
 });
 
 afterEach(async () => {
   // Use require() to get the CURRENT module instance (post-resetModules) for cleanup
   try {
     const db = require('../../db/index');
-    await db.execute('TRUNCATE token_usage, story_results, pipeline_runs, workspaces, users CASCADE');
+    await db.execute('TRUNCATE token_usage, story_results, pipeline_runs, workspace_members, workspaces, users CASCADE');
     await db.closePool();
   } catch { /* ignore */ }
   fs.rmSync(tmpDir, { recursive: true, force: true });
@@ -99,6 +114,49 @@ async function seedAnalyticsData() {
   }
 
   return runId;
+}
+
+async function seedPiProviderData(workspaceId: string, authIdForWorkspace?: string) {
+  const workspacePath = path.join(tmpDir, `workspace-${workspaceId}`);
+  fs.mkdirSync(workspacePath, { recursive: true });
+  await execute(
+    `INSERT INTO workspaces (id, label, path)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (id) DO UPDATE SET path = EXCLUDED.path`,
+    [workspaceId, `Workspace ${workspaceId}`, workspacePath],
+  );
+
+  if (authIdForWorkspace) {
+    await execute(
+      `INSERT INTO workspace_members (workspace_id, user_auth_id, role)
+       VALUES ($1, $2::uuid, 'owner')
+       ON CONFLICT (workspace_id, user_auth_id) DO NOTHING`,
+      [workspaceId, authIdForWorkspace],
+    );
+  }
+
+  const piRun = await queryOne<{ id: number }>(
+    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, finished_at)
+     VALUES ('forge/specs/approved/pi-spec.json', $1, 'done', 'pi', 'pi', NOW())
+     RETURNING id`,
+    [workspaceId],
+  );
+  const nonPiRun = await queryOne<{ id: number }>(
+    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, finished_at)
+     VALUES ('forge/specs/approved/non-pi-spec.json', $1, 'done', 'claude', 'claude', NOW())
+     RETURNING id`,
+    [workspaceId],
+  );
+
+  await execute(
+    `INSERT INTO token_usage (run_id, story_id, workspace_id, model, input_tokens, output_tokens, cost_usd, recorded_at)
+     VALUES
+       ($1, 'US-001', $2, 'pi/openai/gpt-4.1', 1000, 200, 0, NOW() - INTERVAL '2 hours'),
+       ($1, 'US-002', $2, 'pi/openai/gpt-4.1', 500, 100, 0.5, NOW() - INTERVAL '1 hour'),
+       ($1, 'US-003', $2, 'pi/omlx/local', 700, 50, 0, NOW() - INTERVAL '30 minutes'),
+       ($3, 'US-999', $2, 'claude-sonnet-4-5-20250929', 999, 999, 9.99, NOW())`,
+    [piRun!.id, workspaceId, nonPiRun!.id],
+  );
 }
 
 // ─── GET /api/analytics/usage ────────────────────────────────────────────────
@@ -223,6 +281,66 @@ describe('GET /api/analytics/pricing', () => {
 
   test('requires authentication', async () => {
     const res = await request(app).get('/api/analytics/pricing');
+    expect(res.status).toBe(401);
+  });
+});
+
+describe('GET /api/analytics/pi-providers', () => {
+  test('returns empty array when no pi runs exist', async () => {
+    const res = await get(`/api/analytics/pi-providers?workspace_id=${WS_ID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual([]);
+  });
+
+  test('aggregates usage by pi provider', async () => {
+    await seedPiProviderData(WS_ID, authId);
+
+    const res = await get(`/api/analytics/pi-providers?workspace_id=${WS_ID}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+
+    const openai = res.body.find((row: any) => row.provider === 'openai');
+    const omlx = res.body.find((row: any) => row.provider === 'omlx');
+
+    expect(openai).toMatchObject({
+      provider: 'openai',
+      totalRuns: 1,
+      totalStories: 2,
+      totalInputTokens: 1500,
+      totalOutputTokens: 300,
+      totalCost: 0.5,
+      avgCostPerStory: 0.25,
+    });
+    expect(typeof openai.lastUsed).toBe('string');
+
+    expect(omlx).toMatchObject({
+      provider: 'omlx',
+      totalRuns: 1,
+      totalStories: 1,
+      totalInputTokens: 700,
+      totalOutputTokens: 50,
+      totalCost: 0,
+      avgCostPerStory: 0,
+    });
+  });
+
+  test('applies workspace RLS via withUserClient', async () => {
+    const hiddenWorkspaceId = 'ws-analytics-hidden';
+    await seedPiProviderData(WS_ID, authId);
+    await seedPiProviderData(hiddenWorkspaceId);
+
+    const res = await get('/api/analytics/pi-providers');
+
+    expect(res.status).toBe(200);
+    expect(res.body).toHaveLength(2);
+    expect(res.body.find((row: any) => row.provider === 'openai')?.totalStories).toBe(2);
+    expect(res.body.find((row: any) => row.provider === 'omlx')?.totalStories).toBe(1);
+  });
+
+  test('requires authentication', async () => {
+    const res = await request(app).get('/api/analytics/pi-providers');
     expect(res.status).toBe(401);
   });
 });

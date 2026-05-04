@@ -1,5 +1,12 @@
 #!/usr/bin/env node
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * rolling-worker.ts — Minimal pg-boss worker for zero-downtime rolling deploy tests.
  *
  * Behaviour:
@@ -59,7 +66,7 @@ const PipelineRunPayloadSchema = z.object({
   runId: z.number().int().positive(),
   specPath: z.string().min(1),
   workspacePath: z.string().min(1),
-  agent: z.enum(['claude', 'opencode', 'codex']).default('claude'),
+  agent: z.enum(['claude', 'opencode', 'codex', 'pi']).default('claude'),
   model: z.string().nullable().default(null),
   worktreePath: z.string().nullable().default(null),
   branchName: z.string().nullable().default(null),

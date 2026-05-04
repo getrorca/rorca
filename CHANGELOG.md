@@ -11,6 +11,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- SECURITY: `/mcp` now requires a Unix-style Bearer token from `~/.rorca/mcp-token` (mode `0600`); old unauthenticated HTTP MCP client configs break immediately and must be re-linked with `rorca mcp setup-claude`
+- CLI: `rorca mcp token`, `rorca mcp setup-claude`, `rorca mcp rotate-token`, and `rorca mcp status`
+- Doctor: MCP token existence and file mode checks
+
 - Structured error responses audit — replace raw error strings with AppError
 - API documentation completeness — @swagger on all routes
 - Default to free plan on fresh install (BIL-001)
@@ -846,4 +850,3 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - resolved conflicts in run-state.json + progress.txt
 - Merge branch 'feat/rorca-opencode-integration-1772183276908'
 - resolve HubPanel.tsx conflict from feat/rorca-ui-redesign-p2
-

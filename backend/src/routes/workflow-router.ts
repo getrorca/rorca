@@ -1,6 +1,13 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response } from 'express';
 import { z } from 'zod';
-import { query, queryOne } from '../db/index';
+import { execute, query, queryOne } from '../db/index';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
@@ -11,7 +18,7 @@ const VALID_WORKFLOW_IDS = ['spec_generation', 'pipeline_execution', 'memory_con
 
 // Zod schema for PUT body
 const UpdateWorkflowConfigSchema = z.object({
-  runtime: z.enum(['native', 'claude', 'opencode', 'codex']).optional(),
+  runtime: z.enum(['native', 'claude', 'opencode', 'codex', 'pi']).optional(),
   provider: z.string().min(1).optional(),
   model: z.string().nullable().optional(),
 });
@@ -62,7 +69,7 @@ interface VaultKeyCheck {
  *                     enum: [spec_generation, pipeline_execution, memory_consolidation]
  *                   runtime:
  *                     type: string
- *                     enum: [native, claude, opencode, codex]
+ *                     enum: [native, claude, opencode, codex, pi]
  *                   provider:
  *                     type: string
  *                   model:
@@ -137,7 +144,7 @@ router.get('/', async (req: Request, res: Response) => {
  *             properties:
  *               runtime:
  *                 type: string
- *                 enum: [native, claude, opencode, codex]
+ *                 enum: [native, claude, opencode, codex, pi]
  *               provider:
  *                 type: string
  *               model:
@@ -228,6 +235,18 @@ router.put('/:workflowId', async (req: Request, res: Response) => {
 
     if (!row) {
       throw new NotFoundError(`Workflow config not found: ${workflowId}`);
+    }
+
+    if (workflowId === 'pipeline_execution' && runtime !== undefined) {
+      await execute(
+        `INSERT INTO agent_config (id, agent_type, agent_model, updated_at)
+         VALUES ('default', $1, $2, NOW())
+         ON CONFLICT (id) DO UPDATE SET
+           agent_type = EXCLUDED.agent_type,
+           agent_model = COALESCE(EXCLUDED.agent_model, agent_config.agent_model),
+           updated_at = NOW()`,
+        [row.runtime, row.model],
+      );
     }
 
     res.json({

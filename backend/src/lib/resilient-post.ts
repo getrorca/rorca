@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * resilient-post.ts — Retry wrapper + fallback file writer for backend POST calls.
  *
  * When execution-engine.ts or run-loop.ts POST story results / WAL events to the

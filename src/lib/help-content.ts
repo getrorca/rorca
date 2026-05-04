@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * Centralized help tooltip content for V2-056.
  * Keys match component/feature names for easy lookup.
  * Content supports Markdown formatting and optional 'Learn more' links.

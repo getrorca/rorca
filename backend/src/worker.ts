@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * worker.ts — Standalone pg-boss worker process for Rorca.
  *
  * This process is completely independent of the Express server. It connects
@@ -41,6 +48,7 @@ import { performMerge } from './lib/merge-handler';
 import { initDb, query, queryOne, execute, closePool } from './db/index';
 import { initBoss, getBoss } from './lib/pg-boss';
 import { registerSchedulesWithBoss, triggerScheduledRun, checkAndFireDueSchedules } from './lib/scheduler';
+import { registerSpecJobHandlers } from './lib/spec-job-worker';
 import { logger } from './lib/logger';
 import { broadcastAll } from './lib/sse-hub';
 import { advanceQueue } from './lib/run-queue';
@@ -2458,6 +2466,7 @@ async function start(): Promise<void> {
   await boss.work('pipeline:retry', { batchSize: computeBatchSize(currentSettings) }, handlePipelineRetry);
   await boss.work('pipeline:cancel', { batchSize: 10 }, handlePipelineCancel);
   await boss.work('pipeline:merge', { batchSize: 1 }, handlePipelineMerge);
+  await registerSpecJobHandlers(boss);
 
   // Poll worker_settings every WORKER_SETTINGS_POLL_MS (default 30s).
   // If concurrency settings changed, hot-reload the pipeline:run and pipeline:retry subscriptions.
@@ -2705,7 +2714,7 @@ async function start(): Promise<void> {
     void pgBossHealthCheck();
   }, HEARTBEAT_INTERVAL_MS);
 
-  logger.info('[worker] ready — listening for pipeline:run, pipeline:retry, pipeline:cancel, pipeline:cron, pipeline:merge');
+  logger.info('[worker] ready — listening for pipeline and spec job queues');
 }
 
 // Only auto-start when this file is run directly (not imported by tests or other modules).

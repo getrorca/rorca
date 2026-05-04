@@ -131,3 +131,9 @@ Planned canonical execution engine — replaces bash `run-loop.sh` entirely. Bui
 - **Schema hydrator is file-based** — it's async (uses `fs.readFile`) but never opens a DB connection.
 - **Git hydrator is expensive** — each chunk is an LLM call. Don't call on every request.
 - **SSE hub subscribers leak** — `attachSSE()` handles cleanup on disconnect. Don't manually manage subscriber sets outside `sse-hub.ts`.
+
+## Security-Critical Files
+
+- Files matching `backend/src/lib/mcp-*.ts` are security-critical.
+- Any change there requires: an explicit security review tag in the PR, an updated threat model section in [CLAUDE.md](/Users/dimitriteravanessian/rorca-feat-rorca-cli-tui-pi-harness/CLAUDE.md), and regression coverage in `backend/src/__tests__/mcp-aegis.test.ts` or the current MCP security test equivalent.
+- Root-level context reminder: this scoped [AGENTS.md](/Users/dimitriteravanessian/rorca-feat-rorca-cli-tui-pi-harness/backend/src/lib/AGENTS.md) is valid for local governance and prompt injection, but it does **not** satisfy the workspace health requirement for a root-level `AGENTS.md`.

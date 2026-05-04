@@ -1,3 +1,10 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 // Load environment variables before any other imports so module-level constants
 // (e.g. GITHUB_CLIENT_ID in auth.ts) pick up the correct values.
 import dotenv from 'dotenv';
@@ -13,6 +20,7 @@ import path from 'path';
 import workspacesRouter from './routes/workspaces';
 import directionRouter from './routes/direction';
 import specsRouter from './routes/specs';
+import specJobsRouter from './routes/spec-jobs';
 import walRouter from './routes/wal';
 import contextRouter from './routes/context';
 import pipelineRouter, { cleanupOldLogs, cleanupOrphanRuns } from './routes/pipeline';
@@ -40,6 +48,8 @@ import { supabaseAdmin } from './lib/supabase';
 import onboardingRouter from './routes/onboarding';
 import backupsRouter from './routes/backups';
 import healthRouter from './routes/health';
+import doctorRouter from './routes/doctor';
+import versionRouter from './routes/version';
 import { startScheduler } from './lib/scheduler';
 import { registerWebhookHandlers } from './routes/webhook-handlers';
 import { registerCiAutofixHandler } from './lib/ci-autofix/webhook-handler';
@@ -87,8 +97,7 @@ import searchRouter from './routes/search';
 import recallRouter from './routes/recall';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
-import { createMcpRequestHandler } from './lib/mcp-http';
-import { ensureMcpToken, requireMcpAuth, requireLocalhost, logMcpTokenStatus } from './lib/mcp-auth';
+import { buildMcpToolTierResolver, createMcpRequestHandler, getMcpToolDefinitions } from './lib/mcp-http';
 import telemetryRouter from './routes/telemetry';
 import authE2ERouter from './routes/auth-e2e';
 import { logger } from './lib/logger';
@@ -109,6 +118,16 @@ import { initBoss } from './lib/pg-boss';
 import { WebSocketServer, WebSocket } from 'ws';
 import * as ptyManager from './lib/pty-manager';
 import http from 'http';
+import { AuthError } from './lib/errors';
+import {
+  ensureMcpToken,
+  isAllowedMcpOrigin,
+  MCP_ALLOWED_ORIGINS,
+  requireLocalhost,
+  requireMcpAuth,
+} from './lib/mcp-auth';
+import { summarizeRorcaTiers } from './lib/tier-auth';
+import { planGate } from './lib/plan-gate';
 
 const OSC_TITLE_REGEX = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
 const OSC_SEQUENCE_REGEX = /\x1b\][02];[^\x07\x1b]*(?:\x07|\x1b\\)/g;
@@ -140,7 +159,10 @@ if (agentType === 'opencode') {
 
 const app = express();
 const PORT = process.env.PORT || 3030;
-const BACKGROUND_RUNTIME_ENABLED = process.env.NODE_ENV !== 'test';
+const BACKGROUND_RUNTIME_ENABLED =
+  process.env.NODE_ENV !== 'test' &&
+  process.env.RORCA_DISABLE_BACKGROUND_RUNTIME !== 'true';
+const MCP_HTTP_ENABLED = process.env.RORCA_SERVE_MCP !== 'false';
 
 // Disable ETags on API responses — prevents browsers from caching 404s and replaying
 // stale error responses after backend state changes (workspace renames, schema fixes, etc.).
@@ -158,6 +180,10 @@ app.use(pinoHttp({ logger }));
 // In production, set CORS_ORIGIN to https://rorca.app (or comma-separated list).
 let corsOrigin: boolean | string | string[];
 let allowCredentials = false;
+
+// CLI-046: Only trust proxy headers for MCP when operators explicitly opt into
+// remote MCP behind a trusted TLS terminator that sanitizes Authorization.
+app.set('trust proxy', process.env.RORCA_MCP_ALLOW_REMOTE === 'true');
 
 if (process.env.RORCA_SERVE_STATIC === '1') {
   // Same-origin static mode: reflect request origin (frontend served by Express)
@@ -232,6 +258,8 @@ app.use(queryTimerMiddleware);
 
 // ─── Public routes (no auth required) ───
 app.use('/api/health', healthRouter);
+app.use('/api/doctor', doctorRouter);
+app.use('/api/version', versionRouter);
 
 if (process.env.NODE_ENV === 'test') {
   app.use('/api/test/auth', authE2ERouter);
@@ -261,84 +289,50 @@ if (BACKGROUND_RUNTIME_ENABLED) {
 // CA-021: MCP Streamable HTTP transport — auto-generated from OpenAPI spec
 // MCP clients (Claude Code, IDE extensions) connect over HTTP without browser
 // origin headers. Scoped CORS on /mcp only — no credentials, session-id header
-// allowed, localhost-only binding keeps it off the network.
+// allowed, and browser access is restricted to same-origin localhost tools.
+// CORS rejection is handled by the cors package callback and bubbles into the
+// generic Express error path rather than the JSON error schema used elsewhere.
 const mcpCors = cors({
-  origin: true,
+  origin: (origin, callback) => {
+    if (isAllowedMcpOrigin(origin)) {
+      callback(null, true);
+      return;
+    }
+
+    callback(new Error(`Origin not allowed: ${origin}`));
+  },
   credentials: false,
   methods: ['GET', 'POST', 'DELETE', 'OPTIONS'],
   allowedHeaders: ['Content-Type', 'Accept', 'Mcp-Session-Id', 'Authorization'],
   exposedHeaders: ['Mcp-Session-Id'],
   maxAge: 86400,
 });
-const mcpHandlers = createMcpRequestHandler(swaggerSpec as any);
 
-// CLI-045 (Project Aegis): Generate MCP token on first run, enforce Bearer auth.
-// HARD CUTOVER — no grace period. Existing `claude mcp add` configs must
-// re-run `rorca mcp setup-claude` to inject the Authorization header.
-const { created: mcpTokenCreated } = ensureMcpToken();
-logMcpTokenStatus(mcpTokenCreated);
-
-// Middleware order matters: CORS → localhost guard → Bearer auth → handler.
-// Cheaper checks run first; localhost rejection saves the token comparison.
-app.post('/mcp', mcpCors, requireLocalhost, requireMcpAuth, mcpHandlers.handlePost);
-app.get('/mcp', mcpCors, requireLocalhost, requireMcpAuth, mcpHandlers.handleGet);
-app.delete('/mcp', mcpCors, requireLocalhost, requireMcpAuth, mcpHandlers.handleDelete);
-
-// ── Trivial local OAuth 2.0 server for MCP HTTP transport ───────────────────
-// Claude desktop app (newer versions) requires OAuth for HTTP MCP servers.
-// Since Rorca is a local single-user tool, we implement a no-op OAuth flow
-// that auto-approves any client — no real security, just satisfies the protocol.
-const MCP_OAUTH_BASE = process.env.RORCA_PUBLIC_URL || 'http://localhost:3030';
-app.get('/.well-known/oauth-authorization-server', (_req, res) => {
-  res.json({
-    issuer: MCP_OAUTH_BASE,
-    authorization_endpoint: `${MCP_OAUTH_BASE}/oauth/authorize`,
-    token_endpoint: `${MCP_OAUTH_BASE}/oauth/token`,
-    registration_endpoint: `${MCP_OAUTH_BASE}/oauth/register`,
-    response_types_supported: ['code'],
-    grant_types_supported: ['authorization_code'],
-    code_challenge_methods_supported: ['S256'],
-  });
-});
-app.get('/.well-known/oauth-protected-resource', (_req, res) => {
-  res.json({
-    resource: MCP_OAUTH_BASE,
-    authorization_servers: [MCP_OAUTH_BASE],
-  });
-});
-// Dynamic client registration — accept any client, return a dummy client_id
-const handleOAuthRegister = (req: import('express').Request, res: import('express').Response) => {
-  const body = req.body || {};
-  res.status(201).json({
-    client_id: 'rorca-local',
-    client_secret: 'rorca-local-secret',
-    client_id_issued_at: Math.floor(Date.now() / 1000),
-    redirect_uris: body.redirect_uris || [],
-    grant_types: body.grant_types || ['authorization_code'],
-    response_types: body.response_types || ['code'],
-    token_endpoint_auth_method: body.token_endpoint_auth_method || 'client_secret_basic',
-  });
+const NO_OAUTH_RESPONSE = {
+  error: 'OAuth not supported',
+  message: 'Rorca uses Bearer token authentication, not OAuth. See ~/.rorca/mcp-token.',
+  documentation: 'Run `rorca mcp setup-claude` to configure your MCP client.',
 };
-app.post('/oauth/register', express.json(), handleOAuthRegister);
-app.post('/register', express.json(), handleOAuthRegister);
-// Authorization endpoint — auto-approve, redirect immediately with code
-app.get('/oauth/authorize', (req, res) => {
-  const { redirect_uri, state } = req.query as Record<string, string>;
-  const code = 'rorca-auth-code-' + Date.now();
-  const url = new URL(redirect_uri);
-  url.searchParams.set('code', code);
-  if (state) url.searchParams.set('state', state);
-  res.redirect(url.toString());
-});
-// Token endpoint — exchange any code for a permanent local token
-app.post('/oauth/token', express.urlencoded({ extended: false }), express.json(), (_req, res) => {
-  res.json({
-    access_token: 'rorca-local-access-token',
-    token_type: 'bearer',
-    expires_in: 86400 * 365, // 1 year
-    scope: 'mcp',
-  });
-});
+
+for (const oauthPath of [
+  '/.well-known/oauth-authorization-server',
+  '/.well-known/oauth-protected-resource',
+  '/oauth/authorize',
+  '/oauth/token',
+  '/oauth/register',
+  '/register',
+]) {
+  app.all(oauthPath, (_req, res) => res.status(501).json(NO_OAUTH_RESPONSE));
+}
+
+if (MCP_HTTP_ENABLED) {
+  const mcpHandlers = createMcpRequestHandler(swaggerSpec as any);
+  const mcpToolTierResolver = buildMcpToolTierResolver(swaggerSpec as any);
+  logger.info({ origins: MCP_ALLOWED_ORIGINS }, '[MCP Aegis] HTTP transport locked to localhost browser origins by default');
+  app.post('/mcp', mcpCors, requireLocalhost, requireMcpAuth('public', mcpToolTierResolver), mcpHandlers.handlePost);
+  app.get('/mcp', mcpCors, requireLocalhost, requireMcpAuth(), mcpHandlers.handleGet);
+  app.delete('/mcp', mcpCors, requireLocalhost, requireMcpAuth(), mcpHandlers.handleDelete);
+}
 
 // MC-004: MCP Tools enumeration endpoint (public — used by VS Code extension, no auth required)
 app.use('/api/mcp/tools', mcpToolsRouter);
@@ -374,8 +368,9 @@ if (process.env.AUTH_REQUIRED === 'true') {
           req.user = resolvedUser;
           return next();
         }
+        return next(new AuthError('Invalid token'));
       } catch {
-        // fall through to LOCAL_ADMIN
+        return next(new AuthError('Invalid token'));
       }
     }
     req.user = LOCAL_ADMIN;
@@ -390,12 +385,14 @@ app.use(rateLimiter);
 // Validates X-CSRF-Token header against _csrf cookie on POST/PUT/PATCH/DELETE.
 // Exempt: webhooks, MCP, docs, health, CSRF bootstrap, login/register, billing webhook.
 app.use(csrfProtection);
+app.use(planGate());
 
 // ─── Protected routes ───
 app.use('/api/workspaces', workspacesRouter);
 app.use('/api/workspace', fileWatchRouter);
 app.use('/api/direction', directionRouter);
 app.use('/api/specs', specsRouter);
+app.use('/api/spec-jobs', specJobsRouter);
 // EQ-007: Review link creation (auth-protected, mounted under /api/specs)
 app.use('/api/specs', specReviewRouter);
 app.use('/api/wal', walRouter);
@@ -523,6 +520,22 @@ process.on('uncaughtException', (err) => {
 
 /* istanbul ignore next -- only when run directly, not in tests */
 if (process.env.NODE_ENV !== 'test') {
+  const tierSummary = summarizeRorcaTiers(swaggerSpec as any);
+  const mcpToolDefinitions = getMcpToolDefinitions(swaggerSpec as any);
+  logger.info(`[Rorca Tier] Route exposure: ${tierSummary.public} public, ${tierSummary.auth} auth, ${tierSummary.paid} paid, ${tierSummary.admin} admin (${tierSummary.denied} default-denied)`);
+  logger.info(`[Rorca Tier] MCP exposure: ${mcpToolDefinitions.length} tools (public + auth only)`);
+  logger.info(`[Rorca Tier] Open-source CLI surface: ${tierSummary.publicApi} routes (public + public-api flagged)`);
+
+  if (MCP_HTTP_ENABLED) {
+    const { publicCreated, adminCreated } = ensureMcpToken();
+    if (publicCreated || adminCreated) {
+      logger.info('[MCP Aegis] Ensured MCP public token at ~/.rorca/mcp-token and admin token at ~/.rorca/mcp-admin-token (mode 0600)');
+      logger.info('[MCP Aegis] Run `rorca mcp setup-claude` for public access or `rorca mcp setup-claude --admin` for admin access');
+    } else {
+      logger.info('[MCP Aegis] Loaded existing MCP public/admin tokens');
+    }
+  }
+
   // BL-013: Log license status at startup
   (() => {
     const envLicenseKey = process.env.RORCA_LICENSE_KEY;
@@ -567,14 +580,23 @@ if (process.env.NODE_ENV !== 'test') {
        SET status = 'killed', exited_at = NOW()
        WHERE status = 'active'`
     ).catch(err => logger.error({ err }, '[terminal] Startup cleanup failed'));
+    initRateLimiterCache().catch(err => logger.error({ err }, '[RateLimiter] Cache init failed'));
+    runQueryPlanAudit().catch(err => logger.error({ err }, '[QueryAudit] Startup audit failed'));
+    queryOne('SELECT id FROM workspaces LIMIT 1').then(row => {
+      if (!row) logger.warn('[StartupCheck] No workspaces found — onboarding will show');
+      else logger.info({ id: (row as any).id }, '[StartupCheck] Workspace query OK — search_path verified');
+    }).catch(err => logger.error({ err }, '[StartupCheck] Workspace query FAILED — search_path may be wrong'));
+
+    if (!BACKGROUND_RUNTIME_ENABLED) {
+      logger.info('[server] Background runtime disabled for this process');
+      return;
+    }
+
     // OC-015: Clean up orphan runs (stale status='running' from crashed backend)
     cleanupOrphanRuns();
+    // Scheduler runs in-process with API — see CLI-035 Supervisor decision.
     startScheduler();
     cleanupOldLogs();
-    // PR-xxx: Init rate limiter cache so fallback user ID is loaded (prevents 429s in single-user mode)
-    initRateLimiterCache().catch(err => logger.error({ err }, '[RateLimiter] Cache init failed'));
-    // V2-099: Run EXPLAIN QUERY PLAN audit at startup
-    runQueryPlanAudit().catch(err => logger.error({ err }, '[QueryAudit] Startup audit failed'));
     // CIE-009: Start file watchers for all registered workspaces
     startFileWatcher();
     // PG-004: Initialise pg-boss so the Express process can send jobs
@@ -583,11 +605,6 @@ if (process.env.NODE_ENV !== 'test') {
     storyLogFollower.recover().catch(err => logger.error({ err }, '[story-log-follower] Recovery failed'));
     // US-003: Start dedicated LISTEN/NOTIFY client for real-time WAL event push
     startWalListener();
-    // Startup self-test: verify workspace queries resolve against rorca schema (not ag_catalog)
-    queryOne('SELECT id FROM workspaces LIMIT 1').then(row => {
-      if (!row) logger.warn('[StartupCheck] No workspaces found — onboarding will show');
-      else logger.info({ id: (row as any).id }, '[StartupCheck] Workspace query OK — search_path verified');
-    }).catch(err => logger.error({ err }, '[StartupCheck] Workspace query FAILED — search_path may be wrong'));
   });
 
   // OCT-002/OCT-021: WebSocket server for PTY I/O with origin validation and connection tokens

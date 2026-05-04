@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * cross-workspace-memory.ts — API routes for cross-workspace memory sharing (PR-021)
  *
  * Surfaces memory entries from other workspaces in the same domain as
@@ -23,6 +30,9 @@ const router = Router();
  *     tags: [Memory]
  *     summary: Get cross-workspace memory suggestions
  *     operationId: getCrossWorkspaceMemory
+ *     x-rorca-tier: paid
+ *     x-rorca-capability: federatedMemory
+ *     x-rorca-rationale: "Cross-workspace memory is a federated collaboration feature and belongs behind the paid plan boundary."
  *     description: |
  *       Returns suggested memory entries from other workspaces sharing the same
  *       domain (L2). When pgvector is available, entries are filtered by cosine
@@ -89,6 +99,9 @@ router.get('/:workspaceId', async (req: Request<{ workspaceId: string }>, res: R
  *     tags: [Memory]
  *     summary: Accept a cross-workspace memory suggestion
  *     operationId: acceptCrossWorkspaceMemory
+ *     x-rorca-tier: paid
+ *     x-rorca-capability: federatedMemory
+ *     x-rorca-rationale: "Accepting federated memory suggestions mutates a paid cross-workspace collaboration feature."
  *     description: |
  *       Copies the suggested entry into the target workspace's MEMORY.md with
  *       source attribution (From: {workspace label}). The entry is marked as
@@ -145,6 +158,9 @@ router.post('/:workspaceId/accept/:entryId', async (req: Request<{ workspaceId: 
  *     tags: [Memory]
  *     summary: Dismiss a cross-workspace memory suggestion
  *     operationId: dismissCrossWorkspaceMemory
+ *     x-rorca-tier: paid
+ *     x-rorca-capability: federatedMemory
+ *     x-rorca-rationale: "Dismissing federated memory suggestions is part of the paid cross-workspace collaboration surface."
  *     description: |
  *       Marks the suggestion as dismissed so it does not resurface.
  *       The entry is NOT copied to the target workspace.

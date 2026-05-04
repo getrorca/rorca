@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * PR-051: Plan-based feature gating middleware.
  *
  * Checks the current user's plan against plan_quotas.
@@ -110,16 +117,16 @@ export function requirePlan(feature: string) {
       // BL-013: Check RORCA_LICENSE_KEY env var FIRST — env var wins over DB
       const envLicenseKey = process.env.RORCA_LICENSE_KEY;
       if (envLicenseKey) {
-        try {
-          const license = verifyLicense(envLicenseKey);
+        const license = verifyLicense(envLicenseKey);
+        if (license.valid && license.plan !== 'free') {
           // Valid self-hosted license — allow the request
           logger.debug({ plan: license.plan, feature }, '[requirePlan] Self-hosted license valid via RORCA_LICENSE_KEY');
           next();
           return;
-        } catch {
-          // Invalid/expired env var license — fall through to DB check (does not hard-reject)
-          logger.debug({ feature }, '[requirePlan] RORCA_LICENSE_KEY invalid/expired — falling through to DB check');
         }
+
+        // Invalid/expired env var license — fall through to DB check (does not hard-reject)
+        logger.debug({ feature, error: license.error }, '[requirePlan] RORCA_LICENSE_KEY invalid/expired — falling through to DB check');
       }
 
       const user = await getEffectiveUser(req);

@@ -1,6 +1,14 @@
+/**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
 import { Router, Request, Response } from 'express';
 import { generateCsrfToken, setCsrfCookie } from '../lib/csrf';
 import { authRequired } from '../lib/auth-utils';
+import { getEffectiveUser } from '../lib/get-user';
 import { supabaseAdmin } from '../lib/supabase';
 import { sendVerificationEmail } from '../lib/email';
 
@@ -63,7 +71,8 @@ router.get('/csrf-token', (_req: Request, res: Response) => {
  *         description: Authentication required
  */
 router.get('/me', authRequired, async (req: Request, res: Response) => {
-  res.json({ user: req.user ?? null });
+  const user = await getEffectiveUser(req);
+  res.json({ user });
 });
 
 /**

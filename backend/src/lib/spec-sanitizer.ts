@@ -1,4 +1,11 @@
 /**
+ * Copyright (c) 2026 Rorca Inc.
+ * SPDX-License-Identifier: BUSL-1.1
+ * Licensed under the Business Source License 1.1.
+ * See LICENSE file in the project root for full license text.
+ */
+
+/**
  * spec-sanitizer.ts — PII and secret scrubber for marketplace spec publishing.
  *
  * Walks spec JSON recursively, applies 8 regex patterns, replaces matches with
