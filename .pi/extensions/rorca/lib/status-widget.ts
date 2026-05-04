@@ -1,3 +1,4 @@
+/// <reference types="node" />
 import { existsSync, readFileSync } from "fs";
 import { homedir } from "os";
 import { basename, join } from "path";
