@@ -2,7 +2,7 @@
   "specId": "Rorca Pi-Native Execution Runtime and Embedded TUI",
   "runId": 20260316000259,
   "startedAt": "2026-05-04T07:24:12.380Z",
-  "lastUpdatedAt": "2026-05-04T07:30:16.108Z",
+  "lastUpdatedAt": "2026-05-04T07:30:37.924Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -153,6 +153,16 @@
       "agentType": "pi",
       "model": "gpt-5.4",
       "elapsedMs": 9133
+    },
+    {
+      "storyId": "US-016",
+      "title": "Embedded TUI: Direction Stack and Workspace Settings Views",
+      "status": "passed",
+      "startedAt": "2026-05-04T07:30:31.288Z",
+      "finishedAt": "2026-05-04T07:30:37.924Z",
+      "agentType": "pi",
+      "model": "gpt-5.4",
+      "elapsedMs": 6636
     }
   ],
   "failedStories": [],
