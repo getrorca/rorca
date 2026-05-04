@@ -365,6 +365,25 @@ function shouldUseAsyncSpecJob(method: string, resolvedPath: string): boolean {
     && ASYNC_SPEC_JOB_SUFFIXES.some(suffix => resolvedPath.endsWith(suffix));
 }
 
+function isAsyncSpecJobEndpoint(method: string, resolvedPath: string): boolean {
+  return method === 'POST' && resolvedPath.endsWith('/async');
+}
+
+function getEnqueuedSpecJobId(body: unknown): string | null {
+  if (!body || typeof body !== 'object') {
+    return null;
+  }
+
+  const payload = body as { jobId?: string; pollUrl?: string };
+  if (!payload.jobId || !payload.pollUrl) {
+    return null;
+  }
+  if (!payload.pollUrl.startsWith('/api/spec-jobs/')) {
+    return null;
+  }
+  return payload.jobId;
+}
+
 async function readFetchBody(fetchRes: Awaited<ReturnType<typeof fetch>>): Promise<unknown> {
   const contentType = fetchRes.headers.get('content-type') || '';
   return contentType.includes('application/json')
@@ -459,12 +478,26 @@ async function executeApiCall(
 
   if (shouldUseAsyncSpecJob(method, resolvedPath)) {
     const enqueue = await fetchJsonWithTimeout(asyncUrl, fetchOptions, 30_000);
-    const enqueueBody = enqueue.body as { jobId?: string };
-    if (enqueue.status < 200 || enqueue.status >= 300 || !enqueueBody?.jobId) {
+    const jobId = getEnqueuedSpecJobId(enqueue.body);
+    if (enqueue.status < 200 || enqueue.status >= 300 || !jobId) {
       return enqueue;
     }
 
-    const finalState = await pollSpecJob(enqueueBody.jobId, {
+    const finalState = await pollSpecJob(jobId, {
+      intervalMs: 2_000,
+      maxWaitMs: 1_800_000,
+    });
+    return mapTerminalSpecJobState(finalState);
+  }
+
+  if (isAsyncSpecJobEndpoint(method, resolvedPath)) {
+    const enqueue = await fetchJsonWithTimeout(url, fetchOptions, 30_000);
+    const jobId = getEnqueuedSpecJobId(enqueue.body);
+    if (enqueue.status < 200 || enqueue.status >= 300 || !jobId) {
+      return enqueue;
+    }
+
+    const finalState = await pollSpecJob(jobId, {
       intervalMs: 2_000,
       maxWaitMs: 1_800_000,
     });

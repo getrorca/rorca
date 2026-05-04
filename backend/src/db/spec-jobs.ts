@@ -9,6 +9,7 @@ import { execute, query, queryOne } from './index';
 
 export type SpecJobType =
   | 'enrich'
+  | 'context-enrich'
   | 'match-skills'
   | 'suggest-skills'
   | 'suggest-models'
