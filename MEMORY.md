@@ -3506,3 +3506,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-04 [Architecture] sse-hub is process-local, not cross-process: Do not rely on `broadcastAll()` or in-memory topic subscribers to deliver worker events to Express routes when the worker runs as a separate process; pair them with a DB-backed or polling fallback.
 > Rule: sse-hub is process-local, not cross-process: Do not rely on `broadcastAll()` or in-memory topic subscribers to deliver worker events to Express routes when the worker runs as a separate process; pair them with a DB-backed or polling fallback.
+
+## 2026-05-04 [Architecture] MCP spec enrichment and skill tools must use async job endpoints: When exposing long-running spec operations over MCP, call the `/async` variant first and poll `/api/spec-jobs/:jobId` server-side until terminal status instead of holding the synchronous LLM HTTP request open.
+> Rule: MCP spec enrichment and skill tools must use async job endpoints: When exposing long-running spec operations over MCP, call the `/async` variant first and poll `/api/spec-jobs/:jobId` server-side until terminal status instead of holding the synchronous LLM HTTP request open.
