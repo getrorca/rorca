@@ -3,9 +3,9 @@
 Spec: Rorca Pi-Native Execution Runtime and Embedded TUI
 Run ID: 20260316000259
 Started: 2026-05-04T07:24:12.380Z
-Last Updated: 2026-05-04T07:28:07.404Z
+Last Updated: 2026-05-04T07:28:36.163Z
 
-## Completed Stories (10)
+## Completed Stories (11)
 - US-001: Hardened MCP Bridge with Live Tool Discovery and Semantic Overrides — DONE (pi, gpt-5.4, 8s)
 - US-002: Pi-Native Execution Mode Agent Type Registration — DONE (pi, gpt-5.4, 9s)
 - US-003: External Run Lifecycle API: Create, Heartbeat, Finalize, Cancel — DONE (pi, gpt-5.4, 5s)
@@ -16,3 +16,4 @@ Last Updated: 2026-05-04T07:28:07.404Z
 - US-008: Model Precedence Handling and Preflight Validation — DONE (pi, gpt-5.4, 14s)
 - US-009: Stale Run Reconciliation and Restart Recovery — DONE (pi, gpt-5.4, 7s)
 - US-010: Learning Loop: Memory and Direction Proposal Engine — DONE (pi, gpt-5.4, 19s)
+- US-011: Embedded TUI: Always-On Status Widget and WAL Event Ticker — DONE (pi, gpt-5.4, 14s)
