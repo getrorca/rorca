@@ -158,7 +158,7 @@ describe('QRW-012 AC2: spawnClaude reasoning flag construction', () => {
     agentModel: string | null,
     thinkingEnabled?: boolean,
     thinkingBudget?: number,
-    effortLevel?: 'low' | 'medium' | 'high' | 'max',
+    effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
   ): string[] {
     return [
       '--dangerously-skip-permissions',

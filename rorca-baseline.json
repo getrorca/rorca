@@ -1,0 +1,55 @@
+{
+  "capturedAt": "2026-05-02T05:28:50.391Z",
+  "npmPackMetadata": {
+    "name": "rorca",
+    "version": "0.1.0",
+    "packageSize": "2.4",
+    "unpackedSize": "9.4",
+    "totalFiles": 489,
+    "shasum": "104714a4d3940d4811253776956abc4e09197e10"
+  },
+  "tarballFileCount": 489,
+  "tarballTopLevelDirs": [
+    "LICENSE",
+    "README.md",
+    "backend",
+    "bin",
+    "cli.js",
+    "dist",
+    "forge",
+    "package.json"
+  ],
+  "tarballSummary": {
+    "backendDistFiles": 380,
+    "distFiles": 100,
+    "binFiles": 1,
+    "forgeFiles": 2
+  },
+  "artifactChecksumCount": 480,
+  "artifactChecksumsSample": {
+    "first10": [
+      "003f52d7a52a6cd598828f41e3fbe8bb88ad4f5cd8f949bf156c8d78458f57a2  dist/assets/index-CRHg9lkC.css",
+      "0166035630aee2c92e035568102f2dc8518b1a00182157372b446f9788c8c238  dist/assets/CompletionRatePanel-B0JEEJM_.js",
+      "01b4f34654ee4fe1f21036e0c3ea27fe6d41f92275707a08470961cb7de9f241  backend/dist/routes/config.d.ts",
+      "027e833ca0aefa05d0f27bec6915dbe5713bb8a24a51abab0eead7d405f47c8c  backend/dist/scripts/migrate-sqlite-to-pg.d.ts",
+      "02a2dac97e123bacb243dba2f40d92f5439fa7824e0c864e6b6576e60f876521  backend/dist/lib/resilient-post.js",
+      "04869932643e1d9f0313bad6362d5090874fe1ffdcd4ff1e58414a52cbce496d  backend/dist/lib/validate.js",
+      "04c63d08055290f887223d4bc130ea70f953085d49b47807be6763b3de39504b  backend/dist/lib/require-plan.d.ts",
+      "051f3b15ea21720db1b79aa9df330071131796282e9cfb4cb10899a34e9c2f76  backend/dist/lib/github-checks.d.ts",
+      "053902385f5736de3058de46407a2db38bfa1802537034db2721f3f2879d1927  dist/assets/index-Bnwee0vy.js",
+      "0597c0b17fdbcddbcae9baa532b34c0bd12dccae99aed5fed705783dc2b85c85  backend/dist/routes/notifications.d.ts"
+    ],
+    "last10": [
+      "fc1626c798c3c107925bc1cd66342511757f59b963742eff43ec764e09383478  backend/dist/lib/skill-registry.js",
+      "fc18d677e71e6bf0e87e05b30a513666f2c93840e96ac490389f4d3d1efeae82  backend/dist/lib/validate.d.ts",
+      "fcbd0eb02012805e857e6554815d26945a9686b5232b7ba9b728d8b1b2165ff2  backend/dist/routes/backups.js",
+      "fd3e1896f3ed53f271abb4c72c1b13e0c11e44c4b21e6564b5739dbdb6d59239  dist/rorca-flat.svg",
+      "fd3f8d9195c7e3dfac9ff93540ce2664c163e4f582fa107c0c2c698f34dba05e  backend/dist/lib/agents-parser.js",
+      "fdf3dcc70a47869e0a35f317c34b41f30cdd375ead02ebe9aaff776e82e364a0  backend/dist/routes/context.js",
+      "fe1f0754422f3b3fd9fe3da0afa255977d196a60474098c8c3f85c1a7318cd20  backend/dist/lib/claude-auth.js",
+      "fe58167174fc93564ec102ea50ccd1e7429ac54d2859b3a66aff160fa2593eab  backend/dist/lib/telemetry-collector.js",
+      "fea322fb4e1cff769c63a2b003ae9d3e4e4d78c204ed1b503176b4813e44c358  backend/dist/lib/convention-agent.js",
+      "ff20ca27ed1501d12751a0de9aefeb78301b1cb85d35195c899b732c1fc38d3f  backend/dist/lib/shell-integration.js"
+    ]
+  }
+}

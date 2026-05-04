@@ -88,6 +88,7 @@ import recallRouter from './routes/recall';
 import { agentType } from './lib/config';
 import { requireOpenCode } from './lib/opencode-detector';
 import { createMcpRequestHandler } from './lib/mcp-http';
+import { ensureMcpToken, requireMcpAuth, requireLocalhost, logMcpTokenStatus } from './lib/mcp-auth';
 import telemetryRouter from './routes/telemetry';
 import authE2ERouter from './routes/auth-e2e';
 import { logger } from './lib/logger';
@@ -270,9 +271,18 @@ const mcpCors = cors({
   maxAge: 86400,
 });
 const mcpHandlers = createMcpRequestHandler(swaggerSpec as any);
-app.post('/mcp', mcpCors, mcpHandlers.handlePost);
-app.get('/mcp', mcpCors, mcpHandlers.handleGet);
-app.delete('/mcp', mcpCors, mcpHandlers.handleDelete);
+
+// CLI-045 (Project Aegis): Generate MCP token on first run, enforce Bearer auth.
+// HARD CUTOVER — no grace period. Existing `claude mcp add` configs must
+// re-run `rorca mcp setup-claude` to inject the Authorization header.
+const { created: mcpTokenCreated } = ensureMcpToken();
+logMcpTokenStatus(mcpTokenCreated);
+
+// Middleware order matters: CORS → localhost guard → Bearer auth → handler.
+// Cheaper checks run first; localhost rejection saves the token comparison.
+app.post('/mcp', mcpCors, requireLocalhost, requireMcpAuth, mcpHandlers.handlePost);
+app.get('/mcp', mcpCors, requireLocalhost, requireMcpAuth, mcpHandlers.handleGet);
+app.delete('/mcp', mcpCors, requireLocalhost, requireMcpAuth, mcpHandlers.handleDelete);
 
 // ── Trivial local OAuth 2.0 server for MCP HTTP transport ───────────────────
 // Claude desktop app (newer versions) requires OAuth for HTTP MCP servers.
