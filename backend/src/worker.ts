@@ -687,6 +687,23 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     const payload: PipelineRunJobPayloadType = parsed.data;
     const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
 
+    if (payload.agent === 'pi') {
+      const runRow = await queryOne<{ workspace_id: number }>(
+        'SELECT workspace_id FROM pipeline_runs WHERE id = $1',
+        [payload.runId],
+      );
+      const workspaceId = runRow?.workspace_id;
+      if (workspaceId !== undefined) {
+        await emitWalEvent('pi_native_run_pending', workspaceId, {
+          run_id: payload.runId,
+          spec_path: payload.specPath,
+          model: payload.model ?? null,
+        });
+      }
+      await getBoss().complete('pipeline:run', job.id);
+      return;
+    }
+
     // Determine effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
 
