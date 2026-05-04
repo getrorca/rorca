@@ -46,6 +46,13 @@ import { PDFParse } from 'pdf-parse';
 import mammoth from 'mammoth';
 import { handleRouteError } from '../lib/async-handler';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
+import { createJob, updateJobStatus } from '../db/spec-jobs';
+import { getBoss } from '../lib/pg-boss';
+import {
+  SPEC_ENRICH_QUEUE,
+  SPEC_MATCH_SKILLS_QUEUE,
+  SPEC_SUGGEST_SKILLS_QUEUE,
+} from '../lib/spec-job-worker';
 
 /* hydrateGitMemory removed — git_memory column dropped in migration 075.
    Git-derived knowledge is now served via the memories table + memory-router.ts. */
@@ -75,6 +82,11 @@ function briefToSlug(text: string): string {
 
 const MAX_ATTACHMENT_TOKENS = 2000;
 const IMAGE_CONTENT_TYPES = new Set(['image/png', 'image/jpeg', 'image/webp', 'image/gif', 'image/bmp']);
+const ASYNC_SPEC_JOB_QUEUE = {
+  enrich: SPEC_ENRICH_QUEUE,
+  'match-skills': SPEC_MATCH_SKILLS_QUEUE,
+  'suggest-skills': SPEC_SUGGEST_SKILLS_QUEUE,
+} as const;
 
 /**
  * Extract text content from an attachment's binary data based on MIME type.
@@ -281,6 +293,39 @@ import { ConflictError, ForbiddenError, NotFoundError, PayloadTooLargeError, Unp
 import { githubRateLimiter } from '../lib/github-rate-limiter';
 
 const router = Router();
+
+async function enqueueAsyncSpecJob(
+  specId: string,
+  workspaceId: string,
+  jobType: keyof typeof ASYNC_SPEC_JOB_QUEUE,
+): Promise<{ jobId: string; status: 'pending'; pollUrl: string; streamUrl: string }> {
+  const job = await createJob(workspaceId, specId, jobType, null);
+  const bossJobId = await getBoss().send(ASYNC_SPEC_JOB_QUEUE[jobType], {
+    jobId: job.id,
+    specId,
+    workspaceId,
+  });
+
+  if (!bossJobId) {
+    await updateJobStatus(job.id, 'failed', {
+      errorMessage: `boss.send() returned null for ${jobType}`,
+      finishedAt: new Date(),
+    });
+    throw new UnprocessableError(`Failed to enqueue ${jobType} job`);
+  }
+
+  await updateJobStatus(job.id, 'pending', {
+    bossJobId,
+    progressMessage: `Queued ${jobType} job`,
+  });
+
+  return {
+    jobId: job.id,
+    status: 'pending',
+    pollUrl: `/api/spec-jobs/${job.id}`,
+    streamUrl: `/api/spec-jobs/${job.id}/stream`,
+  };
+}
 
 // ─── Batch Queue Types ────────────────────────────────────────────────────────
 
@@ -10190,6 +10235,59 @@ ${storyList}`;
   }
 });
 
+/**
+ * @swagger
+ * /api/specs/{specId}/match-skills/async:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Queue an async skill-matching job for a spec
+ *     operationId: rorca_specs_by_id_match_skills_async
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Queues local background skill matching for UI and MCP polling without privileged side effects."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       202:
+ *         description: Async skill matching queued
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 jobId: { type: string, format: uuid }
+ *                 status: { type: string, enum: [pending] }
+ *                 pollUrl: { type: string }
+ *                 streamUrl: { type: string }
+ */
+router.post('/:specId/match-skills/async', async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const { workspaceId } = req.body as { workspaceId?: string };
+
+    if (!workspaceId) {
+      throw new ValidationError('workspaceId is required');
+    }
+
+    const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'match-skills');
+    res.status(202).json(payload);
+  } catch (error) {
+    handleRouteError(res, error, '[Specs] match-skills async');
+  }
+});
+
 // ─── POST /:specId/suggest-models — LLM-driven model suggestion ────────────
 
 /**
@@ -10683,6 +10781,59 @@ router.post('/:specId/suggest-skills', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] suggest-skills');
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/{specId}/suggest-skills/async:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Queue an async skill-suggestion job for a spec
+ *     operationId: rorca_specs_by_id_suggest_skills_async
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Queues local background skill suggestion for UI and MCP polling without privileged side effects."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       202:
+ *         description: Async skill suggestion queued
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 jobId: { type: string, format: uuid }
+ *                 status: { type: string, enum: [pending] }
+ *                 pollUrl: { type: string }
+ *                 streamUrl: { type: string }
+ */
+router.post('/:specId/suggest-skills/async', async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const { workspaceId } = req.body as { workspaceId?: string };
+
+    if (!workspaceId) {
+      throw new ValidationError('workspaceId is required');
+    }
+
+    const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'suggest-skills');
+    res.status(202).json(payload);
+  } catch (error) {
+    handleRouteError(res, error, '[Specs] suggest-skills async');
   }
 });
 
@@ -11637,6 +11788,59 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
     res.json({ success: true, retrieval_method: highestTier, storiesEnriched });
   } catch (error: unknown) {
     handleRouteError(res, error, '[Specs] Enrich context');
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/{specId}/enrich/async:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Queue an async enrichment job for a spec
+ *     operationId: rorca_specs_by_id_enrich_async
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Queues local background spec enrichment for UI and MCP polling without privileged side effects."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: specId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *     responses:
+ *       202:
+ *         description: Async enrichment queued
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 jobId: { type: string, format: uuid }
+ *                 status: { type: string, enum: [pending] }
+ *                 pollUrl: { type: string }
+ *                 streamUrl: { type: string }
+ */
+router.post('/:specId/enrich/async', async (req: Request, res: Response) => {
+  try {
+    const specId = String(req.params.specId);
+    const { workspaceId } = req.body as { workspaceId?: string };
+
+    if (!workspaceId) {
+      throw new ValidationError('workspaceId is required');
+    }
+
+    const payload = await enqueueAsyncSpecJob(specId, workspaceId, 'enrich');
+    res.status(202).json(payload);
+  } catch (error) {
+    handleRouteError(res, error, '[Specs] enrich async');
   }
 });
 

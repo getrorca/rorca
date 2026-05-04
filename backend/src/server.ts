@@ -20,6 +20,7 @@ import path from 'path';
 import workspacesRouter from './routes/workspaces';
 import directionRouter from './routes/direction';
 import specsRouter from './routes/specs';
+import specJobsRouter from './routes/spec-jobs';
 import walRouter from './routes/wal';
 import contextRouter from './routes/context';
 import pipelineRouter, { cleanupOldLogs, cleanupOrphanRuns } from './routes/pipeline';
@@ -391,6 +392,7 @@ app.use('/api/workspaces', workspacesRouter);
 app.use('/api/workspace', fileWatchRouter);
 app.use('/api/direction', directionRouter);
 app.use('/api/specs', specsRouter);
+app.use('/api/spec-jobs', specJobsRouter);
 // EQ-007: Review link creation (auth-protected, mounted under /api/specs)
 app.use('/api/specs', specReviewRouter);
 app.use('/api/wal', walRouter);
