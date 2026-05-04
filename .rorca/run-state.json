@@ -2,7 +2,7 @@
   "specId": "Rorca Pi-Native Execution Runtime and Embedded TUI",
   "runId": 20260316000259,
   "startedAt": "2026-05-04T07:24:12.380Z",
-  "lastUpdatedAt": "2026-05-04T07:31:31.060Z",
+  "lastUpdatedAt": "2026-05-04T07:31:53.506Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -183,6 +183,16 @@
       "agentType": "pi",
       "model": "gpt-5.4",
       "elapsedMs": 11714
+    },
+    {
+      "storyId": "US-019",
+      "title": "Context Enrichment Service: CAG, RAG, and Knowledge Graph Retrieval via MCP",
+      "status": "passed",
+      "startedAt": "2026-05-04T07:31:46.060Z",
+      "finishedAt": "2026-05-04T07:31:53.506Z",
+      "agentType": "pi",
+      "model": "gpt-5.4",
+      "elapsedMs": 7446
     }
   ],
   "failedStories": [],
