@@ -107,3 +107,13 @@ export const PipelineMergeJobPayload = z.object({
 }).strict();
 
 export type PipelineMergeJobPayloadType = z.infer<typeof PipelineMergeJobPayload>;
+
+// ── spec jobs ────────────────────────────────────────────────────────────────
+
+export const SpecJobPayload = z.object({
+  jobId: z.string().uuid(),
+  specId: z.string().min(1),
+  workspaceId: z.string().min(1),
+}).strict();
+
+export type SpecJobPayloadType = z.infer<typeof SpecJobPayload>;
