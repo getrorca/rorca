@@ -83,6 +83,8 @@ function inferSourceType(source: string): SourceType {
  *     tags: [Memory]
  *     summary: List memory entries for a workspace
  *     operationId: listMemoryEntries
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: Returns structured memory ledger entries from MEMORY.md for a workspace. Can filter by category or return the N most recent entries.
  *     parameters:
  *       - name: workspaceId
@@ -160,6 +162,8 @@ router.get('/', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Append a new memory entry
  *     operationId: createMemoryEntry
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: Appends a new structured entry to the workspace MEMORY.md ledger file with the current date.
  *     requestBody:
  *       required: true
@@ -271,6 +275,8 @@ router.post('/', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Update an existing memory entry
  *     operationId: updateMemoryEntry
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: Updates an existing memory entry identified by date and title with the provided field changes.
  *     requestBody:
  *       required: true
@@ -332,6 +338,8 @@ router.put('/entry', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Delete a memory entry by date + title
  *     operationId: deleteMemoryEntry
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: Removes a specific memory entry from the MEMORY.md ledger, identified by its date and title.
  *     requestBody:
  *       required: true
@@ -380,6 +388,8 @@ router.delete('/entry', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: List memory proposals for a workspace
  *     operationId: listMemoryProposals
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: Returns persisted proposals from memory_proposals table. Defaults to pending status. Supports filtering by status and run ID.
  *     parameters:
  *       - name: workspaceId
@@ -486,6 +496,8 @@ router.get('/proposals', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Approve, reject, or edit memory proposals
  *     operationId: resolveMemoryProposals
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: Processes an array of proposal actions (approve, reject, or edit) and updates both the MEMORY.md ledger and the database accordingly. Approved and edited entries are immediately appended to MEMORY.md.
  *     requestBody:
  *       required: true
@@ -661,6 +673,8 @@ router.post('/proposals', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Dismiss memory proposals
  *     operationId: dismissMemoryProposals
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: Marks the specified proposals as dismissed so they no longer appear in the pending review queue. Dismissed proposals can be restored via /undismiss.
  *     requestBody:
  *       required: true
@@ -712,6 +726,8 @@ router.post('/proposals/dismiss', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Restore dismissed proposals back to pending
  *     operationId: undismissMemoryProposals
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: Restores previously dismissed proposals back to pending status. If proposalIds is omitted, restores all dismissed proposals for the workspace.
  *     requestBody:
  *       required: true
@@ -772,6 +788,8 @@ router.post('/proposals/undismiss', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: List rejected memory entries
  *     operationId: listRejectedMemoryEntries
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: Returns all previously rejected memory entries for the given workspace from the rejected log file (MEMORY_REJECTED.md).
  *     parameters:
  *       - name: workspaceId
@@ -809,6 +827,8 @@ router.get('/rejected', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Get memory context snippet for agent prompt injection
  *     operationId: getMemoryContextSnippet
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: Generates a formatted context snippet from recent memory entries suitable for injection into agent prompts. Returns a compact markdown section with token estimate.
  *     parameters:
  *       - name: workspaceId
@@ -850,6 +870,8 @@ router.get('/context', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: List available memory categories
  *     operationId: listMemoryCategories
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: Returns the list of valid memory entry categories that can be used when creating or filtering entries.
  *     responses:
  *       200:
@@ -875,6 +897,8 @@ router.get('/categories', (_req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Get archived entry count for a workspace
  *     operationId: getMemoryArchiveCount
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: Returns the number of entries in the MEMORY_ARCHIVE.md file for the given workspace.
  *     parameters:
  *       - name: workspaceId
@@ -911,6 +935,8 @@ router.get('/archive/count', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Rotate old memory entries to archive
  *     operationId: rotateMemoryEntries
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: |
  *       Moves old or excess entries from MEMORY.md to .rorca/memory/MEMORY_ARCHIVE.md.
  *       Architecture and Convention entries are never rotated (permanent project knowledge).
@@ -960,21 +986,26 @@ router.post('/rotate', async (req: Request, res: Response) => {
 
 /**
  * @swagger
- * /api/memory/synthesize-from-run/{runId}:
+ * /api/memory/synthesize:
  *   post:
  *     tags: [Memory]
- *     summary: Synthesize memory proposals from a pipeline run
- *     operationId: synthesizeMemoryFromRun
+ *     summary: Synthesize memory proposals from recent pipeline runs
+ *     operationId: synthesizeMemory
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: |
- *       Analyzes WAL events for the specified run and generates candidate memory entries.
+ *       Analyzes WAL events from recent completed runs in the workspace and generates candidate memory entries.
  *       Entries are deduplicated against existing memory, persisted as proposals in the
  *       memory_proposals table, and broadcast via SSE. User can then approve/reject proposals.
- *     parameters:
- *       - name: runId
- *         in: path
- *         required: true
- *         schema: { type: integer }
- *         description: Pipeline run ID to analyze
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string, description: "Workspace ID to analyze recent runs for" }
  *     responses:
  *       200:
  *         description: Generated proposals
@@ -997,8 +1028,7 @@ router.post('/rotate', async (req: Request, res: Response) => {
  *                       source: { type: string }
  *                       status: { type: string }
  *                 total: { type: integer }
- *       400: { description: "Invalid runId" }
- *       404: { description: "Run not found" }
+ *       400: { description: "Missing workspaceId" }
  */
 // POST /api/memory/synthesize — synthesize memory proposals from all recent runs for a workspace
 router.post('/synthesize', async (req: Request, res: Response) => {
@@ -1067,6 +1097,8 @@ router.post('/synthesize', async (req: Request, res: Response) => {
  *     tags: [Context Files]
  *     summary: Synthesize memory proposals from a pipeline run
  *     operationId: synthesizeMemoryFromRun
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: >
  *       Analyzes WAL events and story results from a completed pipeline run and
  *       generates memory proposals (structured entries for MEMORY.md). Proposals
@@ -1200,6 +1232,8 @@ router.post('/synthesize-from-run/:runId', async (req: Request, res: Response) =
  *     tags: [Memory]
  *     summary: Deduplicate memory entries using embedding similarity
  *     operationId: deduplicateMemory
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: |
  *       Detects semantically duplicate memory entries using pgvector embedding similarity (>0.92 cosine threshold).
  *       When duplicates found: keeps the most recent entry, merges unique details from older entries.
@@ -1262,6 +1296,8 @@ router.post('/deduplicate', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Memory]
  *     summary: Paginated memory list — use for browsing, filtering, or "show me the last N memories"
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     description: >
  *       USE THIS for paginated listing ("show last 50 memories", "list all Architecture memories", "memories from run #42").
  *       Returns memories sorted by pinned-first then newest, with category/confidence/run filters.
@@ -1440,6 +1476,8 @@ router.get('/items', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Update a memory entry (content, pinned status)
  *     operationId: updateMemoryItem
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     parameters:
  *       - name: id
  *         in: path
@@ -1540,6 +1578,8 @@ router.patch('/items/:id', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Soft-delete a memory entry
  *     operationId: deleteMemoryItem
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     parameters:
  *       - name: id
  *         in: path
@@ -1574,6 +1614,8 @@ router.delete('/items/:id', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Restore a soft-deleted memory entry
  *     operationId: undeleteMemoryItem
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     parameters:
  *       - name: id
  *         in: path
@@ -1608,6 +1650,8 @@ router.post('/items/:id/undelete', async (req: Request, res: Response) => {
  *     tags: [Memory]
  *     summary: Bulk operations on memory items (delete, pin, unpin)
  *     operationId: bulkMemoryAction
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Memory entries are workspace-specific and user-owned; auth prevents cross-workspace pollution."
  *     requestBody:
  *       required: true
  *       content:

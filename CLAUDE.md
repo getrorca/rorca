@@ -105,7 +105,7 @@ Rorca runs on localhost as a single-user developer tool. Project Aegis exists so
 2. **Localhost binding** (CLI-046) — `/mcp` rejects non-loopback socket addresses unless `RORCA_MCP_ALLOW_REMOTE=true`.
 3. **Bearer token authentication** (CLI-045) — missing or invalid MCP tokens fail closed at the HTTP layer.
 4. **Opt-in route annotations** (CLI-047) — unannotated routes are denied by default.
-5. **Curated allow-list** (CLI-048) — verified on May 3, 2026: `44` of `423` OpenAPI operations are MCP-exposed today (`27` public, `15` auth, `2` explicit admin overrides).
+5. **Curated allow-list** (CLI-048) — verified on May 4, 2026: `79` of `437` OpenAPI operations are MCP-exposed today (`37` public, `41` auth, `2` explicit admin overrides).
 6. **Scoped tier authorization** (CLI-049) — public tokens cannot call admin-tier MCP tools even if the tool is visible in `tools/list`.
 7. **Audit log + rate limit** (CLI-051) — every MCP call is recorded in `mcp_audit_log`, and high-risk tools have tighter per-minute caps.
 
@@ -130,7 +130,7 @@ Rorca runs on localhost as a single-user developer tool. Project Aegis exists so
 1. Add the `@swagger` annotation as usual.
 2. Set `x-rorca-tier` and `x-rorca-rationale`.
 3. If and only if an admin route must be reachable from MCP, add `x-mcp-tier: admin`. Do not invent `x-mcp-tier: public`; `public` and `auth` already opt in through `x-rorca-tier`.
-4. Run `npm run lint:tier` for route-tier drift. There is currently no dedicated `npm run lint:mcp`; the source-backed MCP exposure check is the backend startup log (`[Rorca Tier] MCP exposure: 44 tools`) plus `backend/src/__tests__/mcp-tier.test.ts`. Note: as of May 3, 2026, `lint:tier` still has a stale baseline for the two explicit admin MCP overrides.
+4. Run `npm run lint:tier` for route-tier drift. There is currently no dedicated `npm run lint:mcp`; the source-backed MCP exposure check is the backend startup log (`[Rorca Tier] MCP exposure: 79 tools`) plus `backend/src/__tests__/mcp-tier.test.ts`. Note: as of May 4, 2026, `lint:tier` still has a stale baseline for the two explicit admin MCP overrides.
 5. Expect extra scrutiny for anything touching filesystem writes, env vars, credentials, code execution, billing, or outbound network side effects.
 
 ### What's Permanently Denied (and Why)

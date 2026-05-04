@@ -426,9 +426,8 @@ async function fetchActiveRuns(
  *   get:
  *     operationId: getRecall
  *     summary: Semantic workspace context recall — use when asking "what do we know about X?" or bootstrapping a session
- *     x-rorca-tier: public
- *     x-rorca-rationale: "Recall is a read-only workspace intelligence surface used by CLI and MCP flows to bootstrap context without crossing billing or admin boundaries."
- *     x-rorca-public-api: true
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Semantic memory retrieval is a user-specific operation tied to workspace context and must require authentication to prevent cross-user data leaks."
  *     description: >
  *       USE THIS for semantic memory search ("find memories about deployment", "what conventions exist for auth").
  *       Pass the `query` parameter to trigger 3-tier semantic retrieval (CAG cache → RAG embeddings → Knowledge Graph)
@@ -485,13 +484,59 @@ async function fetchActiveRuns(
  *         description: Missing or invalid workspaceId
  *       404:
  *         description: Workspace not found
+ *   post:
+ *     operationId: postRecall
+ *     summary: Semantic workspace context recall — body form for MCP and CLI consumers
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Semantic memory retrieval is a user-specific operation tied to workspace context and must require authentication to prevent cross-user data leaks."
+ *     description: >
+ *       Body-based alias for GET /api/recall. Accepts the same fields and returns the same payload,
+ *       but avoids query-string encoding limits for longer semantic retrieval prompts.
+ *     tags: [Recall]
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId]
+ *             properties:
+ *               workspaceId: { type: string, description: "Workspace ID to recall context for" }
+ *               category: { type: string, enum: [Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha] }
+ *               includeRuns: { type: boolean, default: true }
+ *               includeHealth: { type: boolean, default: true }
+ *               storyText: { type: string }
+ *               query: { type: string }
+ *               titlesOnly: { type: boolean, default: false }
+ *     responses:
+ *       200:
+ *         description: Full recall payload
+ *       400:
+ *         description: Missing or invalid workspaceId
+ *       404:
+ *         description: Workspace not found
  */
-router.get('/', async (req: Request, res: Response, next: NextFunction) => {
+function normalizeRecallInput(source: Request['query'] | Record<string, unknown>): Record<string, unknown> {
+  const normalized = { ...(source as Record<string, unknown>) };
+  for (const key of ['includeRuns', 'includeHealth', 'titlesOnly'] as const) {
+    if (typeof normalized[key] === 'boolean') {
+      normalized[key] = normalized[key] ? 'true' : 'false';
+    }
+  }
+  return normalized;
+}
+
+async function handleRecall(
+  req: Request,
+  res: Response,
+  next: NextFunction,
+  source: Request['query'] | Record<string, unknown>,
+) {
   try {
   const start = Date.now();
 
   // Validate query params
-  const parsed = RecallQuerySchema.safeParse(req.query);
+  const parsed = RecallQuerySchema.safeParse(normalizeRecallInput(source));
   if (!parsed.success) {
     throw new ValidationError(
       parsed.error.issues.map(i => i.message).join('; '),
@@ -639,6 +684,14 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
 
   res.json(response);
   } catch (err) { next(err); }
+}
+
+router.get('/', async (req: Request, res: Response, next: NextFunction) => {
+  await handleRecall(req, res, next, req.query);
+});
+
+router.post('/', async (req: Request, res: Response, next: NextFunction) => {
+  await handleRecall(req, res, next, req.body as Record<string, unknown>);
 });
 
 // ─── Dump-specific fetchers (no limits, no truncation) ──────────────────────
@@ -821,6 +874,8 @@ async function fetchRecentRunsDump(workspaceId: string): Promise<RunSummary[]> {
  *   get:
  *     operationId: getRecallDump
  *     summary: Unfiltered brain export with no token budget or limits
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Semantic memory retrieval is a user-specific operation tied to workspace context and must require authentication to prevent cross-user data leaks."
  *     description: >
  *       Returns the complete workspace brain with no truncation, no LIMIT
  *       clauses on memories, full skill content (not previews), raw direction

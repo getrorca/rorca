@@ -2656,7 +2656,7 @@ router.post('/runs', async (req: Request, res: Response) => {
  *     summary: Create or reuse an external pi-native run
  *     operationId: createExternalPipelineRun
  *     x-rorca-tier: auth
- *     x-rorca-rationale: "Pi-native run lifecycle mutations own run state and must be authenticated to prevent orphan runs from external callers."
+ *     x-rorca-rationale: "Pi-native run lifecycle mutations own run state and must be caller-authenticated to prevent orphan runs from unauthenticated external processes."
  *     description: Creates an idempotent pipeline_runs row for the external pi orchestrator, or returns the existing run for the same idempotency key.
  *     requestBody:
  *       required: true
@@ -2751,7 +2751,7 @@ router.post('/runs/external', async (req: Request, res: Response) => {
  *     summary: Record an external pi-native run heartbeat
  *     operationId: heartbeatExternalPipelineRun
  *     x-rorca-tier: auth
- *     x-rorca-rationale: "Pi-native run lifecycle mutations own run state and must be authenticated to prevent orphan runs from external callers."
+ *     x-rorca-rationale: "Pi-native run lifecycle mutations own run state and must be caller-authenticated to prevent orphan runs from unauthenticated external processes."
  *     parameters:
  *       - in: path
  *         name: id
@@ -2796,7 +2796,7 @@ router.post('/runs/:id/heartbeat', async (req: Request, res: Response) => {
  *     summary: Finalize an external pi-native run
  *     operationId: finalizeExternalPipelineRun
  *     x-rorca-tier: auth
- *     x-rorca-rationale: "Pi-native run lifecycle mutations own run state and must be authenticated to prevent orphan runs from external callers."
+ *     x-rorca-rationale: "Pi-native run lifecycle mutations own run state and must be caller-authenticated to prevent orphan runs from unauthenticated external processes."
  *     requestBody:
  *       required: true
  *       content:
@@ -3931,7 +3931,7 @@ router.post('/runs/:runId/context', async (req: Request, res: Response) => {
  *     summary: Cancel a queued, running, or pi-native pipeline run
  *     operationId: cancelPipelineRun
  *     x-rorca-tier: auth
- *     x-rorca-rationale: "Pi-native run lifecycle mutations own run state and must be authenticated to prevent orphan runs from external callers."
+ *     x-rorca-rationale: "Pi-native run lifecycle mutations own run state and must be caller-authenticated to prevent orphan runs from unauthenticated external processes."
  *     description: >
  *       For queued runs: removes the pg-boss job and marks the run as cancelled immediately.
  *       For running runs: delivers a pipeline:cancel job to the worker (which sends SIGTERM then SIGKILL after 10s) and returns 200 immediately — DB and WAL updates happen asynchronously in the worker.

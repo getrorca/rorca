@@ -27,6 +27,10 @@ describe('MCP tier exposure', () => {
     expect(operation?.['x-rorca-public-api']).toBe(true);
   });
 
+  it('matches the live MCP exposure baseline from the generated OpenAPI spec', () => {
+    expect(getMcpToolDefinitions(swaggerSpec as any)).toHaveLength(79);
+  });
+
   it('registers zero MCP tools for a spec with no tier annotations', () => {
     const spec = {
       paths: {

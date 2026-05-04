@@ -2,7 +2,7 @@
   "specId": "Rorca Pi-Native Execution Runtime and Embedded TUI",
   "runId": 20260316000266,
   "startedAt": "2026-05-04T08:33:31.901Z",
-  "lastUpdatedAt": "2026-05-04T08:55:41.472Z",
+  "lastUpdatedAt": "2026-05-04T09:06:06.519Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -213,6 +213,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 731032
+    },
+    {
+      "storyId": "US-004",
+      "title": "Per-Story Result Envelope API, story_output_chunks, and Migration",
+      "status": "passed",
+      "startedAt": "2026-05-04T08:55:48.733Z",
+      "finishedAt": "2026-05-04T09:05:53.451Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 604718
     }
   ],
   "failedStories": [
@@ -228,7 +238,7 @@
     }
   ],
   "skippedStories": [],
-  "currentStory": "US-004",
+  "currentStory": "US-017",
   "decisions": [],
   "resumedFromStory": "US-005"
 }

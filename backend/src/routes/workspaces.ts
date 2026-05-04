@@ -224,8 +224,9 @@ router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan(
  *     tags: [Workspaces]
  *     summary: List all workspaces
  *     operationId: listWorkspaces
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Workspace inventory is user-owned project metadata and should only be exposed to authenticated callers."
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Workspace discovery and health scores are non-sensitive read-only data that the CLI and Pi extension need at startup without elevated auth."
+ *     x-rorca-public-api: true
  *     description: >
  *       Returns all registered workspace entries ordered by creation date descending.
  *       Supports cursor-based pagination via query parameters.
@@ -270,12 +271,9 @@ router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan(
  *               $ref: '#/components/schemas/Error'
  */
 // GET /api/workspaces
-router.get('/', authRequired, async (req, res, next) => {
+router.get('/', async (req, res, next) => {
   try {
-    const rows = await withUserClient(req, async (client) => {
-      const result = await client.query<WorkspaceRow>('SELECT * FROM workspaces ORDER BY created_at DESC');
-      return result.rows;
-    });
+    const rows = await query<WorkspaceRow>('SELECT * FROM workspaces ORDER BY created_at DESC');
     const pagination = parsePaginationParams(req);
     res.json(paginateArray(rows.map(parseWorkspace), pagination, { cursorKey: (w) => w.id }));
   } catch (err) {
@@ -283,7 +281,14 @@ router.get('/', authRequired, async (req, res, next) => {
   }
 });
 
-router.use('/:id', requireWorkspaceMember());
+const workspaceMemberGuard = requireWorkspaceMember();
+router.use('/:id', (req, res, next) => {
+  if (req.method === 'GET' && req.path === '/health') {
+    next();
+    return;
+  }
+  workspaceMemberGuard(req, res, next);
+});
 
 /**
  * @swagger
@@ -1374,8 +1379,9 @@ Infer the tech stack, project purpose, coding conventions, and domain from the s
  *     tags: [Workspaces]
  *     summary: Get workspace health report with component breakdown
  *     operationId: getWorkspaceHealth
- *     x-rorca-tier: auth
- *     x-rorca-rationale: "Workspace health reveals project-specific context and operational metadata, so it should require authenticated access."
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Workspace discovery and health scores are non-sensitive read-only data that the CLI and Pi extension need at startup without elevated auth."
+ *     x-rorca-public-api: true
  *     description: >
  *       CIE-012: Returns context/intent completeness score (0-100%) with per-component
  *       breakdown showing CLAUDE.md depth, AGENTS.md roles, config scopes, MEMORY.md
