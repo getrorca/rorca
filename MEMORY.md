@@ -3500,3 +3500,6 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-04 [Convention] New Postgres migrations use timestamp prefixes: Add new backend SQL migrations as YYYYMMDDHHMMSS_description.sql so parallel branches cannot collide on numeric prefixes.
 > Rule: New Postgres migrations use timestamp prefixes: Add new backend SQL migrations as YYYYMMDDHHMMSS_description.sql so parallel branches cannot collide on numeric prefixes.
+
+## 2026-05-04 [Architecture] Spec long-runners should share pure job handlers behind pg-boss queues: For long-running spec operations, keep the LLM/filesystem logic in reusable lib handlers and let the worker own pg-boss queue pickup, spec_jobs status transitions, and throttled progress writes.
+> Rule: Spec long-runners should share pure job handlers behind pg-boss queues: For long-running spec operations, keep the LLM/filesystem logic in reusable lib handlers and let the worker own pg-boss queue pickup, spec_jobs status transitions, and throttled progress writes.

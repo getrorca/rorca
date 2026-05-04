@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-04T00:02:46.527Z",
+  "lastUpdatedAt": "2026-05-04T00:08:29.882Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -543,6 +543,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 120503
+    },
+    {
+      "storyId": "CLI-058",
+      "title": "MCP ASYNC P0: pg-boss worker handlers for spec:enrich, spec:match-skills, spec:suggest-skills",
+      "status": "passed",
+      "startedAt": "2026-05-04T00:03:06.909Z",
+      "finishedAt": "2026-05-04T00:08:29.881Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 322972
     }
   ],
   "failedStories": [],
