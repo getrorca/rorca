@@ -3,9 +3,9 @@
 Spec: rorca-cli-tui-and-mcp-hardening
 Run ID: 20260316000242
 Started: 2026-05-03T21:34:47.790Z
-Last Updated: 2026-05-04T00:08:29.882Z
+Last Updated: 2026-05-04T00:17:38.305Z
 
-## Completed Stories (55)
+## Completed Stories (56)
 - CLI-001: Add 'pi' as a 4th AgentType in config.ts and VALID_AGENT_TYPES — DONE (codex, gpt-5.4, 113s)
 - CLI-002: Create pi-detector.ts — binary detection, version parsing, model listing — DONE (codex, gpt-5.4, 58s)
 - CLI-003: Expose pi-detector in GET /api/health endpoint — DONE (codex, gpt-5.4, 79s)
@@ -61,3 +61,4 @@ Last Updated: 2026-05-04T00:08:29.882Z
 - CLI-032: [DEPRECATED — folded into CLI-033 + CLI-040 + CLI-044] rorca init: guided first-run setup — Docker pull, AGE bootstrap, workspace scaffold — DONE (codex, gpt-5.4, 222s)
 - CLI-057: MCP ASYNC P0: spec_jobs table + JobStatus state machine for long-running operations — DONE (codex, gpt-5.4, 121s)
 - CLI-058: MCP ASYNC P0: pg-boss worker handlers for spec:enrich, spec:match-skills, spec:suggest-skills — DONE (codex, gpt-5.4, 323s)
+- CLI-059: MCP ASYNC P0: async HTTP endpoints — POST .../enrich/async + GET /spec-jobs/:id + SSE stream — DONE (codex, gpt-5.4, 528s)

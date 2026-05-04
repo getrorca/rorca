@@ -2,7 +2,7 @@
   "specId": "rorca-cli-tui-and-mcp-hardening",
   "runId": 20260316000242,
   "startedAt": "2026-05-03T21:34:47.790Z",
-  "lastUpdatedAt": "2026-05-04T00:08:29.882Z",
+  "lastUpdatedAt": "2026-05-04T00:17:38.305Z",
   "completedStories": [
     {
       "storyId": "CLI-001",
@@ -553,6 +553,16 @@
       "agentType": "codex",
       "model": "gpt-5.4",
       "elapsedMs": 322972
+    },
+    {
+      "storyId": "CLI-059",
+      "title": "MCP ASYNC P0: async HTTP endpoints — POST .../enrich/async + GET /spec-jobs/:id + SSE stream",
+      "status": "passed",
+      "startedAt": "2026-05-04T00:08:50.389Z",
+      "finishedAt": "2026-05-04T00:17:38.305Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 527916
     }
   ],
   "failedStories": [],
