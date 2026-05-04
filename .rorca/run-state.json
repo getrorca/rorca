@@ -1,8 +1,8 @@
 {
   "specId": "Rorca Pi-Native Execution Runtime and Embedded TUI",
-  "runId": 20260316000259,
-  "startedAt": "2026-05-04T07:24:12.380Z",
-  "lastUpdatedAt": "2026-05-04T08:22:19.084Z",
+  "runId": 20260316000266,
+  "startedAt": "2026-05-04T08:33:31.901Z",
+  "lastUpdatedAt": "2026-05-04T08:55:41.472Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -203,11 +203,32 @@
       "agentType": "pi",
       "model": "gpt-5.4",
       "elapsedMs": 6706
+    },
+    {
+      "storyId": "US-003",
+      "title": "External Run Lifecycle API: Create, Heartbeat, Finalize, Cancel",
+      "status": "passed",
+      "startedAt": "2026-05-04T08:43:17.315Z",
+      "finishedAt": "2026-05-04T08:55:28.347Z",
+      "agentType": "codex",
+      "model": "gpt-5.4",
+      "elapsedMs": 731032
     }
   ],
-  "failedStories": [],
+  "failedStories": [
+    {
+      "storyId": "US-001",
+      "title": "Hardened MCP Bridge with Live Tool Discovery and Semantic Overrides",
+      "status": "failed",
+      "startedAt": "2026-05-04T08:39:23.639Z",
+      "finishedAt": "2026-05-04T08:43:06.691Z",
+      "agentType": "codex",
+      "failReason": "no_code_changes",
+      "retries": 3
+    }
+  ],
   "skippedStories": [],
-  "currentStory": "US-019",
+  "currentStory": "US-004",
   "decisions": [],
-  "resumedFromStory": null
+  "resumedFromStory": "US-005"
 }

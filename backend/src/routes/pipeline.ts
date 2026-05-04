@@ -915,6 +915,93 @@ interface StoryResultRow {
   output_tokens: number | null;
   model_used: string | null;
   cost_usd: number | null;
+  exit_code?: number | null;
+  stderr_tail?: string | null;
+  commit_sha?: string | null;
+  duration_ms?: number | null;
+  resolved_model?: string | null;
+  worktree_path?: string | null;
+  worktree_branch?: string | null;
+  blocked_by?: string | null;
+  active_skills?: string | null;
+}
+
+type PiNativeStoryStatus = 'passed' | 'failed' | 'skipped';
+
+const piNativeStoryParamsSchema = z.object({
+  runId: z.coerce.number().int().positive(),
+  storyId: z.string().min(1),
+});
+
+const piNativeStoryResultSchema = z.object({
+  status: z.enum(['passed', 'failed', 'skipped']),
+  exitCode: z.number().int(),
+  stderrTail: z.string().max(4000).optional(),
+  commitSha: z.string().regex(/^[0-9a-f]{40}$/).optional(),
+  durationMs: z.number().int().positive(),
+  resolvedModel: z.string().min(1).optional(),
+});
+
+const piNativeStoryOutputSchema = z.object({
+  data: z.string().max(8192),
+  sequence: z.number().int().nonnegative(),
+});
+
+function normalizeExternalStoryStatus(status: PiNativeStoryStatus): 'pass' | 'fail' | 'skip' {
+  switch (status) {
+    case 'passed':
+      return 'pass';
+    case 'failed':
+      return 'fail';
+    case 'skipped':
+      return 'skip';
+  }
+}
+
+function storyWalEventType(status: PiNativeStoryStatus): 'story_passed' | 'story_failed' | 'story_skipped' {
+  switch (status) {
+    case 'passed':
+      return 'story_passed';
+    case 'failed':
+      return 'story_failed';
+    case 'skipped':
+      return 'story_skipped';
+  }
+}
+
+function normalizeRunStatusForClient(status: string): string {
+  switch (status) {
+    case 'pi_native':
+    case 'cancelling':
+      return 'running';
+    case 'passed':
+      return 'done';
+    case 'stale':
+      return 'failed';
+    default:
+      return status;
+  }
+}
+
+function toClientRun<T extends PipelineRunRow>(run: T): T {
+  return {
+    ...run,
+    status: normalizeRunStatusForClient(run.status),
+  };
+}
+
+function toStoryResultEnvelope(row: StoryResultRow) {
+  return {
+    id: row.id,
+    storyId: row.story_id,
+    status: row.status,
+    exitCode: row.exit_code ?? null,
+    stderrTail: row.stderr_tail ?? null,
+    commitSha: row.commit_sha ?? null,
+    durationMs: row.duration_ms ?? null,
+    resolvedModel: row.resolved_model ?? null,
+    createdAt: row.finished_at ?? row.started_at,
+  };
 }
 
 const externalRunCreateSchema = z.object({
@@ -2820,10 +2907,11 @@ router.get('/runs', authRequired, async (req: Request, res: Response) => {
       'SELECT COUNT(*)::int as total FROM pipeline_runs WHERE workspace_id = $1',
       [workspaceId]
     ))?.total ?? 0;
-    const items = await query<PipelineRunRow>(
+    const rows = await query<PipelineRunRow>(
       'SELECT * FROM pipeline_runs WHERE workspace_id = $1 ORDER BY id DESC LIMIT $2 OFFSET $3',
       [workspaceId, limit, offset]
     );
+    const items = rows.map(toClientRun);
 
     res.json({ items, total, limit, offset });
   } catch (error: any) {
@@ -3061,24 +3149,26 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
+    const runRow = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
 
-    if (!run) {
+    if (!runRow) {
       throw new NotFoundError('Run not found');
       return;
     }
 
+    const run = toClientRun(runRow);
     const stories = await query('SELECT * FROM story_results WHERE run_id = $1 ORDER BY id ASC', [runId]) as StoryResultRow[];
+    const storyResults = stories.map(toStoryResultEnvelope);
 
     // Read spec JSON to return full userStories list (including pending ones)
     // OC-029: Include per-story engine assignment in response
-    const runAgentType = (run.agent_type || run.agent || 'claude') as AgentType;
+    const runAgentType = (runRow.agent_type || runRow.agent || 'claude') as AgentType;
     let specStories: { id: string; title: string; dependsOn?: string[]; passes?: boolean; agent?: string; reroute?: { fromEngine: string; toEngine: string; reason: string } }[] = [];
     let specModel: string | null = null;
     try {
       const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [run.workspace_id]) as { path: string } | undefined;
       if (workspace) {
-        const absSpecPath = path.join(workspace.path, run.spec_path);
+        const absSpecPath = path.join(workspace.path, runRow.spec_path);
         if (fs.existsSync(absSpecPath)) {
           const specJson = JSON.parse(fs.readFileSync(absSpecPath, 'utf-8'));
           specModel = specJson.model || null;
@@ -3152,7 +3242,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       actual: Record<string, { contextFiles: string[] }>;
     } | null = null;
 
-    const predictedRaw = (run as any).context_preview;
+    const predictedRaw = (runRow as any).context_preview;
     if (predictedRaw) {
       try {
         const predicted = JSON.parse(predictedRaw);
@@ -3182,14 +3272,15 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     res.json({
       run,
       stories,
+      storyResults,
       specStories,
       specModel,
-      agentType: run.agent_type ?? null,
-      agentModel: run.agent_model || null,
+      agentType: runRow.agent_type ?? null,
+      agentModel: runRow.agent_model || null,
       // US-004: Expose worktree fields at top level for easy frontend access
-      worktreePath: run.worktree_path || null,
-      branchName: run.branch_name || null,
-      includeGraph: run.include_graph ?? false,
+      worktreePath: runRow.worktree_path || null,
+      branchName: runRow.branch_name || null,
+      includeGraph: runRow.include_graph ?? false,
       tokenSummary: {
         inputTokens: tokenRow.total_input,
         outputTokens: tokenRow.total_output,
@@ -4056,6 +4147,96 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
   }
 });
 
+async function streamRunOutputChunks(
+  req: Request,
+  res: Response,
+  runId: number,
+  options?: { workspaceId?: string; pollIntervalMs?: number }
+) {
+  const workspaceId = options?.workspaceId;
+  const pollIntervalMs = options?.pollIntervalMs ?? 200;
+
+  if (workspaceId) {
+    const ownerCheck = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: number } | undefined;
+    if (ownerCheck && String(ownerCheck.workspace_id) !== workspaceId) {
+      throw new ForbiddenError('Run does not belong to this workspace');
+    }
+  }
+
+  res.writeHead(200, {
+    'Content-Type': 'text/event-stream',
+    'Cache-Control': 'no-cache',
+    Connection: 'keep-alive',
+  });
+  res.write(': connected\n\n');
+
+  const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
+
+  const runRow = await queryOne('SELECT agent_type, agent, agent_model, status FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null; status: string } | undefined;
+  const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
+
+  res.write(`event: run_meta\ndata: ${JSON.stringify({ agentType: agent, agentModel: runRow?.agent_model ?? null })}\n\n`);
+
+  interface ChunkRow { sequence: number; chunk: Buffer }
+  const existingChunks = await query<ChunkRow>(
+    'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 ORDER BY sequence ASC',
+    [runId],
+  );
+
+  let lastSequence = 0;
+  for (const row of existingChunks) {
+    const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
+    res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
+    emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
+    lastSequence = row.sequence;
+  }
+
+  const terminalStatuses = ['done', 'failed', 'cancelled', 'passed', 'stale'];
+  if (runRow && terminalStatuses.includes(runRow.status)) {
+    clearInterval(hb);
+    res.write('event: done\ndata: \n\n');
+    res.end();
+    return;
+  }
+
+  const pollInterval = setInterval(async () => {
+    try {
+      const newChunks = await query<ChunkRow>(
+        'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC',
+        [runId, lastSequence],
+      );
+
+      for (const row of newChunks) {
+        const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
+        res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
+        emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
+        lastSequence = row.sequence;
+      }
+
+      const statusRow = await queryOne<{ status: string }>(
+        'SELECT status FROM pipeline_runs WHERE id = $1',
+        [runId],
+      );
+      if (!statusRow || terminalStatuses.includes(statusRow.status)) {
+        clearInterval(pollInterval);
+        clearInterval(hb);
+        res.write('event: done\ndata: \n\n');
+        res.end();
+      }
+    } catch {
+      clearInterval(pollInterval);
+      clearInterval(hb);
+      res.write('event: done\ndata: \n\n');
+      res.end();
+    }
+  }, pollIntervalMs);
+
+  req.on('close', () => {
+    clearInterval(pollInterval);
+    clearInterval(hb);
+  });
+}
+
 // ─── GET /api/pipeline/runs/:runId/output — Raw terminal output SSE ──────────
 // Streams raw stdout/stderr (with ANSI codes) to xterm.js on the frontend.
 // Output is stored in run_output_chunks table (persisted across backend restarts).
@@ -4088,95 +4269,9 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     throw new ValidationError('Invalid runId');
     return;
   }
-
-  // Validate workspace ownership if workspaceId is provided
-  const wsId = req.query.workspaceId as string | undefined;
-  if (wsId) {
-    const ownerCheck = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: number } | undefined;
-    if (ownerCheck && String(ownerCheck.workspace_id) !== wsId) {
-      throw new ForbiddenError('Run does not belong to this workspace');
-      return;
-    }
-  }
-
-  res.writeHead(200, {
-    'Content-Type': 'text/event-stream',
-    'Cache-Control': 'no-cache',
-    Connection: 'keep-alive',
-  });
-  res.write(': connected\n\n');
-
-  const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
-
-  // Resolve agent type for semantic parsing (defaults to 'claude')
-  const runRow = await queryOne('SELECT agent_type, agent, agent_model, status FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null; status: string } | undefined;
-  const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
-
-  // Emit run metadata so frontend knows which renderer to use
-  res.write(`event: run_meta\ndata: ${JSON.stringify({ agentType: agent, agentModel: runRow?.agent_model ?? null })}\n\n`);
-
-  // ── Replay all existing chunks (late-join support) ────────────────────────
-  interface ChunkRow { sequence: number; chunk: Buffer }
-  const existingChunks = await query<ChunkRow>(
-    'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 ORDER BY sequence ASC',
-    [runId],
-  );
-
-  let lastSequence = 0;
-  for (const row of existingChunks) {
-    const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-    res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
-    emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
-    lastSequence = row.sequence;
-  }
-
-  // ── If the run is already terminal, close immediately ────────────────────
-  const terminalStatuses = ['done', 'failed', 'cancelled'];
-  if (runRow && terminalStatuses.includes(runRow.status)) {
-    clearInterval(hb);
-    res.write('event: done\ndata: \n\n');
-    res.end();
-    return;
-  }
-
-  // ── Poll for new chunks while run is active ───────────────────────────────
-  // Checks every 200 ms; uses lastSequence to fetch only new rows efficiently.
-  const pollInterval = setInterval(async () => {
-    try {
-      const newChunks = await query<ChunkRow>(
-        'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC',
-        [runId, lastSequence],
-      );
-
-      for (const row of newChunks) {
-        const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-        res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
-        emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
-        lastSequence = row.sequence;
-      }
-
-      // Check if run has reached a terminal state
-      const statusRow = await queryOne<{ status: string }>(
-        'SELECT status FROM pipeline_runs WHERE id = $1',
-        [runId],
-      );
-      if (!statusRow || terminalStatuses.includes(statusRow.status)) {
-        clearInterval(pollInterval);
-        clearInterval(hb);
-        res.write('event: done\ndata: \n\n');
-        res.end();
-      }
-    } catch {
-      clearInterval(pollInterval);
-      clearInterval(hb);
-      res.write('event: done\ndata: \n\n');
-      res.end();
-    }
-  }, 200);
-
-  req.on('close', () => {
-    clearInterval(pollInterval);
-    clearInterval(hb);
+  await streamRunOutputChunks(req, res, runId, {
+    workspaceId: req.query.workspaceId as string | undefined,
+    pollIntervalMs: 200,
   });
 });
 
@@ -4373,6 +4468,206 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
   }
 });
 
+// ─── POST /api/pipeline/runs/:runId/stories/:storyId/result — Pi-native story result ─
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/stories/{storyId}/result:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Record a structured Pi-native story result envelope
+ *     operationId: recordPiNativeStoryResult
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Pi-native story lifecycle updates are local execution control-plane writes needed for open-source orchestration and observability."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [status, exitCode, durationMs]
+ *             properties:
+ *               status: { type: string, enum: [passed, failed, skipped] }
+ *               exitCode: { type: integer }
+ *               stderrTail: { type: string, maxLength: 4000, nullable: true }
+ *               commitSha: { type: string, pattern: "^[0-9a-f]{40}$", nullable: true }
+ *               durationMs: { type: integer, minimum: 1 }
+ *               resolvedModel: { type: string, nullable: true }
+ *     responses:
+ *       200: { description: "Story result recorded" }
+ */
+router.post('/runs/:runId/stories/:storyId/result', validateBody(piNativeStoryResultSchema), async (req: Request, res: Response) => {
+  try {
+    const { runId, storyId } = piNativeStoryParamsSchema.parse(req.params);
+    const body = req.body as z.infer<typeof piNativeStoryResultSchema>;
+    const normalizedStatus = normalizeExternalStoryStatus(body.status);
+
+    const existing = await queryOne<{ id: number }>(
+      `SELECT id
+         FROM story_results
+        WHERE run_id = $1 AND story_id = $2
+        ORDER BY id DESC
+        LIMIT 1`,
+      [runId, storyId],
+    );
+
+    if (existing) {
+      await execute(
+        `UPDATE story_results
+            SET status = $2,
+                exit_code = $3,
+                stderr_tail = $4,
+                commit_sha = $5,
+                duration_ms = $6,
+                resolved_model = $7,
+                finished_at = NOW()
+          WHERE id = $1`,
+        [
+          existing.id,
+          normalizedStatus,
+          body.exitCode,
+          body.stderrTail ?? null,
+          body.commitSha ?? null,
+          body.durationMs,
+          body.resolvedModel ?? null,
+        ],
+      );
+    } else {
+      await execute(
+        `INSERT INTO story_results
+           (run_id, story_id, status, exit_code, stderr_tail, commit_sha, duration_ms, resolved_model, started_at, finished_at)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
+        [
+          runId,
+          storyId,
+          normalizedStatus,
+          body.exitCode,
+          body.stderrTail ?? null,
+          body.commitSha ?? null,
+          body.durationMs,
+          body.resolvedModel ?? null,
+        ],
+      );
+    }
+
+    await execute(
+      `UPDATE pipeline_runs
+          SET last_heartbeat_at = NOW()
+        WHERE id = $1 AND agent_type = 'pi'`,
+      [runId],
+    );
+
+    const run = await queryOne<{ workspace_id: string; spec_path: string }>(
+      'SELECT workspace_id, spec_path FROM pipeline_runs WHERE id = $1',
+      [runId],
+    );
+    if (!run) {
+      throw new NotFoundError('Run not found');
+    }
+
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload, ts)
+       VALUES ($1, $2, $3, $4, $5, NOW())
+       RETURNING *`,
+      [
+        storyWalEventType(body.status),
+        run.workspace_id,
+        path.basename(run.spec_path, '.json'),
+        storyId,
+        JSON.stringify({
+          runId,
+          run_id: runId,
+          storyId,
+          story_id: storyId,
+          exitCode: body.exitCode,
+          exit_code: body.exitCode,
+          commitSha: body.commitSha ?? null,
+          commit_sha: body.commitSha ?? null,
+          durationMs: body.durationMs,
+          duration_ms: body.durationMs,
+          status: body.status,
+          source: 'pi_native',
+        }),
+      ],
+    );
+
+    if (walEvent) broadcastAll(walEvent);
+    res.status(200).json({ ok: true });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] Pi-native story result');
+  }
+});
+
+// ─── POST /api/pipeline/runs/:runId/stories/:storyId/output — Pi-native output chunk ─
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/stories/{storyId}/output:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Append an idempotent Pi-native output chunk
+ *     operationId: appendPiNativeStoryOutput
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Pi-native chunk streaming writes local terminal output into the shared replay buffer used by Observatory and reattach flows."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: storyId
+ *         required: true
+ *         schema: { type: string }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [data, sequence]
+ *             properties:
+ *               data: { type: string, maxLength: 8192, description: "Base64-encoded terminal bytes" }
+ *               sequence: { type: integer, minimum: 0 }
+ *     responses:
+ *       200: { description: "Chunk recorded or duplicate ignored" }
+ */
+router.post('/runs/:runId/stories/:storyId/output', validateBody(piNativeStoryOutputSchema), async (req: Request, res: Response) => {
+  try {
+    const { runId } = piNativeStoryParamsSchema.parse(req.params);
+    const body = req.body as z.infer<typeof piNativeStoryOutputSchema>;
+    const chunk = Buffer.from(body.data, 'base64');
+
+    await execute(
+      `INSERT INTO run_output_chunks (run_id, chunk, sequence, created_at)
+       VALUES ($1, $2, $3, NOW())
+       ON CONFLICT (run_id, sequence) DO NOTHING`,
+      [runId, chunk, body.sequence],
+    );
+
+    await execute(
+      `UPDATE pipeline_runs
+          SET last_heartbeat_at = NOW()
+        WHERE id = $1 AND agent_type = 'pi'`,
+      [runId],
+    );
+
+    res.status(200).json({ ok: true });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] Pi-native story output');
+  }
+});
+
 // ─── GET /api/pipeline/runs/:runId/stories/:storyId/output — Last N lines of story output ─
 // Extracts the story's log section from the run log file or returns WAL failure info.
 
@@ -4381,9 +4676,15 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
  * /api/pipeline/runs/{runId}/stories/{storyId}/output:
  *   get:
  *     tags: [Pipeline]
- *     summary: Get last N lines of a story's output
+ *     summary: Stream Pi-native story output via SSE or fetch the JSON tail
  *     operationId: getStoryOutput
- *     description: Returns the tail of a story's log output extracted from the per-story log file, the run log file, or the in-memory buffer. Also includes failure reason and blocked-by info from WAL events.
+ *     description: >
+ *       When the request Accept header includes text/event-stream, this mirrors
+ *       GET /api/pipeline/runs/{runId}/output and streams the shared run_output_chunks
+ *       replay buffer for the run. The storyId parameter is currently accepted but
+ *       ignored in SSE mode because run_output_chunks does not yet carry story_id.
+ *       For normal JSON requests, returns the tail of the story's log output extracted
+ *       from the per-story log file, the run log file, or the in-memory buffer.
  *     parameters:
  *       - in: path
  *         name: runId
@@ -4399,8 +4700,11 @@ router.post('/runs/:runId/stories/:storyId/tokens', async (req: Request, res: Re
  *         description: Number of lines to return (max 100)
  *     responses:
  *       200:
- *         description: Story output lines with metadata
+ *         description: Story output SSE stream or JSON tail payload
  *         content:
+ *           text/event-stream:
+ *             schema:
+ *               type: string
  *           application/json:
  *             schema:
  *               type: object
@@ -4423,9 +4727,15 @@ router.get('/runs/:runId/stories/:storyId/output', async (req: Request, res: Res
     const runId = parseInt(String(req.params.runId), 10);
     const storyId = String(req.params.storyId);
     const lines = Math.min(parseInt(String(req.query.lines ?? '20'), 10) || 20, 100);
+    const wantsSse = String(req.headers.accept || '').includes('text/event-stream');
 
     if (isNaN(runId)) {
       throw new ValidationError('Invalid runId');
+      return;
+    }
+
+    if (wantsSse) {
+      await streamRunOutputChunks(req, res, runId, { pollIntervalMs: 1000 });
       return;
     }
 

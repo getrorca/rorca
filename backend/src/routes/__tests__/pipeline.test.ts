@@ -968,6 +968,42 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.body.agentModel).toBeNull();
   });
 
+  test('GET /runs/:runId returns normalized Pi-native run status and structured storyResults', async () => {
+    const runId = await seedRun({ status: 'running' });
+    await execute(
+      `UPDATE pipeline_runs
+          SET status = 'pi_native', agent = 'pi', agent_type = 'pi', spec_path = 'forge/specs/approved/pi.json'
+        WHERE id = $1`,
+      [runId],
+    );
+
+    await execute(`
+      INSERT INTO story_results (run_id, story_id, status, exit_code, stderr_tail, commit_sha, duration_ms, resolved_model, finished_at)
+      VALUES ($1, 'US-001', 'pass', 0, 'tail', 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa', 1234, 'pi/openai/gpt-4.1', NOW())
+    `, [runId]);
+
+    const seeded = await queryOne<{ id: string }>('SELECT id FROM pipeline_runs WHERE id = $1', [runId]);
+    expect(seeded?.id).toBe(String(runId));
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(res.status).toBe(200);
+    expect(res.body.run.status).toBe('running');
+    expect(res.body.storyResults).toEqual([
+      expect.objectContaining({
+        storyId: 'US-001',
+        status: 'pass',
+        exitCode: 0,
+        stderrTail: 'tail',
+        commitSha: 'aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+        durationMs: 1234,
+        resolvedModel: 'pi/openai/gpt-4.1',
+      }),
+    ]);
+  });
+
   test('pipeline_runs table has agent_type and agent_model columns', async () => {
     const cols = await query<{ column_name: string }>(`SELECT column_name FROM information_schema.columns WHERE table_name = 'pipeline_runs'`);
     const colNames = cols.map(c => c.column_name);
@@ -1502,5 +1538,115 @@ describe('GET /api/pipeline/runs/:runId/stories/:storyId/stream', () => {
     // Connection should close within 1 second of the WAL event (300ms delay + ≤200ms poll + margin)
     // Total elapsed should be well under 2 seconds
     expect(elapsed).toBeLessThan(2_000);
+  });
+});
+
+describe('Pi-native story endpoints', () => {
+  test('POST /api/pipeline/runs/:runId/stories/:storyId/result records the envelope and emits a WAL event', async () => {
+    const runId = await seedRun({ status: 'pi_native' });
+
+    const res = await request(app)
+      .post(`/api/pipeline/runs/${runId}/stories/US-001/result`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        status: 'passed',
+        exitCode: 0,
+        stderrTail: 'tail output',
+        commitSha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+        durationMs: 4321,
+        resolvedModel: 'pi/openai/gpt-4.1',
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body).toEqual({ ok: true });
+
+    const row = await queryOne<{
+      status: string;
+      exit_code: number | null;
+      stderr_tail: string | null;
+      commit_sha: string | null;
+      duration_ms: number | null;
+      resolved_model: string | null;
+    }>(
+      `SELECT status, exit_code, stderr_tail, commit_sha, duration_ms, resolved_model
+         FROM story_results
+        WHERE run_id = $1 AND story_id = 'US-001'
+        ORDER BY id DESC
+        LIMIT 1`,
+      [runId],
+    );
+
+    expect(row).toEqual({
+      status: 'pass',
+      exit_code: 0,
+      stderr_tail: 'tail output',
+      commit_sha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+      duration_ms: 4321,
+      resolved_model: 'pi/openai/gpt-4.1',
+    });
+
+    const walEvent = await queryOne<{ event_type: string; story_id: string; payload: Record<string, unknown> }>(
+      `SELECT event_type, story_id, payload
+         FROM wal_events
+        WHERE workspace_id = 'ws-pipe' AND story_id = 'US-001'
+        ORDER BY id DESC
+        LIMIT 1`,
+    );
+
+    expect(walEvent?.event_type).toBe('story_passed');
+    expect(walEvent?.story_id).toBe('US-001');
+    expect(walEvent?.payload).toMatchObject({
+      run_id: Number(runId),
+      story_id: 'US-001',
+      exit_code: 0,
+      duration_ms: 4321,
+      commit_sha: 'bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb',
+    });
+  });
+
+  test('POST /api/pipeline/runs/:runId/stories/:storyId/output is idempotent and SSE replay ignores storyId', async () => {
+    const runId = await seedRun({ status: 'pi_native' });
+    const encoded = Buffer.from('pi native chunk').toString('base64');
+
+    const first = await request(app)
+      .post(`/api/pipeline/runs/${runId}/stories/US-001/output`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ data: encoded, sequence: 0 });
+    const duplicate = await request(app)
+      .post(`/api/pipeline/runs/${runId}/stories/US-999/output`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ data: encoded, sequence: 0 });
+
+    expect(first.status).toBe(200);
+    expect(duplicate.status).toBe(200);
+
+    const count = await queryOne<{ count: string }>(
+      'SELECT COUNT(*)::text AS count FROM run_output_chunks WHERE run_id = $1 AND sequence = 0',
+      [runId],
+    );
+    expect(count?.count).toBe('1');
+
+    await execute(
+      `INSERT INTO wal_events (event_type, workspace_id, payload)
+       VALUES ('run_finished', 'ws-pipe', $1)`,
+      [JSON.stringify({ run_id: runId })],
+    );
+    await execute(`UPDATE pipeline_runs SET status = 'passed', finished_at = NOW() WHERE id = $1`, [runId]);
+
+    const sse = await request(app)
+      .get(`/api/pipeline/runs/${runId}/stories/US-123/output`)
+      .set('Accept', 'text/event-stream')
+      .set('Authorization', `Bearer ${authToken}`)
+      .buffer(true)
+      .parse((res, cb) => {
+        let data = '';
+        res.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+        res.on('end', () => cb(null, data));
+      });
+
+    expect(sse.status).toBe(200);
+    expect(String(sse.body)).toContain('event: chunk');
+    expect(String(sse.body)).toContain(`data: ${encoded}`);
+    expect(String(sse.body)).toContain('event: done');
   });
 });

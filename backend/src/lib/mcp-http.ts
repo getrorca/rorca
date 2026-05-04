@@ -173,6 +173,8 @@ const PUBLIC_TOOL_RULES: Array<{ method: string; pattern: RegExp }> = [
   { method: 'POST', pattern: /^\/api\/pipeline\/runs\/external$/ },
   { method: 'POST', pattern: /^\/api\/pipeline\/runs\/[^/]+\/heartbeat$/ },
   { method: 'POST', pattern: /^\/api\/pipeline\/runs\/[^/]+\/finalize$/ },
+  { method: 'POST', pattern: /^\/api\/pipeline\/runs\/[^/]+\/stories\/[^/]+\/result$/ },
+  { method: 'POST', pattern: /^\/api\/pipeline\/runs\/[^/]+\/stories\/[^/]+\/output$/ },
   { method: 'POST', pattern: /^\/api\/pipeline\/runs\/[^/]+\/cancel$/ },
 ];
 
