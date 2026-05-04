@@ -20,9 +20,70 @@ import {
 } from '../lib/context-extractor';
 import { validateBody } from '../lib/validate';
 import { chatComplete } from '../lib/llm-client';
-import { ValidationError } from '../lib/errors';
+import { handleRouteError } from '../lib/async-handler';
+import { ValidationError, UnprocessableError } from '../lib/errors';
+import { createJob, updateJobStatus } from '../db/spec-jobs';
+import { getBoss } from '../lib/pg-boss';
 
 const router = Router();
+
+const ContextEnrichQuerySchema = z.object({
+  mode: z.enum(['fetchAll', 'recent', 'semantic']).default('semantic'),
+});
+
+const ContextEnrichBodySchema = z.object({
+  workspaceId: z.string().min(1),
+  specId: z.string().min(1),
+  storyId: z.string().min(1).optional(),
+  currentTask: z.string().min(1).optional(),
+  storyText: z.string().min(1).optional(),
+  maxTokens: z.number().int().positive().optional(),
+  includeGraph: z.boolean().optional(),
+});
+
+async function enqueueContextEnrichmentJob(input: z.infer<typeof ContextEnrichBodySchema> & z.infer<typeof ContextEnrichQuerySchema>) {
+  const requestPayload = {
+    mode: input.mode,
+    storyId: input.storyId ?? null,
+    currentTask: input.currentTask ?? null,
+    storyText: input.storyText ?? null,
+    maxTokens: input.maxTokens ?? null,
+    includeGraph: input.includeGraph ?? true,
+  };
+
+  const job = await createJob(input.workspaceId, input.specId, 'context-enrich', requestPayload);
+  const bossJobId = await getBoss().send('context:enrich', {
+    jobId: job.id,
+    specId: input.specId,
+    workspaceId: input.workspaceId,
+    storyId: input.storyId ?? null,
+    mode: input.mode,
+    currentTask: input.currentTask,
+    storyText: input.storyText,
+    maxTokens: input.maxTokens,
+    includeGraph: input.includeGraph ?? true,
+  });
+
+  if (!bossJobId) {
+    await updateJobStatus(job.id, 'failed', {
+      errorMessage: 'boss.send() returned null for context-enrich',
+      finishedAt: new Date(),
+    });
+    throw new UnprocessableError('Failed to enqueue context enrichment job');
+  }
+
+  await updateJobStatus(job.id, 'pending', {
+    bossJobId,
+    progressMessage: `Queued context enrichment (${input.mode})`,
+  });
+
+  return {
+    jobId: job.id,
+    status: 'pending' as const,
+    pollUrl: `/api/spec-jobs/${job.id}`,
+    streamUrl: `/api/spec-jobs/${job.id}/stream`,
+  };
+}
 
 // ---------------------------------------------------------------------------
 // Multer config for /upload
@@ -224,6 +285,69 @@ router.get('/fetch-preview', async (req: Request, res: Response) => {
   } catch (err: any) {
     const status = err.statusCode || 500;
     res.status(status).json({ error: err.message });
+  }
+});
+
+/**
+ * @swagger
+ * /api/context/enrich/async:
+ *   post:
+ *     tags: [Context]
+ *     summary: Queue async shared context enrichment for MCP and Pi clients
+ *     operationId: rorca_context_enrich_async
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Queues read-only shared context retrieval so MCP clients can poll for long-running enrichment without holding open requests."
+ *     x-rorca-public-api: true
+ *     parameters:
+ *       - in: query
+ *         name: mode
+ *         required: false
+ *         schema: { type: string, enum: [fetchAll, recent, semantic], default: semantic }
+ *         description: Shared retrieval mode. `semantic` uses currentTask/storyText, `recent` returns the last 100 memories pinned-first, and `fetchAll` returns the widest cached dump that fits the token budget.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, specId]
+ *             properties:
+ *               workspaceId: { type: string }
+ *               specId: { type: string }
+ *               storyId: { type: string, nullable: true }
+ *               currentTask: { type: string }
+ *               storyText: { type: string }
+ *               maxTokens: { type: integer }
+ *               includeGraph: { type: boolean, default: true }
+ *     responses:
+ *       202:
+ *         description: Async context enrichment queued
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 jobId: { type: string, format: uuid }
+ *                 status: { type: string, enum: [pending] }
+ *                 pollUrl: { type: string }
+ *                 streamUrl: { type: string }
+ */
+router.post('/enrich/async', async (req: Request, res: Response) => {
+  try {
+    const query = ContextEnrichQuerySchema.parse(req.query);
+    const body = ContextEnrichBodySchema.parse(req.body);
+
+    if (query.mode === 'semantic' && !body.storyId && !body.storyText && !body.currentTask) {
+      throw new ValidationError('semantic mode requires storyId, storyText, or currentTask');
+    }
+
+    const payload = await enqueueContextEnrichmentJob({
+      ...body,
+      ...query,
+    });
+    res.status(202).json(payload);
+  } catch (error) {
+    handleRouteError(res, error, '[context] enrich async');
   }
 });
 

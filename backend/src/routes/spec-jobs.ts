@@ -17,6 +17,7 @@ const router = Router();
 
 const JOB_QUEUE_BY_TYPE = {
   enrich: 'spec:enrich',
+  'context-enrich': 'context:enrich',
   'match-skills': 'spec:match-skills',
   'suggest-skills': 'spec:suggest-skills',
 } as const;
@@ -51,7 +52,7 @@ function writeSseEvent(res: Response, event: string, payload: unknown): void {
  *                 id: { type: string, format: uuid }
  *                 specId: { type: string }
  *                 workspaceId: { type: string }
- *                 jobType: { type: string, enum: [enrich, match-skills, suggest-skills, suggest-models, detect-dependencies, knowledge-graph, add-stories, validate, score] }
+ *                 jobType: { type: string, enum: [enrich, context-enrich, match-skills, suggest-skills, suggest-models, detect-dependencies, knowledge-graph, add-stories, validate, score] }
  *                 status: { type: string, enum: [pending, running, completed, failed, cancelled] }
  *                 progress:
  *                   type: object
