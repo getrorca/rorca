@@ -18,6 +18,13 @@ export interface WalEvent {
   payload: string | null;
 }
 
+export const PI_NATIVE_WAL_EVENT_TYPES = [
+  'pi_native_run_requested',
+  'pi_native_run_pending',
+] as const;
+
+export type PiNativeWalEventType = typeof PI_NATIVE_WAL_EVENT_TYPES[number];
+
 type Subscriber = (event: WalEvent) => void;
 type TopicSubscriber<T = unknown> = (event: T) => void;
 

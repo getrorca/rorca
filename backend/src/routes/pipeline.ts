@@ -1349,7 +1349,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     if (!queuedRunId) {
       // ── 4a. Queue operations: always accepted up to max queue depth ──────────
-      if (queue) {
+      if (queue && resolvedAgentType !== 'pi') {
         const MAX_QUEUE_DEPTH = 10;
         const queueCount = Number((await queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`, [workspaceId]))?.count ?? '0');
 
@@ -1384,19 +1384,19 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const runNowMaxConcurrent = concurrencyRows.length > 0 ? parseInt(concurrencyRows[0].value, 10) : 3;
 
         const activeWorktreeCount = Number((await queryOne<{ count: string }>(
-          `SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') AND worktree_path IS NOT NULL`,
+          `SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') AND worktree_path IS NOT NULL`,
           [workspaceId],
         ))?.count ?? '0');
 
         if (activeWorktreeCount >= runNowMaxConcurrent) {
-          const activeRun = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') AND worktree_path IS NOT NULL LIMIT 1`, [workspaceId]);
+          const activeRun = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') AND worktree_path IS NOT NULL LIMIT 1`, [workspaceId]);
           res.json({ conflict: true, activeRunId: activeRun?.id, reason: `Maximum ${runNowMaxConcurrent} concurrent worktree runs reached. Wait for an active run to complete or increase run_now_max_concurrent.` });
           return;
         }
         // Fall through — allowed, will create worktree below
       } else {
         // ── 4c. Run Now without autoWorktree: conflict if any run active ──────
-        const activeRun = await queryOne<PipelineRunRow>(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') LIMIT 1`, [workspaceId]);
+        const activeRun = await queryOne<PipelineRunRow>(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') LIMIT 1`, [workspaceId]);
         if (activeRun) {
           res.json({ conflict: true, activeRunId: activeRun.id });
           return;
@@ -1406,6 +1406,42 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     // 4. Build absolute spec path: workspace/<specPath>
     const absSpecPath = path.join(workspace.path, specPath);
+
+    const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
+    const triggeredVia = queuedRunId ? 'queue' : 'run_now';
+
+    if (resolvedAgentType === 'pi') {
+      const specId = path.basename(specPath, '.json');
+      const runResult = await queryOne<{ id: number }>(
+        `INSERT INTO pipeline_runs
+           (spec_path, workspace_id, status, trigger_type, agent, agent_type, agent_model, started_at, finished_at, pid, triggered_via)
+         VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7)
+         RETURNING id`,
+        [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, resolvedAgentModel, triggeredVia],
+      );
+      const runId = runResult!.id;
+
+      const walEvent = await queryOne<WalEvent>(
+        `INSERT INTO wal_events (event_type, workspace_id, spec_id, payload)
+         VALUES ($1, $2, $3, $4)
+         RETURNING *`,
+        ['pi_native_run_requested', workspaceId, specId, JSON.stringify({
+          run_id: runId,
+          spec_id: specId,
+          workspace_id: workspaceId,
+          model: resolvedAgentModel ?? null,
+        })],
+      );
+
+      broadcastAll(walEvent!);
+
+      res.status(200).json({
+        runId,
+        status: 'pi_native',
+        expectsExternalOrchestration: true,
+      });
+      return;
+    }
 
     // 4b. Auto-select orchestration mode (sequential vs wave-parallel)
     // IMPORTANT: Respect waveParallelism from .rorca/config.json — if false, force sequential
@@ -1517,7 +1553,6 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
 
     // 6. Create pipeline_runs record (with agent_type and agent_model)
     //    If queuedRunId is provided, promote the existing queued row instead of inserting
-    const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
     // Enforce constraint: auto_merge is only true when autoWorktree is true
     const computedAutoMerge = needsWorktree && (autoMerge !== false);
 
@@ -1546,7 +1581,6 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // US-002: Track trigger source — 'queue' when promoted from run queue, 'run_now' for direct triggers
-    const triggeredVia = queuedRunId ? 'queue' : 'run_now';
     let runId: number;
 
     if (queuedRunId) {
@@ -2103,7 +2137,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 4. Conflict detection
-    const activeRun = await queryOne(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') LIMIT 1`, [workspaceId]) as PipelineRunRow | undefined;
+    const activeRun = await queryOne(`SELECT * FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') LIMIT 1`, [workspaceId]) as PipelineRunRow | undefined;
     if (activeRun) {
       res.json({ conflict: true, activeRunId: activeRun.id });
       return;
@@ -2914,7 +2948,7 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       stories,
       specStories,
       specModel,
-      agentType: run.agent_type || run.agent || 'claude',
+      agentType: run.agent_type ?? null,
       agentModel: run.agent_model || null,
       // US-004: Expose worktree fields at top level for easy frontend access
       worktreePath: run.worktree_path || null,
@@ -5323,7 +5357,7 @@ router.post('/queue', async (req: Request, res: Response) => {
 
     // Check for active run
     const activeRun = await queryOne(
-      `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused') LIMIT 1`,
+      `SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native') LIMIT 1`,
       [workspaceId]
     ) as { id: number } | undefined;
 
@@ -5556,7 +5590,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       runId: newRunId,
       specPath: originalRun.spec_path,
       workspacePath: workspace.path,
-      agent: (originalRun.agent_type ?? originalRun.agent ?? 'claude') as 'claude' | 'opencode' | 'codex',
+      agent: (originalRun.agent_type ?? originalRun.agent ?? 'claude') as 'claude' | 'opencode' | 'codex' | 'pi',
       model: originalRun.agent_model ?? null,
       worktreePath: originalRun.worktree_path ?? null,
       branchName: originalRun.branch_name ?? null,
@@ -6408,7 +6442,7 @@ router.get('/queue/:workspaceId', async (req: Request, res: Response) => {
     const activeRuns = await query<{ id: number; spec_path: string; status: string; started_at: string; triggered_via: string; branch_name: string | null; worktree_path: string | null; agent_type: string }>(
       `SELECT id, spec_path, status, started_at, triggered_via, branch_name, worktree_path, agent_type
        FROM pipeline_runs
-       WHERE workspace_id = $1 AND status IN ('running', 'paused')
+       WHERE workspace_id = $1 AND status IN ('running', 'paused', 'pi_native')
        ORDER BY started_at ASC`,
       [workspaceId],
     );

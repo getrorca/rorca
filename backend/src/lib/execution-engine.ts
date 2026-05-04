@@ -4214,6 +4214,11 @@ function computeBlockedStories(
 async function main(): Promise<void> {
   const config = parseArgs();
 
+  if (process.env.RORCA_AGENT === 'pi' && process.env.RORCA_PROCESS_ROLE === 'engine') {
+    logger.info('[Pi-native] Pi-native mode: orchestration owned by Pi extension');
+    process.exit(0);
+  }
+
   // Report our own PID to the parent worker via IPC so it can update pipeline_runs.pid
   // with the real Node.js engine PID (tsx wrapper PID becomes stale within ~1-2s).
   // process.send is only available when spawned with an IPC channel — the ?. guard
