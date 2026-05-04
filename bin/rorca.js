@@ -11,7 +11,7 @@ import readline from 'node:readline/promises';
 import { execa } from 'execa';
 import { ensureMcpToken, getMcpAdminToken, getMcpAdminTokenPath, getMcpPublicToken, getMcpPublicTokenPath, rotateMcpToken, } from '../backend/src/lib/mcp-auth';
 import { detectDbMode, isAgeAvailable } from '../backend/src/lib/db-strategy';
-import { dbStatus } from '../backend/src/lib/db-sidecar';
+import { dbStart, dbStatus } from '../backend/src/lib/db-sidecar';
 import { MIN_PI_VERSION, detectPi as detectPiShared } from '../backend/src/lib/pi-detector';
 import { checkDuplicatePrefixes } from '../backend/src/db/pg-index';
 import { checkVersion as checkVersionShared, MIN_BACKEND_VERSION as SHARED_MIN_BACKEND_VERSION } from '../packages/rorca-cli/src/version-check';
@@ -1433,45 +1433,99 @@ async function startServer(options) {
         });
     });
 }
+function printInitDockerInstallInstructions() {
+    console.error('Docker is required for `rorca init`.');
+    console.error('Install one of:');
+    console.error('  OrbStack: https://orbstack.dev/');
+    console.error('  Docker Desktop: https://www.docker.com/products/docker-desktop/');
+}
+async function pullInitDatabaseImage() {
+    console.log('Pulling Rorca database image (~200MB, first run only)...');
+    const result = await docker(['pull', DB_IMAGE], 'inherit');
+    if (result.code !== 0) {
+        throw new Error('Failed to pull the Rorca database image.');
+    }
+}
+async function enableInitExtensions() {
+    const result = await docker([
+        'exec',
+        DB_CONTAINER,
+        'psql',
+        '-U',
+        'rorca',
+        '-d',
+        'rorca',
+        '-c',
+        'CREATE EXTENSION IF NOT EXISTS age; CREATE EXTENSION IF NOT EXISTS vector;',
+    ]);
+    if (result.code !== 0) {
+        throw new Error(result.stderr || result.stdout || 'Failed to enable AGE/vector extensions.');
+    }
+}
+function writeInitFileIfMissing(root, relativePath, content) {
+    const filePath = path.join(root, relativePath);
+    if (existsSync(filePath)) {
+        console.log(`Already exists: ${relativePath}`);
+        return;
+    }
+    writeFileSync(filePath, content);
+    console.log(`Created: ${relativePath}`);
+}
+function ensureInitDirectory(root, relativePath) {
+    const dirPath = path.join(root, relativePath);
+    if (existsSync(dirPath)) {
+        console.log(`Already exists: ${relativePath}/`);
+        return;
+    }
+    mkdirSync(dirPath, { recursive: true });
+    console.log(`Created: ${relativePath}/`);
+}
 async function runInit(targetPath, options) {
-    const pi = await ensurePiInstalled({ autoInstall: options?.autoInstallPi });
-    if (!pi.ok) {
-        return 1;
+    const root = path.resolve(process.cwd(), targetPath);
+    mkdirSync(root, { recursive: true });
+    if (options?.skipDocker) {
+        console.log('Skipping Docker setup — ensure AGE + pgvector are enabled: CREATE EXTENSION IF NOT EXISTS age; CREATE EXTENSION IF NOT EXISTS vector;');
     }
-    const root = path.resolve(targetPath);
-    const rorcaDir = path.join(root, '.rorca');
-    const skillsDir = path.join(rorcaDir, 'skills');
-    mkdirSync(skillsDir, { recursive: true });
-    const configPath = path.join(rorcaDir, 'config.json');
-    const agentsPath = path.join(root, 'AGENTS.md');
-    const memoryPath = path.join(root, 'MEMORY.md');
-    if (!existsSync(configPath)) {
-        writeFileSync(configPath, '{}\n');
+    else {
+        console.log('Checking Docker...');
+        const status = await dbStatus();
+        let dockerReady = false;
+        try {
+            const dockerInfo = await docker(['info']);
+            dockerReady = dockerInfo.code === 0;
+        }
+        catch {
+            dockerReady = false;
+        }
+        if (!dockerReady) {
+            printInitDockerInstallInstructions();
+            return 1;
+        }
+        console.log('✓ Docker is available');
+        if (!status.containerExists) {
+            await pullInitDatabaseImage();
+        }
+        else {
+            console.log('Database container already exists; skipping image pull.');
+        }
+        console.log('Starting database...');
+        await dbStart();
+        console.log('✓ Database ready at localhost:5432');
+        console.log('Enabling AGE + pgvector extensions...');
+        await enableInitExtensions();
+        console.log('✓ Graph + vector extensions enabled');
     }
-    if (!existsSync(agentsPath)) {
-        writeFileSync(agentsPath, [
-            '# AGENTS.md',
-            '',
-            'Project guidance for Rorca runs in this workspace.',
-            '',
-            '## Rules',
-            '- Keep changes scoped to the requested task.',
-            '- Prefer project conventions already present in the codebase.',
-            '',
-        ].join('\n'));
-    }
-    if (!existsSync(memoryPath)) {
-        writeFileSync(memoryPath, '# Memory Ledger\n\n');
-    }
-    console.log(`Initialized Rorca workspace files in ${root}`);
-    console.log(`- ${path.relative(root, configPath)}`);
-    console.log(`- ${path.relative(root, agentsPath)}`);
-    console.log(`- ${path.relative(root, memoryPath)}`);
-    console.log(`- ${path.relative(root, skillsDir)}/`);
-    console.log('');
-    console.log('Next steps:');
-    console.log('1. Register this workspace in Rorca if you have not already.');
-    console.log('2. Run rorca start to launch.');
+    console.log(`Scaffolding workspace at ${root}...`);
+    ensureInitDirectory(root, '.rorca');
+    ensureInitDirectory(root, '.rorca/skills');
+    writeInitFileIfMissing(root, '.rorca/config.json', '{}\n');
+    writeInitFileIfMissing(root, 'AGENTS.md', '# AGENTS.md\n\nAdd your file governance rules here.\n');
+    writeInitFileIfMissing(root, 'MEMORY.md', '# Memory\n\n_No entries yet._\n');
+    console.log(`Rorca is ready! Next steps:
+  1. rorca start          # Start backend + worker
+  2. rorca doctor         # Verify all systems  
+  3. rorca auth login     # Connect pi to a provider
+  4. rorca forge <brief>  # Generate your first spec`);
     return 0;
 }
 function formatWalLine(event) {
@@ -2342,8 +2396,12 @@ program
     .command('init')
     .option('--path <dir>', 'Target directory', process.cwd())
     .option('--auto-install-pi', 'Install pi automatically with npm in non-interactive environments')
+    .option('--skip-docker', 'Skip Docker database setup')
     .action(async (options) => {
-    process.exitCode = await runInit(options.path, { autoInstallPi: Boolean(options.autoInstallPi) });
+    process.exitCode = await runInit(options.path, {
+        autoInstallPi: Boolean(options.autoInstallPi),
+        skipDocker: Boolean(options.skipDocker),
+    });
 });
 program
     .command('chat')
