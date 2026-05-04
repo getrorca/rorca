@@ -12,6 +12,7 @@ import { ConflictError, NotFoundError, UnprocessableError } from './errors';
 import { logger } from './logger';
 import { chatComplete, DEFAULT_MODEL, isValidModel } from './llm-client';
 import { retrieveContext, type RetrievedContext } from './memory-router';
+import { buildContextForStory } from './context-enrichment';
 import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from './knowledge-graph';
 import { SkillRegistry } from './skill-registry';
 import { PersonaRegistry } from './agent-personas';
@@ -83,6 +84,11 @@ export interface EnrichResult {
   success: true;
   retrieval_method: 'graph' | 'rag' | 'cag' | 'direction_only';
   storiesEnriched: number;
+}
+
+export interface ContextEnrichResult {
+  success: true;
+  context: Awaited<ReturnType<typeof buildContextForStory>>;
 }
 
 function safeReadFile(filePath: string): string {
@@ -429,6 +435,58 @@ ${storyList}`;
     matched: totalSkillsMatched,
     stories: responseStories,
     ...(contextSummary ? { contextSummary } : {}),
+  };
+}
+
+export async function runContextEnrichJob(
+  payload: {
+    workspaceId: string;
+    specId: string;
+    storyId?: string | null;
+    mode?: 'fetchAll' | 'recent' | 'semantic';
+    currentTask?: string;
+    storyText?: string;
+    maxTokens?: number;
+    includeGraph?: boolean;
+  },
+  onProgress?: ProgressCallback,
+): Promise<ContextEnrichResult> {
+  await onProgress?.({
+    current: 1,
+    total: 3,
+    message: 'Resolving workspace and story context',
+  });
+
+  const mode = payload.mode ?? 'semantic';
+
+  await onProgress?.({
+    current: 2,
+    total: 3,
+    message: `Retrieving ${mode} context`,
+  });
+
+  const context = await buildContextForStory(
+    payload.storyId ?? null,
+    payload.specId,
+    payload.workspaceId,
+    {
+      mode,
+      currentTask: payload.currentTask,
+      storyText: payload.storyText,
+      maxTokens: payload.maxTokens,
+      includeGraph: payload.includeGraph,
+    },
+  );
+
+  await onProgress?.({
+    current: 3,
+    total: 3,
+    message: 'Context enrichment complete',
+  });
+
+  return {
+    success: true,
+    context,
   };
 }
 

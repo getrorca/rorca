@@ -2,7 +2,7 @@
   "specId": "Rorca Pi-Native Execution Runtime and Embedded TUI",
   "runId": 20260316000259,
   "startedAt": "2026-05-04T07:24:12.380Z",
-  "lastUpdatedAt": "2026-05-04T07:32:15.217Z",
+  "lastUpdatedAt": "2026-05-04T08:22:19.084Z",
   "completedStories": [
     {
       "storyId": "US-001",
@@ -207,7 +207,7 @@
   ],
   "failedStories": [],
   "skippedStories": [],
-  "currentStory": null,
+  "currentStory": "US-019",
   "decisions": [],
   "resumedFromStory": null
 }
