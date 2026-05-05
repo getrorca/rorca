@@ -76,7 +76,6 @@ export class StatusWidget {
   private readonly token?: string;
   private intervalId: ReturnType<typeof setInterval> | null = null;
   private fallbackMode = false;
-  private workspaceId: string | null = process.env.RORCA_WORKSPACE_ID ?? null;
   private workspaceName: string | null = null;
   private lastEvents: string[] = [];
   private lastPendingCount = 0;
@@ -160,7 +159,7 @@ export class StatusWidget {
       return basename(workspacePath);
     }
 
-    return this.workspaceId;
+    return process.env.RORCA_WORKSPACE_ID?.trim() || null;
   }
 
   private getUi(): UiApi | null {
@@ -202,7 +201,31 @@ export class StatusWidget {
     process.stderr.write(`[rorca] ${statusLine}\n`);
   }
 
+  private buildRenderState(statusLine: string): RenderState {
+    return {
+      statusLine,
+    };
+  }
+
+  private pushWidget(renderState: RenderState): void {
+    const ui = this.getUi();
+    if (typeof ui?.setWidget !== "function") {
+      return;
+    }
+
+    try {
+      ui.setWidget(WIDGET_ID, {
+        type: "text",
+        content: renderState.statusLine,
+      });
+    } catch {
+      // Widget rendering is opportunistic. Status-only mode is still valid.
+    }
+  }
+
   private pushStatus(renderState: RenderState): void {
+    this.pushWidget(renderState);
+
     if (this.fallbackMode) {
       process.stderr.write(`[rorca] ${renderState.statusLine}\n`);
       return;
@@ -219,19 +242,6 @@ export class StatusWidget {
     } catch {
       this.activateFallback(renderState.statusLine);
       return;
-    }
-
-    if (typeof ui?.setWidget === "function") {
-      try {
-        ui.setWidget(WIDGET_ID, {
-          type: "text",
-          content: renderState.statusLine,
-          title: this.workspaceName ? `Workspace: ${this.workspaceName}` : "Rorca",
-          ticker: this.lastEvents.slice(0, 3),
-        });
-      } catch {
-        // Widget rendering is opportunistic. Status-only mode is still valid.
-      }
     }
   }
 
@@ -255,7 +265,7 @@ export class StatusWidget {
         statusLine = `Rorca: Idle — ${this.lastPendingCount} pending | ${lastEvent}`;
       }
 
-      this.pushStatus({ statusLine });
+      this.pushStatus(this.buildRenderState(statusLine));
     } catch {
       // The widget is best-effort. Never throw from the polling loop.
     }
@@ -279,16 +289,7 @@ export class StatusWidget {
   }
 
   private async fetchPendingCount(): Promise<number | null> {
-    const params = new URLSearchParams({
-      status: "pending",
-      limit: "1",
-    });
-
-    if (this.workspaceId) {
-      params.set("workspaceId", this.workspaceId);
-    }
-
-    const response = await this.fetchJson<SpecsResponse>(`/api/specs?${params.toString()}`);
+    const response = await this.fetchJson<SpecsResponse>("/api/specs?status=pending&limit=1");
     if (!response) {
       return null;
     }
