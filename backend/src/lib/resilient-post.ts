@@ -26,6 +26,7 @@ import { logger } from './logger';
 
 const POST_MAX_RETRIES = 3;
 const POST_RETRY_DELAY_MS = 1_000;
+const POST_TIMEOUT_MS = 10_000;
 const FALLBACK_FILENAME = '.rorca-results.jsonl';
 
 // ─── Retry POST ──────────────────────────────────────────────────────────────
@@ -39,17 +40,26 @@ export async function retryPost(
   label: string,
 ): Promise<boolean> {
   for (let attempt = 1; attempt <= POST_MAX_RETRIES; attempt++) {
+    const controller = new AbortController();
+    const timeoutId = setTimeout(() => controller.abort(), POST_TIMEOUT_MS);
+
     try {
       const resp = await fetch(url, {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
         body: JSON.stringify(body),
+        signal: controller.signal,
       });
       if (resp.ok) return true;
       // Non-2xx but server responded — log and retry
       logger.error(`[resilient-post] ${label} attempt ${attempt}/${POST_MAX_RETRIES}: HTTP ${resp.status}`);
     } catch (err: any) {
-      logger.error(`[resilient-post] ${label} attempt ${attempt}/${POST_MAX_RETRIES}: ${err.message ?? err}`);
+      const message = err?.name === 'AbortError'
+        ? `timed out after ${POST_TIMEOUT_MS}ms`
+        : (err.message ?? err);
+      logger.error(`[resilient-post] ${label} attempt ${attempt}/${POST_MAX_RETRIES}: ${message}`);
+    } finally {
+      clearTimeout(timeoutId);
     }
     if (attempt < POST_MAX_RETRIES) {
       await new Promise(resolve => setTimeout(resolve, POST_RETRY_DELAY_MS));

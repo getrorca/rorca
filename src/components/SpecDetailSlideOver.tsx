@@ -459,7 +459,11 @@ function SpecDetailContent({
   // Sync stories from detail — only on initial load, not on spec-level field updates
   // (spec model/engine changes update `detail` but should not clobber story model overrides)
   useEffect(() => {
-    const incoming = detail?.userStories ?? detail?.stories ?? [];
+    const raw = detail?.userStories ?? detail?.stories ?? [];
+    const incoming = raw.map((s: any) => ({
+      ...s,
+      acceptanceCriteria: s.acceptanceCriteria ?? s.steps ?? (s.acceptance ? [s.acceptance] : []),
+    }));
     if (!storiesInitialized.current && incoming.length > 0) {
       setLocalStories(incoming);
       storiesInitialized.current = true;
@@ -1104,7 +1108,8 @@ function StoriesTabContent({ stories, specId, workspaceId, onToggleExclude, onSt
         // Parent will pick it up via onStoryUpdated on individual edits;
         // for bulk refresh we reload the page data by refetching the spec
         const fresh = await apiFetch<{ userStories?: Story[]; stories?: Story[] }>(`/api/specs/${specId}?workspaceId=${workspaceId}`).catch(() => null);
-        const freshStories = fresh?.userStories ?? fresh?.stories ?? [];
+        const freshRaw = fresh?.userStories ?? fresh?.stories ?? [];
+        const freshStories = freshRaw.map((s: any) => ({ ...s, acceptanceCriteria: s.acceptanceCriteria ?? s.steps ?? (s.acceptance ? [s.acceptance] : []) }));
         freshStories.forEach(s => onStoryUpdated?.(s));
       }
     } catch (err: unknown) {

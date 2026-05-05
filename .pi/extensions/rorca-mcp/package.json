@@ -1,9 +1,12 @@
 {
-  "name": "pi-rorca-mcp-extension",
+  "name": "rorca-mcp-pi-extension",
   "private": true,
   "type": "module",
   "dependencies": {
     "@modelcontextprotocol/sdk": "^1.26.0",
     "@sinclair/typebox": "^0.34.41"
+  },
+  "pi": {
+    "extensions": ["./index.ts"]
   }
 }
