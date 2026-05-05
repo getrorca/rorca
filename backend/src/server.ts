@@ -368,9 +368,13 @@ if (process.env.AUTH_REQUIRED === 'true') {
           req.user = resolvedUser;
           return next();
         }
-        return next(new AuthError('Invalid token'));
+        // Stale/invalid token in local mode — fall through to LOCAL_ADMIN
+        req.user = LOCAL_ADMIN;
+        return next();
       } catch {
-        return next(new AuthError('Invalid token'));
+        // Stale/invalid token in local mode — fall through to LOCAL_ADMIN
+        req.user = LOCAL_ADMIN;
+        return next();
       }
     }
     req.user = LOCAL_ADMIN;
