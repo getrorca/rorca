@@ -20,7 +20,7 @@ import { swaggerSpec } from '../lib/swagger';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-export const server = createMcpHttpServer(swaggerSpec as any);
+export const server: ReturnType<typeof createMcpHttpServer> = createMcpHttpServer(swaggerSpec as any);
 
 export async function main(): Promise<void> {
   const transport = new StdioServerTransport();
