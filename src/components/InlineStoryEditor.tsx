@@ -240,11 +240,11 @@ export function InlineStoryEditor({
         <input
           type="number"
           min={5}
-          max={120}
+          max={240}
           value={timeoutMinutes}
           onChange={e => {
             const v = parseInt(e.target.value, 10);
-            if (!isNaN(v)) setTimeoutMinutes(Math.max(5, Math.min(120, v)));
+            if (!isNaN(v)) setTimeoutMinutes(Math.max(5, Math.min(240, v)));
           }}
           className="w-24 px-2 py-1.5 text-sm rounded border border-border bg-bg text-text focus:outline-none focus:border-accent"
         />
