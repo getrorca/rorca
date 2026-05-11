@@ -248,7 +248,7 @@ export function InlineStoryEditor({
           }}
           className="w-24 px-2 py-1.5 text-sm rounded border border-border bg-bg text-text focus:outline-none focus:border-accent"
         />
-        <span className="ml-2 text-[10px] text-muted">5–120 min (default 45)</span>
+        <span className="ml-2 text-[10px] text-muted">5–240 min (default 90)</span>
       </div>
 
       {/* AI Rewrite section */}
