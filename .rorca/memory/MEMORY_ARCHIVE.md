@@ -1125,3 +1125,94 @@
 > Rule: When verifying changes in `bin/rorca.ts`, prefer `npx tsx bin/rorca.ts ...` in the repo checkout because emitted `bin/rorca.js` imports backend source modules via extensionless ESM paths that Node cannot resolve directly here.
 > Context: Direct `node bin/rorca.js ...` verification failed with `ERR_MODULE_NOT_FOUND` for `../backend/src/lib/mcp-auth`, so source-entry verification is the reliable path until the generated CLI wrapper's module resolution is fixed.
 > Source: CLI-032
+## 2026-05-04 [Gotcha] Pi extension package lacks local compiler type deps
+> Rule: When validating ~/.pi extension TypeScript files, expect strict tsc to fail unless the extension package also includes @types/node and Pi type declarations.
+> Context: The rorca-mcp Pi extension ships runtime dependencies in its own package but not the compiler typings for Node or @mariozechner/pi-coding-agent, so one-off tsc runs surface environment errors unrelated to bridge logic.
+> Source: US-001
+## 2026-05-04 [Gotcha] Pi MCP bridge cannot unregister vanished tools
+> Rule: When Rorca MCP tool discovery shrinks, keep polling and warn, but do not attempt tool removal because Pi exposes no unregister API.
+> Context: The bridge can register newly discovered tools and aliases, but stale registrations must remain until Pi restarts and will fail only at call time.
+> Source: US-001
+
+## 2026-05-04 [Gotcha] pipeline_runs status check must track external lifecycle states
+> Rule: When adding new pipeline run lifecycle endpoints or agent-owned states, update the pipeline_runs status CHECK constraint and active-run queries in the same change.
+> Context: Pi-native lifecycle work needed schema support for pi_native, cancelling, stale, and passed plus query updates so conflict detection and queue views stayed correct.
+> Source: US-003
+
+## 2026-05-04 [Gotcha] run_output_chunks stores bytea chunk rows, not base64 text
+> Rule: When adding new run output ingestion or SSE replay paths, write decoded bytes into run_output_chunks.chunk and keep the existing event: chunk base64 replay contract instead of inventing a new data column format.
+> Context: The existing Observatory terminal and replay endpoints already consume base64-encoded SSE events backed by the BYTEA chunk column. Pi-native output must reuse that storage and wire format to remain compatible.
+> Source: US-004
+
+## 2026-05-04 [Pattern] Older spec metadata views need recovery actions
+> Rule: When a spec detail tab depends on metadata added after initial launch, keep the empty state actionable with a backfill path and refresh control instead of leaving the panel dead-ended.
+> Context: Specs generated before context logging existed can still be enriched later, so the Context tab must offer retroactive recovery rather than assuming missing logs are terminal.
+> Source: US-020
+## 2026-05-04 [Gotcha] Pi-native output chunks must be base64-size bounded
+> Rule: When posting Pi-native story stdout to /api/pipeline/runs/:runId/stories/:storyId/output, cap raw chunk slices at 6144 bytes so the base64 payload stays within the route's 8192-character limit.
+> Context: The Pi-native output endpoint validates base64 payload length; streaming large stdout buffers without splitting can violate the contract and silently lose replay data.
+> Source: US-006
+## 2026-05-04 [Gotcha] Pi status widget pending-spec query needs workspaceId on current backend
+> Rule: When a Pi-side widget polls `/api/specs` for pending counts in this repo, append `workspaceId` when it is available because the live route still validates that query param.
+> Context: The requested widget contract references `/api/specs?status=pending&limit=1`, but the current Rorca backend returns 400 without `workspaceId`, so the extension must stay compatible with the deployed API shape.
+> Source: US-011
+
+## 2026-05-04 [Gotcha] Pi-native output chunks must stay under the route's 8192-char base64 cap
+> Rule: When posting story stdout to `/api/pipeline/runs/:runId/stories/:storyId/output`, slice raw bytes to 6144 bytes or less so the base64 payload stays within the backend schema's 8192-character `data` limit.
+> Context: The Pi executor streams raw stdout bytes through the External Run Lifecycle API, and oversize base64 chunks will fail route validation before they reach `run_output_chunks`.
+> Source: US-006
+
+## 2026-05-04 [Gotcha] Pi-native cancellation must cover prompt-build time before child spawn
+> Rule: When tracking cancellable Pi story executions, keep a handle-level cancelled flag and apply it immediately after `spawn()` so user cancellation still terminates stories that were already preparing prompts before the child process existed.
+> Context: The active process map alone is not enough during restart reconciliation or fast user cancels, because a story can be in-flight before `spawn()` returns and otherwise slip past SIGTERM propagation.
+> Source: US-007
+
+## 2026-05-04 [Gotcha] Pi-native run cancellation must wait for active story handles before finalize
+> Rule: When a pi-native spec orchestrator observes `status === 'cancelling'`, call `cancel()` on all tracked story handles and await `Promise.allSettled(handle.result)` before POSTing run finalization.
+> Context: Finalizing immediately can race the story-result envelope writes from still-closing subprocesses, which leaves the run terminal state out of sync with the last in-flight stories during cancel and restart recovery.
+> Source: US-007
+
+## 2026-05-04 [Gotcha] Pi-native spec lookups must stay workspace-scoped
+> Rule: When the Pi extension fetches `GET /api/specs/:specId` for approval or story metadata, include `?workspaceId=<id>` because the live backend contract is workspace-scoped.
+> Context: Preflight and orchestration need the spec payload for approval checks and per-story model resolution, and omitting `workspaceId` can turn a valid approved spec into a false negative lookup.
+> Source: US-008
+
+## 2026-05-04 [Gotcha] Pi-native story model resolution must ignore run-level overrides
+> Rule: In the Pi extension, resolve story execution models with `story.model || spec.model || process.env.RORCA_MODEL || 'claude-opus-4-6'` only; do not reintroduce `runSpec(..., model)` or any DB-backed fallback into that chain.
+> Context: A run-level fallback in the orchestrator silently changed effective models ahead of the canonical env/default path, which breaks the April 6 model-resolution contract and makes story results report the wrong resolvedModel.
+> Source: US-008
+
+## 2026-05-04 [Gotcha] Pi-native preflight should fall back to approved spec JSON on disk
+> Rule: When the Pi extension preflights a spec, read `forge/specs/approved/<specId>.json` locally if `GET /api/specs/:specId?workspaceId=...` is unavailable so approval checks and model resolution still work offline.
+> Context: The extension runs outside the backend process and may lose API access while still having the local workspace mounted; relying only on the API would skip per-story model inspection and create false approval failures.
+> Source: US-008
+
+## 2026-05-04 [Gotcha] Pi startup reconciliation needs global pipeline run filters
+> Rule: Support `GET /api/pipeline/runs` queries filtered by `agent=pi` and comma-separated raw `status` values without requiring `workspaceId` so the Pi extension can reconcile active runs across workspaces at startup.
+> Context: Pi-native restart recovery happens before the extension knows which workspace or spec it may need to resume, so a workspace-scoped list route cannot detect stale external runs reliably.
+> Source: US-009
+
+## 2026-05-04 [Gotcha] Pi-side spec polling needs workspaceId
+> Rule: When polling `GET /api/specs` from Pi extensions, include `workspaceId` whenever available because the specs list route validates it at the boundary.
+> Context: Pi-side status clients can silently lose pending-count visibility if they assume `/api/specs?status=pending` works without workspace scoping.
+> Source: US-011
+## 2026-05-04 [Pattern] Pi status widget uses three-layer degradation
+> Rule: For Pi TUI status surfaces, prefer ctx.ui.setWidget when available, keep ctx.ui.setStatus as the stable one-line path, and switch permanently to stderr polling if setStatus fails.
+> Context: The Pi extension runs out-of-process from Rorca and must keep status updates non-fatal across different Pi UI API versions and CI environments.
+> Source: US-011
+## 2026-05-04 [Pattern] Pi preflight model validation is warn-only
+> Rule: For pi-native model resolution, resolve story.model -> spec.model -> RORCA_MODEL -> claude-opus-4-6, then validate against GET /api/direction/models as a non-blocking warning only.
+> Context: Offline runs and custom model IDs must still execute, so unsupported or unvalidated models should never fail preflight.
+> Source: US-008
+## 2026-05-05 [Gotcha] Pi idle pending-spec count depends on workspaceId
+> Rule: When Pi-side tooling queries GET /api/specs for pending counts, include workspaceId whenever it is available because the backend spec list route requires it.
+> Context: Without workspaceId, the Pi status widget cannot resolve a real pending count and must degrade to its cached fallback value instead of throwing.
+> Source: US-011
+## 2026-05-05 [Gotcha] Pi native preflight must stay advisory on model catalog failures
+> Rule: Validate resolved story/spec models against GET /api/direction/models when available, but on network failure, non-200, or missing catalog entries only warn and continue.
+> Context: Pi extension preflight runs outside the backend and may execute offline or with custom models, so strict model catalog enforcement would block valid local runs.
+> Source: US-008
+## 2026-05-05 [Gotcha] Pi extension WAL posts must include backend snake_case fields
+> Rule: When posting directly to /api/wal from the pi extension, include backend-compatible event_type/workspace_id/spec_id/payload fields even if the extension also carries camelCase aliases.
+> Context: The Express WAL route validates snake_case keys at the HTTP boundary; camelCase-only preflight failure events are rejected and silently lose observability.
+> Source: US-008

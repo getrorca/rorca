@@ -6,10 +6,10 @@
 Context: L1-L2 are global engineering/domain principles. L3+ are per-workspace. L4/L5 come from spec brief and story annotations.
 > Source: CIE-003
 
-## 2026-02-27 [Convention] Spec ID vs specName: spec.id is the filename slug (use for API calls and path construction). spec.specName is the human-readable title (display only).
-> Rule: Spec ID vs specName: spec.id is the filename slug (use for API calls and path construction). spec.specName is the human-readable title (display only).
+## 2026-02-27 [Gotcha] Backend requires restart after changes: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
+> Rule: Backend requires restart after changes: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
 
-Context: Confusing these causes file-not-found errors in pipeline trigger and archive panel.
+Context: Changes to backend code are not picked up automatically. Forgetting to restart causes stale behavior.
 > Source: v2-platform
 
 ## 2026-02-27 [Convention] chatComplete returns ChatResult: chatComplete() returns ChatResult { text, usage } — always use .text accessor, never treat result as a string.
@@ -18,10 +18,10 @@ Context: Confusing these causes file-not-found errors in pipeline trigger and ar
 Context: The return type was changed from string to ChatResult in US-003 (model selection). All callers must use .text.
 > Source: US-003
 
-## 2026-02-27 [Gotcha] Backend requires restart after changes: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
-> Rule: Backend requires restart after changes: tsx has no hot-reload. Always kill port 3030 and restart after backend changes: lsof -ti:3030 | xargs kill -9 && npm run dev
+## 2026-02-27 [Convention] Spec ID vs specName: spec.id is the filename slug (use for API calls and path construction). spec.specName is the human-readable title (display only).
+> Rule: Spec ID vs specName: spec.id is the filename slug (use for API calls and path construction). spec.specName is the human-readable title (display only).
 
-Context: Changes to backend code are not picked up automatically. Forgetting to restart causes stale behavior.
+Context: Confusing these causes file-not-found errors in pipeline trigger and archive panel.
 > Source: v2-platform
 
 ## 2026-02-28 [Architecture] Context Router uses virtual file assembly: Context is assembled virtually at runtime — no physical file scatter. Path-based scoping + tag injection + token budget enforcement.
@@ -36,16 +36,16 @@ Context: .rorca/config.json routing section defines globals, scopes, and tags. m
 Context: Machine-readable, human-editable. Categories: Architecture, Convention, Bug Fix, Decision, Pattern, Gotcha.
 > Source: CIE-005
 
-## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
-> Rule: Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
-
-Context: SM-001 failed in wave 0, causing SM-002, SM-004, and SM-006 to skip despite not being directly tested. This cascading failure pattern means early wave failures have exponential impact on run completion rate.
-> Source: SM-001
-
 ## 2026-03-01 [Convention] TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
 > Rule: TypeScript typecheck failures require immediate resolution: Stories must pass `npx tsc --noEmit` validation before being marked as passed, even if runtime behavior appears correct
 
 Context: SM-001 failed with reason='typecheck' despite potentially working at runtime. The execution engine enforces strict type safety as a quality gate. Always verify both frontend and backend type checks before committing.
+> Source: SM-001
+
+## 2026-03-01 [Gotcha] Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
+> Rule: Wave-based execution blocks dependent stories on single failure: When wave execution is enabled, a single story failure in wave 0 causes all dependent stories to skip with reason='blocked_by'
+
+Context: SM-001 failed in wave 0, causing SM-002, SM-004, and SM-006 to skip despite not being directly tested. This cascading failure pattern means early wave failures have exponential impact on run completion rate.
 > Source: SM-001
 
 ## 2026-03-01 [Pattern] Marketplace UI components follow extract-then-enhance pattern: When adding features to marketplace panels, first extract shared utilities (SM-003: renderMarkdown), then build new UI features (SM-005: category filters) on top of the shared foundation
@@ -53,6 +53,30 @@ Context: SM-001 failed with reason='typecheck' despite potentially working at ru
 
 Context: SM-003 and SM-005 passed while SM-001 failed, suggesting the incremental approach of establishing shared utilities before complex features reduces integration risk.
 > Source: SM-003
+
+## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
+> Rule: Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
+
+Context: PR-003 establishes Docker Compose as the canonical self-hosted deployment method. This supersedes manual npm install flows and ensures consistent environments across installations.
+> Source: PR-003
+
+## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
+> Rule: Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
+
+Context: The production-ready spec shows these are interdependent: rate limiting without CORS leaves attack vectors open; health checks without secrets management can't validate encrypted data access.
+> Source: rorca-production-ready
+
+## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
+> Rule: Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
+
+Context: PR-052 implements upgrade prompts + feature badges. This creates a progressive disclosure UX where users discover features organically rather than via docs. Version gate prevents showing unavailable features.
+> Source: PR-052
+
+## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+> Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
+
+Context: PR-051 creates plan_quotas table + requirePlan middleware. This centralizes enforcement logic and makes quota changes (free → paid tier) declarative. Route handlers stay clean.
+> Source: PR-051
 
 ## 2026-03-08 [Convention] Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
 > Rule: Rate Limiter Configuration Uses Database Table: Rate limits are stored in the `rate_limits` DB table with 30s cache; defaults are 100 req/min authenticated, 20 req/min unauthenticated
@@ -66,18 +90,6 @@ Context: To change limits: UPDATE rate_limits table then call invalidateRateLimi
 Context: PR-049 and PR-050 (SQLite optimization + benchmarks) were superseded by the rorca-postgres-migration spec. This teaches us that production-grade DB decisions should be made upfront, not incrementally optimized from dev-grade solutions.
 > Source: rorca-postgres-migration
 
-## 2026-03-08 [Pattern] Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
-> Rule: Production Hardening Follows Layered Security Model: Production readiness requires CORS hardening (PR-NEW-2), rate limiting (PR-NEW-1), secrets management (vault_keys table), and health checks — implement all four layers, not just one
-
-Context: The production-ready spec shows these are interdependent: rate limiting without CORS leaves attack vectors open; health checks without secrets management can't validate encrypted data access.
-> Source: rorca-production-ready
-
-## 2026-03-08 [Architecture] Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
-> Rule: Docker Compose as Primary Self-Hosted Distribution: Self-hosted distribution uses Docker Compose with Postgres 16 + pgvector + Apache AGE + Rorca backend — single `docker compose up` command
-
-Context: PR-003 establishes Docker Compose as the canonical self-hosted deployment method. This supersedes manual npm install flows and ensures consistent environments across installations.
-> Source: PR-003
-
 ## 2026-03-08 [Convention] Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
 > Rule: Health Checks Return Structured Component Breakdown: Health endpoints must return both aggregate score and per-component status (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt)
 
@@ -89,18 +101,6 @@ Context: Implemented via workspace-echolocation.ts echolocate() function. Penalt
 
 Context: PR-QUEUE-1 (Spec Review Queue Panel) establishes this pattern. Both tabs subscribe to the same SSE stream but filter differently. Prevents code duplication and ensures real-time consistency across views.
 > Source: PR-QUEUE-1
-
-## 2026-03-08 [Decision] Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-> Rule: Feature Badges Use Semantic Versioning Gates: New features get badges (e.g. 'New in v2.1') tied to semantic version checks — frontend shows prompts for features available in current version but not yet used
-
-Context: PR-052 implements upgrade prompts + feature badges. This creates a progressive disclosure UX where users discover features organically rather than via docs. Version gate prevents showing unavailable features.
-> Source: PR-052
-
-## 2026-03-08 [Convention] Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-> Rule: Plan Quotas Enforced via Middleware Not Route Logic: Usage quotas (plan limits, token budgets) are enforced via requirePlan middleware attached to routes, not inline in route handlers
-
-Context: PR-051 creates plan_quotas table + requirePlan middleware. This centralizes enforcement logic and makes quota changes (free → paid tier) declarative. Route handlers stay clean.
-> Source: PR-051
 
 ## 2026-03-10 [Gotcha] pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
 > Rule: pg is async — always await DB calls: All DB calls (query, queryOne, execute) are async via pg Pool. Always use `await`. Use `$1, $2, ...` numbered placeholders (NOT `?`).
@@ -3509,3 +3509,72 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-04 [Architecture] MCP spec enrichment and skill tools must use async job endpoints: When exposing long-running spec operations over MCP, call the `/async` variant first and poll `/api/spec-jobs/:jobId` server-side until terminal status instead of holding the synchronous LLM HTTP request open.
 > Rule: MCP spec enrichment and skill tools must use async job endpoints: When exposing long-running spec operations over MCP, call the `/async` variant first and poll `/api/spec-jobs/:jobId` server-side until terminal status instead of holding the synchronous LLM HTTP request open.
+
+## 2026-05-04 [Gotcha] Pi extension package lacks local compiler type deps: When validating ~/.pi extension TypeScript files, expect strict tsc to fail unless the extension package also includes @types/node and Pi type declarations.
+> Rule: Pi extension package lacks local compiler type deps: When validating ~/.pi extension TypeScript files, expect strict tsc to fail unless the extension package also includes @types/node and Pi type declarations.
+
+## 2026-05-04 [Architecture] MCP async endpoints must be polled server-side: When a public MCP tool maps directly to a POST `.../async` endpoint, the MCP HTTP bridge must detect the returned `jobId` and poll `/api/spec-jobs/:jobId` to terminal state instead of surfacing only the enqueue response.
+> Rule: MCP async endpoints must be polled server-side: When a public MCP tool maps directly to a POST `.../async` endpoint, the MCP HTTP bridge must detect the returned `jobId` and poll `/api/spec-jobs/:jobId` to terminal state instead of surfacing only the enqueue response.
+
+## 2026-05-04 [Gotcha] Pi MCP bridge cannot unregister vanished tools: When Rorca MCP tool discovery shrinks, keep polling and warn, but do not attempt tool removal because Pi exposes no unregister API.
+> Rule: Pi MCP bridge cannot unregister vanished tools: When Rorca MCP tool discovery shrinks, keep polling and warn, but do not attempt tool removal because Pi exposes no unregister API.
+
+## 2026-05-04 [Gotcha] pipeline_runs status check must track external lifecycle states: When adding new pipeline run lifecycle endpoints or agent-owned states, update the pipeline_runs status CHECK constraint and active-run queries in the same change.
+> Rule: pipeline_runs status check must track external lifecycle states: When adding new pipeline run lifecycle endpoints or agent-owned states, update the pipeline_runs status CHECK constraint and active-run queries in the same change.
+
+## 2026-05-04 [Gotcha] run_output_chunks stores bytea chunk rows, not base64 text: When adding new run output ingestion or SSE replay paths, write decoded bytes into run_output_chunks.chunk and keep the existing event: chunk base64 replay contract instead of inventing a new data column format.
+> Rule: run_output_chunks stores bytea chunk rows, not base64 text: When adding new run output ingestion or SSE replay paths, write decoded bytes into run_output_chunks.chunk and keep the existing event: chunk base64 replay contract instead of inventing a new data column format.
+
+## 2026-05-04 [Architecture] Public MCP token allow-list must include auth-tier local routes: When a route is intentionally MCP-callable in local single-user mode, add its method+path pattern to PUBLIC_TOOL_RULES even if the OpenAPI tier is auth, because the public MCP bearer token acts as the user's token.
+> Rule: Public MCP token allow-list must include auth-tier local routes: When a route is intentionally MCP-callable in local single-user mode, add its method+path pattern to PUBLIC_TOOL_RULES even if the OpenAPI tier is auth, because the public MCP bearer token acts as the user's token.
+
+## 2026-05-04 [Pattern] Older spec metadata views need recovery actions: When a spec detail tab depends on metadata added after initial launch, keep the empty state actionable with a backfill path and refresh control instead of leaving the panel dead-ended.
+> Rule: Older spec metadata views need recovery actions: When a spec detail tab depends on metadata added after initial launch, keep the empty state actionable with a backfill path and refresh control instead of leaving the panel dead-ended.
+
+## 2026-05-04 [Architecture] Pi prompt reconstruction should poll shared context-enrich jobs: When Pi-native prompt assembly needs semantic workspace context, enqueue `/api/context/enrich/async` and poll `/api/spec-jobs/:jobId` instead of duplicating retrieval logic or holding a synchronous recall request open.
+> Rule: Pi prompt reconstruction should poll shared context-enrich jobs: When Pi-native prompt assembly needs semantic workspace context, enqueue `/api/context/enrich/async` and poll `/api/spec-jobs/:jobId` instead of duplicating retrieval logic or holding a synchronous recall request open.
+
+## 2026-05-04 [Gotcha] Pi-native output chunks must be base64-size bounded: When posting Pi-native story stdout to /api/pipeline/runs/:runId/stories/:storyId/output, cap raw chunk slices at 6144 bytes so the base64 payload stays within the route's 8192-character limit.
+> Rule: Pi-native output chunks must be base64-size bounded: When posting Pi-native story stdout to /api/pipeline/runs/:runId/stories/:storyId/output, cap raw chunk slices at 6144 bytes so the base64 payload stays within the route's 8192-character limit.
+
+## 2026-05-04 [Gotcha] Pi status widget pending-spec query needs workspaceId on current backend: When a Pi-side widget polls `/api/specs` for pending counts in this repo, append `workspaceId` when it is available because the live route still validates that query param.
+> Rule: Pi status widget pending-spec query needs workspaceId on current backend: When a Pi-side widget polls `/api/specs` for pending counts in this repo, append `workspaceId` when it is available because the live route still validates that query param.
+
+## 2026-05-04 [Gotcha] Pi-native output chunks must stay under the route's 8192-char base64 cap: When posting story stdout to `/api/pipeline/runs/:runId/stories/:storyId/output`, slice raw bytes to 6144 bytes or less so the base64 payload stays within the backend schema's 8192-character `data` limit.
+> Rule: Pi-native output chunks must stay under the route's 8192-char base64 cap: When posting story stdout to `/api/pipeline/runs/:runId/stories/:storyId/output`, slice raw bytes to 6144 bytes or less so the base64 payload stays within the backend schema's 8192-character `data` limit.
+
+## 2026-05-04 [Gotcha] Pi-native cancellation must cover prompt-build time before child spawn: When tracking cancellable Pi story executions, keep a handle-level cancelled flag and apply it immediately after `spawn()` so user cancellation still terminates stories that were already preparing prompts before the child process existed.
+> Rule: Pi-native cancellation must cover prompt-build time before child spawn: When tracking cancellable Pi story executions, keep a handle-level cancelled flag and apply it immediately after `spawn()` so user cancellation still terminates stories that were already preparing prompts before the child process existed.
+
+## 2026-05-04 [Gotcha] Pi-native run cancellation must wait for active story handles before finalize: When a pi-native spec orchestrator observes `status === 'cancelling'`, call `cancel()` on all tracked story handles and await `Promise.allSettled(handle.result)` before POSTing run finalization.
+> Rule: Pi-native run cancellation must wait for active story handles before finalize: When a pi-native spec orchestrator observes `status === 'cancelling'`, call `cancel()` on all tracked story handles and await `Promise.allSettled(handle.result)` before POSTing run finalization.
+
+## 2026-05-04 [Gotcha] Pi-native spec lookups must stay workspace-scoped: When the Pi extension fetches `GET /api/specs/:specId` for approval or story metadata, include `?workspaceId=<id>` because the live backend contract is workspace-scoped.
+> Rule: Pi-native spec lookups must stay workspace-scoped: When the Pi extension fetches `GET /api/specs/:specId` for approval or story metadata, include `?workspaceId=<id>` because the live backend contract is workspace-scoped.
+
+## 2026-05-04 [Gotcha] Pi-native story model resolution must ignore run-level overrides: In the Pi extension, resolve story execution models with `story.model || spec.model || process.env.RORCA_MODEL || 'claude-opus-4-6'` only; do not reintroduce `runSpec(..., model)` or any DB-backed fallback into that chain.
+> Rule: Pi-native story model resolution must ignore run-level overrides: In the Pi extension, resolve story execution models with `story.model || spec.model || process.env.RORCA_MODEL || 'claude-opus-4-6'` only; do not reintroduce `runSpec(..., model)` or any DB-backed fallback into that chain.
+
+## 2026-05-04 [Gotcha] Pi-native preflight should fall back to approved spec JSON on disk: When the Pi extension preflights a spec, read `forge/specs/approved/<specId>.json` locally if `GET /api/specs/:specId?workspaceId=...` is unavailable so approval checks and model resolution still work offline.
+> Rule: Pi-native preflight should fall back to approved spec JSON on disk: When the Pi extension preflights a spec, read `forge/specs/approved/<specId>.json` locally if `GET /api/specs/:specId?workspaceId=...` is unavailable so approval checks and model resolution still work offline.
+
+## 2026-05-04 [Gotcha] Pi startup reconciliation needs global pipeline run filters: Support `GET /api/pipeline/runs` queries filtered by `agent=pi` and comma-separated raw `status` values without requiring `workspaceId` so the Pi extension can reconcile active runs across workspaces at startup.
+> Rule: Pi startup reconciliation needs global pipeline run filters: Support `GET /api/pipeline/runs` queries filtered by `agent=pi` and comma-separated raw `status` values without requiring `workspaceId` so the Pi extension can reconcile active runs across workspaces at startup.
+
+## 2026-05-04 [Gotcha] Pi-side spec polling needs workspaceId: When polling `GET /api/specs` from Pi extensions, include `workspaceId` whenever available because the specs list route validates it at the boundary.
+> Rule: Pi-side spec polling needs workspaceId: When polling `GET /api/specs` from Pi extensions, include `workspaceId` whenever available because the specs list route validates it at the boundary.
+
+## 2026-05-04 [Pattern] Pi status widget uses three-layer degradation: For Pi TUI status surfaces, prefer ctx.ui.setWidget when available, keep ctx.ui.setStatus as the stable one-line path, and switch permanently to stderr polling if setStatus fails.
+> Rule: Pi status widget uses three-layer degradation: For Pi TUI status surfaces, prefer ctx.ui.setWidget when available, keep ctx.ui.setStatus as the stable one-line path, and switch permanently to stderr polling if setStatus fails.
+
+## 2026-05-04 [Pattern] Pi preflight model validation is warn-only: For pi-native model resolution, resolve story.model -> spec.model -> RORCA_MODEL -> claude-opus-4-6, then validate against GET /api/direction/models as a non-blocking warning only.
+> Rule: Pi preflight model validation is warn-only: For pi-native model resolution, resolve story.model -> spec.model -> RORCA_MODEL -> claude-opus-4-6, then validate against GET /api/direction/models as a non-blocking warning only.
+
+## 2026-05-05 [Gotcha] Pi idle pending-spec count depends on workspaceId: When Pi-side tooling queries GET /api/specs for pending counts, include workspaceId whenever it is available because the backend spec list route requires it.
+> Rule: Pi idle pending-spec count depends on workspaceId: When Pi-side tooling queries GET /api/specs for pending counts, include workspaceId whenever it is available because the backend spec list route requires it.
+
+## 2026-05-05 [Gotcha] Pi native preflight must stay advisory on model catalog failures: Validate resolved story/spec models against GET /api/direction/models when available, but on network failure, non-200, or missing catalog entries only warn and continue.
+> Rule: Pi native preflight must stay advisory on model catalog failures: Validate resolved story/spec models against GET /api/direction/models when available, but on network failure, non-200, or missing catalog entries only warn and continue.
+
+## 2026-05-05 [Gotcha] Pi extension WAL posts must include backend snake_case fields: When posting directly to /api/wal from the pi extension, include backend-compatible event_type/workspace_id/spec_id/payload fields even if the extension also carries camelCase aliases.
+> Rule: Pi extension WAL posts must include backend snake_case fields: When posting directly to /api/wal from the pi extension, include backend-compatible event_type/workspace_id/spec_id/payload fields even if the extension also carries camelCase aliases.
