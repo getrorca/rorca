@@ -413,7 +413,6 @@ router.delete('/:id', async (req: Request, res: Response) => {
 router.post('/test', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { throw new AuthError('No user found'); return; }
-  const userClient = await withUserClient(req);
   const { workspaceId, provider } = req.body as { workspaceId?: string; provider?: string };
 
   if (!workspaceId || typeof workspaceId !== 'string') {
@@ -439,19 +438,12 @@ router.post('/test', async (req: Request, res: Response) => {
 
     if (provider !== 'claude-cli') {
       // Look up vault key for this user + provider
-      const { data: rows, error: selectError } = await userClient
-        .from('api_key_vault')
-        .select('id, encrypted_key, base_url')
-        .eq('workspace_id', workspaceId)
-        .eq('provider', provider)
-        .order('created_at', { ascending: false })
-        .limit(1);
-
-      if (selectError) {
-        throw new AuthError(selectError.message);
-      }
-
-      const row = rows?.[0] as Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'> | undefined;
+      const row = await queryOne<Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'>>(
+        `SELECT id, encrypted_key, base_url FROM api_key_vault
+         WHERE workspace_id = $1 AND provider = $2
+         ORDER BY created_at DESC LIMIT 1`,
+        [workspaceId, provider]
+      );
 
       if (!row) {
         throw new ValidationError(`No API key stored for provider "${provider}". Add a key first.`);
