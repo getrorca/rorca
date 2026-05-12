@@ -2828,26 +2828,50 @@ async function runPiAuthCommand(action: 'login' | 'logout', provider?: string): 
 }
 
 async function waitForGeneratedSpec(jobId: string): Promise<{ slug?: string }> {
-  for (;;) {
-    const status = await fetchJson<{
-      jobId: string;
-      status: string;
-      slug?: string;
-      error?: string;
-    }>(`/api/specs/generate/job/${encodeURIComponent(jobId)}`);
+  const spinFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
+  let spinIdx = 0;
+  const startMs = Date.now();
 
-    if (status.status === 'done') {
-      return status;
+  const ticker = setInterval(() => {
+    const elapsed = ((Date.now() - startMs) / 1000).toFixed(0);
+    const frame = spinFrames[spinIdx++ % spinFrames.length];
+    process.stdout.write(`\r${frame}  Generating spec… ${dim(`${elapsed}s`)}`);
+  }, 100);
+
+  try {
+    for (;;) {
+      const status = await fetchJson<{
+        jobId: string;
+        status: string;
+        slug?: string;
+        error?: string;
+      }>(`/api/specs/generate/job/${encodeURIComponent(jobId)}`);
+
+      if (status.status === 'done') {
+        clearInterval(ticker);
+        const elapsed = ((Date.now() - startMs) / 1000).toFixed(1);
+        process.stdout.write(`\r${green('✓')}  Spec generated  ${dim(`(${elapsed}s)`)}\n`);
+        return status;
+      }
+      if (status.status === 'failed') {
+        clearInterval(ticker);
+        process.stdout.write(`\r${red('✗')}  Spec generation failed\n`);
+        throw new Error(status.error || 'Spec generation failed.');
+      }
+      await sleep(2000);
     }
-    if (status.status === 'failed') {
-      throw new Error(status.error || 'Spec generation failed.');
-    }
-    await sleep(2000);
+  } catch (err) {
+    clearInterval(ticker);
+    throw err;
   }
 }
 
 async function runForge(brief: string, options: { approve?: boolean; run?: boolean }): Promise<number> {
   const workspace = await getDefaultWorkspace();
+
+  process.stdout.write(`${dim('⠋')}  Generating spec… `);
+  const genStart = Date.now();
+
   const generated = await fetchJson<Record<string, unknown>>('/api/specs/generate', {
     method: 'POST',
     body: JSON.stringify({
@@ -2858,8 +2882,14 @@ async function runForge(brief: string, options: { approve?: boolean; run?: boole
 
   let specSlug = typeof generated.slug === 'string' ? generated.slug : undefined;
   if (!specSlug && typeof generated.jobId === 'string') {
+    // async job path — spinner runs inside waitForGeneratedSpec
+    process.stdout.write('\n');
     const completed = await waitForGeneratedSpec(generated.jobId);
     specSlug = completed.slug;
+  } else if (specSlug) {
+    // synchronous path — print the done line here
+    const elapsed = ((Date.now() - genStart) / 1000).toFixed(1);
+    process.stdout.write(`\r${green('✓')}  Spec generated  ${dim(`(${elapsed}s)`)}\n`);
   }
 
   if (!specSlug) {
@@ -2872,7 +2902,7 @@ async function runForge(brief: string, options: { approve?: boolean; run?: boole
     title: string;
   }>;
 
-  console.log(`${bold(specSlug)} in workspace ${workspace.id}`);
+  console.log(`${bold(specSlug)} in workspace ${workspace.label || workspace.id}`);
   if (stories.length > 0) {
     printTable(['Story', 'Title'], stories.map((story) => [story.id, story.title]));
   }
@@ -2990,7 +3020,7 @@ program
     process.exitCode = await runDoctor(options);
   });
 
-const auth = program.command('auth').description('Manage Pi authentication');
+const auth = program.command('auth').description('Manage provider authentication (via pi — Rorca\'s execution engine)');
 
 auth
   .action(async () => {
