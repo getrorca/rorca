@@ -1599,10 +1599,10 @@ type TokenUpdateCallback = (update: TokenUpdate) => void;
 
 // ─── Idle Watchdog ──────────────────────────────────────────────────────────
 
-/** Default idle timeout: 5 minutes. Overridden by LLM_IDLE_TIMEOUT_MS env var. */
+/** Default idle timeout: 15 minutes. Overridden by LLM_IDLE_TIMEOUT_MS env var. */
 const LLM_IDLE_TIMEOUT_MS: number = (() => {
   const parsed = parseInt(process.env.LLM_IDLE_TIMEOUT_MS ?? '', 10);
-  return Number.isNaN(parsed) ? 300_000 : parsed;
+  return Number.isNaN(parsed) ? 900_000 : parsed;
 })();
 
 interface IdleWatchdog {
