@@ -1,6 +1,9 @@
 # Run State Summary
 
-Spec: Pi Metadata-Only Change Detection Recheck
-Run ID: 20260316000294
-Started: 2026-05-06T18:52:28.337Z
-Last Updated: 2026-05-06T18:52:28.337Z
+Spec: zz-mcp-pi-single-story-pass-1778699432
+Run ID: 20260316000304
+Started: 2026-05-13T19:11:56.278Z
+Last Updated: 2026-05-13T19:12:12.803Z
+
+## Completed Stories (1)
+- US-001: Add a Pi RPC support note to the README execution engine section — DONE (pi, openai-codex/gpt-5.4, 15s)
