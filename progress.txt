@@ -1,6 +1,9 @@
 # Run State Summary
 
-Spec: Pi Metadata-Only Change Detection Recheck
-Run ID: 20260316000294
-Started: 2026-05-06T18:52:28.337Z
-Last Updated: 2026-05-06T18:52:28.337Z
+Spec: zz rorca p0 reverify 1778697404 add a tiny docs-only spec that adds one verification note to README and then validates it without changing runtime logic
+Run ID: 20260316000303
+Started: 2026-05-13T18:42:20.263Z
+Last Updated: 2026-05-13T18:44:22.090Z
+
+## Completed Stories (1)
+- US-004: Validate execution-engine.ts pi agent branch matches README claims — DONE (pi, openai-codex/gpt-5.4, 9s)

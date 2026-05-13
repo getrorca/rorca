@@ -2,8 +2,19 @@
   "specId": "zz rorca p0 reverify 1778697404 add a tiny docs-only spec that adds one verification note to README and then validates it without changing runtime logic",
   "runId": 20260316000303,
   "startedAt": "2026-05-13T18:42:20.263Z",
-  "lastUpdatedAt": "2026-05-13T18:42:20.263Z",
-  "completedStories": [],
+  "lastUpdatedAt": "2026-05-13T18:44:22.090Z",
+  "completedStories": [
+    {
+      "storyId": "US-004",
+      "title": "Validate execution-engine.ts pi agent branch matches README claims",
+      "status": "passed",
+      "startedAt": "2026-05-13T18:44:12.854Z",
+      "finishedAt": "2026-05-13T18:44:22.090Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 9236
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
