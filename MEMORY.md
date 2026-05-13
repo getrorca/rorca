@@ -3586,3 +3586,11 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 ## 2026-05-13 [Pattern] For docs-only validation stories, verify: (1) heading anchors unchanged via `git diff HEAD -- README.md | grep '^[+-]#'`, (2) fenced code block triple-backtick pairs are balanced (even count of ``` lines), (3) trailing newline is exactly one byte.
 > Rule: For docs-only validation stories, verify: (1) heading anchors unchanged via `git diff HEAD -- README.md | grep '^[+-]#'`, (2) fenced code block triple-backtick pairs are balanced (even count of ``` lines), (3) trailing newline is exactly one byte.
 > Source: US-002
+
+## 2026-05-13 [Convention] The pi agent branch in execution-engine.ts uses `pi run --jsonl --skill <direction-file>` as documented in README and CLAUDE.md. The `--skill` flag receives a synthesized direction stack file path (not hardcoded), and `PI_BIN` env var is used for binary detection following the same pattern as `CLAUDE_BIN`/`OPENCODE_BIN`/`CODEX_BIN`.
+> Rule: The pi agent branch in execution-engine.ts uses `pi run --jsonl --skill <direction-file>` as documented in README and CLAUDE.md. The `--skill` flag receives a synthesized direction stack file path (not hardcoded), and `PI_BIN` env var is used for binary detection following the same pattern as `CLAUDE_BIN`/`OPENCODE_BIN`/`CODEX_BIN`.
+> Source: US-004
+
+## 2026-05-13 [Architecture] All four execution engine agent branches (claude, opencode, codex, pi) follow a consistent env var pattern: `RORCA_AGENT=<name>` for selection and `<NAME>_BIN` for binary path override/auto-detection. Session control flags for pi (`--session`, `--fork`, `--continue`) are documented in CLAUDE.md but may not all be passed by execution-engine.ts — check actual code before assuming they are active.
+> Rule: All four execution engine agent branches (claude, opencode, codex, pi) follow a consistent env var pattern: `RORCA_AGENT=<name>` for selection and `<NAME>_BIN` for binary path override/auto-detection. Session control flags for pi (`--session`, `--fork`, `--continue`) are documented in CLAUDE.md but may not all be passed by execution-engine.ts — check actual code before assuming they are active.
+> Source: US-004
