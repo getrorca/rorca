@@ -1,11 +1,12 @@
 {
-  "specId": "",
-  "runId": 0,
-  "startedAt": "",
-  "lastUpdatedAt": "2026-05-06T18:52:28.344Z",
+  "specId": "zz rorca p0 reverify 1778697404 add a tiny docs-only spec that adds one verification note to README and then validates it without changing runtime logic",
+  "runId": 20260316000303,
+  "startedAt": "2026-05-13T18:42:20.263Z",
+  "lastUpdatedAt": "2026-05-13T18:42:20.263Z",
   "completedStories": [],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
-  "decisions": []
+  "decisions": [],
+  "resumedFromStory": null
 }
