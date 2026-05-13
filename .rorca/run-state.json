@@ -2,7 +2,7 @@
   "specId": "zz rorca p0 reverify 1778697404 add a tiny docs-only spec that adds one verification note to README and then validates it without changing runtime logic",
   "runId": 20260316000303,
   "startedAt": "2026-05-13T18:42:20.263Z",
-  "lastUpdatedAt": "2026-05-13T18:44:51.629Z",
+  "lastUpdatedAt": "2026-05-13T18:45:22.951Z",
   "completedStories": [
     {
       "storyId": "US-004",
@@ -23,6 +23,16 @@
       "agentType": "pi",
       "model": "openai-codex/gpt-5.4",
       "elapsedMs": 12599
+    },
+    {
+      "storyId": "US-006",
+      "title": "Validate pi-execution-mode.ts existence and surface area in README",
+      "status": "passed",
+      "startedAt": "2026-05-13T18:45:09.041Z",
+      "finishedAt": "2026-05-13T18:45:22.951Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 13910
     }
   ],
   "failedStories": [],
