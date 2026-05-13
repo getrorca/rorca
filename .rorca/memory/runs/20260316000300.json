@@ -1,0 +1,139 @@
+{
+  "specId": "zz rorca extension verification 1778694092 add a tiny docs-only spec that updates README with one short verification note and no code changes",
+  "runId": 20260316000300,
+  "startedAt": "2026-05-13T17:43:05.446Z",
+  "lastUpdatedAt": "2026-05-13T17:43:21.269Z",
+  "completedStories": [],
+  "failedStories": [],
+  "skippedStories": [
+    {
+      "storyId": "US-002",
+      "title": "US-002",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:19.119Z",
+      "finishedAt": "2026-05-13T17:43:19.119Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-001"
+    },
+    {
+      "storyId": "US-003",
+      "title": "US-003",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:19.133Z",
+      "finishedAt": "2026-05-13T17:43:19.133Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-001"
+    },
+    {
+      "storyId": "US-004",
+      "title": "US-004",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:19.141Z",
+      "finishedAt": "2026-05-13T17:43:19.141Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-001"
+    },
+    {
+      "storyId": "US-005",
+      "title": "US-005",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:19.158Z",
+      "finishedAt": "2026-05-13T17:43:19.158Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-001"
+    },
+    {
+      "storyId": "US-006",
+      "title": "US-006",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:19.163Z",
+      "finishedAt": "2026-05-13T17:43:19.163Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-002, US-003, US-004, US-005"
+    },
+    {
+      "storyId": "US-007",
+      "title": "US-007",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:19.168Z",
+      "finishedAt": "2026-05-13T17:43:19.168Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-006"
+    },
+    {
+      "storyId": "US-008",
+      "title": "US-008",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:19.173Z",
+      "finishedAt": "2026-05-13T17:43:19.173Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-007"
+    },
+    {
+      "storyId": "US-002",
+      "title": "Verify README change is the only file modified",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:21.192Z",
+      "finishedAt": "2026-05-13T17:43:21.192Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-001"
+    },
+    {
+      "storyId": "US-003",
+      "title": "Validate README markdown syntax is valid",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:21.204Z",
+      "finishedAt": "2026-05-13T17:43:21.204Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-001"
+    },
+    {
+      "storyId": "US-004",
+      "title": "Confirm verification note is human-readable",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:21.217Z",
+      "finishedAt": "2026-05-13T17:43:21.217Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-001"
+    },
+    {
+      "storyId": "US-005",
+      "title": "Ensure verification note does not duplicate existing content",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:21.230Z",
+      "finishedAt": "2026-05-13T17:43:21.230Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-001"
+    },
+    {
+      "storyId": "US-006",
+      "title": "Commit the README change with a descriptive message",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:21.250Z",
+      "finishedAt": "2026-05-13T17:43:21.250Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-002, US-003, US-004, US-005"
+    },
+    {
+      "storyId": "US-007",
+      "title": "Verify the spec itself passes all acceptance criteria checks",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:21.262Z",
+      "finishedAt": "2026-05-13T17:43:21.262Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-006"
+    },
+    {
+      "storyId": "US-008",
+      "title": "Document the verification outcome in a run summary comment",
+      "status": "skipped",
+      "startedAt": "2026-05-13T17:43:21.269Z",
+      "finishedAt": "2026-05-13T17:43:21.269Z",
+      "agentType": "pi",
+      "failReason": "blocked_by: US-007"
+    }
+  ],
+  "currentStory": null,
+  "decisions": [],
+  "resumedFromStory": null
+}

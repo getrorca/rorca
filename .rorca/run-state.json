@@ -1,11 +1,12 @@
 {
-  "specId": "",
-  "runId": 0,
-  "startedAt": "",
-  "lastUpdatedAt": "2026-05-06T18:52:28.344Z",
+  "specId": "zz rorca extension verification 1778694092 add a tiny docs-only spec that updates README with one short verification note and no code changes",
+  "runId": 20260316000301,
+  "startedAt": "2026-05-13T17:46:55.354Z",
+  "lastUpdatedAt": "2026-05-13T17:46:55.354Z",
   "completedStories": [],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
-  "decisions": []
+  "decisions": [],
+  "resumedFromStory": null
 }

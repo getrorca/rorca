@@ -1,6 +1,22 @@
 # Run State Summary
 
-Spec: Pi Metadata-Only Change Detection Recheck
-Run ID: 20260316000294
-Started: 2026-05-06T18:52:28.337Z
-Last Updated: 2026-05-06T18:52:28.337Z
+Spec: zz rorca extension verification 1778694092 add a tiny docs-only spec that updates README with one short verification note and no code changes
+Run ID: 20260316000300
+Started: 2026-05-13T17:43:05.446Z
+Last Updated: 2026-05-13T17:43:21.269Z
+
+## Skipped Stories (14)
+- US-002: US-002 — SKIPPED (blocked_by: US-001)
+- US-003: US-003 — SKIPPED (blocked_by: US-001)
+- US-004: US-004 — SKIPPED (blocked_by: US-001)
+- US-005: US-005 — SKIPPED (blocked_by: US-001)
+- US-006: US-006 — SKIPPED (blocked_by: US-002, US-003, US-004, US-005)
+- US-007: US-007 — SKIPPED (blocked_by: US-006)
+- US-008: US-008 — SKIPPED (blocked_by: US-007)
+- US-002: Verify README change is the only file modified — SKIPPED (blocked_by: US-001)
+- US-003: Validate README markdown syntax is valid — SKIPPED (blocked_by: US-001)
+- US-004: Confirm verification note is human-readable — SKIPPED (blocked_by: US-001)
+- US-005: Ensure verification note does not duplicate existing content — SKIPPED (blocked_by: US-001)
+- US-006: Commit the README change with a descriptive message — SKIPPED (blocked_by: US-002, US-003, US-004, US-005)
+- US-007: Verify the spec itself passes all acceptance criteria checks — SKIPPED (blocked_by: US-006)
+- US-008: Document the verification outcome in a run summary comment — SKIPPED (blocked_by: US-007)
