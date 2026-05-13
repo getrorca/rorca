@@ -2,7 +2,7 @@
   "specId": "zz rorca p0 reverify 1778697404 add a tiny docs-only spec that adds one verification note to README and then validates it without changing runtime logic",
   "runId": 20260316000303,
   "startedAt": "2026-05-13T18:42:20.263Z",
-  "lastUpdatedAt": "2026-05-13T18:46:23.683Z",
+  "lastUpdatedAt": "2026-05-13T18:46:53.298Z",
   "completedStories": [
     {
       "storyId": "US-004",
@@ -43,6 +43,16 @@
       "agentType": "pi",
       "model": "openai-codex/gpt-5.4",
       "elapsedMs": 42050
+    },
+    {
+      "storyId": "US-008",
+      "title": "Commit all README changes with conventional commit message",
+      "status": "passed",
+      "startedAt": "2026-05-13T18:46:41.740Z",
+      "finishedAt": "2026-05-13T18:46:53.298Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 11558
     }
   ],
   "failedStories": [],

@@ -3,10 +3,11 @@
 Spec: zz rorca p0 reverify 1778697404 add a tiny docs-only spec that adds one verification note to README and then validates it without changing runtime logic
 Run ID: 20260316000303
 Started: 2026-05-13T18:42:20.263Z
-Last Updated: 2026-05-13T18:46:23.683Z
+Last Updated: 2026-05-13T18:46:53.298Z
 
-## Completed Stories (4)
+## Completed Stories (5)
 - US-004: Validate execution-engine.ts pi agent branch matches README claims — DONE (pi, openai-codex/gpt-5.4, 9s)
 - US-005: Validate pi-autonomous-runner.ts existence and surface area in README — DONE (pi, openai-codex/gpt-5.4, 13s)
 - US-006: Validate pi-execution-mode.ts existence and surface area in README — DONE (pi, openai-codex/gpt-5.4, 14s)
 - US-007: Run backend TypeScript type check to confirm no regressions — DONE (pi, openai-codex/gpt-5.4, 42s)
+- US-008: Commit all README changes with conventional commit message — DONE (pi, openai-codex/gpt-5.4, 12s)
