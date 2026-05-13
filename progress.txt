@@ -3,7 +3,8 @@
 Spec: zz-mcp-pi-draft-pr-verify-1778699938
 Run ID: 20260316000305
 Started: 2026-05-13T19:19:21.301Z
-Last Updated: 2026-05-13T19:19:31.608Z
+Last Updated: 2026-05-13T19:19:53.836Z
 
-## Completed Stories (1)
+## Completed Stories (2)
 - US-001: Add a Pi RPC support note to the README execution engine section — DONE (pi, openai-codex/gpt-5.4, 8s)
+- US-001: Add a Pi RPC support note to the README execution engine section — DONE (pi, openai-codex/gpt-5.4, 6s)
