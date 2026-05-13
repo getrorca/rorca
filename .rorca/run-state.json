@@ -1,11 +1,23 @@
 {
-  "specId": "",
-  "runId": 0,
-  "startedAt": "",
-  "lastUpdatedAt": "2026-05-06T18:52:28.344Z",
-  "completedStories": [],
+  "specId": "zz-mcp-pi-draft-pr-verify-1778699938",
+  "runId": 20260316000305,
+  "startedAt": "2026-05-13T19:19:21.301Z",
+  "lastUpdatedAt": "2026-05-13T19:19:31.608Z",
+  "completedStories": [
+    {
+      "storyId": "US-001",
+      "title": "Add a Pi RPC support note to the README execution engine section",
+      "status": "passed",
+      "startedAt": "2026-05-13T19:19:23.770Z",
+      "finishedAt": "2026-05-13T19:19:31.608Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 7838
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
   "currentStory": null,
-  "decisions": []
+  "decisions": [],
+  "resumedFromStory": null
 }
