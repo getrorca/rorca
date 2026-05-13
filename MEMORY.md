@@ -3578,3 +3578,11 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-05 [Gotcha] Pi extension WAL posts must include backend snake_case fields: When posting directly to /api/wal from the pi extension, include backend-compatible event_type/workspace_id/spec_id/payload fields even if the extension also carries camelCase aliases.
 > Rule: Pi extension WAL posts must include backend snake_case fields: When posting directly to /api/wal from the pi extension, include backend-compatible event_type/workspace_id/spec_id/payload fields even if the extension also carries camelCase aliases.
+
+## 2026-05-13 [Convention] README.md validation uses `npx markdownlint README.md` (or `npx markdownlint-cli README.md`); never skip if tool is missing — fail with a clear message instead. File must end with exactly one newline (`\n`), not double.
+> Rule: README.md validation uses `npx markdownlint README.md` (or `npx markdownlint-cli README.md`); never skip if tool is missing — fail with a clear message instead. File must end with exactly one newline (`\n`), not double.
+> Source: US-002
+
+## 2026-05-13 [Pattern] For docs-only validation stories, verify: (1) heading anchors unchanged via `git diff HEAD -- README.md | grep '^[+-]#'`, (2) fenced code block triple-backtick pairs are balanced (even count of ``` lines), (3) trailing newline is exactly one byte.
+> Rule: For docs-only validation stories, verify: (1) heading anchors unchanged via `git diff HEAD -- README.md | grep '^[+-]#'`, (2) fenced code block triple-backtick pairs are balanced (even count of ``` lines), (3) trailing newline is exactly one byte.
+> Source: US-002
