@@ -3594,3 +3594,15 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 ## 2026-05-13 [Architecture] All four execution engine agent branches (claude, opencode, codex, pi) follow a consistent env var pattern: `RORCA_AGENT=<name>` for selection and `<NAME>_BIN` for binary path override/auto-detection. Session control flags for pi (`--session`, `--fork`, `--continue`) are documented in CLAUDE.md but may not all be passed by execution-engine.ts — check actual code before assuming they are active.
 > Rule: All four execution engine agent branches (claude, opencode, codex, pi) follow a consistent env var pattern: `RORCA_AGENT=<name>` for selection and `<NAME>_BIN` for binary path override/auto-detection. Session control flags for pi (`--session`, `--fork`, `--continue`) are documented in CLAUDE.md but may not all be passed by execution-engine.ts — check actual code before assuming they are active.
 > Source: US-004
+
+## 2026-05-13 [Architecture] pi-autonomous-runner.ts exists as an untracked file at src/lib/pi-autonomous-runner.ts (not yet committed to git). It wraps the `pi run --jsonl` subprocess and exposes a public surface for pi execution that should be cross-checked against README claims about the pi execution path.
+> Rule: pi-autonomous-runner.ts exists as an untracked file at src/lib/pi-autonomous-runner.ts (not yet committed to git). It wraps the `pi run --jsonl` subprocess and exposes a public surface for pi execution that should be cross-checked against README claims about the pi execution path.
+> Source: US-005
+
+## 2026-05-13 [Convention] For README-only documentation stories with no runtime code changes, use the commit prefix `docs:` (not `feat:`), e.g. `docs: note pi-autonomous-runner public surface`. The diff budget for this spec is shared across all stories at ≤15 lines total.
+> Rule: For README-only documentation stories with no runtime code changes, use the commit prefix `docs:` (not `feat:`), e.g. `docs: note pi-autonomous-runner public surface`. The diff budget for this spec is shared across all stories at ≤15 lines total.
+> Source: US-005
+
+## 2026-05-13 [Gotcha] Untracked files (`??` in git status) exist on disk and can be read directly but are invisible to git history and diffs. Always read the file system directly (not git) when verifying existence of untracked source files before making documentation claims.
+> Rule: Untracked files (`??` in git status) exist on disk and can be read directly but are invisible to git history and diffs. Always read the file system directly (not git) when verifying existence of untracked source files before making documentation claims.
+> Source: US-005
