@@ -530,3 +530,7 @@ Rorca will show the conflict details inline. Resolve conflicts manually in the w
 ## License
 
 MIT
+
+## Verification
+
+Extension verification 1778694092 completed successfully.
