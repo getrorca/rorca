@@ -1,42 +1,6 @@
 # Run State Summary
 
-Spec: Rorca Pi-Native Execution Runtime and Embedded TUI
-Run ID: 20260316000262
-Started: 2026-05-04T08:04:31.479Z
-Last Updated: 2026-05-04T08:05:58.017Z
-
-## Skipped Stories (34)
-- US-003: US-003 — SKIPPED (blocked_by: US-002)
-- US-004: US-004 — SKIPPED (blocked_by: US-003)
-- US-005: US-005 — SKIPPED (blocked_by: US-001, US-002)
-- US-006: US-006 — SKIPPED (blocked_by: US-004, US-005)
-- US-007: US-007 — SKIPPED (blocked_by: US-006)
-- US-008: US-008 — SKIPPED (blocked_by: US-005, US-007)
-- US-009: US-009 — SKIPPED (blocked_by: US-003, US-007)
-- US-010: US-010 — SKIPPED (blocked_by: US-007)
-- US-011: US-011 — SKIPPED (blocked_by: US-001)
-- US-012: US-012 — SKIPPED (blocked_by: US-011)
-- US-013: US-013 — SKIPPED (blocked_by: US-012, US-007)
-- US-014: US-014 — SKIPPED (blocked_by: US-013, US-004)
-- US-015: US-015 — SKIPPED (blocked_by: US-010, US-011)
-- US-016: US-016 — SKIPPED (blocked_by: US-011)
-- US-017: US-017 — SKIPPED (blocked_by: US-003, US-004)
-- US-018: US-018 — SKIPPED (blocked_by: US-001, US-007, US-009, US-011, US-012, US-013, US-014, US-015, US-016, US-017)
-- US-020: US-020 — SKIPPED (blocked_by: US-004, US-019)
-- US-011: Embedded TUI: Always-On Status Widget and WAL Event Ticker — SKIPPED (blocked_by: US-001)
-- US-003: External Run Lifecycle API: Create, Heartbeat, Finalize, Cancel — SKIPPED (blocked_by: US-002)
-- US-005: buildPrompt Reconstruction via MCP and API Data — SKIPPED (blocked_by: US-001, US-002)
-- US-012: Embedded TUI: Spec Board Interactive View — SKIPPED (blocked_by: US-011)
-- US-016: Embedded TUI: Direction Stack and Workspace Settings Views — SKIPPED (blocked_by: US-011)
-- US-004: Per-Story Result Envelope API, story_output_chunks, and Migration — SKIPPED (blocked_by: US-003)
-- US-006: Pi Child-Process Story Executor with Worktree Isolation — SKIPPED (blocked_by: US-004, US-005)
-- US-017: Backend MCP Tier Annotations for Memory, Workspace, and Pi-Lifecycle Routes — SKIPPED (blocked_by: US-003, US-004)
-- US-020: Spec Detail Context Tab Backfill and Empty-State Recovery — SKIPPED (blocked_by: US-004, US-019)
-- US-007: Pi Orchestrator: Wave-Based Parallel Spec Execution — SKIPPED (blocked_by: US-006)
-- US-008: Model Precedence Handling and Preflight Validation — SKIPPED (blocked_by: US-005, US-007)
-- US-009: Stale Run Reconciliation and Restart Recovery — SKIPPED (blocked_by: US-003, US-007)
-- US-010: Learning Loop: Memory and Direction Proposal Engine — SKIPPED (blocked_by: US-007)
-- US-013: Embedded TUI: Spec Detail and Run Trigger Modal — SKIPPED (blocked_by: US-012, US-007)
-- US-015: Embedded TUI: Memory Browser and Proposal Review Modal — SKIPPED (blocked_by: US-010, US-011)
-- US-014: Embedded TUI: Live Run View with Per-Story Output Streaming — SKIPPED (blocked_by: US-013, US-004)
-- US-018: Pi Extension Bootstrap, Command Registration, and E2E Integration Test — SKIPPED (blocked_by: US-001, US-007, US-009, US-011, US-012, US-013, US-014, US-015, US-016, US-017)
+Spec: Pi Metadata-Only Change Detection Recheck
+Run ID: 20260316000294
+Started: 2026-05-06T18:52:28.337Z
+Last Updated: 2026-05-06T18:52:28.337Z

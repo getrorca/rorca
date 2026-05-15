@@ -44,7 +44,7 @@ import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
-import { requirePi } from './pi-detector';
+import { requirePi, listPiModels } from './pi-detector';
 import {
   buildPiDoneChecklist,
   buildPiProgressLogPath,
@@ -356,7 +356,7 @@ const MAX_RETRIES = 3;
 const MAX_RATE_LIMIT_RETRIES = 4;
 const RATE_LIMIT_BACKOFF_MS = [30_000, 60_000, 120_000, 240_000];
 const RATE_LIMIT_FAST_EXIT_THRESHOLD_MS = 5_000;
-const DEFAULT_TIMEOUT_MINUTES = 45;
+const DEFAULT_TIMEOUT_MINUTES = 90;
 
 const CLAUDE_BIN = process.env.CLAUDE_BIN ||
   (() => {
@@ -379,6 +379,53 @@ const CODEX_BIN = process.env.CODEX_BIN ||
 const PI_BIN = process.env.PI_BIN || (() => {
   try { return execSync('which pi', { encoding: 'utf8' }).trim(); } catch { return 'pi'; }
 })();
+
+interface PiCliSelection {
+  provider: string | null;
+  model: string | null;
+}
+
+function resolvePiCliSelection(requestedModel: string | null): PiCliSelection {
+  if (!requestedModel) return { provider: null, model: null };
+
+  const trimmed = requestedModel.trim();
+  if (!trimmed) return { provider: null, model: null };
+
+  if (trimmed.startsWith('pi/')) {
+    const [, provider, ...rest] = trimmed.split('/');
+    return {
+      provider: provider || null,
+      model: rest.length > 0 ? rest.join('/') : null,
+    };
+  }
+
+  const available = listPiModels(PI_BIN);
+
+  const slashIndex = trimmed.indexOf('/');
+  if (slashIndex !== -1) {
+    const provider = trimmed.slice(0, slashIndex);
+    const model = trimmed.slice(slashIndex + 1);
+    if (available.some(entry => entry.provider === provider && entry.model === model)) {
+      return { provider, model };
+    }
+  }
+
+  const matching = available.filter(entry => entry.model === trimmed);
+  if (matching.length === 1) {
+    return { provider: matching[0].provider, model: matching[0].model };
+  }
+
+  return { provider: null, model: trimmed };
+}
+
+function resolvePiExtensionPaths(): string[] {
+  const home = os.homedir();
+  const candidates = [
+    path.join(home, '.pi', 'agent', 'extensions', 'rorca-mcp', 'index.ts'),
+    path.join(home, '.pi', 'agent', 'extensions', 'rorca-slash-commands.ts'),
+  ];
+  return candidates.filter(candidate => fs.existsSync(candidate));
+}
 
 // Claude env vars that must be stripped to avoid nested-session detection
 const CLAUDE_ENV_VARS_TO_REMOVE = [
@@ -941,7 +988,19 @@ async function startPiRpcServer(
     await stopPiRpcServer();
   }
 
-  const args = ['--mode', 'rpc', ...(model ? ['--model', model] : []), ...skillFiles.flatMap(skillFile => ['--skill', skillFile])];
+  const piSelection = resolvePiCliSelection(model);
+  const explicitExtensions = resolvePiExtensionPaths();
+  const args = [
+    '--mode', 'rpc',
+    '--no-extensions',
+    '--tools', 'read,bash,edit,write,grep,find,ls',
+    '--append-system-prompt', 'You are running inside a non-interactive autonomous execution pipeline. Complete feasible coding tasks by reading files, editing code, and validating results in the same turn. Do not stop after inspection or planning only. If you end the turn without making code changes, it will be treated as failure unless you clearly report a concrete blocker with file-level evidence.',
+    ...explicitExtensions.flatMap(extensionPath => ['--extension', extensionPath]),
+    ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
+    ...(piSelection.model ? ['--model', piSelection.model] : []),
+    ...skillFiles.flatMap(skillFile => ['--skill', skillFile]),
+  ];
+  logger.info(`[pi-rpc] Resolved Pi model selection: requested=${model ?? 'default'} provider=${piSelection.provider ?? 'default'} model=${piSelection.model ?? 'default'} extensions=${explicitExtensions.length > 0 ? explicitExtensions.join(',') : 'none'}`);
   const child = spawn(PI_BIN, args, {
     cwd,
     env: buildCleanEnv(),
@@ -986,11 +1045,28 @@ async function startPiRpcServer(
         && (data as { type?: unknown }).type === 'response'
         && typeof (data as { id?: unknown }).id === 'string'
       ) {
-        const id = (data as { id: string }).id;
+        const response = data as { id: string; success?: unknown; error?: unknown; command?: unknown };
+        const id = response.id;
         const pending = server.pending.get(id);
         if (pending) {
           server.pending.delete(id);
           pending.resolve(data);
+          return;
+        }
+
+        if (response.success === false) {
+          const message = typeof response.error === 'string'
+            ? response.error
+            : `pi RPC command failed (${String(response.command ?? 'unknown')})`;
+          server.stderr += `\n[pi-rpc] Async command failure: ${message}`;
+          for (const listener of [...server.eventListeners]) {
+            try {
+              listener({ type: 'error', message, command: response.command });
+            } catch (error: unknown) {
+              const listenerMessage = error instanceof Error ? error.message : String(error);
+              server.stderr += `\n[pi-rpc] Event listener error: ${listenerMessage}`;
+            }
+          }
         }
         return;
       }
@@ -1090,6 +1166,18 @@ function sendPiRpcCommand(server: PiRpcServer, command: object): Promise<unknown
     server.pending.set(id, {
       resolve: (result) => {
         clearTimeout(timeout);
+        if (
+          typeof result === 'object'
+          && result !== null
+          && (result as { type?: unknown }).type === 'response'
+          && (result as { success?: unknown }).success === false
+        ) {
+          const message = typeof (result as { error?: unknown }).error === 'string'
+            ? (result as { error: string }).error
+            : `pi RPC command failed (${String((result as { command?: unknown }).command ?? 'unknown')})`;
+          reject(new Error(message));
+          return;
+        }
         resolve(result);
       },
       reject: (error) => {
@@ -1119,10 +1207,12 @@ function extractPiSessionId(response: unknown): string | undefined {
 
 async function preparePiRpcSession(
   sendCommand: (command: object) => Promise<unknown>,
-  retryContext?: PiRetryContext,
+  _retryContext?: PiRetryContext,
 ): Promise<string | undefined> {
-  const shouldClone = retryContext?.isRetry === true && retryContext.attempt > 0;
-  await sendCommand({ type: shouldClone ? 'clone' : 'new_session' });
+  // Always start a fresh session for pipeline stories.
+  // Reusing/cloning prior sessions preserved stale planning state and made no-op retries
+  // much more likely; it also contributed to opaque retry failures.
+  await sendCommand({ type: 'new_session' });
   const state = await sendCommand({ type: 'get_state' });
   return extractPiSessionId(state);
 }
@@ -1147,7 +1237,9 @@ async function buildPiSessionOptions(
 ): Promise<PiSessionOptions | undefined> {
   if (!workspaceId) return undefined;
 
+  logger.info(`[pi] Building session options for ${story.id} in workspace ${workspaceId}`);
   const layers = await getDirectionLayers(workspaceId);
+  logger.info(`[pi] Loaded direction layers for ${story.id}`);
   const directionText = synthesize({
     l1: layers.l1,
     l2: layers.l2,
@@ -1281,16 +1373,61 @@ function formatSkillsSection(skills: ResolvedSkill[]): string {
 }
 
 /** SW-004: Extract plausible file paths from story description + acceptance criteria. */
+const GLOBAL_PI_EXTENSION_PATH_PATTERN = /(?:~|\/Users\/[^\s`'"\/)]+)\/\.pi\/agent\/extensions\/[^\s`'"\)]+/g;
+
+function mapPiGlobalExtensionPathToRepoPath(rawPath: string): string | null {
+  const marker = '/.pi/agent/extensions/';
+  if (rawPath.startsWith(`~${marker}`)) {
+    return `.pi/extensions/${rawPath.slice((`~${marker}`).length)}`;
+  }
+  const markerIndex = rawPath.indexOf(marker);
+  if (markerIndex >= 0) {
+    return `.pi/extensions/${rawPath.slice(markerIndex + marker.length)}`;
+  }
+  return null;
+}
+
+function extractPipelinePathMappings(story: UserStory): Array<{ originalPath: string; pipelinePath: string }> {
+  const files = (story as UserStory & { files?: unknown }).files;
+  const text = [
+    story.description ?? '',
+    ...(Array.isArray(story.acceptanceCriteria) ? story.acceptanceCriteria : []),
+    ...(Array.isArray(files) ? files.filter((file): file is string => typeof file === 'string') : []),
+  ].join('\n');
+
+  const matches = text.match(GLOBAL_PI_EXTENSION_PATH_PATTERN) ?? [];
+  const deduped = new Map<string, string>();
+  for (const match of matches) {
+    const pipelinePath = mapPiGlobalExtensionPathToRepoPath(match);
+    if (pipelinePath) deduped.set(match, pipelinePath);
+  }
+  return [...deduped.entries()].map(([originalPath, pipelinePath]) => ({ originalPath, pipelinePath }));
+}
+
 function extractPredictedPaths(story: UserStory): string[] {
   const text = [
     story.description ?? '',
     ...(Array.isArray(story.acceptanceCriteria) ? story.acceptanceCriteria : []),
   ].join('\n');
 
-  const pathPattern = /(?:src|backend|frontend|lib|components|routes|hooks|panels|db|migrations)\/[\w\-\/\.]+\.[a-z]+/g;
+  const pathPattern = /(?:src|backend|frontend|lib|components|routes|hooks|panels|db|migrations|\.pi\/extensions)\/[\w\-\/\.]+\.[a-z]+/g;
   const matches = text.match(pathPattern) ?? [];
+  const mappedPiPaths = extractPipelinePathMappings(story).map(mapping => mapping.pipelinePath);
   // Deduplicate
-  return [...new Set(matches)];
+  return [...new Set([...matches, ...mappedPiPaths])];
+}
+
+function getStoryFiles(story: UserStory, agentType?: AgentType): string[] {
+  const files = (story as UserStory & { files?: unknown }).files;
+  const explicitFiles = Array.isArray(files)
+    ? files
+        .filter((file): file is string => typeof file === 'string' && file.trim().length > 0)
+        .map(file => agentType === 'pi' ? (mapPiGlobalExtensionPathToRepoPath(file) ?? file) : file)
+    : [];
+  const mappedPiPaths = agentType === 'pi'
+    ? extractPipelinePathMappings(story).map(mapping => mapping.pipelinePath)
+    : [];
+  return [...new Set([...explicitFiles, ...mappedPiPaths])];
 }
 
 function buildPrompt(
@@ -1307,10 +1444,21 @@ function buildPrompt(
 ): string {
   const ac = getAcceptance(story);
   const acSection = ac ? `\nAcceptance Criteria:\n${ac}` : '';
+  const pipelinePathMappings = agentType === 'pi' ? extractPipelinePathMappings(story) : [];
+  const storyFiles = getStoryFiles(story, agentType);
+  const filesSection = storyFiles.length > 0
+    ? `\nPrimary Files:\n${storyFiles.map(file => `- ${file}`).join('\n')}`
+    : '';
+  const pipelinePathSection = pipelinePathMappings.length > 0
+    ? `\nPipeline Path Mapping:\n${pipelinePathMappings.map(mapping => `- ${mapping.originalPath} -> ${mapping.pipelinePath}`).join('\n')}\nUse the repo-local path inside this worktree so the pipeline can track and commit the change.`
+    : '';
 
-  // CIE-004: Read compiled context file and prepend to prompt
+  // CIE-004: Read compiled context file and prepend to prompt.
+  // Pi performs better with a tighter task prompt; it already receives a direction
+  // skill file and should read concrete target files itself rather than wading through
+  // a large inline context dump before acting.
   let contextPreamble = '';
-  if (contextFilePath) {
+  if (contextFilePath && agentType !== 'pi') {
     try {
       contextPreamble = fs.readFileSync(contextFilePath, 'utf-8');
     } catch {
@@ -1404,22 +1552,65 @@ function buildPrompt(
     ].filter(Boolean).join('\n');
   }
 
+  const piAutonomyInstruction = agentType === 'pi'
+    ? [
+      '## Pi Execution Requirements',
+      '- You are running inside a non-interactive autonomous pipeline.',
+      '- Do not stop after only reading files or planning.',
+      '- If the task is feasible, make the required file edits in this turn before ending.',
+      '- Ending the turn with zero code changes will be treated as a failed run unless you are concretely blocked.',
+      '- If blocked, say exactly what blocked you and cite the file or command that proved it.',
+    ].join('\n')
+    : '';
+
+  if (agentType === 'pi') {
+    return [
+      'Implement this task now. This is an autonomous coding run, not a planning pass.',
+      piAutonomyInstruction,
+      '## Required execution behavior',
+      '- Start by reading the primary files listed below, not generic project docs.',
+      '- If the story mentions ~/.pi/agent/extensions paths, use the mapped repo-local .pi/extensions path shown below instead of editing the global home-directory copy.',
+      '- After reading the target files, make the required edits in the same turn.',
+      '- Do not stop after reading AGENTS.md/CLAUDE.md unless a concrete blocker forces you to.',
+      '- Prefer direct file edits over long explanations.',
+      '- If a target file does not need changes, move to the next listed file.',
+      '- Before ending, run a minimal validation command if you changed code.',
+      personaSection,
+      '', '---', '',
+      `Task (${story.id}): ${story.title}`,
+      story.description,
+      pipelinePathSection,
+      filesSection,
+      acSection,
+    ].filter(Boolean).join('\n');
+  }
+
   // Implementation mode
   // Injection order: contextPreamble → mode → agent instructions → roleSection → matched skills → graph context → workflow → persona → story task
   return [
     contextPreamble,
-    'Follow this workflow for implementation:',
+    'You are implementing a code change in this repository.',
     openCodeSkillInstruction,
     codexAgentsInstruction,
     roleSection ?? '',
     matchedSkills,
     graphBlock,
+    piAutonomyInstruction,
+    '## Workflow',
+    '1. Read the relevant AGENTS.md files for every directory you modify.',
+    '2. Read the primary files listed below before making changes.',
+    '3. Implement the requested behavior now — do not stop at analysis or planning.',
+    '4. Run the smallest useful validation commands after editing.',
+    '5. If you cannot complete the task, explain the concrete blocker with file-level evidence.',
     personaSection,
     claudeMemoryInstruction,
     nonClaudeMemoryInstruction,
     '', '---', '',
     `Your task (${story.id}):`,
-    story.description, acSection,
+    story.description,
+    pipelinePathSection,
+    filesSection,
+    acSection,
   ].filter(Boolean).join('\n');
 }
 
@@ -1461,10 +1652,10 @@ type TokenUpdateCallback = (update: TokenUpdate) => void;
 
 // ─── Idle Watchdog ──────────────────────────────────────────────────────────
 
-/** Default idle timeout: 5 minutes. Overridden by LLM_IDLE_TIMEOUT_MS env var. */
+/** Default idle timeout: 15 minutes. Overridden by LLM_IDLE_TIMEOUT_MS env var. */
 const LLM_IDLE_TIMEOUT_MS: number = (() => {
   const parsed = parseInt(process.env.LLM_IDLE_TIMEOUT_MS ?? '', 10);
-  return Number.isNaN(parsed) ? 300_000 : parsed;
+  return Number.isNaN(parsed) ? 900_000 : parsed;
 })();
 
 interface IdleWatchdog {
@@ -2139,12 +2330,36 @@ async function spawnPiRpc(
 
   const startTime = Date.now();
   try {
-    const server = await startPiRpcServer(cwd, model, piServerSkillFiles);
-    const piSessionId = await preparePiRpcSession(
-      (command) => sendPiRpcCommand(server, command),
-      retryContext,
-    );
-    await onSessionReady?.(piSessionId);
+    logger.info(`[pi-rpc] Starting pi RPC server (model=${model ?? 'default'}, skills=${piServerSkillFiles.length > 0 ? piServerSkillFiles.join(',') : 'none'})`);
+    let server = await startPiRpcServer(cwd, model, piServerSkillFiles);
+    logger.info('[pi-rpc] pi RPC server started');
+
+    let piSessionId: string | undefined;
+    try {
+      piSessionId = await preparePiRpcSession(
+        (command) => sendPiRpcCommand(server, command),
+        retryContext,
+      );
+    } catch (error: unknown) {
+      const message = error instanceof Error ? (error.stack || error.message) : String(error);
+      logger.warn(`[pi-rpc] Session bootstrap failed on first attempt; restarting RPC server once. ${message}`);
+      logger.warn(`[pi-rpc] First-attempt stderr tail:\n${server.stderr.slice(-4096)}`);
+      await stopPiRpcServer();
+      server = await startPiRpcServer(cwd, model, piServerSkillFiles);
+      logger.info('[pi-rpc] pi RPC server restarted after bootstrap failure');
+      piSessionId = await preparePiRpcSession(
+        (command) => sendPiRpcCommand(server, command),
+        retryContext,
+      );
+    }
+
+    logger.info(`[pi-rpc] Session ready${piSessionId ? ` (${piSessionId})` : ''}`);
+    if (onSessionReady) {
+      void Promise.resolve(onSessionReady(piSessionId)).catch((error: unknown) => {
+        const message = error instanceof Error ? error.message : String(error);
+        server.stderr += `\n[pi-rpc] onSessionReady callback failed: ${message}`;
+      });
+    }
 
     const logStream = fs.createWriteStream(logFile, { flags: 'a' });
     let storyTimedOut = false;
@@ -2173,6 +2388,15 @@ async function spawnPiRpc(
       }
     };
 
+    const sendExtensionUiResponse = (id: string, payload: Record<string, unknown>): void => {
+      try {
+        server.process.stdin?.write(serializeJsonLine({ type: 'extension_ui_response', id, ...payload }));
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        server.stderr += `\n[pi-rpc] Failed to write extension_ui_response: ${message}`;
+      }
+    };
+
     let turnCount = 0;
     let cumulativeInput = 0;
     let cumulativeOutput = 0;
@@ -2186,6 +2410,17 @@ async function spawnPiRpc(
         const assistantMessageEvent = data.assistantMessageEvent as Record<string, unknown> | undefined;
         if (assistantMessageEvent?.type === 'text_delta' && typeof assistantMessageEvent.delta === 'string') {
           writeOutput(assistantMessageEvent.delta);
+        }
+        return;
+      }
+
+      if (eventType === 'extension_ui_request') {
+        const method = typeof data.method === 'string' ? data.method : 'unknown';
+        writeOutput(`[pi-ui] ${method}\n`);
+        const requestId = typeof data.id === 'string' ? data.id : undefined;
+        if (requestId && ['select', 'confirm', 'input', 'editor'].includes(method)) {
+          writeOutput(`[pi-ui] auto-cancelling unsupported RPC UI method: ${method}\n`);
+          sendExtensionUiResponse(requestId, { cancelled: true });
         }
         return;
       }
@@ -2293,8 +2528,11 @@ async function spawnPiRpc(
     }, timeoutMs);
 
     try {
+      logger.info('[pi-rpc] Dispatching prompt');
       await sendPiRpcCommand(server, { type: 'prompt', message: prompt });
+      logger.info('[pi-rpc] Prompt accepted by RPC server; waiting for turn completion');
       await storyDone;
+      logger.info('[pi-rpc] Story turn completed');
       clearTimeout(timeout);
       cleanupListener();
       logStream.end();
@@ -2418,6 +2656,42 @@ function classifyOpenCodeError(result: AgentResult): ClassifiedError {
   };
 }
 
+function classifyPiError(result: AgentResult): ClassifiedError {
+  const lower = result.stderrTail.toLowerCase();
+  const raw = result.stderrTail;
+
+  if (lower.includes('no api key found') || lower.includes('use /login') || lower.includes('invalid api key')
+      || lower.includes('authentication') || lower.includes('unauthorized') || lower.includes('forbidden')) {
+    return {
+      category: 'api_key_invalid',
+      message: raw.trim().slice(0, 300) || 'Pi provider API key missing or invalid',
+      retryable: false,
+    };
+  }
+
+  if (lower.includes('model not found') || lower.includes('model not available') || lower.includes('unknown model')) {
+    return {
+      category: 'model_not_available',
+      message: raw.trim().slice(0, 300) || 'Pi model not available',
+      retryable: false,
+    };
+  }
+
+  if (result.exitCode === 124 || lower.includes('timed out')) {
+    return {
+      category: 'timeout',
+      message: raw.trim().slice(0, 300) || 'Pi story execution timed out',
+      retryable: true,
+    };
+  }
+
+  return {
+    category: 'unknown',
+    message: raw.trim().slice(0, 300) || `Pi exited with code ${result.exitCode}`,
+    retryable: result.exitCode !== 0,
+  };
+}
+
 /** Extract provider name hint from error output */
 function extractProviderHint(stderr: string): string {
   if (stderr.includes('openai') || stderr.includes('OpenAI')) return '(OpenAI)';
@@ -2449,6 +2723,21 @@ function extractRateLimitWait(stderr: string): number | null {
 function isRateLimited(result: AgentResult): boolean {
   if (result.exitCode === 0) return false;
   const lower = result.stderrTail.toLowerCase();
+
+  const definitelyNotRateLimit = [
+    'no api key found',
+    'use /login',
+    'authentication',
+    'unauthorized',
+    'forbidden',
+    'invalid api key',
+    'api key',
+    'model not found',
+    'model not available',
+    'not found for azure-openai-responses',
+  ];
+  if (definitelyNotRateLimit.some(text => lower.includes(text))) return false;
+
   if (lower.includes('rate limit') || lower.includes('overloaded') || lower.includes('429')
       || lower.includes('too many requests') || lower.includes('quota exceeded')) return true;
   if (result.exitCode === 1 && result.elapsedMs < RATE_LIMIT_FAST_EXIT_THRESHOLD_MS) return true;
@@ -2535,49 +2824,91 @@ export function extractTokenUsage(
 
 // ─── Spec File Mutations ────────────────────────────────────────────────────
 
-function markStoryPassed(jsonPath: string, storyId: string): void {
-  const raw = fs.readFileSync(jsonPath, 'utf8');
-  const spec: SpecJson = JSON.parse(raw);
-  const stories = getStories(spec);
+// Mutex to prevent concurrent read-modify-write races when multiple stories
+// in the same wave finish simultaneously and both try to update the spec JSON.
+const specJsonMutex: Map<string, Promise<void>> = new Map();
 
-  for (const s of stories) {
-    if (s.id === storyId) {
-      if (spec.userStories || s.passes !== undefined) {
-        s.passes = true;
-        s.notes = 'Completed by Rorca engine';
-      } else {
-        s.status = 'passed';
-      }
-      break;
-    }
-  }
-
-  fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
-  logger.info(`Marked ${storyId} as passed`);
+async function withSpecLock(jsonPath: string, fn: () => void): Promise<void> {
+  const prev = specJsonMutex.get(jsonPath) ?? Promise.resolve();
+  let release!: () => void;
+  const next = new Promise<void>(res => { release = res; });
+  specJsonMutex.set(jsonPath, prev.then(() => next));
+  await prev;
+  try { fn(); } finally { release(); }
 }
 
-function markStorySkipped(jsonPath: string, storyId: string): void {
-  const raw = fs.readFileSync(jsonPath, 'utf8');
-  const spec: SpecJson = JSON.parse(raw);
-  const stories = getStories(spec);
+async function markStoryPassed(jsonPath: string, storyId: string): Promise<void> {
+  await withSpecLock(jsonPath, () => {
+    const raw = fs.readFileSync(jsonPath, 'utf8');
+    const spec: SpecJson = JSON.parse(raw);
+    const stories = getStories(spec);
 
-  for (const s of stories) {
-    if (s.id === storyId) {
-      s.skipped = true;
-      s.notes = `Skipped after max retries — fix manually and re-run with --story ${storyId}`;
-      break;
+    for (const s of stories) {
+      if (s.id === storyId) {
+        if (spec.userStories || s.passes !== undefined) {
+          s.passes = true;
+          s.notes = 'Completed by Rorca engine';
+        } else {
+          s.status = 'passed';
+        }
+        break;
+      }
     }
-  }
 
-  fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
-  logger.info(`Marked ${storyId} as skipped`);
+    fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+    logger.info(`Marked ${storyId} as passed`);
+  });
+}
+
+async function markStorySkipped(jsonPath: string, storyId: string): Promise<void> {
+  await withSpecLock(jsonPath, () => {
+    const raw = fs.readFileSync(jsonPath, 'utf8');
+    const spec: SpecJson = JSON.parse(raw);
+    const stories = getStories(spec);
+
+    for (const s of stories) {
+      if (s.id === storyId) {
+        s.skipped = true;
+        s.notes = `Skipped after max retries — fix manually and re-run with --story ${storyId}`;
+        break;
+      }
+    }
+
+    fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+    logger.info(`Marked ${storyId} as skipped`);
+  });
 }
 
 /** Revert a story's passes:true when its sub-worktree merge fails.
  *  Without this, the next run sees passes:true and skips the story even
  *  though its code never made it to the parent branch. */
-function markStoryMergeFailed(jsonPath: string, storyId: string): void {
+async function markStoryMergeFailed(jsonPath: string, storyId: string): Promise<void> {
   try {
+    await withSpecLock(jsonPath, () => {
+      const raw = fs.readFileSync(jsonPath, 'utf8');
+      const spec: SpecJson = JSON.parse(raw);
+      const stories = getStories(spec);
+
+      for (const s of stories) {
+        if (s.id === storyId) {
+          s.passes = false;
+          s.skipped = false;
+          s.notes = `Merge conflict — code passed but failed to merge into parent branch. Re-run to retry.`;
+          break;
+        }
+      }
+
+      fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
+      logger.info(`Reverted ${storyId} to passes:false after merge failure`);
+    });
+  } catch (err: any) {
+    logger.warn({ storyId, err: err?.message }, `Failed to revert ${storyId} passes status after merge failure`);
+  }
+}
+
+/** CA-011: Revert a story's passed status to needs_revision (adversarial review blocked it). */
+async function markStoryNeedsRevision(jsonPath: string, storyId: string): Promise<void> {
+  await withSpecLock(jsonPath, () => {
     const raw = fs.readFileSync(jsonPath, 'utf8');
     const spec: SpecJson = JSON.parse(raw);
     const stories = getStories(spec);
@@ -2585,62 +2916,200 @@ function markStoryMergeFailed(jsonPath: string, storyId: string): void {
     for (const s of stories) {
       if (s.id === storyId) {
         s.passes = false;
-        s.skipped = false;
-        s.notes = `Merge conflict — code passed but failed to merge into parent branch. Re-run to retry.`;
+        s.status = 'needs_revision';
+        s.notes = `Blocked by adversarial review — fix issues and re-run with --story ${storyId}`;
         break;
       }
     }
 
     fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
-    logger.info(`Reverted ${storyId} to passes:false after merge failure`);
-  } catch (err: any) {
-    logger.warn({ storyId, err: err?.message }, `Failed to revert ${storyId} passes status after merge failure`);
-  }
-}
-
-/** CA-011: Revert a story's passed status to needs_revision (adversarial review blocked it). */
-function markStoryNeedsRevision(jsonPath: string, storyId: string): void {
-  const raw = fs.readFileSync(jsonPath, 'utf8');
-  const spec: SpecJson = JSON.parse(raw);
-  const stories = getStories(spec);
-
-  for (const s of stories) {
-    if (s.id === storyId) {
-      s.passes = false;
-      s.status = 'needs_revision';
-      s.notes = `Blocked by adversarial review — fix issues and re-run with --story ${storyId}`;
-      break;
-    }
-  }
-
-  fs.writeFileSync(jsonPath, JSON.stringify(spec, null, 2) + '\n');
-  logger.info(`Marked ${storyId} as needs_revision`);
+    logger.info(`Marked ${storyId} as needs_revision`);
+  });
 }
 
 // ─── Git Commit ─────────────────────────────────────────────────────────────
+
+const STORY_METADATA_PREFIXES = [
+  'forge/specs/',
+  'forge/logs/',
+  '.rorca/',
+  '.claude/',
+  '.opencode/',
+  '.playwright-mcp/',
+];
+
+const STORY_METADATA_EXACT = new Set([
+  'progress.txt',
+  'MEMORY.md',
+]);
+
+interface StoryWorkingTreeChanges {
+  meaningfulFiles: string[];
+  metadataFiles: string[];
+}
+
+interface GitCommitStoryResult {
+  committed: boolean;
+  meaningfulFiles: string[];
+  metadataFiles: string[];
+  reason?: 'no_meaningful_changes' | 'nothing_to_commit' | 'git_error';
+  message?: string;
+}
+
+function normalizeGitStatusPath(rawPath: string): string {
+  const trimmed = rawPath.trim();
+  if (!trimmed) return '';
+  const renameArrow = trimmed.indexOf(' -> ');
+  return renameArrow >= 0 ? trimmed.slice(renameArrow + 4).trim() : trimmed;
+}
+
+function isMeaningfulStoryChange(file: string): boolean {
+  const normalized = file.replace(/\\/g, '/');
+  if (!normalized) return false;
+  if (STORY_METADATA_EXACT.has(normalized)) return false;
+  return !STORY_METADATA_PREFIXES.some(prefix => normalized.startsWith(prefix));
+}
+
+function classifyStoryWorkingTreeChanges(files: string[]): StoryWorkingTreeChanges {
+  const meaningfulFiles: string[] = [];
+  const metadataFiles: string[] = [];
+
+  for (const file of files) {
+    if (!file) continue;
+    if (isMeaningfulStoryChange(file)) {
+      meaningfulFiles.push(file);
+    } else {
+      metadataFiles.push(file);
+    }
+  }
+
+  return { meaningfulFiles, metadataFiles };
+}
+
+function getStoryWorkingTreeChanges(cwd: string): StoryWorkingTreeChanges {
+  const env = buildCleanEnv();
+  const porcelain = execSync('git status --porcelain=v1 --untracked-files=all', {
+    cwd,
+    env,
+    encoding: 'utf8',
+    stdio: ['pipe', 'pipe', 'pipe'],
+  }).trim();
+
+  if (!porcelain) {
+    return { meaningfulFiles: [], metadataFiles: [] };
+  }
+
+  const files = porcelain
+    .split('\n')
+    .map(line => normalizeGitStatusPath(line.length > 3 ? line.slice(3) : ''))
+    .filter(Boolean);
+
+  return classifyStoryWorkingTreeChanges(files);
+}
+
+function gitPathArgs(files: string[]): string {
+  return files.map(file => JSON.stringify(file)).join(' ');
+}
 
 function gitCommitStory(
   cwd: string,
   storyId: string,
   storyTitle: string,
   mode: 'impl' | 'qa' | 'journey',
-): void {
+): GitCommitStoryResult {
   const env = buildCleanEnv();
   const prefix = mode === 'qa' ? 'test' : mode === 'journey' ? 'journey' : 'feat';
 
+  let changes: StoryWorkingTreeChanges;
+  try {
+    changes = getStoryWorkingTreeChanges(cwd);
+  } catch (err: any) {
+    return {
+      committed: false,
+      meaningfulFiles: [],
+      metadataFiles: [],
+      reason: 'git_error',
+      message: err?.message ?? String(err),
+    };
+  }
+
+  if (mode !== 'journey' && changes.meaningfulFiles.length === 0) {
+    return {
+      committed: false,
+      meaningfulFiles: [],
+      metadataFiles: changes.metadataFiles,
+      reason: 'no_meaningful_changes',
+      message: 'Only runtime/metadata files changed.',
+    };
+  }
+
   try {
     execSync('git add -A', { cwd, env, stdio: 'pipe' });
+
+    if (changes.metadataFiles.length > 0) {
+      execSync(`git reset -q HEAD -- ${gitPathArgs(changes.metadataFiles)}`, {
+        cwd,
+        env,
+        stdio: 'pipe',
+      });
+    }
+
+    const stagedOutput = execSync('git diff --cached --name-only --diff-filter=ACDMRTUXB', {
+      cwd,
+      env,
+      encoding: 'utf8',
+      stdio: ['pipe', 'pipe', 'pipe'],
+    }).trim();
+
+    const stagedFiles = stagedOutput
+      ? stagedOutput.split('\n').map(line => line.trim()).filter(Boolean).filter(isMeaningfulStoryChange)
+      : [];
+
+    if (mode !== 'journey' && stagedFiles.length === 0) {
+      return {
+        committed: false,
+        meaningfulFiles: [],
+        metadataFiles: changes.metadataFiles,
+        reason: 'no_meaningful_changes',
+        message: 'No meaningful staged files remained after filtering runtime metadata.',
+      };
+    }
+
+    if (stagedFiles.length === 0) {
+      return {
+        committed: false,
+        meaningfulFiles: [],
+        metadataFiles: changes.metadataFiles,
+        reason: 'nothing_to_commit',
+        message: 'No staged files to commit.',
+      };
+    }
+
     execSync(
       `git commit -m "${prefix}(${storyId}): ${storyTitle.replace(/"/g, '\\"')}\n\nAutomated by Rorca engine.\n\nCo-Authored-By: Claude Opus 4.6 <noreply@anthropic.com>"`,
       { cwd, env, stdio: 'pipe' },
     );
+
     try {
       execSync('git push origin HEAD', { cwd, env, stdio: 'pipe', timeout: 60_000 });
     } catch {
       logger.info('  Push failed (will retry next iteration)');
     }
-  } catch {
-    // git commit may fail if nothing to commit — that's OK
+
+    return {
+      committed: true,
+      meaningfulFiles: stagedFiles,
+      metadataFiles: changes.metadataFiles,
+    };
+  } catch (err: any) {
+    const message = err?.stderr?.toString?.().trim() || err?.message || String(err);
+    return {
+      committed: false,
+      meaningfulFiles: changes.meaningfulFiles,
+      metadataFiles: changes.metadataFiles,
+      reason: message.includes('nothing to commit') ? 'nothing_to_commit' : 'git_error',
+      message,
+    };
   }
 }
 
@@ -3685,6 +4154,9 @@ async function executeStory(
 
   const rateLimitKey = `rl:${story.id}`;
   let rateLimitAttempts = retryCounts.get(rateLimitKey) ?? 0;
+  if (effectiveAgent === 'pi') {
+    logger.info(`[pi] Session options ready for ${story.id}`);
+  }
 
   // Real-time token update callback — emits WAL events as tokens stream in
   const tokenUpdateCallback: TokenUpdateCallback | undefined =
@@ -3720,11 +4192,23 @@ async function executeStory(
       const prompt = effectiveAgent === 'pi' && piSessionOptions
         ? `${buildPiStoryPromptContext({ ...piSessionOptions, attempt: retryAttempt + 1, maxAttempts: MAX_RETRIES })}\n\n${promptBody}`
         : promptBody;
-      fs.writeFileSync(promptLogFile, prompt);
+      const attemptPrompt = effectiveAgent === 'pi' && retryAttempt > 0
+        ? [
+            prompt,
+            '',
+            '## Retry instruction',
+            `A previous attempt for ${story.id} ended with zero code changes.`,
+            'This retry must not stop after reading generic docs or summarizing the task.',
+            'Read the concrete target files listed under Primary Files, then edit the necessary files in this turn.',
+            'If you truly cannot change code, report the exact blocker and the specific file or command that proved it.',
+          ].join('\n')
+        : prompt;
+      fs.writeFileSync(promptLogFile, attemptPrompt);
 
+      logger.info(`[agent] Launching ${effectiveAgent} for ${story.id}`);
       const result = await runAgent(
         effectiveAgent,
-        prompt,
+        attemptPrompt,
         effectiveCwd,
         timeoutMin * 60 * 1000,
         storyLogFile,
@@ -3916,72 +4400,70 @@ async function executeStory(
         return 'failed';
       }
 
-      // Gate passed — verify agent produced meaningful code changes (not just metadata)
-      // Journey mode stories browse the live app and produce no file edits — skip this gate entirely.
+      // Gate passed — verify agent produced meaningful code changes (not just runtime metadata)
+      // Journey mode stories browse the live app and may intentionally produce no file edits.
       let meaningfulChanges: string[] = [];
       try {
-        const porcelain = mode === 'journey' ? '' : execSync('git status --porcelain', { cwd: effectiveCwd, encoding: 'utf8' }).trim();
-        const METADATA_PREFIXES = ['forge/specs/', 'progress', '.rorca/', '.claude/', '.opencode/', '.playwright-mcp/'];
-        meaningfulChanges = porcelain.split('\n').filter(line => {
-          if (!line.trim()) return false;
-          const file = line.substring(3); // strip git status prefix
-          return !METADATA_PREFIXES.some(p => file.startsWith(p));
-        });
-        if (mode !== 'journey' && meaningfulChanges.length === 0) {
+        const { meaningfulFiles } = mode === 'journey'
+          ? { meaningfulFiles: [] }
+          : getStoryWorkingTreeChanges(effectiveCwd);
+
+        meaningfulChanges = meaningfulFiles;
+
+        if (mode !== 'journey' && meaningfulFiles.length === 0) {
           if (storyAllowsNoCodeChanges(story, mode)) {
             logger.info(`${story.id}: No meaningful file changes detected, but the story is validation/documentation-only — allowing pass`);
           } else {
-            logger.warn(`${story.id}: Agent exited 0 but produced no code changes — treating as failure`);
+            const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
+            retryCounts.set(story.id, noChangeRetries);
+
             recordPiProgress({
               knownIssues: ['Agent exited successfully but no meaningful code changes were detected.'],
               validationResults: ['Validation failed: no meaningful file changes detected.'],
               remainingWork: ['Implement the required changes and rerun validation.'],
             });
+
+            if (noChangeRetries < MAX_RETRIES) {
+              logger.warn(`${story.id}: Agent exited 0 with no meaningful code changes — retrying (${noChangeRetries}/${MAX_RETRIES - 1} retries used)`);
+              continue;
+            }
+
+            logger.warn(`${story.id}: Agent exited 0 but only changed runtime metadata — treating as failure`);
             if (workspaceId) {
               await emitWalEvent(config.port, 'story_failed', workspaceId, {
-                run_id: config.runId, story_id: story.id, reason: 'no_code_changes',
-                summary: 'Agent subprocess exited successfully but did not modify any code files.',
+                run_id: config.runId,
+                story_id: story.id,
+                reason: 'no_code_changes',
+                summary: 'Agent subprocess exited successfully but only changed runtime/metadata files.',
                 log_file: storyLogFile,
               }, story.id);
               await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
             }
-            const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
-            retryCounts.set(story.id, noChangeRetries);
-            if (noChangeRetries >= MAX_RETRIES) {
-              markStorySkipped(config.jsonPath, story.id);
-              return 'failed';
-            }
-            continue;
+            markStorySkipped(config.jsonPath, story.id);
+            rsMarkStoryFailed(effectiveCwd, {
+              storyId: story.id,
+              title: story.title,
+              status: 'failed',
+              startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+              finishedAt: new Date().toISOString(),
+              agentType: effectiveAgent,
+              failReason: 'no_code_changes',
+              retries: noChangeRetries,
+            });
+            writeProgressTxt(effectiveCwd);
+            return 'failed';
           }
         }
-      } catch {
-        // git status failed — proceed normally rather than blocking
+      } catch (err: any) {
+        logger.warn(`${story.id}: Failed to inspect working tree for meaningful changes: ${err?.message ?? String(err)}`);
       }
 
-      // All checks passed — mark story as done
       recordPiProgress({
         completedWork: ['Engine marked the story passed after validation gates succeeded.'],
         modifiedFiles: meaningfulChanges,
         keyDecisions: [`Validated with agent ${effectiveAgent}${currentModel ? ` using model ${currentModel}` : ''}.`],
         validationResults: ['Story passed execution and validation gates.'],
       });
-      markStoryPassed(config.jsonPath, story.id);
-      retryCounts.delete(story.id);
-      retryCounts.delete(rateLimitKey);
-
-      // CIE-007: Record story completion in run-state.json
-      rsMarkStoryCompleted(effectiveCwd, {
-        storyId: story.id,
-        title: story.title,
-        status: 'passed',
-        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
-        finishedAt: new Date().toISOString(),
-        agentType: effectiveAgent,
-        model: currentModel ?? undefined,
-        elapsedMs: result.elapsedMs,
-      });
-      writeProgressTxt(effectiveCwd);
-
       // US-005: Ingest proposed memories from opencode/codex agents (file-based fallback for non-MCP agents)
       // Moved before writeMemoryMd so newly proposed memories appear in the rebuilt MEMORY.md
       if (workspaceId) {
@@ -4037,7 +4519,64 @@ async function executeStory(
       }
 
       logger.info(`Committing ${story.id}...`);
-      gitCommitStory(effectiveCwd, story.id, story.title, mode);
+      const commitResult = gitCommitStory(effectiveCwd, story.id, story.title, mode);
+
+      if (mode !== 'journey' && !commitResult.committed) {
+        const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
+        retryCounts.set(story.id, noChangeRetries);
+        const failureReason = commitResult.reason === 'git_error' ? 'commit_verification_failed' : 'no_code_changes';
+        const failureSummary = commitResult.reason === 'git_error'
+          ? `Failed to verify or commit meaningful story changes: ${commitResult.message ?? 'unknown git error'}`
+          : `Only runtime/metadata files changed (${commitResult.metadataFiles.join(', ') || 'none detected'}).`;
+
+        if (noChangeRetries < MAX_RETRIES) {
+          logger.warn(`${story.id}: ${failureSummary} — retrying (${noChangeRetries}/${MAX_RETRIES - 1} retries used)`);
+          continue;
+        }
+
+        logger.warn(`${story.id}: ${failureSummary} — treating as failure`);
+        if (workspaceId) {
+          await emitWalEvent(config.port, 'story_failed', workspaceId, {
+            run_id: config.runId,
+            story_id: story.id,
+            reason: failureReason,
+            summary: failureSummary,
+            log_file: storyLogFile,
+          }, story.id);
+          await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+        }
+        markStorySkipped(config.jsonPath, story.id);
+        rsMarkStoryFailed(effectiveCwd, {
+          storyId: story.id,
+          title: story.title,
+          status: 'failed',
+          startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+          finishedAt: new Date().toISOString(),
+          agentType: effectiveAgent,
+          failReason: failureReason,
+          retries: noChangeRetries,
+        });
+        writeProgressTxt(effectiveCwd);
+        return 'failed';
+      }
+
+      // All checks passed — mark story as done
+      markStoryPassed(config.jsonPath, story.id);
+      retryCounts.delete(story.id);
+      retryCounts.delete(rateLimitKey);
+
+      // CIE-007: Record story completion in run-state.json
+      rsMarkStoryCompleted(effectiveCwd, {
+        storyId: story.id,
+        title: story.title,
+        status: 'passed',
+        startedAt: new Date(Date.now() - result.elapsedMs).toISOString(),
+        finishedAt: new Date().toISOString(),
+        agentType: effectiveAgent,
+        model: currentModel ?? undefined,
+        elapsedMs: result.elapsedMs,
+      });
+      writeProgressTxt(effectiveCwd);
 
       // CIE-006: Post-commit violation detection
       if (assignedRole) {
@@ -4166,7 +4705,9 @@ async function executeStory(
     // ── Non-zero exit: classify error and retry ────────────────────────
     const classified = effectiveAgent === 'opencode'
       ? classifyOpenCodeError(result)
-      : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
+      : effectiveAgent === 'pi'
+        ? classifyPiError(result)
+        : { category: 'unknown' as OpenCodeErrorCategory, message: result.stderrTail.slice(0, 200), retryable: true };
 
     // Non-retryable errors (wrong API key, model not found, not installed) — fail immediately
     if (!classified.retryable) {
@@ -4275,7 +4816,16 @@ async function executeStory(
 
 // ─── Exported helpers for pipeline.ts ────────────────────────────────────────
 
-export { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, createIdleWatchdog, preparePiRpcSession };
+export {
+  scanRequiredEngines,
+  countStoriesByEngine,
+  resolveStoryAgent,
+  reroutedStories,
+  createIdleWatchdog,
+  preparePiRpcSession,
+  isMeaningfulStoryChange,
+  classifyStoryWorkingTreeChanges,
+};
 export type { UserStory as EngineUserStory, RerouteInfo, IdleWatchdog };
 
 // ─── Bounded Concurrency ────────────────────────────────────────────────────
@@ -4469,16 +5019,17 @@ async function main(): Promise<void> {
   process.on('SIGINT', () => {
     void (async () => {
       logger.info('');
-      logger.info('Engine stopped by user.');
+      logger.info('[engine] Received SIGINT — stopping run');
       await cleanupBrowserServers();
-      process.exit(0);
+      process.exit(130);
     })();
   });
 
   process.on('SIGTERM', () => {
     void (async () => {
+      logger.error('[engine] Received SIGTERM — terminating run before completion');
       await cleanupBrowserServers();
-      process.exit(0);
+      process.exit(143);
     })();
   });
 
@@ -5029,7 +5580,8 @@ function parseArgs(): EngineConfig {
 const _isDirectRun = require.main === module || process.argv[1]?.endsWith('execution-engine.ts');
 if (_isDirectRun) {
   main().catch((err) => {
-    logger.error('[engine] Fatal error:', err);
+    const message = err instanceof Error ? (err.stack || err.message) : String(err);
+    logger.error(`[engine] Fatal error: ${message}`);
     process.exit(1);
   });
 }

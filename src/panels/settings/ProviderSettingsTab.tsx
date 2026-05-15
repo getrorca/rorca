@@ -973,6 +973,7 @@ function ConnectionCard({
 
 function ConnectionsHubSection() {
   const toast = useGlobalToast();
+  const { workspaceId } = useWorkspace();
 
   // ── State ──────────────────────────────────────────────────────────────────
   const [keys, setKeys] = useState<ApiKeyEntry[]>([]);
@@ -990,7 +991,7 @@ function ConnectionsHubSection() {
   const fetchData = useCallback(async () => {
     try {
       const [keyData, config, claude, ollama, healthData] = await Promise.all([
-        apiFetch<{ keys: ApiKeyEntry[] }>('/api/vault/keys'),
+        apiFetch<{ keys: ApiKeyEntry[] }>(workspaceId ? `/api/vault/keys?workspaceId=${encodeURIComponent(workspaceId)}` : '/api/vault/keys'),
         apiFetch<AgentConfig>('/api/config'),
         apiFetch<ClaudeAuthState>('/api/config/claude-auth'),
         apiFetch<OllamaStatus>('/api/config/ollama'),
@@ -1005,7 +1006,7 @@ function ConnectionsHubSection() {
     } catch { /* silent */ } finally {
       setLoading(false);
     }
-  }, []);
+  }, [workspaceId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -1013,28 +1014,31 @@ function ConnectionsHubSection() {
   const findKey = (provider: string) => keys.find(k => k.provider === provider);
 
   const addKey = async (provider: string, key: string, label: string, baseUrl?: string) => {
+    if (!workspaceId) { toast.show('No workspace selected', 'error'); return; }
     await apiFetch('/api/vault/keys', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ provider, key, label, base_url: baseUrl }),
+      body: JSON.stringify({ workspaceId, provider, key, label, base_url: baseUrl }),
     });
     toast.show('API key added', 'success');
     fetchData();
   };
 
   const removeKey = async (id: string) => {
-    await apiFetch(`/api/vault/keys/${id}`, { method: 'DELETE' });
+    if (!workspaceId) { toast.show('No workspace selected', 'error'); return; }
+    await apiFetch(`/api/vault/keys/${id}?workspaceId=${encodeURIComponent(workspaceId)}`, { method: 'DELETE' });
     toast.show('API key removed', 'success');
     fetchData();
   };
 
   const testConnection = async (provider: string) => {
+    if (!workspaceId) { toast.show('No workspace selected', 'error'); return; }
     setTestingProvider(provider);
     try {
       const result = await apiFetch<{ ok: boolean; latencyMs: number; response: string }>('/api/vault/keys/test', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ provider }),
+        body: JSON.stringify({ workspaceId, provider }),
       });
       setTestResults(prev => ({ ...prev, [provider]: { ok: true, latencyMs: result.latencyMs } }));
     } catch (err: any) {

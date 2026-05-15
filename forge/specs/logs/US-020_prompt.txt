@@ -12,6 +12,11 @@ This file provides guidance to Claude Code (claude.ai/code) when working with co
 # Start everything (recommended)
 npm run dev                # Frontend :5210 + Backend :3030 + pg-boss Worker concurrently
 
+# Supabase local development
+supabase start             # Start local Supabase stack (API :54321, DB :54322, Studio :54323)
+supabase stop              # Stop local Supabase stack
+supabase db reset          # Rebuild Supabase-managed local DB from `supabase/migrations/`
+
 # Frontend (root)
 npm run dev                # Vite dev server (:5210)
 npm run build              # TypeScript + Vite production build
@@ -40,6 +45,30 @@ lsof -ti:3030 | xargs kill -9 && cd backend && npm run dev
 npm run self-register
 ```
 
+### CLI Commands
+
+| Command | Purpose |
+|---------|---------|
+| `rorca start` | Serve the built frontend and backend from one local process on `:3030`. |
+| `rorca doctor` | Verify local prerequisites, binary discovery, runtime health, and MCP token file permissions before running specs. |
+| `rorca auth` | Manage local CLI authentication flows and provider sign-in state. |
+| `rorca chat` | Open the interactive chat control surface for live operator-driven work. |
+| `rorca forge` | Launch the Forge TUI for spec review, orchestration, and command-center control. |
+| `rorca attach` | Reattach to an existing run, session, or control surface without starting a new one. |
+| `npm run self-register` | Register the local `rorca/` repo as a workspace for self-hosting. |
+
+## Supabase Local Development
+
+- Install the Supabase CLI first: `brew install supabase/tap/supabase`
+- Initialize local config once with `supabase init` if the `supabase/` directory is missing
+- Start services with `supabase start`
+- Stop services with `supabase stop`
+- Reset only the Supabase-managed local database with `supabase db reset`
+- Frontend local URL is `http://127.0.0.1:54321`; Studio runs on `http://127.0.0.1:54323`
+- For GitHub OAuth in local dev, set the callback URL in your GitHub OAuth app to `http://127.0.0.1:54321/auth/v1/callback`
+- Rorca app schema migrations in `backend/src/db/pg-migrations/` are separate from Supabase CLI migrations in `supabase/migrations/`
+- Warning: `supabase db reset` only runs `supabase/migrations/`; it does not apply `backend/src/db/pg-migrations/`. Use `npm run migrate` if available, or rely on `pg-index.ts` on backend startup for app schema migrations.
+
 ## Architecture
 
 **Rorca** is a spec-driven development platform. It turns a plain-English brief into a structured spec (N user stories), then executes each story as an isolated subprocess with the full tool set — no context limits, resumable, runs to completion autonomously.
@@ -53,15 +82,108 @@ Browser (React :5210)  ←→  Express API (:3030)  ←→  PostgreSQL 16
                                                    execution-engine subprocesses
                                                    ├── claude --print
                                                    ├── opencode run
-                                                   └── codex
+                                                   ├── codex
+                                                   └── pi run --jsonl
 
 Landing Page: Next.js 14 + Tailwind v4 + Framer Motion (:3002)
 ```
 
+## Security Model (Project Aegis)
+
+### Threat Model
+
+Rorca runs on localhost as a single-user developer tool. Project Aegis exists so future refactors do not silently undo the localhost-only and explicit-exposure guardrails.
+
+1. **Drive-by browser attack** — User visits `evil.com` in a tab while Rorca is running and the page attempts `fetch('http://localhost:3030/mcp', ...)`. Defense: browser-origin allow-list on `/mcp` plus Bearer token auth.
+2. **LAN attacker** — User is on shared Wi-Fi and an attacker can route traffic to `:3030`. Defense: `/mcp` loopback-only gate unless `RORCA_MCP_ALLOW_REMOTE=true`.
+3. **Compromised MCP client** — User installs or connects a malicious MCP client. Defense: separate public/admin tokens, tier enforcement per tool, and `mcp_audit_log`.
+4. **Token leak** — User pastes a token into chat, Discord, or logs. Defense: token tiering limits blast radius and `rorca mcp rotate-token` supports fast revocation.
+5. **Privilege escalation via auto-exposed routes** — Future `@swagger` work accidentally exposes a dangerous route to MCP. Defense: routes are MCP-denied by default unless they are `x-rorca-tier: public|auth` or explicitly overridden with `x-mcp-tier: admin`.
+6. **Insider abuse** — A valid client hammers expensive tools such as spec generation or pipeline trigger. Defense: per-tool/per-tier MCP rate limits plus audit anomaly scans.
+
+### Defense Layers
+
+1. **Origin lockdown** (CLI-046) — `/mcp` is meant for localhost browser origins only: `http://localhost:3030` and `http://127.0.0.1:3030`.
+2. **Localhost binding** (CLI-046) — `/mcp` rejects non-loopback socket addresses unless `RORCA_MCP_ALLOW_REMOTE=true`.
+3. **Bearer token authentication** (CLI-045) — missing or invalid MCP tokens fail closed at the HTTP layer.
+4. **Opt-in route annotations** (CLI-047) — unannotated routes are denied by default.
+5. **Curated allow-list** (CLI-048) — verified on May 4, 2026: `79` of `437` OpenAPI operations are MCP-exposed today (`37` public, `41` auth, `2` explicit admin overrides).
+6. **Scoped tier authorization** (CLI-049) — public tokens cannot call admin-tier MCP tools even if the tool is visible in `tools/list`.
+7. **Audit log + rate limit** (CLI-051) — every MCP call is recorded in `mcp_audit_log`, and high-risk tools have tighter per-minute caps.
+
+### Default Stance
+
+- Browser/web UI: soft-auth can inject `LOCAL_ADMIN` for normal `/api/*` requests in local single-user mode. See **Critical Gotchas → Auth Middleware — Intentionally Bypassed**.
+- LOCAL_ADMIN carries `role: 'admin'` and `plan: 'pro'`, so local single-user development continues to pass auth-tier, paid-tier, and admin-tier HTTP checks without requiring Stripe or a cloud-issued subscription record.
+- MCP HTTP: Bearer token is always required. Missing tokens return `401 MCP_AUTH_REQUIRED`, invalid tokens return `401 MCP_AUTH_INVALID`, and neither case may ever fall through to `LOCAL_ADMIN`.
+- MCP admin tools: public tokens fail with `403 MCP_AUTH_INSUFFICIENT_TIER`.
+- Production deployments: set `AUTH_REQUIRED=true` to force full JWT auth for regular API routes.
+
+### Open-Core Trust Boundary
+
+- The CLI is open-source and untrusted. Users can fork it, remove UI checks, or fabricate headers.
+- The backend is authoritative. Authorization is enforced server-side with `402 PLAN_REQUIRED` and `403 ADMIN_REQUIRED`.
+- Plan resolution comes from `users.plan` at request time or a cryptographically signed self-hosted license key, never from request headers or JWT plan claims.
+- License keys are RSA-signed. The private key is never shipped in the OSS CLI; only the backend verifier carries the public key.
+- Forking the CLI must not unlock paid features. If a feature is paid, the backend must reject unauthorized requests even when the client lies.
+
+### Adding a New MCP Tool
+
+1. Add the `@swagger` annotation as usual.
+2. Set `x-rorca-tier` and `x-rorca-rationale`.
+3. If and only if an admin route must be reachable from MCP, add `x-mcp-tier: admin`. Do not invent `x-mcp-tier: public`; `public` and `auth` already opt in through `x-rorca-tier`.
+4. Run `npm run lint:tier` for route-tier drift. There is currently no dedicated `npm run lint:mcp`; the source-backed MCP exposure check is the backend startup log (`[Rorca Tier] MCP exposure: 79 tools`) plus `backend/src/__tests__/mcp-tier.test.ts`. Note: as of May 4, 2026, `lint:tier` still has a stale baseline for the two explicit admin MCP overrides.
+5. Expect extra scrutiny for anything touching filesystem writes, env vars, credentials, code execution, billing, or outbound network side effects.
+
+### What's Permanently Denied (and Why)
+
+- `/api/terminal/*` — PTY spawn is arbitrary code execution.
+- `/api/vault/*` — credential read/write surface.
+- `/api/billing/*` — Stripe and subscription side effects.
+- `/api/admin/*` by default — backups, license generation, embed-all, and other operator actions stay out of MCP unless explicitly overridden for forensics.
+- `/api/skills/install*` — skill install is a prompt-injection supply-chain surface.
+- `/api/workspaces/{id}/env-vars` mutations — environment injection surface.
+- `/api/webhooks/*` — signature spoofing and replay risk.
+- Most `DELETE` routes — destructive operations stay denied except narrow story/comment maintenance paths that are deliberately reviewed.
+
+### Token Management
+
+- Public token path: `~/.rorca/mcp-token` with mode `0600`
+- Admin token path: `~/.rorca/mcp-admin-token` with mode `0600`
+- Tokens are generated locally and must never be logged or committed.
+- Rotate with `rorca mcp rotate-token --public`, `--admin`, or `--all`.
+- Configure clients with `rorca mcp setup-claude` or `rorca mcp setup-claude --admin`.
+
+### Plan Resolution
+
+- Route-tier plan gating reads the effective user plan from `users.plan`.
+- Self-hosted instances can override paid capability checks with `RORCA_LICENSE_KEY`; valid licenses are decoded locally and can grant `pro`, `team`, or `enterprise`.
+- Cloud deployments keep `users.plan` in sync from Stripe webhooks.
+- Manual recovery or operator overrides are still valid: `UPDATE users SET plan='pro' WHERE id='...'`.
+
+## Lite Mode
+
+When DB mode is `native`, Apache AGE is not installed. Rorca still works, but graph-backed features are explicitly disabled and surface `503` with:
+`{ error, code: 'AGE_NOT_INSTALLED', mode: 'lite', hint }`
+
+Disabled in Lite Mode:
+- `GET /api/specs/:specId/knowledge-graph` — spec review graph memory payload is unavailable.
+- `POST /api/graph/populate` — graph population job cannot run without AGE.
+- `POST /api/admin/graph-backfill` — admin graph backfill is unavailable.
+- `GET /api/admin/graph-stats` — admin graph statistics are unavailable.
+- `POST /api/workspaces/:id/drift/check` — graph-powered drift detection cannot run.
+- Related-context expansion in story prompts — `graph-context.ts` returns no graph enrichment when AGE is unavailable.
+
+Still available in Lite Mode:
+- `GET /api/graph/stats` — returns `available: false` for lightweight capability/status checks.
+- `GET /api/workspaces/:id/drift` — reads previously stored drift reports from PostgreSQL.
+- `GET /api/specs/:specId/graph` — this is the story dependency DAG from spec JSON, not Apache AGE.
+- Specs CRUD, runs, analytics, direction stack, and non-graph memory/search flows continue to work.
+
 **Stack**:
 - Frontend: React 18 + TypeScript + Vite + Tailwind CSS + xterm.js
 - Backend: Express.js + TypeScript + PostgreSQL 16 (`pg` Pool, async, connection pooling, pgvector, Apache AGE)
-- Execution: `claude --print` (Claude sub) OR `opencode run --format json --attach` (OpenCode, any provider) OR `codex --approval-mode auto-edit` (ChatGPT sub)
+- Execution: `claude --print` (Claude sub) OR `opencode run --format json --attach` (OpenCode, any provider) OR `codex exec --dangerously-bypass-approvals-and-sandbox` (ChatGPT sub) OR `pi run --jsonl` (pi subprocess)
 - Spec generation: OpenCode (autonomous codebase exploration) OR SDK fallback (`SPEC_PROVIDER` env var)
 - MCP: API-first (OpenAPI spec → auto-generated MCP tools via HTTP transport on :3030)
 
@@ -78,7 +200,28 @@ Spec (N stories)
   └── Story N  →  ...
 ```
 
-### Three execution paths — all first-class
+## Command Center Architecture
+
+Rorca's command center is split into four layers so interactive control, orchestration state, headless execution, and observability stay decoupled:
+
+| Layer | Role |
+|-------|------|
+| Forge TUI | Local control surface for `rorca forge`, `rorca chat`, approvals, and operator commands. |
+| Engine `:3030` | Orchestration state machine: API, WAL, pg-boss queue, worker coordination, and persistence. |
+| Muscle | Headless `pi` subprocesses that execute stories and chat tasks with the full tool set. |
+| Observatory | Web UI for run state, logs, analytics, and architecture audit views. |
+
+**BYOA model**: pi is bring-your-own-auth. `pi` manages provider auth locally, Rorca never stores pi API keys, and users run `pi auth login <provider>` once per provider on the machine that will execute runs.
+
+### Dual-Mode Vision
+
+| Mode | Entry Point | Purpose |
+|------|-------------|---------|
+| Interactive Chat | `rorca chat` | Operator-driven live sessions against the same local workspace context. |
+| Autonomous Spec | `rorca run` | Queue and execute approved specs through the orchestration engine. |
+| Architecture Audit | web Observatory | Inspect system state, traces, and architecture-level health from the browser UI. |
+
+### Four execution paths — all first-class
 
 **Claude subscription** (Pro / Max / Max 5x):
 - Binary: `claude --print`
@@ -94,13 +237,39 @@ Spec (N stories)
 - Configured via `RORCA_AGENT=opencode` + `RORCA_MODEL=openai/gpt-4o`
 
 **Codex CLI** (ChatGPT Plus/Pro subscription):
-- Binary: `codex --approval-mode auto-edit`
+- Binary: `codex exec --dangerously-bypass-approvals-and-sandbox`
 - Same tool set: file edit, bash, read, write, glob, grep (non-interactive mode)
 - Subscription-based — flat rate, no per-token cost. `RORCA_MODEL` is ignored.
 - No model cascading — single model tied to ChatGPT subscription
 - Configured via `RORCA_AGENT=codex`
 
-**No raw SDK agent path for execution.** OpenCode IS the multi-model execution path. A raw `openai.chat.completions.create()` call cannot replace it — no persistent bash state, no surgical edits, no CLAUDE.md injection.
+**pi CLI** (provider auth handled locally by pi):
+- Package: `@mariozechner/pi-coding-agent`
+- Install:
+```bash
+npm i -g @mariozechner/pi-coding-agent
+pnpm add -g @mariozechner/pi-coding-agent
+bun add -g @mariozechner/pi-coding-agent
+curl -fsSL https://pi.run/install.sh | sh
+```
+- Binary invocation: `pi run --jsonl --skill <direction-file>`
+- JSON-L events stream to stdout for engine ingestion
+- Session controls: `--session`, `--fork`, and `--continue`
+- Direction injection: `--skill` is the direction-stack injection path for pi runs
+- Auth model: BYOA. Users run `pi auth login <provider>` once per provider; Rorca never stores pi API keys
+- Recommended for: Headless provider-flexible runs with pi-managed auth and resumable session/fork workflows
+
+### Pi peer dependency
+
+`pi` is intentionally a peer dependency, not bundled with Rorca. Rationale: bundling adds unnecessary 50-100MB tarball weight, and silent auto-download would remove user agency around what gets installed on the machine.
+
+The install bridge is detect + prompt:
+- `rorca init` checks for `pi` first and offers npm/pnpm/bun/curl install options
+- `rorca auth login` does the same before attempting provider login
+- `rorca init --auto-install-pi` exists for CI and other non-interactive environments
+- The curl path always requires an explicit confirmation prompt before execution
+
+**No raw SDK agent path for execution.** Claude, OpenCode, Codex, and pi are the supported execution harnesses. A raw SDK call cannot replace them — no persistent bash state, no surgical edits, no harness-native context injection.
 
 ### OpenCode for spec generation
 OpenCode also handles spec generation (not just execution). Spec gen benefits from tools: `glob` existing specs, `read` CLAUDE.md, `grep` codebase patterns, `webfetch` library docs. This makes specs dramatically more context-aware than a blind API call and replaces the manual context extraction step.
@@ -175,9 +344,9 @@ Pipeline runs are no longer spawned synchronously by `pipeline.ts`. The flow is:
 - `GET /api/pipeline/runs/:runId/output` SSE endpoint replays all chunks since sequence 0, then streams live
 
 ### The Ralph Loop (`backend/src/lib/execution-engine.ts`)
-The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by the **Worker process** (not directly by `pipeline.ts`). The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — only used if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all three agent types. **Always edit `execution-engine.ts` for all execution behavior.**
+The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScript, cross-platform, spawned by the **Worker process** (not directly by `pipeline.ts`). The legacy `forge/run-loop.sh` (in each project workspace) is a bash fallback — only used if `execution-engine.ts` is somehow missing. `run-loop.ts` has been deleted — `execution-engine.ts` is a strict superset covering all four agent types. **Always edit `execution-engine.ts` for all execution behavior.**
 
-**Flags**: `--json <path>` (spec file), `--cwd <path>` (workspace root), `--run-id <number>` (required for WAL events), `--story <ID>` (single story), `--dry-run` (preview only), `--port <number>` (default 3030), `--agent <claude|opencode|codex>`, `--model <model>`
+**Flags**: `--json <path>` (spec file), `--cwd <path>` (workspace root), `--run-id <number>` (required for WAL events), `--story <ID>` (single story), `--dry-run` (preview only), `--port <number>` (default 3030), `--agent <claude|opencode|codex|pi>`, `--model <model>`
 
 **Modes** (auto-detected from JSON structure):
 - Implementation (`impl`): `{ userStories: [...] }` — injects `.claude/skills/rorca.md`, `feat:` commits
@@ -186,7 +355,7 @@ The sole execution engine is `backend/src/lib/execution-engine.ts` — TypeScrip
 
 **What `execution-engine.ts` does per story**:
 1. `emitWalEvent('story_started')` via `fetch` to `/api/wal`
-2. Spawns agent subprocess (`claude --print`, `opencode run`, or `codex`) with clean env
+2. Spawns agent subprocess (`claude --print`, `opencode run`, `codex`, or `pi`) with clean env
 3. Timeout via SIGTERM → SIGKILL after 10s
 4. On exit 0: `markStoryPassed()` (writes spec JSON), `gitCommitStory()`, `emitWalEvent('story_passed')`, POST to `/api/pipeline/story-result`
 5. On exit 124 (timeout): `markStorySkipped()`, `emitWalEvent('story_failed', { reason: 'timeout' })`
@@ -220,6 +389,7 @@ rorca/
 │       │                     # errors, scheduler, agent-hook-runner, etc.)
 │       ├── worker.ts         # pg-boss worker process (pipeline job consumer)
 │       ├── mcp/              # MCP stdio server (5 tools)
+│       ├── tui/              # Forge TUI control surface
 │       └── db/
 │           ├── index.ts      # PostgreSQL Pool + async query helpers
 │           ├── pg-index.ts   # Migration runner (schema_migrations tracking)
@@ -295,7 +465,7 @@ rorca/
 | `run_output_chunks` | DB-backed terminal output streaming — `(run_id, sequence, data)`, monotonically increasing, survives restarts, enables late-join SSE replay |
 | `worker_heartbeat` | Worker liveness — `(worker_id, pid, hostname, started_at, last_seen)`, updated every 30s; stale if `last_seen` > 90s ago |
 
-**WAL event types**: `generate`, `spec_approved`, `spec_rejected`, `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `worktree_created`, `worktree_merged`, `run_blocked` (HITL pause), `context_file_changed` (CIE file watcher), `story_escalated` (CIE model escalation), `skill_installed` (skill added), `skill_removed` (skill deleted), `skill_matched` (LLM skill-to-spec matching)
+**WAL event types**: `generate`, `spec_approved`, `spec_rejected`, `run_started`, `story_started`, `story_passed`, `story_failed`, `story_skipped`, `run_finished`, `worktree_created`, `worktree_merged`, `run_blocked` (HITL pause), `context_file_changed` (CIE file watcher), `story_escalated` (CIE model escalation), `skill_installed` (skill added), `skill_removed` (skill deleted), `skill_matched` (LLM skill-to-spec matching), `terminal_session_started`, `terminal_session_ended`
 
 PostgreSQL enforces FK constraints natively. Connection pooling (max 20, 30s idle timeout) is configured in `backend/src/db/index.ts`.
 
@@ -407,7 +577,7 @@ Key `backend/src/lib/` modules beyond `llm-client` and `direction-stack`:
 - **`workspace-echolocation.ts`** — Workspace intelligence scanner. `echolocate(path)` → `EcholocationReport` detects stack (80+ npm packages, Cargo.toml, requirements.txt, go.mod, Dockerfile), context files, monorepo structure, and computes weighted health score (CLAUDE.md 30pt, AGENTS.md 20pt, config.json 20pt, MEMORY.md 15pt, skills 15pt). `discoverMonorepo()` scans `apps/`, `packages/`, `libs/`, `services/`, `modules/` for manifests. `inferSkillsFromStack()` maps detected tech names to skill filenames via `STACK_TO_SKILLS` lookup. Health penalty: CLAUDE.md < 10 lines = half credit, < 50 lines = 75% credit.
 
 ### Static Serving (Self-Hosted)
-When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the built frontend and handles SPA fallback. This is the `rorca start` CLI mode — frontend and backend served from the same process on port 3030.
+When `RORCA_SERVE_STATIC=1` + `RORCA_STATIC_DIR=<path>`, Express serves the built frontend and handles SPA fallback. This is the `rorca start` CLI mode — frontend and backend served from the same process on port 3030. MCP HTTP transport is enabled by default on the same process at `http://localhost:3030/mcp`; set `RORCA_SERVE_MCP=false` to disable the MCP bridge entirely.
 
 ## Critical Gotchas
 
@@ -520,6 +690,45 @@ The health check (`computeHealthReport`) and workspace setup look for files at t
 - `MEMORY.md` must exist at `<workspace>/MEMORY.md` (NOT at `<workspace>/.rorca/MEMORY.md`)
 - `.rorca/config.json` must exist at `<workspace>/.rorca/config.json`
 
+### node-pty Native Module — Terminal Feature Dependency (CRITICAL)
+`node-pty` is a native N-API module required for the OpenCode terminal feature (OCT-001–OCT-004). It requires compiled binaries per platform.
+
+**Graceful degradation**: `pty-manager.ts` wraps the `require('node-pty')` in a try/catch at module load. If the import fails:
+- `PTY_AVAILABLE` flag is set to `false`
+- `POST /api/terminal/sessions` returns `503 Service Unavailable` with error code `PTY_NOT_AVAILABLE`
+- Response includes hint: `"cd backend && npm rebuild node-pty"`
+- Backend starts successfully (terminal feature disabled, all other routes work)
+
+**Installation**:
+```bash
+cd backend && npm install  # Triggers postinstall probe
+npm rebuild node-pty       # Rebuild if probe fails
+```
+
+**Distribution constraint**: `node-pty` **cannot** be bundled with `bun build --compile` (DIST-001–DIST-010). Native N-API modules require a real `node_modules/` directory on disk. The terminal feature is **server-only** and requires either:
+- Users run `npm rebuild node-pty` after install (documented in install script)
+- Future Electron/Tauri packaging handles native modules automatically
+
+**Prebuild binaries**: `node-pty` v1.1.0+ ships prebuilt binaries for common platforms (macOS arm64/x64, Linux x64/arm64, Windows x64). The `backend/node_modules/node-pty/prebuilds/` directory is excluded from git (platform-specific, rebuilt on install).
+
+**Testing**: Backend starts even when node-pty is not built. Create a PTY session to verify — should return 503 if module unavailable, 201 if working.
+
+### WebSocket Security Model (OCT-021)
+The `/ws/terminal` WebSocket endpoint is hardened against cross-origin attacks. With Rorca's auth bypassed, an unauthenticated WebSocket would be a remote code execution vector accessible from any local webpage via DNS rebinding.
+
+**Security layers**:
+1. **Origin validation** — `verifyClient` callback rejects connections from disallowed origins. Allowed: `http://localhost:5210`, `http://127.0.0.1:5210`, `http://localhost:3030`, `http://127.0.0.1:3030`. Rejected: any other origin with 403 Forbidden.
+2. **Short-lived connection tokens** — `POST /api/terminal/sessions` returns `wsToken` (UUID, 60s TTL). WebSocket URL is `/ws/terminal?wsToken=<token>` (NOT `?sessionId=<id>`). Server validates token, maps to sessionId, then deletes (one-time use). Prevents sessionId enumeration.
+3. **Secure binding** — HTTP server binds to `127.0.0.1` by default (local-only). `RORCA_BIND_HOST` env var can override (e.g., `0.0.0.0` for Docker/cloud). Production deployments should keep `127.0.0.1` and use nginx/Cloudflare for TLS termination.
+4. **Security headers** — WebSocket upgrade response includes `X-Content-Type-Options: nosniff` and `X-Frame-Options: DENY`.
+
+**Token lifecycle**:
+- Generated: `POST /api/terminal/sessions` → `{ sessionId, wsToken, ... }`
+- Validated: WebSocket client connects with `?wsToken=<token>` → server looks up sessionId from token map, deletes token (one-time use)
+- Expired: Tokens older than 60s are rejected; background cleanup runs every 30s
+
+**Why this matters**: Without these guards, a malicious webpage at `http://evil.local:8080` could open a WebSocket to `ws://localhost:3030/ws/terminal?sessionId=<guessed-uuid>` and execute arbitrary commands in the user's terminal. Origin validation blocks this. Connection tokens prevent sessionId brute-force.
+
 ### ContextRoutingSettings — Visual Config Editor
 `src/components/ContextRoutingSettings.tsx` (1318 lines) is the UI for `.rorca/config.json` editing. Key behaviors:
 - Has `viewMode: 'visual' | 'json'` — visual editor with directory tree picker, or raw JSON with inline validation
@@ -540,7 +749,58 @@ Express API routes → @swagger JSDoc annotations → OpenAPI spec (/api/docs/op
 
 **Current state**: 24 hand-written stdio MCP tools in `backend/src/mcp/server.ts`.
 
-Setup (stdio): `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
+**Bridge URL**: HTTP MCP transport is mounted at `http://localhost:3030/mcp` when `RORCA_SERVE_MCP` is unset or not equal to `false`. `RORCA_SERVE_MCP=false` disables the HTTP bridge; Pi chat sessions then run without Rorca MCP tools.
+
+Security: `/mcp` now requires `Authorization: Bearer <token>` where the token is stored at `~/.rorca/mcp-token` with mode `0600`. The backend generates this token at startup. Never log or commit it.
+
+### MCP Auth Contract
+Rorca does not support OAuth on `/mcp`. The previous trivial OAuth shim was removed because it provided no real security and could mislead readers into thinking OAuth protection existed. This also avoids ambiguity with the real Bearer-token enforcement introduced for MCP HTTP.
+
+Use Bearer-token clients only:
+- Claude Code CLI: `rorca mcp setup-claude`
+- Manual Claude Code CLI: `claude mcp add rorca http://localhost:3030/mcp --header "Authorization: Bearer $(cat ~/.rorca/mcp-token)"`
+- VS Code/custom clients: configure an `Authorization: Bearer <token>` header explicitly
+
+Claude Desktop limitation: newer Claude Desktop builds require OAuth for MCP HTTP servers. Rorca cannot connect there in v0 without a real OAuth 2.1 + PKCE implementation. Use Claude Code CLI instead.
+
+### MCP Security Model (CLI-046)
+By default, MCP is **localhost-only** even when the main API is intentionally bound to `0.0.0.0` via `RORCA_BIND_HOST`. The `/mcp` routes enforce two layers:
+1. **CORS lockdown** — browser requests are allowed only from `http://localhost:3030` and `http://127.0.0.1:3030`. Server-to-server clients like Claude Code, curl, and stdio bridges typically send no `Origin` header and are allowed. Drive-by browser requests from `https://evil.com` are rejected at the CORS layer before auth runs.
+2. **Loopback gate** — `/mcp` rejects any non-local socket address unless `RORCA_MCP_ALLOW_REMOTE=true`. Accepted loopback forms are `127.0.0.1`, `::1`, and `::ffff:127.0.0.1`.
+
+Remote MCP is an explicit escape hatch:
+- Set `RORCA_MCP_ALLOW_REMOTE=true` only behind a trusted TLS terminator or auth proxy.
+- That proxy must validate and sanitize `Authorization` header forwarding to prevent header smuggling or accidental token passthrough from untrusted clients.
+- If remote MCP is enabled, configure Express `trust proxy` only in that trusted deployment shape so forwarded client IPs are meaningful.
+- Rotate the MCP bearer token regularly with `rorca mcp rotate-token`.
+- Review `mcp_audit_log` entries from CLI-051 as part of ongoing security monitoring.
+
+Asymmetry note: a localhost-gate failure returns structured JSON (`403 MCP_REMOTE_FORBIDDEN`), but a CORS denial comes from the `cors` middleware callback and surfaces as a generic CORS/network failure in browsers rather than the standard API JSON schema.
+
+### Route Tier Model (CLI-047)
+OpenAPI route annotations now define a unified `x-rorca-tier` boundary for MCP exposure, the open-source CLI surface, and future plan-gating.
+
+| Tier | Who can call | MCP exposure | Typical examples |
+|------|--------------|--------------|------------------|
+| `public` | CLI/MCP/web without paid gating | Yes | Spec CRUD, local memory, recall, search, story execution |
+| `auth` | Logged-in user only | Yes | Personal profile, owned workspace settings, user preferences |
+| `paid` | Paid subscription only | No | Team RBAC, federated memory, GRC audit traces, FinOps |
+| `admin` | Local single-user admin only | No | Backups, license generation, embed-all, migrations |
+| unset | Default denied | No | Route stays out of MCP and future opt-in enforcement can 404 it |
+
+Rules:
+- `x-rorca-rationale` is required for any non-denied tier.
+- `x-rorca-public-api: true` is allowed only on `public` routes and marks stable open-source CLI contract surface.
+- `paid` and `admin` are never MCP-callable, even with admin tokens. This is defense-in-depth: LLMs must not trigger billing, backup, or other privileged operations.
+- V0 compatibility: unannotated routes still serve the web app normally, but they are excluded from MCP exposure by default.
+
+Setup (Claude HTTP): `rorca mcp setup-claude`
+
+Manual token access: `rorca mcp token`
+
+Token rotation: `rorca mcp rotate-token`
+
+Legacy stdio fallback: `claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts`
 
 **Specs & Pipeline**
 | Tool | Purpose |
@@ -615,10 +875,11 @@ PORT=3030                     # Optional override
 DATABASE_URL=postgres://rorca:rorca@localhost:5432/rorca  # PostgreSQL connection string
 
 # Execution engine
-RORCA_AGENT=claude           # Options: claude (default), opencode, codex
+RORCA_AGENT=claude           # Options: claude (default), opencode, codex, pi
 RORCA_MODEL=openai/gpt-4o   # OpenCode model string (provider/model) — ignored for codex
 OPENCODE_BIN=/path/to/opencode  # Auto-detected if in PATH
 CODEX_BIN=/path/to/codex        # Auto-detected if in PATH
+PI_BIN=/path/to/pi              # Auto-detected if in PATH
 
 # Spec generation providers (used when RORCA_AGENT=claude or as SDK fallback)
 SPEC_PROVIDER=claude          # Options: claude (default), anthropic, openrouter
@@ -629,9 +890,9 @@ OPENROUTER_API_KEY=sk-or-...  # Required if SPEC_PROVIDER=openrouter
 RORCA_PROCESS_ROLE=engine     # Set to 'engine' by worker.ts when spawning execution-engine subprocesses
 ```
 
-### Execution Engine: Claude vs OpenCode vs Codex
+### Execution Engine: Claude vs OpenCode vs Codex vs pi
 
-Rorca supports three first-class execution paths. All use the same tool set (edit, bash, read, write, glob, grep, webfetch, websearch) and produce the same output.
+Rorca supports four first-class execution paths. All use the same tool set (edit, bash, read, write, glob, grep, webfetch, websearch) and produce the same output contract.
 
 **Claude subscription** (`RORCA_AGENT=claude`, default):
 - Binary: `claude --print --dangerously-skip-permissions --output-format stream-json`
@@ -659,7 +920,7 @@ Rorca supports three first-class execution paths. All use the same tool set (edi
 - Recommended for: Multi-model workflows, cost optimization, teams without Claude subscription
 
 **Codex CLI** (`RORCA_AGENT=codex`):
-- Binary: `codex --approval-mode auto-edit`
+- Binary: `codex exec --dangerously-bypass-approvals-and-sandbox`
 - Auth: ChatGPT Plus/Pro subscription — no API key needed
 - Advantages:
   - **Subscription-based** — flat-rate, no per-token cost (like Claude subscription)
@@ -671,6 +932,16 @@ Rorca supports three first-class execution paths. All use the same tool set (edi
   - **No structured JSON output** — stdout/stderr captured raw (like `claude --print`)
   - FinOps shows token counts only (no dollar cost — flat-rate subscription)
 - Recommended for: Teams with ChatGPT Plus/Pro subscriptions who prefer OpenAI models
+
+**pi CLI** (`RORCA_AGENT=pi`):
+- Binary: `pi run --jsonl --skill <direction-file>`
+- Auth: BYOA via local pi auth state. Users run `pi auth login <provider>` once per provider; Rorca never stores pi API keys
+- Advantages:
+  - **JSON-L events** — structured stdout stream for orchestration, logs, and replay
+  - **Session branching** — `--session`, `--fork`, and `--continue` support resumable and branchable runs
+  - **Skill injection** — `--skill` maps cleanly to synthesized direction-stack context
+  - **Provider-local auth** — provider credentials stay in pi's local auth store instead of the Rorca vault
+- Recommended for: Local-first headless execution with pi-managed sessions and provider auth
 
 ### OpenCode Setup (Step-by-Step)
 
@@ -796,7 +1067,7 @@ Escalation cascade on failure:
 
 **API arbitrage**: Cascading saves ~40–60% vs all-Opus baseline. FinOps dashboard (OC-023) shows realized savings per run and trend chart.
 
-**Claude/Codex subscription paths**: Cascading not applicable — `claude --print` and `codex --approval-mode auto-edit` use the same subscription regardless of story complexity. Quality difference is negligible for most stories; Opus is the recommended tier for all implementation runs.
+**Claude/Codex subscription paths**: Cascading not applicable — `claude --print` and `codex exec --dangerously-bypass-approvals-and-sandbox` use the same subscription regardless of story complexity. Quality difference is negligible for most stories; Opus is the recommended tier for all implementation runs.
 
 ## Spec Pipeline — Run Order
 
@@ -1151,9 +1422,9 @@ Phase 6 — React Native Mobile (after cloud)
 
 **The brand statement**: "Every story runs as a fresh isolated subprocess with the full tool set — bash, edit, read, write, glob, grep. No context limits. A spec can run forever. That's the Rorca engine."
 
-## Wave-Based Parallel Execution (Future Roadmap)
+## Wave-Based Parallel Execution
 
-**Status**: Not built. Sequential execution is default for V1. Wave = opt-in V2 feature.
+**Status**: Built. Wave parallel is opt-in per run (toggle in spec detail slide-over). Sequential is still the default.
 
 **The idea**: Instead of running stories one-by-one, compile the `dependsOn` DAG into topological wave groups. Each wave runs its stories in parallel git worktrees, then auto-merges before the next wave starts.
 
@@ -1164,16 +1435,7 @@ Wave 2: US-006 → 1 worktree → merge → done
 Sequential: 40 min total  →  Wave parallel: ~12 min (3.3x speedup on 3-wave spec)
 ```
 
-**What needs to be built** (future `rorca-wave-execution` spec):
-1. Wave compiler — topological sort of `dependsOn` DAG into wave groups (~50 lines)
-2. Wave orchestrator — spawn N parallel subprocesses, one per story per wave
-3. File-touch predictor — pre-analyze stories to detect shared-file conflicts before wave starts
-4. Auto-merge sequence — merge each wave's worktrees in sequence; use Haiku to resolve conflicts
-5. `.rorca/config.json` toggle: `execution.waveParallelism: false` (default) → `true` to enable
-
-**Why not V1**: Shared filesystem race conditions. Two stories editing the same file simultaneously cause merge conflicts. The file-touch predictor + auto-merge resolves most, but adds complexity. Sequential is safer and simpler for initial launch. Wave stays opt-in.
-
-**Trigger**: Build this spec after `rorca-integrations` ships. Requires worktrees (already built) + file-touch predictor (new). Infrastructure is 80% there.
+**How it works**: Wave compiler does a topological sort of the `dependsOn` DAG into wave groups. Each wave runs its stories in parallel git worktrees. Auto-merge fires after each wave before the next starts. Configurable max parallelism (default 20). Toggle visible in the spec detail slide-over — shows wave breakdown before you run.
 
 
 ---
@@ -1207,10 +1469,35 @@ Rorca is an AI spec orchestration and pipeline management platform for autonomou
 - **Rules**:
   - One file per resource (specs.ts, pipeline.ts, workspaces.ts, run-queue.ts, etc.)
   - JSDoc `@swagger` annotations on every public endpoint (feeds `/api/docs`)
+  - Add `x-rorca-tier` on every `@swagger` operation. Valid tiers: `public | auth | paid | admin`. Omitted tier defaults to denied and is never MCP-exposed.
+  - Any non-denied tier must include `x-rorca-rationale` explaining why that exposure level is correct.
+  - `x-rorca-public-api: true` is only valid on `public` routes and marks the stable open-source CLI contract surface.
   - Throw `AppError` subclasses — never raw `Error` or manual `res.status().json()` for errors
   - Use `paginate()` for list endpoints
   - Validate input at route boundary, trust internal code after
   - Kanban API (`GET /api/specs/kanban`) returns `activeRunStatus` and `queuePosition` per spec — frontend derives running vs queued visual state from these fields
+
+### Route Author Guide
+Use this annotation shape for every exposed route:
+```typescript
+/**
+ * @swagger
+ * /api/specs:
+ *   get:
+ *     summary: List specs
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only spec listing — stable local/MCP surface with no billing or admin action."
+ *     x-rorca-public-api: true
+ *     responses:
+ *       200: { description: OK }
+ */
+```
+
+Choose tiers this way:
+- `public`: safe local automation and CLI/MCP use, no billing/admin side effects
+- `auth`: user-owned settings or profile data, still MCP-callable
+- `paid`: subscription-gated product surface, never MCP-callable
+- `admin`: local operator-only maintenance and licensing, never MCP-callable
 
 ### Backend Libs (`backend/src/lib/`)
 - **Owner**: Architect
@@ -1338,71 +1625,73 @@ Add workspace → automatic context extraction → generates L3 + CLAUDE.md (if 
 
 # Memory Ledger (recent decisions)
 
-## 2026-03-12 [Bug Fix] mod+shift+r hotkey hijacked browser hard refresh (Cmd+Shift+R)
-> Rule: Do not bind mod+shift+r (Cmd+Shift+R) as a hotkey in the app — it is the browser's hard refresh shortcut on macOS. The hotkey was bound to navigate('/runs'), so every hard refresh silently redirected the user to the Runs page instead of refreshing. Fixed by removing the binding from the hotkeys array in App.tsx.
+## 2026-04-15 [Architecture] OpenCode terminal access is drawer-only
+> Rule: Expose the OpenCode terminal exclusively through the global TerminalDrawer overlay, not a sidebar nav item, with desktop handle bar and mobile FAB entry points.
 
-## 2026-03-12 [Decision] rorca-ensure-postgres completed — zero-prereq Postgres provisioning in bin/rorca.ts
-> Rule: bin/rorca.ts now includes a full ensurePostgres() function. On first run, it downloads Postgres 16 binaries from zonkyio/embedded-postgres-binaries, extracts, runs initdb, starts pg_ctl on port 5433, creates rorca user and database. No Docker required. DATABASE_URL env var bypasses this entirely (preserves Docker workflow). --no-postgres flag also skips it. Postgres is stopped on SIGINT/SIGTERM via stopManagedPostgres().
+## 2026-04-21 [Architecture] Merge Strategy — 4-way post-run routing
+> Rule: Worktree runs support 4 merge strategies: direct (merge+push main), pr (push branch+create PR), draft-pr (push branch+create draft PR), branch-only (push branch, no PR/merge). Resolved from: per-run trigger override > spec JSON mergeStrategy field > workspace pipeline_config.mergeStrategy > 'direct' fallback. Implemented in worker.ts switch statement, pg-boss-schemas.ts MergeStrategyEnum, pipeline.ts trigger route, and TriggerPopover.tsx dropdown UI.
 
-## 2026-03-12 [Bug Fix] tsx watch restarts backend during parallel runs → resilient-post retries exhaust
-> Rule: When a fast worktree run auto-merges into main, tsx watch detects the file changes and restarts the backend (5-10s TypeScript recompile). If resilient-post.ts retry window is shorter than the restart time, execution engine can't report story results and the run shows as failed. Fix: raise POST_MAX_RETRIES to 10 and POST_RETRY_DELAY_MS to 3000 (30s coverage) in backend/src/lib/resilient-post.ts.
+## 2026-04-21 [Architecture] LLM-synthesized diff summary in auto-PR bodies
+> Rule: github-pr-creator.ts now runs git diff main...branch through chatComplete to generate a truthful bullet-point summary of what was actually built (not what the spec planned). The synthesized summary replaces spec.brief as the primary PR summary. Spec brief is shown as a blockquote for context. Diff is truncated to 50k chars for LLM context limits. Falls back to spec brief if synthesis fails. Template variable is {{run.diffSummary}}.
 
-## 2026-03-12 [Decision] Distribution format: curl|sh for launch, native installers deferred
-> Rule: Use `curl -fsSL https://get.rorca.app | sh` (macOS/Linux) + PowerShell equivalent (Windows) for launch distribution. Do NOT build .pkg (macOS) or .exe (Windows) installers yet — they require code signing certs (~$400/yr) and unsigned installers trigger OS security warnings (Gatekeeper, SmartScreen) which is worse UX than curl|sh. Native installers and Homebrew tap (`brew install getrorca/tap/rorca`) are deferred until there's user demand.
+## 2026-04-22 [Architecture] Supabase workspace RLS dependency chain
+> Rule: Create workspace_members and get_user_workspace_ids(auth_id) in the same migration that adds users.auth_id so workspace RLS policies never depend on objects created later.
 
-## 2026-03-13 [Bug Fix] pgboss.archive column names are snake_case: retry_count, archived_on (NOT retrycount/archivedon)
-> Rule: pgboss.archive uses snake_case column names: retry_count, retry_limit, archived_on. The production route GET /api/pipeline/runs/:id/dlq in pipeline.ts incorrectly uses retrycount and archivedon — these fail with "column does not exist". The .catch(()=>undefined) in the production route silently swallows the error, making it always return 404. Total attempts = retry_count + 1 (retry_count = retries consumed, not including initial attempt).
+## 2026-04-22 [Convention] Supabase local dev docs must separate migration systems
+> Rule: When documenting local Supabase setup, explicitly note that `supabase db reset` only runs `supabase/migrations/` and does not apply app schema migrations from `backend/src/db/pg-migrations/`.
 
-## 2026-03-13 [Gotcha] Worktree spec runs don't auto-merge — manual merge required
-> Rule: When a spec runs with autoWorktree:true, all story commits land on a feature branch (feat/&lt;slug&gt;-&lt;timestamp&gt;) and are NEVER automatically merged to main. The run shows "done" and stories show "pass" in the DB, but the code is not in main. Must manually: git merge --no-ff feat/&lt;branch&gt;. Resolve conflicts carefully — parallel main commits may have added migrations or modified the same files.
+## 2026-04-22 [Architecture] Team RLS needs direct workspace scoping
+> Rule: When applying workspace-based RLS to `teams`, add and backfill a direct `workspace_id` on `teams` instead of inferring scope indirectly through joins.
 
-## 2026-03-13 [Gotcha] Parallel feature branches cause duplicate migration numbers
-> Rule: Migration runner keys on the numeric version extracted from the filename (e.g. 069 from 069_foo.sql). If two branches independently create a migration with the same number, the runner applies the first alphabetically and silently skips the second. Always check the highest migration number in schema_migrations before creating a new migration file. Fix: rename the conflicting file to the next available number and INSERT the new version into schema_migrations manually.
+## 2026-04-22 [Architecture] Failure Registry replaces failedIds Set (CP-002)
+> Rule: execution-engine.ts uses `failureRegistry: Map<string, FailureRecord>` (from failure-registry.ts) instead of `failedIds: Set<string>`. Use `markFailed()`, `isFailed()`, `getFailureRecord()`, `removeFailure()` helpers. `computeBlockedStories()` accepts FailureRegistryMap and extracts keys via `failedIdSet()`. FailureRecord tracks: storyId, waveIndex, failedAt, reason, recoveryClass, recoveryAttempts, lastRecoveryAt, recoveryInFlight, conflictingFiles?, stderrTail?.
 
-## 2026-03-13 [Bug Fix] pg-boss internal column is started_on not startedon
-> Rule: When querying pgboss.job directly, the column name is started_on (with underscore), NOT startedon. Using startedon causes a DatabaseError that is caught and logged as a warning, making stale job recovery silently fail on every worker startup without crashing. Any direct pgboss.job queries must use started_on, completed_on, expire_in (not expirein), etc.
+## 2026-05-03 [Convention] Backend Ink TUI must use CommonJS-compatible Ink packages
+> Rule: In the backend package, pin Ink to the CommonJS-compatible line (`ink@3.x` with matching `react` and `@types/react`) unless the backend module system is intentionally migrated away from CommonJS.
 
-## 2026-03-13 [Bug Fix] Kill button silent fail — activeProcesses map empty after worker restart
-> Rule: The cancel route sends a pipeline:cancel pg-boss job to the worker, which looks up activeProcesses.get(runId). If the worker was restarted since the run started, activeProcesses is empty and no SIGTERM is sent — the HTTP call returns 200 but the process is never killed. WR-010 added a dead-PID fallback: when activeProcesses misses, fall back to the pid stored in pipeline_runs and kill directly. Now live in main.
+## 2026-05-03 [Architecture] Pi provider is encoded in token_usage.model
+> Rule: For Pi FinOps and analytics, derive the provider from token_usage.model using the pi/<provider>/<model> format rather than expecting a dedicated provider column.
 
-## 2026-03-13 [Gotcha] 150+ unmerged feat/ branches accumulate — audit regularly
-> Rule: Worktree spec runs create feat/ branches that never auto-merge. After several months of development, 150+ branches can accumulate. Most are stale (superseded by later runs of the same spec). When auditing: (1) check remote feat/ branches with commits not in main using `git branch -r | grep feat/ | while read b; do count=$(git log --oneline main.."$b" 2>/dev/null | wc -l | tr -d ' '); if [ "$count" -gt "0" ]; then echo "$count | $b"; fi; done`, (2) skip old pg-boss/scaffolding branches — their work is superseded by WR spec, (3) merge the most recent run of each spec (highest timestamp suffix = most complete), (4) skip convention-agents branches (old stubs, superseded by future spec).
+## 2026-05-03 [Architecture] CLI loads backend DB helpers at runtime across separate builds
+> Rule: When bin/rorca.ts needs backend-only helpers, load backend/dist modules at runtime and fall back to backend/src under tsx instead of adding static cross-package TS imports.
 
-## 2026-03-13 [Bug Fix] completedon → completed_on in pgboss.job UPDATE queries
-> Rule: pg-boss internal schema uses snake_case with underscores for ALL column names: started_on, completed_on, completed_after, expire_in. NOT startedon, completedon, etc. Affected reconcileState (Case B) and recoverStaleJobs — both silently failed on every 30s tick, leaving stale active pgboss.job rows that block new runs from being picked up. Fixed 2026-03-13 in worker.ts. When writing any direct pgboss.job or pgboss.archive queries, always use underscored column names.
+## 2026-05-03 [Architecture] Pi MCP integration must use a generated extension bridge
+> Rule: Do not assume Pi supports a native --mcp-server flag. For Rorca integration, verify Pi capabilities first and expose Rorca MCP tools by generating a temporary Pi extension that performs the MCP HTTP handshake and registers tools at session start.
 
-## 2026-03-13 [Gotcha] Old execution-engine processes from test runs survive indefinitely
-> Rule: Execution-engine subprocesses from old load test runs (WR-019, PG-020) and integration tests in temp paths can survive machine restarts and run for days, consuming CPU/memory. Check with: `ps aux | grep execution-engine | grep -v grep`. Kill PIDs associated with temp paths (/var/folders, /tmp) or old worktree paths. WR-007 graceful shutdown only helps for clean worker exits — kill -9 or machine crash still orphans children. Safe to kill any execution-engine with a temp path or a worktree path that no longer exists.
+## 2026-05-03 [Architecture] Forge TUI must treat SSE loss as detach, not run termination
+> Rule: When Forge loses its WAL or output SSE while a pipeline run is still active, clear the foreground attachment, keep the backend-owned run alive, and recover background state by polling GET /api/pipeline/runs.
 
-## 2026-03-13 [Decision] MCP-native generation: API as context+persistence layer, LLM work in caller's session
-> Rule: Rorca's API should split LLM-heavy operations (spec generation, enrichment) into two phases: (1) context-fetch — API returns the synthesized direction stack, memory, schema, skills as a raw bundle with no LLM call; (2) save — API persists the result the caller's LLM already generated. The LLM reasoning happens IN the caller's MCP session (Claude Code, OpenCode CLI, Codex CLI), not in a server-spawned subprocess. This means: rorca_get_generation_context returns the context bundle, the calling LLM generates the spec JSON in-session using cached/warm context, then rorca_save_spec persists it. The existing server-side generation path (spawning claude --print) is kept as a fallback for browser UI users who have no MCP session. This is the correct long-term architecture for rorca_forge_and_run too — it should orchestrate tool calls that the caller's session handles, not block on a subprocess.
+## 2026-05-03 [Architecture] HTTP MCP and stdio MCP are separate exposure surfaces
+> Rule: When changing MCP security or route exposure, audit both the OpenAPI-generated HTTP bridge in backend/src/lib/mcp-http.ts and the legacy hand-registered stdio server in backend/src/mcp/server.ts.
 
-## 2026-03-13 [Architecture] All three CLI coding assistants support MCP — Rorca tools work from any of them
-> Rule: Claude Code, OpenCode CLI, and Codex CLI all support MCP servers. A user working in any of these three can call Rorca MCP tools (rorca_generate_spec, rorca_trigger_run, etc.) from their active session. The only path that does NOT support MCP is the browser UI. This means the MCP-native generation architecture benefits all CLI users regardless of which assistant they use: Claude Code (Claude model), OpenCode CLI (any provider — GPT-4o, Gemini, etc.), Codex CLI (ChatGPT model). Architecture principle: Rorca API = context + persistence. LLM reasoning = caller's session. Browser UI = server-side subprocess fallback only.
+## 2026-05-03 [Architecture] Admin MCP exposure needs explicit x-mcp-tier override
+> Rule: Keep x-rorca-tier: admin routes excluded from MCP by default, and only expose an admin route to MCP when the OpenAPI operation also declares x-mcp-tier: admin.
 
-## 2026-03-13 [Bug Fix] Model override UI renders object instead of string — Objects are not valid as React child
-> Rule: In the story model override UI (SpecDetailSlideOver or SpecsPanel), a full model object {id, label, provider, providerType, costPer1kInput, costPer1kOutput, contextWindow, speedTier, costTier, recommended} is being rendered directly as a React child. Fix: render model.label or model.id instead of the raw object. One-line fix wherever `{selectedModel}` or `{model}` appears in JSX — must be `{selectedModel.label}`, `{selectedModel.id}`, etc.
+## 2026-05-03 [Convention] Paid tier routes need explicit capability annotations
+> Rule: Any route annotated with x-rorca-tier: paid must also declare x-rorca-capability with a valid PlanCapabilities key, and the HTTP plan gate enforces that capability against the resolved user plan.
 
-## 2026-03-14 [Bug Fix] AGE search_path pool poisoning — intermittent "Workspace not found" 404s
-> Rule: Any code that calls setupAgeSession() (LOAD 'age' + SET search_path = ag_catalog) MUST restore the search_path before releasing the pool connection: `await client.query('SET search_path = rorca, public')` in the finally block before `client.release()`. Without this, the pool connection retains ag_catalog as the first schema, causing subsequent queries to hit ag_catalog.workspaces (empty) instead of rorca.workspaces (real data) — producing intermittent "Workspace not found" 404s across all routes.
+## 2026-05-03 [Architecture] Contract tooling must target a fresh live tsx server
+> Rule: For OpenAPI contract generation in this repo, fetch /api/docs/openapi.json from a fresh tsx-backed server instance, not an older long-running build, because stale servers can omit newly added vendor extensions and collapse the public-route snapshot to zero.
 
-## 2026-03-14 [Convention] New migrations MUST use YYYYMMDDHHMMSS timestamp format
-> Rule: All new database migrations must use 14-digit timestamp prefixes (YYYYMMDDHHMMSS_description.sql), not sequential numbers. Example: 20260314150000_add_user_preferences.sql. Sequential numbers (001-079) stay as-is — the runner supports both formats indefinitely via numeric sort. Timestamps are structurally unique and eliminate the collision class caused by parallel worktree branches creating the same migration number.
+## 2026-05-04 [Convention] New Postgres migrations use timestamp prefixes
+> Rule: Add new backend SQL migrations as YYYYMMDDHHMMSS_description.sql so parallel branches cannot collide on numeric prefixes.
 
-## 2026-03-14 [Gotcha] PostgreSQL BIGINT returned as strings by pg driver — must coerce with Number()
-> Rule: The node-pg driver returns BIGINT column values as JavaScript strings, not numbers. When comparing BIGINT values with parseInt() results (e.g. in Set.has() lookups), always coerce with Number(r.version) when building the Set. Without this, Set.has(1) won't match "1" and the migration runner would try to re-apply every migration on every startup.
+## 2026-05-04 [Architecture] Spec long-runners should share pure job handlers behind pg-boss queues
+> Rule: For long-running spec operations, keep the LLM/filesystem logic in reusable lib handlers and let the worker own pg-boss queue pickup, spec_jobs status transitions, and throttled progress writes.
 
-## 2026-03-14 [Decision] Hybrid migration strategy — keep sequential 001-079, timestamps going forward
-> Rule: Do NOT rename existing sequential migrations (001-079) to timestamp format. The hybrid approach is intentional: existing migrations keep their numbers, new migrations use YYYYMMDDHHMMSS. The runner's numeric sort naturally orders timestamps after sequential numbers (79 < 20260314150000). Renaming 79+ existing files and updating schema_migrations records is high-risk with no benefit — the old migrations are already applied and immutable.
+## 2026-05-04 [Architecture] sse-hub is process-local, not cross-process
+> Rule: Do not rely on `broadcastAll()` or in-memory topic subscribers to deliver worker events to Express routes when the worker runs as a separate process; pair them with a DB-backed or polling fallback.
 
-## 2026-03-15 [Bug Fix] pipeline:cron backlog floods worker on restart — starves pipeline:run jobs
-> Rule: When the worker is down, the scheduler (running in the API server) keeps queuing pipeline:cron meta-tick jobs — one per minute. On worker restart, hundreds of cron ticks flood the pipeline:cron queue (batchSize:10, fires every 2s). This saturates the worker's polling loop and can cause pipeline:run jobs to be picked up silently but die mid-process, ending up as stale 'active' jobs that recoverStaleJobs() then marks failed. Any pipeline:run job that was queued while the worker was down may need to be re-triggered after the worker restarts.
+## 2026-05-04 [Architecture] MCP spec enrichment and skill tools must use async job endpoints
+> Rule: When exposing long-running spec operations over MCP, call the `/async` variant first and poll `/api/spec-jobs/:jobId` server-side until terminal status instead of holding the synchronous LLM HTTP request open.
 
-Follow this workflow for implementation:
+You are implementing a code change in this repository.
+AGENTS.md in the workspace root contains the Rorca direction stack with project standards and context. Follow its guidance for all implementation decisions.
+
 ## Agent Role: Frontend
 
 
-## Skill: react-review (relevance: 7)
+## Skill: react-review (relevance: 9)
 ---
 name: react-review
 description: Review React components for best practices and performance issues
@@ -1462,182 +1751,174 @@ Use this skill when:
 - Includes TypeScript and JavaScript variants
 - References official React documentation and community patterns
 
+## Skill: api-documentation (relevance: 8)
 ---
-name: rorca
-description: Implement and validate changes to the Rorca codebase with subagent-assisted context management.
+name: api-documentation
+description: Use when you need to generate comprehensive API documentation for REST/HTTP, gRPC, GraphQL, and RPC APIs
+license: MIT
+compatibility: opencode
+metadata:
+  audience: developers, technical-writers
+  category: documentation
 ---
 
-## 0. KingMode — Behavioral Discipline Layer
+# API Documentation
 
-<KING_MODE>
-You are operating in KingMode. This is a behavioral discipline layer. You are the apex predator of this codebase.
+Generate comprehensive, interactive API documentation for multiple API protocols including REST/HTTP, gRPC, GraphQL, and RPC. This skill helps create documentation that is accurate, up-to-date, and useful for both developers and consumers.
 
-HARD RULES:
-- **Zero Friction**: No warm-up prose, "Sure!", or "I can help with that". Direct execution only.
-- **Apex efficiency**: If a task can be done with one complex `sed` command or a multi-file `grep`, do it. Don't crawl files sequentially if unnecessary.
-- **No Permission Theater**: Do not ask "Should I...?" for standard engineering decisions (naming, placement, refactoring). Just do it and document in the summary.
-- **Concurrency**: Use parallel tool calls for research and verification whenever possible.
-- **Orca Pulse**: Be assertive, precise, and hunt for bugs with zero mercy.
+## When to use me
 
-ULTRATHINK TRIGGER:
-When you see ULTRATHINK, spend ONE silent planning pass (≤10s) before tool calls. No prose. Then execute.
+Use this skill when:
+- You need to document APIs for internal or external consumers
+- You have multiple API protocols (REST, gRPC, GraphQL, RPC) that need consistent documentation
+- You want to generate documentation from code or API definitions automatically
+- You need interactive documentation with testing capabilities
+- You're preparing API documentation for public release or developer portals
+- You need to maintain documentation consistency across multiple API versions
+- You want to improve API discoverability and usability
 
-SCOPE DISCIPLINE:
-- Change ONLY what is requested. 
-- "While I'm here" refactors are prohibited unless they fix a direct blocker.
+## What I do
 
-OUTPUT FORMAT:
-- Code blocks > Prose.
-- Terminal commands must be absolute and copy-paste ready.
-- End immediately after the last tool/code block. No "hope this helps!"
-</KING_MODE>
+- **Multi-protocol support**: Generate documentation for REST/HTTP, gRPC, GraphQL, and RPC APIs
+- **Code-first documentation**: Extract documentation from code annotations, OpenAPI/Swagger, Protobuf, GraphQL schemas
+- **Interactive examples**: Create executable API examples with testing capabilities
+- **Version management**: Handle multiple API versions with migration guides
+- **Consistency checking**: Ensure consistency between API implementation and documentation
+- **Documentation generation**: Generate HTML, Markdown, PDF, and interactive API consoles
+- **Authentication documentation**: Document authentication methods (OAuth, API keys, JWT)
+- **Error handling documentation**: Document error codes, messages, and troubleshooting
+- **Rate limiting documentation**: Document rate limits, quotas, and usage policies
 
-## 1. Context Gathering
+## Examples
 
-**Check progress.txt FIRST** (if it exists):
-- `## Current Phase` / `## Story [ID]` → Resume from where you left off
-- `## Specs Loaded` → Skip re-reading already-loaded docs
-- `## Gotchas Discovered` → Pre-load before touching those files
-
-**For codebase research (use subagent):**
-```
-Task(subagent_type="Explore", prompt="
-  Directories: [list dirs you'll modify, e.g. src/panels, backend/src/routes]
-  Task: [description]
-  Return: AGENTS.md gotchas + existing patterns (max 20 lines)
-")
-```
-
-**For project docs:** Load CLAUDE.md for architecture (it's comprehensive). Load specific AGENTS.md in each directory you'll touch.
-
-## 2. Before Writing Code
-- Redundancy check: Is this already implemented? (spec versions, templates, model selection all done — see progress.txt)
-- Missing details: Ask user rather than guessing
-- Non-trivial task (>3 files or new patterns): Use `EnterPlanMode`
-
-## 3. Implementation
-
-### Backend changes
-- PostgreSQL 16 via `pg` Pool — all DB calls are **async** (always `await`)
-- `query<T>(sql, params)` → `T[]`, `queryOne<T>(sql, params)` → `T | undefined`, `execute(sql, params)` → `{ rowCount }`
-- Use `$1, $2, ...` numbered placeholders (NOT `?`)
-- FK constraints always on, connection pooling (max 20, 30s idle timeout)
-- Emit `wal_events` for every state change — this drives the SSE pipeline and audit log
-- **New tables**: numbered SQL migration files in `backend/src/db/pg-migrations/`, tracked via `schema_migrations` table. Use `IF NOT EXISTS` guards freely.
-- `chatComplete()` returns `ChatResult { text: string; usage: TokenUsage }` — always use `.text`
-
-### Frontend changes
-- `apiFetch<T>(path, init?)` in `src/lib/apiFetch.ts` — use this for all API calls
-- `useWorkspace()` provides `workspaceId`, `workspaces`, `selectedWorkspace`
-- Panel components live in `src/panels/`, shared components in `src/components/`
-- xterm.js: `@xterm/xterm` + `@xterm/addon-fit` (NOT the old `xterm` package)
-
-### Critical path gotchas
-- **Spec path**: `ralph/specs/approved/${spec.id}.json` (NOT `specs/approved/${spec.specName}.json`)
-- **spec.id** = filename slug; **spec.specName** = human title (display only)
-- **chatComplete** returns `ChatResult` — use `.text` accessor everywhere
-- **Pipeline trigger** strips 4 Claude env vars before spawning `execution-engine.ts`
-- **execution-engine.ts** (`backend/src/lib/execution-engine.ts`) is the universal TypeScript execution engine — handles claude, opencode, and codex agent paths. Replaces run-loop.sh/run-loop.ts entirely.
-- **Backend port 3030** — restart required after any changes (`lsof -ti:3030 | xargs kill -9`)
-
-## 4. Validation (REQUIRED)
-
-Run in parallel where possible:
 ```bash
-# From rorca root
-bash -c "cd /Users/dimitriteravanessian/rorca && npx tsc --noEmit 2>&1; echo FRONTEND:\$?" &
-bash -c "cd /Users/dimitriteravanessian/rorca/backend && npx tsc --noEmit 2>&1; echo BACKEND:\$?" &
-wait
+# Generate OpenAPI documentation from code
+./scripts/analyze-api-docs.sh --source src/ --format openapi
 
-# Backend tests
-cd /Users/dimitriteravanessian/rorca/backend && npm test
+# Generate gRPC documentation from Protobuf files
+./scripts/analyze-api-docs.sh --source proto/ --format grpc
 
-# Build check
-cd /Users/dimitriteravanessian/rorca && npm run build
+# Generate GraphQL schema documentation
+./scripts/analyze-api-docs.sh --source schema.graphql --format graphql
+
+# Generate comprehensive API portal
+./scripts/analyze-api-docs.sh --portal --output docs/api-portal
+
+# Check documentation consistency
+./scripts/analyze-api-docs.sh --consistency-check --api implementations/
 ```
 
-All must pass before marking story done. Fix failures before moving on.
-
-## 4b. Browser Testing (if UI changed)
-
-Use **Playwright MCP** for automated browser testing — never ask user to manually test.
-```
-mcp__playwright__browser_navigate url=http://localhost:5210
-mcp__playwright__browser_snapshot
-mcp__playwright__browser_click ref=<uid>
-```
-Test: happy path + one edge case. Keep it under 60 seconds.
-
-## 5. QA Checklist
-- [ ] Happy path works end-to-end?
-- [ ] Error/edge case handled gracefully?
-- [ ] New WAL event emitted for state changes?
-- [ ] TypeScript strict — no `any` without justification?
-- [ ] Backend test added for new endpoints?
-
-## 6. Progress Tracking (`progress.txt`)
-
-**Update after every story completion** — critical for surviving context compaction across multi-hour runs.
+## Output format
 
 ```
-## Story [ID]: [Title] — DONE
-Files touched: [list with brief note on what changed]
-What was built: [2-3 bullet summary of what exists now]
-Key decisions: [non-obvious choices, gotchas discovered]
+API Documentation Analysis
+─────────────────────────────────────
+API Protocol: REST/HTTP
+Source Files: 42
+Endpoints Documented: 127/142 (89%)
 
-## Story [ID]: [Title] — IN PROGRESS
-Remaining: [specific remaining tasks, not vague]
-Blockers: [anything blocking]
+DOCUMENTATION QUALITY METRICS:
+───────────────────────────────
+✅ Complete: Authentication documented (OAuth 2.0, API keys)
+✅ Complete: Error responses documented (25 error codes)
+✅ Complete: Request/response examples provided
+⚠️ Needs Improvement: Rate limiting documentation missing
+⚠️ Needs Improvement: 15 endpoints missing parameter descriptions
+❌ Missing: Version migration guide for v1 → v2
 
-## Story [ID]: [Title] — NOT STARTED
-Expects: [prerequisites from prior stories]
+API DISCOVERABILITY:
+────────────────────
+• Endpoints grouped by resource (Users, Products, Orders)
+• Search functionality available
+• Interactive testing console enabled
+• SDK generation for 5 languages (JavaScript, Python, Go, Java, C#)
+
+MULTI-PROTOCOL ANALYSIS:
+────────────────────────
+REST/HTTP APIs: 142 endpoints
+  • OpenAPI specification: Complete
+  • Interactive docs: Available via Swagger UI
+  • Testing examples: 85%
+
+gRPC APIs: 28 services
+  • Protobuf documentation: Complete
+  • gRPC reflection: Enabled
+  • Client libraries: Generated for 3 languages
+
+GraphQL APIs: 1 schema
+  • GraphQL schema: Documented
+  • GraphiQL interface: Available
+  • Queries/Mutations: 47 operations documented
+
+RPC APIs: 12 methods
+  • JSON-RPC documentation: Partial
+  • WebSocket support: Documented
+  • Binary protocols: Not documented
+
+CONSISTENCY ISSUES (3):
+────────────────────────
+1. Endpoint /api/v1/users/{id}/profile missing from OpenAPI spec
+2. gRPC service "PaymentService" missing authentication documentation
+3. GraphQL field "Product.inventory" description inconsistent with REST API
+
+RECOMMENDATIONS:
+────────────────
+1. HIGH PRIORITY: Document rate limiting policies for all endpoints
+2. HIGH PRIORITY: Add version migration guide for upcoming v2 release
+3. MEDIUM PRIORITY: Complete JSON-RPC documentation for remaining 5 methods
+4. MEDIUM PRIORITY: Generate SDKs for additional languages (Ruby, PHP, Swift)
+5. LOW PRIORITY: Add deprecation notices for endpoints scheduled for removal
+
+GENERATED ARTIFACTS:
+────────────────────
+• OpenAPI 3.0 specification: openapi.yaml
+• Interactive API console: docs/api-console/index.html
+• Client SDKs: sdk/javascript/, sdk/python/, sdk/go/
+• API reference PDF: docs/api-reference.pdf
+• Postman collection: docs/postman-collection.json
+• cURL examples: docs/curl-examples.md
 ```
 
-**Rules:**
-- Re-read progress.txt FIRST after any `/compact` — it's your resume checkpoint
-- Never overwrite previous entries — append below existing content
-- Discovered gotchas → add to relevant `AGENTS.md` AND note in progress.txt under `## Gotchas Discovered`
-- `## Specs Loaded` section — list PRDs/SDDs you've already read so you skip re-reading
+## Notes
 
-## 7. Wrap-up
-- [ ] `npx tsc --noEmit` passes (frontend + backend)
-- [ ] `npm run build` succeeds
-- [ ] Backend tests pass
-- [ ] New gotchas documented in relevant `AGENTS.md`
-- [ ] `progress.txt` updated with completed story summary
-- [ ] WAL events emitted for new state changes
-- [ ] README.md updated if user-facing behavior changed
+- Documentation should be generated as close to the code as possible
+- Interactive documentation increases API adoption and reduces support requests
+- Consistency between API implementation and documentation is critical
+- Consider documentation as part of the API development lifecycle
+- Different API protocols may require different documentation approaches
+- Version management helps consumers migrate between API versions
+- Authentication and error handling are the most commonly referenced sections
+- Regular documentation reviews help maintain accuracy and completeness
 
-## Context Alert
-At ~75% context: output `Context: ~X% | /compact?`
-
+## Workflow
+1. Read the relevant AGENTS.md files for every directory you modify.
+2. Read the primary files listed below before making changes.
+3. Implement the requested behavior now — do not stop at analysis or planning.
+4. Run the smallest useful validation commands after editing.
+5. If you cannot complete the task, explain the concrete blocker with file-level evidence.
+## Memory Instructions
+When you discover something worth remembering, append a JSON object to the file .rorca/proposed_memories.json in the workspace root.
+The file is a JSON array. If the file does not exist, create it with [].
+Each object must have: { "category": "Architecture|Convention|Bug Fix|Decision|Pattern|Gotcha", "title": "short summary", "rule": "the actionable lesson", "context": "why it matters", "source": "<storyId>" }.
+Do NOT edit MEMORY.md directly — it is read-only and generated automatically.
 ---
 Your task (US-020):
-Add an 'Integrations' sub-tab to the Settings panel (SettingsTab type). The hub shows cards for each integration: GitHub (primary, launch), Linear (coming soon), Vercel (coming soon), Slack (coming soon). Each card shows: integration logo, name, status (connected/disconnected/error), connected account info (for GitHub: org name + username). GitHub card has Connect/Disconnect buttons. Connected state shows last sync time and health indicator. Cards for coming-soon integrations are grayed out with 'Coming Soon' badge. Backend: GET /api/workspaces/:id/integrations returns list with status per integration.
+The Spec Detail slide-over must never leave the Context tab stranded at "No generation data available". When an approved or pending spec lacks historical generation logs, the UI should offer a primary Context Enrichment action that backfills the tab using the same CAG → RAG → Knowledge Graph pipeline and the rorca_enrich_spec MCP tool / POST /api/specs/:id/enrich route. This turns the empty state in the screenshot into a recovery flow that can enrich older specs, surface the retrieval method, and keep the Context tab useful even when the spec was created before context logging existed.
 
 ## Context
-- **SettingsTab type extension**: Add `'integrations'` to the `SettingsTab` union type in `SettingsPanel.tsx`. The existing 17 sub-tabs are defined there — follow the same pattern for routing (`/settings/integrations`) and sidebar nav item placement. Group under "Integrations" section logically near `github`, `slack`, `linear`, `vercel` if those exist as individual tabs already.
-
-- **Backend route**: Create `GET /api/workspaces/:id/integrations` in a new or existing route file under `backend/src/routes/`. Use `queryOne` to check `github_connections` table for GitHub status. Return shape: `{ provider: string, status: 'connected' | 'disconnected' | 'error', connectedAt: string | null, username: string | null, avatarUrl: string | null, orgName: string | null }[]`. For Linear/Vercel/Slack, return hardcoded `{ status: 'coming_soon' }` entries — no DB lookup needed.
-
-- **GitHub connection data**: The `github_connections` table already stores OAuth tokens and installation IDs per workspace. Query it for connection status, username, and org info. The `integration_credentials` table (AES-256-GCM encrypted) may also be relevant. Do NOT expose tokens or secrets in the API response.
-
-- **Error handling pattern**: Use `AppError` hierarchy — if workspace not found, throw `NotFoundError`. Frontend error state should use the toast context (`ToastContext`) for transient errors and inline error UI with retry button for the hub fetch failure. Follow the `apiFetch` pattern from `src/lib/` for the frontend API call.
-
-- **Loading/skeleton state**: Use Tailwind `animate-pulse` on placeholder card elements during fetch. This is consistent with existing skeleton patterns in the codebase (e.g., lazy-loaded panels use `Suspense` with skeleton fallbacks).
-
-- **Card layout**: Use Tailwind grid (`grid-cols-1 sm:grid-cols-2`) for the integration cards. Coming-soon cards should have `opacity-50 pointer-events-none` with a badge overlay. GitHub card should be visually prominent (recommended highlight border or badge) in the empty state.
-
-- **No auth middleware globally**: Auth is intentionally disabled (`authRequired` commented out in `server.ts`). Do NOT re-enable it or add per-route auth for this endpoint unless explicitly requested.
-
-- **Swagger annotation**: Add `@swagger` JSDoc to the new route for OpenAPI spec generation. Follow the existing pattern in other route files — this ensures the endpoint is auto-discoverable via `/api/docs` and future MCP auto-generation.
+- The enrich endpoint is async and pg-boss backed: `POST /api/specs/:id/enrich` may have both sync and async (`/enrich/async`) variants per CLI-058/059/060. Use the sync HTTP path from the UI (`apiFetch`) but handle long response times with a loading state — do NOT hold a blocking spinner without a timeout fallback.
+- `SpecDetailSlideOver` lives in `src/panels/SpecsPanel.tsx` (single large file with `@refresh reset` directive). The Context tab rendering is inside this file — locate the existing empty-state conditional before editing. Preserve the `@refresh reset` comment.
+- The enrich route expects `workspaceId` from the active workspace context (`useWorkspace()` hook in `src/contexts/WorkspaceContext`). Ensure `workspaceId` is passed alongside `specId` in the request body — the backend resolves the workspace path from the DB.
+- Generation log data likely comes from `wal_events` or a dedicated generation log table. The Context tab re-fetch after enrichment should query the same endpoint the tab already uses for its initial load — check for a `GET /api/specs/:id/generation-log` or similar route.
+- Error handling: use `ToastContext` for non-blocking error toasts (already used across the codebase). Do NOT use `alert()` or modal dialogs for enrichment failures.
+- The spec `id` field is the filename slug (e.g., `rorca-feature-enhancements`), not the human-readable title. Use `spec.id` when constructing the enrich API call path.
+- Both `pending` and `approved` specs must be enrichable — the enrich endpoint should not gate on spec status. Verify the backend route doesn't reject based on spec lifecycle state before assuming the UI path works for both.
+- Keep the explainer text about older specs concise (1-2 sentences max) and render it as a muted/secondary text element above or below the empty-state illustration, not as a blocking banner.
 
 Acceptance Criteria:
-- Settings panel has a new 'Integrations' tab accessible via /settings/integrations route
-- GitHub integration card shows connect/disconnect button and connection status badge (green='Connected', red='Disconnected')
-- Connected GitHub card displays org name, username, avatar, and last sync timestamp
-- Linear, Vercel, Slack cards are visible but grayed with 'Coming Soon' badge and disabled connect button
-- GET /api/workspaces/:id/integrations returns JSON array with { provider, status, connectedAt, username } per integration type
-- If the integrations API call fails, the hub shows error 'Unable to load integrations — check your connection' with a retry button
-- When no integrations are connected (empty state), the hub shows a 'Connect your first integration' prompt with GitHub highlighted as recommended
-- While integration status is being fetched, cards show skeleton placeholders with pulsing animation (loading state)
+- When SpecDetailSlideOver opens the Context tab for a spec with no generation logs, it still renders the existing empty-state copy but now also shows a primary button labeled "Enrich with Context" and a secondary "Refresh" action instead of a dead-end panel.
+- Clicking "Enrich with Context" calls the existing apiFetch-based enrich path (POST /api/specs/:id/enrich) or the rorca_enrich_spec MCP tool depending on the active execution surface, passes workspaceId + specId, and shows a loading state labeled "Enriching context…" until the request settles.
+- On success, the tab re-fetches the spec generation log and replaces the empty state with enriched data: retrieval method badge, model, tokens used, direction layers, and a compact summary of CAG / RAG / Knowledge Graph hits.
+- The empty-state recovery path must work for both pending and approved specs, and it must not require regenerating the spec or altering the spec stories first — enrichment is retroactive.
+- If enrichment fails because the backend or MCP tool is unavailable, the UI surfaces a non-blocking error toast that explains the failure and preserves the existing empty-state copy so the user can retry later.
+- The Context tab should display a short explainer that context logging was introduced in a later update, so older specs are expected to start empty until they are enriched.

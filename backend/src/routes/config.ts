@@ -1278,14 +1278,18 @@ router.get('/pi-models', (_req: Request, res: Response) => {
   }
 
   const now = Date.now();
-  const models =
-    cachedPiModels && now - cachedPiModels.ts < 60_000
-      ? cachedPiModels.models
-      : (() => {
-          const freshModels = listPiModels(status.piBinPath!);
-          cachedPiModels = { models: freshModels, ts: now };
-          return freshModels;
-        })();
+  const hasFreshCachedModels =
+    cachedPiModels &&
+    cachedPiModels.models.length > 0 &&
+    now - cachedPiModels.ts < 60_000;
+
+  const models = hasFreshCachedModels
+    ? cachedPiModels!.models
+    : (() => {
+        const freshModels = listPiModels(status.piBinPath!);
+        cachedPiModels = freshModels.length > 0 ? { models: freshModels, ts: now } : null;
+        return freshModels;
+      })();
 
   res.json({
     models,

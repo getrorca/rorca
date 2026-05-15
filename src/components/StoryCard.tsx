@@ -46,8 +46,8 @@ interface StoryCommit {
 
 function getReadinessWarnings(story: Story, allStoryIds?: Set<string>): string[] {
   const warnings: string[] = [];
-  if (story.acceptanceCriteria.length < 3) {
-    warnings.push(`Only ${story.acceptanceCriteria.length} acceptance criteria (needs 3+)`);
+  if ((story.acceptanceCriteria ?? []).length < 3) {
+    warnings.push(`Only ${(story.acceptanceCriteria ?? []).length} acceptance criteria (needs 3+)`);
   }
   if (allStoryIds) {
     const deps = story.dependsOn ?? story.dependencies ?? [];
@@ -160,7 +160,8 @@ export function StoryCard({
   };
 
   const canEnhance = !!(specId && workspaceId && !isDone);
-  const hasFewCriteria = story.acceptanceCriteria.length < 3;
+  const ac = story.acceptanceCriteria ?? [];
+  const hasFewCriteria = ac.length < 3;
 
   const handleEnhanceCriteria = async () => {
     if (!specId || !workspaceId || enhanceLoading) return;
@@ -372,14 +373,14 @@ export function StoryCard({
           )}
         </div>
 
-        {story.acceptanceCriteria.length > 0 && (
+        {ac.length > 0 && (
           <div className="flex items-center gap-2 mt-2">
             <button
               onClick={() => setExpanded(!expanded)}
               className="flex items-center gap-1 text-xs text-muted hover:text-text transition-colors"
             >
               {expanded ? <ChevronDown size={12} /> : <ChevronRight size={12} />}
-              Acceptance criteria ({story.acceptanceCriteria.length})
+              Acceptance criteria ({ac.length})
             </button>
             {canEnhance && hasFewCriteria && suggestions.length === 0 && (
               <button
@@ -395,7 +396,7 @@ export function StoryCard({
           </div>
         )}
 
-        {canEnhance && story.acceptanceCriteria.length === 0 && suggestions.length === 0 && (
+        {canEnhance && ac.length === 0 && suggestions.length === 0 && (
           <button
             onClick={handleEnhanceCriteria}
             disabled={enhanceLoading}
@@ -456,7 +457,7 @@ export function StoryCard({
       {expanded && (
         <div className="px-3 pb-3 pt-0">
           <ul className="space-y-1 ml-5">
-            {story.acceptanceCriteria.map((ac, i) => (
+            {ac.map((ac, i) => (
               <li key={i} className="text-xs text-muted list-disc">
                 {ac}
               </li>
