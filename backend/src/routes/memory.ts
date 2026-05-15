@@ -61,6 +61,12 @@ function todayDate(): string {
   return new Date().toISOString().slice(0, 10);
 }
 
+function toRunId(value: number | string | null | undefined): number | null {
+  if (value == null) return null;
+  const parsed = typeof value === 'number' ? value : Number(value);
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
 /** Infer source_type from the file-based source field text */
 function inferSourceType(source: string): SourceType {
   if (!source) return 'manual';
@@ -1383,7 +1389,7 @@ router.get('/items', async (req: Request, res: Response) => {
     category: string;
     content: string;
     source_story_id: string | null;
-    source_run_id: number | null;
+    source_run_id: number | string | null;
     confidence: string;
     related_files: string;
     pinned: boolean;
@@ -1401,7 +1407,7 @@ router.get('/items', async (req: Request, res: Response) => {
   );
 
   // Get recent run IDs for filter dropdown
-  const runRows = await dbQuery<{ source_run_id: number }>(
+  const runRows = await dbQuery<{ source_run_id: number | string }>(
     `SELECT DISTINCT source_run_id FROM memories
      WHERE workspace_id = $1 AND deleted_at IS NULL AND source_run_id IS NOT NULL
      ORDER BY source_run_id DESC LIMIT 10`,
@@ -1414,7 +1420,7 @@ router.get('/items', async (req: Request, res: Response) => {
     category: r.category,
     content: r.content,
     sourceStoryId: r.source_story_id,
-    sourceRunId: r.source_run_id,
+    sourceRunId: toRunId(r.source_run_id),
     confidence: r.confidence,
     relatedFiles: typeof r.related_files === 'string' ? JSON.parse(r.related_files) : r.related_files,
     pinned: r.pinned,
@@ -1426,7 +1432,7 @@ router.get('/items', async (req: Request, res: Response) => {
     items,
     total: parseInt(countRows[0]?.total ?? '0', 10),
     pinned: parseInt(countRows[0]?.pinned ?? '0', 10),
-    recentRunIds: runRows.map(r => r.source_run_id),
+    recentRunIds: runRows.map(r => toRunId(r.source_run_id)).filter((value): value is number => value !== null),
     categories: MEMORY_CATEGORIES,
     page,
     pageSize,
@@ -1513,7 +1519,7 @@ router.patch('/items/:id', async (req: Request, res: Response) => {
 
   const updated = await queryOne<{
     id: number; workspace_id: string; category: string; content: string;
-    source_story_id: string | null; source_run_id: number | null;
+    source_story_id: string | null; source_run_id: number | string | null;
     confidence: string; related_files: string; pinned: boolean; created_at: string;
   }>(sql, params);
 
@@ -1525,7 +1531,7 @@ router.patch('/items/:id', async (req: Request, res: Response) => {
     category: updated!.category,
     content: updated!.content,
     sourceStoryId: updated!.source_story_id,
-    sourceRunId: updated!.source_run_id,
+    sourceRunId: toRunId(updated!.source_run_id),
     confidence: updated!.confidence,
     relatedFiles: typeof updated!.related_files === 'string' ? JSON.parse(updated!.related_files) : updated!.related_files,
     pinned: updated!.pinned,

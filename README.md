@@ -70,6 +70,31 @@ If `pi` is missing, `rorca init` and `rorca auth login` detect that and offer an
 
 For non-interactive environments, use `rorca init --auto-install-pi` to skip the prompt and run the npm install path directly.
 
+### Pi extension package
+
+Rorca ships a project-local Pi extension package at `packages/rorca-pi-extension`.
+
+Install it into Pi for the current repo:
+
+```bash
+pi install ./packages/rorca-pi-extension -l
+```
+
+That enables Rorca slash commands inside Pi such as:
+
+- `/rorca-forge @docs/feature.md --approve`
+- `/rorca-forge-run @docs/feature.md`
+- `/rorca-run my-spec-slug --story US-003`
+- `/rorca-status`
+- `/rorca-watch 123`
+- `/rorca-retry 123 US-004`
+
+The same extension also bridges Rorca MCP tools into Pi when the backend MCP transport is healthy.
+
+Detailed extension docs:
+- usage guide: `packages/rorca-pi-extension/README.md`
+- maintainer / publishing guide: `packages/rorca-pi-extension/PUBLISHING.md`
+
 ## Local Supabase Development
 
 - Initialize local Supabase config with `supabase init` if needed

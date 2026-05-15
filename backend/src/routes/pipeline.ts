@@ -32,6 +32,7 @@ import { parseLine, type SemanticStep } from '../lib/semantic-log-parser';
 import { activeAgent, activeModel, type AgentType } from '../lib/config';
 import { resolveWorkflowConfig } from '../lib/workflow-config-resolver';
 import { OpenCodeServer } from '../lib/opencode-server';
+import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
 import { synthesize } from '../lib/direction-stack';
 import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
 import { readRunState, type RunState } from '../lib/run-state';
@@ -42,6 +43,7 @@ import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
 import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftReport } from '../lib/drift-detector';
 import { synthesizeRunMemory } from '../lib/auto-memory';
+import * as piDetector from '../lib/pi-detector';
 import { logger } from '../lib/logger';
 import { getBoss } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
@@ -71,6 +73,47 @@ function buildCleanEnvForMerge(): Record<string, string> {
     }
   }
   return env;
+}
+
+const DEFAULT_PI_MODEL = process.env.RORCA_PI_DEFAULT_MODEL?.trim() || 'openai-codex/gpt-5.4';
+
+function normalizePiModelId(provider: string, model: string): string {
+  return `${provider}/${model}`;
+}
+
+function resolvePreferredPiModel(requestedModel: string | null, models: piDetector.PiModel[]): string | null {
+  if (models.length === 0) {
+    if (requestedModel?.startsWith('openai-codex/')) return requestedModel;
+    return DEFAULT_PI_MODEL;
+  }
+
+  const normalized = new Map<string, string>();
+  for (const model of models) {
+    const id = normalizePiModelId(model.provider, model.model);
+    normalized.set(id, id);
+    normalized.set(model.model, id);
+  }
+
+  if (requestedModel) {
+    const exact = normalized.get(requestedModel);
+    if (exact) return exact;
+  }
+
+  const preferredIds = [
+    'openai-codex/gpt-5.4',
+    'openai-codex/gpt-5.4-mini',
+    'openai-codex/gpt-5.3-codex',
+    'openai-codex/gpt-5.2',
+  ];
+  for (const id of preferredIds) {
+    if (normalized.has(id)) return normalized.get(id)!;
+  }
+
+  const firstCodex = models.find((model) => model.provider === 'openai-codex');
+  if (firstCodex) return normalizePiModelId(firstCodex.provider, firstCodex.model);
+
+  const first = models[0];
+  return normalizePiModelId(first.provider, first.model);
 }
 
 /** Auto-select sequential vs wave-parallel based on dependency graph analysis. */
@@ -1013,9 +1056,17 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               workspaceId: { type: string }
  *               autoWorktree: { type: boolean, default: false, description: "Create git worktree for isolated run" }
  *               autoMerge: { type: boolean, default: false, description: "Auto-merge worktree branch to main on successful run" }
+ *               mergeStrategy: { type: string, enum: [direct, pr, draft-pr, branch-only], default: direct, description: "Post-run branch handling strategy when worktrees are enabled" }
  *               dryRun: { type: boolean, default: false }
  *               triggerType: { type: string, enum: [manual, scheduled], default: manual }
  *               includeGraph: { type: boolean, default: false, description: "Include knowledge graph context in the pipeline run" }
+ *               agentOverride: { type: string, enum: [claude, opencode, codex, pi], description: "Override the execution agent for this run" }
+ *               modelOverride: { type: string, description: "Override the execution model for this run" }
+ *               storyId: { type: string, description: "Run only a specific story ID from the spec" }
+ *               thinkingEnabled: { type: boolean, description: "Enable extended reasoning for supported agents" }
+ *               thinkingBudget: { type: integer, description: "Budget for extended reasoning" }
+ *               effortLevel: { type: string, enum: [low, medium, high, max, xhigh], description: "Reasoning effort level hint for supported agents" }
+ *               forceRerun: { type: boolean, description: "Force rerun even if an identical idempotent request already exists" }
  *     responses:
  *       200:
  *         description: Pipeline started or conflict detected
@@ -1060,7 +1111,7 @@ const PipelineTriggerSchema = z.object({
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, forceRerun } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, forceRerun } = req.body;
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1174,6 +1225,18 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       const isClaudeModel = /^claude-/.test(finalAgentModel) && !finalAgentModel.includes('/');
       if (!isClaudeModel) {
         finalAgentModel = null;
+      }
+    }
+
+    if (resolvedAgentType === 'pi') {
+      const piStatus = piDetector.detectPi();
+      if (piStatus.piInstalled && piStatus.piBinPath) {
+        const availablePiModels = piDetector.listPiModels(piStatus.piBinPath);
+        const preferredPiModel = resolvePreferredPiModel(finalAgentModel, availablePiModels);
+        if (preferredPiModel !== finalAgentModel) {
+          logger.info({ requestedModel: finalAgentModel, preferredPiModel }, '[Pipeline] Adjusted Pi model to an available local Pi model');
+        }
+        finalAgentModel = preferredPiModel;
       }
     }
 
@@ -1346,10 +1409,11 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     // 4. Conflict check — workspace-scoped, respects queue vs run_now semantics
     //    If queuedRunId is set, this is an internal promotion call — skip conflict check entirely
     const { queue } = req.body;
+    const useExternalPiOrchestration = resolvedAgentType === 'pi' && isPiExternalOrchestrationEnabled();
 
     if (!queuedRunId) {
       // ── 4a. Queue operations: always accepted up to max queue depth ──────────
-      if (queue && resolvedAgentType !== 'pi') {
+      if (queue && !useExternalPiOrchestration) {
         const MAX_QUEUE_DEPTH = 10;
         const queueCount = Number((await queryOne<{ count: string }>(`SELECT COUNT(*) as count FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued'`, [workspaceId]))?.count ?? '0');
 
@@ -1363,8 +1427,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
 
         const position = queueCount + 1;
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree]);
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model)
+           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel]);
         const queuedId = queueResult!.id;
 
         res.status(202).json({
@@ -1410,14 +1474,14 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     const validTriggerType = triggerType === 'scheduled' ? 'scheduled' : 'manual';
     const triggeredVia = queuedRunId ? 'queue' : 'run_now';
 
-    if (resolvedAgentType === 'pi') {
+    if (useExternalPiOrchestration) {
       const specId = path.basename(specPath, '.json');
       const runResult = await queryOne<{ id: number }>(
         `INSERT INTO pipeline_runs
            (spec_path, workspace_id, status, trigger_type, agent, agent_type, agent_model, started_at, finished_at, pid, triggered_via)
          VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7)
          RETURNING id`,
-        [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, resolvedAgentModel, triggeredVia],
+        [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia],
       );
       const runId = runResult!.id;
 
@@ -1429,7 +1493,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           run_id: runId,
           spec_id: specId,
           workspace_id: workspaceId,
-          model: resolvedAgentModel ?? null,
+          model: finalAgentModel ?? null,
         })],
       );
 
@@ -1587,10 +1651,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       // Promote queued run to running — worker will actually execute it
       await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
-         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12 WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, queuedRunId, resolvedMergeStrategy]);
+         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12 WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, queuedRunId, resolvedMergeStrategy]);
       runId = queuedRunId;
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, resolvedAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy]);
       runId = runResult!.id;
     }
 
@@ -1642,7 +1706,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     }
 
     // Inject GitHub Copilot token when using github/copilot model
-    if (resolvedAgentModel === 'github/copilot' && pipelineUser) {
+    if (finalAgentModel === 'github/copilot' && pipelineUser) {
       const copilotToken = await getCopilotToken(pipelineUser.id);
       if (copilotToken) {
         envOverrides['GITHUB_TOKEN'] = copilotToken;
@@ -1760,7 +1824,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       autoMerge: computedAutoMerge,
       mergeStrategy: resolvedMergeStrategy,
       envOverrides,
-      ...(startFromStoryId ? { startFromStoryId } : {}),
+      ...(!storyId && startFromStoryId ? { startFromStoryId } : {}),
+      ...(storyId ? { specificStory: storyId } : {}),
       triggeredVia,
       includeGraph: includeGraph ?? false,
       ...(agentOverride ? { agentOverride } : {}),
@@ -1795,7 +1860,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       worktreePath,
       branchName,
       agentType: resolvedAgentType,
-      agentModel: resolvedAgentModel,
+      agentModel: finalAgentModel,
       ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
       ...(orchestration ? { orchestration } : {}),
     });

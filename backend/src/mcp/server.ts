@@ -11,6 +11,7 @@
  * This server intentionally mirrors the HTTP MCP surface by registering tools
  * from the same OpenAPI tier-filtered source of truth.
  */
+import type { McpServer } from '@modelcontextprotocol/sdk/server/mcp.js';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import * as dotenv from 'dotenv';
 import * as path from 'path';
@@ -20,7 +21,7 @@ import { swaggerSpec } from '../lib/swagger';
 
 dotenv.config({ path: path.resolve(__dirname, '../../.env') });
 
-export const server = createMcpHttpServer(swaggerSpec as any);
+export const server: McpServer = createMcpHttpServer(swaggerSpec as any);
 
 export async function main(): Promise<void> {
   const transport = new StdioServerTransport();

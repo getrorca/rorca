@@ -1278,10 +1278,17 @@ async function spawnInteractivePi(piBinPath, args, env) {
         });
     });
 }
+function resolveRorcaPiExtensionEntry() {
+    const entry = path.join(ROOT_DIR, 'packages', 'rorca-pi-extension', 'extensions', 'rorca', 'index.ts');
+    if (!existsSync(entry)) {
+        throw new Error(`Rorca Pi extension not found at ${entry}`);
+    }
+    return entry;
+}
 async function runChat(options) {
     let workspaceName = options.workspaceId ?? 'default';
     let tempSkillFile = null;
-    let tempExtensionFile = null;
+    const extensionEntry = resolveRorcaPiExtensionEntry();
     const tokens = ensureMcpToken();
     const health = await fetchBackendHealth().catch((error) => {
         const message = error instanceof Error ? error.message : String(error);
@@ -1313,9 +1320,17 @@ async function runChat(options) {
             }),
         });
         tempSkillFile = path.join(tmpdir(), `rorca-chat-context-${Date.now()}-${process.pid}.md`);
-        writeFileSync(tempSkillFile, `${direction.synthesized.trim()}\n`, 'utf8');
-        tempExtensionFile = path.join(tmpdir(), `rorca-pi-mcp-bridge-${Date.now()}-${process.pid}.ts`);
-        writeFileSync(tempExtensionFile, buildRorcaPiMcpExtension(health.mcp.url), 'utf8');
+        writeFileSync(tempSkillFile, [
+            '---',
+            'name: rorca-chat-context',
+            'description: Rorca direction stack and workspace context injected for rorca chat sessions.',
+            '---',
+            '',
+            '# Rorca Chat Context',
+            '',
+            direction.synthesized.trim(),
+            '',
+        ].join('\n'), 'utf8');
     }
     catch (error) {
         if (isBackendUnavailableError(error)) {
@@ -1324,8 +1339,9 @@ async function runChat(options) {
         throw error;
     }
     const args = [
+        '--no-extensions',
         ...(tempSkillFile ? ['--skill', tempSkillFile] : []),
-        ...(tempExtensionFile ? ['--extension', tempExtensionFile] : []),
+        '--extension', extensionEntry,
         ...(options.model ? ['--model', options.model] : []),
     ];
     console.log('─── Rorca Chat ───────────────────────────────────────────────');
@@ -1333,7 +1349,10 @@ async function runChat(options) {
     console.log('─────────────────────────────────────────────────────────────');
     try {
         return await spawnInteractivePi(resolvePiBinPath(health.piBinPath), args, {
+            RORCA_PI_API_URL: API_BASE,
+            RORCA_PI_MCP_URL: health.mcp.url,
             RORCA_PI_MCP_TOKEN: tokens.adminToken,
+            ...(options.workspaceId ? { RORCA_PI_WORKSPACE_ID: options.workspaceId } : {}),
         });
     }
     catch (error) {
@@ -1344,7 +1363,6 @@ async function runChat(options) {
     }
     finally {
         cleanupTempFile(tempSkillFile);
-        cleanupTempFile(tempExtensionFile);
         console.log('Chat session ended');
     }
 }
