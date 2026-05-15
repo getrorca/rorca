@@ -142,6 +142,7 @@ export default function BatchForge() {
             title: e.title.trim(),
             brief: e.brief.trim(),
             workspaceId,
+            agentOverride: 'pi',
           })),
         }),
       });

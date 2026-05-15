@@ -308,6 +308,7 @@ export default function OnboardingWizard() {
           title: specTitle.trim() || 'my-first-spec',
           brief: specBrief,
           storyCount: 5,
+          agentOverride: 'pi',
         }),
       });
       setSpecGenerated(true);

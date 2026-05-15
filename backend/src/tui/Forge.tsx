@@ -1227,6 +1227,7 @@ export function Forge(): JSX.Element {
       body: {
         brief,
         workspaceId: workspace.id,
+        agentOverride: 'pi',
       },
       timeoutMs: GENERATE_TIMEOUT_MS,
     });

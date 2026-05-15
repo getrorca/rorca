@@ -83,6 +83,7 @@ export function generateSpec(
       workspaceId: p.workspaceId,
       model: p.model,
       templateId: p.templateId,
+      agentOverride: 'pi',
     }),
     signal: p.signal,
   });

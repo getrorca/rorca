@@ -28,6 +28,7 @@ import { getPlanLimits, type PlanTier } from '../lib/plan-limits';
 import { compileWaves, isCycleError } from '../lib/wave-compiler';
 import { agentType as configuredAgentType } from '../lib/config';
 import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
+import { draftSpecWithPi } from '../lib/pi-spec-drafter';
 import { runChunkedGeneration, CHUNK_THRESHOLD } from '../lib/spec-gen-chunked';
 import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
@@ -339,6 +340,7 @@ interface BatchBriefItem {
   model?: string;
   storyCount?: number;
   domain?: string;
+  agentOverride?: 'claude' | 'opencode' | 'pi';
   userId?: string;
   status: BatchBriefStatus;
   error?: string;
@@ -861,6 +863,7 @@ const GenerateSpecSchema = z.object({
   storyCount: z.union([z.number(), z.string()]).optional(),
   model: z.string().optional(),
   multiPass: z.boolean().optional(),
+  agentOverride: z.enum(['claude', 'opencode', 'pi']).optional(),
   storyPrefix: z.string().optional(),
   async: z.boolean().optional(), // Force async chunked generation
   thinkingEnabled: z.boolean().optional(), // Enable extended thinking (Anthropic models)
@@ -927,6 +930,11 @@ const GenerateSpecSchema = z.object({
  *                 type: boolean
  *                 description: Enable multi-pass spec generation for richer output
  *                 example: false
+ *               agentOverride:
+ *                 type: string
+ *                 description: Override the drafting engine for spec generation
+ *                 enum: [claude, opencode, pi]
+ *                 example: pi
  *               storyPrefix:
  *                 type: string
  *                 description: Prefix for story IDs (default US)
@@ -973,6 +981,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     const storyCount: number = rawCount === 0 ? 0 : Math.min(500, Math.max(1, rawCount || 8));
     const requestedModel: string | undefined = req.body.model;
     const multiPass: boolean = req.body.multiPass === true;
+    const agentOverride: 'claude' | 'opencode' | 'pi' | undefined = req.body.agentOverride;
     // Support both legacy thinkingEnabled/thinkingBudget and new reasoning object (RE-008)
     const reasoningBody: { enabled: boolean; effort?: string } | undefined = req.body.reasoning;
     const thinkingEnabled: boolean = reasoningBody?.enabled === true || req.body.thinkingEnabled === true;
@@ -1405,11 +1414,48 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       return;
     }
 
-    // 8. Route by agent type: OpenCode path vs SDK (llm-client) path
+    // 8. Route by drafting engine: Pi skill-first path vs legacy OpenCode / SDK paths
     let parsed: { stories: unknown[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
     let tokenUsage = { inputTokens: 0, outputTokens: 0 };
 
-    if (multiPass) {
+    if (agentOverride === 'pi') {
+      const piPrompt = multiPass
+        ? [
+            fullPrompt,
+            '',
+            'ADDITIONAL SKILL-FIRST FORGE INSTRUCTION:',
+            'Perform the equivalent of a PM/spec-writer/verifier pass internally before answering.',
+            'Be especially careful about story decomposition quality, dependency correctness, and acceptance-criteria completeness.',
+            'If useful, include a top-level verificationReport object describing final structural issues/warnings/stats.',
+          ].join('\n')
+        : fullPrompt;
+
+      const piResult = await draftSpecWithPi({
+        cwd: workspace.path as string,
+        prompt: piPrompt,
+        model: resolvedModel,
+        timeoutMs: 300_000,
+      });
+      tokenUsage = piResult.usage;
+      usedProvider = 'pi';
+
+      try {
+        parsed = parseLLMJson(piResult.text) as typeof parsed;
+      } catch {
+        res.status(500).json(buildSpecError(
+          new Error('Pi forge drafter returned non-JSON'),
+          piResult.text,
+        ));
+        return;
+      }
+
+      if (!Array.isArray(parsed.stories)) {
+        res.status(500).json(buildSpecError(
+          new Error('Invalid spec structure from Pi forge drafter'),
+        ));
+        return;
+      }
+    } else if (multiPass) {
       // ── Multi-pass mode: Pass 1 (PM) → Pass 2 (Spec Writer) ──
       logger.info(`[Specs] Multi-pass generation enabled for "${effectiveTitle}"`);
 
@@ -2554,6 +2600,7 @@ interface BatchRequestItem {
   model?: string;
   storyCount?: number;
   domain?: string;
+  agentOverride?: 'claude' | 'opencode' | 'pi';
 }
 
 /**
@@ -2619,6 +2666,7 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   }
 
   const storyPrefix = 'US';
+  const agentOverride = item.agentOverride;
 
   // Discover skill + persona catalogs for batch brief
   const batchCatalogs = await buildCatalogContext(workspace.path, workspace.id);
@@ -2676,13 +2724,27 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     '- Your entire response must be valid JSON parseable by JSON.parse()',
   ].join('\n');
 
-  // Call LLM (use vault key if available for this user)
-  const batchVaultCreds = item.userId ? await resolveVaultCreds(item.userId, resolvedModel) : {};
-  const llmResult = await chatComplete(
-    [{ role: 'user', content: fullPrompt }],
-    { model: resolvedModel, apiKey: batchVaultCreds.apiKey, baseUrl: batchVaultCreds.baseUrl },
-  );
-  const rawResponse = llmResult.text;
+  // Call drafting engine (Pi skill-first path or legacy LLM path)
+  let rawResponse = '';
+  let draftingUsage = { inputTokens: 0, outputTokens: 0 };
+  if (agentOverride === 'pi') {
+    const piResult = await draftSpecWithPi({
+      cwd: workspace.path,
+      prompt: fullPrompt,
+      model: resolvedModel,
+      timeoutMs: 300_000,
+    });
+    rawResponse = piResult.text;
+    draftingUsage = piResult.usage;
+  } else {
+    const batchVaultCreds = item.userId ? await resolveVaultCreds(item.userId, resolvedModel) : {};
+    const llmResult = await chatComplete(
+      [{ role: 'user', content: fullPrompt }],
+      { model: resolvedModel, apiKey: batchVaultCreds.apiKey, baseUrl: batchVaultCreds.baseUrl },
+    );
+    rawResponse = llmResult.text;
+    draftingUsage = llmResult.usage;
+  }
 
   // Parse JSON
   let parsed: { stories: unknown[]; diagrams?: Record<string, unknown> };
@@ -2708,11 +2770,11 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
 
   // WAL event
-  const provider = getActiveProvider();
+  const provider = agentOverride === 'pi' ? 'pi' : getActiveProvider();
   await execute(`INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', $1, $2)`, [slug, JSON.stringify({
     title, domain: item.domain, storyCount: parsed.stories.length, provider, model: resolvedModel,
     hasSchema: !!ctx?.schema_snapshot,
-    inputTokens: llmResult.usage.inputTokens, outputTokens: llmResult.usage.outputTokens,
+    inputTokens: draftingUsage.inputTokens, outputTokens: draftingUsage.outputTokens,
   })]);
 
   // Snapshot existing spec if regenerating
@@ -2824,6 +2886,7 @@ async function processBatch(batch: BatchState): Promise<void> {
  *                     model: { type: string }
  *                     storyCount: { type: integer }
  *                     domain: { type: string }
+ *                     agentOverride: { type: string, enum: [claude, opencode, pi] }
  *     responses:
  *       201:
  *         description: Batch queued successfully
@@ -2869,6 +2932,7 @@ router.post('/generate/batch', async (req: Request, res: Response) => {
         model: b.model,
         storyCount: b.storyCount,
         domain: b.domain,
+        agentOverride: b.agentOverride,
         userId: batchUser.id,
         status: 'queued' as const,
       })),
