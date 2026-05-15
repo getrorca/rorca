@@ -55,6 +55,7 @@ import { advanceQueue } from './lib/run-queue';
 import { FlushBuffer } from './lib/flush-buffer';
 import { createOrUpdateAutoPr } from './lib/github-pr-creator';
 import { createDraftPr, finalizeDraftPr } from './lib/github-draft-pr';
+import { isPiExternalOrchestrationEnabled } from './lib/pi-execution-mode';
 
 // ── tsx binary resolution ─────────────────────────────────────────────────────
 
@@ -367,6 +368,47 @@ async function emitWalEvent(
     );
   } catch (err) {
     logger.warn({ err, eventType }, '[worker] Failed to emit WAL event');
+  }
+}
+
+async function getRunPrNumber(runId: number): Promise<number | null> {
+  const row = await queryOne<{ pr_number: number | null }>(
+    'SELECT pr_number FROM pipeline_runs WHERE id = $1',
+    [runId],
+  );
+  return row?.pr_number ?? null;
+}
+
+async function persistGhCliPrMetadata(
+  runId: number,
+  workspaceId: string | number,
+  worktreePath: string,
+  branchName: string,
+  eventType: 'pr_created' | 'pr_draft_created',
+): Promise<number | null> {
+  try {
+    const raw = execSync(
+      `gh pr list --head "${branchName}" --json number,url --limit 1`,
+      { cwd: worktreePath, encoding: 'utf8', stdio: 'pipe', timeout: 30_000 },
+    );
+    const parsed = JSON.parse(raw) as Array<{ number?: number; url?: string }>;
+    const pr = Array.isArray(parsed) ? parsed[0] : undefined;
+    if (!pr?.number) return null;
+
+    await execute(
+      'UPDATE pipeline_runs SET pr_number = $1, pr_creating = FALSE, pr_creation_error = NULL WHERE id = $2',
+      [pr.number, runId],
+    );
+    await emitWalEvent(eventType, workspaceId, {
+      run_id: runId,
+      pr_number: pr.number,
+      pr_url: pr.url ?? null,
+      branch: branchName,
+      source: 'gh_cli_fallback',
+    });
+    return pr.number;
+  } catch {
+    return null;
   }
 }
 
@@ -685,9 +727,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, specificStory, includeGraph, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
 
-    if (payload.agent === 'pi') {
+    if (payload.agent === 'pi' && isPiExternalOrchestrationEnabled()) {
       const runRow = await queryOne<{ workspace_id: number }>(
         'SELECT workspace_id FROM pipeline_runs WHERE id = $1',
         [payload.runId],
@@ -804,7 +846,9 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     if (model) {
       engineArgs.push('--model', model);
     }
-    if (startFromStoryId) {
+    if (specificStory) {
+      engineArgs.push('--story', specificStory);
+    } else if (startFromStoryId) {
       engineArgs.push('--start-from', startFromStoryId);
     }
     // US-004: Pass worktree context to execution-engine so it can log worktree info
@@ -1024,7 +1068,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
               case 'pr': {
                 // Push branch (already pushed per-story, but ensure) + create PR
-                try { await execute(`UPDATE pipeline_runs SET merge_status = 'pr_created' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
                 try {
                   const git = simpleGit(worktreePath);
                   await git.push('origin', payload.branchName, ['--set-upstream']);
@@ -1040,7 +1084,11 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                     workspacePath,
                     force: true,
                   });
-                  mergeLog('[merge-strategy:pr] PR created');
+                  const prNumber = await getRunPrNumber(runId);
+                  if (!prNumber) {
+                    throw new Error('GitHub PR integration did not persist a pr_number');
+                  }
+                  mergeLog(`[merge-strategy:pr] PR created (#${prNumber})`);
                 } catch (prErr: any) {
                   // Fallback: try gh CLI if GitHub API integration isn't configured
                   try {
@@ -1049,7 +1097,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                       `gh pr create --title "feat: ${specSlug}" --body "Automated spec execution via Rorca.\n\nRun #${runId} completed — all stories passed." --base main`,
                       { cwd: worktreePath, stdio: 'pipe', timeout: 30_000 },
                     );
-                    mergeLog('[merge-strategy:pr] PR created via gh CLI fallback');
+                    const prNumber = await persistGhCliPrMetadata(runId, workspaceId, worktreePath, payload.branchName, 'pr_created');
+                    if (prNumber) {
+                      mergeLog(`[merge-strategy:pr] PR created via gh CLI fallback (#${prNumber})`);
+                    } else {
+                      mergeLog('[merge-strategy:pr] gh CLI reported success but no PR metadata could be recovered');
+                    }
                   } catch (ghErr: any) {
                     mergeLog(`[merge-strategy:pr] PR creation failed (gh CLI fallback also failed): ${ghErr.message}`);
                     // Graceful degradation to branch-only
@@ -1061,7 +1114,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
               case 'draft-pr': {
                 // Push branch + create draft PR
-                try { await execute(`UPDATE pipeline_runs SET merge_status = 'pr_created' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
                 try {
                   const git = simpleGit(worktreePath);
                   await git.push('origin', payload.branchName, ['--set-upstream']);
@@ -1087,7 +1140,11 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                     totalStories: draftTotalStories,
                     force: true,
                   });
-                  mergeLog('[merge-strategy:draft-pr] Draft PR created');
+                  const prNumber = await getRunPrNumber(runId);
+                  if (!prNumber) {
+                    throw new Error('GitHub draft PR integration did not persist a pr_number');
+                  }
+                  mergeLog(`[merge-strategy:draft-pr] Draft PR created (#${prNumber})`);
                 } catch (prErr: any) {
                   // Fallback: try gh CLI
                   try {
@@ -1096,7 +1153,12 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
                       `gh pr create --draft --title "WIP: ${specSlug}" --body "Draft PR for review.\n\nRun #${runId} completed — all stories passed." --base main`,
                       { cwd: worktreePath, stdio: 'pipe', timeout: 30_000 },
                     );
-                    mergeLog('[merge-strategy:draft-pr] Draft PR created via gh CLI fallback');
+                    const prNumber = await persistGhCliPrMetadata(runId, workspaceId, worktreePath, payload.branchName, 'pr_draft_created');
+                    if (prNumber) {
+                      mergeLog(`[merge-strategy:draft-pr] Draft PR created via gh CLI fallback (#${prNumber})`);
+                    } else {
+                      mergeLog('[merge-strategy:draft-pr] gh CLI reported success but no PR metadata could be recovered');
+                    }
                   } catch (ghErr: any) {
                     mergeLog(`[merge-strategy:draft-pr] Draft PR creation failed: ${ghErr.message}`);
                     mergeLog('[merge-strategy:draft-pr] Falling back to branch-only — branch is on remote for manual PR creation');
@@ -1107,7 +1169,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
 
               case 'branch-only': {
                 // Just ensure branch is on remote — no PR, no merge
-                try { await execute(`UPDATE pipeline_runs SET merge_status = 'branch_pushed' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                try { await execute(`UPDATE pipeline_runs SET merge_status = 'pending' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
                 try {
                   const git = simpleGit(worktreePath);
                   await git.push('origin', payload.branchName, ['--set-upstream']);

@@ -45,6 +45,17 @@ import { parseAgentConfig, type AgentType } from './config';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
 import { requirePi } from './pi-detector';
+import {
+  buildPiDoneChecklist,
+  buildPiProgressLogPath,
+  buildPiServerSkillFiles,
+  buildPiStoryPromptContext,
+  ensurePiStoryProgressLog,
+  inferPiCandidateTests,
+  inferPiValidationCommands,
+  recordPiStoryProgressLog,
+} from './pi-autonomous-runner';
+import { isPiExternalOrchestrationEnabled } from './pi-execution-mode';
 import { detectCapability } from './reasoning-detector';
 import {
   loadOrchestrationConfig,
@@ -335,7 +346,7 @@ interface PiRpcServer {
   ready: boolean;
   cwd: string;
   model: string | null;
-  skillFile?: string;
+  skillFiles: string[];
 }
 let _piRpcServer: PiRpcServer | null = null;
 let _piRpcExitCleanupRegistered = false;
@@ -691,6 +702,25 @@ function buildStoryText(story: UserStory): string {
   return `${story.id}: ${story.title}\n${story.description}${ac ? `\nAcceptance Criteria:\n${ac}` : ''}`;
 }
 
+function storyAllowsNoCodeChanges(story: UserStory, mode: 'impl' | 'qa' | 'journey'): boolean {
+  if (mode === 'journey' || mode === 'qa') return true;
+
+  const title = story.title.trim().toLowerCase();
+  if (/^(verify|validate|confirm|ensure|review|audit|check|inspect)\b/.test(title)) {
+    return true;
+  }
+
+  const acceptance = [story.description, ...(story.acceptanceCriteria ?? [])].join('\n').toLowerCase();
+  return [
+    'no source code files are modified',
+    'no source code, tests, or configuration files are modified',
+    'read-only',
+    'documentation only',
+    'no new dependencies are installed',
+    'only file modified',
+  ].some(fragment => acceptance.includes(fragment));
+}
+
 /** PG-020: Read last N bytes of a log file for memory synthesis context */
 function readLogTail(logPath: string, maxBytes: number = 8000): string {
   try {
@@ -888,16 +918,21 @@ function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void)
   };
 }
 
+function samePiSkillFiles(a: string[], b: string[]): boolean {
+  if (a.length !== b.length) return false;
+  return a.every((value, index) => value === b[index]);
+}
+
 async function startPiRpcServer(
   cwd: string,
   model: string | null,
-  skillFile?: string,
+  skillFiles: string[] = [],
 ): Promise<PiRpcServer> {
   if (
     _piRpcServer?.ready
     && _piRpcServer.cwd === cwd
     && _piRpcServer.model === model
-    && _piRpcServer.skillFile === skillFile
+    && samePiSkillFiles(_piRpcServer.skillFiles, skillFiles)
   ) {
     return _piRpcServer;
   }
@@ -906,7 +941,7 @@ async function startPiRpcServer(
     await stopPiRpcServer();
   }
 
-  const args = ['--mode', 'rpc', ...(model ? ['--model', model] : []), ...(skillFile ? ['--skill', skillFile] : [])];
+  const args = ['--mode', 'rpc', ...(model ? ['--model', model] : []), ...skillFiles.flatMap(skillFile => ['--skill', skillFile])];
   const child = spawn(PI_BIN, args, {
     cwd,
     env: buildCleanEnv(),
@@ -922,7 +957,7 @@ async function startPiRpcServer(
     ready: false,
     cwd,
     model,
-    skillFile,
+    skillFiles,
   };
 
   child.stderr?.on('data', (chunk: Buffer | string) => {
@@ -1092,17 +1127,6 @@ async function preparePiRpcSession(
   return extractPiSessionId(state);
 }
 
-function resolvePiSkillFile(cwd: string, override?: string): string | undefined {
-  const candidates = override
-    ? [override]
-    : [
-        path.join(cwd, '.rorca', 'skills', 'rorca.md'),
-        path.join(cwd, '.claude', 'skills', 'rorca.md'),
-      ];
-
-  return candidates.find(candidate => fs.existsSync(candidate));
-}
-
 function getStoryAnnotationText(spec: SpecJson | undefined, story: UserStory): string | undefined {
   const annotations = spec?.storyAnnotations;
   if (typeof annotations === 'string') return annotations.trim() || undefined;
@@ -1115,8 +1139,10 @@ function getStoryAnnotationText(spec: SpecJson | undefined, story: UserStory): s
 
 async function buildPiSessionOptions(
   runId: number,
+  cwd: string,
   story: UserStory,
   workspaceId: string | null,
+  mode: 'impl' | 'qa' | 'journey',
   spec?: SpecJson,
 ): Promise<PiSessionOptions | undefined> {
   if (!workspaceId) return undefined;
@@ -1133,10 +1159,34 @@ async function buildPiSessionOptions(
     storyAnnotations: getStoryAnnotationText(spec, story),
   });
 
-  const skillFile = path.join(os.tmpdir(), `rorca-direction-${runId}-${story.id}.md`);
-  fs.writeFileSync(skillFile, directionText, { encoding: 'utf8', mode: 0o600 });
-  return { skillFile };
+  const progressLogPath = buildPiProgressLogPath(cwd, runId, story.id);
+  const candidateFiles = extractPredictedPaths(story);
+  const candidateTests = inferPiCandidateTests(cwd, candidateFiles);
+  const validationCommands = inferPiValidationCommands(cwd, mode);
+  const doneChecklist = buildPiDoneChecklist(getAcceptance(story), mode);
+
+  ensurePiStoryProgressLog(progressLogPath, {
+    runId,
+    storyId: story.id,
+    storyTitle: story.title,
+    acceptanceCriteria: getAcceptance(story),
+    mode,
+    doneChecklist,
+    candidateFiles,
+    candidateTests,
+    validationCommands,
+  });
+
+  return {
+    progressLogPath,
+    directionText: directionText.trim() || undefined,
+    doneChecklist,
+    candidateFiles,
+    candidateTests,
+    validationCommands,
+  };
 }
+
 
 async function deleteFileIfExists(filePath?: string): Promise<void> {
   if (!filePath) return;
@@ -1388,8 +1438,12 @@ interface PiRetryContext {
 }
 
 interface PiSessionOptions {
-  /** Explicit `--skill` path override. When set, auto-lookup is skipped entirely. */
-  skillFile?: string;
+  progressLogPath: string;
+  directionText?: string;
+  doneChecklist?: string[];
+  candidateFiles?: string[];
+  candidateTests?: string[];
+  validationCommands?: string[];
 }
 
 interface TokenUpdate {
@@ -1484,6 +1538,7 @@ function runAgent(
   mcpServers?: Record<string, string>,
   retryContext?: PiRetryContext,
   onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
+  piServerSkillFiles?: string[],
   piSessionOptions?: PiSessionOptions,
 ): Promise<AgentResult> {
   switch (agentType) {
@@ -1495,7 +1550,7 @@ function runAgent(
       // thinking/effort flags are not forwarded to Codex
       return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServers);
     case 'pi':
-      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piSessionOptions);
+      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piServerSkillFiles, piSessionOptions);
   }
 }
 
@@ -2070,7 +2125,8 @@ async function spawnPiRpc(
   onTokenUpdate?: TokenUpdateCallback,
   retryContext?: PiRetryContext,
   onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
-  piSessionOptions?: PiSessionOptions,
+  piServerSkillFiles: string[] = [],
+  _piSessionOptions?: PiSessionOptions,
 ): Promise<AgentResult> {
   const previousStory = _piRpcStoryQueue;
   let releaseStoryQueue!: () => void;
@@ -2083,8 +2139,7 @@ async function spawnPiRpc(
 
   const startTime = Date.now();
   try {
-    const skillFile = resolvePiSkillFile(cwd, piSessionOptions?.skillFile);
-    const server = await startPiRpcServer(cwd, model, skillFile);
+    const server = await startPiRpcServer(cwd, model, piServerSkillFiles);
     const piSessionId = await preparePiRpcSession(
       (command) => sendPiRpcCommand(server, command),
       retryContext,
@@ -3528,10 +3583,17 @@ async function executeStory(
     }
   }
 
-  let prompt = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath, roleSection, personaRegistry, skillsSection, graphSection);
+  const piSessionOptions = effectiveAgent === 'pi'
+    ? await buildPiSessionOptions(config.runId, effectiveCwd, story, workspaceId, mode, spec)
+    : undefined;
+  const piServerSkillFiles = effectiveAgent === 'pi'
+    ? buildPiServerSkillFiles(effectiveCwd, config.runId).skillFiles
+    : [];
+
+  let promptBody = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath, roleSection, personaRegistry, skillsSection, graphSection);
 
   if (wantsBrowser && browserMcpUrl) {
-    prompt += [
+    promptBody += [
       '',
       '## Browser MCP',
       'The `playwright` MCP server is active for this story. Use it for all UI verification:',
@@ -3546,7 +3608,7 @@ async function executeStory(
   }
 
   if (wantsChrome && chromeMcpUrl) {
-    prompt += [
+    promptBody += [
       '',
       '## Chrome DevTools MCP',
       'The `chrome-devtools` MCP server is active for this story. It is attached to the',
@@ -3565,7 +3627,18 @@ async function executeStory(
   }
 
   const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
-  fs.writeFileSync(promptLogFile, prompt);
+
+  const recordPiProgress = (update: {
+    completedWork?: string[];
+    remainingWork?: string[];
+    keyDecisions?: string[];
+    modifiedFiles?: string[];
+    knownIssues?: string[];
+    validationResults?: string[];
+  }): void => {
+    if (!piSessionOptions?.progressLogPath) return;
+    recordPiStoryProgressLog(piSessionOptions.progressLogPath, update);
+  };
 
   const timestamp = new Date().toISOString().replace(/[:.]/g, '').slice(0, 15);
   const storyLogFile = path.join(logDir, `${story.id}_${timestamp}.log`);
@@ -3612,9 +3685,6 @@ async function executeStory(
 
   const rateLimitKey = `rl:${story.id}`;
   let rateLimitAttempts = retryCounts.get(rateLimitKey) ?? 0;
-  const piSessionOptions = effectiveAgent === 'pi'
-    ? await buildPiSessionOptions(config.runId, story, workspaceId, spec)
-    : undefined;
 
   // Real-time token update callback — emits WAL events as tokens stream in
   const tokenUpdateCallback: TokenUpdateCallback | undefined =
@@ -3647,6 +3717,10 @@ async function executeStory(
       const piRetryContext: PiRetryContext | undefined = effectiveAgent === 'pi'
         ? { isRetry: retryAttempt > 0, attempt: retryAttempt }
         : undefined;
+      const prompt = effectiveAgent === 'pi' && piSessionOptions
+        ? `${buildPiStoryPromptContext({ ...piSessionOptions, attempt: retryAttempt + 1, maxAttempts: MAX_RETRIES })}\n\n${promptBody}`
+        : promptBody;
+      fs.writeFileSync(promptLogFile, prompt);
 
       const result = await runAgent(
         effectiveAgent,
@@ -3663,6 +3737,7 @@ async function executeStory(
         Object.keys(mcpServers).length > 0 ? mcpServers : undefined,
         piRetryContext,
         effectiveAgent === 'pi' ? emitStoryStarted : undefined,
+        piServerSkillFiles,
         piSessionOptions,
       );
 
@@ -3719,6 +3794,11 @@ async function executeStory(
         }
 
         logger.info(`${story.id} rate limited ${rateLimitAttempts} times — exhausted. Marking failed.`);
+        recordPiProgress({
+          knownIssues: [`Engine exhausted rate-limit retries on ${effectiveAgent}.`],
+          validationResults: [`Attempt failed: rate limit exhausted after ${rateLimitAttempts} retries.`],
+          remainingWork: ['Resume once rate limits clear or reroute the story.'],
+        });
         markStorySkipped(config.jsonPath, story.id);
         rsMarkStoryFailed(effectiveCwd, {
           storyId: story.id, title: story.title, status: 'failed',
@@ -3748,6 +3828,11 @@ async function executeStory(
 
       const backoffMs = RATE_LIMIT_BACKOFF_MS[rateLimitAttempts - 1] ?? RATE_LIMIT_BACKOFF_MS[RATE_LIMIT_BACKOFF_MS.length - 1];
       logger.info(`${story.id} rate limited (attempt ${rateLimitAttempts}/${MAX_RATE_LIMIT_RETRIES}). Retrying in ${backoffMs / 1000}s...`);
+      recordPiProgress({
+        knownIssues: [`Attempt ${rateLimitAttempts}/${MAX_RATE_LIMIT_RETRIES} hit a rate limit on ${effectiveAgent}.`],
+        validationResults: [`Retrying after rate limit with ${backoffMs / 1000}s backoff.`],
+        remainingWork: ['Wait for the retry and continue from the progress log context.'],
+      });
 
       if (workspaceId) {
         await emitWalEvent(config.port, 'story_rate_limited', workspaceId, {
@@ -3786,6 +3871,11 @@ async function executeStory(
 
       if (!gate.passed) {
         logger.info(`${story.id} agent succeeded but gate failed: ${gate.reason}`);
+        recordPiProgress({
+          knownIssues: [`Engine gate failed: ${gate.reason}.`],
+          validationResults: [`Gate failure: ${gate.reason}${gate.output ? ` — ${String(gate.output).slice(0, 240)}` : ''}`],
+          remainingWork: [`Fix the ${gate.reason} failure and rerun validation.`],
+        });
 
         // Standard gate failure handling — retry up to MAX_RETRIES, then skip
         const currentRetries = (retryCounts.get(story.id) ?? 0) + 1;
@@ -3828,37 +3918,53 @@ async function executeStory(
 
       // Gate passed — verify agent produced meaningful code changes (not just metadata)
       // Journey mode stories browse the live app and produce no file edits — skip this gate entirely.
+      let meaningfulChanges: string[] = [];
       try {
         const porcelain = mode === 'journey' ? '' : execSync('git status --porcelain', { cwd: effectiveCwd, encoding: 'utf8' }).trim();
         const METADATA_PREFIXES = ['forge/specs/', 'progress', '.rorca/', '.claude/', '.opencode/', '.playwright-mcp/'];
-        const meaningfulChanges = porcelain.split('\n').filter(line => {
+        meaningfulChanges = porcelain.split('\n').filter(line => {
           if (!line.trim()) return false;
           const file = line.substring(3); // strip git status prefix
           return !METADATA_PREFIXES.some(p => file.startsWith(p));
         });
         if (mode !== 'journey' && meaningfulChanges.length === 0) {
-          logger.warn(`${story.id}: Agent exited 0 but produced no code changes — treating as failure`);
-          if (workspaceId) {
-            await emitWalEvent(config.port, 'story_failed', workspaceId, {
-              run_id: config.runId, story_id: story.id, reason: 'no_code_changes',
-              summary: 'Agent subprocess exited successfully but did not modify any code files.',
-              log_file: storyLogFile,
-            }, story.id);
-            await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+          if (storyAllowsNoCodeChanges(story, mode)) {
+            logger.info(`${story.id}: No meaningful file changes detected, but the story is validation/documentation-only — allowing pass`);
+          } else {
+            logger.warn(`${story.id}: Agent exited 0 but produced no code changes — treating as failure`);
+            recordPiProgress({
+              knownIssues: ['Agent exited successfully but no meaningful code changes were detected.'],
+              validationResults: ['Validation failed: no meaningful file changes detected.'],
+              remainingWork: ['Implement the required changes and rerun validation.'],
+            });
+            if (workspaceId) {
+              await emitWalEvent(config.port, 'story_failed', workspaceId, {
+                run_id: config.runId, story_id: story.id, reason: 'no_code_changes',
+                summary: 'Agent subprocess exited successfully but did not modify any code files.',
+                log_file: storyLogFile,
+              }, story.id);
+              await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'fail', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
+            }
+            const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
+            retryCounts.set(story.id, noChangeRetries);
+            if (noChangeRetries >= MAX_RETRIES) {
+              markStorySkipped(config.jsonPath, story.id);
+              return 'failed';
+            }
+            continue;
           }
-          const noChangeRetries = (retryCounts.get(story.id) ?? 0) + 1;
-          retryCounts.set(story.id, noChangeRetries);
-          if (noChangeRetries >= MAX_RETRIES) {
-            markStorySkipped(config.jsonPath, story.id);
-            return 'failed';
-          }
-          continue;
         }
       } catch {
         // git status failed — proceed normally rather than blocking
       }
 
       // All checks passed — mark story as done
+      recordPiProgress({
+        completedWork: ['Engine marked the story passed after validation gates succeeded.'],
+        modifiedFiles: meaningfulChanges,
+        keyDecisions: [`Validated with agent ${effectiveAgent}${currentModel ? ` using model ${currentModel}` : ''}.`],
+        validationResults: ['Story passed execution and validation gates.'],
+      });
       markStoryPassed(config.jsonPath, story.id);
       retryCounts.delete(story.id);
       retryCounts.delete(rateLimitKey);
@@ -4022,6 +4128,11 @@ async function executeStory(
     if (result.exitCode === 124) {
       logger.info(`${story.id} timed out after ${timeoutMin}m (exit 124)`);
       logger.info(`   Log: ${storyLogFile}`);
+      recordPiProgress({
+        knownIssues: [`Story timed out after ${timeoutMin} minutes.`],
+        validationResults: [`Attempt timed out after ${timeoutMin}m.`],
+        remainingWork: ['Investigate the timeout, split the work, or run narrower checks before retrying.'],
+      });
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
@@ -4061,6 +4172,11 @@ async function executeStory(
     if (!classified.retryable) {
       logger.info(`${story.id} failed (non-retryable): ${classified.category} — ${classified.message}`);
       logger.info(`   Log: ${storyLogFile}`);
+      recordPiProgress({
+        knownIssues: [`Non-retryable ${effectiveAgent} failure: ${classified.category}.`],
+        validationResults: [`Attempt failed: ${classified.category} — ${classified.message}`],
+        remainingWork: ['Resolve the configuration or runtime issue before rerunning.'],
+      });
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
@@ -4097,6 +4213,11 @@ async function executeStory(
       logger.info(`${story.id} failed after ${MAX_RETRIES} attempts. Skipping.`);
       logger.info(`   Log: ${storyLogFile}`);
       logger.info(`   Error: ${classified.message}`);
+      recordPiProgress({
+        knownIssues: [`Engine exhausted retries due to ${classified.category}.`],
+        validationResults: [`Max retries reached: ${classified.message}`],
+        remainingWork: ['Inspect the logs and resolve the underlying failure before rerunning.'],
+      });
       markStorySkipped(config.jsonPath, story.id);
       rsMarkStoryFailed(effectiveCwd, {
         storyId: story.id, title: story.title, status: 'failed',
@@ -4130,6 +4251,11 @@ async function executeStory(
     logger.info(`${story.id} failed (attempt ${currentRetries}/${MAX_RETRIES}): ${classified.category}`);
     logger.info(`   Log: ${storyLogFile}`);
     logger.info(`   Error: ${classified.message}`);
+    recordPiProgress({
+      knownIssues: [`Attempt ${currentRetries}/${MAX_RETRIES} failed: ${classified.category}.`],
+      validationResults: [`Retry scheduled after failure: ${classified.message}`],
+      remainingWork: [`Address ${classified.category} and continue from the progress log.`],
+    });
     if (workspaceId) {
       await emitWalEvent(config.port, 'story_retry', workspaceId, {
         run_id: config.runId,
@@ -4143,7 +4269,7 @@ async function executeStory(
     return 'failed';
     }
   } finally {
-    await deleteFileIfExists(piSessionOptions?.skillFile);
+    // Pi story progress logs are intentionally persistent across retries and compaction.
   }
 }
 
@@ -4214,8 +4340,8 @@ function computeBlockedStories(
 async function main(): Promise<void> {
   const config = parseArgs();
 
-  if (process.env.RORCA_AGENT === 'pi' && process.env.RORCA_PROCESS_ROLE === 'engine') {
-    logger.info('[Pi-native] Pi-native mode: orchestration owned by Pi extension');
+  if (process.env.RORCA_AGENT === 'pi' && process.env.RORCA_PROCESS_ROLE === 'engine' && isPiExternalOrchestrationEnabled()) {
+    logger.info('[Pi-native] External Pi orchestration enabled — execution engine standing by');
     process.exit(0);
   }
 
@@ -4314,12 +4440,17 @@ async function main(): Promise<void> {
   initRunState(config.cwd, specId, config.runId);
   const resumeCtx = getResumeContext(config.cwd, specId);
 
+  const piServerSkillBundle = requiredEngines.has('pi')
+    ? buildPiServerSkillFiles(config.cwd, config.runId)
+    : null;
+
   if (requiredEngines.has('pi')) {
-    await startPiRpcServer(config.cwd, config.agentModel);
+    await startPiRpcServer(config.cwd, config.agentModel, piServerSkillBundle?.skillFiles ?? []);
   }
 
   async function cleanupBrowserServers(): Promise<void> {
     await stopPiRpcServer();
+    await deleteFileIfExists(piServerSkillBundle?.generatedSkillFile);
     if (_playwrightMcpServerPid) {
       try { process.kill(_playwrightMcpServerPid, 'SIGTERM'); } catch { /* already gone */ }
     }

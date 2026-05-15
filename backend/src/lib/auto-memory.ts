@@ -218,8 +218,12 @@ export async function autoSynthesizeMemory(
 
 // ─── Spec-Generation Memory Capture (PG-023) ────────────────────────────────
 
-/** Timeout for spec memory synthesis — kept tight like per-story (< 5s target) */
-const SPEC_SYNTHESIS_TIMEOUT_MS = 5_000;
+/**
+ * Timeout for spec memory synthesis.
+ * Spec synthesis runs fire-and-forget after the HTTP response, so we can afford a slightly
+ * larger budget than the per-story path to avoid dropping most spec-memory captures.
+ */
+const SPEC_SYNTHESIS_TIMEOUT_MS = 15_000;
 
 /**
  * After successful spec generation, synthesizes 1-2 memory entries capturing
