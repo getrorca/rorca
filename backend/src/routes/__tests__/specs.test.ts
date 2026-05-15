@@ -32,9 +32,14 @@ jest.mock('../../lib/llm-client', () => ({
   SUPPORTED_MODELS: ['claude-sonnet-4-5-20250929', 'claude-opus-4-6', 'claude-haiku-4-5-20251001'],
 }));
 
+jest.mock('../../lib/pi-spec-drafter', () => ({
+  draftSpecWithPi: jest.fn(),
+}));
+
 let app: Express;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
+let mockDraftSpecWithPi: jest.Mock;
 let authToken: string;
 
 const validLlmResponse = JSON.stringify({
@@ -69,7 +74,9 @@ beforeAll(async () => {
   const serverMod = require('../../server');
   app = serverMod.default;
   const llmClient = require('../../lib/llm-client');
+  const piDrafter = require('../../lib/pi-spec-drafter');
   mockChatComplete = llmClient.chatComplete;
+  mockDraftSpecWithPi = piDrafter.draftSpecWithPi;
 });
 
 beforeEach(async () => {
@@ -142,6 +149,37 @@ test('POST /api/specs/generate with valid body returns slug, stories, diagrams, 
   expect(res.body.specPath).toContain('auth-system.json');
   expect(res.body.diagramsPath).toBeDefined();
   expect(res.body.diagramsPath).toContain('auth-system-diagrams.md');
+});
+
+test('POST /api/specs/generate with agentOverride=pi uses the Pi forge drafter path', async () => {
+  mockDraftSpecWithPi.mockResolvedValue({
+    text: validLlmResponse,
+    usage: { inputTokens: 33, outputTokens: 44 },
+  });
+
+  const res = await request(app)
+    .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({
+      workspaceId: 'ws-test',
+      domain: 'backend',
+      title: 'Pi Forge',
+      brief: 'Generate via Pi',
+      agentOverride: 'pi',
+    });
+
+  expect(res.status).toBe(200);
+  expect(res.body.slug).toBe('pi-forge');
+  expect(res.body.provider).toBe('pi');
+  expect(res.body.model).toBe('claude-sonnet-4-5-20250929');
+  expect(res.body.usage).toEqual({ inputTokens: 33, outputTokens: 44 });
+  expect(mockDraftSpecWithPi).toHaveBeenCalledTimes(1);
+  const draftingCalls = mockChatComplete.mock.calls.filter((call) => {
+    const messages = call[0] as Array<{ content?: string }> | undefined;
+    return Array.isArray(messages)
+      && messages.some((message) => typeof message?.content === 'string' && message.content.includes('TASK: Generate a software specification JSON'));
+  });
+  expect(draftingCalls).toHaveLength(0);
 });
 
 test('LLM returns non-JSON → 500 with error and raw', async () => {
@@ -1040,6 +1078,35 @@ describe('POST /api/specs/generate/batch', () => {
     expect(res.body.batchId).toBeDefined();
     expect(typeof res.body.batchId).toBe('string');
     expect(res.body.briefCount).toBe(2);
+  });
+
+  test('batch generation calls the Pi forge drafter when a brief sets agentOverride=pi', async () => {
+    mockDraftSpecWithPi.mockResolvedValue({
+      text: validLlmResponse,
+      usage: { inputTokens: 11, outputTokens: 22 },
+    });
+
+    const createRes = await request(app)
+      .post('/api/specs/generate/batch')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        briefs: [
+          { brief: 'Build user auth', workspaceId: 'ws-test', title: 'Auth Feature', agentOverride: 'pi' },
+        ],
+      });
+
+    expect(createRes.status).toBe(201);
+    expect(createRes.body.batchId).toBeDefined();
+
+    await new Promise((resolve) => setTimeout(resolve, 150));
+
+    const statusRes = await request(app)
+      .get(`/api/specs/generate/batch/${createRes.body.batchId}`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(statusRes.status).toBe(200);
+    expect(mockDraftSpecWithPi).toHaveBeenCalled();
+    expect(['generating', 'completed']).toContain(statusRes.body.items[0].status);
   });
 
   test('missing briefs array → 400', async () => {

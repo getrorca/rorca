@@ -2458,7 +2458,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     try {
       const result = await apiFetch<GeneratedSpec>('/api/specs/generate', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
-        body: JSON.stringify({ workspaceId, domain: workspace?.domain || undefined, specName: specName || undefined, storyCount, specBrief, model: selectedModel || undefined, ...(reasoningCapability.supportsReasoning && reasoningEnabled ? { reasoning: { enabled: true, effort: effortIsAuto ? (autoEffortResult?.effort ?? 'medium') : reasoningEffort } } : {}) }),
+        body: JSON.stringify({ workspaceId, domain: workspace?.domain || undefined, specName: specName || undefined, storyCount, specBrief, model: selectedModel || undefined, agentOverride: 'pi', ...(reasoningCapability.supportsReasoning && reasoningEnabled ? { reasoning: { enabled: true, effort: effortIsAuto ? (autoEffortResult?.effort ?? 'medium') : reasoningEffort } } : {}) }),
       });
       setApiDone(true);
       // Map backend response fields: backend returns { slug, title } but GeneratedSpec expects { slug, specName }

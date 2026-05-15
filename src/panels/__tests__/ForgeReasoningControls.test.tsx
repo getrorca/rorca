@@ -569,7 +569,7 @@ describe('TriggerPopover — Reasoning section', () => {
     }, { timeout: 3000 });
   });
 
-  it('does NOT fetch model-capability when specModel is not provided', async () => {
+  it('fetches model-capability from the selected agent model when specModel is not provided', async () => {
     mockApiFetch.mockImplementation(buildTriggerMock());
 
     render(
@@ -580,13 +580,12 @@ describe('TriggerPopover — Reasoning section', () => {
       />,
     );
 
-    // Give time for any async fetches to complete
-    await new Promise(r => setTimeout(r, 200));
-
-    const capCalls = mockApiFetch.mock.calls.filter(([p]) =>
-      (p as string).includes('/api/config/model-capability'),
-    );
-    expect(capCalls.length).toBe(0);
+    await waitFor(() => {
+      const capCalls = mockApiFetch.mock.calls.filter(([p]) =>
+        (p as string).includes('/api/config/model-capability'),
+      );
+      expect(capCalls.length).toBeGreaterThanOrEqual(1);
+    }, { timeout: 3000 });
   });
 
   // ── Collapsible expand/collapse ────────────────────────────────────────────

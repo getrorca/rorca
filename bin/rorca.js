@@ -2357,6 +2357,7 @@ async function runForge(brief, options) {
         body: JSON.stringify({
             brief,
             workspaceId: workspace.id,
+            agentOverride: 'pi',
         }),
     }, 120_000);
     let specSlug = typeof generated.slug === 'string' ? generated.slug : undefined;

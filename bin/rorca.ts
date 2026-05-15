@@ -2876,6 +2876,7 @@ async function runForge(brief: string, options: { approve?: boolean; run?: boole
     body: JSON.stringify({
       brief,
       workspaceId: workspace.id,
+      agentOverride: 'pi',
     }),
   }, 120_000);
 
