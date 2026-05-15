@@ -151,4 +151,42 @@ describe('CLI-016: GET /api/config/pi-models', () => {
 
     nowSpy.mockRestore();
   });
+
+  it('does not cache empty results so a later refresh can recover models', async () => {
+    const nowSpy = jest.spyOn(Date, 'now');
+    mockDetectPi.mockReturnValue({
+      piInstalled: true,
+      piVersion: '1.2.3',
+      piBinPath: '/usr/local/bin/pi',
+    });
+    mockListPiModels
+      .mockReturnValueOnce([])
+      .mockReturnValueOnce([
+        {
+          provider: 'openai-codex',
+          model: 'gpt-5.1',
+          contextTokens: 272000,
+          maxOutTokens: 128000,
+          thinking: true,
+          images: true,
+        },
+      ]);
+
+    const app = await buildApp();
+    const request = require('supertest');
+
+    nowSpy.mockReturnValue(1_000);
+    const first = await request(app).get('/api/config/pi-models');
+
+    nowSpy.mockReturnValue(2_000);
+    const second = await request(app).get('/api/config/pi-models');
+
+    expect(first.status).toBe(200);
+    expect(first.body.models).toEqual([]);
+    expect(second.status).toBe(200);
+    expect(second.body.models).toHaveLength(1);
+    expect(mockListPiModels).toHaveBeenCalledTimes(2);
+
+    nowSpy.mockRestore();
+  });
 });

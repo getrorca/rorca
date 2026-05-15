@@ -186,8 +186,6 @@ router.post('/', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { throw new AuthError('No user found'); return; }
 
-  const userClient = await withUserClient(req);
-
   const { workspaceId, provider, key, label, base_url } = req.body;
 
   if (!workspaceId || typeof workspaceId !== 'string') {
@@ -215,21 +213,11 @@ router.post('/', async (req: Request, res: Response) => {
   const safeLabel = typeof label === 'string' ? label.trim() : '';
   const safeBaseUrl = typeof base_url === 'string' && base_url.trim() ? base_url.trim() : null;
 
-  const { error } = await userClient
-    .from('api_key_vault')
-    .insert({
-      id,
-      workspace_id: workspaceId,
-      user_id: user.id,
-      provider,
-      encrypted_key: encryptedKey,
-      label: safeLabel,
-      base_url: safeBaseUrl,
-    });
-
-  if (error) {
-    throw new AuthError(error.message);
-  }
+  await execute(
+    `INSERT INTO api_key_vault (id, workspace_id, user_id, provider, encrypted_key, label, base_url)
+     VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+    [id, workspaceId, user.id, provider, encryptedKey, safeLabel, safeBaseUrl],
+  );
 
   // Invalidate embedding provider cache so auto-detection picks up the new key immediately
   invalidateProviderCache();
@@ -367,35 +355,20 @@ router.delete('/:id', async (req: Request, res: Response) => {
   }
   await assertWorkspaceAccess(req, workspaceId, 'admin');
 
-  const userClient = await withUserClient(req);
-
-  const { data: existingRows, error: selectError } = await userClient
-    .from('api_key_vault')
-    .select('id, spend_total_usd')
-    .eq('id', keyId)
-    .eq('workspace_id', workspaceId)
-    .limit(1);
-
-  if (selectError) {
-    throw new AuthError(selectError.message);
-  }
-
-  const existing = existingRows?.[0] as Pick<VaultRow, 'id' | 'spend_total_usd'> | undefined;
+  const existing = await queryOne<Pick<VaultRow, 'id' | 'spend_total_usd'>>(
+    `SELECT id, spend_total_usd FROM api_key_vault WHERE id = $1 AND workspace_id = $2`,
+    [keyId, workspaceId],
+  );
 
   if (!existing) {
     throw new NotFoundError('Key not found');
     return;
   }
 
-  const { error: deleteError } = await userClient
-    .from('api_key_vault')
-    .delete()
-    .eq('id', keyId)
-    .eq('workspace_id', workspaceId);
-
-  if (deleteError) {
-    throw new AuthError(deleteError.message);
-  }
+  await execute(
+    `DELETE FROM api_key_vault WHERE id = $1 AND workspace_id = $2`,
+    [keyId, workspaceId],
+  );
 
   // Invalidate embedding provider cache so auto-detection reflects the removed key
   invalidateProviderCache();
@@ -440,7 +413,6 @@ router.delete('/:id', async (req: Request, res: Response) => {
 router.post('/test', async (req: Request, res: Response) => {
   const user = await getEffectiveUser(req);
   if (!user) { throw new AuthError('No user found'); return; }
-  const userClient = await withUserClient(req);
   const { workspaceId, provider } = req.body as { workspaceId?: string; provider?: string };
 
   if (!workspaceId || typeof workspaceId !== 'string') {
@@ -466,19 +438,12 @@ router.post('/test', async (req: Request, res: Response) => {
 
     if (provider !== 'claude-cli') {
       // Look up vault key for this user + provider
-      const { data: rows, error: selectError } = await userClient
-        .from('api_key_vault')
-        .select('id, encrypted_key, base_url')
-        .eq('workspace_id', workspaceId)
-        .eq('provider', provider)
-        .order('created_at', { ascending: false })
-        .limit(1);
-
-      if (selectError) {
-        throw new AuthError(selectError.message);
-      }
-
-      const row = rows?.[0] as Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'> | undefined;
+      const row = await queryOne<Pick<VaultRow, 'id' | 'encrypted_key' | 'base_url'>>(
+        `SELECT id, encrypted_key, base_url FROM api_key_vault
+         WHERE workspace_id = $1 AND provider = $2
+         ORDER BY created_at DESC LIMIT 1`,
+        [workspaceId, provider]
+      );
 
       if (!row) {
         throw new ValidationError(`No API key stored for provider "${provider}". Add a key first.`);

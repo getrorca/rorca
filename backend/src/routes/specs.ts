@@ -415,7 +415,7 @@ interface UserStory {
   dependsOn: string[];
   complexity?: number;
   priority?: number;  // 1=urgent, 2=high, 3=normal (default), 4=low
-  timeoutMinutes?: number;  // 5-120, default 45
+  timeoutMinutes?: number;  // 5-240, default 45
   model?: string;           // Per-story execution model override
   suggestedSkills?: SuggestedSkillRaw[];
   suggestedPersona?: string;
@@ -5505,7 +5505,7 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
  *     tags: [Specs]
  *     summary: Update a single story
  *     operationId: updateStory
- *     description: Updates fields on a single story within a spec (pending or approved). Creates a version snapshot before applying changes. Supports updating title, description, acceptanceCriteria, complexity (1-5), priority (1-4), and timeoutMinutes (5-120).
+ *     description: Updates fields on a single story within a spec (pending or approved). Creates a version snapshot before applying changes. Supports updating title, description, acceptanceCriteria, complexity (1-5), priority (1-4), and timeoutMinutes (5-240).
  *     parameters:
  *       - in: path
  *         name: specId
@@ -5529,7 +5529,7 @@ router.patch('/:specId/stories/:storyId', async (req: Request, res: Response) =>
  *               acceptanceCriteria: { type: array, items: { type: string } }
  *               complexity: { type: integer, minimum: 1, maximum: 5 }
  *               priority: { type: integer, minimum: 1, maximum: 4 }
- *               timeoutMinutes: { type: integer, minimum: 5, maximum: 120 }
+ *               timeoutMinutes: { type: integer, minimum: 5, maximum: 240 }
  *     responses:
  *       200:
  *         description: Story updated
@@ -5565,8 +5565,8 @@ router.put('/:specId/stories/:storyId', async (req: Request, res: Response) => {
       return;
     }
 
-    if (timeoutMinutes !== undefined && (!Number.isInteger(timeoutMinutes) || timeoutMinutes < 5 || timeoutMinutes > 120)) {
-      throw new ValidationError('timeoutMinutes must be an integer between 5 and 120');
+    if (timeoutMinutes !== undefined && (!Number.isInteger(timeoutMinutes) || timeoutMinutes < 5 || timeoutMinutes > 240)) {
+      throw new ValidationError('timeoutMinutes must be an integer between 5 and 240');
       return;
     }
 
