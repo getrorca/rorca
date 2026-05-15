@@ -960,18 +960,23 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     // Root cause fix (US-007): 'close' fires after all stdio streams drain,
     // guaranteeing flushPending() sees every byte the engine wrote.
     let capturedCode: number | null = null;
-    child.on('exit', (code) => { capturedCode = code; });
+    let capturedSignal: NodeJS.Signals | null = null;
+    child.on('exit', (code, signal) => {
+      capturedCode = code;
+      capturedSignal = signal;
+    });
 
     child.on('close', async () => {
       try {
         await flushPending();
 
         const code = capturedCode;
+        const signal = capturedSignal;
         activeProcesses.delete(runId);
 
 
         const wasCancelled = cancellingRuns.delete(runId);
-        let status = wasCancelled ? 'cancelled' : (code === 0 ? 'done' : 'failed');
+        let status = wasCancelled ? 'cancelled' : (code === 0 && !signal ? 'done' : 'failed');
 
         // A run where every story was skipped is not "done" — it failed
         if (status === 'done') {
@@ -985,7 +990,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
           }
         }
 
-        logger.info({ runId, code, status, wasCancelled }, '[worker] execution-engine exited');
+        logger.info({ runId, code, signal, status, wasCancelled }, '[worker] execution-engine exited');
 
         await execute(
           `UPDATE pipeline_runs SET status = $1, finished_at = NOW() WHERE id = $2`,
@@ -1003,6 +1008,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
             run_id: runId,
             status,
             exit_code: code,
+            exit_signal: signal,
             source: 'worker',
           });
 
@@ -1027,6 +1033,17 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
               }
               if (!allSpecStoriesPassed) {
                 logger.info({ runId, specPath }, '[worker] Skipping post-run routing — spec not fully complete (not all stories passed)');
+                if (status === 'done') {
+                  const storyCount = await queryOne<{ total: string }>(
+                    `SELECT COUNT(*) AS total FROM story_results WHERE run_id = $1`,
+                    [runId],
+                  );
+                  if (!storyCount || parseInt(storyCount.total, 10) === 0) {
+                    logger.warn({ runId, specPath, signal, code }, '[worker] Run exited as done with 0 story_results and incomplete spec — marking failed');
+                    try { await execute(`UPDATE pipeline_runs SET status = 'failed' WHERE id = $1`, [runId]); } catch { /* non-fatal */ }
+                    status = 'failed';
+                  }
+                }
               }
             } catch (specErr: any) {
               logger.warn({ runId, err: specErr?.message }, '[worker] Could not read spec JSON for merge check — skipping');

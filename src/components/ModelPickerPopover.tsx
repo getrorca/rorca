@@ -74,6 +74,43 @@ function formatCost(model: ModelOption): string {
   return `$${model.costPer1kInput.toFixed(3)}/1K`;
 }
 
+const PI_PROVIDER_LABELS: Record<string, string> = {
+  openai: 'OpenAI',
+  chatgpt: 'OpenAI',
+  codex: 'OpenAI',
+  anthropic: 'Anthropic',
+  claude: 'Anthropic',
+  google: 'Google',
+  gemini: 'Google',
+  openrouter: 'OpenRouter',
+  ollama: 'Ollama',
+};
+
+function normalizePiProviderLabel(provider: string): string {
+  const normalized = provider.trim().toLowerCase();
+  return PI_PROVIDER_LABELS[normalized] ?? provider;
+}
+
+function mapPiModels(
+  models: Array<{ provider: string; model: string; contextTokens: number; maxOutTokens: number; thinking: boolean; images: boolean }>,
+  selectedModelId: string | null,
+): ModelOption[] {
+  return models.map((model, index) => ({
+    id: model.model,
+    label: model.model,
+    provider: normalizePiProviderLabel(model.provider),
+    providerType: 'pi',
+    costPer1kInput: 0,
+    costPer1kOutput: 0,
+    contextWindow: model.contextTokens > 0 ? model.contextTokens : undefined,
+    speedTier: undefined,
+    costTier: 'free',
+    recommended: selectedModelId ? model.model === selectedModelId : index === 0,
+    supportsReasoning: model.thinking,
+    effortLevels: model.thinking ? ['low', 'medium', 'high'] : [],
+  }));
+}
+
 const SpeedIcon = ({ tier }: { tier?: string }) => {
   if (tier === 'fast') return <Zap size={11} className="text-emerald-400 shrink-0" />;
   if (tier === 'slow') return <Turtle size={11} className="text-amber-400 shrink-0" />;
@@ -248,6 +285,19 @@ export default function ModelPickerPopover({
         .then(data => {
           // OpenCode uses API keys — hide Anthropic models (those require Claude subscription)
           setModels(data.models.filter(m => m.provider !== 'Anthropic'));
+        })
+        .catch(() => {
+          setModels([]);
+        })
+        .finally(() => setLoading(false));
+      return;
+    }
+
+    if (engine === 'pi') {
+      setLoading(true);
+      apiFetch<{ models: Array<{ provider: string; model: string; contextTokens: number; maxOutTokens: number; thinking: boolean; images: boolean }> }>('/api/config/pi-models')
+        .then(data => {
+          setModels(mapPiModels(data.models ?? [], value || defaultModelId || null));
         })
         .catch(() => {
           setModels([]);

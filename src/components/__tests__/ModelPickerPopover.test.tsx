@@ -128,6 +128,30 @@ const OPENCODE_MODELS_RESPONSE = {
   configuredProviders: ['openai-compat'],
 };
 
+/** Pi CLI model catalog */
+const PI_MODELS_RESPONSE = {
+  models: [
+    {
+      provider: 'openai',
+      model: 'gpt-5',
+      contextTokens: 200000,
+      maxOutTokens: 100000,
+      thinking: true,
+      images: false,
+    },
+    {
+      provider: 'anthropic',
+      model: 'claude-sonnet-4-6',
+      contextTokens: 200000,
+      maxOutTokens: 32000,
+      thinking: true,
+      images: true,
+    },
+  ],
+  count: 2,
+  piBinPath: '/usr/local/bin/pi',
+};
+
 // ─── Setup / Teardown ─────────────────────────────────────────────────────────
 
 // Stub getBoundingClientRect so popover position is calculable
@@ -543,6 +567,34 @@ describe('ModelPickerPopover API interactions', () => {
       );
       expect(calls.length).toBeGreaterThanOrEqual(1);
     }, { timeout: 3000 });
+  });
+
+  it('calls /api/config/pi-models when engine=pi and popover opens', async () => {
+    mockApiFetch.mockResolvedValue(PI_MODELS_RESPONSE as any);
+
+    renderPicker({ engine: 'pi' });
+    await openPicker();
+
+    await waitFor(() => {
+      const calls = mockApiFetch.mock.calls.filter(([path]) =>
+        (path as string).includes('/api/config/pi-models'),
+      );
+      expect(calls.length).toBeGreaterThanOrEqual(1);
+    }, { timeout: 3000 });
+  });
+
+  it('renders Pi models from the local CLI when engine=pi', async () => {
+    mockApiFetch.mockResolvedValue(PI_MODELS_RESPONSE as any);
+
+    renderPicker({ engine: 'pi', value: 'gpt-5' });
+    await openPicker();
+
+    await waitFor(() => {
+      expect(screen.queryByText('Loading models…')).not.toBeInTheDocument();
+    }, { timeout: 3000 });
+
+    expect(screen.getAllByText('gpt-5').length).toBeGreaterThan(0);
+    expect(screen.getAllByText('claude-sonnet-4-6').length).toBeGreaterThan(0);
   });
 
   it('does NOT call /api/direction/models when engine=claude', async () => {

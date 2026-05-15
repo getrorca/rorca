@@ -1,0 +1,813 @@
+import type { ExtensionAPI } from "@mariozechner/pi-coding-agent";
+import { Type } from "@sinclair/typebox";
+import { Client } from "@modelcontextprotocol/sdk/client/index.js";
+import { StreamableHTTPClientTransport } from "@modelcontextprotocol/sdk/client/streamableHttp.js";
+import { CallToolResultSchema, ListToolsResultSchema } from "@modelcontextprotocol/sdk/types.js";
+import { readFileSync } from "fs";
+import { homedir } from "os";
+import { join } from "path";
+
+function readMcpToken(): string | null {
+  try {
+    return readFileSync(join(homedir(), ".rorca", "mcp-token"), "utf8").trim() || null;
+  } catch {
+    return null;
+  }
+}
+
+type JsonSchema = Record<string, unknown>;
+type PiToolResultContent = Array<{ type: "text"; text: string }>;
+
+type SemanticOverride = {
+  name?: string;
+  description?: string;
+  hidden?: boolean;
+};
+
+type RegisteredToolMeta = {
+  originalName: string;
+  registeredName: string;
+  aliasOf?: string;
+};
+
+type DiscoveryResult = {
+  ok: boolean;
+  toolCount: number;
+  error?: string;
+  healthError?: boolean;
+  authError?: boolean;
+};
+
+type ToolCallResult = {
+  content: PiToolResultContent;
+  details: Record<string, unknown>;
+  isError?: boolean;
+};
+
+type PiCtx = {
+  hasUI?: boolean;
+  ui?: {
+    notify?: (message: string, level?: "info" | "success" | "warning" | "error") => void;
+    setStatus?: (key: string, value: string) => void;
+  };
+};
+
+type WorkflowToolBinding = {
+  name: string;
+  label: string;
+  description: string;
+  parameters: ReturnType<typeof Type.Object>;
+  candidates: string[];
+};
+
+type McpToolDefinition = {
+  name?: unknown;
+  title?: unknown;
+  description?: unknown;
+  inputSchema?: unknown;
+};
+
+const DEFAULT_MCP_URL = "http://localhost:3030/mcp";
+const DEFAULT_REFRESH_INTERVAL_MS = 300_000;
+const DISCOVERY_TIMEOUT_MS = 8_000;
+const HEALTH_TIMEOUT_MS = 5_000;
+const INITIAL_RETRY_DELAYS_MS = [2_000, 4_000, 8_000] as const;
+const TOOL_NAME_PREFIX = process.env.RORCA_PI_TOOL_PREFIX || "";
+
+const DENY_LIST_PREFIXES = [
+  "rorca_admin_",
+  "rorca_billing_",
+  "rorca_vault_",
+  "rorca_terminal_",
+  "rorca_webhooks_",
+] as const;
+
+const DENY_LIST = new Set<string>([
+  "rorca_auth_me",
+  "rorca_config_claude_auth_login",
+  "rorca_config_codex_auth_login",
+]);
+
+const SEMANTIC_OVERRIDES = new Map<string, SemanticOverride>([
+  [
+    "rorca_specs_generate",
+    {
+      name: "forge_spec",
+      description:
+        "Generate a Rorca spec from a plain-English brief. Requires workspaceId, specBrief (string), and title (string). Returns {specId, path, storyCount}.",
+    },
+  ],
+  [
+    "rorca_pipeline_trigger",
+    {
+      name: "run_spec",
+      description:
+        "Trigger a Pi-native pipeline run for an approved spec. Requires specId and workspaceId. Returns {runId, status}.",
+    },
+  ],
+  [
+    "rorca_get_pipeline_runs",
+    {
+      name: "run_status",
+      description:
+        "Get pipeline run status and per-story results for a runId or list recent runs for a workspaceId.",
+    },
+  ],
+]);
+
+const WORKFLOW_TOOLS: WorkflowToolBinding[] = [
+  {
+    name: "rorca_spec_generate",
+    label: "Rorca Spec Generate",
+    description: "Spec-first workflow: generate a spec draft from a brief with workspaceId, title, and specBrief.",
+    parameters: Type.Object({
+      workspaceId: Type.String({ description: "Workspace ID" }),
+      title: Type.String({ description: "Human-readable spec title" }),
+      specBrief: Type.String({ description: "Plain-English brief to turn into a spec" }),
+    }),
+    candidates: ["rorca_specs_generate", "rorca_generate_spec"],
+  },
+  {
+    name: "rorca_spec_approve",
+    label: "Rorca Spec Approve",
+    description: "Spec-first workflow: approve a pending spec and move it into the executable queue.",
+    parameters: Type.Object({
+      workspaceId: Type.String({ description: "Workspace ID" }),
+      specId: Type.String({ description: "Spec slug / ID" }),
+    }),
+    candidates: ["rorca_approve_spec", "rorca_specs_approve"],
+  },
+  {
+    name: "rorca_spec_run",
+    label: "Rorca Spec Run",
+    description: "Spec-first workflow: trigger a pipeline run for an approved spec with workspaceId and specId.",
+    parameters: Type.Object({
+      workspaceId: Type.String({ description: "Workspace ID" }),
+      specId: Type.String({ description: "Spec slug / ID" }),
+      dryRun: Type.Optional(Type.Boolean({ description: "Preview execution without running stories" })),
+      autoWorktree: Type.Optional(Type.Boolean({ description: "Run in a git worktree when supported" })),
+    }),
+    candidates: ["rorca_pipeline_trigger", "rorca_trigger_run"],
+  },
+];
+
+function sanitizeToolName(name: string): string {
+  const normalized = `${TOOL_NAME_PREFIX}${name}`.replace(/[^a-zA-Z0-9_]/g, "_");
+  return normalized.replace(/^\d+/, "tool_");
+}
+
+function toPiSchema(schema: JsonSchema | undefined) {
+  if (!schema || typeof schema !== "object") {
+    return Type.Object({}, { additionalProperties: true });
+  }
+  return Type.Unsafe<Record<string, unknown>>(schema as never);
+}
+
+function toPiContent(result: unknown): PiToolResultContent {
+  const content = Array.isArray((result as { content?: unknown[] } | null)?.content)
+    ? ((result as { content: unknown[] }).content ?? [])
+    : [];
+  const out: PiToolResultContent = [];
+
+  for (const item of content) {
+    if (
+      item &&
+      typeof item === "object" &&
+      "type" in item &&
+      "text" in item &&
+      (item as { type?: unknown }).type === "text" &&
+      typeof (item as { text?: unknown }).text === "string"
+    ) {
+      out.push({ type: "text", text: (item as { text: string }).text });
+      continue;
+    }
+
+    if (item && typeof item === "object" && "type" in item && (item as { type?: unknown }).type === "image") {
+      out.push({
+        type: "text",
+        text: `[MCP image result omitted in Pi bridge: ${JSON.stringify(item).slice(0, 500)}]`,
+      });
+      continue;
+    }
+
+    if (item !== undefined) {
+      out.push({ type: "text", text: JSON.stringify(item, null, 2) });
+    }
+  }
+
+  if (out.length === 0) {
+    out.push({ type: "text", text: "[No content returned from MCP tool]" });
+  }
+
+  return out;
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, label: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      reject(new Error(`${label} timed out after ${timeoutMs}ms`));
+    }, timeoutMs);
+
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error) => {
+        clearTimeout(timer);
+        reject(error);
+      },
+    );
+  });
+}
+
+function delay(ms: number) {
+  return new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+function parseErrorMessage(error: unknown) {
+  if (error instanceof Error) {
+    return error.message;
+  }
+  return String(error);
+}
+
+function isAuthErrorMessage(message: string) {
+  return /401|MCP_AUTH_REQUIRED|MCP_AUTH_INVALID/i.test(message);
+}
+
+function isDeniedTool(name: string) {
+  if (DENY_LIST.has(name)) {
+    return true;
+  }
+  return DENY_LIST_PREFIXES.some((prefix) => name.startsWith(prefix));
+}
+
+function buildAuthHeaders(token: string | null): Record<string, string> | undefined {
+  return token ? { Authorization: `Bearer ${token}` } : undefined;
+}
+
+function getMcpUrl() {
+  return process.env.RORCA_MCP_URL || DEFAULT_MCP_URL;
+}
+
+function getRefreshIntervalMs() {
+  const raw = Number(process.env.RORCA_MCP_REFRESH_INTERVAL_MS || DEFAULT_REFRESH_INTERVAL_MS);
+  return Number.isFinite(raw) && raw > 0 ? raw : DEFAULT_REFRESH_INTERVAL_MS;
+}
+
+function getHealthUrl(mcpUrl: string) {
+  const url = new URL(mcpUrl);
+  url.pathname = "/api/health";
+  url.search = "";
+  url.hash = "";
+  return url.toString();
+}
+
+export default function rorcaMcpExtension(pi: ExtensionAPI) {
+  const token = readMcpToken();
+
+  let client: Client | null = null;
+  let transport: StreamableHTTPClientTransport | null = null;
+  let connecting: Promise<void> | null = null;
+  let refreshTimer: ReturnType<typeof setInterval> | null = null;
+  let lastError: string | null = null;
+  let lastDiscoveryAt: string | null = null;
+  let healthError = false;
+  let discoverySucceeded = false;
+  let registeredToolCount = 0;
+
+  const registered = new Map<string, RegisteredToolMeta>();
+  const liveOriginalToolNames = new Set<string>();
+  const lastLiveOriginalToolNames = new Set<string>();
+  const registeredWorkflowTools = new Set<string>();
+
+  function notify(ctx: PiCtx | undefined, message: string, level: "info" | "success" | "warning" | "error") {
+    ctx?.ui?.notify?.(message, level);
+  }
+
+  function setStatus(ctx: PiCtx | undefined, value: string) {
+    ctx?.ui?.setStatus?.("rorca-mcp", value);
+  }
+
+  function logStaleToolWarning(disappeared: string[]) {
+    if (disappeared.length === 0) {
+      return;
+    }
+
+    console.warn(
+      `Rorca MCP bridge: tools disappeared from discovery but remain registered until restart: ${disappeared.join(", ")}`,
+    );
+  }
+
+  function syncActiveTools(newNames: string[]) {
+    if (newNames.length === 0 || typeof pi.getActiveTools !== "function" || typeof pi.setActiveTools !== "function") {
+      return;
+    }
+
+    const current = pi.getActiveTools();
+    const active = new Set(
+      (Array.isArray(current) ? current : []).filter(
+        (value): value is string => typeof value === "string" && value.length > 0,
+      ),
+    );
+
+    for (const name of newNames) {
+      active.add(name);
+    }
+
+    pi.setActiveTools([...active]);
+  }
+
+  async function disconnect() {
+    try {
+      await transport?.close();
+    } catch {
+      // Ignore transport close errors during shutdown and refresh.
+    }
+
+    client = null;
+    transport = null;
+    connecting = null;
+    discoverySucceeded = false;
+  }
+
+  function clearDiscoveryState() {
+    liveOriginalToolNames.clear();
+    healthError = false;
+    discoverySucceeded = false;
+    registeredToolCount = 0;
+  }
+
+  async function ensureConnected(ctx?: PiCtx): Promise<void> {
+    if (client) {
+      return;
+    }
+
+    if (connecting) {
+      return connecting;
+    }
+
+    connecting = (async () => {
+      const mcpUrl = getMcpUrl();
+      const nextClient = new Client({
+        name: "pi-rorca-mcp-bridge",
+        version: "2.0.0",
+      });
+
+      nextClient.onerror = (error) => {
+        lastError = parseErrorMessage(error);
+      };
+
+      const headers = buildAuthHeaders(token);
+      const nextTransport = new StreamableHTTPClientTransport(new URL(mcpUrl), {
+        requestInit: headers ? { headers } : undefined,
+      });
+
+      await withTimeout(nextClient.connect(nextTransport), DISCOVERY_TIMEOUT_MS, "Rorca MCP connect");
+
+      client = nextClient;
+      transport = nextTransport;
+      lastError = null;
+      setStatus(ctx, `Rorca MCP: connected (${mcpUrl})`);
+    })();
+
+    try {
+      await connecting;
+    } catch (error) {
+      lastError = parseErrorMessage(error);
+      await disconnect();
+      throw error;
+    } finally {
+      connecting = null;
+    }
+  }
+
+  async function checkBackendHealth(): Promise<{ ok: true } | { ok: false; message: string }> {
+    const controller = new AbortController();
+    const timer = setTimeout(() => controller.abort(), HEALTH_TIMEOUT_MS);
+
+    try {
+      const response = await fetch(getHealthUrl(getMcpUrl()), {
+        headers: buildAuthHeaders(token),
+        signal: controller.signal,
+      });
+
+      if (!response.ok) {
+        return { ok: false, message: `health check failed (${response.status})` };
+      }
+
+      const body = await response.json().catch(() => null);
+      if (!body || body.status !== "ok") {
+        return { ok: false, message: "health check returned non-ok status" };
+      }
+
+      return { ok: true };
+    } catch (error) {
+      return { ok: false, message: parseErrorMessage(error) };
+    } finally {
+      clearTimeout(timer);
+    }
+  }
+
+  async function callMcpTool(
+    name: string,
+    args: Record<string, unknown>,
+    signal?: AbortSignal,
+    execCtx?: PiCtx,
+  ): Promise<ToolCallResult> {
+    try {
+      await ensureConnected(execCtx);
+      if (!client) {
+        throw new Error("Rorca MCP client unavailable");
+      }
+
+      if (signal?.aborted) {
+        return {
+          content: [{ type: "text", text: "Cancelled before MCP call started." }],
+          details: { cancelled: true },
+        };
+      }
+
+      const callResult = await client.request(
+        {
+          method: "tools/call",
+          params: {
+            name,
+            arguments: args ?? {},
+          },
+        },
+        CallToolResultSchema,
+        signal ? ({ signal } as never) : undefined,
+      );
+
+      lastError = null;
+
+      return {
+        content: toPiContent(callResult),
+        details: {
+          bridge: "rorca-mcp",
+          mcpUrl: getMcpUrl(),
+          originalTool: name,
+          raw: callResult,
+        },
+        isError: Boolean((callResult as { isError?: unknown }).isError),
+      };
+    } catch (error) {
+      const message = parseErrorMessage(error);
+      lastError = message;
+
+      if (isAuthErrorMessage(message)) {
+        notify(
+          execCtx,
+          "Rorca MCP authentication failed. Check ~/.rorca/mcp-token. Requests continue without crashing the Pi session.",
+          "warning",
+        );
+      }
+
+      return {
+        content: [{ type: "text", text: `Rorca MCP tool call failed: ${message}` }],
+        details: {
+          bridge: "rorca-mcp",
+          mcpUrl: getMcpUrl(),
+          originalTool: name,
+          error: message,
+        },
+        isError: true,
+      };
+    }
+  }
+
+  function registerToolIfNeeded(options: {
+    originalName: string;
+    registeredName: string;
+    label: string;
+    description: string;
+    inputSchema: JsonSchema | undefined;
+    promptSnippet?: string;
+    aliasOf?: string;
+  }) {
+    const { originalName, registeredName, label, description, inputSchema, promptSnippet, aliasOf } = options;
+
+    if (registered.has(registeredName)) {
+      return;
+    }
+
+    registered.set(registeredName, {
+      originalName,
+      registeredName,
+      aliasOf,
+    });
+
+    pi.registerTool({
+      name: registeredName,
+      label,
+      description,
+      promptSnippet,
+      parameters: toPiSchema(inputSchema),
+      async execute(
+        _toolCallId: string,
+        params: unknown,
+        signal: AbortSignal | undefined,
+        _onUpdate: unknown,
+        execCtx: PiCtx,
+      ) {
+        return callMcpTool(originalName, (params ?? {}) as Record<string, unknown>, signal, execCtx);
+      },
+    });
+  }
+
+  function resolveWorkflowTarget(candidates: string[]) {
+    for (const candidate of candidates) {
+      if (liveOriginalToolNames.has(candidate)) {
+        return candidate;
+      }
+    }
+    return null;
+  }
+
+  function registerWorkflowTool(binding: WorkflowToolBinding) {
+    if (registeredWorkflowTools.has(binding.name)) {
+      return;
+    }
+
+    registeredWorkflowTools.add(binding.name);
+
+    pi.registerTool({
+      name: binding.name,
+      label: binding.label,
+      description: binding.description,
+      promptSnippet: binding.description,
+      parameters: binding.parameters,
+      async execute(
+        _toolCallId: string,
+        params: unknown,
+        signal: AbortSignal | undefined,
+        _onUpdate: unknown,
+        execCtx: PiCtx,
+      ) {
+        const targetTool = resolveWorkflowTarget(binding.candidates);
+        if (!targetTool) {
+          return {
+            content: [
+              {
+                type: "text",
+                text: "Rorca MCP workflow tool unavailable because the matching live MCP tool was not discovered.",
+              },
+            ],
+            details: {
+              bridge: "rorca-mcp",
+              workflowTool: binding.name,
+              candidates: binding.candidates,
+            },
+            isError: true,
+          };
+        }
+
+        return callMcpTool(targetTool, (params ?? {}) as Record<string, unknown>, signal, execCtx);
+      },
+    });
+
+    syncActiveTools([binding.name]);
+  }
+
+  function ensureWorkflowToolsRegistered() {
+    for (const binding of WORKFLOW_TOOLS) {
+      registerWorkflowTool(binding);
+    }
+  }
+
+  function registerDiscoveredTool(tool: McpToolDefinition, newlyActivated: string[]) {
+    const originalName = typeof tool.name === "string" ? tool.name : "";
+    if (!originalName) {
+      return;
+    }
+
+    const override = SEMANTIC_OVERRIDES.get(originalName);
+    if (override?.hidden) {
+      return;
+    }
+
+    const primaryName = sanitizeToolName(override?.name || originalName);
+    const primaryDescription =
+      override?.description || String(tool.description || `Proxy for Rorca MCP tool ${originalName}`);
+    const primaryLabel = String(override?.name || tool.title || originalName);
+
+    registerToolIfNeeded({
+      originalName,
+      registeredName: primaryName,
+      label: primaryLabel,
+      description: primaryDescription,
+      inputSchema: (tool.inputSchema as JsonSchema | undefined) ?? undefined,
+      promptSnippet: primaryDescription,
+    });
+
+    if (!newlyActivated.includes(primaryName)) {
+      newlyActivated.push(primaryName);
+    }
+
+    const aliasName = sanitizeToolName(originalName);
+    if (aliasName === primaryName) {
+      return;
+    }
+
+    registerToolIfNeeded({
+      originalName,
+      registeredName: aliasName,
+      label: String(tool.title || originalName),
+      description: String(tool.description || `Proxy for Rorca MCP tool ${originalName}`),
+      inputSchema: (tool.inputSchema as JsonSchema | undefined) ?? undefined,
+      aliasOf: primaryName,
+    });
+
+    if (!newlyActivated.includes(aliasName)) {
+      newlyActivated.push(aliasName);
+    }
+  }
+
+  async function discoverAndRegisterTools(ctx?: PiCtx): Promise<DiscoveryResult> {
+    ensureWorkflowToolsRegistered();
+
+    try {
+      return await withTimeout(
+        (async () => {
+          await ensureConnected(ctx);
+          if (!client) {
+            throw new Error("Rorca MCP client unavailable");
+          }
+
+          const toolsResult = await client.request({ method: "tools/list", params: {} }, ListToolsResultSchema);
+          const health = await checkBackendHealth();
+
+          if (!health.ok) {
+            const healthMessage = health.message;
+            clearDiscoveryState();
+            healthError = true;
+            lastError = healthMessage;
+            lastDiscoveryAt = new Date().toISOString();
+            setStatus(ctx, "Rorca backend unhealthy");
+            notify(
+              ctx,
+              "Rorca backend unhealthy — tools not registered. Check http://localhost:3030/api/health",
+              "warning",
+            );
+            return { ok: false, toolCount: 0, error: healthMessage, healthError: true };
+          }
+
+          const toolDefs = Array.isArray((toolsResult as { tools?: unknown[] }).tools)
+            ? ((toolsResult as { tools: unknown[] }).tools ?? [])
+            : [];
+          const currentLiveOriginalNames = new Set<string>();
+          const currentVisibleRegisteredNames = new Set<string>();
+          const newlyActivated: string[] = [];
+
+          liveOriginalToolNames.clear();
+
+          for (const rawTool of toolDefs) {
+            if (!rawTool || typeof rawTool !== "object") {
+              continue;
+            }
+
+            const tool = rawTool as McpToolDefinition;
+            const name = typeof tool.name === "string" ? tool.name.trim() : "";
+            if (!name || isDeniedTool(name)) {
+              continue;
+            }
+
+            currentLiveOriginalNames.add(name);
+            liveOriginalToolNames.add(name);
+
+            const override = SEMANTIC_OVERRIDES.get(name);
+            if (!override?.hidden) {
+              const primaryName = sanitizeToolName(override?.name || name);
+              currentVisibleRegisteredNames.add(primaryName);
+
+              const aliasName = sanitizeToolName(name);
+              if (aliasName !== primaryName) {
+                currentVisibleRegisteredNames.add(aliasName);
+              }
+            }
+
+            registerDiscoveredTool(tool, newlyActivated);
+          }
+
+          logStaleToolWarning([...lastLiveOriginalToolNames].filter((name) => !currentLiveOriginalNames.has(name)));
+
+          lastLiveOriginalToolNames.clear();
+          for (const name of currentLiveOriginalNames) {
+            lastLiveOriginalToolNames.add(name);
+          }
+
+          syncActiveTools(newlyActivated);
+
+          healthError = false;
+          discoverySucceeded = true;
+          registeredToolCount = currentVisibleRegisteredNames.size;
+          lastDiscoveryAt = new Date().toISOString();
+          lastError = null;
+          setStatus(ctx, `Rorca MCP: ${registeredToolCount} tool(s) loaded`);
+
+          return { ok: true, toolCount: registeredToolCount };
+        })(),
+        DISCOVERY_TIMEOUT_MS,
+        "Rorca MCP discovery",
+      );
+    } catch (error) {
+      const message = parseErrorMessage(error);
+      const authError = isAuthErrorMessage(message);
+
+      clearDiscoveryState();
+      lastError = message;
+      lastDiscoveryAt = new Date().toISOString();
+      setStatus(ctx, `Rorca MCP unavailable: ${message}`);
+
+      if (authError) {
+        notify(
+          ctx,
+          "Rorca MCP authentication missing or invalid. Check ~/.rorca/mcp-token. The Pi session will continue without Rorca tools.",
+          "warning",
+        );
+      }
+
+      notify(ctx, `Rorca MCP bridge not connected: ${message}`, "warning");
+      return { ok: false, toolCount: 0, error: message, authError };
+    }
+  }
+
+  function startRefreshTimer(ctx?: PiCtx) {
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+    }
+
+    refreshTimer = setInterval(async () => {
+      const previousCount = registeredToolCount;
+      const result = await discoverAndRegisterTools(ctx);
+
+      if (result.ok && previousCount !== result.toolCount) {
+        notify(ctx, `Rorca MCP: tool count changed from ${previousCount} to ${result.toolCount}`, "info");
+      }
+    }, getRefreshIntervalMs());
+  }
+
+  pi.on("session_start", async (_event: unknown, ctx: PiCtx) => {
+    for (let attempt = 0; attempt <= INITIAL_RETRY_DELAYS_MS.length; attempt += 1) {
+      const result = await discoverAndRegisterTools(ctx);
+      if (result.ok || result.healthError || result.authError) {
+        if (result.ok) {
+          notify(ctx, `Rorca MCP loaded ${result.toolCount} tool(s)`, "success");
+        }
+        startRefreshTimer(ctx);
+        return;
+      }
+
+      if (attempt < INITIAL_RETRY_DELAYS_MS.length) {
+        await delay(INITIAL_RETRY_DELAYS_MS[attempt]);
+      }
+    }
+
+    notify(ctx, `Rorca MCP bridge not connected after retries: ${lastError || "unknown error"}`, "warning");
+    startRefreshTimer(ctx);
+  });
+
+  pi.on("session_shutdown", async () => {
+    if (refreshTimer) {
+      clearInterval(refreshTimer);
+      refreshTimer = null;
+    }
+
+    await disconnect();
+  });
+
+  pi.registerCommand("rorca-mcp-status", {
+    description: "Show Rorca MCP bridge status",
+    handler: async (_args: string, ctx: PiCtx) => {
+      const state = discoverySucceeded && client ? "connected" : "disconnected";
+      const message = [
+        `Rorca MCP bridge: ${state}`,
+        `URL: ${getMcpUrl()}`,
+        `Token: ${token ? "yes" : "no"}`,
+        `Registered tools: ${registeredToolCount}`,
+        `Last discovery: ${lastDiscoveryAt || "never"}`,
+        `Last error: ${lastError || "none"}`,
+      ].join("\n");
+
+      notify(ctx, message, state === "connected" ? "info" : "warning");
+    },
+  });
+
+  pi.registerCommand("rorca-mcp-refresh", {
+    description: "Reconnect to Rorca MCP and re-discover live tools",
+    handler: async (_args: string, ctx: PiCtx) => {
+      await disconnect();
+
+      const result = await discoverAndRegisterTools(ctx);
+      if (result.ok) {
+        notify(ctx, `Rorca MCP refresh complete: ${result.toolCount} tool(s) available`, "success");
+        startRefreshTimer(ctx);
+        return;
+      }
+
+      notify(ctx, `Rorca MCP refresh failed: ${result.error || "unknown error"}`, "warning");
+    },
+  });
+}

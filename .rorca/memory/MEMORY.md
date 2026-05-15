@@ -304,3 +304,18 @@
 > Rule: When exposing long-running spec operations over MCP, call the `/async` variant first and poll `/api/spec-jobs/:jobId` server-side until terminal status instead of holding the synchronous LLM HTTP request open.
 > Context: Anthropic-side HTTP timeouts can kill MCP tool calls even though the MCP session itself supports long-running operations. Decoupling the job from the tool transport preserves the MCP call while the backend job continues independently.
 > Source: CLI-060
+
+## 2026-05-04 [Architecture] MCP async endpoints must be polled server-side
+> Rule: When a public MCP tool maps directly to a POST `.../async` endpoint, the MCP HTTP bridge must detect the returned `jobId` and poll `/api/spec-jobs/:jobId` to terminal state instead of surfacing only the enqueue response.
+> Context: OpenAPI-generated tools can target async endpoints directly, so relying only on sync-to-async path rewriting leaves MCP clients with incomplete `{ jobId, status }` payloads.
+> Source: US-019
+
+## 2026-05-04 [Architecture] Public MCP token allow-list must include auth-tier local routes
+> Rule: When a route is intentionally MCP-callable in local single-user mode, add its method+path pattern to PUBLIC_TOOL_RULES even if the OpenAPI tier is auth, because the public MCP bearer token acts as the user's token.
+> Context: Tier annotations control tool generation, but mcp-http still maps public-token dispatch through PUBLIC_TOOL_RULES. Missing patterns silently turn auth-tier local tools into admin-only MCP tools.
+> Source: US-017
+
+## 2026-05-04 [Architecture] Pi prompt reconstruction should poll shared context-enrich jobs
+> Rule: When Pi-native prompt assembly needs semantic workspace context, enqueue `/api/context/enrich/async` and poll `/api/spec-jobs/:jobId` instead of duplicating retrieval logic or holding a synchronous recall request open.
+> Context: This keeps Pi aligned with the shared CAG → RAG → knowledge-graph pipeline and matches the repo rule that MCP-facing long-running context work must use async job endpoints.
+> Source: US-005
