@@ -934,6 +934,98 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(run.agent_model).toBeNull();
   });
 
+  test('trigger with agentOverride=pi creates a standard queued/run-now pipeline run', async () => {
+    seedSpec('approved', 'pi-agent-record');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specPath: 'forge/specs/approved/pi-agent-record.json', workspaceId: 'ws-pipe', agentOverride: 'pi' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.agentType).toBe('pi');
+    expect(res.body.expectsExternalOrchestration).toBeUndefined();
+
+    const run = await queryOne(`SELECT status, agent, agent_type FROM pipeline_runs WHERE id = $1`, [res.body.runId]) as any;
+    expect(run.agent).toBe('pi');
+    expect(run.agent_type).toBe('pi');
+    expect(run.status).not.toBe('pi_native');
+    expect(['queued', 'running']).toContain(run.status);
+  });
+
+  test('trigger with agentOverride=pi remaps unavailable spec models to an available local Pi model', async () => {
+    const spec = seedSpec('approved', 'pi-model-fallback') as any;
+    spec.model = 'claude-sonnet-4-6';
+    fs.writeFileSync(path.join(wsDir, 'forge', 'specs', 'approved', 'pi-model-fallback.json'), JSON.stringify(spec, null, 2), 'utf8');
+
+    const piDetector = require('../../lib/pi-detector') as typeof import('../../lib/pi-detector');
+    jest.spyOn(piDetector, 'detectPi').mockReturnValue({
+      piInstalled: true,
+      piVersion: '0.67.2',
+      piBinPath: '/usr/local/bin/pi',
+    });
+    jest.spyOn(piDetector, 'listPiModels').mockReturnValue([
+      {
+        provider: 'openai-codex',
+        model: 'gpt-5.4',
+        contextTokens: 272000,
+        maxOutTokens: 128000,
+        thinking: true,
+        images: true,
+      },
+    ]);
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specPath: 'forge/specs/approved/pi-model-fallback.json', workspaceId: 'ws-pipe', agentOverride: 'pi' });
+
+    expect(res.status).toBe(201);
+    const run = await queryOne(`SELECT agent_type, agent_model FROM pipeline_runs WHERE id = $1`, [res.body.runId]) as any;
+    expect(run.agent_type).toBe('pi');
+    expect(run.agent_model).toBe('openai-codex/gpt-5.4');
+  });
+
+  test('queued trigger also works for agentOverride=pi', async () => {
+    seedSpec('approved', 'pi-queued');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specPath: 'forge/specs/approved/pi-queued.json', workspaceId: 'ws-pipe', agentOverride: 'pi', queue: true });
+
+    expect(res.status).toBe(202);
+    expect(res.body.queued).toBe(true);
+
+    const run = await queryOne(`SELECT status, agent_type FROM pipeline_runs WHERE id = $1`, [res.body.runId]) as any;
+    expect(run.status).toBe('queued');
+    expect(run.agent_type).toBe('pi');
+  });
+
+  test('trigger with storyId forwards only a specificStory single-story target into the pipeline job payload', async () => {
+    seedSpec('approved', 'specific-story');
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        specPath: 'forge/specs/approved/specific-story.json',
+        workspaceId: 'ws-pipe',
+        agentOverride: 'pi',
+        storyId: 'US-001',
+      });
+
+    expect(res.status).toBe(201);
+    expect(mockSend).toHaveBeenCalled();
+    const [, payload] = mockSend.mock.calls.at(-1) as [string, Record<string, unknown>];
+    expect(payload.specificStory).toBe('US-001');
+    expect(payload.startFromStoryId).toBeUndefined();
+  });
+
   test('GET /runs/:runId returns agentType and agentModel fields', async () => {
     // Seed a run with explicit agent info
     const insertResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, agent, agent_type, agent_model)

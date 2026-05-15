@@ -48,6 +48,7 @@ export const PipelineRunJobPayload = z.object({
   mergeStrategy: MergeStrategyEnum.optional().default('direct'),
   envOverrides: z.record(z.string(), z.string()).optional().default({}),
   startFromStoryId: z.string().optional(),
+  specificStory: z.string().optional(),
   triggeredVia: z.enum(['queue', 'run_now']).default('run_now'),
   includeGraph: z.boolean().optional().default(false),
   agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),

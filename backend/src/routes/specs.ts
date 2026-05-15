@@ -11372,7 +11372,7 @@ const UpdateSpecSchema = z.object({
  *                 description: Internal notes for the spec
  *               agentOverride:
  *                 type: string
- *                 enum: [claude, opencode, codex]
+ *                 enum: [claude, opencode, codex, pi]
  *                 description: Override the execution agent for this spec
  *               thinkingEnabled:
  *                 type: boolean
@@ -11382,7 +11382,7 @@ const UpdateSpecSchema = z.object({
  *                 description: Token budget for extended thinking
  *               effortLevel:
  *                 type: string
- *                 enum: [low, medium, high]
+ *                 enum: [low, medium, high, max, xhigh]
  *                 description: Effort level hint for execution
  *             required:
  *               - workspaceId

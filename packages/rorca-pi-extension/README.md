@@ -1,0 +1,458 @@
+# Rorca Pi Extension
+
+Pi-native extension package for operating Rorca from inside a Pi session.
+
+This package gives you:
+- slash commands for forge / approve / run / retry / status workflows
+- optional live run watching inside Pi widgets/status bars
+- automatic bridging of Rorca MCP tools into Pi when the backend MCP endpoint is healthy
+- persisted extension session state for last workspace, last spec, last run, and active watch
+
+## What this extension is
+
+The Pi extension is the **Pi-native operator UX** for Rorca.
+
+It is **not** the orchestrator.
+Rorca remains the control plane and source of truth for:
+- spec generation and approval
+- run state
+- task history
+- memory persistence
+- graph / retrieval context
+- branch / PR / merge behavior
+
+Pi acts as the execution agent, and this extension makes that flow pleasant to use from inside Pi.
+
+## Architecture at a glance
+
+There are 3 distinct surfaces:
+
+1. **Rorca app / TUI**
+   - human-facing control and monitoring surface
+2. **Pi extension**
+   - Pi-native slash-command interface
+3. **Rorca MCP tools**
+   - machine-facing tool surface bridged into Pi when available
+
+This extension uses:
+- **Rorca REST API** for slash-command workflows
+- **Rorca HTTP MCP** for tool bridging
+- **Pi session entries** for lightweight local state persistence
+
+It does **not** shell out to the `rorca` CLI for normal runtime operations.
+
+## Prerequisites
+
+Before installing the extension, make sure:
+
+- Pi is installed and working
+- the Rorca backend is running
+- the Rorca worker is running
+- at least one Rorca workspace is registered
+- Pi can access a working model, typically `openai-codex/gpt-5.4`
+
+Typical local setup:
+
+```bash
+# repo root
+npm run dev
+
+# separate shell
+cd backend
+npm run dev:worker
+```
+
+## Install into Pi
+
+From the Rorca repo root:
+
+```bash
+pi install ./packages/rorca-pi-extension -l
+```
+
+That installs the package for the current project.
+
+If you are testing the extension entry directly during development, you can also run:
+
+```bash
+pi --no-extensions -e ./packages/rorca-pi-extension/extensions/rorca/index.ts
+```
+
+## Environment variables
+
+The extension works out of the box for standard local development, but you can override its endpoints.
+
+- `RORCA_PI_API_URL`
+  - default: `http://127.0.0.1:3030`
+- `RORCA_PI_MCP_URL`
+  - default: `${RORCA_PI_API_URL}/mcp`
+- `RORCA_PI_MCP_TOKEN`
+  - optional explicit MCP token
+  - falls back to `~/.rorca/mcp-admin-token`
+- `RORCA_PI_WORKSPACE_ID`
+  - default workspace to use when multiple workspaces exist
+- `RORCA_PI_DEFAULT_MODEL`
+  - default Pi model when the spec’s saved model is unavailable
+  - default fallback in code is `openai-codex/gpt-5.4`
+
+## Session behavior
+
+On Pi session start, the extension:
+
+1. checks the Rorca backend health endpoint
+2. sets a Pi status line for backend availability
+3. attempts to bridge Rorca MCP tools into Pi
+4. restores previous extension state from session entries
+5. resumes watching the last active run if one was being watched
+
+Persisted state includes:
+- last workspace id
+- last spec slug
+- last run id
+- currently watched run id
+
+## Slash commands
+
+## `/rorca-help`
+Show the available Rorca commands and their usage.
+
+Example:
+
+```text
+/rorca-help
+```
+
+## `/rorca-forge`
+Generate a spec from inline text or from a file.
+
+Usage:
+
+```text
+/rorca-forge <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>] [--no-watch]
+```
+
+Behavior:
+- generates a spec in the selected workspace
+- can optionally approve it immediately
+- can optionally trigger a Pi run immediately
+- `@file` reads the brief from a local file relative to the current working directory
+
+Examples:
+
+```text
+/rorca-forge Add a docs-only story that updates the README
+/rorca-forge @docs/brief.md --workspace rorca
+/rorca-forge @docs/brief.md --workspace rorca --approve --run
+/rorca-forge "Create a tiny docs-only spec" --approve --run --model openai-codex/gpt-5.4
+```
+
+## `/rorca-forge-run`
+Generate, approve, and trigger a Pi run in one step.
+
+Usage:
+
+```text
+/rorca-forge-run <brief|@file> [--workspace <id>] [--queue] [--model <model>] [--no-watch]
+```
+
+Examples:
+
+```text
+/rorca-forge-run @docs/brief.md --workspace rorca
+/rorca-forge-run "Add a tiny README note" --workspace mcp-merge-sandbox --model openai-codex/gpt-5.4
+```
+
+## `/rorca-approve`
+Approve the specified spec, or the last generated spec if omitted from local state.
+
+Usage:
+
+```text
+/rorca-approve <spec-slug> [--workspace <id>]
+```
+
+Examples:
+
+```text
+/rorca-approve zz-my-spec --workspace rorca
+```
+
+## `/rorca-run`
+Trigger an approved spec with Pi.
+
+Usage:
+
+```text
+/rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--no-watch]
+```
+
+Behavior:
+- always triggers with `agentOverride: "pi"`
+- defaults `includeGraph` to `true`
+- if `--story <id>` is provided, the trigger uses the single-story path
+- if `--model` is omitted, the extension chooses a preferred local Pi model
+
+Examples:
+
+```text
+/rorca-run zz-my-spec --workspace rorca
+/rorca-run zz-my-spec --workspace rorca --story US-001
+/rorca-run zz-my-spec --workspace rorca --queue
+/rorca-run zz-my-spec --workspace rorca --model openai-codex/gpt-5.4
+```
+
+## `/rorca-status`
+Show a run detail view or recent runs for a workspace.
+
+Usage:
+
+```text
+/rorca-status [runId|workspaceId] [--workspace <id>]
+```
+
+Examples:
+
+```text
+/rorca-status
+/rorca-status 20260316000309
+/rorca-status rorca
+/rorca-status --workspace mcp-merge-sandbox
+```
+
+## `/rorca-watch`
+Start watching the latest known run or an explicit run id.
+
+Usage:
+
+```text
+/rorca-watch [runId]
+```
+
+Examples:
+
+```text
+/rorca-watch
+/rorca-watch 20260316000309
+```
+
+## `/rorca-attach`
+Alias for `/rorca-watch`.
+
+Usage:
+
+```text
+/rorca-attach [runId]
+```
+
+## `/rorca-retry`
+Retry a run, optionally limited to specific story ids.
+
+Usage:
+
+```text
+/rorca-retry <runId> [storyId...] [--no-watch]
+```
+
+Examples:
+
+```text
+/rorca-retry 20260316000301
+/rorca-retry 20260316000301 US-001 US-003
+```
+
+## `/rorca-mcp-status`
+Check that the Rorca MCP bridge is healthy and report the number of bridged tools.
+
+Example:
+
+```text
+/rorca-mcp-status
+```
+
+## Watch mode and Pi UI integration
+
+When watch mode is active, the extension:
+- updates a Pi widget named `rorca-run`
+- updates Pi status text for the run
+- notifies on status transitions
+- stops automatically when a run reaches a terminal state
+
+The extension also surfaces run progress that points back to Rorca’s persistent progress logs under:
+
+```text
+.rorca/progress/run-<runId>/
+```
+
+Those logs are useful when Pi-side execution was autonomous and you want the story-by-story context preserved outside the live session.
+
+## Model selection behavior
+
+The extension tries to avoid selecting unusable models.
+
+Run model selection order:
+1. explicit `--model`
+2. spec model, if it matches a discovered local Pi model
+3. preferred Codex fallback, typically `openai-codex/gpt-5.4`
+4. first available Codex model
+5. first available Pi model
+6. hard fallback from `RORCA_PI_DEFAULT_MODEL` or `openai-codex/gpt-5.4`
+
+If the extension has to override the spec’s saved model, it notifies the user.
+
+## MCP bridging behavior
+
+If the backend MCP endpoint is healthy, the extension auto-registers bridged tools into Pi.
+
+Bridge details:
+- transport: HTTP MCP
+- protocol version: `2025-03-26`
+- accept header: `application/json, text/event-stream`
+- auth: bearer token from `RORCA_PI_MCP_TOKEN` or `~/.rorca/mcp-admin-token`
+
+Important:
+- slash commands continue to work even if MCP bridging is unavailable
+- MCP bridging is additive, not required for the command UX
+
+## Typical workflows
+
+### 1. Forge and run from a brief
+
+```text
+/rorca-forge-run @docs/brief.md --workspace rorca
+```
+
+### 2. Approve then run a spec
+
+```text
+/rorca-approve zz-my-spec --workspace rorca
+/rorca-run zz-my-spec --workspace rorca
+```
+
+### 3. Run a single story only
+
+```text
+/rorca-run zz-my-spec --workspace rorca --story US-001
+```
+
+### 4. Retry failed stories in a run
+
+```text
+/rorca-retry 20260316000301
+```
+
+### 5. Watch a run from a fresh Pi session
+
+```text
+/rorca-watch 20260316000309
+```
+
+## Troubleshooting
+
+## Backend unavailable
+
+Symptom:
+- Pi shows `Rorca API: unavailable`
+- slash commands fail immediately
+
+Check:
+
+```bash
+curl http://127.0.0.1:3030/api/health
+```
+
+Or if you are using another port:
+
+```bash
+export RORCA_PI_API_URL=http://127.0.0.1:3130
+```
+
+## MCP bridge unavailable
+
+Symptom:
+- slash commands work
+- MCP tools are not loaded
+- `/rorca-mcp-status` fails
+
+Check:
+- backend `/api/health` includes healthy MCP info
+- `RORCA_PI_MCP_URL` points to the right endpoint
+- `~/.rorca/mcp-admin-token` exists or `RORCA_PI_MCP_TOKEN` is set
+
+## Wrong workspace selected
+
+Symptom:
+- commands affect the wrong repo/workspace
+
+Fix:
+- pass `--workspace <id>` explicitly
+- or export `RORCA_PI_WORKSPACE_ID=<id>`
+
+## Pi model/auth problems
+
+Symptom:
+- run starts but Pi fails because the selected provider/model is unavailable
+
+Fix:
+- verify models with `pi --list-models`
+- verify provider auth with `pi auth login` for the provider you plan to use
+- pass `--model openai-codex/gpt-5.4` explicitly if needed
+
+## Existing Pi session does not pick up the extension
+
+Symptom:
+- command names are missing after install
+
+Fix:
+- start a new Pi session
+- or reload/restart the current Pi session
+
+## Development notes
+
+For isolated development of this extension, prefer:
+
+```bash
+pi --no-extensions -e ./packages/rorca-pi-extension/extensions/rorca/index.ts
+```
+
+That avoids interference from other globally or project-installed extensions.
+
+## Package layout
+
+```text
+packages/rorca-pi-extension/
+  README.md
+  package.json
+  tsconfig.json
+  vitest.config.ts
+  extensions/rorca/
+    index.ts        # extension entrypoint
+    commands.ts     # slash command registration and handlers
+    args.ts         # CLI-style argument parsing
+    api.ts          # REST client to the Rorca backend
+    bridge.ts       # HTTP MCP bridge into Pi tools
+    watch.ts        # run watch controller / widget updates
+    state.ts        # Pi session state persistence
+    types.ts        # shared types
+```
+
+## Additional docs
+
+- store-style listing copy: `packages/rorca-pi-extension/STORE-LISTING.md`
+- pre-submission metadata pack: `packages/rorca-pi-extension/STORE-SUBMISSION-DRAFT.md`
+- package metadata draft: `packages/rorca-pi-extension/PACKAGE-METADATA-DRAFT.md`
+- screenshot capture checklist: `packages/rorca-pi-extension/SCREENSHOT-CAPTURE-CHECKLIST.md`
+- screenshot + marketing asset plan: `packages/rorca-pi-extension/SCREENSHOT-AND-MARKETING-ASSETS.md`
+- launch / announcement copy: `packages/rorca-pi-extension/ANNOUNCEMENT.md`
+- maintainer / publishing guide: `packages/rorca-pi-extension/PUBLISHING.md`
+- release history: `packages/rorca-pi-extension/CHANGELOG.md`
+
+## Publishing status
+
+This package is currently marked private in `package.json` and is intended for in-repo use.
+
+If you want to publish it externally, see:
+- `packages/rorca-pi-extension/PUBLISHING.md`
+
+## License
+
+BUSL-1.1
