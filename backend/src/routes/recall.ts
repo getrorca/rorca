@@ -219,18 +219,22 @@ async function fetchMemories(
     params,
   );
 
-  // Build a map from content text -> DB row for matching against retrieval results
+  // Build maps for matching retrieval results back to DB rows.
+  const idToRow = new Map<string, MemoryRow>();
   const contentToRow = new Map<string, MemoryRow>();
   for (const row of dbRows) {
+    idToRow.set(String(row.id), row);
     contentToRow.set(row.content, row);
   }
 
-  // Match scored memory texts from retrieveContext against DB rows
+  // Match scored memory items from retrieveContext against DB rows.
+  // Prefer stable IDs from semantic search, then fall back to exact content.
   const matched: Array<{ entry: MemoryEntry; score: number }> = [];
   for (const mem of ctx.memory) {
-    const row = contentToRow.get(mem.text);
-    if (row) {
-      matched.push({ entry: memoryRowToEntry(row), score: mem.score });
+    const row = mem.id ? idToRow.get(mem.id) : undefined;
+    const fallbackRow = row ?? contentToRow.get(mem.text);
+    if (fallbackRow) {
+      matched.push({ entry: memoryRowToEntry(fallbackRow), score: mem.score });
     }
   }
 

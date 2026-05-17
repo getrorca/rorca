@@ -38,9 +38,24 @@ const MCP_TOOLS: McpToolDef[] = [
     requiredParams: ['workspaceId'],
   },
   {
+    name: 'rorca_create_spec',
+    category: 'Specs & Pipeline',
+    description: 'Canonical cross-client path: create a Rorca spec from explicit drafted content after backend validation, normalization, and canonical save.',
+    inputSchema: {
+      workspaceId: { type: 'string', description: 'Rorca workspace ID' },
+      title: { type: 'string', description: 'Human-readable spec title' },
+      slug: { type: 'string', description: 'Optional explicit slug override' },
+      specBrief: { type: 'string', description: 'Optional original brief for provenance and memory synthesis' },
+      stories: { type: 'array', description: 'Explicit drafted stories (userStories alias also accepted)' },
+      overwrite: { type: 'boolean', description: 'Replace an existing spec with the same slug after snapshotting it' },
+      source: { type: 'string', description: 'Optional provenance tag stored in the spec JSON' },
+    },
+    requiredParams: ['workspaceId', 'title', 'stories'],
+  },
+  {
     name: 'rorca_generate_spec',
     category: 'Specs & Pipeline',
-    description: 'Generate a spec JSON (with userStories array) from a brief using the full Direction Stack.',
+    description: 'Legacy/fallback path: generate a spec JSON from a brief when you want Rorca to draft the spec for you.',
     inputSchema: {
       workspaceId: { type: 'string', description: 'Rorca workspace ID' },
       specBrief: { type: 'string', description: 'One-paragraph description of the feature to spec out' },
@@ -50,6 +65,21 @@ const MCP_TOOLS: McpToolDef[] = [
       model: { type: 'string', description: 'LLM model override (e.g. claude-opus-4-6)' },
     },
     requiredParams: ['workspaceId', 'specBrief', 'title'],
+  },
+  {
+    name: 'rorca_persist_spec',
+    category: 'Specs & Pipeline',
+    description: 'Compatibility alias for explicit drafted-spec persistence; prefer rorca_create_spec as the canonical tool name.',
+    inputSchema: {
+      workspaceId: { type: 'string', description: 'Rorca workspace ID' },
+      title: { type: 'string', description: 'Human-readable spec title' },
+      slug: { type: 'string', description: 'Optional explicit slug override' },
+      specBrief: { type: 'string', description: 'Optional original brief for provenance and memory synthesis' },
+      stories: { type: 'array', description: 'Explicit drafted stories (userStories alias also accepted)' },
+      overwrite: { type: 'boolean', description: 'Replace an existing spec with the same slug after snapshotting it' },
+      source: { type: 'string', description: 'Optional provenance tag stored in the spec JSON' },
+    },
+    requiredParams: ['workspaceId', 'title', 'stories'],
   },
   {
     name: 'rorca_list_specs',

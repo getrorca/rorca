@@ -9,10 +9,10 @@
  * PG-015 / SW-005: Graph Populator — WAL event subscriber for knowledge graph population
  *
  * Listens to WAL events and populates the Apache AGE knowledge graph:
- *   - run_finished → parse story_commits for file paths → Story-[:TOUCHES]->File edges
+ *   - run_finished → mine story_output_chunks for file paths → Story-[:TOUCHES]->File edges
  *   - spec_approved → parse spec JSON → Story-[:BELONGS_TO]->Spec, Story-[:DEPENDS_ON]->Story
  *   - story_passed / story_failed → per-story graph population (nodes + file-touch + skills)
- *   - memory_created / memory_auto_saved → Memory-[:LEARNED_FROM]->Story edges
+ *   - memory_created / memory_auto_saved → Memory-[:LEARNED_FROM]->Story and Memory-[:FROM_SPEC]->Spec edges
  */
 
 import { subscribe, type WalEvent } from './sse-hub';
@@ -25,8 +25,11 @@ import {
   addFileTouch,
   addSkillUsage,
   addMemoryLink,
+  addMemoryAboutFile,
+  addMemorySourceSpec,
+  collectStoryFileTouches,
 } from './knowledge-graph';
-import { query, queryOne } from '../db/index';
+import { queryOne } from '../db/index';
 import { logger } from './logger';
 
 /**
@@ -96,14 +99,11 @@ async function handleStoryCompleted(event: WalEvent, status: 'pass' | 'fail'): P
   await addStoryNode({ id: storyId, specId, title, status });
   nodesCreated++;
 
-  // 2. Query story_commits for this story's committed files (commit SHAs as proxy)
-  if (specId) {
-    const commits = await query<{ commit_sha: string }>(
-      'SELECT commit_sha FROM story_commits WHERE story_id = $1 AND spec_id = $2',
-      [storyId, specId],
-    );
-    for (const commit of commits) {
-      await addFileTouch(storyId, `commit:${commit.commit_sha}`, workspaceId);
+  // 2. Mine real file paths from story output chunks instead of commit SHAs.
+  if (runId) {
+    const filePaths = await collectStoryFileTouches(runId, storyId);
+    for (const filePath of filePaths) {
+      await addFileTouch(storyId, filePath, workspaceId);
       edgesCreated++;
     }
   }
@@ -142,26 +142,38 @@ async function handleMemoryCreated(event: WalEvent): Promise<void> {
   );
   if (!(await isGraphAvailable())) return;
 
-  let payload: { storyId?: string; categories?: string[]; id?: string; category?: string };
+  let payload: { storyId?: string; categories?: string[]; id?: string; category?: string; relatedFiles?: string[]; related_files?: string[]; specId?: string; source_spec_id?: string };
   try {
     payload = JSON.parse(event.payload || '{}');
   } catch {
     return;
   }
 
-  const sourceStoryId = event.story_id || payload.storyId;
-  if (!sourceStoryId) return;
+  const sourceStoryId = event.story_id || payload.storyId || '';
+  const sourceSpecId = event.spec_id || payload.specId || payload.source_spec_id || '';
+  if (!sourceStoryId && !sourceSpecId) return;
 
   // memory_auto_saved has categories array; memory_created may have a single category
   const categories = payload.categories || (payload.category ? [payload.category] : ['unknown']);
   const memoryId = payload.id || `mem-${event.id}`;
+  const relatedFiles = [...new Set([...(payload.relatedFiles ?? []), ...(payload.related_files ?? [])])].filter(Boolean);
 
-  for (const category of categories) {
-    await addMemoryLink(memoryId, sourceStoryId, category);
+  if (sourceStoryId) {
+    for (const category of categories) {
+      await addMemoryLink(memoryId, sourceStoryId, category);
+    }
+  }
+
+  if (sourceSpecId) {
+    await addMemorySourceSpec(memoryId, sourceSpecId);
+  }
+
+  for (const filePath of relatedFiles) {
+    await addMemoryAboutFile(memoryId, filePath);
   }
 
   logger.info(
-    { memoryId, sourceStoryId, categories },
+    { memoryId, sourceStoryId, sourceSpecId, categories, relatedFiles },
     '[graph-populator] Memory graph edges created',
   );
 }

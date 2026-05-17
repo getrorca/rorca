@@ -75,7 +75,12 @@ import { loadRorcaConfig } from './rorca-config';
 import { PersonaRegistry } from './agent-personas';
 import { loadMonorepoApps, type MonorepoPackage } from './workspace-echolocation';
 import { loadAgentsMd, matchRole, buildRolePromptSection, detectViolations, getLastCommitFiles } from './agents-parser';
-import { getGraphContext, formatGraphContext } from './graph-context';
+import { retrieveContext, type RetrievedContext } from './memory-router';
+import {
+  buildRetrievalSelectionsFromContext,
+  recordRetrievalSelectionsOutcome,
+  type RetrievalSelection as StoryRetrievalSelection,
+} from './retrieval-outcome';
 import { logger } from './logger';
 import { autoSynthesizeMemory } from './auto-memory';
 import { writeMemoryMd } from './memory-projection';
@@ -768,6 +773,23 @@ function storyAllowsNoCodeChanges(story: UserStory, mode: 'impl' | 'qa' | 'journ
   ].some(fragment => acceptance.includes(fragment));
 }
 
+function formatRetrievedMemorySection(retrieved: RetrievedContext): string {
+  if (retrieved.memory.length === 0) return '';
+
+  const lines = ['## Retrieved Memory Context'];
+  lines.push(
+    retrieved.meta.needsMoreEvidence
+      ? 'Evidence is sparse or weak. Verify these memories against the local code before relying on them.'
+      : 'Use these prior lessons and decisions as soft constraints while implementing the story.',
+  );
+
+  for (const memory of retrieved.memory.slice(0, 8)) {
+    lines.push(`- ${memory.text}`);
+  }
+
+  return lines.join('\n');
+}
+
 /** PG-020: Read last N bytes of a log file for memory synthesis context */
 function readLogTail(logPath: string, maxBytes: number = 8000): string {
   try {
@@ -1440,6 +1462,7 @@ function buildPrompt(
   roleSection?: string,
   personaRegistry?: PersonaRegistry,
   skillsSection?: string,
+  retrievedMemorySection?: string,
   graphSection?: string,
 ): string {
   const ac = getAcceptance(story);
@@ -1513,6 +1536,9 @@ function buildPrompt(
   // SK-003: Matched skills section (injected AFTER roleSection, BEFORE personaSection)
   const matchedSkills = skillsSection ?? '';
 
+  const memoryBlock = retrievedMemorySection
+    ? `\n=== RETRIEVED MEMORY CONTEXT ===\n${retrievedMemorySection}\n=== END RETRIEVED MEMORY CONTEXT ===\n`
+    : '';
 
   // SW-004: Graph context section (related memories, conventions, file history)
   const graphBlock = graphSection
@@ -1530,6 +1556,7 @@ function buildPrompt(
       codexAgentsInstruction,
       roleSection ?? '',
       matchedSkills,
+      memoryBlock,
       graphBlock,
       '', playbookInstruction, '',
       '## Workflow',
@@ -1586,7 +1613,7 @@ function buildPrompt(
   }
 
   // Implementation mode
-  // Injection order: contextPreamble → mode → agent instructions → roleSection → matched skills → graph context → workflow → persona → story task
+  // Injection order: contextPreamble → mode → agent instructions → roleSection → matched skills → retrieved memory → graph context → workflow → persona → story task
   return [
     contextPreamble,
     'You are implementing a code change in this repository.',
@@ -1594,6 +1621,7 @@ function buildPrompt(
     codexAgentsInstruction,
     roleSection ?? '',
     matchedSkills,
+    memoryBlock,
     graphBlock,
     piAutonomyInstruction,
     '## Workflow',
@@ -4011,24 +4039,41 @@ async function executeStory(
   }
   const activeSkillNames = resolvedSkills.map(s => s.name);
 
-  // SW-004: Fetch graph context (related memories, conventions, file history)
+  // PG-023: Unified retrieval for execution-time memory context + graph context + feedback binding
+  const predictedPaths = extractPredictedPaths(story);
+  let retrievedMemorySection = '';
   let graphSection = '';
   let graphHits: number | undefined;
-  if (workspaceId && config.includeGraph) {
+  let retrievalSelections: StoryRetrievalSelection[] = [];
+  let retrievalMatchedSkills: string[] = [];
+  let retrievalTelemetryId: string | undefined;
+  let retrievalNeedsMoreEvidence = false;
+
+  if (workspaceId) {
     try {
-      const predictedPaths = extractPredictedPaths(story);
-      const wsIdNum = parseInt(workspaceId, 10);
-      if (!isNaN(wsIdNum) && predictedPaths.length > 0) {
-        const graphCtx = await getGraphContext(story.id, predictedPaths, wsIdNum);
-        graphSection = formatGraphContext(graphCtx);
-        graphHits = graphCtx.graphHits;
-        if (graphSection) {
-          logger.info(`  [graph] Injected graph context for ${story.id}: ${graphCtx.relatedMemories.length} memories, ${graphCtx.relatedConventions.length} conventions, ${graphCtx.fileHistory.length} file histories (${graphHits} graph hits)`);
-        }
+      const retrieved = await retrieveContext(workspaceId, buildStoryText(story), {
+        maxTokens: 6000,
+        includeGraph: config.includeGraph,
+        predictedPaths,
+        storyId: story.id,
+      });
+
+      retrievedMemorySection = formatRetrievedMemorySection(retrieved);
+      graphSection = retrieved.graphSection ?? '';
+      graphHits = retrieved.meta.graphHits;
+      retrievalSelections = buildRetrievalSelectionsFromContext(retrieved);
+      retrievalMatchedSkills = retrieved.meta.matchedSkills ?? [];
+      retrievalTelemetryId = retrieved.meta.telemetryId;
+      retrievalNeedsMoreEvidence = Boolean(retrieved.meta.needsMoreEvidence);
+
+      if (retrievedMemorySection) {
+        logger.info(`  [retrieval] Injected ${retrieved.memory.length} memory item(s) for ${story.id} (${retrievalSelections.length} tracked selections)`);
+      }
+      if (graphSection) {
+        logger.info(`  [graph] Injected graph context for ${story.id} (${graphHits ?? 0} graph hits)`);
       }
     } catch (err: any) {
-      // Non-fatal — graph context is optional enrichment
-      logger.warn(`  [graph] Graph context fetch failed for ${story.id}: ${err.message}`);
+      logger.warn(`  [retrieval] Context retrieval failed for ${story.id}: ${err.message}`);
     }
   }
 
@@ -4059,7 +4104,19 @@ async function executeStory(
     ? buildPiServerSkillFiles(effectiveCwd, config.runId).skillFiles
     : [];
 
-  let promptBody = buildPrompt(story, mode, effectiveCwd, playbook, effectiveAgent, contextFilePath, roleSection, personaRegistry, skillsSection, graphSection);
+  let promptBody = buildPrompt(
+    story,
+    mode,
+    effectiveCwd,
+    playbook,
+    effectiveAgent,
+    contextFilePath,
+    roleSection,
+    personaRegistry,
+    skillsSection,
+    retrievedMemorySection,
+    graphSection,
+  );
 
   if (wantsBrowser && browserMcpUrl) {
     promptBody += [
@@ -4127,6 +4184,10 @@ async function executeStory(
       ...(worktreeInfo ? { worktree_path: worktreeInfo.worktreePath, worktree_branch: worktreeInfo.branchName } : {}),
       ...(injectedContextFiles.length > 0 ? { context_files: injectedContextFiles } : {}),
       ...(activeSkillNames.length > 0 ? { active_skills: activeSkillNames } : {}),
+      ...(retrievalMatchedSkills.length > 0 ? { retrieval_matched_skills: retrievalMatchedSkills } : {}),
+      ...(retrievalTelemetryId ? { retrieval_telemetry_id: retrievalTelemetryId } : {}),
+      ...(retrievalSelections.length > 0 ? { retrieval_selected_count: retrievalSelections.length } : {}),
+      ...(retrievalNeedsMoreEvidence ? { retrieval_needs_more_evidence: true } : {}),
       ...(graphHits != null ? { graph_hits: graphHits } : {}),
     }, story.id);
   };
@@ -4176,6 +4237,10 @@ async function executeStory(
           }, story.id).catch(() => { /* best-effort — don't block execution */ });
         }
       : undefined;
+
+  const persistRetrievalOutcome = async (success: boolean): Promise<void> => {
+    await recordRetrievalSelectionsOutcome(workspaceId, retrievalSelections, success);
+  };
 
   // Rate limit retry loop
   try {
@@ -4307,6 +4372,7 @@ async function executeStory(
             readLogTail(storyLogFile), 'failed', config.runId, config.port,
           );
         }
+        await persistRetrievalOutcome(false);
         return 'failed';
       }
 
@@ -4397,6 +4463,7 @@ async function executeStory(
             );
           }
         }
+        await persistRetrievalOutcome(false);
         return 'failed';
       }
 
@@ -4453,6 +4520,7 @@ async function executeStory(
             writeProgressTxt(effectiveCwd);
             return 'failed';
           }
+          await persistRetrievalOutcome(false);
         }
       } catch (err: any) {
         logger.warn(`${story.id}: Failed to inspect working tree for meaningful changes: ${err?.message ?? String(err)}`);
@@ -4557,6 +4625,7 @@ async function executeStory(
           retries: noChangeRetries,
         });
         writeProgressTxt(effectiveCwd);
+        await persistRetrievalOutcome(false);
         return 'failed';
       }
 
@@ -4636,6 +4705,7 @@ async function executeStory(
               }, story.id);
               await postStoryResult(config.port, { runId: config.runId, storyId: story.id, status: 'needs_revision', logPath: storyLogFile, ...storyResultExtra, ...activeSkillsExtra, ...tokenPayload });
             }
+            await persistRetrievalOutcome(false);
             return 'failed';
           }
         } catch (err: any) {
@@ -4660,6 +4730,7 @@ async function executeStory(
           readLogTail(storyLogFile), 'passed', config.runId, config.port,
         );
       }
+      await persistRetrievalOutcome(true);
       return 'passed';
     }
 
@@ -4699,6 +4770,7 @@ async function executeStory(
           readLogTail(storyLogFile), 'failed', config.runId, config.port,
         );
       }
+      await persistRetrievalOutcome(false);
       return 'failed';
     }
 
@@ -4743,6 +4815,7 @@ async function executeStory(
           readLogTail(storyLogFile), 'failed', config.runId, config.port,
         );
       }
+      await persistRetrievalOutcome(false);
       return 'failed';
     }
 
@@ -4786,6 +4859,7 @@ async function executeStory(
           readLogTail(storyLogFile), 'failed', config.runId, config.port,
         );
       }
+      await persistRetrievalOutcome(false);
       return 'failed';
     }
 
@@ -4807,6 +4881,7 @@ async function executeStory(
         reason: classified.category,
       }, story.id);
     }
+    await persistRetrievalOutcome(false);
     return 'failed';
     }
   } finally {
@@ -4825,6 +4900,8 @@ export {
   preparePiRpcSession,
   isMeaningfulStoryChange,
   classifyStoryWorkingTreeChanges,
+  formatRetrievedMemorySection,
+  buildRetrievalSelectionsFromContext as buildStoryRetrievalSelections,
 };
 export type { UserStory as EngineUserStory, RerouteInfo, IdleWatchdog };
 

@@ -28,9 +28,14 @@ process.env.NODE_ENV = 'test';
   app = serverMod.default;
 // Create a workspace with spec directories
   workspacePath = path.join(tmpDir, 'test-project');
-  fs.mkdirSync(path.join(workspacePath, 'scripts', 'ralph', 'specs', 'approved'), { recursive: true });
-  fs.mkdirSync(path.join(workspacePath, 'scripts', 'ralph', 'specs', 'pending'), { recursive: true });
-  await execute(`INSERT INTO workspaces (id, label, path) VALUES ($1, $2, $3) ON CONFLICT (id) DO NOTHING`, ['ws-1', 'Test', workspacePath]);
+  fs.mkdirSync(path.join(workspacePath, 'forge', 'specs', 'approved'), { recursive: true });
+  fs.mkdirSync(path.join(workspacePath, 'forge', 'specs', 'pending'), { recursive: true });
+  await execute(
+    `INSERT INTO workspaces (id, label, path)
+     VALUES ($1, $2, $3)
+     ON CONFLICT (id) DO UPDATE SET label = EXCLUDED.label, path = EXCLUDED.path`,
+    ['ws-1', 'Test', workspacePath],
+  );
   authToken = await getAuthToken(app);
 });
 
@@ -42,7 +47,7 @@ delete process.env.NODE_ENV;
 });
 
 function writeSpec(slug: string, spec: object, status: 'pending' | 'approved' = 'approved') {
-  const dir = path.join(workspacePath, 'scripts', 'ralph', 'specs', status);
+  const dir = path.join(workspacePath, 'forge', 'specs', status);
   fs.writeFileSync(path.join(dir, `${slug}.json`), JSON.stringify(spec));
 }
 
@@ -102,8 +107,9 @@ test('detects circular dependencies and returns 422 with cycle path', async () =
 
   expect(res.status).toBe(422);
   expect(res.body.error).toMatch(/[Cc]ircular dependency/);
-  expect(Array.isArray(res.body.cycle)).toBe(true);
-  expect(res.body.cycle.length).toBeGreaterThanOrEqual(2);
+  const cycle = res.body.cycle ?? res.body.details?.cycle ?? res.body.meta?.cycle;
+  expect(Array.isArray(cycle)).toBe(true);
+  expect(cycle.length).toBeGreaterThanOrEqual(2);
 });
 
 test('includes story status from pipeline run when runId is provided', async () => {
@@ -117,7 +123,7 @@ test('includes story status from pipeline run when runId is provided', async () 
   });
 
   // Create a pipeline run and story results
-  await execute(`INSERT INTO pipeline_runs (id, workspace_id, spec_path, status, started_at) VALUES ($1, $2, $3, $4, NOW())`, [1, 'ws-1', 'ralph/specs/approved/status-spec.json', 'running']);
+  await execute(`INSERT INTO pipeline_runs (id, workspace_id, spec_path, status, started_at) VALUES ($1, $2, $3, $4, NOW())`, [1, 'ws-1', 'forge/specs/approved/status-spec.json', 'running']);
 
   await execute(`INSERT INTO story_results (run_id, story_id, status, started_at) VALUES ($1, $2, $3, NOW())`, [1, 'US-001', 'pass']);
   await execute(`INSERT INTO story_results (run_id, story_id, status, started_at) VALUES ($1, $2, $3, NOW())`, [1, 'US-002', 'fail']);
@@ -187,4 +193,69 @@ test('reads spec from pending directory when not in approved', async () => {
   expect(res.status).toBe(200);
   expect(res.body.nodes).toHaveLength(1);
   expect(res.body.nodes[0].id).toBe('US-001');
+});
+
+test('returns retrieval telemetry, durable events, and feedback summaries for operator debugging', async () => {
+  const { recordRetrievalTelemetry, persistRetrievalTelemetry, clearRetrievalTelemetry } = require('../../lib/retrieval-telemetry');
+  clearRetrievalTelemetry();
+
+  const event = recordRetrievalTelemetry({
+    workspaceId: 'ws-1',
+    queryPreview: 'Add auth guard',
+    matchedSkills: ['Auth Security'],
+    selectedCandidateKeys: ['memory:42'],
+    droppedCandidateKeys: ['memory:99'],
+    needsMoreEvidence: false,
+    candidateCount: 2,
+    selectedCount: 1,
+    tokenBudget: 512,
+    contradictions: [],
+    candidates: [
+      {
+        key: 'memory:42',
+        origin: 'search',
+        sourceType: 'manual',
+        finalScore: 0.91,
+        decision: 'keep',
+        freshnessScore: 0.8,
+        validatorScore: 0.9,
+        graphScore: 0.2,
+        historicalScore: 0.7,
+        reasons: ['Strong lexical overlap'],
+        conflictsWith: [],
+      },
+    ],
+    latencyMs: 14,
+    retrievalTier: 'hybrid',
+  });
+  await persistRetrievalTelemetry(event);
+
+  await execute(
+    `INSERT INTO retrieval_feedback (
+       workspace_id, candidate_key, candidate_kind, skill_name,
+       success_count, failure_count, observation_count, usefulness_score,
+       last_seen_at, updated_at
+     ) VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW())`,
+    ['ws-1', 'memory:42', 'memory', 'Auth Security', 3, 1, 4, 0.8],
+  );
+
+  const res = await request(app)
+    .get('/api/graph/retrieval-telemetry?workspaceId=ws-1&limit=5')
+    .set('Authorization', `Bearer ${authToken}`);
+
+  expect(res.status).toBe(200);
+  expect(res.body.workspaceId).toBe('ws-1');
+  expect(res.body.events).toHaveLength(1);
+  expect(res.body.events[0].selectedCandidateKeys).toContain('memory:42');
+  expect(res.body.feedback).toHaveLength(1);
+  expect(res.body.feedback[0].candidate_key).toBe('memory:42');
+  expect(res.body.feedback[0].usefulness_score).toBe(0.8);
+  expect(res.body.persistedEvents).toHaveLength(1);
+  expect(res.body.persistedEvents[0].id).toBe(event.id);
+  expect(res.body.persistedEvents[0].retrievalTier).toBe('hybrid');
+  expect(res.body.summary.telemetry.totalEvents).toBe(1);
+  expect(res.body.summary.telemetry.tierCounts.hybrid).toBe(1);
+  expect(res.body.summary.telemetry.topMatchedSkills[0]).toEqual({ skill: 'Auth Security', count: 1 });
+  expect(res.body.summary.feedback.totalCandidates).toBe(1);
+  expect(res.body.summary.feedback.topPerformers[0].candidate_key).toBe('memory:42');
 });

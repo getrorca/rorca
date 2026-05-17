@@ -1283,8 +1283,8 @@ router.get('/pi-models', (_req: Request, res: Response) => {
     cachedPiModels.models.length > 0 &&
     now - cachedPiModels.ts < 60_000;
 
-  const models = hasFreshCachedModels
-    ? cachedPiModels!.models
+  const models = hasFreshCachedModels && cachedPiModels
+    ? cachedPiModels.models
     : (() => {
         const freshModels = listPiModels(status.piBinPath!);
         cachedPiModels = freshModels.length > 0 ? { models: freshModels, ts: now } : null;

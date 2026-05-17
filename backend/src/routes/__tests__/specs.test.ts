@@ -471,6 +471,146 @@ function seedSpecFile(dir: string, slug: string, overrides?: Record<string, unkn
   return spec;
 }
 
+describe('POST /api/specs/persist', () => {
+  test('persists an explicit drafted spec to pending with canonical source metadata', async () => {
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Explicit Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+          { id: 'US-002', title: 'Session', description: 'Persist authenticated session', acceptanceCriteria: ['Session persists across refresh'], dependsOn: ['US-001'] },
+        ],
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.slug).toBe('explicit-draft');
+    expect(res.body.status).toBe('pending');
+    expect(res.body.source).toBe('explicit-draft');
+    expect(res.body.stories).toHaveLength(2);
+    expect(res.body.postSave).toEqual({ enrich: false, matchSkills: false, memorySynthesis: false });
+
+    const saved = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'explicit-draft.json'), 'utf8'));
+    expect(saved.source).toBe('explicit-draft');
+    expect(saved.userStories).toHaveLength(2);
+  });
+
+  test('seeds a generation log immediately so the Context tab is non-null before enrich completes', async () => {
+    const persistRes = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Immediate Context Draft',
+        stories: [
+          { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+        ],
+      });
+
+    expect(persistRes.status).toBe(200);
+    expect(persistRes.body.postSave).toEqual({ enrich: true, matchSkills: true, memorySynthesis: true });
+
+    const logRes = await request(app)
+      .get('/api/specs/immediate-context-draft/generation-log')
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    expect(logRes.body).toBeTruthy();
+    expect(logRes.body.spec_slug).toBe('immediate-context-draft');
+    expect(logRes.body.status).toBe('pending_enrichment');
+    expect(logRes.body.enriched).toBe(false);
+    expect(logRes.body.retrieval_method).toBe('none');
+    expect(logRes.body.context_summary).toContain('Explicit draft persisted');
+
+    const summary = parsePayload(logRes.body.context_summary_json);
+    expect(summary.source).toBe('explicit-draft');
+    expect(summary.storyCount).toBe(1);
+    expect(summary.pendingEnrichment).toBe(true);
+    expect(summary.postSave).toEqual({ enrich: true, matchSkills: true, memorySynthesis: true });
+  });
+
+  test('normalizes duplicate and missing story IDs while preserving valid dependencies', async () => {
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Normalize Draft',
+        stories: [
+          { id: 'US-001', title: 'First', description: 'First story', acceptanceCriteria: ['AC1'], dependsOn: [] },
+          { id: 'US-001', title: 'Second', description: 'Second story', acceptanceCriteria: ['AC2'], dependsOn: ['US-001'] },
+          { title: 'Third', description: 'Third story', acceptanceCriteria: ['AC3'], dependsOn: ['US-001'] },
+        ],
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.stories.map((story: any) => story.id)).toEqual(['US-001', 'US-002', 'US-003']);
+    expect(res.body.stories[1].dependsOn).toEqual(['US-001']);
+    expect(res.body.stories[2].dependsOn).toEqual(['US-001']);
+    expect(res.body.normalization.changes).toEqual([
+      { from: 'US-001', to: 'US-002', reason: 'duplicate_id' },
+      { to: 'US-003', reason: 'missing_id' },
+    ]);
+  });
+
+  test('returns 409 when a spec already exists and overwrite=false', async () => {
+    seedSpecFile(path.join(os.tmpdir(), 'forge', 'specs', 'pending'), 'persist-conflict');
+
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Persist Conflict',
+        stories: [
+          { id: 'US-001', title: 'Replacement', description: 'Replacement story', acceptanceCriteria: ['AC1'], dependsOn: [] },
+        ],
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+      });
+
+    expect(res.status).toBe(409);
+    expect(res.body.error).toContain("Spec 'persist-conflict' already exists");
+  });
+
+  test('overwrite=true snapshots the previous spec and emits a spec_generated WAL event', async () => {
+    seedSpecFile(path.join(os.tmpdir(), 'forge', 'specs', 'pending'), 'persist-overwrite', { title: 'Old Draft' });
+
+    const res = await request(app)
+      .post('/api/specs/persist')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({
+        workspaceId: 'ws-test',
+        title: 'Persist Overwrite',
+        overwrite: true,
+        source: 'skill-first',
+        stories: [
+          { id: 'US-001', title: 'New Story', description: 'Fresh story', acceptanceCriteria: ['AC1'], dependsOn: [] },
+        ],
+        postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+      });
+
+    expect(res.status).toBe(200);
+    expect(res.body.overwrote).toBe(true);
+    expect(res.body.source).toBe('skill-first');
+
+    const version = await queryOne(`SELECT content_json, status FROM spec_versions WHERE spec_slug = 'persist-overwrite' ORDER BY version DESC LIMIT 1`) as { content_json: unknown; status: string } | undefined;
+    expect(version).toBeDefined();
+    expect(version?.status).toBe('pending');
+    const oldContent = typeof version?.content_json === 'string' ? JSON.parse(version.content_json) : version?.content_json as Record<string, unknown>;
+    expect(oldContent.title).toBe('Old Draft');
+
+    const event = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'spec_generated' AND spec_id = 'persist-overwrite'`) as { payload: string } | undefined;
+    expect(event).toBeDefined();
+    const payload = parsePayload(event!.payload);
+    expect(payload.source).toBe('skill-first');
+    expect(payload.overwrite).toBe(true);
+  });
+});
+
 describe('GET /api/specs (list)', () => {
   test('returns pending and approved specs with correct status', async () => {
     // Clean dirs to avoid cross-suite contamination (batch tests share os.tmpdir())
