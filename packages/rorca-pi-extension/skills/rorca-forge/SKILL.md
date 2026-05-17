@@ -64,7 +64,8 @@ Use tools/internal operations to gather context such as:
 
 ### Mutation and persistence
 Use structured operations for:
-- create spec from explicit content
+- `rorca_create_spec` as the canonical explicit create-spec path when available
+- `rorca_persist_spec` as a compatibility alias for the same persistence contract
 - update spec from explicit content
 - patch stories if needed
 - approve the spec if instructed
@@ -76,8 +77,9 @@ Use structured operations for:
 - use REST fallback only if the launcher explicitly permits it and no better structured path is available
 
 ### Do not use legacy backend generation by default
-Do not call a "generate spec from brief" backend endpoint/tool as the normal path.
+Do not call `rorca_generate_spec` or a "generate spec from brief" backend endpoint/tool as the normal path.
 This skill exists specifically so Pi does the spec reasoning.
+Use backend generation only as an explicit fallback when the launcher permits it and no explicit-draft persistence path is available.
 
 ## Retrieval guidance and validation
 
@@ -176,7 +178,7 @@ Your responsibility is to produce the best draft possible and then hand it off c
 ## Persistence contract behavior
 
 Once you have a complete draft:
-1. persist it using the best available structured create/update path
+1. persist it using `rorca_create_spec` when available, otherwise `rorca_persist_spec`
 2. prefer enrichment enabled where available
 3. if possible, read the saved spec back
 4. verify that a real slug/id exists
