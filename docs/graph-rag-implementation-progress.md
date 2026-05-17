@@ -1,0 +1,106 @@
+done:
+- Restored backend dev/test dependencies with npm install
+- Fixed Jest migration harness compatibility (pg-index direct-run + migration path resolution)
+- Fixed Jest TS-source resolution so tests use .ts instead of stale sibling .js files
+- Fixed backend typecheck blocker in src/routes/config.ts
+- Patched knowledge-graph to mine real file paths from story_output_chunks
+- Patched graph-populator to use real file-path evidence and link memory→spec/file edges
+- Patched manual/proposal memory writes to persist source provenance and emit memory_created WAL events
+- Patched hybrid search to short-circuit disabled modes
+- Patched graph cache keys to include workspaceId
+- Patched recall to match memory rows by stable ID before text
+- Added provenance-aware retrieval candidate pipeline with skill matching, contradiction detection, supersession handling, reranking, diversity selection, telemetry, and freshness scoring
+- Added retrieval telemetry ring buffer, eval metrics helpers, and retrieval feedback persistence table/helper
+- Added graph edge evidence semantics (evidenceCount + lastSeenAt)
+- Updated stale graph/direction-stack tests to current forge/specs and ranked-retrieval behavior
+- Wired execution-engine story runs to retrieveContext so live story prompts now receive retrieved memory context plus graph context from the unified pipeline
+- Wired final story pass/fail outcomes from execution-engine into recordRetrievalOutcome so the retrieval learning loop is closed for the main autonomous run path
+- Added focused execution-engine retrieval helper coverage
+- Added shared retrieval-outcome helper for consistent candidate-key mapping and success/failure persistence across callers
+- Wired spec-job retrieval callers to record outcomes in match-skills and enrich flows
+- Added admin/operator retrieval telemetry debug surface at GET /api/graph/retrieval-telemetry
+- Added focused graph-route and spec-job retrieval feedback coverage
+- Added durable retrieval telemetry persistence in Postgres plus operator summary rollups (tier mix, evidence-gap rate, contradiction rate, top matched skills)
+- Expanded operator telemetry route to return both in-memory recent events and persisted historical events + feedback summaries
+- Extended retrieval outcome feedback into the remaining high-value sync specs.ts retrieval callers (spec generation, add-stories, sync match-skills, sync enrich per-story path)
+- Expanded validation to include specs route integration coverage alongside graph/memory/retrieval slices
+- Added the missing universal skill-first persistence surface:
+  - POST /api/specs/persist for explicit caller-drafted specs
+  - backend validation/normalization of explicit story drafts (ID repair, dependency validation, cycle rejection, skill normalization)
+  - overwrite snapshotting + canonical pending-spec save + WAL emission
+  - optional post-save enrich / match-skills / memory synthesis controls
+- Added friendly MCP aliases for the skill-first spec flow and core spec/pipeline authoring surface:
+  - rorca_persist_spec (preferred explicit-draft path)
+  - rorca_generate_spec (legacy/fallback brief-to-spec path)
+  - rorca_get_context / rorca_list_specs / rorca_approve_spec / rorca_pipeline_status / rorca_edit_story / rorca_add_stories / rorca_delete_story
+- Fixed MCP test isolation so fetch mocks do not leak across suites when route + MCP tests run together
+next:
+- Tune ranking weights and decay curves with real-world eval fixtures over time
+- Build curated offline eval fixtures from real successful/failed runs so retrieval heuristics can be tuned against representative distributions
+- Add optional operator charts/UI on top of the new durable telemetry/feedback summaries when a dashboard/debug panel is needed
+- If desired product-wise, rework external wrapper CLIs/slash-commands (e.g. Pi extension command handlers) to call the new explicit persistence flow instead of backend generation when they can draft specs locally
+decisions:
+- Treat Phase 1 as the first implementation slice, then layer Phase 2/3 features onto memory-router instead of building a second retrieval system
+- Prefer existing DB/WAL/story log evidence over new schema where possible
+- Keep changes small and reversible
+- Use stable DB IDs for recall joins when available
+- Fix validation harness issues instead of downgrading test coverage
+- For universal skill-first creation, add an explicit-draft persistence API/tool rather than overloading the generation endpoint
+- Keep backend generation available as a legacy/fallback MCP alias, but mark explicit persistence as the preferred path in route/tool descriptions
+files:
+- backend/jest.config.ts
+- backend/src/db/pg-index.ts
+- backend/src/db/pg-index.js
+- backend/src/db/pg-migrations/20260508120000_retrieval_feedback.sql
+- backend/src/routes/config.ts
+- backend/src/routes/graph.ts
+- backend/src/routes/memory.ts
+- backend/src/routes/recall.ts
+- backend/src/routes/__tests__/graph.test.ts
+- backend/src/routes/__tests__/memory.test.ts
+- backend/src/lib/knowledge-graph.ts
+- backend/src/lib/graph-populator.ts
+- backend/src/lib/memory-router.ts
+- backend/src/lib/retrieval-feedback.ts
+- backend/src/lib/retrieval-pipeline.ts
+- backend/src/lib/retrieval-telemetry.ts
+- backend/src/db/pg-migrations/20260515110000_retrieval_telemetry_events.sql
+- backend/src/lib/retrieval-evals.ts
+- backend/src/lib/retrieval-feedback.ts
+- backend/src/lib/retrieval-outcome.ts
+- backend/src/lib/retrieval-telemetry.ts
+- backend/src/lib/memory-router.ts
+- backend/src/lib/execution-engine.ts
+- backend/src/lib/spec-job-handlers.ts
+- backend/src/lib/spec-writer.ts
+- backend/src/lib/mcp-http.ts
+- backend/src/routes/graph.ts
+- backend/src/routes/mcp-tools.ts
+- backend/src/routes/specs.ts
+- backend/src/lib/__tests__/graph-rag-phase1.test.ts
+- backend/src/lib/__tests__/retrieval-pipeline.test.ts
+- backend/src/lib/__tests__/direction-stack.test.ts
+- backend/src/lib/__tests__/execution-engine-retrieval-feedback.test.ts
+- backend/src/lib/__tests__/spec-job-handlers-retrieval-feedback.test.ts
+- backend/src/routes/__tests__/graph.test.ts
+- backend/src/routes/__tests__/specs.test.ts
+- backend/src/mcp/__tests__/generate-spec.test.ts
+- backend/src/mcp/__tests__/persist-spec.test.ts
+- backend/src/mcp/__tests__/integration.test.ts
+- docs/graph-rag-implementation-progress.md
+validation:
+- cd backend && npm install -> PASSED
+- cd backend && npx tsc --noEmit --pretty false -> PASSED
+- cd backend && npm test -- --runInBand src/lib/__tests__/graph-rag-phase1.test.ts src/routes/__tests__/memory.test.ts src/routes/__tests__/recall.test.ts -> PASSED
+- cd backend && npm test -- --runInBand src/lib/__tests__/retrieval-pipeline.test.ts src/lib/__tests__/graph-rag-phase1.test.ts src/routes/__tests__/memory.test.ts src/routes/__tests__/recall.test.ts -> PASSED
+- cd backend && npm test -- --runInBand src/routes/__tests__/graph.test.ts src/routes/__tests__/graph-graceful-degradation.test.ts src/lib/__tests__/direction-stack.test.ts -> PASSED
+- cd backend && npm test -- --runInBand src/lib/__tests__/execution-engine-retrieval-feedback.test.ts src/lib/__tests__/retrieval-pipeline.test.ts src/lib/__tests__/graph-rag-phase1.test.ts src/routes/__tests__/memory.test.ts src/routes/__tests__/recall.test.ts src/routes/__tests__/graph.test.ts src/routes/__tests__/graph-graceful-degradation.test.ts src/lib/__tests__/direction-stack.test.ts -> PASSED
+- cd backend && npm test -- --runInBand src/lib/__tests__/spec-job-handlers-retrieval-feedback.test.ts src/lib/__tests__/execution-engine-retrieval-feedback.test.ts src/lib/__tests__/retrieval-pipeline.test.ts src/routes/__tests__/graph.test.ts src/routes/__tests__/graph-graceful-degradation.test.ts src/routes/__tests__/memory.test.ts src/routes/__tests__/recall.test.ts src/lib/__tests__/direction-stack.test.ts -> PASSED
+- cd backend && npm test -- --runInBand src/routes/__tests__/graph.test.ts src/routes/__tests__/graph-graceful-degradation.test.ts src/routes/__tests__/specs.test.ts src/lib/__tests__/retrieval-pipeline.test.ts src/lib/__tests__/execution-engine-retrieval-feedback.test.ts src/lib/__tests__/spec-job-handlers-retrieval-feedback.test.ts src/routes/__tests__/memory.test.ts src/routes/__tests__/recall.test.ts src/lib/__tests__/direction-stack.test.ts -> PASSED
+- cd backend && npm test -- --runInBand src/mcp/__tests__/generate-spec.test.ts src/mcp/__tests__/persist-spec.test.ts src/mcp/__tests__/integration.test.ts -> PASSED
+- cd backend && npm test -- --runInBand src/routes/__tests__/specs.test.ts src/mcp/__tests__/generate-spec.test.ts src/mcp/__tests__/persist-spec.test.ts src/mcp/__tests__/integration.test.ts -> PASSED
+risks:
+- Retrieval outcome feedback is now closed across the main story execution path, current spec-job retrieval paths, and the highest-value synchronous specs.ts retrieval callers, but any future retrieval callers still need to use the shared helper to stay inside the learning loop
+- Durable telemetry and summaries are now available for operators, but ranking weights / freshness decay are still heuristic until tuned against broader offline eval fixtures
+- AGE-lite test runs still emit expected "graph does not exist" warnings while gracefully degrading
+- External wrapper CLIs that bypass MCP and call backend generation directly are not automatically rewritten by this backend slice; they now have a validated universal persistence surface available to adopt

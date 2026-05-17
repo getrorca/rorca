@@ -42,6 +42,7 @@ const config: Config = {
     'src/__tests__/pg-boss-zero-downtime\\.test\\.ts',
   ],
   modulePathIgnorePatterns: ['<rootDir>/dist/'],
+  moduleFileExtensions: ['ts', 'tsx', 'js', 'jsx', 'json', 'node'],
   // Extend timeout for DB-backed integration tests
   testTimeout: 30_000,
   // Force Jest to exit after all tests complete (prevents hanging async ops from keeping process alive)

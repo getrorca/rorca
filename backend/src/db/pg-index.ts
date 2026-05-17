@@ -128,14 +128,18 @@ export async function runPgMigrations(pool?: Pool): Promise<void> {
       END $$;
     `);
 
-    // Resolve migrations directory (works from both src/ and dist/)
-    let migrationsDir = path.join(__dirname, 'pg-migrations');
-    if (!fs.existsSync(migrationsDir)) {
-      migrationsDir = path.join(__dirname, '..', '..', 'src', 'db', 'pg-migrations');
-    }
+    // Resolve migrations directory without assuming CommonJS __dirname.
+    const migrationDirCandidates = [
+      typeof __dirname !== 'undefined' ? path.join(__dirname, 'pg-migrations') : '',
+      typeof __dirname !== 'undefined' ? path.join(__dirname, '..', '..', 'src', 'db', 'pg-migrations') : '',
+      path.join(process.cwd(), 'src', 'db', 'pg-migrations'),
+      path.join(process.cwd(), 'dist', 'db', 'pg-migrations'),
+    ].filter(Boolean);
 
-    if (!fs.existsSync(migrationsDir)) {
-      console.error(`[pg-migrate] Migrations directory not found: ${migrationsDir}`);
+    const migrationsDir = migrationDirCandidates.find((candidate) => fs.existsSync(candidate));
+
+    if (!migrationsDir) {
+      console.error(`[pg-migrate] Migrations directory not found. Tried: ${migrationDirCandidates.join(', ')}`);
       process.exit(1);
     }
 
@@ -306,7 +310,8 @@ export async function prepareLiteSkippedMigrationsForReplay(pool?: Pool): Promis
 }
 
 // ── CLI entrypoint ────────────────────────────────────────────────────────
-if (require.main === module) {
+const isDirectRun = typeof require !== 'undefined' && require.main === module;
+if (isDirectRun) {
   runPgMigrations()
     .then(() => {
       console.log('[pg-migrate] All migrations applied successfully.');

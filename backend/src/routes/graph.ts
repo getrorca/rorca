@@ -6,11 +6,17 @@
  */
 
 import { Router, Request, Response, NextFunction } from 'express';
-import { graphStats, isGraphAvailable, populateFromRun, populateFromSpec } from '../lib/knowledge-graph';
+import { graphStats, populateFromRun, populateFromSpec } from '../lib/knowledge-graph';
 import { query, queryOne } from '../db/index';
 import { broadcastAll } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
-import { requireAge } from '../lib/age-guard';
+import {
+  listPersistedRetrievalTelemetry,
+  listRetrievalTelemetry,
+  summarizePersistedRetrievalTelemetry,
+} from '../lib/retrieval-telemetry';
+import { listRetrievalFeedback, summarizeRetrievalFeedback } from '../lib/retrieval-feedback';
+import { checkAge, getAgeUnavailableBody } from '../lib/age-guard';
 
 const router = Router();
 
@@ -100,6 +106,59 @@ router.get('/stats', async (_req: Request, res: Response, next: NextFunction) =>
   }
 });
 
+/**
+ * @swagger
+ * /api/graph/retrieval-telemetry:
+ *   get:
+ *     tags: [Graph]
+ *     summary: Get recent retrieval telemetry and feedback rows for operator debugging
+ *     operationId: getRetrievalTelemetry
+ *     x-rorca-tier: admin
+ *     x-rorca-rationale: "Retrieval telemetry exposes operator-only debugging and ranking internals and should remain admin-only."
+ *     parameters:
+ *       - in: query
+ *         name: workspaceId
+ *         schema: { type: string }
+ *         description: Optional workspace filter
+ *       - in: query
+ *         name: limit
+ *         schema: { type: integer, minimum: 1, maximum: 100, default: 20 }
+ *         description: Max telemetry events / feedback rows to return
+ *     responses:
+ *       200:
+ *         description: Recent retrieval telemetry and feedback summary
+ */
+router.get('/retrieval-telemetry', async (req: Request, res: Response, next: NextFunction) => {
+  try {
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
+    const parsedLimit = parseInt(String(req.query.limit ?? '20'), 10);
+    const limit = Number.isFinite(parsedLimit) ? Math.min(100, Math.max(1, parsedLimit)) : 20;
+
+    const [persistedEvents, telemetrySummary, feedback, feedbackSummary] = await Promise.all([
+      listPersistedRetrievalTelemetry({ workspaceId, limit }),
+      summarizePersistedRetrievalTelemetry({ workspaceId }),
+      listRetrievalFeedback({ workspaceId, limit }),
+      summarizeRetrievalFeedback({ workspaceId }),
+    ]);
+
+    const events = listRetrievalTelemetry({ workspaceId, limit });
+
+    res.json({
+      workspaceId: workspaceId ?? null,
+      limit,
+      events,
+      persistedEvents,
+      feedback,
+      summary: {
+        telemetry: telemetrySummary,
+        feedback: feedbackSummary,
+      },
+    });
+  } catch (err) {
+    next(err);
+  }
+});
+
 // ─── Helper: emit WAL event and broadcast to SSE subscribers ──────────────
 
 async function emitWal(
@@ -166,12 +225,16 @@ async function emitWal(
  *       409:
  *         description: Population already in progress for this workspace
  */
-router.post('/populate', requireAge(), async (req: Request, res: Response, next: NextFunction) => {
+router.post('/populate', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const { workspaceId } = req.body;
 
     if (!workspaceId || typeof workspaceId !== 'string') {
       return res.status(400).json({ error: 'workspaceId is required' });
+    }
+
+    if (!(await checkAge())) {
+      return res.status(503).json(getAgeUnavailableBody());
     }
 
     if (activePopulations.has(workspaceId)) {

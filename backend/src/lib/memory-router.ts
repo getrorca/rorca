@@ -33,6 +33,12 @@ import {
   getGraphContext,
   formatGraphContext,
 } from './graph-context';
+import {
+  rankRetrievalCandidates,
+  type RetrievalCandidateInput,
+} from './retrieval-pipeline';
+import { persistRetrievalTelemetry, recordRetrievalTelemetry } from './retrieval-telemetry';
+import { getHistoricalUsefulnessMap, recordRetrievalSelection } from './retrieval-feedback';
 import { query as dbQuery } from '../db/index';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -41,6 +47,8 @@ export interface MemoryEntryResult {
   text: string;
   score: number;
   source: 'cache' | 'search';
+  id?: string;
+  sourceType?: string;
 }
 
 export interface SkillContent {
@@ -52,6 +60,21 @@ export interface GraphContext {
   relatedStories: Array<{ id: string; title: string; relevance: number }>;
   fileTouches: Array<{ path: string; storyIds: string[] }>;
   conventionLinks: Array<{ from: string; to: string; type: string }>;
+}
+
+interface MemoryMetadataRow {
+  id: string;
+  category: string;
+  content: string;
+  confidence: string | null;
+  related_files: string | null;
+  source_type: string | null;
+  source: string | null;
+  pinned: boolean;
+  created_at: string;
+  source_story_id: string | null;
+  source_spec_id: string | null;
+  source_run_id: number | null;
 }
 
 export interface RetrievedContext {
@@ -72,6 +95,10 @@ export interface RetrievedContext {
     totalTokens: number;
     latencyMs: number;
     tier: 'cache' | 'search' | 'hybrid';
+    needsMoreEvidence?: boolean;
+    matchedSkills?: string[];
+    selectedCandidateIds?: string[];
+    telemetryId?: string;
   };
 }
 
@@ -113,6 +140,88 @@ const STOPWORDS = new Set([
 function estimateTokens(text: string): number {
   if (!text) return 0;
   return Math.ceil(text.length / 4);
+}
+
+function formatGraphMemoryLine(memory: { text: string; relationship: string; hops: number }): string {
+  if (memory.relationship === 'conflict') {
+    return `- **CONFLICT**: ${memory.text}`;
+  }
+  return `- ${memory.text} (${memory.relationship}, ${memory.hops} hops)`;
+}
+
+function formatGraphConventionLine(convention: { name: string; appliesTo: string }): string {
+  return `- Follow convention "${convention.name}" for files matching ${convention.appliesTo}`;
+}
+
+function formatGraphHistoryLine(history: { path: string; touchedByStories: string[]; lastModifiedSpec: string }): string {
+  return (
+    `- \`${history.path}\` was modified by stories: ${history.touchedByStories.join(', ')}` +
+    (history.lastModifiedSpec ? ` (spec: ${history.lastModifiedSpec})` : '')
+  );
+}
+
+function trimGraphContextForBudget(
+  ctx: {
+    relatedMemories: Array<{ memoryId: string; text: string; relationship: string; hops: number }>;
+    relatedConventions: Array<{ name: string; content: string; appliesTo: string }>;
+    fileHistory: Array<{ path: string; touchedByStories: string[]; lastModifiedSpec: string }>;
+  },
+  budgetTokens: number,
+): { graphSection: string; graphTokens: number } {
+  if (budgetTokens <= 0) {
+    return { graphSection: '', graphTokens: 0 };
+  }
+
+  const lines = ['## Related History (from knowledge graph)'];
+  let estimated = estimateTokens(lines[0]);
+
+  const addLine = (line: string): boolean => {
+    const nextTokens = estimateTokens(lines.join('\n') + '\n' + line);
+    if (nextTokens > budgetTokens) return false;
+    lines.push(line);
+    estimated = nextTokens;
+    return true;
+  };
+
+  for (const memory of ctx.relatedMemories) {
+    if (!addLine(formatGraphMemoryLine(memory))) break;
+  }
+
+  if (ctx.relatedConventions.length > 0) {
+    if (addLine('')) {
+      if (addLine('### Convention Context')) {
+        for (const convention of ctx.relatedConventions) {
+          if (!addLine(formatGraphConventionLine(convention))) break;
+        }
+      }
+    }
+  }
+
+  if (ctx.fileHistory.length > 0) {
+    if (addLine('')) {
+      if (addLine('### File Touch History')) {
+        for (const history of ctx.fileHistory) {
+          if (!addLine(formatGraphHistoryLine(history))) break;
+        }
+      }
+    }
+  }
+
+  if (lines.length === 1) {
+    return { graphSection: '', graphTokens: 0 };
+  }
+
+  return { graphSection: lines.join('\n'), graphTokens: estimated };
+}
+
+function parseRelatedFiles(value: string | null): string[] {
+  if (!value) return [];
+  try {
+    const parsed = JSON.parse(value) as unknown;
+    return Array.isArray(parsed) ? parsed.filter((entry): entry is string => typeof entry === 'string') : [];
+  } catch {
+    return [];
+  }
 }
 
 // ─── Key Phrase Extraction ──────────────────────────────────────────────────
@@ -274,43 +383,104 @@ export async function retrieveContext(
   const remainingTokens = maxTokens - directionTokens;
   const budgets = calculateBudgets(remainingTokens, includeGraph);
 
-  // ── PG-022: Fetch pinned memories first (always included) ───────────────
+  const predictedPaths = options?.predictedPaths ?? extractFilePaths(storyText);
 
-  const memoryEntries: MemoryEntryResult[] = [];
-  let memoryTokensUsed = 0;
-  const pinnedTexts = new Set<string>();
+  // ── Hydrate memory metadata once so the pipeline can use stable IDs/provenance ──
 
+  let memoryRows: MemoryMetadataRow[] = [];
   try {
-    const pinnedRows = await dbQuery<{ content: string }>(
-      `SELECT content FROM memories WHERE workspace_id = $1 AND pinned = true AND deleted_at IS NULL ORDER BY created_at DESC`,
+    memoryRows = await dbQuery<MemoryMetadataRow>(
+      `SELECT
+         id::text AS id,
+         category,
+         content,
+         confidence,
+         related_files,
+         source_type,
+         source,
+         COALESCE(pinned, false) AS pinned,
+         created_at,
+         source_story_id,
+         source_spec_id,
+         source_run_id
+       FROM memories
+       WHERE workspace_id = $1 AND deleted_at IS NULL
+       ORDER BY pinned DESC, created_at DESC
+       LIMIT 250`,
       [wsId],
     );
-    for (const row of pinnedRows) {
-      const tokens = estimateTokens(row.content);
-      memoryEntries.push({ text: row.content, score: 1, source: 'cache' });
-      memoryTokensUsed += tokens;
-      pinnedTexts.add(row.content);
-    }
   } catch {
-    // pinned column may not exist yet — graceful fallback
+    memoryRows = [];
   }
 
-  // ── Populate memory from cache (skip pinned duplicates) ────────────────
+  const rowsById = new Map(memoryRows.map(row => [String(row.id), row]));
+  const rowsByContent = new Map(memoryRows.map(row => [row.content, row]));
+  const retrievalCandidates: RetrievalCandidateInput[] = [];
+  const seenCandidateIds = new Set<string>();
+  const pinnedTexts = new Set<string>();
+
+  const addCandidate = (candidate: RetrievalCandidateInput): void => {
+    const key = `${candidate.origin}:${candidate.id}`;
+    if (seenCandidateIds.has(key)) return;
+    seenCandidateIds.add(key);
+    retrievalCandidates.push(candidate);
+  };
+
+  const rowToCandidate = (
+    row: MemoryMetadataRow,
+    origin: RetrievalCandidateInput['origin'],
+    baseScore: number,
+    matchType: RetrievalCandidateInput['matchType'],
+  ): RetrievalCandidateInput => ({
+    id: String(row.id),
+    text: row.content,
+    title: row.category || 'Memory Entry',
+    origin,
+    baseScore,
+    matchType,
+    category: row.category,
+    confidence: row.confidence,
+    sourceType: row.source_type,
+    source: row.source,
+    pinned: row.pinned,
+    createdAt: row.created_at,
+    relatedFiles: parseRelatedFiles(row.related_files),
+    sourceStoryId: row.source_story_id,
+    sourceSpecId: row.source_spec_id,
+    sourceRunId: row.source_run_id,
+  });
+
+  // ── PG-022: Pinned memories become top-priority candidates ──────────────
+
+  for (const row of memoryRows) {
+    if (!row.pinned) continue;
+    pinnedTexts.add(row.content);
+    addCandidate(rowToCandidate(row, 'pinned', 1, 'cache'));
+  }
+
+  // ── Cache memories become candidates with stable provenance when possible ──
 
   for (const entry of cachedMemory) {
     if (pinnedTexts.has(entry.text)) continue;
-    const tokens = estimateTokens(entry.text);
-    if (memoryTokensUsed + tokens <= budgets.memory) {
-      memoryEntries.push({ text: entry.text, score: 0, source: 'cache' });
-      memoryTokensUsed += tokens;
-    }
+    const row = rowsByContent.get(entry.text);
+    addCandidate(row
+      ? rowToCandidate(row, 'cache', 0.55, 'cache')
+      : {
+          id: `cache:${entry.ts}:${entry.text.slice(0, 32)}`,
+          text: entry.text,
+          title: 'Memory Entry',
+          origin: 'cache',
+          baseScore: 0.45,
+          matchType: 'cache',
+          createdAt: entry.ts,
+          relatedFiles: [],
+        });
   }
 
-  // ── Populate skills from cache ───────────────────────────────────────────
+  // ── Populate skills from cache (skill validator will reorder them later) ──
 
   const skills: SkillContent[] = [];
   let skillsTokensUsed = 0;
-
   for (const skill of cachedSkills) {
     const tokens = estimateTokens(skill.content);
     if (skillsTokensUsed + tokens <= budgets.skills) {
@@ -322,7 +492,10 @@ export async function retrieveContext(
   // ── Step 2: RAG — Check if cache coverage is sufficient ──────────────────
 
   const keyPhrases = extractKeyPhrases(storyText);
-  const coverage = computeCacheCoverage(keyPhrases, cachedMemory);
+  const coverage = computeCacheCoverage(
+    keyPhrases,
+    [...cachedMemory, ...memoryRows.filter(row => row.pinned).map(row => ({ text: row.content }))],
+  );
 
   if (coverage < CACHE_COVERAGE_THRESHOLD && storyText.length > 0) {
     logger.debug(
@@ -338,30 +511,34 @@ export async function retrieveContext(
 
     ragHits = ragResults.length;
 
-    // Deduplicate against cached entries by text content
-    const existingTexts = new Set(memoryEntries.map(m => m.text));
-
     for (const result of ragResults) {
-      const text = result.snippet || result.title;
-      if (existingTexts.has(text)) continue; // already from cache
-
-      const tokens = estimateTokens(text);
-      if (memoryTokensUsed + tokens <= budgets.memory) {
-        memoryEntries.push({ text, score: result.score, source: 'search' });
-        memoryTokensUsed += tokens;
-        existingTexts.add(text);
-      }
+      const row = rowsById.get(result.sourceId) ?? rowsByContent.get(result.snippet || result.title);
+      addCandidate(row
+        ? rowToCandidate(row, 'search', result.score, result.matchType)
+        : {
+            id: result.sourceId,
+            text: result.snippet || result.title,
+            title: result.title,
+            origin: 'search',
+            baseScore: result.score,
+            matchType: result.matchType,
+            sourceType: result.sourceType,
+            relatedFiles: [],
+          });
     }
   }
+
+  let memoryEntries: MemoryEntryResult[] = [];
+  let memoryTokensUsed = 0;
 
   // ── Step 3: Graph — Knowledge graph context via Apache AGE ───────────────
 
   let graphContext: GraphContext | undefined;
   let graphSection: string | undefined;
+  let graphTokensUsed = 0;
   if (includeGraph) {
     try {
       // PG-016: Use getGraphContext() for deep traversal when predictedPaths provided
-      const predictedPaths = options?.predictedPaths ?? extractFilePaths(storyText);
       const currentStoryId = options?.storyId ?? '';
 
       if (predictedPaths.length > 0 && currentStoryId) {
@@ -392,7 +569,29 @@ export async function retrieveContext(
 
         graphHits = fullCtx.relatedMemories.length + fullCtx.relatedConventions.length + fullCtx.fileHistory.length;
         graphContext = { relatedStories: dedupedStories, fileTouches, conventionLinks };
-        graphSection = formatGraphContext(fullCtx);
+        for (const memory of fullCtx.relatedMemories) {
+          const row = rowsById.get(memory.memoryId) ?? rowsByContent.get(memory.text);
+          addCandidate(row
+            ? {
+                ...rowToCandidate(row, 'graph', 0.72, 'graph'),
+                graphRelationship: memory.relationship,
+                graphHops: memory.hops,
+              }
+            : {
+                id: memory.memoryId,
+                text: memory.text,
+                title: 'Graph Memory',
+                origin: 'graph',
+                baseScore: 0.72,
+                matchType: 'graph',
+                graphRelationship: memory.relationship,
+                graphHops: memory.hops,
+                relatedFiles: predictedPaths,
+              });
+        }
+        const budgeted = trimGraphContextForBudget(fullCtx, budgets.graph);
+        graphSection = budgeted.graphSection;
+        graphTokensUsed = budgeted.graphTokens;
       } else {
         // Fallback: use queryImpact for file-path-based lookup
         const stats = await graphStats();
@@ -431,13 +630,20 @@ export async function retrieveContext(
 
           graphHits = relatedStories.length + fileTouches.length + conventionLinks.length;
           graphContext = { relatedStories, fileTouches, conventionLinks };
+          const budgeted = trimGraphContextForBudget({
+            relatedMemories: [],
+            relatedConventions: conventionLinks.map(c => ({ name: c.from, content: c.from, appliesTo: c.to })),
+            fileHistory: fileTouches.map(f => ({ path: f.path, touchedByStories: f.storyIds, lastModifiedSpec: '' })),
+          }, budgets.graph);
+          graphSection = budgeted.graphSection;
+          graphTokensUsed = budgeted.graphTokens;
         } else {
           graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
         }
       }
 
       logger.debug(
-        { workspaceId: wsId, graphHits },
+        { workspaceId: wsId, graphHits, graphTokensUsed },
         '[memory-router] Graph context retrieved',
       );
     } catch (err) {
@@ -445,6 +651,34 @@ export async function retrieveContext(
       graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
     }
   }
+
+  // ── Phase 2/3: provenance-aware ranking, validator pass, telemetry ──────
+
+  const historicalUsefulness = await getHistoricalUsefulnessMap(
+    wsId,
+    retrievalCandidates.map(candidate => `memory:${candidate.id}`),
+  );
+
+  const ranked = rankRetrievalCandidates({
+    queryText: storyText,
+    predictedPaths,
+    candidates: retrievalCandidates,
+    skills: cachedSkills,
+    historicalUsefulness,
+    tokenBudget: budgets.memory,
+  });
+
+  memoryEntries = ranked.selected.map(candidate => ({
+    text: candidate.text,
+    score: candidate.finalScore,
+    source: candidate.origin === 'search' || candidate.origin === 'graph' ? 'search' : 'cache',
+    id: candidate.id,
+    sourceType: candidate.sourceType || candidate.origin,
+  }));
+  memoryTokensUsed = ranked.selected.reduce((sum, candidate) => sum + candidate.tokenCount, 0);
+
+  const skillScoreMap = new Map(ranked.matchedSkills.map(skill => [skill.name.toLowerCase(), skill.score]));
+  skills.sort((a, b) => (skillScoreMap.get(b.name.toLowerCase()) || 0) - (skillScoreMap.get(a.name.toLowerCase()) || 0));
 
   // ── Redistribute unused budget ───────────────────────────────────────────
 
@@ -464,7 +698,7 @@ export async function retrieveContext(
 
   // ── Compute total tokens and tier ────────────────────────────────────────
 
-  const totalTokens = directionTokens + memoryTokensUsed + skillsTokensUsed;
+  const totalTokens = directionTokens + memoryTokensUsed + skillsTokensUsed + graphTokensUsed;
   const latencyMs = Date.now() - start;
 
   let tier: 'cache' | 'search' | 'hybrid';
@@ -475,6 +709,46 @@ export async function retrieveContext(
   } else {
     tier = 'cache';
   }
+
+  const telemetry = recordRetrievalTelemetry({
+    workspaceId: wsId,
+    queryPreview: storyText.slice(0, 240),
+    matchedSkills: ranked.matchedSkills.map(skill => skill.name),
+    selectedCandidateKeys: ranked.selected.map(candidate => candidate.key),
+    droppedCandidateKeys: ranked.candidates.filter(candidate => !ranked.selected.some(selected => selected.key === candidate.key)).map(candidate => candidate.key),
+    needsMoreEvidence: ranked.needsMoreEvidence,
+    candidateCount: ranked.candidates.length,
+    selectedCount: ranked.selected.length,
+    tokenBudget: budgets.memory,
+    contradictions: ranked.contradictions,
+    candidates: ranked.candidates.map(candidate => ({
+      key: candidate.key,
+      origin: candidate.origin,
+      sourceType: candidate.sourceType || undefined,
+      finalScore: candidate.finalScore,
+      decision: candidate.decision,
+      freshnessScore: candidate.freshnessScore,
+      validatorScore: candidate.validatorScore,
+      graphScore: candidate.graphScore,
+      historicalScore: candidate.historicalScore,
+      reasons: candidate.reasons,
+      conflictsWith: candidate.conflictsWith,
+      supersededBy: candidate.supersededBy,
+    })),
+    latencyMs,
+    retrievalTier: tier,
+  });
+
+  await persistRetrievalTelemetry(telemetry);
+
+  await recordRetrievalSelection(
+    wsId,
+    ranked.selected.map(candidate => ({
+      candidateKey: candidate.key,
+      candidateKind: 'memory',
+      skillName: ranked.matchedSkills[0]?.name,
+    })),
+  );
 
   logger.info(
     { workspaceId: wsId, tier, cagHits, ragHits, graphHits, totalTokens, latencyMs },
@@ -494,6 +768,10 @@ export async function retrieveContext(
       totalTokens,
       latencyMs,
       tier,
+      needsMoreEvidence: ranked.needsMoreEvidence,
+      matchedSkills: ranked.matchedSkills.map(skill => skill.name),
+      selectedCandidateIds: ranked.selected.map(candidate => candidate.id),
+      telemetryId: telemetry.id,
     },
   };
 }

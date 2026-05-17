@@ -95,6 +95,15 @@ Choose tiers this way:
   - Theme switching via CSS variable swap — no Tailwind `dark:` prefix
   - `tailwind.config.ts` maps CSS variables to utility classes
 
+## Spec Creation Contract
+
+For agents/CLIs that create Rorca specs, the canonical path is:
+- draft the spec in the caller when possible
+- persist it through `rorca_create_spec` / `rorca_persist_spec` or `POST /api/specs/persist`
+- treat `rorca_generate_spec` / `POST /api/specs/generate` as legacy/fallback backend drafting
+
+If the user explicitly asks to create a Rorca spec and a structured tool surface is available, prefer the explicit-draft persistence path over backend generation.
+
 ## Critical Gotchas
 
 ### Spec Path Construction (CRITICAL — has caused bugs)

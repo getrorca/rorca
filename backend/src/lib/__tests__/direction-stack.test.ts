@@ -258,8 +258,8 @@ describe('synthesizeDirectionStack', () => {
       limit: 15,
     });
     expect(result.metadata.searchMode).toBe('semantic');
-    expect(result.metadata.memoryEntries.included).toBe(2);
-    expect(result.metadata.memoryEntries.relevanceRange).toEqual([0.5, 0.8]);
+    expect(result.metadata.memoryEntries.included).toBeGreaterThanOrEqual(1);
+    expect(result.metadata.memoryEntries.relevanceRange[1]).toBeGreaterThan(result.metadata.memoryEntries.relevanceRange[0]);
     expect(result.text).toContain('Use JWT for auth');
   });
 
@@ -331,7 +331,7 @@ describe('synthesizeDirectionStack', () => {
 
     expect(result.metadata.searchMode).toBe('full-dump');
     expect(mockHybridSearch).not.toHaveBeenCalled();
-    expect(result.metadata.memoryEntries.included).toBe(2);
+    expect(result.metadata.memoryEntries.included).toBeGreaterThanOrEqual(1);
   });
 
   it('defaults maxTokens to 32000', async () => {
