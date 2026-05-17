@@ -58,12 +58,14 @@ export interface GraphContext {
 
 // ─── Cache Key ──────────────────────────────────────────────────────────────
 
-function buildCacheKey(storyId: string, predictedPaths: string[]): string {
+function buildCacheKey(storyId: string, predictedPaths: string[], workspaceId: string | number): string {
   const hash = createHash('md5')
+    .update(String(workspaceId))
+    .update('\n')
     .update(predictedPaths.slice().sort().join('\n'))
     .digest('hex')
     .slice(0, 12);
-  return `graph-context:${storyId}:${hash}`;
+  return `graph-context:${workspaceId}:${storyId}:${hash}`;
 }
 
 // ─── Cypher Helpers (use knowledge-graph.ts internals via pool) ─────────────
@@ -134,7 +136,7 @@ export async function getGraphContext(
   const start = Date.now();
 
   // Check cache first
-  const cacheKey = buildCacheKey(storyId, predictedPaths);
+  const cacheKey = buildCacheKey(storyId, predictedPaths, workspaceId);
   const cached = get<GraphContext>(cacheKey);
   if (cached) {
     logger.debug({ storyId, cacheKey }, '[graph-context] cache HIT');

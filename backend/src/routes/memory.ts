@@ -74,6 +74,50 @@ function inferSourceType(source: string): SourceType {
   return 'manual';
 }
 
+function inferStoryIdFromSource(source: string): string | null {
+  const trimmed = source.trim();
+  if (/^[A-Z]{1,6}-\d{1,4}$/.test(trimmed)) return trimmed;
+  const storyMatch = trimmed.match(/^story-(.+)$/i);
+  if (storyMatch?.[1]) return storyMatch[1].trim();
+  return null;
+}
+
+async function emitMemoryCreatedWalEvent(params: {
+  workspaceId: string;
+  memoryId: string;
+  category: string;
+  content: string;
+  storyId?: string | null;
+  specId?: string | null;
+  relatedFiles?: string[];
+}): Promise<void> {
+  try {
+    const walPayload = JSON.stringify({
+      id: params.memoryId,
+      text: params.content,
+      category: params.category,
+      relatedFiles: params.relatedFiles ?? [],
+    });
+    const walEvent = await queryOne<{ id: number }>(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      ['memory_created', params.workspaceId, params.specId ?? null, params.storyId ?? null, walPayload],
+    );
+    if (walEvent) {
+      broadcastAll({
+        id: walEvent.id,
+        event_type: 'memory_created',
+        workspace_id: params.workspaceId,
+        spec_id: params.specId ?? null,
+        story_id: params.storyId ?? null,
+        payload: walPayload,
+        ts: new Date().toISOString(),
+      } as any);
+    }
+  } catch {
+    // Best-effort WAL event — don't block memory creation
+  }
+}
+
 // ─── Routes ─────────────────────────────────────────────────────────────────
 
 /**
@@ -207,8 +251,8 @@ router.post('/', async (req: Request, res: Response) => {
     throw new ValidationError(`Invalid category. Must be one of: ${MEMORY_CATEGORIES.join(', ')}`);
   }
 
-  // Validate sourceType if provided; default to 'manual'
-  const resolvedSourceType: SourceType = sourceType ?? 'manual';
+  // Validate sourceType if provided; otherwise infer from source text.
+  const resolvedSourceType: SourceType = sourceType ?? inferSourceType(source ?? '');
   if (!VALID_SOURCE_TYPES.includes(resolvedSourceType as SourceType)) {
     throw new ValidationError(`Invalid sourceType. Must be one of: ${VALID_SOURCE_TYPES.join(', ')}`);
   }
@@ -242,9 +286,9 @@ router.post('/', async (req: Request, res: Response) => {
   if (embeddingStr) {
     try {
       const row = await queryOne<{ id: string }>(
-        `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
-         VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
-        [workspaceId, category, `${title}: ${rule}`, 'high', '[]', embeddingStr, resolvedSourceType],
+        `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type, source)
+         VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8) RETURNING id`,
+        [workspaceId, category, `${title}: ${rule}`, 'high', '[]', embeddingStr, resolvedSourceType, source ?? null],
       );
       insertedId = row?.id;
     } catch {
@@ -253,11 +297,22 @@ router.post('/', async (req: Request, res: Response) => {
   }
   if (!insertedId) {
     const row = await queryOne<{ id: string }>(
-      `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type)
-       VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-      [workspaceId, category, `${title}: ${rule}`, 'high', '[]', resolvedSourceType],
+      `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type, source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+      [workspaceId, category, `${title}: ${rule}`, 'high', '[]', resolvedSourceType, source ?? null],
     );
     insertedId = row?.id;
+  }
+
+  if (insertedId) {
+    await emitMemoryCreatedWalEvent({
+      workspaceId,
+      memoryId: insertedId,
+      category,
+      content: `${title}: ${rule}`,
+      storyId: inferStoryIdFromSource(source ?? ''),
+      relatedFiles: [],
+    });
   }
 
   invalidateMemory(workspaceId); // PG-013
@@ -582,25 +637,34 @@ router.post('/proposals', async (req: Request, res: Response) => {
         // Embedding failure is non-fatal
       }
       const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
-      let proposalInserted = false;
+      let proposalRow: { id: string } | undefined;
       if (embeddingStr) {
         try {
-          await queryOne<{ id: string }>(
-            `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
-             VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
-            [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', embeddingStr, 'synthesis'],
+          proposalRow = await queryOne<{ id: string }>(
+            `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type, source)
+             VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8) RETURNING id`,
+            [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', embeddingStr, 'synthesis', entryToAppend.source || null],
           );
-          proposalInserted = true;
         } catch {
           // embedding column may not exist (pgvector not installed) — fall through
         }
       }
-      if (!proposalInserted) {
-        await queryOne<{ id: string }>(
-          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-          [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', 'synthesis'],
+      if (!proposalRow) {
+        proposalRow = await queryOne<{ id: string }>(
+          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type, source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+          [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', 'synthesis', entryToAppend.source || null],
         );
+      }
+      if (proposalRow?.id) {
+        await emitMemoryCreatedWalEvent({
+          workspaceId,
+          memoryId: proposalRow.id,
+          category: entryToAppend.category,
+          content: `${entryToAppend.title}: ${entryToAppend.rule}`,
+          specId: null,
+          relatedFiles: [],
+        });
       }
 
       results.push({ proposalId: p.proposalId, action: 'approve', success: true });
@@ -633,18 +697,30 @@ router.post('/proposals', async (req: Request, res: Response) => {
         // Embedding failure is non-fatal
       }
       const editEmbeddingStr = editEmbedding ? `[${editEmbedding.join(',')}]` : null;
+      let proposalRow: { id: string } | undefined;
       if (editEmbeddingStr) {
-        await queryOne<{ id: string }>(
-          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type)
-           VALUES ($1, $2, $3, $4, $5, $6::vector, $7) RETURNING id`,
-          [workspaceId, edited.category, `${edited.title}: ${edited.rule}`, 'high', '[]', editEmbeddingStr, 'synthesis'],
+        proposalRow = await queryOne<{ id: string }>(
+          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type, source)
+           VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8) RETURNING id`,
+          [workspaceId, edited.category, `${edited.title}: ${edited.rule}`, 'high', '[]', editEmbeddingStr, 'synthesis', edited.source || null],
         );
       } else {
-        await queryOne<{ id: string }>(
-          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type)
-           VALUES ($1, $2, $3, $4, $5, $6) RETURNING id`,
-          [workspaceId, edited.category, `${edited.title}: ${edited.rule}`, 'high', '[]', 'synthesis'],
+        proposalRow = await queryOne<{ id: string }>(
+          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type, source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
+          [workspaceId, edited.category, `${edited.title}: ${edited.rule}`, 'high', '[]', 'synthesis', edited.source || null],
         );
+      }
+
+      if (proposalRow?.id) {
+        await emitMemoryCreatedWalEvent({
+          workspaceId,
+          memoryId: proposalRow.id,
+          category: edited.category,
+          content: `${edited.title}: ${edited.rule}`,
+          specId: null,
+          relatedFiles: [],
+        });
       }
 
       results.push({ proposalId: p.proposalId, action: 'edit', success: true });

@@ -9,7 +9,7 @@ import { spawn } from 'child_process';
 import * as path from 'path';
 
 describe('MCP server integration', () => {
-  it('lists all 9 expected tools', (done) => {
+  it('lists the core friendly spec/pipeline aliases', (done) => {
     const proc = spawn('npx', ['tsx', path.resolve(__dirname, '../server.ts')], {
       env: { ...process.env, NODE_ENV: 'production', RORCA_API_URL: 'http://localhost:3030' },
       stdio: ['pipe', 'pipe', 'pipe'],
@@ -37,12 +37,13 @@ describe('MCP server integration', () => {
       expect(toolsResponse).toBeTruthy();
       const toolNames = toolsResponse.result.tools.map((t: { name: string }) => t.name);
       expect(toolNames).toContain('rorca_get_context');
+      expect(toolNames).toContain('rorca_create_spec');
       expect(toolNames).toContain('rorca_generate_spec');
+      expect(toolNames).toContain('rorca_persist_spec');
       expect(toolNames).toContain('rorca_list_specs');
       expect(toolNames).toContain('rorca_approve_spec');
       expect(toolNames).toContain('rorca_pipeline_status');
       expect(toolNames).toContain('rorca_edit_story');
-      expect(toolNames).toContain('rorca_search_stories');
       expect(toolNames).toContain('rorca_add_stories');
       expect(toolNames).toContain('rorca_delete_story');
       done();

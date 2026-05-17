@@ -4,7 +4,7 @@ MCP (Model Context Protocol) server — exposes Rorca as a set of tools that Cla
 
 ## What It Does
 
-`server.ts` registers 14 MCP tools using `@modelcontextprotocol/sdk`. When Claude (or another MCP client) connects, it can call these tools to interact with Rorca without going through the HTTP API manually.
+`server.ts` builds the MCP server from the OpenAPI spec using `@modelcontextprotocol/sdk`. Public/auth routes become MCP tools automatically, and a small alias layer adds friendly names for the core spec/pipeline workflows.
 
 The MCP server hits Rorca's HTTP API internally: `RORCA_API_URL` env var (default `http://localhost:3030`).
 
@@ -13,7 +13,9 @@ The MCP server hits Rorca's HTTP API internally: `RORCA_API_URL` env var (defaul
 | Tool | Inputs | Output |
 |------|--------|--------|
 | `rorca_get_context` | `workspaceId`, `specBrief`, `storyAnnotations?` | Synthesized Direction Stack (all 5 layers merged) |
-| `rorca_generate_spec` | `workspaceId`, `specBrief`, `title`, `storyCount?` (1-500, default 8) | Generated spec JSON |
+| `rorca_create_spec` | `workspaceId`, `title`, `stories`, `slug?`, `specBrief?`, `overwrite?`, `source?` | Canonical explicit cross-client spec-creation path |
+| `rorca_generate_spec` | `workspaceId`, `specBrief`, `title`, `storyCount?` | Legacy/fallback brief→spec generation when you want Rorca to draft |
+| `rorca_persist_spec` | `workspaceId`, `title`, `stories`, `slug?`, `specBrief?`, `overwrite?`, `source?` | Compatibility alias for explicit-draft persistence |
 | `rorca_approve_spec` | `workspaceId`, `specSlug` | Approval confirmation, new version number |
 | `rorca_list_specs` | `workspaceId`, `status?` (pending/approved) | Array of spec summaries |
 | `rorca_list_workspaces` | (none) | All registered workspaces |
@@ -29,6 +31,15 @@ The MCP server hits Rorca's HTTP API internally: `RORCA_API_URL` env var (defaul
 | `rorca_delete_story` | `workspaceId`, `specId`, `storyId` | Remove story, reindex IDs |
 
 ## Usage Pattern
+
+Preferred universal skill-first flow:
+1. caller/skill retrieves context via MCP tools
+2. caller drafts the spec content locally
+3. caller persists the explicit draft with `rorca_create_spec` (or compatibility alias `rorca_persist_spec`)
+4. backend validates, normalizes, saves, and can run post-save enrichment
+
+`rorca_generate_spec` remains available as the legacy/fallback path when the caller wants backend-side drafting.
+
 
 ```typescript
 // Tools are called by Claude via MCP protocol
