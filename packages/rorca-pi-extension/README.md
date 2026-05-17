@@ -35,8 +35,8 @@ There are 3 distinct surfaces:
    - machine-facing tool surface bridged into Pi when available
 
 This extension uses:
-- **Rorca REST API** for slash-command workflows
-- **Rorca HTTP MCP** for tool bridging
+- **Rorca REST API** for legacy/fallback slash-command workflows
+- **Rorca HTTP MCP** for tool bridging and skill-first structured persistence
 - **Pi session entries** for lightweight local state persistence
 
 It does **not** shell out to the `rorca` CLI for normal runtime operations.
@@ -122,8 +122,30 @@ Example:
 /rorca-help
 ```
 
+## `/rorca-create-spec`
+Create a Rorca spec through the skill-first path.
+
+Usage:
+
+```text
+/rorca-create-spec <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>]
+```
+
+Behavior:
+- dispatches `/skill:rorca-forge`
+- Pi/skill performs the drafting
+- Rorca persists the explicit draft through the structured persistence flow
+- this is the preferred explicit and reliable create-spec command in Pi
+
+Examples:
+
+```text
+/rorca-create-spec Add a docs-only story that updates the README
+/rorca-create-spec @docs/brief.md --workspace rorca --approve --run
+```
+
 ## `/rorca-forge`
-Generate a spec from inline text or from a file.
+Legacy/fallback path: generate a spec from inline text or from a file using backend-side drafting.
 
 Usage:
 
@@ -136,6 +158,7 @@ Behavior:
 - can optionally approve it immediately
 - can optionally trigger a Pi run immediately
 - `@file` reads the brief from a local file relative to the current working directory
+- this remains available for compatibility, but `/rorca-create-spec` is the preferred explicit command
 
 Examples:
 
@@ -315,32 +338,38 @@ Important:
 
 ## Typical workflows
 
-### 1. Forge and run from a brief
+### 1. Skill-first create and run from a brief
+
+```text
+/rorca-create-spec @docs/brief.md --workspace rorca --approve --run
+```
+
+### 2. Legacy backend-generated forge and run from a brief
 
 ```text
 /rorca-forge-run @docs/brief.md --workspace rorca
 ```
 
-### 2. Approve then run a spec
+### 3. Approve then run a spec
 
 ```text
 /rorca-approve zz-my-spec --workspace rorca
 /rorca-run zz-my-spec --workspace rorca
 ```
 
-### 3. Run a single story only
+### 4. Run a single story only
 
 ```text
 /rorca-run zz-my-spec --workspace rorca --story US-001
 ```
 
-### 4. Retry failed stories in a run
+### 5. Retry failed stories in a run
 
 ```text
 /rorca-retry 20260316000301
 ```
 
-### 5. Watch a run from a fresh Pi session
+### 6. Watch a run from a fresh Pi session
 
 ```text
 /rorca-watch 20260316000309
