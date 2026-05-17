@@ -406,11 +406,50 @@ export async function hybridSearch(
     semanticWeight = 1.0,
   } = options;
 
-  // Run keyword and semantic searches in parallel
+  const runKeyword = keywordWeight > 0;
+  const runSemantic = semanticWeight > 0;
+
+  // Run only the enabled search legs.
   const [keywordHits, semanticHits] = await Promise.all([
-    keywordSearch(queryText, sourceTypes, workspaceId),
-    semanticSearch(queryText, sourceTypes, workspaceId),
+    runKeyword ? keywordSearch(queryText, sourceTypes, workspaceId) : Promise.resolve([]),
+    runSemantic ? semanticSearch(queryText, sourceTypes, workspaceId) : Promise.resolve([]),
   ]);
+
+  // If only keyword search is enabled, return keyword results directly.
+  if (runKeyword && !runSemantic) {
+    return keywordHits.slice(0, limit).map(hit => ({
+      sourceType: hit.sourceType,
+      sourceId: hit.sourceId,
+      title: hit.title,
+      snippet: hit.snippet,
+      score: hit.rank,
+      matchType: 'keyword' as MatchType,
+      highlights: hit.highlights,
+    }));
+  }
+
+  // If only semantic search is enabled, return semantic results directly.
+  if (runSemantic && !runKeyword) {
+    const results: SearchResult[] = [];
+    for (const hit of semanticHits.slice(0, limit)) {
+      let title = `[${hit.sourceType}] ${hit.sourceId}`;
+      const row = await queryOne<{ spec_title: string }>(
+        'SELECT spec_title FROM spec_search_index WHERE spec_slug = $1 LIMIT 1',
+        [hit.sourceId],
+      );
+      if (row?.spec_title) title = row.spec_title;
+
+      results.push({
+        sourceType: hit.sourceType,
+        sourceId: hit.sourceId,
+        title,
+        snippet: '',
+        score: hit.similarity,
+        matchType: 'semantic',
+      });
+    }
+    return results;
+  }
 
   // If no semantic hits, return keyword results directly (no RRF needed)
   if (semanticHits.length === 0) {
@@ -429,7 +468,6 @@ export async function hybridSearch(
   if (keywordHits.length === 0) {
     const results: SearchResult[] = [];
     for (const hit of semanticHits.slice(0, limit)) {
-      // Try to get title from spec_search_index
       let title = `[${hit.sourceType}] ${hit.sourceId}`;
       const row = await queryOne<{ spec_title: string }>(
         'SELECT spec_title FROM spec_search_index WHERE spec_slug = $1 LIMIT 1',

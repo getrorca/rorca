@@ -167,6 +167,7 @@ const PUBLIC_TOOL_RULES: Array<{ method: string; pattern: RegExp }> = [
   { method: 'GET', pattern: /^\/api\/specs\/[^/]+\/generation-log$/ },
   // Specs — mutations (core open-source workflow)
   { method: 'POST', pattern: /^\/api\/specs\/generate$/ },
+  { method: 'POST', pattern: /^\/api\/specs\/persist$/ },
   { method: 'POST', pattern: /^\/api\/specs\/generate\/batch$/ },
   { method: 'POST', pattern: /^\/api\/specs\/[^/]+\/approve$/ },
   { method: 'POST', pattern: /^\/api\/specs\/[^/]+\/reject$/ },
@@ -759,28 +760,97 @@ export function createMcpHttpServer(spec: OpenAPISpec, options: McpHttpServerOpt
     registerDefinition(definition);
   }
 
-  const definitionByPath = new Map(definitions.map((definition) => [definition.capturedPath, definition]));
+  const definitionByRoute = new Map(definitions.map((definition) => [`${definition.capturedMethod} ${definition.capturedPath}`, definition]));
   const legacyAliases = [
+    {
+      toolName: 'rorca_get_context',
+      description: 'Friendly alias for direction-stack synthesis when a caller needs project context before drafting.',
+      method: 'POST',
+      path: '/api/direction/synthesize',
+    },
+    {
+      toolName: 'rorca_generate_spec',
+      description: 'Friendly alias for legacy/fallback brief-to-spec generation where Rorca does the drafting.',
+      method: 'POST',
+      path: '/api/specs/generate',
+    },
+    {
+      toolName: 'rorca_create_spec',
+      description: 'Canonical explicit spec-creation alias: create a Rorca spec from caller-drafted content via backend validation and persistence.',
+      method: 'POST',
+      path: '/api/specs/persist',
+    },
+    {
+      toolName: 'rorca_persist_spec',
+      description: 'Compatibility alias for explicit spec persistence; prefer rorca_create_spec as the cross-client command/tool name.',
+      method: 'POST',
+      path: '/api/specs/persist',
+    },
+    {
+      toolName: 'rorca_list_specs',
+      description: 'Friendly alias for listing specs in a workspace.',
+      method: 'GET',
+      path: '/api/specs',
+    },
+    {
+      toolName: 'rorca_approve_spec',
+      description: 'Friendly alias for approving a pending spec.',
+      method: 'POST',
+      path: '/api/specs/{specId}/approve',
+    },
+    {
+      toolName: 'rorca_pipeline_status',
+      description: 'Friendly alias for listing recent pipeline runs and their current status.',
+      method: 'GET',
+      path: '/api/pipeline/runs',
+    },
+    {
+      toolName: 'rorca_edit_story',
+      description: 'Friendly alias for editing a single story inside a spec.',
+      method: 'PATCH',
+      path: '/api/specs/{specId}/stories/{storyId}',
+    },
+    {
+      toolName: 'rorca_search_stories',
+      description: 'Friendly alias for cross-spec story search.',
+      method: 'GET',
+      path: '/api/specs/search-stories',
+    },
+    {
+      toolName: 'rorca_add_stories',
+      description: 'Friendly alias for appending generated stories to a spec.',
+      method: 'POST',
+      path: '/api/specs/{specId}/add-stories',
+    },
+    {
+      toolName: 'rorca_delete_story',
+      description: 'Friendly alias for deleting a story from a spec.',
+      method: 'DELETE',
+      path: '/api/specs/{specId}/stories/{storyId}',
+    },
     {
       toolName: 'rorca_enrich_spec',
       description: 'Legacy alias for spec enrichment via the async spec-job bridge.',
+      method: 'POST',
       path: '/api/specs/{specId}/enrich',
     },
     {
       toolName: 'rorca_match_skills',
       description: 'Legacy alias for spec skill matching via the async spec-job bridge.',
+      method: 'POST',
       path: '/api/specs/{specId}/match-skills',
     },
     {
       toolName: 'rorca_suggest_skills',
       description: 'Legacy alias for spec skill suggestions via the async spec-job bridge.',
+      method: 'POST',
       path: '/api/specs/{specId}/suggest-skills',
     },
   ] as const;
 
   let aliasCount = 0;
   for (const alias of legacyAliases) {
-    const definition = definitionByPath.get(alias.path);
+    const definition = definitionByRoute.get(`${alias.method} ${alias.path}`);
     if (definition) {
       registerDefinition(definition, {
         toolName: alias.toolName,
@@ -790,7 +860,7 @@ export function createMcpHttpServer(spec: OpenAPISpec, options: McpHttpServerOpt
     }
   }
 
-  logger.info(`[MCP-HTTP] Registered ${definitions.length} OpenAPI tools and ${aliasCount} legacy aliases`);
+  logger.info(`[MCP-HTTP] Registered ${definitions.length} OpenAPI tools and ${aliasCount} friendly aliases`);
   return server;
 }
 

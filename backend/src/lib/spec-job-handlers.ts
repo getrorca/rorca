@@ -13,6 +13,11 @@ import { logger } from './logger';
 import { chatComplete, DEFAULT_MODEL, isValidModel } from './llm-client';
 import { retrieveContext, type RetrievedContext } from './memory-router';
 import { buildContextForStory } from './context-enrichment';
+import {
+  buildRetrievalSelectionsFromContext,
+  recordRetrievalSelectionsOutcome,
+  type RetrievalSelection,
+} from './retrieval-outcome';
 import { querySkillEffectiveness, querySkillPathAffinity, type SkillEffectivenessRow, type SkillPathAffinityRow } from './knowledge-graph';
 import { SkillRegistry } from './skill-registry';
 import { PersonaRegistry } from './agent-personas';
@@ -248,6 +253,7 @@ export async function runMatchSkillsJob(
   const agentsContext = catalogs.agentsMd ? catalogs.agentsMd.slice(0, 2000) : '';
 
   let skillGraphSection = '';
+  let retrievalSelections: RetrievalSelection[] = [];
   let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
   try {
     const storyBrief = stories.map((s) => `${s.title}: ${s.description ?? ''}`).join('\n');
@@ -255,6 +261,7 @@ export async function runMatchSkillsJob(
       maxTokens: 8000,
       includeGraph: true,
     });
+    retrievalSelections = buildRetrievalSelectionsFromContext(retrieved);
     if (retrieved.graphSection) {
       skillGraphSection = retrieved.graphSection;
     }
@@ -338,13 +345,14 @@ ${agentsContext || '(empty)'}
 ## Stories to match
 ${storyList}`;
 
-  await onProgress?.({
-    current: totalStories,
-    total: totalStories,
-    message: formatProgressMessage('Running skill match LLM pass for', totalStories, totalStories, specId),
-  });
+  try {
+    await onProgress?.({
+      current: totalStories,
+      total: totalStories,
+      message: formatProgressMessage('Running skill match LLM pass for', totalStories, totalStories, specId),
+    });
 
-  const llmResult = await chatComplete([{ role: 'user', content: prompt }], { model: resolvedModel as never });
+    const llmResult = await chatComplete([{ role: 'user', content: prompt }], { model: resolvedModel as never });
 
   let parsed: { matches: Array<{ storyId: string; suggestedSkills: SuggestedSkillRaw[] }> };
   try {
@@ -431,11 +439,17 @@ ${storyList}`;
     } : {}),
   } : undefined;
 
-  return {
-    matched: totalSkillsMatched,
-    stories: responseStories,
-    ...(contextSummary ? { contextSummary } : {}),
-  };
+    await recordRetrievalSelectionsOutcome(workspaceId, retrievalSelections, true);
+
+    return {
+      matched: totalSkillsMatched,
+      stories: responseStories,
+      ...(contextSummary ? { contextSummary } : {}),
+    };
+  } catch (err) {
+    await recordRetrievalSelectionsOutcome(workspaceId, retrievalSelections, false);
+    throw err;
+  }
 }
 
 export async function runContextEnrichJob(
@@ -648,7 +662,12 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
   };
 
   const ENRICH_CONCURRENCY = 3;
-  type StoryResult = { story: (typeof userStories)[number]; result: Awaited<ReturnType<typeof chatComplete>>; ctx: RetrievedContext };
+  type StoryResult = {
+    story: (typeof userStories)[number];
+    result: Awaited<ReturnType<typeof chatComplete>>;
+    ctx: RetrievedContext;
+    retrievalSelections: RetrievalSelection[];
+  };
   const results: PromiseSettledResult<StoryResult>[] = [];
 
   for (let i = 0; i < userStories.length; i += ENRICH_CONCURRENCY) {
@@ -664,9 +683,15 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
 
         const storyText = `${story.title} ${story.description ?? ''}`;
         const ctx = await retrieveContext(workspaceId, storyText, { maxTokens: 2000, includeGraph: true });
+        const retrievalSelections = buildRetrievalSelectionsFromContext(ctx);
         const prompt = buildPromptForStory(story, ctx);
-        const result = await chatComplete([{ role: 'user', content: prompt }], annotationModel);
-        return { story, result, ctx };
+        try {
+          const result = await chatComplete([{ role: 'user', content: prompt }], annotationModel);
+          return { story, result, ctx, retrievalSelections };
+        } catch (err) {
+          Object.assign(err as object, { retrievalSelections });
+          throw err;
+        }
       }),
     );
     results.push(...batchResults);
@@ -674,7 +699,7 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
 
   for (const outcome of results) {
     if (outcome.status === 'fulfilled') {
-      const { story, result, ctx } = outcome.value;
+      const { story, result, ctx, retrievalSelections } = outcome.value;
       const annotation = result.text.trim();
       totalInputTokens += result.usage.inputTokens;
       totalOutputTokens += result.usage.outputTokens;
@@ -698,7 +723,12 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
       const descWithoutOldContext = (story.description ?? '').replace(/\n\n## Context\n[\s\S]*$/, '');
       story.description = `${descWithoutOldContext}\n\n## Context\n${annotation}`;
       storiesEnriched += 1;
+      await recordRetrievalSelectionsOutcome(workspaceId, retrievalSelections, true);
     } else {
+      const failedSelections = Array.isArray((outcome.reason as { retrievalSelections?: unknown })?.retrievalSelections)
+        ? ((outcome.reason as { retrievalSelections: RetrievalSelection[] }).retrievalSelections)
+        : [];
+      await recordRetrievalSelectionsOutcome(workspaceId, failedSelections, false);
       logger.warn({ err: outcome.reason }, '[spec-job-handlers] enrich: annotation failed for a story — skipping');
     }
   }

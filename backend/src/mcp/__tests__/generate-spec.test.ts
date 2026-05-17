@@ -6,11 +6,13 @@
  */
 
 const mockFetch = jest.fn();
-(global as any).fetch = mockFetch;
+const originalFetch = (global as any).fetch;
 
 process.env.NODE_ENV = 'test';
 
-import { server, RORCA_API } from '../server';
+import { server } from '../server';
+
+const RORCA_API = process.env.RORCA_API_URL || 'http://localhost:3030';
 
 function getToolHandler(toolName: string) {
   const tools = (server as any)._registeredTools as Record<string, { handler: Function }>;
@@ -33,6 +35,24 @@ const MOCK_SPEC = {
   ],
 };
 
+function mockJsonResponse(body: unknown, status: number = 200) {
+  mockFetch.mockResolvedValueOnce({
+    ok: status >= 200 && status < 300,
+    status,
+    headers: { get: () => 'application/json' },
+    json: async () => body,
+    text: async () => JSON.stringify(body),
+  });
+}
+
+beforeAll(() => {
+  (global as any).fetch = mockFetch;
+});
+
+afterAll(() => {
+  (global as any).fetch = originalFetch;
+});
+
 beforeEach(() => {
   mockFetch.mockReset();
 });
@@ -43,10 +63,7 @@ test('rorca_generate_spec is registered on the McpServer', () => {
 });
 
 test('calls POST /api/specs/generate with correct body', async () => {
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
-    json: async () => MOCK_SPEC,
-  });
+  mockJsonResponse(MOCK_SPEC);
 
   const handler = getToolHandler('rorca_generate_spec');
   await handler({
@@ -54,7 +71,6 @@ test('calls POST /api/specs/generate with correct body', async () => {
     specBrief: 'Build an auth system',
     title: 'Auth System',
     storyCount: 5,
-    includeDiagrams: false,
   });
 
   expect(mockFetch).toHaveBeenCalledWith(
@@ -71,49 +87,11 @@ test('calls POST /api/specs/generate with correct body', async () => {
     specBrief: 'Build an auth system',
     title: 'Auth System',
     storyCount: 5,
-    includeDiagrams: false,
   });
-});
-
-test('storyCount defaults to 8 when not provided', async () => {
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
-    json: async () => MOCK_SPEC,
-  });
-
-  const handler = getToolHandler('rorca_generate_spec');
-  await handler({
-    workspaceId: 'ws-456',
-    specBrief: 'Build an auth system',
-    title: 'Auth System',
-  });
-
-  const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-  expect(body.storyCount).toBe(8);
-});
-
-test('includeDiagrams defaults to true when not provided', async () => {
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
-    json: async () => MOCK_SPEC,
-  });
-
-  const handler = getToolHandler('rorca_generate_spec');
-  await handler({
-    workspaceId: 'ws-456',
-    specBrief: 'Build an auth system',
-    title: 'Auth System',
-  });
-
-  const body = JSON.parse(mockFetch.mock.calls[0][1].body);
-  expect(body.includeDiagrams).toBe(true);
 });
 
 test('returns content with spec title in text', async () => {
-  mockFetch.mockResolvedValueOnce({
-    ok: true,
-    json: async () => MOCK_SPEC,
-  });
+  mockJsonResponse(MOCK_SPEC);
 
   const handler = getToolHandler('rorca_generate_spec');
   const result = await handler({
@@ -122,25 +100,23 @@ test('returns content with spec title in text', async () => {
     title: 'Auth System',
   });
 
+  expect(result.isError).toBeUndefined();
   expect(result.content).toHaveLength(1);
   expect(result.content[0].type).toBe('text');
-  expect(result.content[0].text).toContain('Generated spec: Auth System');
+  expect(result.content[0].text).toContain('Auth System');
   expect(result.content[0].text).toContain('"userStories"');
 });
 
-test('throws with error message when API returns non-200', async () => {
-  mockFetch.mockResolvedValueOnce({
-    ok: false,
-    status: 422,
-    text: async () => 'Invalid workspace ID',
-  });
+test('returns MCP error content when API returns non-200', async () => {
+  mockJsonResponse({ error: 'Invalid workspace ID' }, 422);
 
   const handler = getToolHandler('rorca_generate_spec');
-  await expect(
-    handler({
-      workspaceId: 'bad-id',
-      specBrief: 'Build something',
-      title: 'Test',
-    })
-  ).rejects.toThrow('Spec generation failed (422): Invalid workspace ID');
+  const result = await handler({
+    workspaceId: 'bad-id',
+    specBrief: 'Build something',
+    title: 'Test',
+  });
+
+  expect(result.isError).toBe(true);
+  expect(result.content[0].text).toContain('Invalid workspace ID');
 });

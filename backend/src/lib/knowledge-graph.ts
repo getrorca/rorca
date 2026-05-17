@@ -235,6 +235,64 @@ function escCypher(value: string): string {
     .replace(/'/g, "\\'");
 }
 
+function evidenceEdgeSet(alias: string): string {
+  const now = new Date().toISOString();
+  return `
+    ON CREATE SET ${alias}.evidenceCount = 1,
+                  ${alias}.lastSeenAt = '${now}'
+    ON MATCH SET ${alias}.evidenceCount = COALESCE(${alias}.evidenceCount, 0) + 1,
+                 ${alias}.lastSeenAt = '${now}'
+  `;
+}
+
+/**
+ * Extract probable file paths from prose chunks produced by the story log follower.
+ * Supports human-readable tool traces like "Reading src/foo.ts" and "Editing backend/app.ts".
+ */
+function extractFilePathsFromProse(text: string): string[] {
+  if (!text) return [];
+
+  const paths = new Set<string>();
+  const humanReadable = /\b(?:Reading|Writing|Editing|Read|Write|Edit)\s+([\w./@-]+\.[\w-]+)/g;
+  let match: RegExpExecArray | null;
+  while ((match = humanReadable.exec(text)) !== null) {
+    paths.add(match[1]);
+  }
+
+  const genericPath = /(?:^|\s)((?:[\w.-]+\/)+[\w.-]+\.[\w-]+)/g;
+  while ((match = genericPath.exec(text)) !== null) {
+    paths.add(match[1]);
+  }
+
+  return [...paths];
+}
+
+/**
+ * Collect file paths touched by a story from the story_output_chunks table.
+ * This mines the human-readable story log trail instead of using commit SHAs as
+ * file proxies, which keeps graph file nodes aligned with actual paths.
+ */
+export async function collectStoryFileTouches(runId: number, storyId: string): Promise<string[]> {
+  try {
+    const rows = await query<{ chunk: string }>(
+      `SELECT chunk FROM story_output_chunks
+       WHERE run_id = $1 AND story_id = $2
+       ORDER BY sequence ASC`,
+      [runId, storyId],
+    );
+
+    const paths = new Set<string>();
+    for (const row of rows) {
+      for (const filePath of extractFilePathsFromProse(row.chunk)) {
+        paths.add(filePath);
+      }
+    }
+    return [...paths];
+  } catch {
+    return [];
+  }
+}
+
 // ── Node Operations ─────────────────────────────────────────────────────────
 
 export interface StoryNode {
@@ -306,7 +364,8 @@ export async function addFileTouch(storyId: string, filePath: string, workspaceI
     MERGE (s:Story {id: '${escCypher(storyId)}'})
     MERGE (f:File {path: '${escCypher(filePath)}'})
     ON CREATE SET f.workspace_id = '${escCypher(wsId)}'
-    MERGE (s)-[:TOUCHES]->(f)
+    MERGE (s)-[r:TOUCHES]->(f)
+    ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
   logger.debug({ storyId, filePath }, '[knowledge-graph] File touch edge added');
@@ -324,7 +383,8 @@ export async function addMemoryLink(memoryId: string, storyId: string, category?
     ON CREATE SET m.category = '${escCypher(cat)}',
                   m.created_at = '${new Date().toISOString()}'
     MERGE (s:Story {id: '${escCypher(storyId)}'})
-    MERGE (m)-[:LEARNED_FROM]->(s)
+    MERGE (m)-[r:LEARNED_FROM]->(s)
+    ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
   logger.debug({ memoryId, storyId }, '[knowledge-graph] Memory link added');
@@ -339,10 +399,27 @@ export async function addMemoryAboutFile(memoryId: string, filePath: string): Pr
   const cypher = `
     MERGE (m:Memory {id: '${escCypher(memoryId)}'})
     MERGE (f:File {path: '${escCypher(filePath)}'})
-    MERGE (m)-[:ABOUT]->(f)
+    MERGE (m)-[r:ABOUT]->(f)
+    ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
   logger.debug({ memoryId, filePath }, '[knowledge-graph] Memory-about-file edge added');
+}
+
+/**
+ * Link a Memory entry to the Spec that produced it.
+ * PG-019: No-op if AGE is unavailable.
+ */
+export async function addMemorySourceSpec(memoryId: string, specId: string): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+  const cypher = `
+    MERGE (m:Memory {id: '${escCypher(memoryId)}'})
+    MERGE (sp:Spec {id: '${escCypher(specId)}'})
+    MERGE (m)-[r:FROM_SPEC]->(sp)
+    ${evidenceEdgeSet('r')}
+  `;
+  await cypherMutate(cypher);
+  logger.debug({ memoryId, specId }, '[knowledge-graph] Memory-from-spec edge added');
 }
 
 /**
@@ -356,7 +433,8 @@ export async function addConventionLink(conventionName: string, filePath: string
     ON CREATE SET c.source = '${escCypher(source || '')}',
                   c.layer = '${escCypher(layer || '')}'
     MERGE (f:File {path: '${escCypher(filePath)}'})
-    MERGE (c)-[:APPLIES_TO]->(f)
+    MERGE (c)-[r:APPLIES_TO]->(f)
+    ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
   logger.debug({ conventionName, filePath }, '[knowledge-graph] Convention link added');
@@ -371,7 +449,8 @@ export async function addConventionViolation(conventionName: string, storyId: st
   const cypher = `
     MERGE (c:Convention {name: '${escCypher(conventionName)}'})
     MERGE (s:Story {id: '${escCypher(storyId)}'})
-    MERGE (c)-[:VIOLATED_BY]->(s)
+    MERGE (c)-[r:VIOLATED_BY]->(s)
+    ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
   logger.debug({ conventionName, storyId }, '[knowledge-graph] Convention violation edge added');
@@ -387,7 +466,8 @@ export async function addSkillUsage(skillName: string, storyId: string, source?:
     MERGE (sk:Skill {name: '${escCypher(skillName)}'})
     ON CREATE SET sk.source = '${escCypher(source || '')}'
     MERGE (s:Story {id: '${escCypher(storyId)}'})
-    MERGE (sk)-[:USED_IN]->(s)
+    MERGE (sk)-[r:USED_IN]->(s)
+    ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
   logger.debug({ skillName, storyId }, '[knowledge-graph] Skill usage edge added');
@@ -405,7 +485,8 @@ export async function addSpecNode(spec: SpecNode): Promise<void> {
         sp.status = '${escCypher(spec.status)}',
         sp.workspace_id = '${escCypher(spec.workspace_id)}'
     MERGE (w:Workspace {id: '${escCypher(spec.workspace_id)}'})
-    MERGE (sp)-[:IN_WORKSPACE]->(w)
+    MERGE (sp)-[r:IN_WORKSPACE]->(w)
+    ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
   logger.debug({ specId: spec.id }, '[knowledge-graph] Spec node upserted');
@@ -420,7 +501,8 @@ export async function addStoryToSpec(storyId: string, specId: string): Promise<v
   const cypher = `
     MERGE (s:Story {id: '${escCypher(storyId)}'})
     MERGE (sp:Spec {id: '${escCypher(specId)}'})
-    MERGE (s)-[:BELONGS_TO]->(sp)
+    MERGE (s)-[r:BELONGS_TO]->(sp)
+    ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
 }
@@ -434,7 +516,8 @@ export async function addStoryDependency(storyId: string, dependsOnId: string): 
   const cypher = `
     MERGE (s:Story {id: '${escCypher(storyId)}'})
     MERGE (d:Story {id: '${escCypher(dependsOnId)}'})
-    MERGE (s)-[:DEPENDS_ON]->(d)
+    MERGE (s)-[r:DEPENDS_ON]->(d)
+    ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
 }
@@ -442,7 +525,7 @@ export async function addStoryDependency(storyId: string, dependsOnId: string): 
 // ── Query Operations ────────────────────────────────────────────────────────
 
 export type NodeType = 'Story' | 'File' | 'Memory' | 'Spec' | 'Convention' | 'Workspace' | 'Skill';
-export type EdgeType = 'TOUCHES' | 'BELONGS_TO' | 'DEPENDS_ON' | 'LEARNED_FROM' | 'ABOUT' | 'APPLIES_TO' | 'VIOLATED_BY' | 'USED_IN' | 'IN_WORKSPACE';
+export type EdgeType = 'TOUCHES' | 'BELONGS_TO' | 'DEPENDS_ON' | 'LEARNED_FROM' | 'ABOUT' | 'APPLIES_TO' | 'VIOLATED_BY' | 'USED_IN' | 'IN_WORKSPACE' | 'FROM_SPEC';
 
 export interface CypherResult {
   id: unknown;
@@ -578,7 +661,7 @@ export async function queryImpact(filePath: string): Promise<ImpactResult> {
 
 /**
  * Populate graph from a completed run:
- * - Parse story_commits for file paths → Story-[:TOUCHES]->File edges
+ * - Mine story_output_chunks for real file paths → Story-[:TOUCHES]->File edges
  * - Parse spec JSON for dependsOn → Story-[:DEPENDS_ON]->Story edges
  * - Create Story-[:BELONGS_TO]->Spec edges
  * - Create Spec-[:IN_WORKSPACE]->Workspace edges
@@ -632,16 +715,10 @@ export async function populateFromRun(
       await addStoryToSpec(sr.story_id, specId);
       edgesCreated++;
 
-      // Get file touches from story_commits
-      const commits = await query<{ commit_sha: string }>(
-        'SELECT commit_sha FROM story_commits WHERE story_id = $1 AND spec_id = $2',
-        [sr.story_id, specId],
-      );
-
-      // For each commit, we'd ideally parse the git diff for file paths.
-      // Since we don't have the diff content stored, link commits as proxy nodes.
-      for (const commit of commits) {
-        await addFileTouch(sr.story_id, `commit:${commit.commit_sha}`, String(workspaceId));
+      // Mine real file paths from the story output chunks written by story-log-follower.
+      const filePaths = await collectStoryFileTouches(runId, sr.story_id);
+      for (const filePath of filePaths) {
+        await addFileTouch(sr.story_id, filePath, String(workspaceId));
         edgesCreated++;
       }
     }
@@ -970,7 +1047,7 @@ export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowl
 
   try {
     // 1. Memory nodes linked to this spec's stories via LEARNED_FROM
-    const memoryRows = await cypherQuery<{ mid: unknown; cat: unknown; sid: unknown }>(
+    const learnedRows = await cypherQuery<{ mid: unknown; cat: unknown; sid: unknown }>(
       `MATCH (m:Memory)-[:LEARNED_FROM]->(s:Story)-[:BELONGS_TO]->(sp:Spec {id: '${safeSpecId}'})
        RETURN m.id, m.category, s.id`,
       [
@@ -980,12 +1057,29 @@ export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowl
       ],
     );
 
-    const memories: KnowledgeGraphMemory[] = memoryRows.map(row => ({
-      id: String(parseAgtype(row.mid) ?? ''),
-      category: String(parseAgtype(row.cat) ?? ''),
-      relationship: 'LEARNED_FROM',
-      storyId: String(parseAgtype(row.sid) ?? ''),
-    }));
+    const sourceSpecRows = await cypherQuery<{ mid: unknown; cat: unknown }>(
+      `MATCH (m:Memory)-[:FROM_SPEC]->(sp:Spec {id: '${safeSpecId}'})
+       RETURN m.id, m.category`,
+      [
+        { name: 'mid', type: 'agtype' },
+        { name: 'cat', type: 'agtype' },
+      ],
+    );
+
+    const memories: KnowledgeGraphMemory[] = [
+      ...learnedRows.map(row => ({
+        id: String(parseAgtype(row.mid) ?? ''),
+        category: String(parseAgtype(row.cat) ?? ''),
+        relationship: 'LEARNED_FROM',
+        storyId: String(parseAgtype(row.sid) ?? ''),
+      })),
+      ...sourceSpecRows.map(row => ({
+        id: String(parseAgtype(row.mid) ?? ''),
+        category: String(parseAgtype(row.cat) ?? ''),
+        relationship: 'FROM_SPEC',
+        storyId: specId,
+      })),
+    ];
 
     // 2. Convention nodes that APPLIES_TO files touched by this spec's stories
     const conventionRows = await cypherQuery<{ cname: unknown; csrc: unknown; fpath: unknown }>(

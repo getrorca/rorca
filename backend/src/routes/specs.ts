@@ -34,6 +34,7 @@ import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
 import { hybridSearch } from '../lib/search';
 import { retrieveContext } from '../lib/memory-router';
+import { recordRetrievedContextOutcome } from '../lib/retrieval-outcome';
 import { querySkillEffectiveness, querySkillPathAffinity, isGraphAvailable, graphStats, querySpecKnowledgeGraph, type SkillEffectivenessRow, type SkillPathAffinityRow } from '../lib/knowledge-graph';
 import { requireAge } from '../lib/age-guard';
 import { autoSynthesizeSpecMemory } from '../lib/auto-memory';
@@ -850,6 +851,277 @@ function extractSkillNames(story: Record<string, unknown>): string[] {
   }).filter(Boolean);
 }
 
+const ExplicitDraftSuggestedSkillSchema = z.union([
+  z.string().min(1),
+  z.object({
+    name: z.string().min(1),
+    relevance: z.number().int().min(1).max(10).optional(),
+    reason: z.string().optional(),
+  }),
+]);
+
+const ExplicitDraftStorySchema = z.object({
+  id: z.string().min(1).optional(),
+  title: z.string().min(1),
+  description: z.string().min(1),
+  acceptanceCriteria: z.array(z.string().min(1)).min(1),
+  dependsOn: z.union([z.array(z.string().min(1)), z.string().min(1)]).optional(),
+  complexity: z.number().int().min(1).max(5).optional(),
+  priority: z.number().int().min(1).max(4).optional(),
+  timeoutMinutes: z.number().int().min(5).max(240).optional(),
+  model: z.string().optional(),
+  suggestedSkills: z.array(ExplicitDraftSuggestedSkillSchema).optional(),
+  suggestedPersona: z.string().min(1).optional(),
+  suggestedReviewers: z.array(z.string().min(1)).optional(),
+  passes: z.boolean().optional(),
+  excluded: z.boolean().optional(),
+});
+
+const ExplicitDraftReasoningSchema = z.object({
+  enabled: z.boolean(),
+  effort: z.string().optional(),
+});
+
+const ExplicitDraftContextUsedSchema = z.object({
+  text: z.string(),
+  meta: z.record(z.string(), z.unknown()),
+});
+
+const PersistSpecDraftSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  title: z.string().min(1),
+  slug: z.string().min(1).optional(),
+  brief: z.string().min(1).optional(),
+  specBrief: z.string().min(1).optional(),
+  storyPrefix: z.string().min(1).optional(),
+  stories: z.array(ExplicitDraftStorySchema).optional(),
+  userStories: z.array(ExplicitDraftStorySchema).optional(),
+  diagrams: z.record(z.string(), z.object({ mermaid: z.string(), ascii: z.string() })).optional(),
+  mermaidDiagram: z.string().optional(),
+  model: z.string().optional(),
+  contextUsed: ExplicitDraftContextUsedSchema.optional(),
+  reasoning: ExplicitDraftReasoningSchema.optional(),
+  overwrite: z.boolean().optional(),
+  source: z.string().optional(),
+  postSave: z.object({
+    enrich: z.boolean().optional(),
+    matchSkills: z.boolean().optional(),
+    memorySynthesis: z.boolean().optional(),
+  }).optional(),
+}).refine(data => Array.isArray(data.stories) || Array.isArray(data.userStories), {
+  message: 'stories (or userStories) is required',
+  path: ['stories'],
+});
+
+interface PersistSpecDraftNormalizationChange {
+  from?: string;
+  to: string;
+  reason: 'missing_id' | 'duplicate_id';
+}
+
+function normalizeStoryDependencyInput(raw: string[] | string | undefined): string[] {
+  if (Array.isArray(raw)) return raw;
+  if (typeof raw === 'string' && raw.trim()) return [raw.trim()];
+  return [];
+}
+
+function inferStoryPrefix(stories: Array<{ id?: string }>, preferredPrefix?: string): string {
+  const requested = preferredPrefix?.trim();
+  if (requested) return requested.toUpperCase();
+  for (const story of stories) {
+    const match = story.id?.trim().match(/^([A-Za-z][A-Za-z0-9_-]*)-\d+$/);
+    if (match) return match[1].toUpperCase();
+  }
+  return 'US';
+}
+
+function nextGeneratedStoryId(prefix: string, nextIndex: { value: number }, usedIds: Set<string>): string {
+  while (true) {
+    const candidate = `${prefix}-${String(nextIndex.value).padStart(3, '0')}`;
+    nextIndex.value += 1;
+    if (!usedIds.has(candidate)) return candidate;
+  }
+}
+
+function normalizeExplicitDraftStories(
+  stories: z.infer<typeof ExplicitDraftStorySchema>[],
+  preferredPrefix?: string,
+): { stories: UserStory[]; changes: PersistSpecDraftNormalizationChange[] } {
+  const prefix = inferStoryPrefix(stories, preferredPrefix);
+  const usedIds = new Set<string>();
+  const nextIndex = { value: 1 };
+  const idMap = new Map<string, string>();
+  const changes: PersistSpecDraftNormalizationChange[] = [];
+  const normalized = stories.map((story) => {
+    const requestedId = story.id?.trim();
+    let finalId = requestedId;
+    if (!finalId) {
+      finalId = nextGeneratedStoryId(prefix, nextIndex, usedIds);
+      changes.push({ to: finalId, reason: 'missing_id' });
+    } else if (usedIds.has(finalId)) {
+      const reassignedId = nextGeneratedStoryId(prefix, nextIndex, usedIds);
+      changes.push({ from: finalId, to: reassignedId, reason: 'duplicate_id' });
+      finalId = reassignedId;
+    }
+
+    usedIds.add(finalId);
+    if (requestedId && !idMap.has(requestedId)) idMap.set(requestedId, finalId);
+
+    const normalizedSkills = Array.isArray(story.suggestedSkills)
+      ? story.suggestedSkills.map((skill) => {
+        if (typeof skill === 'string') {
+          return { name: skill, relevance: 5, reason: 'Explicitly provided by caller' };
+        }
+        return {
+          name: skill.name,
+          relevance: skill.relevance ?? 5,
+          reason: skill.reason ?? 'Explicitly provided by caller',
+        };
+      })
+      : undefined;
+
+    return {
+      story,
+      normalized: {
+        id: finalId,
+        title: story.title.trim(),
+        description: story.description.trim(),
+        acceptanceCriteria: story.acceptanceCriteria.map((criterion) => criterion.trim()).filter(Boolean),
+        dependsOn: [] as string[],
+        ...(story.complexity != null ? { complexity: story.complexity } : {}),
+        ...(story.priority != null ? { priority: story.priority } : {}),
+        ...(story.timeoutMinutes != null ? { timeoutMinutes: story.timeoutMinutes } : {}),
+        ...(story.model ? { model: story.model } : {}),
+        ...(normalizedSkills?.length ? { suggestedSkills: normalizedSkills } : {}),
+        ...(story.suggestedPersona ? { suggestedPersona: story.suggestedPersona.trim() } : {}),
+        ...(story.suggestedReviewers?.length ? { suggestedReviewers: story.suggestedReviewers.map((reviewer) => reviewer.trim()).filter(Boolean) } : {}),
+        passes: story.passes ?? false,
+        ...(story.excluded !== undefined ? { excluded: story.excluded } : {}),
+      } satisfies UserStory,
+      rawDependsOn: normalizeStoryDependencyInput(story.dependsOn),
+    };
+  });
+
+  const validIds = new Set(normalized.map((entry) => entry.normalized.id));
+  for (const entry of normalized) {
+    const resolvedDependsOn = entry.rawDependsOn.map((dep) => idMap.get(dep) ?? dep);
+    const dedupedDependsOn = Array.from(new Set(resolvedDependsOn.filter(Boolean)));
+    for (const dep of dedupedDependsOn) {
+      if (!validIds.has(dep)) {
+        throw new ValidationError(`Story ${entry.normalized.id} dependsOn unknown story "${dep}"`);
+      }
+      if (dep === entry.normalized.id) {
+        throw new ValidationError(`Story ${entry.normalized.id} cannot depend on itself`);
+      }
+    }
+    entry.normalized.dependsOn = dedupedDependsOn;
+  }
+
+  const resultStories = normalized.map((entry) => entry.normalized);
+  const cycle = detectCycle(resultStories);
+  if (cycle) {
+    throw new ValidationError(`Spec contains a circular dependency: ${cycle.join(' -> ')}`);
+  }
+
+  return { stories: resultStories, changes };
+}
+
+interface SpecPostSaveOptions {
+  enrich: boolean;
+  matchSkills: boolean;
+  memorySynthesis: boolean;
+}
+
+function resolveSpecPostSaveOptions(input?: Partial<SpecPostSaveOptions>): SpecPostSaveOptions {
+  return {
+    enrich: input?.enrich !== false,
+    matchSkills: input?.matchSkills !== false,
+    memorySynthesis: input?.memorySynthesis !== false,
+  };
+}
+
+async function seedPersistGenerationLog(input: {
+  slug: string;
+  source: string;
+  title: string;
+  storyCount: number;
+  model?: string;
+  overwrite: boolean;
+  postSave: SpecPostSaveOptions;
+  normalizationChanges: Array<{ from?: string; to: string; reason: string }>;
+  contextUsed?: unknown;
+  reasoning?: unknown;
+}): Promise<void> {
+  const pendingEnrichment = input.postSave.enrich;
+  const status = pendingEnrichment ? 'pending_enrichment' : 'persisted';
+  const summaryJson = {
+    source: input.source,
+    title: input.title,
+    storyCount: input.storyCount,
+    overwrite: input.overwrite,
+    pendingEnrichment,
+    postSave: input.postSave,
+    normalizationChanges: input.normalizationChanges,
+    ...(input.contextUsed !== undefined ? { contextUsed: input.contextUsed } : {}),
+    ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
+  };
+
+  await execute(
+    `INSERT INTO spec_generation_logs (
+      spec_slug,
+      model,
+      provider,
+      duration_ms,
+      context_summary,
+      enriched,
+      retrieval_method,
+      context_summary_json,
+      status
+    ) VALUES ($1, $2, $3, $4, $5, false, $6, $7, $8)`,
+    [
+      input.slug,
+      input.model?.trim() || 'explicit-draft',
+      'api',
+      0,
+      pendingEnrichment
+        ? 'Explicit draft persisted; pending post-save enrichment'
+        : 'Explicit draft persisted without post-save enrichment',
+      'none',
+      JSON.stringify(summaryJson),
+      status,
+    ],
+  );
+}
+
+function scheduleSpecPostSaveJobs(specId: string, workspaceId: string, options: Pick<SpecPostSaveOptions, 'enrich' | 'matchSkills'>): void {
+  if (!options.enrich && !options.matchSkills) return;
+
+  setImmediate(() => {
+    const apiBase = `http://127.0.0.1:${process.env.PORT || 3030}`;
+    const headers = { 'Content-Type': 'application/json' };
+    const body = JSON.stringify({ workspaceId });
+    const runMatchSkills = () => fetch(`${apiBase}/api/specs/${specId}/match-skills`, { method: 'POST', headers, body });
+
+    const work = options.enrich
+      ? fetch(`${apiBase}/api/specs/${specId}/enrich`, { method: 'POST', headers, body })
+        .then((response) => {
+          if (!response.ok) logger.warn(`[post-save] enrich failed: ${response.status}`);
+          else logger.info(`[post-save] enrich complete for ${specId}`);
+          if (options.matchSkills) return runMatchSkills();
+          return undefined;
+        })
+      : runMatchSkills();
+
+    Promise.resolve(work)
+      .then((response) => {
+        if (!options.matchSkills || !response) return;
+        if (!response.ok) logger.warn(`[post-save] match-skills failed: ${response.status}`);
+        else logger.info(`[post-save] match-skills complete for ${specId}`);
+      })
+      .catch((err) => logger.warn({ err }, `[post-save] enrich/match-skills error for ${specId}`));
+  });
+}
+
 const GenerateSpecSchema = z.object({
   workspaceId: z.union([z.string().min(1), z.number()]),
   brief: z.string().min(1).optional(),
@@ -890,6 +1162,9 @@ const GenerateSpecSchema = z.object({
  *     description: >
  *       Generates a structured spec (JSON with userStories array) from a plain-English
  *       brief using LLM with the synthesized direction stack (L1-L5) as context.
+ *       This is the legacy/fallback creation path when the caller wants Rorca to do
+ *       the drafting. For skill-first flows where the caller already drafted the spec,
+ *       prefer POST /api/specs/persist so Rorca only validates, normalizes, and saves.
  *       Spec is saved to the workspace's forge/specs/pending/ directory.
  *       Generation typically takes 20-60 seconds depending on story count and model.
  *     requestBody:
@@ -972,9 +1247,12 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
   let precomputedContextSummary: Record<string, unknown> | undefined;
   const genStartTime = Date.now();
   let genSlug = 'unknown';
+  let generationWorkspaceId: string | null = null;
+  let specGenerationRetrievedContext: import('../lib/memory-router').RetrievedContext | null = null;
 
   try {
     const { workspaceId, domain, diagramTypes, storyAnnotations, templateId } = req.body;
+    generationWorkspaceId = String(workspaceId);
     const title: string = req.body.title || req.body.specName;
     const brief: string = req.body.brief || req.body.specBrief;
     const rawCount = parseInt(req.body.storyCount);
@@ -1079,6 +1357,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         maxTokens: 16000,
         includeGraph: true,
       });
+      specGenerationRetrievedContext = retrieved;
       if (retrieved.graphSection) {
         semanticGraphSection = retrieved.graphSection;
       }
@@ -1536,6 +1815,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       try {
         pass1Result = parseLLMJson(llmResult1.text) as typeof pass1Result;
       } catch {
+        await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
         res.status(500).json(buildSpecError(
           new Error('Pass 1 (PM Agent) returned non-JSON'),
           llmResult1.text,
@@ -1544,6 +1824,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       }
 
       if (!Array.isArray(pass1Result.stories)) {
+        await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
         res.status(500).json(buildSpecError(
           new Error('Pass 1 (PM Agent) returned invalid spec structure'),
         ));
@@ -1644,6 +1925,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       try {
         parsed = parseLLMJson(llmResult2.text) as typeof parsed;
       } catch {
+        await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
         res.status(500).json(buildSpecError(
           new Error('Pass 2 (Spec Writer Agent) returned non-JSON'),
           llmResult2.text,
@@ -1652,6 +1934,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       }
 
       if (!Array.isArray(parsed.stories)) {
+        await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
         res.status(500).json(buildSpecError(
           new Error('Pass 2 (Spec Writer Agent) returned invalid spec structure'),
         ));
@@ -2231,6 +2514,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         try {
           parsed = parseLLMJson(rawResponse) as typeof parsed;
         } catch {
+          await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
           res.status(500).json(buildSpecError(
             new Error('LLM returned non-JSON (fallback after OpenCode failure)'),
             rawResponse,
@@ -2239,6 +2523,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         }
 
         if (!Array.isArray(parsed.stories)) {
+          await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
           res.status(500).json(buildSpecError(
             new Error('Invalid spec structure from LLM (fallback)'),
           ));
@@ -2270,6 +2555,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       try {
         parsed = parseLLMJson(rawResponse) as typeof parsed;
       } catch {
+        await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
         res.status(500).json(buildSpecError(
           new Error('LLM returned non-JSON'),
           rawResponse,
@@ -2278,6 +2564,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       }
 
       if (!Array.isArray(parsed.stories)) {
+        await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
         res.status(500).json(buildSpecError(
           new Error('Invalid spec structure from LLM'),
         ));
@@ -2400,6 +2687,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     }
 
     // 16. Return response
+    await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, true);
     res.set('X-Git-Hydration', 'fresh');
     res.json({
       slug,
@@ -2434,24 +2722,9 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
     // Runs after response is sent so callers (MCP, UI) get instant feedback.
     // Enrich runs first (adds context to story descriptions), then match-skills
     // (assigns suggestedSkills arrays). Both write back to the spec JSON on disk.
-    setImmediate(() => {
-      const apiBase = `http://127.0.0.1:${process.env.PORT || 3030}`;
-      const headers = { 'Content-Type': 'application/json' };
-      const body = JSON.stringify({ workspaceId });
-      fetch(`${apiBase}/api/specs/${slug}/enrich`, { method: 'POST', headers, body })
-        .then(r => {
-          if (!r.ok) logger.warn(`[post-generate] enrich failed: ${r.status}`);
-          else logger.info(`[post-generate] enrich complete for ${slug}`);
-          // Match skills after enrich finishes (needs enriched descriptions for better matching)
-          return fetch(`${apiBase}/api/specs/${slug}/match-skills`, { method: 'POST', headers, body });
-        })
-        .then(r => {
-          if (!r.ok) logger.warn(`[post-generate] match-skills failed: ${r.status}`);
-          else logger.info(`[post-generate] match-skills complete for ${slug}`);
-        })
-        .catch(err => logger.warn({ err }, `[post-generate] enrich/match-skills error for ${slug}`));
-    });
+    scheduleSpecPostSaveJobs(slug, workspaceId, { enrich: true, matchSkills: true });
   } catch (error: any) {
+    await recordRetrievedContextOutcome(generationWorkspaceId, specGenerationRetrievedContext, false);
     // Let AppErrors (NotFoundError, ValidationError, etc.) propagate to the global error handler
     // so they return their correct HTTP status codes instead of always returning 500.
     if (error && typeof error.statusCode === 'number' && error.statusCode < 500) {
@@ -2485,6 +2758,200 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       suggestion,
       ...(precomputedContextSummary ? { contextSummary: precomputedContextSummary } : {}),
     });
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/persist:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Persist an explicit caller-drafted spec
+ *     operationId: persistExplicitSpecDraft
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Skill-first spec persistence is a core open-source CLI/MCP authoring workflow: the caller drafts, Rorca validates and stores the canonical spec."
+ *     x-rorca-public-api: true
+ *     description: >
+ *       Preferred creation path for skill-first flows. The caller drafts the spec content,
+ *       then Rorca validates, normalizes, snapshots any overwritten spec, and saves the
+ *       canonical spec JSON to forge/specs/pending/. Optional post-save enrichment,
+ *       skill-matching, and memory synthesis can run after persistence.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, title, stories]
+ *             properties:
+ *               workspaceId:
+ *                 type: string
+ *               title:
+ *                 type: string
+ *                 description: Human-readable spec title
+ *               slug:
+ *                 type: string
+ *                 description: Optional explicit slug override; defaults to slugified title
+ *               brief:
+ *                 type: string
+ *                 description: Optional original brief for provenance/memory synthesis
+ *               specBrief:
+ *                 type: string
+ *                 description: Alias for brief
+ *               storyPrefix:
+ *                 type: string
+ *                 description: Prefix used when the backend must assign missing story IDs
+ *               stories:
+ *                 type: array
+ *                 description: Explicit drafted stories (userStories alias is also accepted)
+ *                 items:
+ *                   $ref: '#/components/schemas/UserStory'
+ *               userStories:
+ *                 type: array
+ *                 items:
+ *                   $ref: '#/components/schemas/UserStory'
+ *               overwrite:
+ *                 type: boolean
+ *                 description: Replace an existing pending/approved spec with the same slug after snapshotting it
+ *               source:
+ *                 type: string
+ *                 description: Provenance tag stored in the spec JSON (defaults to explicit-draft)
+ *               postSave:
+ *                 type: object
+ *                 properties:
+ *                   enrich: { type: boolean }
+ *                   matchSkills: { type: boolean }
+ *                   memorySynthesis: { type: boolean }
+ *     responses:
+ *       200:
+ *         description: Spec persisted successfully
+ *       400:
+ *         description: Invalid stories, dependencies, or request fields
+ *       404:
+ *         description: Workspace not found
+ *       409:
+ *         description: Spec already exists and overwrite=false
+ */
+router.post('/persist', validateBody(PersistSpecDraftSchema), async (req: Request, res: Response) => {
+  try {
+    const parsedBody = PersistSpecDraftSchema.parse(req.body);
+    const workspaceId = String(parsedBody.workspaceId);
+    const workspace = await getWorkspace(workspaceId, req);
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    const title = parsedBody.title.trim();
+    const rawSlug = (parsedBody.slug?.trim() || title)
+      .toLowerCase()
+      .replace(/[^a-z0-9]+/g, '-')
+      .replace(/^-|-$/g, '');
+    const slug = rawSlug || briefToSlug(title);
+    const source = parsedBody.source?.trim() || 'explicit-draft';
+    const overwrite = parsedBody.overwrite === true;
+    const postSave = resolveSpecPostSaveOptions(parsedBody.postSave);
+    const draftStories = parsedBody.stories ?? parsedBody.userStories ?? [];
+
+    const { stories: normalizedStories, changes } = normalizeExplicitDraftStories(draftStories, parsedBody.storyPrefix);
+
+    const catalogs = await buildCatalogContext(workspace.path, workspaceId);
+    if (catalogs.skillNames.size > 0) {
+      validateSuggestedSkills(normalizedStories as unknown as Record<string, unknown>[], catalogs.skillNames);
+    }
+
+    const algorithmicDiagrams = generateDiagramBundle(normalizedStories as any, ['storyDeps']);
+    const allDiagrams = { ...(parsedBody.diagrams ?? {}), ...algorithmicDiagrams };
+    const mermaidDiagram = parsedBody.mermaidDiagram?.trim() || algorithmicDiagrams.storyDeps?.mermaid || '';
+
+    const { pendingDir, approvedDir } = specsDirs(workspace.path);
+    const existingPending = path.join(pendingDir, `${slug}.json`);
+    const existingApproved = path.join(approvedDir, `${slug}.json`);
+    const hadExistingSpec = fs.existsSync(existingPending) || fs.existsSync(existingApproved);
+
+    if (hadExistingSpec && !overwrite) {
+      throw new ConflictError(`Spec '${slug}' already exists. Re-submit with overwrite=true to replace it.`);
+    }
+
+    if (fs.existsSync(existingPending)) {
+      await snapshotVersion(slug, fs.readFileSync(existingPending, 'utf8'), 'pending');
+      fs.unlinkSync(existingPending);
+    } else if (fs.existsSync(existingApproved)) {
+      await snapshotVersion(slug, fs.readFileSync(existingApproved, 'utf8'), 'approved');
+      fs.unlinkSync(existingApproved);
+    }
+
+    const writeResult = writeSpec(workspace.path, {
+      slug,
+      title,
+      stories: normalizedStories,
+      diagrams: allDiagrams as any,
+      mermaidDiagram: mermaidDiagram || undefined,
+      model: parsedBody.model,
+      contextUsed: parsedBody.contextUsed as any,
+      reasoning: parsedBody.reasoning,
+      source,
+    });
+
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES ('spec_generated', $1, $2, 'api', $3) RETURNING *`,
+      [workspaceId, slug, JSON.stringify({
+        title,
+        source,
+        overwrite,
+        storyCount: normalizedStories.length,
+        normalizationChanges: changes,
+        postSave,
+      })],
+    );
+    if (walEvent) {
+      broadcastAll(walEvent);
+    }
+
+    await seedPersistGenerationLog({
+      slug,
+      source,
+      title,
+      storyCount: normalizedStories.length,
+      model: parsedBody.model,
+      overwrite,
+      postSave,
+      normalizationChanges: changes,
+      contextUsed: parsedBody.contextUsed,
+      reasoning: parsedBody.reasoning,
+    });
+
+    res.json({
+      slug,
+      title,
+      status: 'pending',
+      source,
+      stories: normalizedStories,
+      diagrams: allDiagrams,
+      mermaidDiagram,
+      specPath: writeResult.specPath,
+      diagramsPath: writeResult.diagramsPath,
+      normalization: { changes },
+      overwrote: hadExistingSpec,
+      postSave,
+    });
+
+    if (postSave.memorySynthesis) {
+      const memoryBrief = parsedBody.brief || parsedBody.specBrief || title;
+      autoSynthesizeSpecMemory(
+        slug,
+        workspaceId,
+        memoryBrief,
+        { stories: normalizedStories as unknown[] },
+        { source, explicitDraft: true },
+      ).catch(() => { /* non-blocking — errors logged internally */ });
+    }
+
+    scheduleSpecPostSaveJobs(slug, workspaceId, {
+      enrich: postSave.enrich,
+      matchSkills: postSave.matchSkills,
+    });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Specs] Persist explicit draft');
   }
 });
 
@@ -4838,9 +5305,12 @@ router.get('/search/stories', async (req: Request, res: Response) => {
  *       500: { description: "LLM returned non-JSON or invalid structure" }
  */
 router.post('/:specId/add-stories', async (req: Request, res: Response) => {
+  let addStoriesRetrievedContext: import('../lib/memory-router').RetrievedContext | null = null;
+  let addStoriesWorkspaceId: string | null = null;
   try {
     const { specId } = req.params;
     const { workspaceId, count, brief } = req.body;
+    addStoriesWorkspaceId = workspaceId ? String(workspaceId) : null;
 
     const storyCount = Math.min(20, Math.max(1, parseInt(count) || 3));
 
@@ -4913,6 +5383,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
         maxTokens: 16000,
         includeGraph: true,
       });
+      addStoriesRetrievedContext = retrieved;
       if (retrieved.graphSection) {
         semanticGraphSection = retrieved.graphSection;
       }
@@ -4959,7 +5430,11 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
 
     const { chatComplete: chatCompleteFn } = await import('../lib/llm-client');
     const addStoriesUser = await getEffectiveUser(req);
-    if (!addStoriesUser) { res.status(500).json({ error: 'No user configured' }); return; }
+    if (!addStoriesUser) {
+      await recordRetrievedContextOutcome(workspaceId, addStoriesRetrievedContext, false);
+      res.status(500).json({ error: 'No user configured' });
+      return;
+    }
     const addStoriesVaultCreds = await resolveVaultCreds(addStoriesUser.id, DEFAULT_MODEL);
     const rawResponse = await chatCompleteFn(
       [{ role: 'user', content: fullPrompt }],
@@ -4974,11 +5449,13 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
       const jsonStart = jsonStr.indexOf('{');
       parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
     } catch {
+      await recordRetrievedContextOutcome(workspaceId, addStoriesRetrievedContext, false);
       res.status(500).json({ error: 'LLM returned non-JSON', raw: rawResponse.text });
       return;
     }
 
     if (!Array.isArray(parsed.stories)) {
+      await recordRetrievedContextOutcome(workspaceId, addStoriesRetrievedContext, false);
       res.status(500).json({ error: 'Invalid structure from LLM' });
       return;
     }
@@ -4993,6 +5470,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
 
     fs.writeFileSync(specFilePath, JSON.stringify(specContent, null, 2), 'utf8');
 
+    await recordRetrievedContextOutcome(workspaceId, addStoriesRetrievedContext, true);
     res.json({
       ok: true,
       addedCount: newStories.length,
@@ -5010,6 +5488,7 @@ router.post('/:specId/add-stories', async (req: Request, res: Response) => {
       } : {}),
     });
   } catch (error: any) {
+    await recordRetrievedContextOutcome(addStoriesWorkspaceId, addStoriesRetrievedContext, false);
     handleRouteError(res, error, '[Specs] Add stories');
   }
 });
@@ -10030,9 +10509,12 @@ router.post('/:specId/stories/:storyId/accept-criteria', async (req: Request, re
  *         description: No skills installed
  */
 router.post('/:specId/match-skills', async (req: Request, res: Response) => {
+  let matchSkillsRetrievedContext: import('../lib/memory-router').RetrievedContext | null = null;
+  let matchSkillsWorkspaceId: string | null = null;
   try {
     const specId = req.params.specId as string;
     const { workspaceId } = req.body;
+    matchSkillsWorkspaceId = workspaceId ? String(workspaceId) : null;
 
     if (!workspaceId) {
       throw new ValidationError('workspaceId is required');
@@ -10087,6 +10569,7 @@ router.post('/:specId/match-skills', async (req: Request, res: Response) => {
         maxTokens: 8000,
         includeGraph: true,
       });
+      matchSkillsRetrievedContext = retrieved;
       if (retrieved.graphSection) {
         skillGraphSection = retrieved.graphSection;
       }
@@ -10204,12 +10687,14 @@ ${storyList}`;
       }
       parsed = JSON.parse(cleaned);
     } catch {
+      await recordRetrievedContextOutcome(workspaceId, matchSkillsRetrievedContext, false);
       logger.error(`[Specs] match-skills: LLM returned invalid JSON: ${llmResult.text.slice(0, 500)}`);
       res.status(500).json({ error: 'LLM returned invalid JSON for skill matching' });
       return;
     }
 
     if (!Array.isArray(parsed.matches)) {
+      await recordRetrievedContextOutcome(workspaceId, matchSkillsRetrievedContext, false);
       res.status(500).json({ error: 'LLM response missing matches array' });
       return;
     }
@@ -10262,6 +10747,7 @@ ${storyList}`;
     })]);
     broadcastAll(walEvent!);
 
+    await recordRetrievedContextOutcome(workspaceId, matchSkillsRetrievedContext, true);
     res.json({
       matched: totalSkillsMatched,
       stories: responseStories,
@@ -10295,6 +10781,7 @@ ${storyList}`;
       } : {}),
     });
   } catch (error: any) {
+    await recordRetrievedContextOutcome(matchSkillsWorkspaceId, matchSkillsRetrievedContext, false);
     handleRouteError(res, error, '[Specs] match-skills');
   }
 });
@@ -11748,8 +12235,13 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
           const storyText = `${story.title} ${story.description ?? ''}`;
           const ctx = await retrieveContext(workspaceId, storyText, { maxTokens: 2000, includeGraph: true });
           const prompt = buildPromptForStory(story, ctx);
-          const result = await chatComplete([{ role: 'user', content: prompt }], annotationModel);
-          return { story, result, ctx };
+          try {
+            const result = await chatComplete([{ role: 'user', content: prompt }], annotationModel);
+            return { story, result, ctx };
+          } catch (err) {
+            Object.assign(err as object, { retrievedContext: ctx });
+            throw err;
+          }
         })
       );
       results.push(...batchResults);
@@ -11784,7 +12276,10 @@ Respond with ONLY the annotation content (no preamble). Format as a markdown bul
         const descWithoutOldContext = (story.description ?? '').replace(/\n\n## Context\n[\s\S]*$/, '');
         story.description = `${descWithoutOldContext}\n\n## Context\n${annotation}`;
         storiesEnriched++;
+        await recordRetrievedContextOutcome(workspaceId, ctx, true);
       } else {
+        const failedCtx = (outcome.reason as { retrievedContext?: import('../lib/memory-router').RetrievedContext })?.retrievedContext;
+        await recordRetrievedContextOutcome(workspaceId, failedCtx ?? null, false);
         logger.warn({ err: outcome.reason }, '[specs/enrich] Annotation failed for a story — skipping');
       }
     }
