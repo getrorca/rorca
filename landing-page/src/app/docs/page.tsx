@@ -52,28 +52,17 @@ export default function DocsPage() {
         ))}
       </div>
 
-      <div className="grid grid-cols-1 lg:grid-cols-2 gap-4">
-        <section className="bg-zinc-950 border border-white/10 rounded-2xl p-6">
-          <p className="text-sm uppercase tracking-[0.24em] text-zinc-500 mb-4">Current product truth</p>
-          <ul className="space-y-3 text-zinc-300 leading-relaxed">
-            <li className="flex gap-3"><span className="text-accent mt-1">•</span><span><strong className="text-white">Explicit spec persistence</strong> is the reliable cross-client create-spec path, while the dashboard and BatchForge now route through the same shared skill-first forge workflow.</span></li>
-            <li className="flex gap-3"><span className="text-accent mt-1">•</span><span><strong className="text-white">Retrieval is backend-native</strong> and combines cached context, memory, graph context, reranking, telemetry, and feedback.</span></li>
-            <li className="flex gap-3"><span className="text-accent mt-1">•</span><span><strong className="text-white">Pi CLI</strong> is an execution provider, while <strong className="text-white">the Pi extension</strong> is a separate operator surface.</span></li>
-          </ul>
-        </section>
-
-        <section className="bg-zinc-950 border border-white/10 rounded-2xl p-6">
-          <p className="text-sm uppercase tracking-[0.24em] text-zinc-500 mb-4">Core routes</p>
-          <div className="space-y-3 text-zinc-300 leading-relaxed">
-            <Link href="/download" className="block hover:text-white transition-colors">/download — install and run locally</Link>
-            <Link href="/architecture" className="block hover:text-white transition-colors">/architecture — control-plane overview</Link>
-            <Link href="/memory" className="block hover:text-white transition-colors">/memory — retrieval and graph story</Link>
-            <Link href="/execution" className="block hover:text-white transition-colors">/execution — provider-selected runtime story</Link>
-            <Link href="/docs/tools" className="block hover:text-white transition-colors">/docs/tools — CLI, TUI, MCP, and Pi extension reference</Link>
-            <Link href="/pricing" className="block hover:text-white transition-colors">/pricing — public packaging surface</Link>
-          </div>
-        </section>
-      </div>
+      <section className="bg-zinc-950 border border-white/10 rounded-2xl p-6">
+        <p className="text-sm uppercase tracking-[0.24em] text-zinc-500 mb-4">Start with these routes</p>
+        <div className="grid grid-cols-1 lg:grid-cols-2 gap-3 text-zinc-300 leading-relaxed">
+          <Link href="/download" className="block hover:text-white transition-colors">/download — install and run locally</Link>
+          <Link href="/architecture" className="block hover:text-white transition-colors">/architecture — control-plane overview</Link>
+          <Link href="/memory" className="block hover:text-white transition-colors">/memory — retrieval and graph story</Link>
+          <Link href="/execution" className="block hover:text-white transition-colors">/execution — provider-selected runtime story</Link>
+          <Link href="/docs/tools" className="block hover:text-white transition-colors">/docs/tools — CLI, TUI, MCP, and Pi extension reference</Link>
+          <Link href="/pricing" className="block hover:text-white transition-colors">/pricing — public packaging surface</Link>
+        </div>
+      </section>
     </div>
   );
 }
