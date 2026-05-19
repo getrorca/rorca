@@ -64,13 +64,21 @@ npm run dev:worker
 
 ## Install into Pi
 
-From the Rorca repo root:
+The easiest install path from the Rorca repo root is:
+
+```bash
+rorca pi install
+```
+
+That installs the bundled extension into the current Pi project.
+
+Advanced/dev fallback:
 
 ```bash
 pi install ./packages/rorca-pi-extension -l
 ```
 
-That installs the package for the current project.
+If Pi was already open when you installed the extension, run `/reload`. If the commands still do not appear, restart Pi.
 
 If you are testing the extension entry directly during development, you can also run:
 
@@ -432,8 +440,9 @@ Symptom:
 - command names are missing after install
 
 Fix:
-- start a new Pi session
-- or reload/restart the current Pi session
+- run `rorca pi install` again if needed
+- run `/reload` inside Pi if the session was already open
+- restart Pi if the commands still do not appear
 
 ## Development notes
 

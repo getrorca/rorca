@@ -2850,6 +2850,46 @@ async function runPiAuthCommand(action: 'login' | 'logout', provider?: string): 
   return 0;
 }
 
+function getBundledPiExtensionPath(): string {
+  const extensionDir = path.join(ROOT_DIR, 'packages', 'rorca-pi-extension');
+  const manifestPath = path.join(extensionDir, 'package.json');
+  if (existsSync(manifestPath)) {
+    return extensionDir;
+  }
+  throw new Error('Bundled Rorca Pi extension package not found. Reinstall or rebuild Rorca and try again.');
+}
+
+async function runPiExtensionInstall(options?: { global?: boolean }): Promise<number> {
+  const pi = await ensurePiInstalled();
+  if (!pi.ok) {
+    return 1;
+  }
+  if (pi.skipped) {
+    return 0;
+  }
+
+  const extensionDir = getBundledPiExtensionPath();
+  const installScope = options?.global ? 'globally' : 'for this project';
+  const args = ['install', extensionDir, ...(options?.global ? [] : ['-l'])];
+
+  console.log(`Installing Rorca Pi extension ${installScope}...`);
+  const result = await runCommand(resolvePiBinPath(), args, { stdio: 'inherit' });
+  if (result.code !== 0) {
+    return result.code;
+  }
+
+  console.log(green(`Installed Rorca Pi extension ${installScope}.`));
+  console.log('');
+  console.log('Next steps:');
+  console.log(options?.global ? '  1. Open Pi in the session where you want Rorca commands.' : '  1. Open Pi in this project.');
+  console.log('  2. Run /rorca-help to verify the commands are loaded.');
+  console.log('  3. If Pi was already open, run /reload.');
+  console.log('  4. If the commands still do not appear, restart Pi.');
+  console.log('');
+  console.log(dim(`Advanced/dev fallback: pi install ${extensionDir} ${options?.global ? '' : '-l'}`.trim()));
+  return 0;
+}
+
 async function waitForGeneratedSpec(jobId: string): Promise<{ slug?: string }> {
   const spinFrames = ['⠋', '⠙', '⠹', '⠸', '⠼', '⠴', '⠦', '⠧', '⠇', '⠏'];
   let spinIdx = 0;
@@ -3068,6 +3108,15 @@ auth
   .command('install')
   .action(() => {
     printPiInstallMethods();
+  });
+
+const pi = program.command('pi').description('Manage Pi integration and the Rorca Pi extension');
+
+pi
+  .command('install')
+  .option('--global', 'Install the extension for all Pi sessions instead of the current project')
+  .action(async (options: { global?: boolean }) => {
+    process.exitCode = await runPiExtensionInstall({ global: Boolean(options.global) });
   });
 
 program
