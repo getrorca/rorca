@@ -1,557 +1,531 @@
 # Rorca
 
-**AI spec orchestration for autonomous development.** Rorca is a standalone dashboard that turns a plain-English brief into a validated, structured spec — then tracks it through approval, execution, and archival. It works with any git repository and integrates with Claude Code via MCP.
+**Rorca is an AI spec orchestration platform for autonomous software development.**
 
-[![CI](https://github.com/getrorca/rorca/actions/workflows/ci.yml/badge.svg)](https://github.com/getrorca/rorca/actions/workflows/ci.yml) ![Status](https://img.shields.io/badge/status-beta-orange) ![Node](https://img.shields.io/badge/node-%3E%3D18-green) ![License](https://img.shields.io/badge/license-MIT-blue)
+It turns a plain-English product brief into a structured spec, helps you review and approve it, then runs the work story-by-story with live progress, retrieval-backed context, and a feedback system that gets smarter over time.
+
+It is designed to feel good across the full Rorca product surface:
+- as a **local dashboard** with agent selection for **Claude, OpenCode, and Codex**
+- as a **backend control plane** that exposes the same spec and execution model everywhere
+- as **CLI and TUI operator surfaces** built on the same forge workflow
+- as an **MCP server** for tool-capable clients
+- as a **Pi-native operator workflow** through the bundled Pi extension
+
+[![CI](https://github.com/getrorca/rorca/actions/workflows/ci.yml/badge.svg)](https://github.com/getrorca/rorca/actions/workflows/ci.yml)
+![Status](https://img.shields.io/badge/status-beta-orange)
+![Node](https://img.shields.io/badge/node-%3E%3D20-green)
+![License](https://img.shields.io/badge/license-BUSL--1.1-blue)
 
 ---
 
-## What it does
+## Why Rorca exists
 
-You give Rorca a brief: *"Add OAuth login with Google and GitHub."* It synthesizes everything it knows about your project — your architecture, tech stack, existing patterns — and produces a spec with 8–12 user stories, each with acceptance criteria and a dependency graph. You review and approve it. Then the Ralph Loop runs story-by-story and Rorca tracks progress in real time.
+Most AI coding tools are great at taking a single prompt and producing a burst of output.
+They are much worse at maintaining **project memory**, **team conventions**, **reviewable specs**, and **long-running execution state**.
 
-The key concept is the **Direction Stack**: a 5-layer context cascade (like CSS specificity, but for AI prompts) that makes every generated spec aware of your global engineering standards, domain conventions, and project specifics — without you having to repeat yourself every time.
+Rorca sits one layer above the model.
+
+It gives you:
+- a durable **spec-first workflow**
+- a **Direction Stack** for project conventions and architectural context
+- backend-native **CAG + RAG + graph retrieval**
+- explicit **skill-first spec creation**
+- a real **execution engine** for running approved work story-by-story
+- **telemetry and retrieval feedback** so context quality can improve over time
+
+The result is simple to describe:
+
+> Rorca helps AI stop acting like it just woke up inside your codebase.
 
 ---
 
-## Architecture overview
+## One forge workflow across every Rorca product
 
+Rorca now uses one **skill-first** creation model across the whole product:
+- **dashboard + backend** use the shared forge workflow
+- **CLI + TUI** use the same persisted spec contract
+- **Pi extension** exposes the same flow through slash commands
+- **MCP clients** use the same explicit tools
+
+The short version is simple:
+
+> **skills think, MCP/tools fetch and mutate, Rorca persists and orchestrates**
+
+### Canonical paths
+- **Create or persist a drafted spec:** `rorca_create_spec` or `POST /api/specs/persist`
+- **Use the built-in Rorca forge surfaces:** shared `POST /api/specs/forge` and `POST /api/specs/forge/batch`
+- **Use legacy server-side drafting only when intentional:** `rorca_generate_spec` or `POST /api/specs/generate`
+
+### Why this matters
+- one spec workflow across UI, backend, CLI, TUI, Pi, and MCP clients
+- one canonical persisted spec format
+- one retrieval and memory layer
+- one execution control plane across Claude, OpenCode, Codex, and Pi-backed runs
+
+### Product truth
+Skills are the reasoning layer.
+MCP and API calls are the reliable control surface.
+The backend is the source of truth for persistence, retrieval, telemetry, and execution orchestration.
+
+---
+
+## The mental model
+
+Rorca has three core ideas.
+
+### Direction Stack
+A layered prompt/context model that captures global standards, project rules, spec intent, and story-specific annotations.
+
+### Retrieval stack
+A backend-native memory system that combines:
+- cached context
+- text and vector-style memory retrieval
+- graph traversal
+- scoring, reranking, telemetry, and feedback
+
+### Execution engine
+Approved specs become executable work.
+Rorca runs them story-by-story through a unified execution engine with live status, logs, retries, and final outcomes.
+
+---
+
+## Architecture at a glance
+
+```text
+┌──────────────────────────────────────────────────────────────┐
+│ Rorca surfaces                                              │
+│  - React dashboard / local app                              │
+│  - CLI / TUI operator surfaces                              │
+│  - HTTP MCP server                                          │
+│  - Pi extension                                             │
+└───────────────────────────────┬──────────────────────────────┘
+                                │
+                                ▼
+┌──────────────────────────────────────────────────────────────┐
+│ Express backend                                             │
+│  - specs, pipeline, workspaces, memory, graph, MCP          │
+│  - shared forge workflow (`/api/specs/forge`)               │
+│  - explicit spec contract (`/api/specs/persist`)            │
+│  - retrieval telemetry + feedback                           │
+└───────────────┬──────────────────────────────┬───────────────┘
+                │                              │
+                ▼                              ▼
+┌─────────────────────────────┐    ┌──────────────────────────┐
+│ PostgreSQL 16               │    │ Execution engine         │
+│  - specs                    │    │  - Claude Code           │
+│  - memories                 │    │  - OpenCode              │
+│  - retrieval feedback       │    │  - Codex path            │
+│  - telemetry                │    │  - Pi-native execution   │
+│  - graph-linked evidence    │    └──────────────────────────┘
+└─────────────────────────────┘
 ```
-┌─────────────────────────────────────────────────────────┐
-│  Rorca Dashboard (React, port 5210)                     │
-│  ┌──────────┐ ┌───────────┐ ┌──────────┐ ┌──────────┐  │
-│  │ Spec     │ │ Direction │ │ Review   │ │ Pipeline │  │
-│  │ Forge    │ │ Stack     │ │ Queue    │ │ Monitor  │  │
-│  └──────────┘ └───────────┘ └──────────┘ └──────────┘  │
-│  ┌──────────┐ ┌───────────┐                             │
-│  │Worktrees │ │ Archive   │                             │
-│  └──────────┘ └───────────┘                             │
-└───────────────────────┬─────────────────────────────────┘
-                        │ REST + SSE
-┌───────────────────────▼─────────────────────────────────┐
-│  Express API (port 3030)                                 │
-│  /api/workspaces  /api/direction  /api/specs             │
-│  /api/pipeline    /api/worktrees  /api/context           │
-└───────────┬──────────────────────┬──────────────────────┘
-            │                      │
-    ┌───────▼──────┐    ┌──────────▼───────────────────────┐
-    │ PostgreSQL   │    │  Execution Engine                 │
-    │ 16 + pgvec   │    │  ├── claude --print  (Claude sub) │
-    │              │    │  └── opencode run    (75+ models) │
-    └──────────────┘    └──────────────────────────────────┘
-```
 
-**Backend**: Express.js + PostgreSQL 16 (`pg` Pool, async, pgvector, Apache AGE)
-**Frontend**: React 18 + TypeScript + Vite + Tailwind CSS
-**Execution**: Two first-class paths — `claude --print` (Claude subscription) or `opencode run` (75+ models via API key)
-**MCP**: 5 tools that expose Rorca to Claude Code for in-session spec generation
+### Main app stack
+- **Frontend:** React + Vite + Tailwind
+- **Backend:** Express + PostgreSQL 16
+- **Live updates:** SSE
+- **Retrieval:** direction stack + memory + graph
+- **Execution:** Claude / OpenCode / Codex / Pi-native paths
+- **Dashboard agent UX:** the browser UI exposes agent selection for **Claude, OpenCode, and Codex**, with OpenCode model selection available in the forge/run flow
+
+### Default local ports
+- frontend: `5210`
+- backend: `3030`
+- landing page: `3002`
 
 ---
 
-## Prerequisites
+## One contract, many front doors
 
-- **Node.js** 18 or later
-- **Git** (for workspace registration and git hydration)
-- **Supabase CLI** for local auth/database development: `brew install supabase/tap/supabase`
-- **One of the following execution engines:**
-  - **Claude Code CLI** installed and authenticated (`claude --version`) — uses your Pro/Max subscription, no API key
-  - **OpenCode CLI** (`npm i -g opencode`, `opencode --version` >= 0.1.0) + an API key for your chosen provider
+| Surface | Recommended path |
+|---|---|
+| Dashboard / UI | Built-in shared forge workflow |
+| CLI / TUI | Shared forge workflow and persisted spec contract |
+| MCP clients | `rorca_create_spec` |
+| Pi extension | `/rorca-create-spec` |
+| Legacy fallback | `rorca_generate_spec` / `/api/specs/generate` |
 
-### Pi peer dependency
+### Important truth
+If you want **reliable cross-client behavior**, use an **explicit tool or command path**.
+Freeform intent routing is helpful, but it is not the contract.
 
-`pi` is a peer dependency, not bundled into the Rorca package. That keeps the CLI and future standalone builds smaller and avoids auto-running remote installers without user consent.
+---
 
-If `pi` is missing, `rorca init` and `rorca auth login` detect that and offer an install bridge:
+## Quickstart
 
-- `npm install -g @mariozechner/pi-coding-agent`
-- `pnpm add -g @mariozechner/pi-coding-agent`
-- `bun add -g @mariozechner/pi-coding-agent`
-- `curl -fsSL https://pi.mariozechner.com/install.sh | sh` after explicit confirmation
+### Prerequisites
+- Node.js **20+**
+- PostgreSQL **16**
+- Git
+- one execution path:
+  - **Claude Code CLI**
+  - **OpenCode**
+  - or another configured runtime path
 
-For non-interactive environments, use `rorca init --auto-install-pi` to skip the prompt and run the npm install path directly.
-
-### Pi extension package
-
-Rorca ships a project-local Pi extension package at `packages/rorca-pi-extension`.
-
-Install it into Pi for the current repo:
+### Install
 
 ```bash
-pi install ./packages/rorca-pi-extension -l
-```
-
-That enables Rorca slash commands inside Pi such as:
-
-- `/rorca-forge @docs/feature.md --approve`
-- `/rorca-forge-run @docs/feature.md`
-- `/rorca-run my-spec-slug --story US-003`
-- `/rorca-status`
-- `/rorca-watch 123`
-- `/rorca-retry 123 US-004`
-
-The same extension also bridges Rorca MCP tools into Pi when the backend MCP transport is healthy.
-
-Detailed extension docs:
-- usage guide: `packages/rorca-pi-extension/README.md`
-- maintainer / publishing guide: `packages/rorca-pi-extension/PUBLISHING.md`
-
-## Local Supabase Development
-
-- Initialize local Supabase config with `supabase init` if needed
-- Start the local stack with `supabase start`
-- Stop it with `supabase stop`
-- Local endpoints: API `http://127.0.0.1:54321`, DB `127.0.0.1:54322`, Studio `http://127.0.0.1:54323`
-- Configure your GitHub OAuth app callback URL as `http://127.0.0.1:54321/auth/v1/callback`
-- Supabase CLI migrations and Rorca app schema migrations are separate systems:
-  - Supabase CLI uses `supabase/migrations/`
-  - Rorca app schema uses `backend/src/db/pg-migrations/` via `pg-index.ts`
-- `supabase db reset` only resets and reapplies `supabase/migrations/`; it does not run `backend/src/db/pg-migrations/`
-
----
-
-## Quickstart with Docker
-
-No Node.js required. Run Rorca in under 5 minutes:
-
-```bash
-git clone https://github.com/your-org/rorca.git
-cd rorca
-docker compose up
-```
-
-- **Dashboard**: http://localhost:5210
-- **API**: http://localhost:3030/api/health
-
-PostgreSQL data persists in the `rorca-pgdata` Docker volume across restarts.
-
-To pass your API key or configure the execution engine:
-
-```bash
-ANTHROPIC_API_KEY=sk-ant-... docker compose up
-# or create a .env file at the repo root — docker compose picks it up automatically
-```
-
----
-
-## Installation
-
-```bash
-git clone https://github.com/your-org/rorca.git
+git clone https://github.com/getrorca/rorca.git
 cd rorca
 npm install
 cd backend && npm install && cd ..
 ```
 
-### Configure execution engine
-
-By default, Rorca uses your Claude subscription (`claude --print`). No API keys needed.
-
-To use OpenCode (75+ models via API key), set these in `backend/.env`:
-
-```bash
-RORCA_AGENT=opencode
-RORCA_MODEL=openai/gpt-4o    # or google/gemini-2.0-flash, ollama/llama3, etc.
-```
-
-See the [Execution Engine](#execution-engine) section below for full provider setup, or use the in-app Setup Guide at **Settings > Model & Providers > Execution Engine**.
-
----
-
-## Running Rorca
+### Run the app
 
 ```bash
 npm run dev
 ```
 
-This starts both servers concurrently:
+`npm run dev` is the smart default:
+- if no backend is running, it starts the local dev stack
+- if a healthy backend is already running on `:3030`, it starts the frontend only
 
-- **Frontend**: http://localhost:5210
-- **Backend API**: http://localhost:3030
+Default local services:
+- frontend UI: `http://localhost:5210`
+- backend API: `http://localhost:3030`
+- landing page: `http://localhost:3002`
+
+### Managing frontend, backend, and worker
+
+Rorca is easiest to understand as **three local processes**:
+- **frontend** — the React/Vite dashboard
+- **backend** — the Express API, MCP surface, and retrieval control plane
+- **worker** — the separate pg-boss job runner that executes queued pipeline/spec jobs
+
+#### Start the full dev stack
+
+```bash
+npm run dev:full
+```
+
+This runs:
+- `npm run dev:frontend`
+- `npm run dev:server`
+- `npm run dev:worker:optional`
+
+#### Run services individually
+
+Frontend only:
+
+```bash
+npm run dev:frontend
+```
+
+Backend only:
+
+```bash
+npm run dev:server
+```
+
+Worker only:
+
+```bash
+npm run dev:worker
+```
+
+#### When to run the worker
+
+You will usually want the worker running when you are:
+- executing specs
+- processing queued pipeline jobs
+- running enrich / match-skills / background spec jobs
+- testing the autonomous execution path end-to-end
+
+If you are only doing UI work or light API work, the frontend + backend may be enough.
+
+#### Useful backend-only commands
+
+Run the backend in contract-only mode:
+
+```bash
+npm run dev:server:contract
+```
+
+Run the backend worker under its restart supervisor:
+
+```bash
+cd backend
+npm run worker
+```
+
+If the backend gets stuck on `:3030`, restart it:
+
+```bash
+lsof -ti:3030 | xargs kill -9
+cd backend && npm run dev
+```
 
 ---
 
-## The Direction Stack
-
-The Direction Stack is how Rorca makes every spec context-aware. It's a 5-layer cascade where lower layers override higher ones — the same mental model as CSS specificity:
-
-| Layer | Name | Scope | Example content |
-|-------|------|-------|-----------------|
-| L1 | Global Brain | All workspaces | Engineering principles, preferred libraries, code style |
-| L2 | Domain Profile | Domain (e.g. "saas", "api") | Auth patterns, API conventions, error handling |
-| L3 | Project Brief | One workspace | Stack, architecture decisions, key constraints |
-| L4 | Spec Brief | One spec generation | What this feature is and why |
-| L5 | Story Annotations | One story | Edge cases, known gotchas, reviewer notes |
-
-L1–L2 are shared globals. L3 and below are set per workspace in the **Direction Stack** panel. When you generate a spec, all applicable layers are synthesized into a single context that guides the LLM.
-
-**Why YAML?** Direction Stack layers are stored as YAML because it survives LLM prompt injection cleanly, supports key-level merging across layers, and is human-readable enough to edit directly in the UI.
-
----
-
-## Workflow
+## Your first workflow
 
 ### 1. Register a workspace
+Point Rorca at any local git repo.
+Rorca stores the path; it does not copy the project.
 
-In the sidebar, click **+ Add Workspace** and point it at any local git repository. Rorca reads the path — it doesn't move or copy files.
+### 2. Add context
+Use the Direction Stack to describe:
+- engineering principles
+- architecture
+- conventions
+- domain rules
+- project constraints
 
-### 2. Hydrate context (optional but recommended)
+### 3. Create a spec
+All Rorca products now follow the same basic pattern: use a skill-first forge flow, then persist through the shared Rorca contract.
 
-After registering, Rorca can automatically extract context from:
+- **Dashboard / UI:** use **Spec Forge**
+- **CLI / TUI:** use the shared forge workflow
+- **Pi:** use `/rorca-create-spec`
+- **MCP / clients:** use `rorca_create_spec`
 
-- **Git history** — map/reduce over commit log to build a `memory.yaml` of what was built and when
-- **Database schema** — reads SQL migration files, extracts table/column structure
+### 4. Review and approve
+Specs land as pending, then move through review and approval.
 
-Run hydration from the **Direction Stack** panel → **Hydrate** tab.
+### 5. Run the work
+Trigger the spec through the pipeline.
+Rorca executes stories one by one, tracks outcomes, and streams status live.
 
-### 3. Fill in your Direction Stack
-
-In the **Direction Stack** panel, add L1–L3 content for your workspace. You can:
-
-- Type or paste YAML directly
-- Use the **Bootstrap Context** modal for guided input (Q&A wizard, file upload, URL fetch, or multi-source)
-
-### 4. Generate a spec
-
-Go to **Spec Forge**:
-
-1. Select your workspace
-2. Write a brief (one paragraph is enough)
-3. Click **Generate** — Rorca synthesizes your Direction Stack and calls Claude to produce a structured spec with user stories, acceptance criteria, and a Mermaid dependency diagram
-
-### 5. Review and approve
-
-The generated spec appears in the **Review Queue**. Read through the stories, check the diagram, inspect the raw JSON. When satisfied, click **Approve** — the spec moves to `specs/approved/` in your workspace directory.
-
-### 6. Run the Ralph Loop
-
-**From the UI (recommended):** Open the **Archive** panel, click any approved spec to expand the drawer, then click **Run in Pipeline**. Rorca finds `scripts/run-loop.sh` in the registered workspace directory and spawns it automatically — no terminal needed.
-
-If a run is already active for that workspace, Rorca detects the conflict and prompts: *"Run in a new worktree instead?"* Clicking **Run in worktree** creates a fresh git worktree branch (e.g. `feat/my-spec-1234567890`) and runs the loop there in parallel.
-
-**From the terminal** (also works):
-```bash
-/path/to/workspace/scripts/run-loop.sh --json specs/approved/your-spec.json
-```
-
-Or use `rorca_approve_spec` from Claude Code (see MCP section) — it prints the exact command.
-
-### 7. Monitor progress
-
-The **Pipeline Monitor** panel streams live story-by-story progress via SSE as the Ralph Loop runs. Each story shows status, elapsed time, and expandable log output.
-
-After clicking **Run in Pipeline**, Rorca automatically navigates you to Pipeline Monitor once the run starts.
-
-### 8. Merge worktrees
-
-When a spec running in a dedicated worktree is complete, open the **Worktrees** panel, select the worktree branch, and click **Merge to main**. Rorca runs a `--no-ff` merge into your main branch. If there are merge conflicts, an inline error appears with the conflict details so you can resolve them manually.
-
-### 9. Review history
-
-The **Archive** panel shows all completed runs with full-text search across spec names, story titles, and acceptance criteria.
+### 6. Learn from outcomes
+Retrieval selections and execution outcomes feed back into the retrieval feedback system.
+That is how the system gets better over time instead of only growing noisier.
 
 ---
 
-## Execution Engine
+## Retrieval and GraphRAG, explained simply
 
-Rorca supports two execution paths — both first-class, both using the same tool set (edit, bash, read, write, glob, grep).
+Rorca does not treat “memory” as a single blob.
+It separates concerns.
 
-### Claude subscription (default)
+### CAG
+Cached context and structured direction context.
+This is the always-available baseline.
 
-Uses `claude --print` via your Pro/Max/Max5x subscription. No API key needed.
+### RAG
+Memory retrieval from stored observations, specs, and prior work.
+This is where the system pulls relevant past knowledge.
 
-```bash
-# backend/.env (or omit — claude is the default)
-RORCA_AGENT=claude
-```
+### Graph retrieval
+A knowledge graph connects memories, specs, stories, and file evidence.
+This helps Rorca surface context that is structurally related, not just textually similar.
 
-**Advantages**: Prompt caching (~10x lower latency after turn 1), surgical diff edits (~150 tokens vs full rewrites), persistent bash shell state, CLAUDE.md auto-injection, hierarchical subagents.
+### What happens at runtime
+For a live retrieval call, Rorca now does roughly this:
 
-### OpenCode (multi-model)
+1. load direction/context cache
+2. search memory candidates
+3. optionally traverse graph-linked evidence
+4. score and rerank candidates
+5. select a compact final context set
+6. record telemetry
+7. later record outcome usefulness
 
-Uses `opencode run` with any of 75+ models via API key, OAuth, or local inference.
+That is the important point:
 
-```bash
-# backend/.env
-RORCA_AGENT=opencode
-RORCA_MODEL=openai/gpt-4o
-```
-
-**Supported providers:**
-
-| Provider | Example model | Auth |
-|----------|--------------|------|
-| OpenAI | `openai/gpt-4o` | API key |
-| Google | `google/gemini-2.0-flash` | API key |
-| Anthropic API | `anthropic/claude-sonnet-4-5-20250929` | API key |
-| OpenRouter | `openrouter/auto` | API key |
-| Ollama | `ollama/llama3` | None (free, local) |
-| GitHub Copilot | `github/copilot` | GitHub OAuth |
-
-**Advantages**: Model choice flexibility, cost optimization via model cascading (Haiku→Sonnet→Opus by story complexity), local execution with Ollama, subscription-based with GitHub Copilot.
-
-API keys can be added via:
-- `backend/.env` environment variables
-- **Settings > Model & Providers > Add Key** (encrypted AES-256-GCM vault)
-- **Settings > Execution Engine > Sign in with GitHub** (for Copilot OAuth)
-
-The in-app **Setup Guide** (Settings > Model & Providers > Execution Engine) walks through installation and provider configuration step by step.
+> retrieval is not just “search.” It is selection plus feedback.
 
 ---
 
-## MCP Integration (Claude Code)
+## Execution engine
 
-Rorca exposes MCP tools over HTTP at `http://localhost:3030/mcp`. Authentication is Bearer-token only.
+Rorca has one main execution engine with multiple agent paths.
 
-## Security
+### Supported paths
+- **Claude**
+- **OpenCode**
+- **Codex path**
+- **Pi-native execution mode**
 
-Rorca uses `Authorization: Bearer <token>` for `/mcp`, with the token stored in `~/.rorca/mcp-token` and generated locally by the backend.
+The important UI truth is that OpenCode is not just a backend capability.
+It is exposed in the dashboard through the same forge/run controls used for the other execution paths.
 
-The previous trivial OAuth shim has been removed intentionally. It did not provide real security and it created the false impression that OAuth protection existed. Removing it also avoids conflicts with the real Bearer-token enforcement on `/mcp`.
-
-Claude Desktop note: newer Claude Desktop releases expect OAuth for MCP HTTP servers. Rorca does not implement OAuth yet, so Claude Desktop HTTP MCP integration is not supported in v0. Use Claude Code CLI, VS Code, or another MCP client that can send Bearer headers.
-
-### Setup
-
-```bash
-rorca mcp setup-claude
-```
-
-Verify it connected:
-
-```bash
-claude mcp list
-```
-
-Manual Claude Code CLI setup:
-
-```bash
-claude mcp add rorca http://localhost:3030/mcp --header "Authorization: Bearer $(cat ~/.rorca/mcp-token)"
-```
-
-VS Code / custom MCP clients:
-
-```json
-{
-  "headers": {
-    "Authorization": "Bearer <token from ~/.rorca/mcp-token>"
-  }
-}
-```
-
-If you previously configured a client against the removed OAuth probe, run:
-
-```bash
-rorca mcp diagnose-clients
-```
-
-### Available tools
-
-| Tool | What it does |
-|------|-------------|
-| `rorca_get_context` | Synthesize and inject your full Direction Stack into the current Claude session |
-| `rorca_generate_spec` | Generate a spec from a brief using your workspace's Direction Stack |
-| `rorca_list_specs` | List pending or approved specs for a workspace |
-| `rorca_approve_spec` | Approve a pending spec and get the exact run-loop command |
-| `rorca_pipeline_status` | Check live status of an active or recent pipeline run |
-
-### Example usage in Claude Code
-
-```
-Use rorca_get_context for my project at /Users/me/myapp, then generate
-a spec for "Add Stripe subscription billing with monthly and annual plans"
-```
-
-Claude will inject your full Direction Stack, generate a structured spec aware of your existing codebase, and return the story list directly in the conversation.
+### Why this matters
+The spec/review/retrieval/control-plane logic stays consistent even if the execution agent changes.
+You are not rewriting your workflow every time you switch models.
 
 ---
 
-## Multi-Workspace & Parallel Runs
+## MCP integration
 
-Rorca's `workspaces` table stores the filesystem `path` of each registered project (e.g. `/Users/me/cashflow-app`, `/Users/me/rorca`). When you trigger a run, the backend resolves `scripts/run-loop.sh` from that path and runs it in the correct project directory — so any workspace can run its own loop without any manual path configuration.
+Rorca exposes HTTP MCP from the backend.
 
-Multiple specs can run simultaneously:
-- **Different workspaces**: Each has its own `pipeline_runs` row, its own spawned process, and its own SSE stream.
-- **Same workspace, multiple specs**: Rorca detects the active run and prompts you to use a worktree, keeping both specs isolated in parallel git branches.
+Typical local endpoint:
 
-## Git Worktrees
+```text
+http://localhost:3030/mcp
+```
 
-The **Worktrees** panel manages git worktrees for your registered workspaces. Each spec can run in its own worktree so multiple specs can be in-progress simultaneously without conflicts.
+### Important tools
+- `rorca_create_spec` — preferred explicit drafted-spec path
+- `rorca_persist_spec` — compatibility alias
+- `rorca_generate_spec` — backend drafting fallback
+- `rorca_get_context`
+- `rorca_list_specs`
+- `rorca_approve_spec`
+- `rorca_pipeline_status`
+- `rorca_edit_story`
+- `rorca_add_stories`
+- `rorca_delete_story`
 
-You can create worktrees manually from the panel, or let Rorca create them automatically when you trigger a run and a conflict is detected. The panel shows branch status, ahead/behind counts, and modified files for each worktree.
-
-When a worktree branch is ready to land, click **Merge to main** in the detail panel. Rorca merges with `--no-ff` into the workspace's main branch. Merge conflicts surface inline so you know exactly what needs resolution.
+### Why this matters
+This is the shared contract behind the dashboard/backend, CLI/TUI, Pi extension, and external clients.
+It keeps Rorca's spec, retrieval, and execution behavior consistent without embedding the core orchestration logic into each surface separately.
 
 ---
 
-## Self-hosting
+## Pi extension
 
-Rorca can register its own repository as a workspace and generate specs for its own features:
+Rorca ships a project-local Pi extension package:
 
 ```bash
-npm run self-register
+pi install ./packages/rorca-pi-extension -l
 ```
 
-This registers `~/rorca/` in Rorca's PostgreSQL database, seeds the Direction Stack with Rorca's own architecture context, and verifies the full loop end-to-end on Rorca's own codebase.
+### Useful Pi commands
+- `/rorca-help`
+- `/rorca-create-spec`
+- `/rorca-forge`
+- `/rorca-forge-run`
+- `/rorca-approve`
+- `/rorca-run`
+- `/rorca-status`
+- `/rorca-watch`
+
+### Recommended command
+Use:
+
+```text
+/rorca-create-spec <brief or @file>
+```
+
+That is the preferred Pi path because it maps to the same skill-first Rorca contract used across the rest of the product.
+
+For extension-specific details, see:
+- `packages/rorca-pi-extension/README.md`
 
 ---
 
 ## Development
 
-### Project structure
-
-```
-rorca/
-├── src/                      # React frontend
-│   ├── panels/               # Six main panel components
-│   ├── components/           # Shared UI components
-│   ├── contexts/             # WorkspaceContext
-│   └── hooks/                # usePipelineSSE, etc.
-├── backend/
-│   ├── src/
-│   │   ├── routes/           # Express route handlers
-│   │   ├── lib/              # Core services (see below)
-│   │   ├── mcp/              # MCP stdio server
-│   │   └── db/
-│   │       └── pg-migrations/ # PostgreSQL migration files
-└── scripts/
-    └── self-register.ts      # Self-hosting bootstrap
-```
-
-### Core services (`backend/src/lib/`)
-
-| Service | What it does |
-|---------|-------------|
-| `llm-client.ts` | Calls `claude --print` (your subscription) — no API key needed |
-| `execution-engine.ts` | Universal execution engine — handles claude, opencode, and codex agent paths |
-| `opencode-detector.ts` | Detects OpenCode binary, validates version, startup guard |
-| `opencode-server.ts` | Manages warm OpenCode server lifecycle for `--attach` mode |
-| `opencode-parser.ts` | Streaming JSON parser for OpenCode `--format json` output |
-| `opencode-spec-gen.ts` | Spec generation via OpenCode (codebase-aware, tool-assisted) |
-| `direction-stack.ts` | Synthesizes L1–L5 layers into a single context string |
-| `spec-writer.ts` | Parses LLM output and writes spec JSON to `specs/` |
-| `context-extractor.ts` | Multi-source context ingestion (paste, file, URL, Q&A) |
-| `git-hydrator.ts` | Map/reduce over git history → `memory.yaml` |
-| `schema-hydrator.ts` | Parses SQL migrations → schema YAML |
-| `sse-hub.ts` | In-process pub/sub for Server-Sent Events |
-
-### Commands
+### Useful commands
 
 ```bash
-# Development
-npm run dev              # Start frontend (5210) + backend (3030)
-npm run build            # Production build
-npm run typecheck        # TypeScript check (frontend + backend)
+npm run dev
+npm run build
+npm run typecheck
+npm run test:pi-extension
+npm run auth:test
+```
 
-# Backend
+Backend:
+
+```bash
 cd backend
-npm test                 # Jest test suite
-npm run mcp              # Run MCP server standalone (for debugging)
+npm test
+npx tsc --noEmit
+```
 
-# Self-hosting
-npm run self-register    # Register ~/rorca/ as its own workspace
+### Project structure
+
+```text
+rorca/
+├── src/                         # dashboard frontend
+├── backend/                     # API, MCP, retrieval, execution engine
+├── landing-page/                # public site
+├── packages/                    # extension packages, including Pi extension
+├── docs/                        # architecture notes and deep dives
+├── forge/                       # local runtime/spec assets
+├── default-personas/            # built-in persona overlays
+└── scripts/                     # dev and maintenance scripts
 ```
 
 ---
 
-## The Ralph Loop (Execution Engine)
+## Self-hosting and local-first behavior
 
-The Ralph Loop runs specs story-by-story through the execution engine. The primary engine is `backend/src/lib/execution-engine.ts` (TypeScript, cross-platform), which supports all agent types (claude, opencode, codex). The legacy `scripts/run-loop.sh` is a bash fallback.
+Rorca is built to run locally against real repositories.
+That means:
+- your workspace is a real git repo
+- your specs are real files
+- execution is tied to real branches/worktrees
+- context can be derived from your actual code, history, and project memory
 
-### CLI usage
+This is one of the big differences between Rorca and “prompt in a web box, get a response back” tooling.
 
-```bash
-./scripts/run-loop.sh                                          # Run next pending story (prd-implement.json)
-./scripts/run-loop.sh --json specs/approved/my-spec.json      # Relative path (resolved from scripts/)
-./scripts/run-loop.sh --json /abs/path/to/my-spec.json        # Absolute path (from UI trigger)
-./scripts/run-loop.sh --story US-005                          # Run a specific story by ID
-./scripts/run-loop.sh --dry-run                               # Preview next story without running
-```
+---
 
-### Context files (auto-discovered in the project working directory)
+## Current product truth
 
-When the loop runs, it looks for these files in the workspace root and includes them automatically — no manual configuration needed:
+A few things are worth saying plainly.
 
-| File | Where it's used |
-|------|----------------|
-| `CLAUDE.md` | Injected into every story prompt — architecture, gotchas, critical conventions |
-| `.claude/skills/rorca.md` | Workflow skill injected into implementation mode prompts (falls back to `dimitri.md`) |
-| `AGENTS.md` | Referenced in the skill prompt — agents read directory-level `AGENTS.md` before touching code |
-| `progress.txt` | Read at start of each story so Claude can resume without re-loading context after compaction |
+### What is solid today
+- explicit spec persistence is real
+- MCP tools are real
+- backend-native retrieval is real
+- telemetry and retrieval feedback are real
+- Pi integration is real
+- execution across multiple agent paths is real
 
-The skill (`rorca.md` / `dimitri.md`) instructs the agent to: check `progress.txt` first, use subagents for codebase research, run type checks + lint + build after every story, and write back to `progress.txt` on completion.
+### What is still heuristic
+- ranking weights and freshness curves still need long-run tuning
+- convenience auto-routing from arbitrary prompts is never as reliable as explicit tools
+- “state of the art” architecture is easier than “state of the art measured performance”
 
-### Modes (auto-detected from JSON structure)
-
-| Mode | JSON shape | Behavior |
-|------|-----------|----------|
-| **Implementation** | `{ userStories: [...] }` | Uses `rorca.md`/`dimitri.md` skill, writes `feat:` commits |
-| **QA** | `{ phases: [{ stories: [...] }] }` | Test-writing focused prompt, references playbook, `test:` commits |
-
-### Process isolation
-
-Each story invocation gets a completely fresh Claude context — no conversation accumulates between stories. Claude Code environment variables (`CLAUDECODE`, `CLAUDE_CODE_ENTRYPOINT`, `CLAUDE_AGENT_SDK_VERSION`, `CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING`) are stripped before spawning so nested invocations work when run from inside Claude Code itself.
-
-A 45-minute per-story timeout is enforced via `gtimeout --foreground` (macOS: `brew install coreutils`). Failed stories are retried up to 2× before being skipped.
-
-### Database
-
-PostgreSQL 16 with pgvector + Apache AGE extensions. Connection via `DATABASE_URL` env var (default: `postgres://rorca:rorca@localhost:5432/rorca`). Tables:
-
-| Table | Purpose |
-|-------|---------|
-| `workspaces` | Registered git repositories |
-| `direction_layers` | Direction Stack content per workspace |
-| `pipeline_runs` | Ralph Loop execution history |
-| `story_results` | Per-story pass/fail/skip outcomes |
-| `wal_events` | Event log (spec_generated, approved, run_started, story_passed, etc.) |
-| `workspace_context` | Cached git memory and schema snapshots |
-| `embeddings` | Vector embeddings for hybrid search (pgvector) |
-
-Connection pooling: max 20, 30s idle timeout, 5s connection timeout. FK constraints always on.
+That is fine.
+The right way to build a system like this is to make the architecture honest first, then tune it with real traces.
+That is exactly where Rorca is headed.
 
 ---
 
 ## Troubleshooting
 
-**`claude: command not found` when generating specs**
-Ensure Claude Code is installed and on your PATH: `which claude`
+### Frontend shows a Vite module error
+If you see a missing Vite chunk or `Cannot find module ... vite/dist/node/chunks/...`, reinstall root dependencies:
 
-**Backend fails to start**
-Port 3030 may be in use: `lsof -ti:3030 | xargs kill -9`
-
-**Spec generation returns empty output**
-The `claude --print` call has a 2-minute timeout. Try a shorter brief, or test the CLI directly: `claude --print "hello"`
-
-**MCP tools not appearing in Claude Code**
-The path must be absolute. Re-add with the full path:
 ```bash
-claude mcp remove rorca
-claude mcp add rorca -- npx tsx /absolute/path/to/rorca/backend/src/mcp/server.ts
+npm install
 ```
 
-**OpenCode: "opencode: command not found"**
-Install with `npm i -g opencode`. If installed but not found, set `OPENCODE_BIN=/path/to/opencode` in `backend/.env`.
+### Backend port already in use
+```bash
+lsof -ti:3030 | xargs kill -9
+```
 
-**OpenCode: Backend exits with "OpenCode version too old"**
-Minimum version is 0.1.0. Update with `npm i -g opencode@latest`.
+### Frontend port already in use
+```bash
+lsof -ti:5210 | xargs kill -9
+```
 
-**OpenCode: "No API key for this provider" in trigger modal**
-Add your provider's API key via Settings > Model & Providers > Add Key, or set the corresponding env var (e.g. `OPENAI_API_KEY`).
+### Pi extension installed but commands are missing
+Reinstall the local package:
 
-**Pipeline Monitor not updating**
-The SSE connection opens on panel mount. Navigate away and back to reconnect.
+```bash
+pi install ./packages/rorca-pi-extension -l
+```
 
-**"Run in Pipeline" button not visible**
-The button only appears for approved specs (those in `specs/approved/`). Specs still in `specs/pending/` show no run button — approve them via the Review Queue first.
+### MCP client works inconsistently for spec creation
+Prefer the explicit path:
+- `rorca_create_spec`
+- not freeform prompt inference
 
-**"Run in Pipeline" fails with 422**
-`scripts/run-loop.sh` was not found in the registered workspace path. Make sure the workspace you selected has `scripts/run-loop.sh` checked in and the workspace `path` in Rorca points to the correct project root.
+---
 
-**Merge to main conflicts**
-Rorca will show the conflict details inline. Resolve conflicts manually in the worktree directory, commit the resolution, then re-attempt the merge — or discard the worktree if you want to start fresh.
+## Further reading
+
+- `docs/graph-rag-deep-dive.md`
+- `docs/graph-rag-implementation-backlog.md`
+- `docs/graph-rag-implementation-progress.md`
+- `docs/cross-cli-spec-creation-plan.md`
+- `packages/rorca-pi-extension/README.md`
 
 ---
 
 ## License
 
-MIT
+This repository is currently licensed under the **Business Source License 1.1 (BUSL-1.1)**.
+See:
+- `LICENSE`
+- `LICENSE-NOTICES.md`
+
+If the licensing model changes as the project opens up further, the repository should be updated to reflect that explicitly.

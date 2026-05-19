@@ -571,7 +571,7 @@ For each run, log:
 - prompt token contribution by source
 - whether the run succeeded
 
-Then build learning loops from that data.
+Then build feedback systems from that data.
 
 ### F) Turn successful runs into relevance feedback
 
@@ -892,7 +892,7 @@ Phase 2 is only complete when:
 
 ---
 
-### Phase 3 — Build true state-of-the-art GraphRAG with learning loops and evals
+### Phase 3 — Build true state-of-the-art GraphRAG with feedback systems and evals
 
 #### Objective
 Convert the system from “retrieval with graph enrichment” into a compounding GraphRAG platform with evaluation, feedback, and continuous improvement.
@@ -927,7 +927,7 @@ Convert the system from “retrieval with graph enrichment” into a compounding
 1. Establish eval fixtures before major ranking changes.
 2. Add retrieval telemetry and prove it is stable.
 3. Introduce stage-separated retrieval orchestration.
-4. Add feedback loops from successful/failed runs.
+4. Add feedback systems from successful/failed runs.
 5. Tune scoring with benchmark data rather than intuition.
 6. Re-run offline evals and integration tests after each scoring change.
 7. Iterate until quality gains are repeatable and measurable.
