@@ -14,7 +14,7 @@ done:
 - Added graph edge evidence semantics (evidenceCount + lastSeenAt)
 - Updated stale graph/direction-stack tests to current forge/specs and ranked-retrieval behavior
 - Wired execution-engine story runs to retrieveContext so live story prompts now receive retrieved memory context plus graph context from the unified pipeline
-- Wired final story pass/fail outcomes from execution-engine into recordRetrievalOutcome so the retrieval learning loop is closed for the main autonomous run path
+- Wired final story pass/fail outcomes from execution-engine into recordRetrievalOutcome so the retrieval feedback system is closed for the main autonomous run path
 - Added focused execution-engine retrieval helper coverage
 - Added shared retrieval-outcome helper for consistent candidate-key mapping and success/failure persistence across callers
 - Wired spec-job retrieval callers to record outcomes in match-skills and enrich flows
@@ -100,7 +100,7 @@ validation:
 - cd backend && npm test -- --runInBand src/mcp/__tests__/generate-spec.test.ts src/mcp/__tests__/persist-spec.test.ts src/mcp/__tests__/integration.test.ts -> PASSED
 - cd backend && npm test -- --runInBand src/routes/__tests__/specs.test.ts src/mcp/__tests__/generate-spec.test.ts src/mcp/__tests__/persist-spec.test.ts src/mcp/__tests__/integration.test.ts -> PASSED
 risks:
-- Retrieval outcome feedback is now closed across the main story execution path, current spec-job retrieval paths, and the highest-value synchronous specs.ts retrieval callers, but any future retrieval callers still need to use the shared helper to stay inside the learning loop
+- Retrieval outcome feedback is now closed across the main story execution path, current spec-job retrieval paths, and the highest-value synchronous specs.ts retrieval callers, but any future retrieval callers still need to use the shared helper to stay inside the feedback system
 - Durable telemetry and summaries are now available for operators, but ranking weights / freshness decay are still heuristic until tuned against broader offline eval fixtures
 - AGE-lite test runs still emit expected "graph does not exist" warnings while gracefully degrading
 - External wrapper CLIs that bypass MCP and call backend generation directly are not automatically rewritten by this backend slice; they now have a validated universal persistence surface available to adopt
