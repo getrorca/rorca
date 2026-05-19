@@ -163,11 +163,16 @@ interface SpecJson {
   /** Optional default reasoning config for all stories in this spec. */
   reasoning?: { enabled: boolean; effort?: string };
   /**
-   * Opt-in/out for @playwright/mcp browser tools (fresh isolated headless browser).
+   * Opt-in/out for @playwright/mcp browser tools (fresh isolated browser).
    * true = always inject, false = never inject, undefined = auto-detect from
    * story content (playwright tool names) and playbook path.
    */
   browserMcp?: boolean;
+  /**
+   * Controls whether @playwright/mcp launches headless. false opens a visible
+   * browser window when the host environment supports it.
+   */
+  browserHeadless?: boolean;
   /**
    * Opt-in/out for chrome-devtools-mcp tools (attaches to user's live Chrome via CDP).
    * true = always inject, false = never inject, undefined = auto-detect from
@@ -352,6 +357,7 @@ interface PiRpcServer {
   cwd: string;
   model: string | null;
   skillFiles: string[];
+  mcpServersSignature: string;
 }
 let _piRpcServer: PiRpcServer | null = null;
 let _piRpcExitCleanupRegistered = false;
@@ -424,6 +430,11 @@ function resolvePiCliSelection(requestedModel: string | null): PiCliSelection {
 }
 
 function resolvePiExtensionPaths(): string[] {
+  const repoExtension = path.join(process.cwd(), 'packages', 'rorca-pi-extension', 'extensions', 'rorca', 'index.ts');
+  if (fs.existsSync(repoExtension)) {
+    return [repoExtension];
+  }
+
   const home = os.homedir();
   const candidates = [
     path.join(home, '.pi', 'agent', 'extensions', 'rorca-mcp', 'index.ts'),
@@ -445,7 +456,7 @@ const CLAUDE_ENV_VARS_TO_REMOVE = [
  * Idempotent — starts at most once per engine process.
  * Returns the server URL on success, null on failure (caller handles gracefully — never throws).
  */
-async function ensurePlaywrightMcpServer(): Promise<string | null> {
+async function ensurePlaywrightMcpServer(headless = true): Promise<string | null> {
   // Health-check: if we think the server is ready, verify it's still alive.
   if (_playwrightMcpReady) {
     try {
@@ -467,8 +478,6 @@ async function ensurePlaywrightMcpServer(): Promise<string | null> {
   } catch {
     // Port not occupied — fall through to spawn
   }
-
-  const headless = process.env.RORCA_BROWSER_HEADLESS !== 'false';
 
   try {
     const mcpProc = spawn(
@@ -992,16 +1001,24 @@ function samePiSkillFiles(a: string[], b: string[]): boolean {
   return a.every((value, index) => value === b[index]);
 }
 
+function normalizePiMcpServers(mcpServers?: Record<string, string>): string {
+  if (!mcpServers || Object.keys(mcpServers).length === 0) return '';
+  return JSON.stringify(Object.entries(mcpServers).sort(([a], [b]) => a.localeCompare(b)));
+}
+
 async function startPiRpcServer(
   cwd: string,
   model: string | null,
   skillFiles: string[] = [],
+  mcpServers?: Record<string, string>,
 ): Promise<PiRpcServer> {
+  const mcpServersSignature = normalizePiMcpServers(mcpServers);
   if (
     _piRpcServer?.ready
     && _piRpcServer.cwd === cwd
     && _piRpcServer.model === model
     && samePiSkillFiles(_piRpcServer.skillFiles, skillFiles)
+    && (mcpServersSignature === '' || _piRpcServer.mcpServersSignature === mcpServersSignature)
   ) {
     return _piRpcServer;
   }
@@ -1022,10 +1039,13 @@ async function startPiRpcServer(
     ...(piSelection.model ? ['--model', piSelection.model] : []),
     ...skillFiles.flatMap(skillFile => ['--skill', skillFile]),
   ];
-  logger.info(`[pi-rpc] Resolved Pi model selection: requested=${model ?? 'default'} provider=${piSelection.provider ?? 'default'} model=${piSelection.model ?? 'default'} extensions=${explicitExtensions.length > 0 ? explicitExtensions.join(',') : 'none'}`);
+  logger.info(`[pi-rpc] Resolved Pi model selection: requested=${model ?? 'default'} provider=${piSelection.provider ?? 'default'} model=${piSelection.model ?? 'default'} extensions=${explicitExtensions.length > 0 ? explicitExtensions.join(',') : 'none'} mcp=${mcpServersSignature || 'none'}`);
+  const env = buildCleanEnv();
+  if (mcpServers?.playwright) env.RORCA_PI_PLAYWRIGHT_MCP_URL = mcpServers.playwright;
+  if (mcpServers?.['chrome-devtools']) env.RORCA_PI_CHROME_MCP_URL = mcpServers['chrome-devtools'];
   const child = spawn(PI_BIN, args, {
     cwd,
-    env: buildCleanEnv(),
+    env,
     stdio: ['pipe', 'pipe', 'pipe'],
   });
 
@@ -1039,6 +1059,7 @@ async function startPiRpcServer(
     cwd,
     model,
     skillFiles,
+    mcpServersSignature,
   };
 
   child.stderr?.on('data', (chunk: Buffer | string) => {
@@ -1769,7 +1790,7 @@ function runAgent(
       // thinking/effort flags are not forwarded to Codex
       return spawnCodex(prompt, cwd, timeoutMs, logFile, agentModel, mcpServers);
     case 'pi':
-      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piServerSkillFiles, piSessionOptions);
+      return spawnPiRpc(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, retryContext, onSessionReady, piServerSkillFiles, piSessionOptions, mcpServers);
   }
 }
 
@@ -2346,6 +2367,7 @@ async function spawnPiRpc(
   onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
   piServerSkillFiles: string[] = [],
   _piSessionOptions?: PiSessionOptions,
+  mcpServers?: Record<string, string>,
 ): Promise<AgentResult> {
   const previousStory = _piRpcStoryQueue;
   let releaseStoryQueue!: () => void;
@@ -2359,7 +2381,7 @@ async function spawnPiRpc(
   const startTime = Date.now();
   try {
     logger.info(`[pi-rpc] Starting pi RPC server (model=${model ?? 'default'}, skills=${piServerSkillFiles.length > 0 ? piServerSkillFiles.join(',') : 'none'})`);
-    let server = await startPiRpcServer(cwd, model, piServerSkillFiles);
+    let server = await startPiRpcServer(cwd, model, piServerSkillFiles, mcpServers);
     logger.info('[pi-rpc] pi RPC server started');
 
     let piSessionId: string | undefined;
@@ -2373,7 +2395,7 @@ async function spawnPiRpc(
       logger.warn(`[pi-rpc] Session bootstrap failed on first attempt; restarting RPC server once. ${message}`);
       logger.warn(`[pi-rpc] First-attempt stderr tail:\n${server.stderr.slice(-4096)}`);
       await stopPiRpcServer();
-      server = await startPiRpcServer(cwd, model, piServerSkillFiles);
+      server = await startPiRpcServer(cwd, model, piServerSkillFiles, mcpServers);
       logger.info('[pi-rpc] pi RPC server restarted after bootstrap failure');
       piSessionId = await preparePiRpcSession(
         (command) => sendPiRpcCommand(server, command),
@@ -4081,7 +4103,7 @@ async function executeStory(
   const wantsBrowser = storyWantsBrowserMcp(story, spec ?? {});
   let browserMcpUrl: string | null = null;
   if (wantsBrowser) {
-    browserMcpUrl = await ensurePlaywrightMcpServer();
+    browserMcpUrl = await ensurePlaywrightMcpServer(spec?.browserHeadless ?? (process.env.RORCA_BROWSER_HEADLESS !== 'false'));
     if (browserMcpUrl) {
       process.stdout.write(`[BrowserMCP] Browser tools active for story ${story.id}\n`);
     }
