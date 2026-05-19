@@ -18,6 +18,17 @@ It is designed to feel good across the full Rorca product surface:
 
 ---
 
+## Start here by surface
+
+If you are new to Rorca, pick the surface that matches how you want to work:
+
+- **CLI** — `rorca start`, `rorca tui`, `rorca forge <brief...>`, `rorca run <specSlug>`
+- **TUI** — `rorca tui` → `w` to watch, `s` to switch workspace, `Tab` to cycle streams
+- **MCP** — `rorca_create_spec`, `rorca_get_context`, `rorca_pipeline_status`
+- **Pi extension** — `/rorca-help`, `/rorca-create-spec`, `/rorca-run`, `/rorca-watch`
+
+If you only remember one command: start with `rorca tui` for the local operator view, or `/rorca-help` inside Pi.
+
 ## Why Rorca exists
 
 Most AI coding tools are great at taking a single prompt and producing a burst of output.
@@ -60,7 +71,16 @@ The short version is simple:
 - one spec workflow across UI, backend, CLI, TUI, Pi, and MCP clients
 - one canonical persisted spec format
 - one retrieval and memory layer
-- one execution control plane across Claude, OpenCode, Codex, and Pi-backed runs
+- one execution control plane across multiple CLI paths
+
+### Command reference
+
+| Surface | What to use | Examples |
+|---|---|---|
+| CLI | Local setup, runs, auth, diagnostics | `rorca start`, `rorca tui`, `rorca forge <brief...>`, `rorca run <specSlug>` |
+| TUI | Live board, run watching, workspace switching | `rorca tui` → `w`, `s`, `Tab`, `Esc` |
+| MCP | Explicit tool calls from clients and skills | `rorca_create_spec`, `rorca_get_context`, `rorca_pipeline_status` |
+| Pi extension | Pi-native slash commands | `/rorca-create-spec`, `/rorca-run`, `/rorca-watch`, `/rorca-mcp-status` |
 
 ### Product truth
 Skills are the reasoning layer.
@@ -329,7 +349,7 @@ That is the important point:
 
 ## Execution engine
 
-Rorca has one main execution engine with multiple agent paths.
+Rorca has one main execution engine with multiple CLI paths.
 
 ### Supported paths
 - **Claude**
@@ -452,29 +472,6 @@ That means:
 - context can be derived from your actual code, history, and project memory
 
 This is one of the big differences between Rorca and “prompt in a web box, get a response back” tooling.
-
----
-
-## Current product truth
-
-A few things are worth saying plainly.
-
-### What is solid today
-- explicit spec persistence is real
-- MCP tools are real
-- backend-native retrieval is real
-- telemetry and retrieval feedback are real
-- Pi integration is real
-- execution across multiple agent paths is real
-
-### What is still heuristic
-- ranking weights and freshness curves still need long-run tuning
-- convenience auto-routing from arbitrary prompts is never as reliable as explicit tools
-- “state of the art” architecture is easier than “state of the art measured performance”
-
-That is fine.
-The right way to build a system like this is to make the architecture honest first, then tune it with real traces.
-That is exactly where Rorca is headed.
 
 ---
 
