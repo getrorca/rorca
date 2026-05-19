@@ -29,6 +29,7 @@ import { compileWaves, isCycleError } from '../lib/wave-compiler';
 import { agentType as configuredAgentType } from '../lib/config';
 import { generateSpecViaOpenCode, isSpecError } from '../lib/opencode-spec-gen';
 import { draftSpecWithPi } from '../lib/pi-spec-drafter';
+import { draftSpecWithCodex } from '../lib/codex-spec-drafter';
 import { runChunkedGeneration, CHUNK_THRESHOLD } from '../lib/spec-gen-chunked';
 import { PersonaRegistry } from '../lib/agent-personas';
 import { SkillRegistry } from '../lib/skill-registry';
@@ -341,7 +342,9 @@ interface BatchBriefItem {
   model?: string;
   storyCount?: number;
   domain?: string;
-  agentOverride?: 'claude' | 'opencode' | 'pi';
+  agentOverride?: 'claude' | 'opencode' | 'codex' | 'pi';
+  reasoning?: { enabled: boolean; effort?: string };
+  postSave?: Partial<SpecPostSaveOptions>;
   userId?: string;
   status: BatchBriefStatus;
   error?: string;
@@ -1122,6 +1125,518 @@ function scheduleSpecPostSaveJobs(specId: string, workspaceId: string, options: 
   });
 }
 
+type SkillFirstForgeAgent = 'claude' | 'opencode' | 'codex' | 'pi';
+
+interface ForgeContextBundle {
+  workspaceId: string;
+  workspace: WorkspaceRow;
+  effectiveTitle: string;
+  brief: string;
+  slug: string;
+  storyCount: number;
+  storyPrefix: string;
+  diagramTypes?: string[];
+  templateId?: string;
+  resolvedModel: string;
+  selectedAgent: SkillFirstForgeAgent;
+  thinkingEnabled: boolean;
+  thinkingBudget?: number;
+  reasoningEffort?: string;
+  synthesized: string;
+  templateContext: string;
+  catalogs: Awaited<ReturnType<typeof buildCatalogContext>>;
+  contextUsed: {
+    text: string;
+    meta: ReturnType<typeof synthesizeWithMeta>['meta'] & { scopesMatched: string[] };
+  };
+  contextSummary: Record<string, unknown>;
+  fullPrompt: string;
+  opencodeDirectionContext: string;
+}
+
+interface ForgePersistResult {
+  slug: string;
+  title: string;
+  status: 'pending';
+  source: string;
+  stories: UserStory[];
+  diagrams: Record<string, unknown>;
+  mermaidDiagram: string;
+  specPath: string;
+  diagramsPath: string;
+  normalization: { changes: PersistSpecDraftNormalizationChange[] };
+  overwrote: boolean;
+  postSave: SpecPostSaveOptions;
+}
+
+async function persistExplicitDraftInternal(
+  req: Request | undefined,
+  body: z.infer<typeof PersistSpecDraftSchema>,
+): Promise<ForgePersistResult> {
+  const workspaceId = String(body.workspaceId);
+  const workspace = await getWorkspace(workspaceId, req);
+  if (!workspace) {
+    throw new NotFoundError('Workspace not found');
+  }
+
+  const title = body.title.trim();
+  const rawSlug = (body.slug?.trim() || title)
+    .toLowerCase()
+    .replace(/[^a-z0-9]+/g, '-')
+    .replace(/^-|-$/g, '');
+  const slug = rawSlug || briefToSlug(title);
+  const source = body.source?.trim() || 'explicit-draft';
+  const overwrite = body.overwrite === true;
+  const postSave = resolveSpecPostSaveOptions(body.postSave);
+  const draftStories = body.stories ?? body.userStories ?? [];
+
+  const { stories: normalizedStories, changes } = normalizeExplicitDraftStories(draftStories, body.storyPrefix);
+
+  const catalogs = await buildCatalogContext(workspace.path, workspaceId);
+  if (catalogs.skillNames.size > 0) {
+    validateSuggestedSkills(normalizedStories as unknown as Record<string, unknown>[], catalogs.skillNames);
+  }
+
+  const algorithmicDiagrams = generateDiagramBundle(normalizedStories as any, ['storyDeps']);
+  const allDiagrams = { ...(body.diagrams ?? {}), ...algorithmicDiagrams };
+  const mermaidDiagram = body.mermaidDiagram?.trim() || algorithmicDiagrams.storyDeps?.mermaid || '';
+
+  const { pendingDir, approvedDir } = specsDirs(workspace.path);
+  const existingPending = path.join(pendingDir, `${slug}.json`);
+  const existingApproved = path.join(approvedDir, `${slug}.json`);
+  const hadExistingSpec = fs.existsSync(existingPending) || fs.existsSync(existingApproved);
+
+  if (hadExistingSpec && !overwrite) {
+    throw new ConflictError(`Spec '${slug}' already exists. Re-submit with overwrite=true to replace it.`);
+  }
+
+  if (fs.existsSync(existingPending)) {
+    await snapshotVersion(slug, fs.readFileSync(existingPending, 'utf8'), 'pending');
+    fs.unlinkSync(existingPending);
+  } else if (fs.existsSync(existingApproved)) {
+    await snapshotVersion(slug, fs.readFileSync(existingApproved, 'utf8'), 'approved');
+    fs.unlinkSync(existingApproved);
+  }
+
+  const writeResult = writeSpec(workspace.path, {
+    slug,
+    title,
+    stories: normalizedStories,
+    diagrams: allDiagrams as any,
+    mermaidDiagram: mermaidDiagram || undefined,
+    model: body.model,
+    contextUsed: body.contextUsed as any,
+    reasoning: body.reasoning,
+    source,
+  });
+
+  const walEvent = await queryOne<WalEvent>(
+    `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES ('spec_generated', $1, $2, 'api', $3) RETURNING *`,
+    [workspaceId, slug, JSON.stringify({
+      title,
+      source,
+      overwrite,
+      storyCount: normalizedStories.length,
+      normalizationChanges: changes,
+      postSave,
+    })],
+  );
+  if (walEvent) {
+    broadcastAll(walEvent);
+  }
+
+  await seedPersistGenerationLog({
+    slug,
+    source,
+    title,
+    storyCount: normalizedStories.length,
+    model: body.model,
+    overwrite,
+    postSave,
+    normalizationChanges: changes,
+    contextUsed: body.contextUsed,
+    reasoning: body.reasoning,
+  });
+
+  if (postSave.memorySynthesis) {
+    const memoryBrief = body.brief || body.specBrief || title;
+    autoSynthesizeSpecMemory(
+      slug,
+      workspaceId,
+      memoryBrief,
+      { stories: normalizedStories as unknown[] },
+      { source, explicitDraft: true },
+    ).catch(() => { /* non-blocking — errors logged internally */ });
+  }
+
+  scheduleSpecPostSaveJobs(slug, workspaceId, {
+    enrich: postSave.enrich,
+    matchSkills: postSave.matchSkills,
+  });
+
+  return {
+    slug,
+    title,
+    status: 'pending',
+    source,
+    stories: normalizedStories,
+    diagrams: allDiagrams,
+    mermaidDiagram,
+    specPath: writeResult.specPath,
+    diagramsPath: writeResult.diagramsPath,
+    normalization: { changes },
+    overwrote: hadExistingSpec,
+    postSave,
+  };
+}
+
+function resolveDraftingAgent(agentOverride: SkillFirstForgeAgent | undefined, model: string): SkillFirstForgeAgent {
+  if (agentOverride) return agentOverride;
+  if (configuredAgentType === 'codex') return 'codex';
+  if (configuredAgentType === 'pi') return 'pi';
+  if (configuredAgentType === 'opencode') return 'opencode';
+  if (/^openai-codex\//i.test(model)) return 'codex';
+  return 'claude';
+}
+
+function buildLayerTitle(content: string | undefined): string | null {
+  if (!content) return null;
+  const firstLine = content.split('\n').map((line) => line.trim()).find((line) => line.length > 0) ?? null;
+  if (!firstLine) return null;
+  return firstLine.length > 40 ? firstLine.slice(0, 40) : firstLine;
+}
+
+function buildSkillFirstPrompt(input: {
+  synthesized: string;
+  semanticGraphSection: string;
+  catalogs: Awaited<ReturnType<typeof buildCatalogContext>>;
+  attachmentSection: string;
+  templateContext: string;
+  effectiveTitle: string;
+  brief: string;
+  storyCount: number;
+  storyPrefix: string;
+  diagramTypes?: string[];
+}): string {
+  const { synthesized, semanticGraphSection, catalogs, attachmentSection, templateContext, effectiveTitle, brief, storyCount, storyPrefix, diagramTypes } = input;
+  const wantDiagrams = Array.isArray(diagramTypes) && diagramTypes.some((type) => type !== 'storyDeps');
+  const diagramSchema = wantDiagrams ? [
+    '',
+    'Also include a "diagrams" key at the top level with Mermaid diagrams for the following types:',
+    (diagramTypes as string[])
+      .filter((type) => type !== 'storyDeps')
+      .map((type) => `  "${type}": { "mermaid": "<valid mermaid string>" }`)
+      .join('\n'),
+    'Each mermaid string must be syntactically valid and use \\n for newlines.',
+  ].join('\n') : '';
+
+  const catalogSections: string[] = [];
+  if (catalogs.memoryMd) {
+    catalogSections.push('=== PROJECT MEMORY ===', catalogs.memoryMd, '=== END PROJECT MEMORY ===', '');
+  }
+  if (catalogs.agentsMd) {
+    catalogSections.push('=== AGENTS GOVERNANCE ===', catalogs.agentsMd, '=== END AGENTS GOVERNANCE ===', '');
+  }
+  if (catalogs.skillCatalog) {
+    catalogSections.push('=== INSTALLED SKILLS ===', catalogs.skillCatalog, '=== END INSTALLED SKILLS ===', '');
+  }
+  if (catalogs.personaCatalog) {
+    catalogSections.push('=== AVAILABLE PERSONAS ===', catalogs.personaCatalog, '=== END AVAILABLE PERSONAS ===', '');
+  }
+
+  const hasSkillsOrPersonas = Boolean(catalogs.skillCatalog || catalogs.personaCatalog);
+  const exactStoryRule = storyCount === 0
+    ? `- Generate an appropriate number of stories (typically 3-20) starting from ${storyPrefix}-001.`
+    : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}.`;
+
+  return [
+    '=== INSTRUCTIONS: READ THIS FIRST ===',
+    'You are a skill-first Rorca spec drafter.',
+    'Think through the brief, the provided context, and likely implementation order before finalizing the spec.',
+    'Your ENTIRE final response must be a single raw JSON object. No markdown fences. No prose before or after.',
+    '=== END INSTRUCTIONS ===',
+    '',
+    synthesized,
+    ...(semanticGraphSection ? ['', '=== KNOWLEDGE GRAPH CONTEXT ===', semanticGraphSection, '=== END KNOWLEDGE GRAPH CONTEXT ===', ''] : []),
+    ...catalogSections,
+    ...(attachmentSection ? [attachmentSection, ''] : []),
+    ...(templateContext ? [templateContext, '---'] : []),
+    '---',
+    storyCount === 0
+      ? 'TASK: Draft an implementation-ready software specification JSON with an appropriate number of user stories.'
+      : `TASK: Draft an implementation-ready software specification JSON with exactly ${storyCount} user stories.`,
+    `Spec title: ${effectiveTitle}`,
+    `Spec brief: ${brief}`,
+    '',
+    'OUTPUT FORMAT: Respond with ONLY a raw JSON object. Start with { and end with }.',
+    '',
+    'JSON schema:',
+    `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3${hasSkillsOrPersonas ? ',"suggestedSkills":[{"name":"skill-name","relevance":8,"reason":"why this skill applies"}],"suggestedPersona":"persona-name","suggestedReviewers":["reviewer-name"]' : ''}}],"mermaidDiagram":"graph TD\\n  ${storyPrefix}-001[\\"Story title\\"]"${wantDiagrams ? ',"diagrams":{"architecture":{"mermaid":"graph TD\\n  A --> B"}}' : ''}}`,
+    wantDiagrams ? diagramSchema : '',
+    '',
+    'Rules:',
+    exactStoryRule,
+    '- Each story needs 3-5 concrete, testable acceptance criteria.',
+    '- Determine dependencies from real implementation order. If story B uses code, APIs, schemas, auth, or components created in story A, then B dependsOn [A].',
+    '- Stories should be concrete and implementation-ready, not vague product prose.',
+    '- Each story must include a complexity score from 1-5.',
+    ...(hasSkillsOrPersonas ? [
+      '- If relevant, include suggestedSkills using ONLY names from the installed skills catalog.',
+      '- If relevant, include suggestedPersona and suggestedReviewers using ONLY names from the available personas catalog.',
+    ] : []),
+    '- Include a mermaidDiagram field showing dependency relationships.',
+    '- The final output must be valid JSON parseable by JSON.parse().',
+  ].join('\n');
+}
+
+async function buildForgeContextBundle(input: {
+  workspaceId: string;
+  domain?: string;
+  storyAnnotations?: Record<string, unknown>;
+  templateId?: string;
+  title?: string;
+  brief: string;
+  storyCount: number;
+  resolvedModel: string;
+  selectedAgent: SkillFirstForgeAgent;
+  diagramTypes?: string[];
+  storyPrefix?: string;
+  thinkingEnabled?: boolean;
+  thinkingBudget?: number;
+  reasoningEffort?: string;
+}): Promise<ForgeContextBundle> {
+  const workspace = await getWorkspace(input.workspaceId);
+  if (!workspace) {
+    throw new NotFoundError('Workspace not found');
+  }
+
+  const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
+  const l2Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [input.domain]) as { content_yaml: string } | undefined;
+  const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [input.workspaceId]) as { content_yaml: string } | undefined;
+  const ctx = await queryOne<{ schema_snapshot: string | null }>(
+    `SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`,
+    [input.workspaceId],
+  );
+
+  const synthResult = synthesizeWithMeta({
+    l1: l1Row?.content_yaml,
+    l2: l2Row?.content_yaml,
+    l3: l3Row?.content_yaml,
+    schemaSnapshot: ctx?.schema_snapshot || undefined,
+    specBrief: input.brief,
+    storyAnnotations: input.storyAnnotations ? JSON.stringify(input.storyAnnotations) : undefined,
+  });
+  const synthesized = synthResult.text;
+
+  let semanticGraphSection = '';
+  let retrievalMeta: { cagHits: number; ragHits: number; graphHits: number; latencyMs: number; tier: string } | undefined;
+  try {
+    const retrieved = await retrieveContext(input.workspaceId, input.brief, {
+      maxTokens: 16000,
+      includeGraph: true,
+    });
+    if (retrieved.graphSection) {
+      semanticGraphSection = retrieved.graphSection;
+    }
+    retrievalMeta = {
+      cagHits: retrieved.meta.cagHits,
+      ragHits: retrieved.meta.ragHits,
+      graphHits: retrieved.meta.graphHits,
+      latencyMs: retrieved.meta.latencyMs,
+      tier: retrieved.meta.tier,
+    };
+  } catch (err) {
+    logger.warn({ err, workspaceId: input.workspaceId }, '[Specs] buildForgeContextBundle retrieveContext failed — using plaintext context only');
+  }
+
+  let templateContext = '';
+  if (input.templateId) {
+    const tpl = await queryOne('SELECT * FROM templates WHERE id = $1', [input.templateId]) as
+      { brief: string; story_structure: string; direction_layers: string | null } | undefined;
+    if (tpl) {
+      const stories = JSON.parse(tpl.story_structure);
+      const storyOutline = stories.map((story: { id: string; title: string; description: string }) =>
+        `- ${story.id}: ${story.title} — ${story.description}`,
+      ).join('\n');
+      templateContext = [
+        '=== REFERENCE TEMPLATE ===',
+        `Template brief: ${tpl.brief}`,
+        '',
+        'Story structure pattern:',
+        storyOutline,
+        '',
+        'Use this as a structural reference. Adapt story IDs, titles, and details to the new spec brief.',
+        '=== END TEMPLATE ===',
+      ].join('\n');
+    }
+  }
+
+  const catalogs = await buildCatalogContext(workspace.path, workspace.id);
+  const skillNamesList = catalogs.skillCatalog
+    ? catalogs.skillCatalog.split('\n').map((line) => line.split(':')[0]?.trim()).filter(Boolean)
+    : [];
+  const fsMemoryCount = catalogs.memoryMd
+    ? (catalogs.memoryMd.match(/^## \d{4}-\d{2}-\d{2}/gm) || []).length
+    : 0;
+  const dbMemoryRow = await queryOne<{ cnt: string }>(
+    'SELECT COUNT(*)::int as cnt FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL',
+    [workspace.id],
+  );
+  const dbMemoryCount = dbMemoryRow ? parseInt(dbMemoryRow.cnt, 10) : 0;
+  const catalogTokens = Math.ceil(
+    (catalogs.skillCatalog.length + catalogs.personaCatalog.length + catalogs.memoryMd.length + catalogs.agentsMd.length + templateContext.length) / 4,
+  );
+  const estimatedTokens = synthResult.meta.totalTokens + catalogTokens;
+  const modelInfo = getModelInfo(input.resolvedModel);
+  const modelContextWindow = modelInfo?.contextWindow ?? 200000;
+  const contextSummary: Record<string, unknown> = {
+    directionLayers: {
+      l1: synthResult.meta.standards,
+      l2: { present: synthResult.meta.conventions, domain: input.domain || null },
+      l3: synthResult.meta.project,
+      l1Title: synthResult.meta.standards ? (buildLayerTitle(l1Row?.content_yaml) ?? 'Standards') : null,
+      l2Title: synthResult.meta.conventions ? (buildLayerTitle(l2Row?.content_yaml) ?? 'Conventions') : null,
+      l3Title: synthResult.meta.project ? (buildLayerTitle(l3Row?.content_yaml) ?? 'Project') : null,
+      l1Tokens: l1Row?.content_yaml ? Math.ceil(l1Row.content_yaml.length / 4) : 0,
+      l2Tokens: l2Row?.content_yaml ? Math.ceil(l2Row.content_yaml.length / 4) : 0,
+      l3Tokens: l3Row?.content_yaml ? Math.ceil(l3Row.content_yaml.length / 4) : 0,
+    },
+    skills: skillNamesList,
+    memoryEntries: Math.max(fsMemoryCount, dbMemoryCount),
+    agentsMd: !!catalogs.agentsMd,
+    template: input.templateId || null,
+    schemaSnapshot: synthResult.meta.schema,
+    estimatedTokens,
+    modelContextWindow,
+    ...(retrievalMeta ? {
+      vectorHits: retrievalMeta.ragHits,
+      graphHits: retrievalMeta.graphHits,
+      retrievalTier: retrievalMeta.tier,
+      retrievalLatencyMs: retrievalMeta.latencyMs,
+      retrieval: {
+        cagHits: retrievalMeta.cagHits,
+        ragHits: retrievalMeta.ragHits,
+        graphHits: retrievalMeta.graphHits,
+        tier: retrievalMeta.tier,
+        latencyMs: retrievalMeta.latencyMs,
+      },
+    } : {}),
+  };
+
+  const slug = input.title
+    ? input.title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '')
+    : briefToSlug(input.brief);
+  const attachmentSection = await buildAttachmentSection(slug, (filename, status) => {
+    emitAttachmentEvent(slug, filename, status, input.workspaceId).catch(() => { /* non-fatal */ });
+  });
+
+  const fullPrompt = buildSkillFirstPrompt({
+    synthesized,
+    semanticGraphSection,
+    catalogs,
+    attachmentSection,
+    templateContext,
+    effectiveTitle: input.title || input.brief,
+    brief: input.brief,
+    storyCount: input.storyCount,
+    storyPrefix: input.storyPrefix || 'US',
+    diagramTypes: input.diagramTypes,
+  });
+
+  const opencodeDirectionContext = [
+    synthesized,
+    ...(semanticGraphSection ? ['', '=== KNOWLEDGE GRAPH CONTEXT ===', semanticGraphSection, '=== END KNOWLEDGE GRAPH CONTEXT ==='] : []),
+    ...(catalogs.memoryMd ? ['', '=== PROJECT MEMORY ===', catalogs.memoryMd, '=== END PROJECT MEMORY ==='] : []),
+    ...(catalogs.agentsMd ? ['', '=== AGENTS GOVERNANCE ===', catalogs.agentsMd, '=== END AGENTS GOVERNANCE ==='] : []),
+    ...(catalogs.skillCatalog ? ['', '=== INSTALLED SKILLS ===', catalogs.skillCatalog, '=== END INSTALLED SKILLS ==='] : []),
+    ...(catalogs.personaCatalog ? ['', '=== AVAILABLE PERSONAS ===', catalogs.personaCatalog, '=== END AVAILABLE PERSONAS ==='] : []),
+    ...(attachmentSection ? ['', attachmentSection] : []),
+  ].join('\n');
+
+  return {
+    workspaceId: input.workspaceId,
+    workspace,
+    effectiveTitle: input.title || input.brief,
+    brief: input.brief,
+    slug,
+    storyCount: input.storyCount,
+    storyPrefix: input.storyPrefix || 'US',
+    ...(input.diagramTypes ? { diagramTypes: input.diagramTypes } : {}),
+    ...(input.templateId ? { templateId: input.templateId } : {}),
+    resolvedModel: input.resolvedModel,
+    selectedAgent: input.selectedAgent,
+    thinkingEnabled: input.thinkingEnabled === true,
+    ...(input.thinkingBudget != null ? { thinkingBudget: input.thinkingBudget } : {}),
+    ...(input.reasoningEffort ? { reasoningEffort: input.reasoningEffort } : {}),
+    synthesized,
+    templateContext,
+    catalogs,
+    contextUsed: {
+      text: synthesized,
+      meta: {
+        ...synthResult.meta,
+        scopesMatched: [],
+      },
+    },
+    contextSummary,
+    fullPrompt,
+    opencodeDirectionContext,
+  };
+}
+
+function appendPredictedFilesToContextSummary(contextSummary: Record<string, unknown>, stories: UserStory[], workspacePath: string): void {
+  try {
+    const rorcaCfg = loadRorcaConfig(workspacePath);
+    if (!rorcaCfg.routing || !Array.isArray(rorcaCfg.routing.scopes) || rorcaCfg.routing.scopes.length === 0) {
+      return;
+    }
+
+    const allFileSet = new Set<string>();
+    for (const story of stories) {
+      const payload = routeContext(
+        {
+          id: story.id,
+          title: story.title,
+          description: story.description,
+          acceptanceCriteria: story.acceptanceCriteria,
+          dependsOn: story.dependsOn,
+        },
+        rorcaCfg.routing,
+        workspacePath,
+      );
+      for (const filePath of payload.injectedFiles) {
+        allFileSet.add(filePath);
+      }
+    }
+
+    contextSummary.predictedFiles = Array.from(allFileSet).sort().slice(0, 30);
+  } catch {
+    // Non-fatal — omit predicted files when routing analysis fails.
+  }
+}
+
+async function resolveSpecGenerationModelForUser(userId: string | undefined, workspaceId: string, requestedModel?: string): Promise<string> {
+  const wfConfig = await resolveWorkflowConfig('spec_generation', userId);
+
+  let resolvedModel = wfConfig.model || DEFAULT_MODEL;
+  const l3Pref = await queryOne<{ preferred_model: string | null }>(
+    `SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`,
+    [workspaceId],
+  );
+  if (l3Pref?.preferred_model) {
+    resolvedModel = l3Pref.preferred_model;
+  }
+  if (requestedModel) {
+    resolvedModel = requestedModel;
+  }
+  return resolvedModel;
+}
+
+async function resolveSpecGenerationModel(req: Request | undefined, workspaceId: string, requestedModel?: string): Promise<string> {
+  const forgeUser = req ? await getEffectiveUser(req) : undefined;
+  return resolveSpecGenerationModelForUser(forgeUser?.id, workspaceId, requestedModel);
+}
+
 const GenerateSpecSchema = z.object({
   workspaceId: z.union([z.string().min(1), z.number()]),
   brief: z.string().min(1).optional(),
@@ -1147,6 +1662,331 @@ const GenerateSpecSchema = z.object({
 }).refine(data => !!(data.brief || data.specBrief), {
   message: 'brief (or specBrief) is required',
   path: ['brief'],
+});
+
+const SkillFirstForgeSchema = z.object({
+  workspaceId: z.union([z.string().min(1), z.number()]),
+  brief: z.string().min(1).optional(),
+  specBrief: z.string().min(1).optional(),
+  title: z.string().optional(),
+  specName: z.string().optional(),
+  domain: z.string().optional(),
+  diagramTypes: z.array(z.string()).optional(),
+  storyAnnotations: z.record(z.string(), z.unknown()).optional(),
+  templateId: z.string().optional(),
+  storyCount: z.union([z.number(), z.string()]).optional(),
+  model: z.string().optional(),
+  agentOverride: z.enum(['claude', 'opencode', 'codex', 'pi']).optional(),
+  storyPrefix: z.string().optional(),
+  thinkingEnabled: z.boolean().optional(),
+  thinkingBudget: z.number().int().positive().max(65536).optional(),
+  reasoning: z.object({
+    enabled: z.boolean(),
+    effort: z.string().optional(),
+  }).optional(),
+  postSave: z.object({
+    enrich: z.boolean().optional(),
+    matchSkills: z.boolean().optional(),
+    memorySynthesis: z.boolean().optional(),
+  }).optional(),
+}).refine(data => !!(data.brief || data.specBrief), {
+  message: 'brief (or specBrief) is required',
+  path: ['brief'],
+});
+
+interface ExecuteSkillFirstForgeOptions {
+  req?: Request;
+  userId?: string;
+  body: z.infer<typeof SkillFirstForgeSchema>;
+  overwrite?: boolean;
+  postSaveDefaults?: Partial<SpecPostSaveOptions>;
+}
+
+interface ExecuteSkillFirstForgeResult extends ForgePersistResult {
+  provider: string;
+  model: string | null;
+  usage: { inputTokens: number; outputTokens: number; costUsd?: number };
+  contextUsed: ForgeContextBundle['contextUsed'];
+  contextSummary: ForgeContextBundle['contextSummary'];
+  draftingAgent: SkillFirstForgeAgent;
+}
+
+async function executeSkillFirstForge(options: ExecuteSkillFirstForgeOptions): Promise<ExecuteSkillFirstForgeResult> {
+  const parsedBody = options.body;
+  const workspaceId = String(parsedBody.workspaceId);
+  const brief = parsedBody.brief || parsedBody.specBrief!;
+  const requestedModel = parsedBody.model?.trim() || undefined;
+  const rawCount = parseInt(String(parsedBody.storyCount ?? '8'), 10);
+  const storyCount = rawCount === 0 ? 0 : Math.min(500, Math.max(1, rawCount || 8));
+  const reasoningBody = parsedBody.reasoning;
+  const thinkingEnabled = reasoningBody?.enabled === true || parsedBody.thinkingEnabled === true;
+  const reasoningEffort = reasoningBody?.effort;
+  const resolvedModel = await resolveSpecGenerationModelForUser(options.userId, workspaceId, requestedModel);
+  const selectedAgent = resolveDraftingAgent(parsedBody.agentOverride, resolvedModel);
+  const bundle = await buildForgeContextBundle({
+    workspaceId,
+    domain: parsedBody.domain,
+    storyAnnotations: parsedBody.storyAnnotations,
+    templateId: parsedBody.templateId,
+    title: parsedBody.title || parsedBody.specName,
+    brief,
+    storyCount,
+    resolvedModel,
+    selectedAgent,
+    diagramTypes: parsedBody.diagramTypes,
+    storyPrefix: parsedBody.storyPrefix,
+    thinkingEnabled,
+    thinkingBudget: parsedBody.thinkingBudget,
+    reasoningEffort,
+  });
+
+  let usedProvider: string = selectedAgent;
+  let usage: { inputTokens: number; outputTokens: number; costUsd?: number } = { inputTokens: 0, outputTokens: 0 };
+  let drafted: { stories: UserStory[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
+  const directModel = parsedBody.model?.trim() || undefined;
+
+  if (selectedAgent === 'pi') {
+    const piResult = await draftSpecWithPi({
+      cwd: bundle.workspace.path,
+      prompt: bundle.fullPrompt,
+      model: directModel || resolvedModel,
+    });
+    usage = piResult.usage;
+    const parsedDraft = parseLLMJson(piResult.text) as { stories?: UserStory[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
+    if (!Array.isArray(parsedDraft.stories)) {
+      throw new ValidationError('Pi forge drafter returned invalid stories array');
+    }
+    drafted = {
+      stories: parsedDraft.stories,
+      diagrams: parsedDraft.diagrams,
+      mermaidDiagram: parsedDraft.mermaidDiagram,
+    };
+    usedProvider = 'pi';
+  } else if (selectedAgent === 'codex') {
+    const codexModel = directModel || (/^(openai-codex\/|gpt-5)/i.test(resolvedModel) ? resolvedModel : undefined);
+    const codexResult = await draftSpecWithCodex({
+      cwd: bundle.workspace.path,
+      prompt: bundle.fullPrompt,
+      model: codexModel,
+    });
+    usage = codexResult.usage;
+    const parsedDraft = parseLLMJson(codexResult.text) as { stories?: UserStory[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
+    if (!Array.isArray(parsedDraft.stories)) {
+      throw new ValidationError('Codex forge drafter returned invalid stories array');
+    }
+    drafted = {
+      stories: parsedDraft.stories,
+      diagrams: parsedDraft.diagrams,
+      mermaidDiagram: parsedDraft.mermaidDiagram,
+    };
+    usedProvider = 'codex';
+  } else if (selectedAgent === 'opencode') {
+    const opencodeResult = await generateSpecViaOpenCode({
+      workspacePath: bundle.workspace.path,
+      title: bundle.effectiveTitle,
+      brief: bundle.brief,
+      storyCount: bundle.storyCount,
+      storyPrefix: bundle.storyPrefix,
+      directionContext: bundle.opencodeDirectionContext,
+      ...(bundle.templateContext ? { templateContext: bundle.templateContext } : {}),
+      ...(bundle.diagramTypes ? { diagramTypes: bundle.diagramTypes } : {}),
+      ...(directModel || resolvedModel ? { model: directModel || resolvedModel } : {}),
+    });
+    if (isSpecError(opencodeResult)) {
+      throw new Error(opencodeResult.error);
+    }
+    usage = opencodeResult.usage;
+    drafted = {
+      stories: opencodeResult.stories as UserStory[],
+      diagrams: opencodeResult.diagrams as Record<string, unknown> | undefined,
+      mermaidDiagram: opencodeResult.mermaidDiagram,
+    };
+    usedProvider = 'opencode';
+  } else {
+    const wfConfig = await resolveWorkflowConfig('spec_generation', options.userId);
+    const orPrefs = await getOpenRouterPrefs(resolvedModel, workspaceId);
+    const llmResult = await chatComplete(
+      [{ role: 'user', content: bundle.fullPrompt }],
+      {
+        model: resolvedModel,
+        apiKey: wfConfig.apiKey ?? undefined,
+        baseUrl: wfConfig.baseUrl ?? undefined,
+        ...(thinkingEnabled ? { thinking: { type: 'enabled' as const, budgetTokens: parsedBody.thinkingBudget || 8192 }, maxTokens: (parsedBody.thinkingBudget || 8192) + 16384 } : {}),
+        ...(orPrefs ? { openRouterProvider: orPrefs } : {}),
+      },
+    );
+    usage = llmResult.usage;
+    usedProvider = getActiveProvider();
+    const parsedDraft = parseLLMJson(llmResult.text) as { stories?: UserStory[]; diagrams?: Record<string, unknown>; mermaidDiagram?: string };
+    if (!Array.isArray(parsedDraft.stories)) {
+      throw new ValidationError('Forge drafter returned invalid stories array');
+    }
+    drafted = {
+      stories: parsedDraft.stories,
+      diagrams: parsedDraft.diagrams,
+      mermaidDiagram: parsedDraft.mermaidDiagram,
+    };
+  }
+
+  appendPredictedFilesToContextSummary(bundle.contextSummary, drafted.stories, bundle.workspace.path);
+
+  const persistResult = await persistExplicitDraftInternal(options.req, {
+    workspaceId,
+    title: bundle.effectiveTitle,
+    slug: bundle.slug,
+    brief: bundle.brief,
+    storyPrefix: bundle.storyPrefix,
+    stories: drafted.stories,
+    ...(drafted.diagrams ? { diagrams: drafted.diagrams as Record<string, { mermaid: string; ascii: string }> } : {}),
+    ...(drafted.mermaidDiagram ? { mermaidDiagram: drafted.mermaidDiagram } : {}),
+    ...(selectedAgent === 'codex' && !directModel ? {} : { model: directModel || resolvedModel }),
+    contextUsed: bundle.contextUsed as any,
+    ...(thinkingEnabled ? { reasoning: { enabled: true, ...(reasoningEffort ? { effort: reasoningEffort } : {}) } } : {}),
+    source: 'skill-first-backend',
+    ...(options.overwrite ? { overwrite: true } : {}),
+    postSave: parsedBody.postSave ?? options.postSaveDefaults,
+  });
+
+  return {
+    ...persistResult,
+    provider: usedProvider,
+    model: selectedAgent === 'codex' && !directModel ? null : (directModel || resolvedModel),
+    usage,
+    contextUsed: bundle.contextUsed,
+    contextSummary: bundle.contextSummary,
+    draftingAgent: selectedAgent,
+  };
+}
+
+/**
+ * @swagger
+ * /api/specs/generation-context:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Build a skill-first forge context bundle
+ *     operationId: getSpecGenerationContext
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only forge context retrieval is part of the open-source skill-first authoring flow for CLI/MCP/local drafters."
+ *     x-rorca-public-api: true
+ *     description: >
+ *       Returns the synthesized context bundle and drafting prompt for skill-first callers.
+ *       This does not persist a spec. It exists so caller-side skills or local runtimes can
+ *       retrieve the same normalized context Rorca would use before drafting.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, brief]
+ *     responses:
+ *       200: { description: Forge context bundle }
+ */
+router.post('/generation-context', validateBody(SkillFirstForgeSchema), async (req: Request, res: Response) => {
+  try {
+    const parsedBody = SkillFirstForgeSchema.parse(req.body);
+    const workspaceId = String(parsedBody.workspaceId);
+    const brief = parsedBody.brief || parsedBody.specBrief!;
+    const requestedModel = parsedBody.model?.trim() || undefined;
+    const rawCount = parseInt(String(parsedBody.storyCount ?? '8'), 10);
+    const storyCount = rawCount === 0 ? 0 : Math.min(500, Math.max(1, rawCount || 8));
+    const resolvedModel = await resolveSpecGenerationModel(req, workspaceId, requestedModel);
+    const selectedAgent = resolveDraftingAgent(parsedBody.agentOverride, resolvedModel);
+    const reasoningBody = parsedBody.reasoning;
+    const thinkingEnabled = reasoningBody?.enabled === true || parsedBody.thinkingEnabled === true;
+
+    const bundle = await buildForgeContextBundle({
+      workspaceId,
+      domain: parsedBody.domain,
+      storyAnnotations: parsedBody.storyAnnotations,
+      templateId: parsedBody.templateId,
+      title: parsedBody.title || parsedBody.specName,
+      brief,
+      storyCount,
+      resolvedModel,
+      selectedAgent,
+      diagramTypes: parsedBody.diagramTypes,
+      storyPrefix: parsedBody.storyPrefix,
+      thinkingEnabled,
+      thinkingBudget: parsedBody.thinkingBudget,
+      reasoningEffort: reasoningBody?.effort,
+    });
+
+    res.json({
+      workspaceId,
+      title: bundle.effectiveTitle,
+      brief: bundle.brief,
+      slug: bundle.slug,
+      storyCount: bundle.storyCount,
+      agentType: bundle.selectedAgent,
+      model: bundle.resolvedModel,
+      storyPrefix: bundle.storyPrefix,
+      prompt: bundle.fullPrompt,
+      contextUsed: bundle.contextUsed,
+      contextSummary: bundle.contextSummary,
+      postSaveDefaults: resolveSpecPostSaveOptions(),
+    });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Specs] Forge generation-context');
+  }
+});
+
+/**
+ * @swagger
+ * /api/specs/forge:
+ *   post:
+ *     tags: [Specs]
+ *     summary: Run the shared skill-first forge workflow
+ *     operationId: forgeSpecSkillFirst
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "The shared UI/CLI forge workflow is a core open-source authoring surface: Rorca gathers context, drafts via the selected runtime, then persists canonically."
+ *     x-rorca-public-api: true
+ *     description: >
+ *       Shared backend-owned skill-first forge path used by Rorca surfaces that cannot spawn
+ *       a local drafter directly (for example the browser UI). Rorca gathers context, drafts
+ *       with the selected runtime, then persists the explicit draft through the canonical save path.
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [workspaceId, brief]
+ *     responses:
+ *       200: { description: Saved spec result }
+ */
+router.post('/forge', validateBody(SkillFirstForgeSchema), async (req: Request, res: Response) => {
+  try {
+    const parsedBody = SkillFirstForgeSchema.parse(req.body);
+    const rawCount = parseInt(String(parsedBody.storyCount ?? '8'), 10);
+    const storyCount = rawCount === 0 ? 0 : Math.min(500, Math.max(1, rawCount || 8));
+
+    const planUser = await getEffectiveUser(req);
+    if (planUser?.id) {
+      const planRow = await queryOne<{ plan: string }>('SELECT plan FROM users WHERE id = $1', [planUser.id]);
+      const userPlan = (planRow?.plan ?? 'free') as PlanTier;
+      const limits = getPlanLimits(userPlan);
+      if (isFinite(limits.maxStoriesPerSpec) && storyCount > limits.maxStoriesPerSpec) {
+        res.status(402).json({
+          error: 'plan_limit',
+          message: `Free plan allows at most ${limits.maxStoriesPerSpec} stories per spec. Upgrade to generate larger specs.`,
+          maxStoriesPerSpec: limits.maxStoriesPerSpec,
+          currentPlan: userPlan,
+        });
+        return;
+      }
+    }
+
+    const result = await executeSkillFirstForge({
+      req,
+      userId: planUser?.id,
+      body: parsedBody,
+    });
+
+    res.json(result);
+  } catch (error: any) {
+    handleRouteError(res, error, '[Specs] Forge skill-first');
+  }
 });
 
 /**
@@ -2835,121 +3675,8 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
 router.post('/persist', validateBody(PersistSpecDraftSchema), async (req: Request, res: Response) => {
   try {
     const parsedBody = PersistSpecDraftSchema.parse(req.body);
-    const workspaceId = String(parsedBody.workspaceId);
-    const workspace = await getWorkspace(workspaceId, req);
-    if (!workspace) {
-      throw new NotFoundError('Workspace not found');
-    }
-
-    const title = parsedBody.title.trim();
-    const rawSlug = (parsedBody.slug?.trim() || title)
-      .toLowerCase()
-      .replace(/[^a-z0-9]+/g, '-')
-      .replace(/^-|-$/g, '');
-    const slug = rawSlug || briefToSlug(title);
-    const source = parsedBody.source?.trim() || 'explicit-draft';
-    const overwrite = parsedBody.overwrite === true;
-    const postSave = resolveSpecPostSaveOptions(parsedBody.postSave);
-    const draftStories = parsedBody.stories ?? parsedBody.userStories ?? [];
-
-    const { stories: normalizedStories, changes } = normalizeExplicitDraftStories(draftStories, parsedBody.storyPrefix);
-
-    const catalogs = await buildCatalogContext(workspace.path, workspaceId);
-    if (catalogs.skillNames.size > 0) {
-      validateSuggestedSkills(normalizedStories as unknown as Record<string, unknown>[], catalogs.skillNames);
-    }
-
-    const algorithmicDiagrams = generateDiagramBundle(normalizedStories as any, ['storyDeps']);
-    const allDiagrams = { ...(parsedBody.diagrams ?? {}), ...algorithmicDiagrams };
-    const mermaidDiagram = parsedBody.mermaidDiagram?.trim() || algorithmicDiagrams.storyDeps?.mermaid || '';
-
-    const { pendingDir, approvedDir } = specsDirs(workspace.path);
-    const existingPending = path.join(pendingDir, `${slug}.json`);
-    const existingApproved = path.join(approvedDir, `${slug}.json`);
-    const hadExistingSpec = fs.existsSync(existingPending) || fs.existsSync(existingApproved);
-
-    if (hadExistingSpec && !overwrite) {
-      throw new ConflictError(`Spec '${slug}' already exists. Re-submit with overwrite=true to replace it.`);
-    }
-
-    if (fs.existsSync(existingPending)) {
-      await snapshotVersion(slug, fs.readFileSync(existingPending, 'utf8'), 'pending');
-      fs.unlinkSync(existingPending);
-    } else if (fs.existsSync(existingApproved)) {
-      await snapshotVersion(slug, fs.readFileSync(existingApproved, 'utf8'), 'approved');
-      fs.unlinkSync(existingApproved);
-    }
-
-    const writeResult = writeSpec(workspace.path, {
-      slug,
-      title,
-      stories: normalizedStories,
-      diagrams: allDiagrams as any,
-      mermaidDiagram: mermaidDiagram || undefined,
-      model: parsedBody.model,
-      contextUsed: parsedBody.contextUsed as any,
-      reasoning: parsedBody.reasoning,
-      source,
-    });
-
-    const walEvent = await queryOne<WalEvent>(
-      `INSERT INTO wal_events (event_type, workspace_id, spec_id, actor, payload) VALUES ('spec_generated', $1, $2, 'api', $3) RETURNING *`,
-      [workspaceId, slug, JSON.stringify({
-        title,
-        source,
-        overwrite,
-        storyCount: normalizedStories.length,
-        normalizationChanges: changes,
-        postSave,
-      })],
-    );
-    if (walEvent) {
-      broadcastAll(walEvent);
-    }
-
-    await seedPersistGenerationLog({
-      slug,
-      source,
-      title,
-      storyCount: normalizedStories.length,
-      model: parsedBody.model,
-      overwrite,
-      postSave,
-      normalizationChanges: changes,
-      contextUsed: parsedBody.contextUsed,
-      reasoning: parsedBody.reasoning,
-    });
-
-    res.json({
-      slug,
-      title,
-      status: 'pending',
-      source,
-      stories: normalizedStories,
-      diagrams: allDiagrams,
-      mermaidDiagram,
-      specPath: writeResult.specPath,
-      diagramsPath: writeResult.diagramsPath,
-      normalization: { changes },
-      overwrote: hadExistingSpec,
-      postSave,
-    });
-
-    if (postSave.memorySynthesis) {
-      const memoryBrief = parsedBody.brief || parsedBody.specBrief || title;
-      autoSynthesizeSpecMemory(
-        slug,
-        workspaceId,
-        memoryBrief,
-        { stories: normalizedStories as unknown[] },
-        { source, explicitDraft: true },
-      ).catch(() => { /* non-blocking — errors logged internally */ });
-    }
-
-    scheduleSpecPostSaveJobs(slug, workspaceId, {
-      enrich: postSave.enrich,
-      matchSkills: postSave.matchSkills,
-    });
+    const result = await persistExplicitDraftInternal(req, parsedBody);
+    res.json(result);
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Persist explicit draft');
   }
@@ -3057,7 +3784,7 @@ router.get('/generate/job/:jobId', async (req: Request, res: Response) => {
   }
 });
 
-// ─── US-008: POST /generate/batch — Queue multiple briefs for sequential generation ─
+// ─── US-008: POST /forge/batch — Queue multiple briefs for sequential skill-first forge ─
 
 interface BatchRequestItem {
   brief: string;
@@ -3067,12 +3794,15 @@ interface BatchRequestItem {
   model?: string;
   storyCount?: number;
   domain?: string;
-  agentOverride?: 'claude' | 'opencode' | 'pi';
+  agentOverride?: 'claude' | 'opencode' | 'codex' | 'pi';
+  reasoning?: { enabled: boolean; effort?: string };
+  postSave?: Partial<SpecPostSaveOptions>;
 }
 
 /**
- * Process a single brief within a batch. Reuses the same logic as POST /generate
- * but captures errors per-brief rather than returning HTTP errors.
+ * Process a single brief within a batch via the shared skill-first forge workflow.
+ * Keeps per-brief isolation and defaults post-save enrichment off to preserve the
+ * existing lightweight batch behavior while reusing the canonical drafting path.
  */
 async function processBatchBrief(item: BatchBriefItem): Promise<void> {
   const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [item.workspaceId]) as WorkspaceRow | undefined;
@@ -3082,190 +3812,40 @@ async function processBatchBrief(item: BatchBriefItem): Promise<void> {
     return;
   }
 
-  // Resolve model (accept any model string for openai-compat pass-through)
-  let resolvedModel: string = DEFAULT_MODEL;
-  if (item.model) {
-    resolvedModel = item.model;
-  } else {
-    const l3Pref = await queryOne(`SELECT preferred_model FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [item.workspaceId]) as { preferred_model: string | null } | undefined;
-    if (l3Pref?.preferred_model) {
-      resolvedModel = l3Pref.preferred_model;
-    }
-  }
-
-  // Generate title from brief if not provided
   const title = item.title || item.brief.slice(0, 60).replace(/[^a-zA-Z0-9 ]/g, '').trim();
-  const rawBatchCount = parseInt(String(item.storyCount));
-  const storyCount = rawBatchCount === 0 ? 0 : Math.min(500, Math.max(1, rawBatchCount || 8));
-
-  // Fetch direction layers
-  const l1Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 1 AND COALESCE(workspace_id, '') = '' AND COALESCE(domain, '') = ''`) as { content_yaml: string } | undefined;
-  const l2Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 2 AND domain = $1 AND COALESCE(workspace_id, '') = ''`, [item.domain ?? '']) as { content_yaml: string } | undefined;
-  const l3Row = await queryOne(`SELECT content_yaml FROM direction_layers WHERE layer = 3 AND workspace_id = $1 AND COALESCE(domain, '') = ''`, [item.workspaceId]) as { content_yaml: string } | undefined;
-  const ctx = await queryOne<{ schema_snapshot: string | null }>(`SELECT schema_snapshot FROM workspace_context WHERE workspace_id = $1`, [item.workspaceId]);
-
-  const synthesized = synthesize({
-    l1: l1Row?.content_yaml,
-    l2: l2Row?.content_yaml,
-    l3: l3Row?.content_yaml,
-    schemaSnapshot: ctx?.schema_snapshot || undefined,
-    specBrief: item.brief,
+  const result = await executeSkillFirstForge({
+    userId: item.userId,
+    overwrite: true,
+    postSaveDefaults: { enrich: false, matchSkills: false, memorySynthesis: false },
+    body: {
+      workspaceId: item.workspaceId,
+      brief: item.brief,
+      title,
+      ...(item.templateId ? { templateId: item.templateId } : {}),
+      ...(item.model ? { model: item.model } : {}),
+      ...(item.storyCount != null ? { storyCount: item.storyCount } : {}),
+      ...(item.domain ? { domain: item.domain } : {}),
+      ...(item.agentOverride ? { agentOverride: item.agentOverride } : {}),
+      ...(item.reasoning ? { reasoning: item.reasoning } : {}),
+      ...(item.postSave ? { postSave: item.postSave } : {}),
+    },
   });
 
-  // Template context
-  let templateContext = '';
-  if (item.templateId) {
-    const tpl = await queryOne('SELECT * FROM templates WHERE id = $1', [item.templateId]) as
-      { brief: string; story_structure: string } | undefined;
-    if (tpl) {
-      const stories = JSON.parse(tpl.story_structure);
-      const storyOutline = stories.map((s: { id: string; title: string; description: string }) =>
-        `- ${s.id}: ${s.title} — ${s.description}`
-      ).join('\n');
-      templateContext = [
-        '=== REFERENCE TEMPLATE ===',
-        `Template brief: ${tpl.brief}`,
-        '', 'Story structure pattern:', storyOutline, '',
-        'Use this as a structural reference. Adapt story IDs, titles, and details to the new spec brief.',
-        '=== END TEMPLATE ===',
-      ].join('\n');
-    }
-  }
+  await execute(
+    `INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', $1, $2)`,
+    [result.slug, JSON.stringify({
+      title,
+      domain: item.domain,
+      storyCount: result.stories.length,
+      provider: result.provider,
+      model: result.model,
+      hasSchema: Boolean((result.contextUsed?.meta as { schema?: boolean } | undefined)?.schema),
+      inputTokens: result.usage.inputTokens,
+      outputTokens: result.usage.outputTokens,
+    })],
+  );
 
-  const storyPrefix = 'US';
-  const agentOverride = item.agentOverride;
-
-  // Discover skill + persona catalogs for batch brief
-  const batchCatalogs = await buildCatalogContext(workspace.path, workspace.id);
-  const batchCatalogSections: string[] = [];
-  if (batchCatalogs.memoryMd) {
-    batchCatalogSections.push('=== PROJECT MEMORY ===', batchCatalogs.memoryMd, '=== END PROJECT MEMORY ===', '');
-  }
-  if (batchCatalogs.agentsMd) {
-    batchCatalogSections.push('=== AGENTS GOVERNANCE ===', batchCatalogs.agentsMd, '=== END AGENTS GOVERNANCE ===', '');
-  }
-  if (batchCatalogs.skillCatalog) {
-    batchCatalogSections.push('=== INSTALLED SKILLS ===', batchCatalogs.skillCatalog, '=== END INSTALLED SKILLS ===', '');
-  }
-  if (batchCatalogs.personaCatalog) {
-    batchCatalogSections.push('=== AVAILABLE PERSONAS ===', batchCatalogs.personaCatalog, '=== END AVAILABLE PERSONAS ===', '');
-  }
-  const batchHasSkillsOrPersonas = !!(batchCatalogs.skillCatalog || batchCatalogs.personaCatalog);
-
-  const fullPrompt = [
-    '=== INSTRUCTIONS: READ THIS FIRST ===',
-    'You are a spec writer. Your ONLY job is to output a single valid JSON object.',
-    'Do NOT explain. Do NOT ask questions. Do NOT add markdown fences. Do NOT converse.',
-    'Your ENTIRE response must be a single JSON object starting with { and ending with }.',
-    'If you output anything other than raw JSON, the system will fail.',
-    '=== END INSTRUCTIONS ===',
-    '',
-    synthesized,
-    ...batchCatalogSections,
-    ...(templateContext ? [templateContext, '---'] : []),
-    '---',
-    storyCount === 0
-      ? 'TASK: Generate a software specification JSON. Generate an appropriate number of user stories (typically 3-20) based on the scope and complexity of the brief. Use fewer stories for focused features and more for large system changes.'
-      : `TASK: Generate a software specification JSON with exactly ${storyCount} user stories.`,
-    `Spec title: ${title}`,
-    `Spec brief: ${item.brief}`,
-    '',
-    'OUTPUT FORMAT: Respond with ONLY a raw JSON object. No markdown fences. No explanation. No preamble. Start your response with { and end with }.',
-    '',
-    'JSON schema:',
-    `{"stories":[{"id":"${storyPrefix}-001","title":"string","description":"string","acceptanceCriteria":["string"],"dependsOn":["${storyPrefix}-001"],"complexity":3${batchHasSkillsOrPersonas ? ',"suggestedSkills":[{"name":"skill-name","relevance":8,"reason":"why"}],"suggestedPersona":"persona-name","suggestedReviewers":["reviewer-name"]' : ''}}]}`,
-    '',
-    `Rules:`,
-    storyCount === 0
-      ? `- Number stories sequentially starting from ${storyPrefix}-001`
-      : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
-    '- Each story needs 3-5 specific testable acceptanceCriteria',
-    '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
-    '- Stories should be concrete and implementable, not vague',
-    '- Each story must have a "complexity" field: integer 1-5 (1=trivial, 2=simple, 3=moderate, 4=complex, 5=epic)',
-    ...(batchHasSkillsOrPersonas ? [
-      '- Each story MUST include "suggestedSkills": array of {name, relevance (1-10), reason} — pick from INSTALLED SKILLS catalog ONLY',
-      '- Each story MUST include "suggestedPersona": string — best-fit persona name from AVAILABLE PERSONAS',
-      '- Each story MUST include "suggestedReviewers": string[] — 1-3 reviewer persona names from AVAILABLE PERSONAS',
-    ] : []),
-    '- Your entire response must be valid JSON parseable by JSON.parse()',
-  ].join('\n');
-
-  // Call drafting engine (Pi skill-first path or legacy LLM path)
-  let rawResponse = '';
-  let draftingUsage = { inputTokens: 0, outputTokens: 0 };
-  if (agentOverride === 'pi') {
-    const piResult = await draftSpecWithPi({
-      cwd: workspace.path,
-      prompt: fullPrompt,
-      model: resolvedModel,
-      timeoutMs: 300_000,
-    });
-    rawResponse = piResult.text;
-    draftingUsage = piResult.usage;
-  } else {
-    const batchVaultCreds = item.userId ? await resolveVaultCreds(item.userId, resolvedModel) : {};
-    const llmResult = await chatComplete(
-      [{ role: 'user', content: fullPrompt }],
-      { model: resolvedModel, apiKey: batchVaultCreds.apiKey, baseUrl: batchVaultCreds.baseUrl },
-    );
-    rawResponse = llmResult.text;
-    draftingUsage = llmResult.usage;
-  }
-
-  // Parse JSON
-  let parsed: { stories: unknown[]; diagrams?: Record<string, unknown> };
-  const fenceMatch = rawResponse.match(/```(?:json)?\s*([\s\S]*?)```/);
-  const jsonStr = fenceMatch ? fenceMatch[1].trim() : rawResponse.trim();
-  const jsonStart = jsonStr.indexOf('{');
-  parsed = JSON.parse(jsonStart > 0 ? jsonStr.slice(jsonStart) : jsonStr);
-
-  if (!Array.isArray(parsed.stories)) {
-    throw new Error('Invalid spec structure from LLM');
-  }
-
-  // Validate suggestedSkills against installed catalog
-  if (batchCatalogs.skillNames.size > 0) {
-    validateSuggestedSkills(parsed.stories, batchCatalogs.skillNames);
-  }
-
-  // Generate diagrams
-  const algorithmicDiagrams = generateDiagramBundle(parsed.stories as any, []);
-  const allDiagrams = { ...(parsed.diagrams || {}), ...algorithmicDiagrams };
-
-  // Build slug
-  const slug = title.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '');
-
-  // WAL event
-  const provider = agentOverride === 'pi' ? 'pi' : getActiveProvider();
-  await execute(`INSERT INTO wal_events (event_type, spec_id, payload) VALUES ('generate', $1, $2)`, [slug, JSON.stringify({
-    title, domain: item.domain, storyCount: parsed.stories.length, provider, model: resolvedModel,
-    hasSchema: !!ctx?.schema_snapshot,
-    inputTokens: draftingUsage.inputTokens, outputTokens: draftingUsage.outputTokens,
-  })]);
-
-  // Snapshot existing spec if regenerating
-  const { pendingDir, approvedDir } = specsDirs(workspace.path);
-  const existingPending = path.join(pendingDir, `${slug}.json`);
-  const existingApproved = path.join(approvedDir, `${slug}.json`);
-  if (fs.existsSync(existingPending)) {
-    await snapshotVersion(slug, fs.readFileSync(existingPending, 'utf8'), 'pending');
-    fs.unlinkSync(existingPending);
-  } else if (fs.existsSync(existingApproved)) {
-    await snapshotVersion(slug, fs.readFileSync(existingApproved, 'utf8'), 'approved');
-    fs.unlinkSync(existingApproved);
-  }
-
-  // Write spec
-  writeSpec(workspace.path, {
-    slug,
-    title,
-    stories: parsed.stories as any,
-    diagrams: allDiagrams as any,
-    model: resolvedModel,
-  });
-
-  item.slug = slug;
+  item.slug = result.slug;
 }
 
 /**
@@ -3326,12 +3906,15 @@ async function processBatch(batch: BatchState): Promise<void> {
 
 /**
  * @swagger
- * /api/specs/generate/batch:
+ * /api/specs/forge/batch:
  *   post:
  *     tags: [Specs]
- *     summary: Queue multiple briefs for sequential spec generation
- *     operationId: generateSpecBatch
- *     description: Accepts an array of briefs and processes them sequentially in the background. Returns a batchId for tracking progress via polling or SSE. Emits batch_started, batch_progress, and batch_finished WAL events.
+ *     summary: Queue multiple briefs for sequential skill-first forge
+ *     operationId: forgeSpecBatch
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Batch forge is a core local authoring workflow for web and CLI surfaces that need Rorca to coordinate multiple explicit draft-and-persist passes."
+ *     x-rorca-public-api: true
+ *     description: Preferred batch skill-first forge endpoint. Accepts an array of briefs, drafts each spec through the shared forge pipeline, persists canonically, and emits batch_started, batch_progress, and batch_finished WAL events. The legacy alias /api/specs/generate/batch remains available for compatibility.
  *     requestBody:
  *       required: true
  *       content:
@@ -3353,7 +3936,7 @@ async function processBatch(batch: BatchState): Promise<void> {
  *                     model: { type: string }
  *                     storyCount: { type: integer }
  *                     domain: { type: string }
- *                     agentOverride: { type: string, enum: [claude, opencode, pi] }
+ *                     agentOverride: { type: string, enum: [claude, opencode, codex, pi] }
  *     responses:
  *       201:
  *         description: Batch queued successfully
@@ -3367,7 +3950,7 @@ async function processBatch(batch: BatchState): Promise<void> {
  *       400: { description: "Missing or empty briefs array, or brief missing required fields" }
  *       500: { description: "Internal server error" }
  */
-router.post('/generate/batch', async (req: Request, res: Response) => {
+router.post(['/forge/batch', '/generate/batch'], async (req: Request, res: Response) => {
   try {
     const { briefs } = req.body as { briefs?: BatchRequestItem[] };
 
@@ -3400,6 +3983,8 @@ router.post('/generate/batch', async (req: Request, res: Response) => {
         storyCount: b.storyCount,
         domain: b.domain,
         agentOverride: b.agentOverride,
+        reasoning: b.reasoning,
+        postSave: b.postSave,
         userId: batchUser.id,
         status: 'queued' as const,
       })),
@@ -3423,22 +4008,25 @@ router.post('/generate/batch', async (req: Request, res: Response) => {
   }
 });
 
-// ─── US-008: GET /generate/batch/:batchId — Batch status ─────────────────────
+// ─── US-008: GET /forge/batch/:batchId — Batch status ────────────────────────
 
 /**
  * @swagger
- * /api/specs/generate/batch/{batchId}:
+ * /api/specs/forge/batch/{batchId}:
  *   get:
  *     tags: [Specs]
  *     summary: Get batch generation status
- *     operationId: getBatchStatus
- *     description: Returns the current status of a batch spec generation job including per-brief progress, completion summary, and any errors. Batches are stored in-memory and auto-clean after 1 hour.
+ *     operationId: getForgeBatchStatus
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Batch forge status is required for local clients to monitor multi-spec authoring progress without introducing side effects."
+ *     x-rorca-public-api: true
+ *     description: Returns the current status of a batch forge job including per-brief progress, completion summary, and any errors. The legacy alias /api/specs/generate/batch/{batchId} remains available for compatibility.
  *     parameters:
  *       - in: path
  *         name: batchId
  *         required: true
  *         schema: { type: string }
- *         description: Batch job ID returned from POST /generate/batch
+ *         description: Batch job ID returned from POST /api/specs/forge/batch
  *     responses:
  *       200:
  *         description: Batch status with per-brief details
@@ -3461,7 +4049,7 @@ router.post('/generate/batch', async (req: Request, res: Response) => {
  *                 items: { type: array, items: { type: object } }
  *       404: { description: "Batch not found or expired" }
  */
-router.get('/generate/batch/:batchId', (req: Request, res: Response) => {
+router.get(['/forge/batch/:batchId', '/generate/batch/:batchId'], (req: Request, res: Response) => {
   try {
     const batchId = req.params.batchId as string;
     const batch = batchQueue.get(batchId);
@@ -3498,28 +4086,31 @@ router.get('/generate/batch/:batchId', (req: Request, res: Response) => {
   }
 });
 
-// ─── US-008: GET /generate/batch/:batchId/stream — SSE batch progress ─────────
+// ─── US-008: GET /forge/batch/:batchId/stream — SSE batch progress ───────────
 
 /**
  * @swagger
- * /api/specs/generate/batch/{batchId}/stream:
+ * /api/specs/forge/batch/{batchId}/stream:
  *   get:
  *     tags: [Specs]
  *     summary: SSE stream for batch generation progress
- *     operationId: streamBatchProgress
- *     description: Server-Sent Events endpoint that streams real-time batch generation progress. Sends an initial snapshot event, then progress events as each brief completes, and a done event when the batch finishes. Heartbeat every 15 seconds.
+ *     operationId: streamForgeBatchProgress
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Streaming batch forge progress is part of the stable local client workflow for monitoring queued multi-spec authoring jobs."
+ *     x-rorca-public-api: true
+ *     description: Server-Sent Events endpoint that streams real-time batch forge progress. Sends an initial snapshot event, then progress events as each brief completes, and a done event when the batch finishes. Heartbeat every 15 seconds. The legacy alias /api/specs/generate/batch/{batchId}/stream remains available for compatibility.
  *     parameters:
  *       - in: path
  *         name: batchId
  *         required: true
  *         schema: { type: string }
- *         description: Batch job ID
+ *         description: Batch job ID returned from POST /api/specs/forge/batch
  *     responses:
  *       200:
  *         description: SSE event stream (text/event-stream)
  *       404: { description: "Batch not found or expired" }
  */
-router.get('/generate/batch/:batchId/stream', (req: Request, res: Response) => {
+router.get(['/forge/batch/:batchId/stream', '/generate/batch/:batchId/stream'], (req: Request, res: Response) => {
   const batchId = req.params.batchId as string;
   const batch = batchQueue.get(batchId);
 

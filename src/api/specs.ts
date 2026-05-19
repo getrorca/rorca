@@ -5,7 +5,7 @@
  * See LICENSE file in the project root for full license text.
  */
 
-import { apiFetch } from '../lib/apiFetch';
+import { apiFetch, BASE_URL } from '../lib/apiFetch';
 import type {
   ApiOptions,
   PaginatedResponse,
@@ -72,6 +72,57 @@ export interface GenerateSpecParams extends ApiOptions {
   templateId?: string;
 }
 
+export interface ForgeSpecParams extends ApiOptions {
+  brief: string;
+  workspaceId: string;
+  model?: string;
+  templateId?: string;
+  title?: string;
+  storyCount?: number;
+  agentOverride?: 'claude' | 'opencode' | 'codex' | 'pi';
+  reasoning?: { enabled: boolean; effort?: string };
+  postSave?: { enrich?: boolean; matchSkills?: boolean; memorySynthesis?: boolean };
+}
+
+export interface ForgeSpecResult {
+  slug: string;
+  title: string;
+  stories: Story[];
+  provider?: string;
+  model?: string | null;
+  contextUsed?: unknown;
+  contextSummary?: unknown;
+}
+
+export interface ForgeBatchSpecItem {
+  brief: string;
+  workspaceId: string;
+  title?: string;
+  templateId?: string;
+  model?: string;
+  storyCount?: number;
+  domain?: string;
+  agentOverride?: 'claude' | 'opencode' | 'codex' | 'pi';
+  reasoning?: { enabled: boolean; effort?: string };
+  postSave?: { enrich?: boolean; matchSkills?: boolean; memorySynthesis?: boolean };
+}
+
+export interface ForgeBatchSpecResult {
+  batchId: string;
+  briefCount: number;
+}
+
+export interface SpecGenerationContextParams extends ApiOptions {
+  brief: string;
+  workspaceId: string;
+  model?: string;
+  templateId?: string;
+  title?: string;
+  storyCount?: number;
+  agentOverride?: 'claude' | 'opencode' | 'codex' | 'pi';
+  reasoning?: { enabled: boolean; effort?: string };
+}
+
 export function generateSpec(
   p: GenerateSpecParams,
 ): Promise<{ slug: string; title: string; stories: Story[] }> {
@@ -87,6 +138,56 @@ export function generateSpec(
     }),
     signal: p.signal,
   });
+}
+
+export function forgeSpec(p: ForgeSpecParams): Promise<ForgeSpecResult> {
+  return apiFetch('/api/specs/forge', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      brief: p.brief,
+      workspaceId: p.workspaceId,
+      model: p.model,
+      templateId: p.templateId,
+      title: p.title,
+      storyCount: p.storyCount,
+      agentOverride: p.agentOverride,
+      reasoning: p.reasoning,
+      postSave: p.postSave,
+    }),
+    signal: p.signal,
+  });
+}
+
+export function getSpecGenerationContext(p: SpecGenerationContextParams): Promise<Record<string, unknown>> {
+  return apiFetch('/api/specs/generation-context', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({
+      brief: p.brief,
+      workspaceId: p.workspaceId,
+      model: p.model,
+      templateId: p.templateId,
+      title: p.title,
+      storyCount: p.storyCount,
+      agentOverride: p.agentOverride,
+      reasoning: p.reasoning,
+    }),
+    signal: p.signal,
+  });
+}
+
+export function forgeSpecBatch(items: ForgeBatchSpecItem[], opts?: ApiOptions): Promise<ForgeBatchSpecResult> {
+  return apiFetch('/api/specs/forge/batch', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ briefs: items }),
+    signal: opts?.signal,
+  });
+}
+
+export function getForgeBatchStreamUrl(batchId: string): string {
+  return `${BASE_URL}/api/specs/forge/batch/${encodeURIComponent(batchId)}/stream`;
 }
 
 export function approveSpec(
