@@ -2454,11 +2454,25 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
     setIsGenerating(true);
     setGenerateError(null);
     setApiDone(false);
-    const modelUsed = selectedModel || defaultModelId || 'claude-sonnet-4-6';
+    const forgeAgent = overrideAgent ? overrideAgentType : wsAgentType;
+    const forgeModel = overrideAgent && overrideAgentType === 'opencode'
+      ? (overrideAgentModel || selectedModel || undefined)
+      : (selectedModel || undefined);
+    const modelUsed = forgeModel || defaultModelId || 'claude-sonnet-4-6';
     try {
-      const result = await apiFetch<GeneratedSpec>('/api/specs/generate', {
+      const result = await apiFetch<GeneratedSpec>('/api/specs/forge', {
         method: 'POST', headers: { 'Content-Type': 'application/json' }, signal: controller.signal,
-        body: JSON.stringify({ workspaceId, domain: workspace?.domain || undefined, specName: specName || undefined, storyCount, specBrief, model: selectedModel || undefined, agentOverride: 'pi', ...(reasoningCapability.supportsReasoning && reasoningEnabled ? { reasoning: { enabled: true, effort: effortIsAuto ? (autoEffortResult?.effort ?? 'medium') : reasoningEffort } } : {}) }),
+        body: JSON.stringify({
+          workspaceId,
+          domain: workspace?.domain || undefined,
+          specName: specName || undefined,
+          storyCount,
+          specBrief,
+          model: forgeModel,
+          agentOverride: forgeAgent,
+          postSave: { matchSkills: autoMatchSkills, enrich: true, memorySynthesis: true },
+          ...(reasoningCapability.supportsReasoning && reasoningEnabled ? { reasoning: { enabled: true, effort: effortIsAuto ? (autoEffortResult?.effort ?? 'medium') : reasoningEffort } } : {}),
+        }),
       });
       setApiDone(true);
       // Map backend response fields: backend returns { slug, title } but GeneratedSpec expects { slug, specName }
@@ -2471,22 +2485,9 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
       setModelSuggestions(null);
       setTimeout(() => setIsGenerating(false), 800);
 
-      // Fire-and-forget auto-match and auto-suggest
       const specId = result.slug || result.specName;
       (async () => {
-        // Auto-match skills
-        if (autoMatchSkills && skillsCount && skillsCount > 0 && workspaceId) {
-          setAutoMatchStatus('matching');
-          try {
-            await apiFetch(`/api/specs/${encodeURIComponent(specId)}/match-skills`, {
-              method: 'POST', headers: { 'Content-Type': 'application/json' },
-              body: JSON.stringify({ workspaceId }),
-            });
-          } catch {
-            console.warn('[Forge] Skill matching failed — can retry from spec review');
-          }
-        } else if (autoMatchSkills && (!skillsCount || skillsCount === 0)) {
-          // No skills to match — show briefly then continue
+        if (autoMatchSkills) {
           setAutoMatchStatus('matching');
           await new Promise(r => setTimeout(r, 800));
         }

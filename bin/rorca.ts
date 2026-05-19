@@ -2889,35 +2889,30 @@ async function waitForGeneratedSpec(jobId: string): Promise<{ slug?: string }> {
   }
 }
 
-async function runForge(brief: string, options: { approve?: boolean; run?: boolean }): Promise<number> {
+async function runForge(brief: string, options: { approve?: boolean; run?: boolean; agent?: 'claude' | 'opencode' | 'codex' | 'pi'; model?: string }): Promise<number> {
   const workspace = await getDefaultWorkspace();
 
-  process.stdout.write(`${dim('⠋')}  Generating spec… `);
+  process.stdout.write(`${dim('⠋')}  Forging spec… `);
   const genStart = Date.now();
 
-  const generated = await fetchJson<Record<string, unknown>>('/api/specs/generate', {
+  const generated = await fetchJson<Record<string, unknown>>('/api/specs/forge', {
     method: 'POST',
     body: JSON.stringify({
       brief,
       workspaceId: workspace.id,
-      agentOverride: 'pi',
+      ...(options.agent ? { agentOverride: options.agent } : {}),
+      ...(options.model ? { model: options.model } : {}),
     }),
   }, 120_000);
 
-  let specSlug = typeof generated.slug === 'string' ? generated.slug : undefined;
-  if (!specSlug && typeof generated.jobId === 'string') {
-    // async job path — spinner runs inside waitForGeneratedSpec
-    process.stdout.write('\n');
-    const completed = await waitForGeneratedSpec(generated.jobId);
-    specSlug = completed.slug;
-  } else if (specSlug) {
-    // synchronous path — print the done line here
+  const specSlug = typeof generated.slug === 'string' ? generated.slug : undefined;
+  if (specSlug) {
     const elapsed = ((Date.now() - genStart) / 1000).toFixed(1);
-    process.stdout.write(`\r${green('✓')}  Spec generated  ${dim(`(${elapsed}s)`)}\n`);
+    process.stdout.write(`\r${green('✓')}  Spec forged  ${dim(`(${elapsed}s)`)}\n`);
   }
 
   if (!specSlug) {
-    throw new Error('Spec generation completed without a slug.');
+    throw new Error('Spec forge completed without a slug.');
   }
 
   const spec = await fetchJson<Record<string, unknown>>(`/api/specs/${encodeURIComponent(specSlug)}?workspaceId=${encodeURIComponent(workspace.id)}`);
@@ -3079,7 +3074,9 @@ program
   .command('forge <brief...>')
   .option('--approve', 'Approve generated spec')
   .option('--run', 'Approve and immediately trigger the run')
-  .action(async (briefParts: string[], options: { approve?: boolean; run?: boolean }) => {
+  .option('--agent <agent>', 'Forge runtime override (claude|opencode|codex|pi)')
+  .option('--model <model>', 'Forge model override')
+  .action(async (briefParts: string[], options: { approve?: boolean; run?: boolean; agent?: 'claude' | 'opencode' | 'codex' | 'pi'; model?: string }) => {
     process.exitCode = await runForge(briefParts.join(' '), options);
   });
 

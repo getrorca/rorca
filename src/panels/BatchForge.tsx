@@ -7,7 +7,7 @@
 
 import { useState, useEffect, useRef, useCallback } from 'react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
-import { apiFetch, BASE_URL } from '../lib/apiFetch';
+import { forgeSpecBatch, getForgeBatchStreamUrl } from '../api/specs';
 import { titleToSlug, KEBAB_RE } from '../lib/slugify';
 
 /* ─── Types ──────────────────────────────────────────────────────── */
@@ -134,18 +134,36 @@ export default function BatchForge() {
     setItems([]);
 
     try {
-      const result = await apiFetch<{ batchId: string; briefCount: number }>('/api/specs/generate/batch', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          briefs: validEntries.map(e => ({
-            title: e.title.trim(),
-            brief: e.brief.trim(),
-            workspaceId,
-            agentOverride: 'pi',
-          })),
-        }),
-      });
+      const preferredModel = (() => {
+        try {
+          const saved = localStorage.getItem('rorca:forge:model')?.trim();
+          return saved || undefined;
+        } catch {
+          return undefined;
+        }
+      })();
+      const preferredReasoning = (() => {
+        if (!preferredModel) return undefined;
+        try {
+          const raw = localStorage.getItem(`rorca:reasoning:${preferredModel}`);
+          if (!raw) return undefined;
+          const parsed = JSON.parse(raw) as { enabled?: boolean; effort?: string };
+          return parsed.enabled ? { enabled: true, ...(parsed.effort ? { effort: parsed.effort } : {}) } : undefined;
+        } catch {
+          return undefined;
+        }
+      })();
+
+      const result = await forgeSpecBatch(
+        validEntries.map(e => ({
+          title: e.title.trim(),
+          brief: e.brief.trim(),
+          workspaceId,
+          ...(preferredModel ? { model: preferredModel } : {}),
+          ...(preferredReasoning ? { reasoning: preferredReasoning } : {}),
+          postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+        })),
+      );
       setBatchId(result.batchId);
     } catch (err: unknown) {
       const message = err instanceof Error ? err.message : String(err);
@@ -159,7 +177,7 @@ export default function BatchForge() {
   useEffect(() => {
     if (!batchId) return;
 
-    const es = new EventSource(`${BASE_URL}/api/specs/generate/batch/${batchId}/stream`);
+    const es = new EventSource(getForgeBatchStreamUrl(batchId));
     eventSourceRef.current = es;
 
     es.addEventListener('snapshot', (e) => {
@@ -208,7 +226,7 @@ export default function BatchForge() {
   if (!workspaceId) {
     return (
       <div className="flex items-center justify-center h-full text-muted">
-        Select a workspace to use Batch Generate.
+        Select a workspace to use Batch Forge.
       </div>
     );
   }

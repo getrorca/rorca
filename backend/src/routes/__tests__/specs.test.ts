@@ -36,10 +36,15 @@ jest.mock('../../lib/pi-spec-drafter', () => ({
   draftSpecWithPi: jest.fn(),
 }));
 
+jest.mock('../../lib/codex-spec-drafter', () => ({
+  draftSpecWithCodex: jest.fn(),
+}));
+
 let app: Express;
 let tmpDir: string;
 let mockChatComplete: jest.Mock;
 let mockDraftSpecWithPi: jest.Mock;
+let mockDraftSpecWithCodex: jest.Mock;
 let authToken: string;
 
 const validLlmResponse = JSON.stringify({
@@ -75,8 +80,10 @@ beforeAll(async () => {
   app = serverMod.default;
   const llmClient = require('../../lib/llm-client');
   const piDrafter = require('../../lib/pi-spec-drafter');
+  const codexDrafter = require('../../lib/codex-spec-drafter');
   mockChatComplete = llmClient.chatComplete;
   mockDraftSpecWithPi = piDrafter.draftSpecWithPi;
+  mockDraftSpecWithCodex = codexDrafter.draftSpecWithCodex;
 });
 
 beforeEach(async () => {
@@ -180,6 +187,80 @@ test('POST /api/specs/generate with agentOverride=pi uses the Pi forge drafter p
       && messages.some((message) => typeof message?.content === 'string' && message.content.includes('TASK: Generate a software specification JSON'));
   });
   expect(draftingCalls).toHaveLength(0);
+});
+
+test('POST /api/specs/generation-context returns a prompt bundle for skill-first callers', async () => {
+  const res = await request(app)
+    .post('/api/specs/generation-context')
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({
+      workspaceId: 'ws-test',
+      title: 'Context Bundle',
+      brief: 'Draft a context-aware spec',
+      agentOverride: 'pi',
+    });
+
+  expect(res.status).toBe(200);
+  expect(res.body.title).toBe('Context Bundle');
+  expect(res.body.slug).toBe('context-bundle');
+  expect(res.body.agentType).toBe('pi');
+  expect(typeof res.body.prompt).toBe('string');
+  expect(res.body.prompt).toContain('Spec brief: Draft a context-aware spec');
+  expect(res.body.contextSummary).toBeDefined();
+});
+
+test('POST /api/specs/forge uses Pi drafting and persists via the explicit-draft path', async () => {
+  mockDraftSpecWithPi.mockResolvedValue({
+    text: validLlmResponse,
+    usage: { inputTokens: 55, outputTokens: 66 },
+  });
+
+  const res = await request(app)
+    .post('/api/specs/forge')
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({
+      workspaceId: 'ws-test',
+      title: 'Shared Pi Forge',
+      brief: 'Create a skill-first forge route',
+      agentOverride: 'pi',
+      postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+    });
+
+  expect(res.status).toBe(200);
+  expect(res.body.slug).toBe('shared-pi-forge');
+  expect(res.body.provider).toBe('pi');
+  expect(res.body.draftingAgent).toBe('pi');
+  expect(res.body.source).toBe('skill-first-backend');
+  expect(res.body.postSave).toEqual({ enrich: false, matchSkills: false, memorySynthesis: false });
+  expect(mockDraftSpecWithPi).toHaveBeenCalledTimes(1);
+
+  const saved = JSON.parse(fs.readFileSync(path.join(os.tmpdir(), 'forge', 'specs', 'pending', 'shared-pi-forge.json'), 'utf8'));
+  expect(saved.source).toBe('skill-first-backend');
+  expect(saved.userStories).toHaveLength(2);
+});
+
+test('POST /api/specs/forge uses Codex drafting when requested', async () => {
+  mockDraftSpecWithCodex.mockResolvedValue({
+    text: validLlmResponse,
+    usage: { inputTokens: 11, outputTokens: 22 },
+  });
+
+  const res = await request(app)
+    .post('/api/specs/forge')
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({
+      workspaceId: 'ws-test',
+      title: 'Codex Shared Forge',
+      brief: 'Create a skill-first forge route through codex',
+      agentOverride: 'codex',
+      postSave: { enrich: false, matchSkills: false, memorySynthesis: false },
+    });
+
+  expect(res.status).toBe(200);
+  expect(res.body.slug).toBe('codex-shared-forge');
+  expect(res.body.provider).toBe('codex');
+  expect(res.body.draftingAgent).toBe('codex');
+  expect(mockDraftSpecWithCodex).toHaveBeenCalledTimes(1);
 });
 
 test('LLM returns non-JSON → 500 with error and raw', async () => {
