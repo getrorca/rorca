@@ -272,7 +272,7 @@ Minimum checks:
 
 ---
 
-## Phase 3 — Build true state-of-the-art GraphRAG with learning loops and evals
+## Phase 3 — Build true state-of-the-art GraphRAG with feedback systems and evals
 
 ### Objective
 Make Rorca a compounding retrieval system that learns from real usage.
@@ -293,7 +293,7 @@ Make Rorca a compounding retrieval system that learns from real usage.
 - precision / recall / MRR / nDCG measurement
 - contradiction and stale-memory detection tests
 
-#### 3.4 Add feedback loops
+#### 3.4 Add feedback systems
 - learn from successful runs
 - boost memory / graph / skill combinations that repeatedly help
 - demote stale or contradicted items
@@ -358,7 +358,7 @@ Minimum checks:
 2. add telemetry
 3. introduce staged orchestration
 4. validate
-5. add feedback loops
+5. add feedback systems
 6. tune scoring against benchmarks
 7. repeat until quality gains are reproducible
 
@@ -370,7 +370,7 @@ If execution time is tight, do it in this order:
 
 1. **Phase 1** — remove the biggest risk and correctness gaps
 2. **Phase 2** — make skills supervise retrieval quality
-3. **Phase 3** — add evals, telemetry, and learning loops
+3. **Phase 3** — add evals, telemetry, and feedback systems
 
 ---
 
@@ -393,7 +393,7 @@ If execution time is tight, do it in this order:
 - staged retrieval orchestration
 - telemetry
 - offline benchmarks
-- feedback loop plumbing
+- feedback system plumbing
 - completion summary
 
 ---
@@ -417,6 +417,6 @@ The fastest path to a strong GraphRAG system in Rorca is:
 
 - fix the graph evidence layer first
 - make skills active retrieval judges second
-- add telemetry, evals, and learning loops third
+- add telemetry, evals, and feedback systems third
 
 That keeps the work safe, measurable, and compounding.

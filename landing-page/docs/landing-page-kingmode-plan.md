@@ -83,7 +83,7 @@ A high-end, vertical timeline layout (Linear/Vercel style) that simulates scroll
 
 #### Section 3: The Pipeline Monitor (Real-Time SSE)
 - **Visual**: A glowing, animated terminal block catching push-based Webhooks (`POST /api/pipeline/webhook/story-result`).
-- **Copy**: "Live telemetry without polling. The native `run-loop.sh` streams Server-Sent Events directly to your dashboard, watching worktrees compile to the exact second."
+- **Copy**: "Live telemetry without polling. Rorca streams Server-Sent Events directly to your dashboard, so you can watch worktrees and story progress in real time."
 
 ---
 

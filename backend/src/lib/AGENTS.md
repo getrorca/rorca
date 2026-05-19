@@ -104,14 +104,14 @@ Expensive — only call on workspace hydration request, not on every spec genera
 import { writeSpec } from '../lib/spec-writer';
 
 await writeSpec(workspacePath, slug, specContent);
-// Writes to: workspace/scripts/ralph/specs/pending/<slug>.json
+// Writes to: workspace/forge/specs/pending/<slug>.json
 ```
 
 Creates directories if missing. Overwrites if exists (used on regenerate).
 
 ## execution-engine.ts
 
-Planned canonical execution engine — replaces bash `run-loop.sh` entirely. Built by `rorca-opencode-integration` spec.
+Planned canonical execution engine — replaces the legacy bash runner entirely. Built by `rorca-opencode-integration` spec.
 
 **Responsibilities**:
 - Per-story process spawning (`claude --print`, `opencode run`, or `codex --approval-mode auto-edit`) based on `RORCA_AGENT` env var

@@ -2,6 +2,8 @@
 
 Status: Draft architecture / implementation plan
 
+Implementation status note (2026-05-19): the product has now crossed the main threshold this plan described. The dashboard/UI, onboarding flow, CLI/TUI-owned forge surfaces, and BatchForge are on the shared skill-first forge path. Remaining references below to older forge behavior are historical planning context, not current product truth.
+
 This file is the broader, updated source-of-truth name for the skill-first forge architecture plan.
 It supersedes the narrower framing implied by `pi-skill-first-rorca-refactor-plan.md`, while preserving the same planning content plus later cross-product refinements.
 
@@ -45,17 +47,17 @@ A skill-first design better matches the intended product shape:
 
 ## 2. Current state vs target state
 
-## Current state
+## Historical state at time of draft
 
 ### Extension front door
-- `/rorca-forge` calls `deps.api.generateSpec(...)`
-- `/rorca-forge-run` calls the same REST generation path, then approve, then trigger
-- `/rorca-run` is REST-triggered, then Pi executes stories via the backend-managed Pi runtime
-- `/rorca-status`, `/rorca-watch`, `/rorca-retry` are structured/API-driven
-- MCP is loaded into Pi when the bridge is healthy, but the slash commands themselves are still primarily REST-backed
+- `/rorca-forge` called `deps.api.generateSpec(...)`
+- `/rorca-forge-run` called the same REST generation path, then approve, then trigger
+- `/rorca-run` was REST-triggered, then Pi executed stories via the backend-managed Pi runtime
+- `/rorca-status`, `/rorca-watch`, `/rorca-retry` were structured/API-driven
+- MCP was loaded into Pi when the bridge was healthy, but the slash commands themselves were still primarily REST-backed
 
 ### Practical consequence
-The extension is Pi-native as a UX shell, but not yet Pi-native as the main cognitive layer for forge/planning.
+At the time this plan was written, the extension was Pi-native as a UX shell, but its main forge/planning cognition still had not moved fully into the skill-first path.
 
 ## Target state
 
@@ -750,7 +752,7 @@ That is no longer the full target.
 ### Updated conclusion
 The desired change is **Rorca-wide**, not extension-only.
 
-The Rorca UI, backend-driven forge flow, CLI, and Pi extension should all converge on the same underlying skill-first forge architecture.
+The Rorca UI, shared backend forge flow, CLI, and Pi extension should all converge on the same underlying skill-first forge architecture.
 
 ### Updated north star
 Not:
@@ -761,12 +763,10 @@ But:
 
 `surface -> shared forge workflow -> Pi skill/runtime does the reasoning -> Rorca enriches/persists canonically`
 
-### Why this matters
-If only the Pi extension becomes skill-first while the UI/backend remains generation-endpoint-first, Rorca ends up with two different forge brains:
-- one skill-first
-- one backend-generation-first
+### Why this mattered
+Earlier, there was a real risk of surface drift, where the Pi extension and the dashboard would follow different forge behaviors and produce inconsistent product semantics.
 
-That would reintroduce product drift and make behavior inconsistent across surfaces.
+That drift is exactly what the shared forge migration was meant to remove.
 
 ### Updated rule
 All main product surfaces should eventually use the same shared forge workflow:

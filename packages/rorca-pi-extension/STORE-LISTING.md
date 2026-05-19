@@ -28,7 +28,7 @@ This extension is built for teams and individuals who want the speed and ergonom
 Users install the Rorca Pi Extension because they want:
 - a Pi-native way to operate Rorca
 - fewer context switches between backend UI and CLI
-- quick forge → approve → run loops
+- quick forge → approve → run workflows
 - one-command single-story reruns
 - real-time visibility into what a run is doing
 - optional access to backend MCP tools in the same Pi session
@@ -156,7 +156,7 @@ This package gives Pi users a native interface for interacting with Rorca’s ba
 
 This extension is a strong fit for:
 - Rorca users who spend a lot of time in Pi
-- operators who want faster spec/run loops
+- operators who want faster spec/run workflows
 - developers who want one conversational surface for orchestration and execution
 - teams experimenting with Rorca + Pi as a daily workflow
 

@@ -2,6 +2,8 @@
 
 Status: Draft implementation checklist / execution spec
 
+Implementation status note (2026-05-19): the main dashboard forge path, onboarding flow, CLI/TUI-owned forge surfaces, and BatchForge have now been migrated to the shared skill-first forge workflow. Remaining unchecked items below should be read as historical planning residue unless they refer to further telemetry/polish work.
+
 This checklist turns the higher-level architecture plan into concrete implementation work.
 
 Primary companion doc:
@@ -26,7 +28,7 @@ That means:
 This work is successful when:
 - the main forge path used by UI/backend is skill-first
 - CLI and Pi extension converge on the same forge architecture
-- legacy backend-generation-first forge path is no longer the default
+- the shared skill-first forge path is the default product behavior
 - spec-memory synthesis still works
 - story-level curated skill suggestion logic still works
 - retrieval/graph enrichment still works
@@ -194,13 +196,13 @@ Make the Rorca UI/backend use the new skill-first flow.
 - [ ] run-now / approve-after-forge flow if coupled to current forge behavior
 
 ### Deliverables
-- [ ] UI/backend forge calls shared `forge-workflow`
-- [ ] backend launches Pi runtime for drafting
-- [ ] UI receives canonical saved spec result
-- [ ] loading/progress/error states remain user-friendly
+- [x] UI/backend forge calls shared `forge-workflow`
+- [x] backend launches the shared drafting/runtime path for dashboard-owned forge flows
+- [x] UI receives canonical saved spec result
+- [x] loading/progress/error states remain user-friendly
 
 ### Key rule
-- [ ] UI should not remain on a separate backend-generation-first path once migration is complete
+- [x] UI uses the shared forge path rather than a separate browser-only forge behavior
 
 ---
 
@@ -271,8 +273,8 @@ Ship incrementally without breaking current users.
 - [ ] CLI/route tests updated for new flow
 
 ### Live verification
-- [ ] UI-triggered forge uses Pi skill/runtime
-- [ ] CLI-triggered forge uses shared skill-first workflow
+- [x] UI-triggered forge uses the shared skill-first workflow
+- [x] CLI-triggered forge uses shared skill-first workflow
 - [ ] Pi extension forge uses the intended skill-first behavior
 - [ ] saved spec includes expected story structure
 - [ ] suggested skills still appear where expected
@@ -301,16 +303,16 @@ Ship incrementally without breaking current users.
 - [ ] preserve persistence/enrichment hooks
 
 ### Phase 3
-- [ ] switch backend/UI forge to shared skill-first path
-- [ ] validate live behavior
+- [x] switch backend/UI forge to shared skill-first path
+- [x] validate live behavior
 
 ### Phase 4
 - [ ] converge CLI and Pi extension
 - [ ] keep fallback path available briefly
 
 ### Phase 5
-- [ ] remove default reliance on legacy backend-generation-first forge
-- [ ] keep only intentional fallback/rollback path if still needed
+- [x] make the shared skill-first forge path the default
+- [x] keep only intentional fallback/rollback path if still needed
 
 ---
 

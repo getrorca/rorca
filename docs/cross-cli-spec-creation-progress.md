@@ -18,8 +18,8 @@ done:
 - Added regression coverage proving persist → immediate generation-log works for the Context tab path
 next:
 - If desired, add stronger project-local routing/config for OpenCode and Codex once a stable in-repo wrapper/config surface is identified
-- Optionally add telemetry showing whether specs were created via explicit tool, skill command, or legacy backend generation
-- Optionally migrate more UX surfaces (e.g. TUI forge panel) to explicit draft persistence once a caller-side drafter is available there
+- Optionally add telemetry showing whether specs were created via explicit tool, skill command, shared dashboard forge, or legacy backend generation
+- Keep refining UX around the shared forge workflow, but the main dashboard/UI and batch forge surfaces are already migrated to the shared skill-first path
 decisions:
 - Treat explicit create-spec invocation as the only truly reliable cross-client path
 - Use `rorca_create_spec` as the canonical cross-client name; keep `rorca_persist_spec` for compatibility
