@@ -58,6 +58,7 @@
     "backend/src/db/pg-migrations/",
     "backend/package.json",
     "backend/package-lock.json",
+    "packages/rorca-pi-extension/",
     "forge/run-loop.sh",
     "forge/self-register.ts",
     "package.json",

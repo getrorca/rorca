@@ -69,7 +69,7 @@ export default function DocsPage() {
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
             <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Pi extension</div>
             <div className="text-white font-medium mb-2">Pi-native slash commands</div>
-            <p className="text-zinc-400 leading-relaxed">Inside Pi, start with <code className="text-zinc-300">/rorca-help</code>, then use <code className="text-zinc-300">/rorca-create-spec</code>, <code className="text-zinc-300">/rorca-run</code>, and <code className="text-zinc-300">/rorca-watch</code>.</p>
+            <p className="text-zinc-400 leading-relaxed">Install with <code className="text-zinc-300">rorca pi install</code>, then inside Pi start with <code className="text-zinc-300">/rorca-help</code>. If Pi was already open, run <code className="text-zinc-300">/reload</code>.</p>
           </div>
         </div>
       </section>

@@ -34,6 +34,7 @@ export default function DocsTroubleshootingPage() {
           <p><strong className="text-white">Landing page vs product:</strong> the website is the public Next app; the product is the local dashboard/backend/worker stack plus CLI and TUI.</p>
           <p><strong className="text-white">Explicit create-spec vs dashboard forge:</strong> explicit persistence is the reliable external contract for caller-authored drafts. The dashboard now uses a shared skill-first forge workflow that drafts and then persists canonically through the same backend semantics.</p>
           <p><strong className="text-white">Pi CLI vs Pi extension:</strong> Pi CLI is a runtime provider; the Pi extension is a separate operator surface.</p>
+          <p><strong className="text-white">Pi extension commands missing after install:</strong> run <code className="text-zinc-300">rorca pi install</code>, then <code className="text-zinc-300">/reload</code> if Pi was already open. If commands still do not appear, restart Pi.</p>
           <p><strong className="text-white">Why explicit is more reliable:</strong> named tools and commands remove ambiguity that freeform prompts can never fully eliminate. That is why MCP/CLI callers should still prefer <code className="text-zinc-300">rorca_create_spec</code> even though the browser UI now uses the shared skill-first forge path.</p>
         </div>
       </section>
