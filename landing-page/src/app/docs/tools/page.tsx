@@ -19,6 +19,7 @@ const cliCommands = [
   { cmd: 'rorca attach <runId>', desc: 'Attach to a running story stream.' },
   { cmd: 'rorca doctor', desc: 'Check local dependencies and health.' },
   { cmd: 'rorca chat', desc: 'Open a Pi-powered Rorca chat session.' },
+  { cmd: 'rorca pi install [--global]', desc: 'Install the bundled Rorca Pi extension into Pi.' },
   { cmd: 'rorca auth status|login|logout|install', desc: 'Manage provider auth.' },
   { cmd: 'rorca mcp token|setup-claude|rotate-token|status|diagnose-clients', desc: 'Manage MCP bridge auth and setup.' },
   { cmd: 'rorca db start|stop|status|reset|logs', desc: 'Manage the optional Docker Postgres sidecar.' },
@@ -73,7 +74,8 @@ const mcpGroups = [
 ];
 
 const piCommands = [
-  { cmd: 'pi install ./packages/rorca-pi-extension -l', desc: 'Install the extension into the current Pi project.' },
+  { cmd: 'rorca pi install', desc: 'Install the bundled extension into the current Pi project.' },
+  { cmd: 'pi install ./packages/rorca-pi-extension -l', desc: 'Advanced/dev fallback install path.' },
   { cmd: 'pi --no-extensions -e ./packages/rorca-pi-extension/extensions/rorca/index.ts', desc: 'Run the extension directly during development.' },
   { cmd: '/rorca-help', desc: 'Print the extension command list.' },
   { cmd: '/rorca-create-spec <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>]', desc: 'Preferred skill-first create-spec command.' },
@@ -108,7 +110,7 @@ export default function DocsToolsPage() {
         <p className="text-xs uppercase tracking-[0.24em] text-zinc-500 mb-4">Reference</p>
         <h1 className="text-4xl md:text-5xl font-medium tracking-tight mb-4">Tools & commands</h1>
         <p className="text-zinc-400 text-lg leading-relaxed max-w-3xl">
-          One page for newcomers who want the full surface area: the Rorca CLI, the embedded TUI, the MCP tool inventory after the skills refactor, and the Pi extension slash commands.
+          One page for newcomers who want the full surface area: the Rorca CLI, the embedded TUI, the MCP tool inventory after the skills refactor, and the Pi extension install + slash-command flow.
         </p>
       </div>
 
@@ -134,6 +136,71 @@ export default function DocsToolsPage() {
             <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Best first command</div>
             <div className="text-white font-medium mb-2"><code className="text-zinc-300">rorca_help</code> / <code className="text-zinc-300">/rorca-help</code></div>
             <p className="text-zinc-400 leading-relaxed">If you only remember one thing, start with the help command on the surface you are using.</p>
+          </div>
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-8">
+        <h2 className="text-2xl font-medium mb-4">Auth model + provider matrix</h2>
+        <p className="text-zinc-400 leading-relaxed mb-6">
+          Rorca supports both subscription-backed CLIs and API-key-backed providers. In the UI, the settings screen uses <strong className="text-white">BYOA</strong> (Bring Your Own Auth) as the product-level label; public docs can describe that as the user bringing their own subscription or key depending on the provider.
+        </p>
+        <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
+          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Claude Code</div>
+            <div className="text-white font-medium mb-2">Subscription-backed</div>
+            <p className="text-zinc-400 leading-relaxed">Uses your Claude subscription via the Claude CLI. No API key needed.</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">OpenCode</div>
+            <div className="text-white font-medium mb-2">API-key-backed</div>
+            <p className="text-zinc-400 leading-relaxed">Uses the OpenCode CLI with your chosen model/provider credentials.</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Codex CLI</div>
+            <div className="text-white font-medium mb-2">Subscription-backed</div>
+            <p className="text-zinc-400 leading-relaxed">Uses your ChatGPT Plus/Pro subscription via the Codex CLI. No API key needed.</p>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Pi CLI</div>
+            <div className="text-white font-medium mb-2">Provider-authenticated</div>
+            <p className="text-zinc-400 leading-relaxed">Pi manages provider authentication natively. The Pi extension remains a separate operator surface.</p>
+          </div>
+        </div>
+        <div className="mt-4 rounded-xl border border-white/10 bg-black/20 p-4 text-sm text-zinc-300 leading-relaxed">
+          Broader model/provider sources also exist in settings, including OpenAI-compatible, OpenRouter, and local paths. This page focuses on the execution CLIs and the explicit control surfaces newcomers should learn first.
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-8">
+        <h2 className="text-2xl font-medium mb-4">Copy-paste examples</h2>
+        <div className="grid gap-4 lg:grid-cols-2">
+          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">CLI</div>
+            <pre className="overflow-x-auto text-sm text-zinc-200 leading-relaxed"><code>{`rorca start
+rorca tui
+rorca forge "Add a docs-only story"
+rorca run zz-my-spec`}</code></pre>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">TUI</div>
+            <pre className="overflow-x-auto text-sm text-zinc-200 leading-relaxed"><code>{`rorca tui
+# board: w to watch
+# board/live: s to switch workspace
+# live: Tab to cycle streams`}</code></pre>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">MCP</div>
+            <pre className="overflow-x-auto text-sm text-zinc-200 leading-relaxed"><code>{`Tool: rorca_create_spec
+workspaceId: rorca
+title: Add a docs-only story
+stories: [...]`}</code></pre>
+          </div>
+          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Pi extension</div>
+            <pre className="overflow-x-auto text-sm text-zinc-200 leading-relaxed"><code>{`/rorca-create-spec @brief.md --workspace rorca --approve --run
+/rorca-watch
+/rorca-status`}</code></pre>
           </div>
         </div>
       </section>
@@ -185,7 +252,7 @@ export default function DocsToolsPage() {
       <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-10">
         <h2 className="text-2xl font-medium mb-4">Pi extension commands</h2>
         <p className="text-zinc-400 leading-relaxed mb-6">
-          Install the extension with <code className="text-zinc-300">pi install ./packages/rorca-pi-extension -l</code>. From there, use slash commands inside Pi.
+          Install the extension with <code className="text-zinc-300">rorca pi install</code>. If Pi was already open, run <code className="text-zinc-300">/reload</code>; if commands still do not appear, restart Pi. The raw <code className="text-zinc-300">pi install ./packages/rorca-pi-extension -l</code> path remains available for advanced/dev use.
         </p>
         <CodeList items={piCommands} />
       </section>

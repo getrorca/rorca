@@ -77,7 +77,7 @@ The short version is simple:
 
 | Surface | What to use | Examples |
 |---|---|---|
-| CLI | Local setup, runs, auth, diagnostics | `rorca start`, `rorca tui`, `rorca forge <brief...>`, `rorca run <specSlug>` |
+| CLI | Local setup, runs, auth, diagnostics | `rorca start`, `rorca tui`, `rorca forge <brief...>`, `rorca run <specSlug>`, `rorca pi install` |
 | TUI | Live board, run watching, workspace switching | `rorca tui` → `w`, `s`, `Tab`, `Esc` |
 | MCP | Explicit tool calls from clients and skills | `rorca_create_spec`, `rorca_get_context`, `rorca_pipeline_status` |
 | Pi extension | Pi-native slash commands | `/rorca-create-spec`, `/rorca-run`, `/rorca-watch`, `/rorca-mcp-status` |
@@ -86,6 +86,19 @@ The short version is simple:
 Skills are the reasoning layer.
 MCP and API calls are the reliable control surface.
 The backend is the source of truth for persistence, retrieval, telemetry, and execution orchestration.
+
+### Auth and provider model
+
+If you were looking for **BYOK**, the product-level docs usually frame that idea as **BYOA** (Bring Your Own Auth): the user brings the subscription or key that the selected provider CLI needs.
+
+| Provider surface | Auth shape | Public docs cue |
+|---|---|---|
+| Claude Code | Subscription-backed | Uses your Claude subscription via the Claude CLI; no API key needed. |
+| OpenCode | API-key-backed / BYOA | Bring your own provider credentials for the models you choose. |
+| Codex CLI | Subscription-backed | Uses your ChatGPT Plus/Pro subscription via the Codex CLI; no API key needed. |
+| Pi CLI | Provider-authenticated | Pi manages provider authentication natively. |
+
+The broader app settings also support other provider/model sources for non-execution surfaces, including **Anthropic API**, **OpenAI-compatible**, **OpenRouter**, and **local** paths. The public docs keep the first-class execution story focused on Claude Code, OpenCode, Codex CLI, and Pi CLI, with the Pi extension called out separately as an operator surface.
 
 ---
 
@@ -396,7 +409,13 @@ It keeps Rorca's spec, retrieval, and execution behavior consistent without embe
 
 ## Pi extension
 
-Rorca ships a project-local Pi extension package:
+The easiest install path is:
+
+```bash
+rorca pi install
+```
+
+That installs the bundled Rorca Pi extension into the current Pi project. Advanced/dev fallback:
 
 ```bash
 pi install ./packages/rorca-pi-extension -l
@@ -420,6 +439,8 @@ Use:
 ```
 
 That is the preferred Pi path because it maps to the same skill-first Rorca contract used across the rest of the product.
+
+If Pi was already open when you installed the extension, run `/reload`. If the commands still do not appear, restart Pi.
 
 For extension-specific details, see:
 - `packages/rorca-pi-extension/README.md`
@@ -495,11 +516,15 @@ lsof -ti:5210 | xargs kill -9
 ```
 
 ### Pi extension installed but commands are missing
-Reinstall the local package:
+Reinstall through Rorca, then reload Pi:
 
 ```bash
-pi install ./packages/rorca-pi-extension -l
+rorca pi install
 ```
+
+Then:
+- run `/reload` inside Pi if the session was already open
+- restart Pi if the commands still do not appear
 
 ### MCP client works inconsistently for spec creation
 Prefer the explicit path:
