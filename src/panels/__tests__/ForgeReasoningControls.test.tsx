@@ -12,7 +12,7 @@
  * - Forge Reasoning Mode section renders for reasoning-capable models only
  * - Enable/disable toggle and effort segmented control present
  * - TriggerPopover has collapsible Reasoning section with effort control
- * - POST /api/specs/generate body includes reasoning: { enabled, effort }
+ * - POST /api/specs/forge body includes reasoning: { enabled, effort }
  * - POST /api/pipeline/trigger body includes thinkingEnabled and reasoningEffort
  * - Cost multiplier label visible when reasoning is enabled
  */
@@ -139,8 +139,8 @@ function buildSpecsPanelMock(overrides: {
     if (path.includes('/api/attachments')) return { attachments: [] };
     if (path.includes('/api/pipeline/worker')) return { alive: true };
     if (path.includes('/api/onboarding')) return { step: 'done', completed: true };
-    // POST to generate
-    if (path === '/api/specs/generate' && opts?.method === 'POST') {
+    // POST to shared skill-first forge
+    if (path === '/api/specs/forge' && opts?.method === 'POST') {
       return { id: 'my-spec', slug: 'my-spec', title: 'My Spec', specName: 'My Spec', userStories: [], generatedAt: new Date().toISOString() };
     }
     return {};
@@ -389,14 +389,14 @@ describe('NewSpecForm — Forge Reasoning Mode section', () => {
     }, { timeout: 3000 });
   });
 
-  it('POST /api/specs/generate includes reasoning: { enabled, effort } when reasoning is on', async () => {
+  it('POST /api/specs/forge includes reasoning: { enabled, effort } when reasoning is on', async () => {
     const { default: SpecsPanel } = await import('../SpecsPanel');
     localStorage.setItem('rorca:forge:model', 'claude-opus-4-6');
     localStorage.setItem('rorca:reasoning:claude-opus-4-6', JSON.stringify({ enabled: true, effort: 'high' }));
 
     let capturedBody: unknown;
     mockApiFetch.mockImplementation(async (path: string, opts?: RequestInit) => {
-      if (path === '/api/specs/generate' && opts?.method === 'POST') {
+      if (path === '/api/specs/forge' && opts?.method === 'POST') {
         capturedBody = JSON.parse(opts.body as string);
         return { id: 'my-spec', slug: 'my-spec', title: 'My Spec', specName: 'My Spec', userStories: [], generatedAt: new Date().toISOString() };
       }
@@ -438,7 +438,7 @@ describe('NewSpecForm — Forge Reasoning Mode section', () => {
     expect(reasoning.effort).toBeTruthy();
   });
 
-  it('POST /api/specs/generate omits reasoning when reasoning is disabled', async () => {
+  it('POST /api/specs/forge omits reasoning when reasoning is disabled', async () => {
     const { default: SpecsPanel } = await import('../SpecsPanel');
     localStorage.setItem('rorca:forge:model', 'claude-opus-4-6');
     // Explicitly disabled
@@ -446,7 +446,7 @@ describe('NewSpecForm — Forge Reasoning Mode section', () => {
 
     let capturedBody: unknown;
     mockApiFetch.mockImplementation(async (path: string, opts?: RequestInit) => {
-      if (path === '/api/specs/generate' && opts?.method === 'POST') {
+      if (path === '/api/specs/forge' && opts?.method === 'POST') {
         capturedBody = JSON.parse(opts.body as string);
         return { id: 'my-spec', slug: 'my-spec', title: 'My Spec', specName: 'My Spec', userStories: [], generatedAt: new Date().toISOString() };
       }

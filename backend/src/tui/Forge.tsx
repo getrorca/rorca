@@ -70,6 +70,15 @@ import {
   type StoryEditorFocus,
   type StoryEditorStory,
 } from './storyEditor';
+import {
+  buildForegroundStreamTargets,
+  reduceForegroundStories,
+  selectWatchableRunForSpec,
+  sortForegroundStories,
+  specSlugFromSpecPath,
+  type ForegroundStorySummary,
+  type WatchableRunSummary,
+} from './foregroundRun';
 
 const MAX_OUTPUT_LINES = 500;
 const CONTEXT_WIDTH = 35;
@@ -133,6 +142,8 @@ interface RunDetailsResponse {
     spec_path?: string;
     started_at?: string | null;
     finished_at?: string | null;
+    queue_position?: number | null;
+    parallelism?: number | null;
   };
   stories: Array<{ story_id: string; status: string }>;
   specStories?: Array<{ id: string; title: string }>;
@@ -141,19 +152,20 @@ interface RunDetailsResponse {
     outputTokens?: number;
     totalCostUsd?: number;
   };
+  runState?: {
+    currentStory?: string | null;
+  } | null;
 }
 
 interface PipelineRunsResponse {
-  items: Array<{
-    id: number;
-    status: string;
-  }>;
+  items: WatchableRunSummary[];
 }
 
 interface ForegroundRunState {
   runId: number;
   specSlug: string;
   queuePosition: number | null;
+  parallelism: number;
   currentStory: number;
   totalStories: number;
   passedCount: number;
@@ -164,6 +176,8 @@ interface ForegroundRunState {
   cumulativeOutput: number;
   cumulativeCost: number;
   directionSummary: string | null;
+  stories: ForegroundStorySummary[];
+  selectedStreamKey: string;
   exitPromptOpen: boolean;
   cancelRequested: boolean;
   confirmCancel: boolean;
@@ -356,12 +370,7 @@ function activeRunStatus(status: string | null | undefined): boolean {
 }
 
 function specSlugFromRunPath(specPath: string | null | undefined, fallbackRunId: number): string {
-  if (!specPath) {
-    return `run-${fallbackRunId}`;
-  }
-
-  const basename = specPath.split('/').pop() ?? specPath;
-  return basename.endsWith('.json') ? basename.slice(0, -5) : basename;
+  return specSlugFromSpecPath(specPath, `run-${fallbackRunId}`);
 }
 
 function truncateText(input: string, width: number): string {
@@ -485,11 +494,74 @@ function summarizeRun(stories: RunDetailsResponse['stories']): {
   return { passed, failed, skipped, excluded };
 }
 
+function seedForegroundStories(details: RunDetailsResponse): ForegroundStorySummary[] {
+  const titleById = new Map((details.specStories ?? []).map((story) => [story.id, story.title]));
+  const latestStatusById = new Map<string, ForegroundStorySummary['status']>();
+
+  for (const story of details.stories) {
+    if (story.status === 'pass') latestStatusById.set(story.story_id, 'passed');
+    else if (story.status === 'fail') latestStatusById.set(story.story_id, 'failed');
+    else if (story.status === 'skip') latestStatusById.set(story.story_id, 'skipped');
+  }
+
+  const stories: ForegroundStorySummary[] = Array.from(latestStatusById.entries()).map(([storyId, status]) => ({
+    storyId,
+    title: titleById.get(storyId) ?? storyId,
+    waveIndex: 0,
+    status,
+  }));
+
+  const currentStoryId = details.runState?.currentStory ?? null;
+  if (currentStoryId && !latestStatusById.has(currentStoryId)) {
+    stories.push({
+      storyId: currentStoryId,
+      title: titleById.get(currentStoryId) ?? currentStoryId,
+      waveIndex: 0,
+      status: 'running',
+    });
+  }
+
+  return sortForegroundStories(stories);
+}
+
+function nextForegroundStreamKey(currentKey: string, stories: ForegroundStorySummary[]): string {
+  const targets = buildForegroundStreamTargets(stories);
+  const currentIndex = Math.max(0, targets.findIndex((target) => target.key === currentKey));
+  return targets[(currentIndex + 1) % targets.length]?.key ?? 'run';
+}
+
+function mergeForegroundStories(
+  current: ForegroundStorySummary[],
+  incoming: ForegroundStorySummary[],
+): ForegroundStorySummary[] {
+  const merged = new Map<string, ForegroundStorySummary>();
+  for (const story of [...current, ...incoming]) {
+    merged.set(story.storyId, story);
+  }
+  return sortForegroundStories(Array.from(merged.values()));
+}
+
+function storyStatusGlyph(status: ForegroundStorySummary['status']): string {
+  switch (status) {
+    case 'running':
+      return '▶';
+    case 'passed':
+      return '✓';
+    case 'failed':
+      return '✗';
+    case 'skipped':
+      return '↷';
+    default:
+      return '•';
+  }
+}
+
 export function Forge(): JSX.Element {
   const { stdout } = useStdout();
   const [now, setNow] = useState(() => new Date());
   const [branchName] = useState(() => safeBranchName());
   const [outputLines, setOutputLines] = useState<OutputEntry[]>([]);
+  const [storyOutputLines, setStoryOutputLines] = useState<OutputEntry[]>([]);
   const [foregroundRun, setForegroundRun] = useState<ForegroundRunState | null>(null);
   const [backgroundRunsCount, setBackgroundRunsCount] = useState(0);
   const [phaseOverride, setPhaseOverride] = useState<OrchestrationPhase | null>(null);
@@ -513,7 +585,10 @@ export function Forge(): JSX.Element {
   const walResponseRef = useRef<IncomingMessage | null>(null);
   const outputRequestRef = useRef<ClientRequest | null>(null);
   const outputResponseRef = useRef<IncomingMessage | null>(null);
+  const storyOutputRequestRef = useRef<ClientRequest | null>(null);
+  const storyOutputResponseRef = useRef<IncomingMessage | null>(null);
   const outputPartialRef = useRef('');
+  const storyOutputPartialRef = useRef('');
   const cancelPromptTimerRef = useRef<NodeJS.Timeout | null>(null);
   const exitAfterCancelRef = useRef(false);
   const activeRunIdRef = useRef<number | null>(null);
@@ -529,7 +604,6 @@ export function Forge(): JSX.Element {
   const stdoutHeight = stdout?.rows ?? 24;
   const leftColumnWidth = Math.max(20, stdoutWidth - CONTEXT_WIDTH - 4);
   const mainHeight = Math.max(5, stdoutHeight - 7);
-  const visibleOutput = outputLines.length === 0 ? [{ key: 'empty', text: '(no output yet)' }] : outputLines.slice(-mainHeight);
 
   const updateBoardSelection = (selection: BoardSelection): void => {
     boardSelectionRef.current = selection;
@@ -843,6 +917,23 @@ export function Forge(): JSX.Element {
     );
   };
 
+  const appendStoryOutput = (...entries: FormattedLine[]): void => {
+    if (entries.length === 0) {
+      return;
+    }
+
+    setStoryOutputLines((current) =>
+      pushRingBuffer(
+        current,
+        entries.map((entry) => ({
+          ...entry,
+          text: stripAnsi(entry.text),
+          key: `story-line-${keyCounterRef.current++}`,
+        })),
+      ),
+    );
+  };
+
   const clearCancelPromptTimer = (): void => {
     if (cancelPromptTimerRef.current) {
       clearTimeout(cancelPromptTimerRef.current);
@@ -850,11 +941,20 @@ export function Forge(): JSX.Element {
     }
   };
 
+  const closeStoryStream = (): void => {
+    storyOutputRequestRef.current?.destroy();
+    storyOutputResponseRef.current?.destroy();
+    storyOutputRequestRef.current = null;
+    storyOutputResponseRef.current = null;
+    storyOutputPartialRef.current = '';
+  };
+
   const closeRunStreams = (): void => {
     walRequestRef.current?.destroy();
     walResponseRef.current?.destroy();
     outputRequestRef.current?.destroy();
     outputResponseRef.current?.destroy();
+    closeStoryStream();
     walRequestRef.current = null;
     walResponseRef.current = null;
     outputRequestRef.current = null;
@@ -862,12 +962,10 @@ export function Forge(): JSX.Element {
     outputPartialRef.current = '';
   };
 
-  const detachForegroundRunAndExit = (): void => {
+  const showBoardForForegroundRun = (): void => {
     clearCancelPromptTimer();
-    activeRunIdRef.current = null;
-    closeRunStreams();
-    setForegroundRun(null);
-    process.exit(0);
+    setForegroundRun((current) => current ? { ...current, exitPromptOpen: false, confirmCancel: false } : current);
+    setBoardOpen(true);
   };
 
   const syncBackgroundRuns = async (): Promise<void> => {
@@ -899,13 +997,21 @@ export function Forge(): JSX.Element {
       }
 
       const summary = summarizeRun(details.stories);
+      const seededStories = seedForegroundStories(details);
       setForegroundRun((current) => {
         if (!current || current.runId !== runId) {
           return current;
         }
 
+        const nextStories = mergeForegroundStories(current.stories, seededStories);
+
+        const selectedStreamKey = current.selectedStreamKey !== 'run' && !nextStories.some((story) => story.storyId === current.selectedStreamKey)
+          ? 'run'
+          : current.selectedStreamKey;
+
         return {
           ...current,
+          parallelism: details.run.parallelism ?? current.parallelism,
           totalStories: details.specStories?.length ?? current.totalStories,
           passedCount: summary.passed,
           failedCount: summary.failed,
@@ -914,6 +1020,8 @@ export function Forge(): JSX.Element {
           cumulativeInput: details.tokenSummary?.inputTokens ?? current.cumulativeInput,
           cumulativeOutput: details.tokenSummary?.outputTokens ?? current.cumulativeOutput,
           cumulativeCost: details.tokenSummary?.totalCostUsd ?? current.cumulativeCost,
+          stories: nextStories,
+          selectedStreamKey,
         };
       });
     } catch {
@@ -993,6 +1101,7 @@ export function Forge(): JSX.Element {
                 ? Math.min(current.totalStories, current.currentStory + 1)
                 : current.currentStory + 1,
               directionSummary: summarizeDirection(payload) ?? current.directionSummary,
+              stories: reduceForegroundStories(current.stories, event),
             }
           : current
       ));
@@ -1014,6 +1123,14 @@ export function Forge(): JSX.Element {
     }
 
     if (event.event_type === 'story_passed' || event.event_type === 'story_failed' || event.event_type === 'story_skipped') {
+      setForegroundRun((current) => (
+        current && current.runId === runId
+          ? {
+              ...current,
+              stories: reduceForegroundStories(current.stories, event),
+            }
+          : current
+      ));
       void syncRunMetadata(runId);
       return;
     }
@@ -1137,6 +1254,142 @@ export function Forge(): JSX.Element {
     req.on('error', () => handleForegroundStreamDisconnect(runId, 'output'));
   };
 
+  const connectStoryOutputStream = (runId: number, storyId: string): void => {
+    closeStoryStream();
+    storyOutputPartialRef.current = '';
+    setStoryOutputLines([]);
+
+    const req = http.get(`http://localhost:3030/api/pipeline/runs/${runId}/stories/${encodeURIComponent(storyId)}/stream`, (res) => {
+      storyOutputResponseRef.current = res;
+      let buffer = '';
+
+      const flushStoryChunk = (chunkText: string): void => {
+        storyOutputPartialRef.current += chunkText;
+        const segments = storyOutputPartialRef.current.split(/\r?\n/);
+        storyOutputPartialRef.current = segments.pop() ?? '';
+
+        for (const segment of segments) {
+          const trimmed = stripAnsi(segment);
+          if (!trimmed.trim() || isStructuredAgentLine(trimmed)) {
+            continue;
+          }
+          appendStoryOutput(formatRawOutputLine(trimmed));
+        }
+      };
+
+      res.setEncoding('utf8');
+      res.on('data', (chunk: string) => {
+        buffer += chunk;
+
+        let boundary = buffer.indexOf('\n\n');
+        while (boundary >= 0) {
+          const rawEvent = buffer.slice(0, boundary);
+          buffer = buffer.slice(boundary + 2);
+          const parsed = parseSseEvent(rawEvent);
+
+          if ((parsed?.event === 'output' || parsed?.event === 'chunk') && parsed.data) {
+            flushStoryChunk(Buffer.from(parsed.data, 'base64').toString('utf8'));
+          } else if (parsed?.event === 'semantic_step' && parsed.data) {
+            try {
+              appendStoryOutput(formatSemanticStepLine(JSON.parse(parsed.data) as SemanticStep));
+            } catch {
+              // Ignore malformed semantic steps.
+            }
+          } else if (parsed?.event === 'done' && storyOutputPartialRef.current.trim()) {
+            appendStoryOutput(formatRawOutputLine(storyOutputPartialRef.current.trim()));
+            storyOutputPartialRef.current = '';
+          }
+
+          boundary = buffer.indexOf('\n\n');
+        }
+      });
+
+      const finishStoryStream = (): void => {
+        if (storyOutputPartialRef.current.trim()) {
+          appendStoryOutput(formatRawOutputLine(storyOutputPartialRef.current.trim()));
+          storyOutputPartialRef.current = '';
+        }
+      };
+
+      res.on('end', finishStoryStream);
+      res.on('close', finishStoryStream);
+      res.on('error', finishStoryStream);
+    });
+
+    storyOutputRequestRef.current = req;
+    req.on('error', (error: NodeJS.ErrnoException) => {
+      if (error.code === 'ECONNRESET' || error.code === 'ERR_STREAM_DESTROYED') {
+        return;
+      }
+      appendStoryOutput({ text: `[${formatClock(new Date())}] story stream unavailable for ${storyId}`, color: 'yellow' });
+    });
+  };
+
+  const switchForegroundStreamTarget = (nextKey: string): void => {
+    setForegroundRun((current) => {
+      if (!current) {
+        return current;
+      }
+
+      const normalized = nextKey === 'run' || current.stories.some((story) => story.storyId === nextKey)
+        ? nextKey
+        : 'run';
+
+      if (normalized === current.selectedStreamKey) {
+        return current;
+      }
+
+      if (normalized === 'run') {
+        closeStoryStream();
+      } else {
+        connectStoryOutputStream(current.runId, normalized);
+      }
+
+      return {
+        ...current,
+        selectedStreamKey: normalized,
+      };
+    });
+  };
+
+  const hydrateForegroundRun = (
+    runId: number,
+    specSlug: string,
+    details: RunDetailsResponse,
+    queuePosition: number | null,
+  ): void => {
+    const summary = summarizeRun(details.stories);
+    setPhaseOverride('FORGING');
+    setStoryOutputLines([]);
+    setForegroundRun({
+      runId,
+      specSlug,
+      queuePosition,
+      parallelism: details.run.parallelism ?? 1,
+      currentStory: 0,
+      totalStories: details.specStories?.length ?? 0,
+      passedCount: summary.passed,
+      failedCount: summary.failed,
+      skippedCount: summary.skipped,
+      excludedCount: summary.excluded,
+      cumulativeInput: details.tokenSummary?.inputTokens ?? 0,
+      cumulativeOutput: details.tokenSummary?.outputTokens ?? 0,
+      cumulativeCost: details.tokenSummary?.totalCostUsd ?? 0,
+      directionSummary: null,
+      stories: seedForegroundStories(details),
+      selectedStreamKey: 'run',
+      exitPromptOpen: false,
+      cancelRequested: false,
+      confirmCancel: false,
+    });
+
+    closeRunStreams();
+    connectWalStream(runId);
+    connectOutputStream(runId);
+    void syncRunMetadata(runId);
+    void syncBackgroundRuns();
+  };
+
   const runSpec = async (
     specSlug: string,
     workspaceOverride?: WorkspaceMatch | null,
@@ -1174,36 +1427,44 @@ export function Forge(): JSX.Element {
 
       streamDetachedRunIdRef.current = null;
       activeRunIdRef.current = trigger.runId;
-      setPhaseOverride('FORGING');
-      setForegroundRun({
-        runId: trigger.runId,
-        specSlug: normalizedSlug,
-        queuePosition: trigger.queuePosition ?? null,
-        currentStory: 0,
-        totalStories: 0,
-        passedCount: 0,
-        failedCount: 0,
-        skippedCount: 0,
-        excludedCount: 0,
-        cumulativeInput: 0,
-        cumulativeOutput: 0,
-        cumulativeCost: 0,
-        directionSummary: null,
-        exitPromptOpen: false,
-        cancelRequested: false,
-        confirmCancel: false,
-      });
+      try {
+        const details = await apiJson<RunDetailsResponse>(`/api/pipeline/runs/${trigger.runId}`);
+        hydrateForegroundRun(trigger.runId, normalizedSlug, details, trigger.queuePosition ?? null);
+      } catch {
+        setPhaseOverride('FORGING');
+        setStoryOutputLines([]);
+        setForegroundRun({
+          runId: trigger.runId,
+          specSlug: normalizedSlug,
+          queuePosition: trigger.queuePosition ?? null,
+          parallelism: 1,
+          currentStory: 0,
+          totalStories: 0,
+          passedCount: 0,
+          failedCount: 0,
+          skippedCount: 0,
+          excludedCount: 0,
+          cumulativeInput: 0,
+          cumulativeOutput: 0,
+          cumulativeCost: 0,
+          directionSummary: null,
+          stories: [],
+          selectedStreamKey: 'run',
+          exitPromptOpen: false,
+          cancelRequested: false,
+          confirmCancel: false,
+        });
+        closeRunStreams();
+        connectWalStream(trigger.runId);
+        connectOutputStream(trigger.runId);
+        void syncRunMetadata(trigger.runId);
+        void syncBackgroundRuns();
+      }
 
       appendOutput({
         text: `⟳ Queued run #${trigger.runId}${trigger.queuePosition ? ` (position ${trigger.queuePosition})` : ''}`,
         color: 'yellow',
       });
-
-      closeRunStreams();
-      connectWalStream(trigger.runId);
-      connectOutputStream(trigger.runId);
-      void syncRunMetadata(trigger.runId);
-      void syncBackgroundRuns();
       if (boardOpen) {
         void refreshBoard();
       }
@@ -1222,12 +1483,12 @@ export function Forge(): JSX.Element {
     workspace: WorkspaceMatch,
     brief: string,
   ): Promise<GeneratedSpecActionState> => {
-    const response = await apiJson<GenerateSpecResponse>('/api/specs/generate', {
+    const response = await apiJson<GenerateSpecResponse>('/api/specs/forge', {
       method: 'POST',
       body: {
         brief,
         workspaceId: workspace.id,
-        agentOverride: 'pi',
+        agentOverride: orchestrationState.activeAgent,
       },
       timeoutMs: GENERATE_TIMEOUT_MS,
     });
@@ -1507,13 +1768,6 @@ export function Forge(): JSX.Element {
   };
 
   const attachRun = async (rawRunId: string): Promise<void> => {
-    if (!foregroundRun) {
-      // continue below for attach mode
-    } else {
-      appendOutput({ text: `[${formatClock(new Date())}] run already in progress`, color: 'yellow' });
-      return;
-    }
-
     const normalized = rawRunId.trim();
     const runId = Number.parseInt(normalized, 10);
     if (!normalized || Number.isNaN(runId) || runId < 1) {
@@ -1530,39 +1784,15 @@ export function Forge(): JSX.Element {
         return;
       }
 
-      const summary = summarizeRun(details.stories);
       streamDetachedRunIdRef.current = null;
       activeRunIdRef.current = runId;
-      setPhaseOverride('FORGING');
-      setForegroundRun({
-        runId,
-        specSlug: specSlugFromRunPath(details.run.spec_path, runId),
-        queuePosition: null,
-        currentStory: 0,
-        totalStories: details.specStories?.length ?? 0,
-        passedCount: summary.passed,
-        failedCount: summary.failed,
-        skippedCount: summary.skipped,
-        excludedCount: summary.excluded,
-        cumulativeInput: details.tokenSummary?.inputTokens ?? 0,
-        cumulativeOutput: details.tokenSummary?.outputTokens ?? 0,
-        cumulativeCost: details.tokenSummary?.totalCostUsd ?? 0,
-        directionSummary: null,
-        exitPromptOpen: false,
-        cancelRequested: false,
-        confirmCancel: false,
-      });
+      hydrateForegroundRun(runId, specSlugFromRunPath(details.run.spec_path, runId), details, details.run.queue_position ?? null);
+      setBoardOpen(false);
 
       appendOutput({
         text: `⟳ Attached to run #${runId}`,
         color: 'yellow',
       });
-
-      closeRunStreams();
-      connectWalStream(runId);
-      connectOutputStream(runId);
-      void syncRunMetadata(runId);
-      void syncBackgroundRuns();
     } catch (error) {
       appendOutput({
         text: `No active run with ID ${runId}`,
@@ -1587,7 +1817,7 @@ export function Forge(): JSX.Element {
         color: 'yellow',
       });
       cancelPromptTimerRef.current = setTimeout(() => {
-        detachForegroundRunAndExit();
+        setForegroundRun((current) => current ? { ...current, exitPromptOpen: false } : current);
       }, 3000);
       return true;
     }
@@ -1679,6 +1909,38 @@ export function Forge(): JSX.Element {
       await refreshBoard();
     } finally {
       setBoardBusyAction(null);
+    }
+  };
+
+  const watchSelectedBoardSpec = async (): Promise<void> => {
+    const selectedColumn = boardColumns[boardSelection.columnIndex];
+    if (!selectedColumn || selectedColumn.key !== 'runningDone' || !currentBoardSpec?.activeRunStatus) {
+      return;
+    }
+
+    if (foregroundRun && foregroundRun.specSlug === currentBoardSpec.id) {
+      setBoardOpen(false);
+      return;
+    }
+
+    try {
+      const workspace = boardWorkspaceRef.current ?? await resolveWorkspaceForCwd();
+      boardWorkspaceRef.current = workspace;
+      if (!workspace) {
+        throw new Error(`No registered workspace matches ${process.cwd()}`);
+      }
+
+      const runs = await apiJson<PipelineRunsResponse>(`/api/pipeline/runs?workspaceId=${encodeURIComponent(workspace.id)}&limit=100`);
+      const selectedRun = selectWatchableRunForSpec(currentBoardSpec.id, runs.items, currentBoardSpec.activeRunStatus ?? null);
+      if (!selectedRun) {
+        appendOutput({ text: `[${formatClock(new Date())}] no active run found for ${currentBoardSpec.id}`, color: 'yellow' });
+        void refreshBoard();
+        return;
+      }
+
+      await attachRun(String(selectedRun.id));
+    } catch (error) {
+      appendOutput({ text: `[${formatClock(new Date())}] watch failed: ${getUserFriendlyError(error)}`, color: 'red' });
     }
   };
 
@@ -1979,10 +2241,43 @@ export function Forge(): JSX.Element {
         key.escape
         || (!key.ctrl && !key.meta && (input === 'n' || input === 'N'))
       ) {
-        detachForegroundRunAndExit();
+        clearCancelPromptTimer();
+        setForegroundRun((current) => current ? { ...current, exitPromptOpen: false } : current);
         return;
       }
 
+      return;
+    }
+
+    if (foregroundRun && !boardOpen && key.escape) {
+      showBoardForForegroundRun();
+      return;
+    }
+
+    if (foregroundRun && !boardOpen && !key.ctrl && !key.meta && (input === 'b' || input === 'B')) {
+      showBoardForForegroundRun();
+      return;
+    }
+
+    if (foregroundRun && !boardOpen && key.tab) {
+      switchForegroundStreamTarget(nextForegroundStreamKey(foregroundRun.selectedStreamKey, foregroundRun.stories));
+      return;
+    }
+
+    if (foregroundRun && !boardOpen && !key.ctrl && !key.meta && /^[0-9]$/.test(input)) {
+      if (input === '0') {
+        switchForegroundStreamTarget('run');
+      } else {
+        const storyIndex = Number.parseInt(input, 10) - 1;
+        const targetStory = foregroundRun.stories[storyIndex];
+        if (targetStory) {
+          switchForegroundStreamTarget(targetStory.storyId);
+        }
+      }
+      return;
+    }
+
+    if (foregroundRun && !boardOpen) {
       return;
     }
 
@@ -2365,6 +2660,16 @@ export function Forge(): JSX.Element {
 
     if ((input === 'r' || input === 'R') && !key.ctrl && !key.meta) {
       void runSelectedBoardSpec();
+      return;
+    }
+
+    if ((input === 'w' || input === 'W') && !key.ctrl && !key.meta) {
+      void watchSelectedBoardSpec();
+      return;
+    }
+
+    if (key.return) {
+      void watchSelectedBoardSpec();
     }
   });
 
@@ -2375,9 +2680,11 @@ export function Forge(): JSX.Element {
   const disabledMessage = foregroundRun
     ? foregroundRun.confirmCancel
       ? `Cancel run #${foregroundRun.runId}? Press Ctrl+C again to confirm, Esc to resume.`
-      : 'Run in progress... Press Ctrl+C to detach or cancel.'
+      : boardOpen
+        ? 'Board active... use arrows, r, a, w/Enter, or Esc.'
+        : 'Run in progress... Press Esc for board, Tab to cycle stream views, Ctrl+C to cancel.'
     : boardOpen
-      ? 'Board active... use arrows, r, a, or Esc.'
+      ? 'Board active... use arrows, r, a, w/Enter, or Esc.'
       : undefined;
   const boardColumnWidth = Math.max(18, Math.floor((leftColumnWidth - 6) / 3));
   const boardRenderedColumns = boardColumns.map((column) =>
@@ -2390,6 +2697,7 @@ export function Forge(): JSX.Element {
   const boardLineCount = Math.max(...boardRenderedColumns.map((column) => column.length), 1);
   const boardCanApprove = boardColumns[boardSelection.columnIndex]?.key === 'pending' && Boolean(currentBoardSpec);
   const boardCanRun = boardColumns[boardSelection.columnIndex]?.key === 'approved' && Boolean(currentBoardSpec);
+  const boardCanWatch = boardColumns[boardSelection.columnIndex]?.key === 'runningDone' && Boolean(currentBoardSpec?.activeRunStatus || (foregroundRun && currentBoardSpec?.id === foregroundRun.specSlug));
   const spinnerLine = forgeGenerationBrief
     ? `${GENERATE_SPINNER_FRAMES[forgeSpinnerFrameIndex]} Generating spec: ${truncateText(forgeGenerationBrief, Math.max(24, leftColumnWidth - 22))}`
     : null;
@@ -2406,6 +2714,28 @@ export function Forge(): JSX.Element {
   const editorDraft = editorStory && storyEditorState
     ? getEffectiveStoryDraft(editorStory, storyEditorState.dirtyMap)
     : null;
+  const selectedForegroundStory = foregroundRun?.selectedStreamKey && foregroundRun.selectedStreamKey !== 'run'
+    ? foregroundRun.stories.find((story) => story.storyId === foregroundRun.selectedStreamKey) ?? null
+    : null;
+  const liveStreamLegend = foregroundRun
+    ? buildForegroundStreamTargets(foregroundRun.stories)
+        .map((target) => {
+          if (target.key === 'run') {
+            return foregroundRun.selectedStreamKey === 'run' ? '[0:run]' : '0:run';
+          }
+          const story = foregroundRun.stories.find((item) => item.storyId === target.key);
+          if (!story) {
+            return target.label;
+          }
+          const selected = foregroundRun.selectedStreamKey === target.key;
+          return `${selected ? '[' : ''}${target.label}${storyStatusGlyph(story.status)}${selected ? ']' : ''}`;
+        })
+        .join('  ')
+    : null;
+  const activeOutputLines = foregroundRun?.selectedStreamKey && foregroundRun.selectedStreamKey !== 'run'
+    ? storyOutputLines
+    : outputLines;
+  const visibleActiveOutput = activeOutputLines.length === 0 ? [{ key: 'empty', text: '(no output yet)' }] : activeOutputLines.slice(-Math.max(1, mainHeight - (foregroundRun && !boardOpen ? 3 : 0)));
   const commandPaletteDisabled = Boolean(foregroundRun)
     || boardOpen
     || Boolean(generatedSpecAction)
@@ -2574,12 +2904,25 @@ export function Forge(): JSX.Element {
                 </Text>
               ))}
               <Text color="gray">
-                [r] run {boardCanRun ? '' : '(approved only)'}  [a] approve {boardCanApprove ? '' : '(pending only)'}  [Esc] back
+                [r] run {boardCanRun ? '' : '(approved only)'}  [a] approve {boardCanApprove ? '' : '(pending only)'}  [w/Enter] watch {boardCanWatch ? '' : '(active only)'}  [Esc] back
               </Text>
             </>
           ) : (
             <>
-              {visibleOutput.map((line) => (
+              {foregroundRun ? (
+                <>
+                  <Text color="cyan">
+                    {selectedForegroundStory
+                      ? `Live stream · run #${foregroundRun.runId} · ${selectedForegroundStory.storyId} · wave ${selectedForegroundStory.waveIndex}`
+                      : `Live stream · run #${foregroundRun.runId} · combined output`}
+                  </Text>
+                  {liveStreamLegend ? (
+                    <Text color="gray">{truncateText(`Views: ${liveStreamLegend}`, Math.max(20, leftColumnWidth - 2))}</Text>
+                  ) : null}
+                  <Text color="gray">[Esc] board  [Tab] cycle view  [0-9] pick stream  [Ctrl+C] cancel</Text>
+                </>
+              ) : null}
+              {visibleActiveOutput.map((line) => (
                 <Text key={line.key} color={line.color} dimColor={line.dimColor}>
                   {line.text}
                 </Text>
@@ -2604,6 +2947,8 @@ export function Forge(): JSX.Element {
           <Text>tokens out: {foregroundRun?.cumulativeOutput ?? orchestrationState.cumulativeTokens.output}</Text>
           <Text>cost usd: ${(foregroundRun?.cumulativeCost ?? orchestrationState.cumulativeTokens.cost).toFixed(2)}</Text>
           <Text>direction: {foregroundRun?.directionSummary ?? orchestrationState.directionSummary ?? 'none'}</Text>
+          <Text>view: {selectedForegroundStory ? selectedForegroundStory.storyId : foregroundRun ? 'combined' : 'none'}</Text>
+          <Text>parallelism: {foregroundRun?.parallelism ?? 1}</Text>
           <Text>background: {effectiveBackgroundRunsCount}</Text>
         </Box>
       </Box>

@@ -43,6 +43,24 @@ const validLlmResponse = JSON.stringify({
   ],
 });
 
+function parsePayload(value: unknown): Record<string, any> {
+  return typeof value === 'string' ? JSON.parse(value) : (value as Record<string, any>);
+}
+
+async function waitForBatch(batchId: string, timeoutMs = 10_000): Promise<void> {
+  const startedAt = Date.now();
+  while (Date.now() - startedAt < timeoutMs) {
+    const res = await request(app).get(`/api/specs/generate/batch/${batchId}`).set('Authorization', `Bearer ${authToken}`);
+    const summary = res.body.summary as { completed?: number; failed?: number; queued?: number; generating?: number } | undefined;
+    const total = res.body.totalBriefs as number | undefined;
+    if (summary && typeof total === 'number' && (summary.completed ?? 0) + (summary.failed ?? 0) === total) {
+      return;
+    }
+    await new Promise(resolve => setTimeout(resolve, 100));
+  }
+  throw new Error(`Batch ${batchId} did not finish within ${timeoutMs}ms`);
+}
+
 beforeEach(async () => {
   jest.resetModules();
 
@@ -103,6 +121,35 @@ test('POST /api/specs/generate/batch returns batchId and briefCount', async () =
   expect(res.body.batchId).toBeDefined();
   expect(typeof res.body.batchId).toBe('string');
   expect(res.body.briefCount).toBe(2);
+
+  await waitForBatch(res.body.batchId);
+});
+
+ test('POST /api/specs/forge/batch uses the shared skill-first batch route', async () => {
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 40, outputTokens: 50 } });
+
+  const res = await request(app)
+    .post('/api/specs/forge/batch')
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({
+      briefs: [
+        { brief: 'Build billing dashboard', workspaceId: 'ws-test', title: 'Billing Dashboard', postSave: { enrich: false, matchSkills: false, memorySynthesis: false } },
+      ],
+    });
+
+  expect(res.status).toBe(201);
+  expect(typeof res.body.batchId).toBe('string');
+  expect(res.body.briefCount).toBe(1);
+
+  await waitForBatch(res.body.batchId);
+
+  const statusRes = await request(app)
+    .get(`/api/specs/forge/batch/${res.body.batchId}`)
+    .set('Authorization', `Bearer ${authToken}`);
+
+  expect(statusRes.status).toBe(200);
+  expect(statusRes.body.items[0].status).toBe('completed');
+  expect(statusRes.body.items[0].slug).toBe('billing-dashboard');
 });
 
 test('POST /api/specs/generate/batch with empty briefs → 400', async () => {
@@ -154,6 +201,8 @@ test('POST /api/specs/generate/batch accepts any model string (pass-through)', a
 
   // Any model string is accepted for openai-compat pass-through
   expect(res.status).not.toBe(400);
+
+  await waitForBatch(res.body.batchId);
 });
 
 test('POST /api/specs/generate/batch emits batch_started WAL event', async () => {
@@ -168,12 +217,13 @@ test('POST /api/specs/generate/batch emits batch_started WAL event', async () =>
 
   expect(res.status).toBe(201);
 
-  const walEvent = await queryOne(`SELECT * FROM wal_events WHERE event_type = 'batch_started'`) as { payload: string } | undefined;
+  const events = await query(`SELECT * FROM wal_events WHERE event_type = 'batch_started' ORDER BY id ASC`) as { payload: unknown }[];
+  const walEvent = events.map((event) => parsePayload(event.payload)).find((payload) => payload.batchId === res.body.batchId);
 
   expect(walEvent).toBeDefined();
-  const payload = JSON.parse(walEvent!.payload);
-  expect(payload.batchId).toBe(res.body.batchId);
-  expect(payload.briefCount).toBe(1);
+  expect(walEvent?.briefCount).toBe(1);
+
+  await waitForBatch(res.body.batchId);
 });
 
 // ─── GET /api/specs/generate/batch/:batchId ──────────────────────────────────
@@ -190,8 +240,7 @@ test('GET /api/specs/generate/batch/:batchId returns batch status', async () => 
 
   const { batchId } = createRes.body;
 
-  // Wait for async processing to complete
-  await new Promise(resolve => setTimeout(resolve, 200));
+  await waitForBatch(batchId);
 
   const statusRes = await request(app).get(`/api/specs/generate/batch/${batchId}`).set('Authorization', `Bearer ${authToken}`);
 
@@ -231,8 +280,7 @@ test('failed brief does not block subsequent briefs', async () => {
 
   expect(createRes.status).toBe(201);
 
-  // Wait for both to process
-  await new Promise(resolve => setTimeout(resolve, 500));
+  await waitForBatch(createRes.body.batchId);
 
   const statusRes = await request(app).get(`/api/specs/generate/batch/${createRes.body.batchId}`).set('Authorization', `Bearer ${authToken}`);
 
@@ -257,14 +305,15 @@ test('batch emits batch_progress WAL events for each brief', async () => {
       ],
     });
 
-  await new Promise(resolve => setTimeout(resolve, 500));
+  await waitForBatch(createRes.body.batchId);
 
-  const progressEvents = await query(`SELECT * FROM wal_events WHERE event_type = 'batch_progress' ORDER BY id ASC`) as { payload: string }[];
+  const progressEvents = await query(`SELECT * FROM wal_events WHERE event_type = 'batch_progress' ORDER BY id ASC`) as { payload: unknown }[];
+  const payloads = progressEvents
+    .map(e => parsePayload(e.payload))
+    .filter((payload) => payload.batchId === createRes.body.batchId);
 
   // 2 briefs × 2 events each (generating + completed) = 4 events
-  expect(progressEvents.length).toBe(4);
-
-  const payloads = progressEvents.map(e => JSON.parse(e.payload));
+  expect(payloads.length).toBe(4);
 
   // First brief: generating → completed
   expect(payloads[0].briefIndex).toBe(0);
@@ -300,7 +349,7 @@ test('batch with invalid workspace captures error per-brief', async () => {
 
   expect(createRes.status).toBe(201);
 
-  await new Promise(resolve => setTimeout(resolve, 500));
+  await waitForBatch(createRes.body.batchId);
 
   const statusRes = await request(app).get(`/api/specs/generate/batch/${createRes.body.batchId}`).set('Authorization', `Bearer ${authToken}`);
 
@@ -319,7 +368,7 @@ test('batch writes spec and emits generate WAL event', async () => {
       briefs: [{ brief: 'Build auth', workspaceId: 'ws-test', title: 'Batch Auth' }],
     });
 
-  await new Promise(resolve => setTimeout(resolve, 300));
+  await waitForBatch(createRes.body.batchId);
 
   // Verify via batch status that the spec was generated with the correct slug
   const statusRes = await request(app).get(`/api/specs/generate/batch/${createRes.body.batchId}`).set('Authorization', `Bearer ${authToken}`);
@@ -327,9 +376,9 @@ test('batch writes spec and emits generate WAL event', async () => {
   expect(statusRes.body.items[0].slug).toBe('batch-auth');
 
   // Verify WAL event for generate was emitted
-  const walEvent = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'batch-auth'`) as { payload: string } | undefined;
+  const walEvent = await queryOne(`SELECT payload FROM wal_events WHERE event_type = 'generate' AND spec_id = 'batch-auth'`) as { payload: unknown } | undefined;
   expect(walEvent).toBeDefined();
-  const payload = JSON.parse(walEvent!.payload);
+  const payload = parsePayload(walEvent!.payload);
   expect(payload.title).toBe('Batch Auth');
   expect(payload.storyCount).toBe(1);
 });

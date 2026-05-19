@@ -22,6 +22,8 @@ backend/backups/
 bin/.generated/
 build/
 rorca
+!packages/rorca-pi-extension/extensions/rorca/
+!packages/rorca-pi-extension/extensions/rorca/**
 .rorca-results.jsonl
 
 # Supabase local development artifacts
