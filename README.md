@@ -87,9 +87,9 @@ Skills are the reasoning layer.
 MCP and API calls are the reliable control surface.
 The backend is the source of truth for persistence, retrieval, telemetry, and execution orchestration.
 
-### Auth and provider model
+### Bring your own subscription or key
 
-If you were looking for **BYOK**, the product-level docs usually frame that idea as **BYOA** (Bring Your Own Auth): the user brings the subscription or key that the selected provider CLI needs.
+If you were looking for **BYOK**, the product-level docs usually frame that idea as **BYOA** (Bring Your Own Auth): the user brings the subscription or key that the selected provider CLI needs. See the `/docs/tools` page for the full auth model + provider matrix.
 
 | Provider surface | Auth shape | Public docs cue |
 |---|---|---|
