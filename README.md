@@ -424,8 +424,6 @@ pi install ./packages/rorca-pi-extension -l
 ### Useful Pi commands
 - `/rorca-help`
 - `/rorca-create-spec`
-- `/rorca-forge`
-- `/rorca-forge-run`
 - `/rorca-approve`
 - `/rorca-run`
 - `/rorca-status`
@@ -441,6 +439,7 @@ Use:
 That is the preferred Pi path because it maps to the same skill-first Rorca contract used across the rest of the product.
 
 If Pi was already open when you installed the extension, run `/reload`. If the commands still do not appear, restart Pi.
+Deprecated compatibility aliases `/rorca-forge` and `/rorca-forge-run` now forward to the same skill-first path but are no longer the public first-class commands.
 
 For extension-specific details, see:
 - `packages/rorca-pi-extension/README.md`

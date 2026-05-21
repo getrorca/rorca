@@ -57,7 +57,7 @@ function parseFlagValue(tokens: string[], index: number, flag: string): { value:
   return { value, nextIndex: index + 2 };
 }
 
-export function parseForgeCommand(input: string): { brief: string; options: ForgeOptions } {
+export function parseForgeCommand(input: string, usageCommand = "/rorca-create-spec"): { brief: string; options: ForgeOptions } {
   const tokens = tokenizeArgs(input);
   const briefParts: string[] = [];
   const options: ForgeOptions = {
@@ -107,7 +107,7 @@ export function parseForgeCommand(input: string): { brief: string; options: Forg
 
   const brief = briefParts.join(" ").trim();
   if (!brief) {
-    throw new Error("Usage: /rorca-forge <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>] [--no-watch]");
+    throw new Error(`Usage: ${usageCommand} <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>] [--no-watch]`);
   }
 
   return { brief, options };

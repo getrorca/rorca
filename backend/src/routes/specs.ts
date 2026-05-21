@@ -712,9 +712,9 @@ interface SpecDiffResult {
  * /api/specs/generate:
  *   post:
  *     tags: [Specs]
- *     summary: Generate a spec from a brief via LLM
+ *     summary: Generate a spec from a brief via LLM (legacy compatibility endpoint)
  *     operationId: generateSpec
- *     description: Generates a software specification JSON from a brief using LLM. Supports single-pass and multi-pass (6-pass pipeline) generation. Routes through OpenCode or SDK path depending on configured agent type.
+ *     description: Legacy compatibility endpoint for server-side spec drafting from a brief. The preferred product-wide path is skill-first drafting plus canonical persistence through POST /api/specs/persist or the shared forge workflow.
  *     requestBody:
  *       required: true
  *       content:
@@ -1994,7 +1994,7 @@ router.post('/forge', validateBody(SkillFirstForgeSchema), async (req: Request, 
  * /api/specs/generate:
  *   post:
  *     tags: [Specs]
- *     summary: Generate a spec from a plain-English brief
+ *     summary: Generate a spec from a plain-English brief (legacy compatibility endpoint)
  *     operationId: generateSpec
  *     x-rorca-tier: public
  *     x-rorca-rationale: "Spec generation is a core open-source CLI workflow and intentionally part of the stable MCP-exposed contract."
@@ -3692,7 +3692,7 @@ router.post('/persist', validateBody(PersistSpecDraftSchema), async (req: Reques
  *     summary: Poll async spec generation job status
  *     operationId: getSpecGenerationJobStatus
  *     description: >
- *       Returns the status of an async chunked spec generation job.
+ *       Returns the status of an async chunked spec generation job for the legacy compatibility generate endpoint.
  *       Poll this endpoint every 2-5 seconds after receiving a jobId from POST /api/specs/generate.
  *     parameters:
  *       - in: path
