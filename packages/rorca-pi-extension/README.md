@@ -35,7 +35,7 @@ There are 3 distinct surfaces:
    - machine-facing tool surface bridged into Pi when available
 
 This extension uses:
-- **Rorca REST API** for legacy/fallback slash-command workflows
+- **Rorca REST API** for stateful command operations such as spec lookup, approval, runs, retry, and watch flows
 - **Rorca HTTP MCP** for tool bridging and skill-first structured persistence
 - **Pi session entries** for lightweight local state persistence
 
@@ -130,6 +130,8 @@ Example:
 /rorca-help
 ```
 
+The help output now centers the current command surface: `/rorca-create-spec`, `/rorca-approve`, `/rorca-run`, `/rorca-status`, `/rorca-watch`, `/rorca-retry`, and `/rorca-mcp-status`.
+
 ## `/rorca-create-spec`
 Create a Rorca spec through the skill-first path.
 
@@ -150,48 +152,17 @@ Examples:
 ```text
 /rorca-create-spec Add a docs-only story that updates the README
 /rorca-create-spec @docs/brief.md --workspace rorca --approve --run
+/rorca-create-spec "Create a tiny docs-only spec" --approve --run --model openai-codex/gpt-5.4
 ```
 
-## `/rorca-forge`
-Legacy/fallback path: generate a spec from inline text or from a file using backend-side drafting.
+## Deprecated compatibility aliases
 
-Usage:
+The old slash commands below still exist only as compatibility aliases:
 
-```text
-/rorca-forge <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>] [--no-watch]
-```
+- `/rorca-forge` → now forwards to `/rorca-create-spec`
+- `/rorca-forge-run` → now forwards to `/rorca-create-spec --approve --run`
 
-Behavior:
-- generates a spec in the selected workspace
-- can optionally approve it immediately
-- can optionally trigger a Pi run immediately
-- `@file` reads the brief from a local file relative to the current working directory
-- this remains available for compatibility, but `/rorca-create-spec` is the preferred explicit command
-
-Examples:
-
-```text
-/rorca-forge Add a docs-only story that updates the README
-/rorca-forge @docs/brief.md --workspace rorca
-/rorca-forge @docs/brief.md --workspace rorca --approve --run
-/rorca-forge "Create a tiny docs-only spec" --approve --run --model openai-codex/gpt-5.4
-```
-
-## `/rorca-forge-run`
-Generate, approve, and trigger a Pi run in one step.
-
-Usage:
-
-```text
-/rorca-forge-run <brief|@file> [--workspace <id>] [--queue] [--model <model>] [--no-watch]
-```
-
-Examples:
-
-```text
-/rorca-forge-run @docs/brief.md --workspace rorca
-/rorca-forge-run "Add a tiny README note" --workspace mcp-merge-sandbox --model openai-codex/gpt-5.4
-```
+They are no longer the public first-class path. Prefer `/rorca-create-spec` for all new workflows.
 
 ## `/rorca-approve`
 Approve the specified spec, or the last generated spec if omitted from local state.
@@ -352,26 +323,20 @@ Important:
 /rorca-create-spec @docs/brief.md --workspace rorca --approve --run
 ```
 
-### 2. Legacy backend-generated forge and run from a brief
-
-```text
-/rorca-forge-run @docs/brief.md --workspace rorca
-```
-
-### 3. Approve then run a spec
+### 2. Approve then run a spec
 
 ```text
 /rorca-approve zz-my-spec --workspace rorca
 /rorca-run zz-my-spec --workspace rorca
 ```
 
-### 4. Run a single story only
+### 3. Run a single story only
 
 ```text
 /rorca-run zz-my-spec --workspace rorca --story US-001
 ```
 
-### 5. Retry failed stories in a run
+### 4. Retry failed stories in a run
 
 ```text
 /rorca-retry 20260316000301
