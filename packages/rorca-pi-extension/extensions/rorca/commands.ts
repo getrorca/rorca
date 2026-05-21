@@ -101,11 +101,35 @@ async function handleTriggeredRun(runId: number, queued: boolean | undefined, au
   }
 }
 
+async function dispatchSkillFirstCreateSpec(
+  args: string,
+  ctx: ExtensionContext,
+  deps: CommandDependencies,
+  options?: { usageCommand?: string; forceApprove?: boolean; forceRun?: boolean; deprecationNotice?: string },
+): Promise<void> {
+  const parsed = parseForgeCommand(args, options?.usageCommand ?? "/rorca-create-spec");
+  const { brief, sourceLabel } = resolveBriefInput(parsed.brief);
+  const workspace = await resolveWorkspace(ctx, deps, parsed.options.workspaceId);
+  deps.updateState({ workspaceId: workspace.id });
+  if (options?.deprecationNotice) {
+    ctx.ui.notify(options.deprecationNotice, "warning");
+  }
+  deps.dispatchSkillSpecCreation({
+    workspaceId: workspace.id,
+    brief,
+    briefSource: sourceLabel,
+    autoApprove: options?.forceApprove ?? parsed.options.approve,
+    autoRun: options?.forceRun ?? parsed.options.run,
+    queue: parsed.options.queue,
+    modelOverride: parsed.options.model,
+  });
+  ctx.ui.notify(`Dispatched skill-first spec creation in workspace ${workspace.id}`, "info");
+}
+
 export function registerRorcaCommands(registerCommand: (name: string, description: string, handler: (args: string, ctx: ExtensionContext) => Promise<void>) => void, deps: CommandDependencies): void {
   registerCommand("rorca-help", "Show Rorca extension commands", async (_args, ctx) => {
     ctx.ui.notify([
       "/rorca-create-spec <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>]",
-      "/rorca-forge <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>] [--no-watch]",
       "/rorca-approve <spec-slug> [--workspace <id>]",
       "/rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--no-watch]",
       "/rorca-status [runId|workspaceId] [--workspace <id>]",
@@ -116,62 +140,14 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
   });
 
   registerCommand("rorca-create-spec", "Skill-first Rorca spec creation via /skill:rorca-forge", async (args, ctx) => {
-    const parsed = parseForgeCommand(args);
-    const { brief, sourceLabel } = resolveBriefInput(parsed.brief);
-    const workspace = await resolveWorkspace(ctx, deps, parsed.options.workspaceId);
-    deps.updateState({ workspaceId: workspace.id });
-    deps.dispatchSkillSpecCreation({
-      workspaceId: workspace.id,
-      brief,
-      briefSource: sourceLabel,
-      autoApprove: parsed.options.approve,
-      autoRun: parsed.options.run,
-      queue: parsed.options.queue,
-      modelOverride: parsed.options.model,
-    });
-    ctx.ui.notify(`Dispatched skill-first spec creation in workspace ${workspace.id}`, "info");
+    await dispatchSkillFirstCreateSpec(args, ctx, deps);
   });
 
-  registerCommand("rorca-forge", "Legacy/fallback backend-generated Rorca spec creation from text or @file", async (args, ctx) => {
-    const parsed = parseForgeCommand(args);
-    const { brief, sourceLabel } = resolveBriefInput(parsed.brief);
-    const workspace = await resolveWorkspace(ctx, deps, parsed.options.workspaceId);
-    const generated = await deps.api.generateSpec(workspace.id, brief);
-    let specSlug = generated.slug;
-    if (!specSlug && generated.jobId) {
-      ctx.ui.notify(`Spec generation queued (${generated.jobId}) from ${sourceLabel}. Waiting for completion...`, "info");
-      specSlug = (await deps.api.waitForGeneratedSpec(generated.jobId)).slug;
-    }
-    if (!specSlug) throw new Error("Spec generation completed without a slug.");
-
-    const spec = await deps.api.getSpec(specSlug, workspace.id);
-    deps.updateState({ workspaceId: workspace.id, lastSpecSlug: specSlug });
-    ctx.ui.notify([
-      `Generated ${specSlug} in workspace ${workspace.id}`,
-      ...storyLines(spec),
-    ].join("\n"), "success");
-
-    if (parsed.options.approve || parsed.options.run) {
-      await deps.api.approveSpec(specSlug, workspace.id);
-      ctx.ui.notify(`Approved ${specSlug}`, "success");
-    }
-
-    if (parsed.options.run) {
-      const resolvedModel = parsed.options.model ?? await resolvePiModelForRun(spec, deps, ctx);
-      const trigger = await deps.api.triggerRun({
-        specSlug,
-        workspaceId: workspace.id,
-        queue: parsed.options.queue,
-        model: resolvedModel,
-        includeGraph: true,
-      });
-
-      if (trigger.conflict) {
-        throw new Error(`Workspace busy. Active run: ${trigger.activeRunId}`);
-      }
-
-      await handleTriggeredRun(trigger.runId, trigger.queued, parsed.options.autoWatch, ctx, deps, `Triggered ${specSlug}`);
-    }
+  registerCommand("rorca-forge", "Deprecated compatibility alias for /rorca-create-spec", async (args, ctx) => {
+    await dispatchSkillFirstCreateSpec(args, ctx, deps, {
+      usageCommand: "/rorca-forge",
+      deprecationNotice: "Deprecated: /rorca-forge now aliases /rorca-create-spec. Prefer /rorca-create-spec.",
+    });
   });
 
   registerCommand("rorca-approve", "Approve the last or specified Rorca spec", async (args, ctx) => {
@@ -182,8 +158,13 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
     ctx.ui.notify(`Approved ${parsed.specSlug}`, "success");
   });
 
-  registerCommand("rorca-forge-run", "Legacy/fallback generate, approve, and run a Rorca spec with Pi", async (args, ctx) => {
-    await registerCompositeForgeRun(args, ctx, deps);
+  registerCommand("rorca-forge-run", "Deprecated compatibility alias for /rorca-create-spec --approve --run", async (args, ctx) => {
+    await dispatchSkillFirstCreateSpec(args, ctx, deps, {
+      usageCommand: "/rorca-forge-run",
+      forceApprove: true,
+      forceRun: true,
+      deprecationNotice: "Deprecated: /rorca-forge-run now aliases /rorca-create-spec --approve --run. Prefer /rorca-create-spec.",
+    });
   });
 
   registerCommand("rorca-run", "Trigger an approved Rorca spec with Pi", async (args, ctx) => {
@@ -263,33 +244,3 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
   });
 }
 
-async function registerCompositeForgeRun(args: string, ctx: ExtensionContext, deps: CommandDependencies): Promise<void> {
-  const parsed = parseForgeCommand(args);
-  const { brief, sourceLabel } = resolveBriefInput(parsed.brief);
-  const workspace = await resolveWorkspace(ctx, deps, parsed.options.workspaceId);
-  const generated = await deps.api.generateSpec(workspace.id, brief);
-  let specSlug = generated.slug;
-  if (!specSlug && generated.jobId) {
-    ctx.ui.notify(`Spec generation queued (${generated.jobId}) from ${sourceLabel}. Waiting for completion...`, "info");
-    specSlug = (await deps.api.waitForGeneratedSpec(generated.jobId)).slug;
-  }
-  if (!specSlug) throw new Error("Spec generation completed without a slug.");
-
-  const spec = await deps.api.getSpec(specSlug, workspace.id);
-  await deps.api.approveSpec(specSlug, workspace.id);
-  const resolvedModel = parsed.options.model ?? await resolvePiModelForRun(spec, deps, ctx);
-  const trigger = await deps.api.triggerRun({
-    specSlug,
-    workspaceId: workspace.id,
-    queue: parsed.options.queue,
-    model: resolvedModel,
-    includeGraph: true,
-  });
-
-  if (trigger.conflict) {
-    throw new Error(`Workspace busy. Active run: ${trigger.activeRunId}`);
-  }
-
-  deps.updateState({ workspaceId: workspace.id, lastSpecSlug: specSlug });
-  await handleTriggeredRun(trigger.runId, trigger.queued, parsed.options.autoWatch, ctx, deps, `Generated + approved + triggered ${specSlug}`);
-}

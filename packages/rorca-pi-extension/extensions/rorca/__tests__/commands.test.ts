@@ -79,25 +79,18 @@ describe("rorca pi extension commands", () => {
     expect(notifications.at(-1)?.message).toContain("Dispatched skill-first spec creation");
   });
 
-  it("runs forge-run workflow and starts watch", async () => {
+  it("maps forge-run compatibility alias onto the skill-first create-spec flow", async () => {
     const { commands, register } = createRegistry();
-    const watch = { start: vi.fn(), stop: vi.fn(), currentRunId: () => null };
+    const dispatchSkillSpecCreation = vi.fn();
     let state: ExtensionState = {};
     const api = {
       resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
-      generateSpec: vi.fn(async () => ({ slug: "oauth-login" })),
-      approveSpec: vi.fn(async () => undefined),
-      getSpec: vi.fn(async () => ({ id: "oauth-login", model: "claude-sonnet-4-6", userStories: [] })),
-      getPiModels: vi.fn(async () => [
-        { provider: "openai-codex", model: "gpt-5.4", contextTokens: 272000, maxOutTokens: 128000, thinking: true, images: true },
-      ]),
-      triggerRun: vi.fn(async () => ({ runId: 55, queued: false })),
     } as any;
 
     registerRorcaCommands(register, {
       api,
-      watch: watch as any,
-      dispatchSkillSpecCreation: vi.fn(),
+      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillSpecCreation,
       getState: () => state,
       updateState: (patch) => {
         state = { ...state, ...patch };
@@ -105,15 +98,20 @@ describe("rorca pi extension commands", () => {
     });
 
     const { ctx, notifications } = createContext();
-    await commands.get("rorca-forge-run")!("Ship OAuth login --workspace cashflow", ctx);
+    await commands.get("rorca-forge-run")!("Ship OAuth login --workspace cashflow --queue", ctx);
 
-    expect(api.generateSpec).toHaveBeenCalledWith("cashflow", "Ship OAuth login");
-    expect(api.getSpec).toHaveBeenCalledWith("oauth-login", "cashflow");
-    expect(api.approveSpec).toHaveBeenCalledWith("oauth-login", "cashflow");
-    expect(api.triggerRun).toHaveBeenCalledWith({ specSlug: "oauth-login", workspaceId: "cashflow", queue: false, model: "openai-codex/gpt-5.4", includeGraph: true });
-    expect(watch.start).toHaveBeenCalledWith(55, ctx);
-    expect(state.lastSpecSlug).toBe("oauth-login");
-    expect(notifications.at(-1)?.message).toContain("run #55");
+    expect(dispatchSkillSpecCreation).toHaveBeenCalledWith({
+      workspaceId: "cashflow",
+      brief: "Ship OAuth login",
+      briefSource: "inline",
+      autoApprove: true,
+      autoRun: true,
+      queue: true,
+      modelOverride: undefined,
+    });
+    expect(state.workspaceId).toBe("cashflow");
+    expect(notifications[0]?.message).toContain("Deprecated: /rorca-forge-run");
+    expect(notifications.at(-1)?.message).toContain("Dispatched skill-first spec creation");
   });
 
   it("shows run status details", async () => {

@@ -1,6 +1,6 @@
 ---
 name: rorca-forge
-description: Draft and persist a canonical Rorca spec from a product brief, markdown file, or feature request. Use when the user wants to turn a brief into a real Rorca spec. This is a skill-first workflow: Pi performs the reasoning and drafting, then hands the result to Rorca for validation, enrichment, and persistence.
+description: "Draft and persist a canonical Rorca spec from a product brief, markdown file, or feature request. Use when the user wants to turn a brief into a real Rorca spec. This is a skill-first workflow: Pi performs the reasoning and drafting, then hands the result to Rorca for validation, enrichment, and persistence."
 ---
 
 # Rorca Forge

@@ -79,8 +79,6 @@ const piCommands = [
   { cmd: 'pi --no-extensions -e ./packages/rorca-pi-extension/extensions/rorca/index.ts', desc: 'Run the extension directly during development.' },
   { cmd: '/rorca-help', desc: 'Print the extension command list.' },
   { cmd: '/rorca-create-spec <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>]', desc: 'Preferred skill-first create-spec command.' },
-  { cmd: '/rorca-forge <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>] [--no-watch]', desc: 'Legacy fallback that drafts in the backend.' },
-  { cmd: '/rorca-forge-run <brief|@file> [--workspace <id>] [--queue] [--model <model>] [--no-watch]', desc: 'Generate, approve, and run in one step.' },
   { cmd: '/rorca-approve <spec-slug> [--workspace <id>]', desc: 'Approve a spec.' },
   { cmd: '/rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--no-watch]', desc: 'Trigger an approved spec with Pi.' },
   { cmd: '/rorca-status [runId|workspaceId] [--workspace <id>]', desc: 'Inspect one run or recent runs.' },
@@ -252,7 +250,7 @@ stories: [...]`}</code></pre>
       <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-10">
         <h2 className="text-2xl font-medium mb-4">Pi extension commands</h2>
         <p className="text-zinc-400 leading-relaxed mb-6">
-          Install the extension with <code className="text-zinc-300">rorca pi install</code>. If Pi was already open, run <code className="text-zinc-300">/reload</code>; if commands still do not appear, restart Pi. The raw <code className="text-zinc-300">pi install ./packages/rorca-pi-extension -l</code> path remains available for advanced/dev use.
+          Install the extension with <code className="text-zinc-300">rorca pi install</code>. If Pi was already open, run <code className="text-zinc-300">/reload</code>; if commands still do not appear, restart Pi. The raw <code className="text-zinc-300">pi install ./packages/rorca-pi-extension -l</code> path remains available for advanced/dev use. Deprecated compatibility aliases like <code className="text-zinc-300">/rorca-forge</code> and <code className="text-zinc-300">/rorca-forge-run</code> now forward to the same skill-first flow but are no longer the public command story.
         </p>
         <CodeList items={piCommands} />
       </section>

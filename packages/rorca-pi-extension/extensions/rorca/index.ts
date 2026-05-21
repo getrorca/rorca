@@ -25,7 +25,7 @@ function formatSkillSpecCreationPrompt(input: {
     `workspaceId: ${input.workspaceId}`,
     `briefSource: ${input.briefSource}`,
     `preferMcp: true`,
-    `allowRestFallback: true`,
+    `allowRestFallback: false`,
     `autoApprove: ${input.autoApprove}`,
     `autoRun: ${input.autoRun}`,
     `queue: ${input.queue}`,
