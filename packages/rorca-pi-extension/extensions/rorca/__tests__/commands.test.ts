@@ -114,6 +114,64 @@ describe("rorca pi extension commands", () => {
     expect(notifications.at(-1)?.message).toContain("Dispatched skill-first spec creation");
   });
 
+  it("forwards sequential mode on /rorca-run", async () => {
+    const { commands, register } = createRegistry();
+    let state: ExtensionState = {};
+    const api = {
+      resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
+      getSpec: vi.fn(async () => ({ id: "oauth-login", model: "openai-codex/gpt-5.4" })),
+      triggerRun: vi.fn(async () => ({ runId: 101, queued: false })),
+    } as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillSpecCreation: vi.fn(),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx } = createContext();
+    await commands.get("rorca-run")!("oauth-login --workspace cashflow --sequential", ctx);
+
+    expect(api.triggerRun).toHaveBeenCalledWith({
+      specSlug: "oauth-login",
+      workspaceId: "cashflow",
+      storyId: undefined,
+      queue: false,
+      model: "openai-codex/gpt-5.4",
+      includeGraph: true,
+      forceSequential: true,
+    });
+  });
+
+  it("forwards sequential mode on /rorca-retry", async () => {
+    const { commands, register } = createRegistry();
+    let state: ExtensionState = { lastRunId: 77 };
+    const api = {
+      retryRun: vi.fn(async () => ({ ok: true, queued: true, runId: 102 })),
+    } as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillSpecCreation: vi.fn(),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx } = createContext();
+    await commands.get("rorca-retry")!("77 US-001 --sequential --no-watch", ctx);
+
+    expect(api.retryRun).toHaveBeenCalledWith(77, ["US-001"], {
+      forceSequential: true,
+    });
+  });
+
   it("shows run status details", async () => {
     const { commands, register } = createRegistry();
     const detail: PipelineRunDetailResponse = {
