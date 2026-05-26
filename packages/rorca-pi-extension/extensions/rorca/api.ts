@@ -97,6 +97,7 @@ export class RorcaApiClient {
     queue?: boolean;
     model?: string;
     includeGraph?: boolean;
+    forceSequential?: boolean;
   }): Promise<TriggerPipelineResponse> {
     return this.fetchJson<TriggerPipelineResponse>("/api/pipeline/trigger", {
       method: "POST",
@@ -108,6 +109,7 @@ export class RorcaApiClient {
         agentOverride: "pi",
         includeGraph: input.includeGraph ?? true,
         ...(input.model ? { modelOverride: input.model } : {}),
+        ...(input.forceSequential ? { forceSequential: true } : {}),
       }),
     }, 60_000);
   }
@@ -121,10 +123,13 @@ export class RorcaApiClient {
     return response.items;
   }
 
-  async retryRun(runId: number, storyIds: string[] = []): Promise<RetryRunResponse> {
+  async retryRun(runId: number, storyIds: string[] = [], options?: { forceSequential?: boolean }): Promise<RetryRunResponse> {
+    const body: Record<string, unknown> = {};
+    if (storyIds.length > 0) body.storyIds = storyIds;
+    if (options?.forceSequential) body.forceSequential = true;
     return this.fetchJson<RetryRunResponse>(`/api/pipeline/runs/${runId}/retry`, {
       method: "POST",
-      body: JSON.stringify(storyIds.length > 0 ? { storyIds } : {}),
+      body: JSON.stringify(body),
     }, 60_000);
   }
 

@@ -163,12 +163,14 @@ export type RunOptions = {
   storyId?: string;
   queue: boolean;
   model?: string;
+  forceSequential?: boolean;
   autoWatch: boolean;
 };
 
 export type RetryOptions = {
   runId: number;
   storyIds: string[];
+  forceSequential?: boolean;
   autoWatch: boolean;
 };
 

@@ -185,13 +185,14 @@ Trigger an approved spec with Pi.
 Usage:
 
 ```text
-/rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--no-watch]
+/rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--sequential] [--no-watch]
 ```
 
 Behavior:
 - always triggers with `agentOverride: "pi"`
 - defaults `includeGraph` to `true`
 - if `--story <id>` is provided, the trigger uses the single-story path
+- if `--sequential` is provided, the trigger sends `forceSequential: true`
 - if `--model` is omitted, the extension chooses a preferred local Pi model
 
 Examples:
@@ -201,6 +202,7 @@ Examples:
 /rorca-run zz-my-spec --workspace rorca --story US-001
 /rorca-run zz-my-spec --workspace rorca --queue
 /rorca-run zz-my-spec --workspace rorca --model openai-codex/gpt-5.4
+/rorca-run zz-my-spec --workspace rorca --sequential
 ```
 
 ## `/rorca-status`
@@ -252,7 +254,7 @@ Retry a run, optionally limited to specific story ids.
 Usage:
 
 ```text
-/rorca-retry <runId> [storyId...] [--no-watch]
+/rorca-retry <runId> [storyId...] [--sequential] [--no-watch]
 ```
 
 Examples:
@@ -260,6 +262,7 @@ Examples:
 ```text
 /rorca-retry 20260316000301
 /rorca-retry 20260316000301 US-001 US-003
+/rorca-retry 20260316000301 --sequential
 ```
 
 ## `/rorca-mcp-status`

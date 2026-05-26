@@ -1083,6 +1083,58 @@ describe('OC-006: Pipeline trigger agent integration', () => {
   });
 });
 
+// ─── POST /api/pipeline/runs/:runId/retry ───────────────────────────────────
+
+describe('POST /api/pipeline/runs/:runId/retry', () => {
+  test('accepts forceSequential and persists retry parallelism = 1', async () => {
+    seedSpec('approved', 'retry-sequential');
+
+    const originalRun = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, parallelism)
+       VALUES ('forge/specs/approved/retry-sequential.json', 'ws-pipe', 'failed', 4)
+       RETURNING id`
+    );
+    expect(originalRun?.id).toBeDefined();
+
+    await execute(
+      `INSERT INTO story_results (run_id, story_id, status, retries)
+       VALUES ($1, 'US-001', 'fail', 0)`,
+      [originalRun!.id],
+    );
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post(`/api/pipeline/runs/${originalRun!.id}/retry`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ forceSequential: true });
+
+    expect(res.status).toBe(201);
+    expect(res.body.ok).toBe(true);
+    expect(res.body.runId).toBeDefined();
+
+    const retryRun = await queryOne<{ parallelism: number; retried_from_run_id: number | null }>(
+      `SELECT parallelism, retried_from_run_id FROM pipeline_runs WHERE id = $1`,
+      [res.body.runId],
+    );
+
+    expect(retryRun).toBeDefined();
+    expect(retryRun!.parallelism).toBe(1);
+    expect(retryRun!.retried_from_run_id).toBe(originalRun!.id);
+    expect(mockSend).toHaveBeenCalledWith(
+      'pipeline:retry',
+      expect.objectContaining({
+        runId: Number(res.body.runId),
+        originalRunId: Number(originalRun!.id),
+        storyIds: ['US-001'],
+      }),
+      expect.any(Object),
+    );
+  });
+});
+
 // ─── POST /api/pipeline/queue — smart run trigger ────────────────────────────
 
 describe('POST /api/pipeline/queue', () => {
