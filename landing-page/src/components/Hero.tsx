@@ -54,7 +54,16 @@ export function Hero() {
       <motion.div
         initial={{ opacity: 0, y: 18 }}
         animate={{ opacity: 1, y: 0 }}
-        transition={{ duration: 0.7, delay: 0.2, ease: 'easeOut' }}
+        transition={{ duration: 0.7, delay: 0.18, ease: 'easeOut' }}
+        className="mt-7 max-w-3xl rounded-2xl border border-white/10 bg-white/[0.03] px-5 py-4 text-sm sm:text-base text-zinc-300 leading-relaxed"
+      >
+        Writing specs for AI-assisted development is context engineering by design: the same artifact that frames model reasoning also becomes the executable unit Rorca reviews, persists, and runs.
+      </motion.div>
+
+      <motion.div
+        initial={{ opacity: 0, y: 18 }}
+        animate={{ opacity: 1, y: 0 }}
+        transition={{ duration: 0.7, delay: 0.24, ease: 'easeOut' }}
         className="mt-10 flex flex-col sm:flex-row items-center gap-3"
       >
         <Link
