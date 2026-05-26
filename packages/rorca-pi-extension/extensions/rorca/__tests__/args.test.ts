@@ -30,19 +30,21 @@ describe("rorca pi extension args", () => {
   });
 
   it("parses run flags", () => {
-    expect(parseRunCommand("oauth-login --story US-003 --workspace ws-2 --queue")).toEqual({
+    expect(parseRunCommand("oauth-login --story US-003 --workspace ws-2 --queue --sequential")).toEqual({
       specSlug: "oauth-login",
       storyId: "US-003",
       workspaceId: "ws-2",
       queue: true,
+      forceSequential: true,
       autoWatch: true,
     });
   });
 
   it("parses retry with fallback run id", () => {
-    expect(parseRetryCommand("US-001 US-002 --no-watch", 42)).toEqual({
+    expect(parseRetryCommand("US-001 US-002 --sequential --no-watch", 42)).toEqual({
       runId: 42,
       storyIds: ["US-001", "US-002"],
+      forceSequential: true,
       autoWatch: false,
     });
   });

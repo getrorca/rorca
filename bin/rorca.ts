@@ -2126,6 +2126,7 @@ async function runSpec(options: {
   dryRun?: boolean;
   agent?: 'claude' | 'opencode' | 'codex' | 'pi';
   model?: string;
+  forceSequential?: boolean;
   tail?: boolean;
 }): Promise<number> {
   const { workspace } = await resolveApprovedSpec(options.specSlug);
@@ -2138,6 +2139,7 @@ async function runSpec(options: {
       dryRun: Boolean(options.dryRun),
       agentOverride: options.agent,
       modelOverride: options.model,
+      forceSequential: Boolean(options.forceSequential),
     }),
   });
 
@@ -3036,14 +3038,16 @@ program
   .option('--dry-run', 'Return dry-run estimate only')
   .option('--agent <agent>', 'Execution agent override')
   .option('--model <model>', 'Model override')
+  .option('--sequential', 'Force sequential execution (parallelism = 1)')
   .option('--tail', 'Tail raw run output alongside WAL lifecycle events')
-  .action(async (specSlug: string, options: { story?: string; dryRun?: boolean; agent?: 'claude' | 'opencode' | 'codex' | 'pi'; model?: string; tail?: boolean }) => {
+  .action(async (specSlug: string, options: { story?: string; dryRun?: boolean; agent?: 'claude' | 'opencode' | 'codex' | 'pi'; model?: string; sequential?: boolean; tail?: boolean }) => {
     const code = await runSpec({
       specSlug,
       story: options.story,
       dryRun: options.dryRun,
       agent: options.agent,
       model: options.model,
+      forceSequential: options.sequential,
       tail: options.tail,
     });
     process.exitCode = code;

@@ -3063,6 +3063,9 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
  *                 type: array
  *                 items: { type: string }
  *                 description: Specific story IDs to retry (all failed if omitted)
+ *               forceSequential:
+ *                 type: boolean
+ *                 description: Force the retry run to execute sequentially (parallelism = 1)
  *     responses:
  *       201: { description: "Retry job enqueued", content: { application/json: { schema: { type: object, properties: { ok: { type: boolean }, queued: { type: boolean }, jobId: { type: string }, runId: { type: integer } } } } } }
  *       404: { description: "Run not found" }
@@ -3076,7 +3079,7 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
       return;
     }
 
-    const { storyIds } = req.body as { storyIds?: string[] };
+    const { storyIds, forceSequential } = req.body as { storyIds?: string[]; forceSequential?: boolean };
 
     // 1. Fetch the original run
     const originalRun = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [originalRunId]) as PipelineRunRow | undefined;
@@ -3178,12 +3181,20 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     const sequenceOffset = seqRow?.max_seq ?? 0;
 
     // 7. Create a NEW pipeline_run linked to the original via retried_from_run_id
-    const newRunResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id)
-       VALUES ($1, $2, 'running', 'retry', $3, $4, $5) RETURNING id`, [originalRun.spec_path,
-      originalRun.workspace_id,
-      originalRun.branch_name,
-      originalRun.worktree_path,
-      originalRunId,]);
+    //    Hotfix: allow callers to explicitly force sequential retry execution.
+    const newRunResult = forceSequential
+      ? await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id, parallelism)
+         VALUES ($1, $2, 'running', 'retry', $3, $4, $5, 1) RETURNING id`, [originalRun.spec_path,
+        originalRun.workspace_id,
+        originalRun.branch_name,
+        originalRun.worktree_path,
+        originalRunId,])
+      : await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id)
+         VALUES ($1, $2, 'running', 'retry', $3, $4, $5) RETURNING id`, [originalRun.spec_path,
+        originalRun.workspace_id,
+        originalRun.branch_name,
+        originalRun.worktree_path,
+        originalRunId,]);
     const newRunId = newRunResult!.id;
 
     // 8. Copy successful story results from the original run to the new run

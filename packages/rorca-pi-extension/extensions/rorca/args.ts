@@ -116,7 +116,7 @@ export function parseForgeCommand(input: string, usageCommand = "/rorca-create-s
 export function parseRunCommand(input: string): RunOptions {
   const tokens = tokenizeArgs(input);
   if (tokens.length === 0) {
-    throw new Error("Usage: /rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--no-watch]");
+    throw new Error("Usage: /rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--sequential] [--no-watch]");
   }
 
   const options: RunOptions = {
@@ -150,6 +150,10 @@ export function parseRunCommand(input: string): RunOptions {
         options.queue = true;
         i += 1;
         break;
+      case "--sequential":
+        options.forceSequential = true;
+        i += 1;
+        break;
       case "--no-watch":
         options.autoWatch = false;
         i += 1;
@@ -166,7 +170,7 @@ export function parseRetryCommand(input: string, fallbackRunId?: number): RetryO
   const tokens = tokenizeArgs(input);
   const maybeRunId = tokens[0] && /^\d+$/.test(tokens[0]) ? Number(tokens[0]) : fallbackRunId;
   if (!maybeRunId) {
-    throw new Error("Usage: /rorca-retry <runId> [storyId...] [--no-watch]");
+    throw new Error("Usage: /rorca-retry <runId> [storyId...] [--sequential] [--no-watch]");
   }
 
   const options: RetryOptions = {
@@ -180,6 +184,8 @@ export function parseRetryCommand(input: string, fallbackRunId?: number): RetryO
     const token = tokens[i];
     if (token === "--no-watch") {
       options.autoWatch = false;
+    } else if (token === "--sequential") {
+      options.forceSequential = true;
     } else if (!token.startsWith("--")) {
       options.storyIds.push(token);
     } else {

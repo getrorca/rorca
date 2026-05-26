@@ -131,10 +131,10 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
     ctx.ui.notify([
       "/rorca-create-spec <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>]",
       "/rorca-approve <spec-slug> [--workspace <id>]",
-      "/rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--no-watch]",
+      "/rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--sequential] [--no-watch]",
       "/rorca-status [runId|workspaceId] [--workspace <id>]",
       "/rorca-watch [runId]",
-      "/rorca-retry <runId> [storyId...] [--no-watch]",
+      "/rorca-retry <runId> [storyId...] [--sequential] [--no-watch]",
       "/rorca-mcp-status",
     ].join("\n"), "info");
   });
@@ -179,6 +179,7 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
       queue: parsed.queue,
       model: resolvedModel,
       includeGraph: true,
+      forceSequential: parsed.forceSequential,
     });
 
     if (trigger.conflict) {
@@ -239,7 +240,9 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
 
   registerCommand("rorca-retry", "Retry failed stories in a Rorca run", async (args, ctx) => {
     const parsed = parseRetryCommand(args, deps.getState().lastRunId);
-    const result = await deps.api.retryRun(parsed.runId, parsed.storyIds);
+    const result = await deps.api.retryRun(parsed.runId, parsed.storyIds, {
+      forceSequential: parsed.forceSequential,
+    });
     await handleTriggeredRun(result.runId, result.queued, parsed.autoWatch, ctx, deps, `Retried run ${parsed.runId}`);
   });
 }
