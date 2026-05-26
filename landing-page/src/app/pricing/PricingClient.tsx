@@ -10,21 +10,20 @@ import { trackPricingToggle, trackCtaClick } from '@/lib/analytics';
 // ─── Static pricing data ───────────────────────────────────────────────────
 
 const FEATURES: { label: string; free: boolean | string; pro: boolean | string; team: boolean | string }[] = [
-    { label: 'Spec generation',        free: true,            pro: true,             team: true },
-    { label: 'Pipeline execution',     free: false,           pro: true,             team: true },
-    { label: 'Workspaces',             free: '1',             pro: '3',              team: 'Unlimited' },
-    { label: 'GitHub / Linear / Vercel integrations', free: false, pro: true,        team: true },
-    { label: 'Model cascading (Haiku → Sonnet → Opus)', free: false, pro: true,     team: true },
-    { label: 'RBAC & access control',  free: false,           pro: false,            team: true },
-    { label: 'Audit log',              free: false,           pro: false,            team: true },
-    { label: 'SSO / SAML',            free: false,           pro: false,            team: true },
-    { label: 'Support',               free: 'Community',     pro: 'Email',          team: 'Priority' },
+    { label: 'Local dashboard + CLI + embedded TUI', free: true, pro: true, team: true },
+    { label: 'Local execution through your selected provider CLI', free: true, pro: true, team: true },
+    { label: 'Local MCP server', free: true, pro: true, team: true },
+    { label: 'Local memory / retrieval / graph', free: true, pro: true, team: true },
+    { label: 'Managed cloud sync + hosted artifacts', free: false, pro: true, team: true },
+    { label: 'Shared workspaces', free: false, pro: false, team: true },
+    { label: 'Model choice across planning, execution, and memory synthesis', free: true, pro: true, team: true },
+    { label: 'RBAC & access control', free: false, pro: false, team: true },
+    { label: 'Audit log / SSO / governance', free: false, pro: false, team: true },
+    { label: 'Support', free: 'Community', pro: 'Priority', team: 'Priority + SLA' },
 ];
 
 const STRIPE_PRO_PRICE_MONTHLY  = process.env.NEXT_PUBLIC_STRIPE_PRICE_ID_PRO_MONTHLY  ?? '';
 const STRIPE_PRO_PRICE_ANNUAL   = process.env.NEXT_PUBLIC_STRIPE_PRICE_ID_PRO_ANNUAL   ?? '';
-const STRIPE_TEAM_PRICE_MONTHLY = process.env.NEXT_PUBLIC_STRIPE_PRICE_ID_TEAM_MONTHLY ?? '';
-const STRIPE_TEAM_PRICE_ANNUAL  = process.env.NEXT_PUBLIC_STRIPE_PRICE_ID_TEAM_ANNUAL  ?? '';
 
 // ─── Sub-components ────────────────────────────────────────────────────────
 
@@ -132,7 +131,6 @@ export default function PricingClient() {
     const teamPrice   = annual ? teamAnnual : teamMonthly;
 
     const proStripeId  = annual ? STRIPE_PRO_PRICE_ANNUAL  : STRIPE_PRO_PRICE_MONTHLY;
-    const teamStripeId = annual ? STRIPE_TEAM_PRICE_ANNUAL : STRIPE_TEAM_PRICE_MONTHLY;
 
     return (
         <main className="min-h-screen bg-abyss text-white selection:bg-accent selection:text-white flex flex-col">
@@ -154,8 +152,8 @@ export default function PricingClient() {
                         </span>{' '}
                         pricing
                     </h1>
-                    <p className="text-zinc-400 text-xl max-w-xl mx-auto leading-relaxed">
-                        Start free. Scale when you ship.
+                    <p className="text-zinc-400 text-xl max-w-2xl mx-auto leading-relaxed">
+                        Free locally. Pay for managed convenience, shared workspaces, and governance when you need them.
                     </p>
                 </motion.div>
 
@@ -168,7 +166,7 @@ export default function PricingClient() {
                 >
                     <div className="inline-flex items-center gap-2 px-4 py-1.5 bg-accent/10 border border-accent/25 rounded-full text-sm font-medium text-accent backdrop-blur-md">
                         <Server className="w-4 h-4" />
-                        Self-hosted is always free
+                        Local single-user Rorca is free
                     </div>
                 </motion.div>
 
@@ -243,9 +241,9 @@ export default function PricingClient() {
                                     </div>
                                     <div className="flex items-end gap-1 mb-1">
                                         <span className="text-5xl font-medium tracking-tight text-white">$0</span>
-                                        <span className="text-zinc-500 text-sm mb-1.5">/ forever</span>
+                                        <span className="text-zinc-500 text-sm mb-1.5">/ local</span>
                                     </div>
-                                    <p className="text-zinc-500 text-sm">Spec generation, no pipeline execution. Perfect for exploring.</p>
+                                    <p className="text-zinc-500 text-sm">Dashboard, CLI, embedded TUI, MCP, provider attachment, and local execution.</p>
                                 </div>
                                 <a
                                     href="/download"
@@ -255,11 +253,11 @@ export default function PricingClient() {
                                     Get Started
                                 </a>
                                 <ul className="flex flex-col gap-3 text-sm text-zinc-400">
-                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Spec generation (all models)</li>
-                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> 1 workspace</li>
+                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Local dashboard + CLI + embedded TUI</li>
+                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Local MCP server + provider attachment</li>
+                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Local execution through Claude Code, OpenCode, Codex, or Pi</li>
+                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Local memory / retrieval / graph</li>
                                     <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Community support</li>
-                                    <li className="flex items-center gap-2"><X     className="w-4 h-4 text-zinc-700 shrink-0" /> Pipeline execution</li>
-                                    <li className="flex items-center gap-2"><X     className="w-4 h-4 text-zinc-700 shrink-0" /> Integrations</li>
                                 </ul>
                             </motion.div>
 
@@ -292,16 +290,16 @@ export default function PricingClient() {
                                     {annual && (
                                         <p className="text-accent text-xs font-medium mb-1">Save ${(proMonthly - proPrice) * 12} / year</p>
                                     )}
-                                    <p className="text-zinc-500 text-sm">Full pipeline execution. Ship real features with any model.</p>
+                                    <p className="text-zinc-500 text-sm">Managed solo convenience: cloud sync, hosted history, and easier background execution.</p>
                                 </div>
                                 <StripeCTA priceId={proStripeId} label="Start Free Trial" />
                                 <ul className="flex flex-col gap-3 text-sm text-zinc-400">
                                     <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Everything in Free</li>
-                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Full pipeline execution</li>
-                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> 3 workspaces</li>
-                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> All integrations (GitHub, Linear, Vercel)</li>
-                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Model cascading (Haiku → Sonnet → Opus)</li>
-                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Email support</li>
+                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Cloud sync between devices</li>
+                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Hosted run history and artifacts</li>
+                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Managed background execution</li>
+                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Easier provider and backup management</li>
+                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Priority support</li>
                                 </ul>
                             </motion.div>
 
@@ -330,7 +328,7 @@ export default function PricingClient() {
                                     {annual && (
                                         <p className="text-accent text-xs font-medium mb-1">Save ${(teamMonthly - teamPrice) * 12} / seat / year</p>
                                     )}
-                                    <p className="text-zinc-500 text-sm">For engineering teams who ship together.</p>
+                                    <p className="text-zinc-500 text-sm">Shared workspaces, governance, visibility, and enterprise-friendly controls.</p>
                                 </div>
                                 <a
                                     href="mailto:hello@rorca.app?subject=Team%20plan%20inquiry"
@@ -341,10 +339,10 @@ export default function PricingClient() {
                                 </a>
                                 <ul className="flex flex-col gap-3 text-sm text-zinc-400">
                                     <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Everything in Pro</li>
-                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Unlimited workspaces</li>
+                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Shared workspaces</li>
                                     <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> RBAC &amp; access control</li>
-                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Audit log</li>
-                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> SSO / SAML</li>
+                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Audit log + SSO / SAML</li>
+                                    <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Org-level governance + visibility</li>
                                     <li className="flex items-center gap-2"><Check className="w-4 h-4 text-accent shrink-0" /> Priority support</li>
                                 </ul>
                             </motion.div>
@@ -360,9 +358,9 @@ export default function PricingClient() {
                                     </div>
                                     <div className="flex items-end gap-1 mb-1">
                                         <span className="text-4xl font-medium text-white">$0</span>
-                                        <span className="text-zinc-500 text-sm mb-1">/ forever</span>
+                                        <span className="text-zinc-500 text-sm mb-1">/ local</span>
                                     </div>
-                                    <p className="text-zinc-500 text-sm">Spec generation only.</p>
+                                    <p className="text-zinc-500 text-sm">Free local core.</p>
                                 </div>
                                 <a
                                     href="/download"
@@ -386,7 +384,7 @@ export default function PricingClient() {
                                         <span className="text-4xl font-medium text-white">${proPrice}</span>
                                         <span className="text-zinc-500 text-sm mb-1">/ mo</span>
                                     </div>
-                                    <p className="text-zinc-500 text-sm">Full pipeline execution.</p>
+                                    <p className="text-zinc-500 text-sm">Managed solo convenience.</p>
                                 </div>
                                 <StripeCTA priceId={proStripeId} label="Start Free Trial" />
                             </div>
@@ -404,7 +402,7 @@ export default function PricingClient() {
                                         <span className="text-4xl font-medium text-white">${teamPrice}</span>
                                         <span className="text-zinc-500 text-sm mb-1">/ seat / mo</span>
                                     </div>
-                                    <p className="text-zinc-500 text-sm">For engineering teams.</p>
+                                    <p className="text-zinc-500 text-sm">Shared workspaces and governance.</p>
                                 </div>
                                 <a
                                     href="mailto:hello@rorca.app?subject=Team%20plan%20inquiry"

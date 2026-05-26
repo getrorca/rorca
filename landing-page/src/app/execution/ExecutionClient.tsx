@@ -18,11 +18,12 @@ export default function ComputeClient() {
                     className="mb-20 text-center lg:text-left"
                 >
                     <h1 className="text-4xl md:text-6xl font-medium tracking-tight mb-6">
-                        Three engines. <br />
+                        CLI-native execution.
+                        <br />
                         <span className="text-zinc-500">Zero lock-in.</span>
                     </h1>
                     <p className="text-zinc-400 text-xl max-w-2xl leading-relaxed">
-                        Three first-class execution engines. Model cascading by story complexity. Wave-parallel worktrees. The same tool set regardless of provider — edit, bash, read, write, glob, grep.
+                        Rorca attaches to the CLI provider the user selected. Claude Code, OpenCode, Codex, and Pi can all drive the same spec loop, and Rorca automates execution through that provider&apos;s native tools while it handles orchestration, retrieval, and story-by-story control.
                     </p>
                 </motion.div>
 
@@ -30,8 +31,8 @@ export default function ComputeClient() {
                     {/* Floating Navigation (Left) */}
                     <div className="lg:col-span-3 hidden lg:block sticky top-32 h-fit">
                         <nav className="flex flex-col gap-4 text-sm font-medium">
-                            <a href="#engines" className="text-zinc-400 hover:text-white transition-colors">Three Execution Engines</a>
-                            <a href="#cascading" className="text-zinc-400 hover:text-white transition-colors">Model Cascading & FinOps</a>
+                            <a href="#engines" className="text-zinc-400 hover:text-white transition-colors">CLI-native execution</a>
+                            <a href="#cascading" className="text-zinc-400 hover:text-white transition-colors">Models across the workflow</a>
                             <a href="#wave-parallel" className="text-zinc-400 hover:text-white transition-colors">Wave-Parallel Execution</a>
                         </nav>
                     </div>
@@ -39,16 +40,16 @@ export default function ComputeClient() {
                     {/* Main Content (Right) */}
                     <div className="lg:col-span-9 space-y-32">
 
-                        {/* Section: Three Execution Engines */}
+                        {/* Section: CLI-native execution */}
                         <section id="engines" className="scroll-mt-32">
                             <div className="flex items-center gap-3 mb-6">
                                 <Cpu className="text-fizz w-6 h-6" />
-                                <h2 className="text-2xl font-medium">Three Execution Engines</h2>
+                                <h2 className="text-2xl font-medium">CLI-native Execution</h2>
                             </div>
                             <p className="text-zinc-400 text-lg mb-8 leading-relaxed">
-                                Every story runs as a fresh isolated subprocess with the full tool set. No context limits. The engine is the same; the model behind it is your choice. Bring your Claude subscription, an API key, or your ChatGPT plan.
+                                Every story runs through the CLI provider the user selected. Rorca doesn’t replace Claude Code, OpenCode, Codex, or Pi — it attaches to them, then loops through the spec using that provider’s own tools, prompts, approvals, and subprocess model while Rorca manages orchestration and feedback.
                             </p>
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 {/* Claude */}
                                 <div className="p-6 bg-zinc-900 border border-white/10 rounded-xl flex flex-col">
                                     <div className="flex items-center gap-2 mb-3">
@@ -77,7 +78,7 @@ export default function ComputeClient() {
                                     <div className="text-xs font-mono text-zinc-600 mb-4">opencode run</div>
                                     <ul className="text-sm text-zinc-400 space-y-2 flex-1">
                                         <li>API key · 75+ models</li>
-                                        <li>Model cascading (Haiku → Opus)</li>
+                                        <li>Broad provider / model catalog</li>
                                         <li>Warm server via --attach</li>
                                         <li>Structured JSON events</li>
                                         <li>GitHub Copilot subscription</li>
@@ -95,39 +96,61 @@ export default function ComputeClient() {
                                         <li>ChatGPT Plus / Pro subscription</li>
                                         <li>Flat-rate, no per-token billing</li>
                                         <li>Direction stack via AGENTS.md</li>
-                                        <li>Same tool set, no cascading</li>
+                                        <li>Subscription-shaped execution path</li>
                                         <li>OpenAI model tier (subscription)</li>
+                                    </ul>
+                                </div>
+
+                                {/* Pi */}
+                                <div className="p-6 bg-zinc-900 border border-white/10 rounded-xl flex flex-col">
+                                    <div className="flex items-center gap-2 mb-3">
+                                        <div className="w-4 h-4 rounded bg-fizz/80 flex items-center justify-center text-[8px] font-bold text-black">P</div>
+                                        <span className="font-medium text-white text-sm">Pi CLI</span>
+                                    </div>
+                                    <div className="text-xs font-mono text-zinc-600 mb-4">pi</div>
+                                    <ul className="text-sm text-zinc-400 space-y-2 flex-1">
+                                        <li>Provider-authenticated local models</li>
+                                        <li>Pi-native execution path inside the Rorca loop</li>
+                                        <li>Model discovery via the local Pi CLI</li>
+                                        <li>Rorca manages orchestration around the Pi session</li>
+                                        <li>Separate from the Pi extension command layer</li>
                                     </ul>
                                 </div>
                             </div>
                         </section>
 
-                        {/* Section: Model Cascading & FinOps */}
+                        {/* Section: Models across the workflow */}
                         <section id="cascading" className="scroll-mt-32">
-                            <div className="flex items-center gap-3 mb-6">
+                            <div className="flex items-center gap-3 mb-4">
                                 <Zap className="text-fizz w-6 h-6" />
-                                <h2 className="text-2xl font-medium">Model Cascading & FinOps</h2>
+                                <h2 className="text-2xl font-medium">Models Across the Workflow</h2>
                             </div>
-                            <p className="text-zinc-400 text-lg mb-8 leading-relaxed">
-                                When running OpenCode, Rorca scores every story by complexity before the subprocess spawns. Simple CRUD goes to Haiku. Failures escalate up the tier automatically on non-zero exit. On average, cascading saves 40–60% vs an all-Opus baseline. The FinOps dashboard tracks realized savings per run and trend over time.
+                            <p className="text-zinc-400 text-lg mb-8 leading-relaxed max-w-4xl">
+                                Rorca no longer markets per-story model routing as the main idea. The more important truth is that different parts of the workflow can use different models for different jobs: one model for spec creation, one model for execution, and a cheaper or faster model for memory synthesis and consolidation when that makes sense.
                             </p>
-                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4">
-                                <div className="bg-zinc-900 border border-fizz/30 rounded-xl p-6 relative overflow-hidden">
-                                    <div className="absolute top-0 left-0 w-full h-1 bg-gradient-to-r from-transparent via-fizz to-transparent opacity-50" />
-                                    <h3 className="text-base font-medium text-white mb-2">Tier 1 — Haiku</h3>
-                                    <p className="text-sm text-zinc-400 mb-4">Simple CRUD, UI copy, config tweaks, low dependsOn depth.</p>
-                                    <div className="text-xs font-mono text-zinc-500 bg-black/40 px-3 py-2 rounded">Non-zero exit → Sonnet</div>
+                            <div className="grid grid-cols-1 md:grid-cols-3 gap-4 mb-5">
+                                <div className="bg-zinc-900 border border-white/10 rounded-xl p-6">
+                                    <div className="text-xs uppercase tracking-[0.2em] text-zinc-500 mb-3">Create</div>
+                                    <h3 className="text-base font-medium text-white mb-2">Spec creation</h3>
+                                    <p className="text-sm text-zinc-400 mb-5">Spec generation, enrich, and skill-matching flows can resolve a model appropriate for drafting and planning work.</p>
+                                    <div className="text-xs font-mono text-zinc-500 bg-black/40 px-3 py-2 rounded">planning / drafting focus</div>
                                 </div>
                                 <div className="bg-zinc-900 border border-zinc-700 rounded-xl p-6">
-                                    <h3 className="text-base font-medium text-white mb-2">Tier 2 — Sonnet</h3>
-                                    <p className="text-sm text-zinc-400 mb-4">Standard features, business logic, moderate file count.</p>
-                                    <div className="text-xs font-mono text-zinc-500 bg-black/40 px-3 py-2 rounded">Non-zero exit → Opus</div>
+                                    <div className="text-xs uppercase tracking-[0.2em] text-zinc-500 mb-3">Execute</div>
+                                    <h3 className="text-base font-medium text-white mb-2">Run execution</h3>
+                                    <p className="text-sm text-zinc-400 mb-5">Approved stories run through the selected CLI provider and its configured execution model. That model stays consistent for the active execution run unless the operator changes it.</p>
+                                    <div className="text-xs font-mono text-zinc-500 bg-black/40 px-3 py-2 rounded">provider-selected runtime model</div>
                                 </div>
                                 <div className="bg-zinc-900/50 border border-zinc-800 rounded-xl p-6">
-                                    <h3 className="text-base font-medium text-white mb-2">Tier 3 — Opus</h3>
-                                    <p className="text-sm text-zinc-400 mb-4">Architecture, security, payments, high dependency depth.</p>
-                                    <div className="text-xs font-mono text-zinc-500 bg-black/40 px-3 py-2 rounded border border-red-500/20 text-red-400">Non-zero exit → story_failed</div>
+                                    <div className="text-xs uppercase tracking-[0.2em] text-zinc-500 mb-3">Learn</div>
+                                    <h3 className="text-base font-medium text-white mb-2">Memory synthesis</h3>
+                                    <p className="text-sm text-zinc-400 mb-5">Memory extraction and consolidation can use a cheaper or faster synthesis model because the job is summarization, not primary execution.</p>
+                                    <div className="text-xs font-mono text-zinc-500 bg-black/40 px-3 py-2 rounded">cheap / fast synthesis path</div>
                                 </div>
+                            </div>
+                            <div className="flex items-start gap-3 p-4 bg-zinc-900/30 border border-white/5 rounded-xl">
+                                <div className="w-2 h-2 rounded-full bg-fizz mt-1.5 flex-shrink-0" />
+                                <p className="text-sm text-zinc-400">The important distinction is phase-specific model choice, not automatic per-story provider-specific routing. Rorca keeps the spec loop stable while different parts of the workflow can optimize for planning, execution, or consolidation.</p>
                             </div>
                         </section>
 

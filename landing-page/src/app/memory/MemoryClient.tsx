@@ -109,7 +109,7 @@ export default function EngineClient() {
                             <div className="bg-zinc-950 border border-white/10 rounded-2xl overflow-hidden p-6 relative">
                                 <div className="absolute inset-0 bg-gradient-to-br from-accent/5 to-transparent pointer-events-none" />
                                 <div className="relative font-mono text-sm leading-relaxed">
-                                    <div className="text-zinc-600 mb-3 text-xs">// .rorca/config.json — routing table</div>
+                                    <div className="text-zinc-600 mb-3 text-xs">{'// .rorca/config.json — routing table'}</div>
                                     <div className="text-zinc-300 space-y-2">
                                         <div>
                                             {'{'} <span className="text-fizz">&quot;match&quot;</span>: <span className="text-blue-300">&quot;src/**/*.tsx&quot;</span>,{' '}
@@ -126,7 +126,7 @@ export default function EngineClient() {
                                         <div className="text-zinc-600">
                                             {'{'} <span className="text-zinc-500">&quot;match&quot;</span>: <span className="text-zinc-500">&quot;**&quot;</span>,{' '}
                                             <span className="text-zinc-500">&quot;priority&quot;</span>: <span className="text-zinc-500">101</span>,{' '}
-                                            <span className="text-zinc-500">&quot;inject&quot;</span>: [<span className="text-zinc-500">&quot;logging-fundamentals.md&quot;</span>] {'}'} <span className="text-zinc-700">// global, always injected</span>
+                                            <span className="text-zinc-500">&quot;inject&quot;</span>: [<span className="text-zinc-500">&quot;logging-fundamentals.md&quot;</span>] {'}'} <span className="text-zinc-700">{'// global, always injected'}</span>
                                         </div>
                                     </div>
                                 </div>

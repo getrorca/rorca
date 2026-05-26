@@ -3,7 +3,7 @@
 import { motion } from 'framer-motion';
 import { Nav } from '@/components/Nav';
 import { Footer } from '@/components/Footer';
-import { Layers, GitPullRequest, Radio, Terminal } from 'lucide-react';
+import { Layers, GitPullRequest, Radio, Terminal, ArrowRight } from 'lucide-react';
 
 export default function ArchitectureClient() {
     return (
@@ -20,7 +20,7 @@ export default function ArchitectureClient() {
                         How Rorca is <span className="text-accent">built</span>.
                     </h1>
                     <p className="text-zinc-400 text-xl max-w-2xl leading-relaxed">
-                        A spec-driven pipeline backed by PostgreSQL 16, a 5-layer context cascade, Apache AGE knowledge graph, and real-time WAL event telemetry.
+                        A spec-driven pipeline backed by PostgreSQL 16, a 5-layer context cascade, Apache AGE knowledge graph, skill-first MCP tools, and real-time WAL event telemetry.
                     </p>
                 </motion.div>
 
@@ -31,7 +31,7 @@ export default function ArchitectureClient() {
                             <a href="#direction-stack" className="text-zinc-400 hover:text-white transition-colors">Direction Stack</a>
                             <a href="#github-integration" className="text-zinc-400 hover:text-white transition-colors">GitHub Integration</a>
                             <a href="#observability" className="text-zinc-400 hover:text-white transition-colors">Real-time Observability</a>
-                            <a href="#mcp" className="text-zinc-400 hover:text-white transition-colors">MCP Interface</a>
+                            <a href="#mcp" className="text-zinc-400 hover:text-white transition-colors">Skill-first MCP</a>
                         </nav>
                     </div>
 
@@ -137,38 +137,53 @@ export default function ArchitectureClient() {
                             </div>
                         </section>
 
-                        {/* Section: MCP Interface */}
+                        {/* Section: Skill-first MCP */}
                         <section id="mcp" className="scroll-mt-32">
                             <div className="flex items-center gap-3 mb-6">
                                 <Terminal className="text-accent w-6 h-6" />
-                                <h2 className="text-2xl font-medium">MCP Interface</h2>
+                                <h2 className="text-2xl font-medium">Skill-first MCP Control Plane</h2>
                             </div>
                             <p className="text-zinc-400 text-lg mb-8 leading-relaxed">
-                                Rorca exposes a Model Context Protocol server alongside the Express API. Once registered, any Claude session can generate specs, approve them, trigger runs, and monitor progress — entirely through natural language. The MCP tools are designed to sit on top of Claude Code, not work against it. They extend your current session rather than replacing it.
+                                Rorca exposes a Model Context Protocol server alongside the Express API, but the important thing is the contract: the reliable path is to draft locally or in-skill, then persist explicitly through <code className="text-zinc-300 font-mono text-sm">rorca_create_spec</code> → <code className="text-zinc-300 font-mono text-sm">POST /api/specs/persist</code>. That keeps the caller in control and makes the spec creation path portable across Claude Code, Pi, OpenCode, Codex, and custom MCP clients.
                             </p>
-                            <div className="bg-zinc-950 border border-white/10 rounded-2xl p-6 mb-8">
-                                <div className="text-xs font-mono text-zinc-600 mb-3">// Register once — available in every Claude session</div>
-                                <pre className="text-sm font-mono text-zinc-300 overflow-x-auto">{`claude mcp add rorca -- npx tsx /path/to/rorca/backend/src/mcp/server.ts`}</pre>
-                            </div>
-
-                            {/* Prompt cache tandem callout */}
-                            <div className="flex items-start gap-4 p-5 bg-zinc-900/50 border border-accent/20 rounded-xl mb-8">
-                                <div className="w-2 h-2 rounded-full bg-accent mt-1.5 flex-shrink-0" />
-                                <div>
-                                    <p className="text-sm font-medium text-zinc-200 mb-1">Works with your session&apos;s prompt cache</p>
-                                    <p className="text-sm text-zinc-400 leading-relaxed">When you&apos;re already coding in Claude Code, your codebase, CLAUDE.md, and context are all warm in the prompt cache. Calling <code className="font-mono text-zinc-300 text-xs">rorca_generate_spec</code> from within that same session means the spec is generated with everything already loaded — no cold start, no redundant context extraction. The spec reflects exactly what you&apos;re working on right now.</p>
+                            <div className="grid grid-cols-1 md:grid-cols-2 gap-4 mb-8">
+                                <div className="bg-zinc-950 border border-white/10 rounded-2xl p-6">
+                                    <div className="text-xs font-mono text-zinc-600 mb-3">{'// Canonical create-spec path'}</div>
+                                    <div className="space-y-2 text-sm font-mono text-zinc-300">
+                                        <div><span className="text-fizz">1.</span> skill / caller drafts the spec</div>
+                                        <div><span className="text-fizz">2.</span> Rorca validates + normalizes it</div>
+                                        <div><span className="text-fizz">3.</span> persist via <code>rorca_create_spec</code></div>
+                                        <div><span className="text-fizz">4.</span> enrich / match-skills / synthesize memory</div>
+                                    </div>
+                                </div>
+                                <div className="bg-zinc-950 border border-white/10 rounded-2xl p-6">
+                                    <div className="text-xs font-mono text-zinc-600 mb-3">{'// Skill role'}</div>
+                                    <div className="space-y-3 text-sm text-zinc-400 leading-relaxed">
+                                        <p>Skills are planners, judges, and operators — they help draft, critique, and choose context.</p>
+                                        <p>They are not the low-level storage or retrieval layer. The backend still owns retrieval, ranking, and telemetry.</p>
+                                    </div>
                                 </div>
                             </div>
 
-                            <p className="text-sm text-zinc-500 mb-6">A typical workflow — from coding session to running spec:</p>
+                            <div className="flex items-start gap-4 p-5 bg-zinc-900/50 border border-accent/20 rounded-xl mb-8">
+                                <div className="w-2 h-2 rounded-full bg-accent mt-1.5 flex-shrink-0" />
+                                <div>
+                                    <p className="text-sm font-medium text-zinc-200 mb-1">Compatible with Claude Code, Pi, and MCP-capable clients</p>
+                                    <p className="text-sm text-zinc-400 leading-relaxed">
+                                        The explicit create-spec flow works because the caller keeps the draft in its own context, then hands a finished spec to Rorca. That is why the architecture is reliable across clients instead of depending on prompt guessing.
+                                    </p>
+                                </div>
+                            </div>
+
+                            <p className="text-sm text-zinc-500 mb-6">Typical flow when a developer wants to create a spec from a session:</p>
                             <div className="space-y-3 mb-8">
                                 {[
-                                    { tool: 'rorca_generate_spec', prompt: '"Add a dark mode toggle to the settings panel"', result: 'Generates user stories with acceptance criteria, dependency graph, and model assignments — using your current session context.' },
-                                    { tool: 'rorca_list_specs', prompt: 'Check what specs are pending', result: 'Returns pending, approved, and running specs grouped by status.' },
-                                    { tool: 'rorca_approve_spec', prompt: '"Looks good, approve it"', result: 'Moves spec to the approved queue. Returns spec ID.' },
-                                    { tool: 'rorca_trigger_run', prompt: '"Run it"', result: 'Spawns the pipeline. Returns run ID and queue position in ~200ms.' },
-                                    { tool: 'rorca_pipeline_status', prompt: '"How\'s it going?"', result: 'Returns per-story pass/fail/skip counts, elapsed time, and last log line.' },
-                                    { tool: 'rorca_get_memories', prompt: '"What did we learn?"', result: 'Returns memories synthesized from the run — Architecture, Convention, Gotcha entries.' },
+                                    { tool: 'rorca_create_spec', prompt: '"Create a spec for a dark mode toggle"', result: 'Persists an explicit drafted spec. This is the canonical cross-client path.' },
+                                    { tool: 'rorca_persist_spec', prompt: 'Compatibility alias', result: 'Same persisted-draft behavior for older clients and scripts.' },
+                                    { tool: 'rorca_generate_spec', prompt: 'Fallback only', result: 'Backend-generated drafting when you intentionally want Rorca to write the spec.' },
+                                    { tool: 'rorca_list_specs', prompt: 'Check pending work', result: 'Returns specs grouped by status.' },
+                                    { tool: 'rorca_approve_spec', prompt: 'Approve the draft', result: 'Moves the spec to the approved queue.' },
+                                    { tool: 'rorca_pipeline_status', prompt: 'Ask how it is going', result: 'Returns run status, elapsed time, and per-story progress.' },
                                 ].map((step) => (
                                     <div key={step.tool} className="p-4 bg-zinc-900/50 border border-white/5 rounded-xl">
                                         <div className="flex flex-wrap items-center gap-3 mb-2">
@@ -180,20 +195,18 @@ export default function ArchitectureClient() {
                                 ))}
                             </div>
 
-                            {/* Slash commands */}
                             <div className="mb-6">
-                                <p className="text-sm text-zinc-500 mb-4">Slash commands are also available for common operations — no MCP tool call overhead:</p>
-                                <div className="grid grid-cols-2 md:grid-cols-3 gap-2">
+                                <p className="text-sm text-zinc-500 mb-4">Pi and Claude Code also have dedicated skill-first entrypoints:</p>
+                                <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                                     {[
-                                        '/generate-spec',
-                                        '/approve-spec',
-                                        '/run-spec',
-                                        '/pipeline-status',
-                                        '/list-specs',
-                                        '/save-memory',
+                                        '/rorca-create-spec',
+                                        '/skill:rorca-forge',
+                                        '/rorca-forge (legacy fallback)',
+                                        '/rorca-forge-run (legacy fallback)',
                                     ].map((cmd) => (
-                                        <div key={cmd} className="px-3 py-2 bg-zinc-950 border border-white/5 rounded-lg">
+                                        <div key={cmd} className="px-3 py-2 bg-zinc-950 border border-white/5 rounded-lg flex items-center justify-between gap-2">
                                             <span className="text-xs font-mono text-fizz">{cmd}</span>
+                                            <ArrowRight className="w-3 h-3 text-zinc-600 shrink-0" />
                                         </div>
                                     ))}
                                 </div>
@@ -201,7 +214,7 @@ export default function ArchitectureClient() {
 
                             <div className="flex items-start gap-3 p-4 bg-zinc-900/30 border border-white/5 rounded-xl">
                                 <div className="w-2 h-2 rounded-full bg-accent mt-1.5 flex-shrink-0" />
-                                <p className="text-sm text-zinc-400">24 tools total covering specs, pipeline, direction stack, workspaces, stories, and memory. Auto-generated from the same OpenAPI spec that powers the REST API — no version skew, always up to date.</p>
+                                <p className="text-sm text-zinc-400">The backend still owns retrieval, ranking, telemetry, and memory synthesis. MCP and skills are the control surface, not the storage layer.</p>
                             </div>
                         </section>
 

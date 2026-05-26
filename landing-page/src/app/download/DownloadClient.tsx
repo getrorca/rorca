@@ -140,17 +140,34 @@ export default function DownloadClient() {
   const [hasReleases, setHasReleases] = useState<boolean | null>(null);
 
   useEffect(() => {
-    setDetected(detectPlatform());
+    let cancelled = false;
+    const controller = new AbortController();
+
+    Promise.resolve().then(() => {
+      if (!cancelled) {
+        setDetected(detectPlatform());
+      }
+    });
 
     fetch('https://api.github.com/repos/getrorca/rorca/releases/latest', {
       headers: { Accept: 'application/vnd.github+json' },
+      signal: controller.signal,
     })
       .then((r) => {
-        setHasReleases(r.ok);
+        if (!cancelled) {
+          setHasReleases(r.ok);
+        }
       })
-      .catch(() => {
-        setHasReleases(false);
+      .catch((error: Error) => {
+        if (!cancelled && error.name !== 'AbortError') {
+          setHasReleases(false);
+        }
       });
+
+    return () => {
+      cancelled = true;
+      controller.abort();
+    };
   }, []);
 
   const handleCopy = () => {
@@ -177,13 +194,13 @@ export default function DownloadClient() {
         >
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/10 bg-white/5 text-xs font-medium text-zinc-400 mb-6">
             <span className="w-1.5 h-1.5 rounded-full bg-emerald-400 animate-pulse" />
-            Self-hosted · No cloud required
+            Self-hosted · CLI + TUI · No cloud required
           </div>
           <h1 className="text-4xl md:text-6xl font-medium tracking-tight mb-5">
             Download Rorca
           </h1>
           <p className="text-zinc-400 text-xl max-w-2xl mx-auto leading-relaxed">
-            A single binary. Postgres auto-provisioned. Dashboard ready in under 30 seconds.
+            A single binary with a local CLI and embedded TUI. Postgres auto-provisioned. Dashboard ready in under 30 seconds.
           </p>
         </motion.div>
 
