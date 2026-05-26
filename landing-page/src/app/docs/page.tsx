@@ -6,7 +6,7 @@ import { docsNav } from '@/lib/docs-nav';
 
 export const metadata: Metadata = buildMetadata({
   title: 'Docs',
-  description: 'Start here for install, explicit spec creation, architecture, memory, execution, and packaging guidance.',
+  description: 'Start here for the true beginner setup path, then go deeper into spec creation, execution, memory, CLI, TUI, and Pi workflows.',
   path: '/docs',
   ogImage: `${SITE_URL}/og/home.png`,
 });
@@ -23,23 +23,23 @@ export default function DocsPage() {
           Docs for the real Rorca product.
         </h1>
         <p className="text-zinc-400 text-lg md:text-xl leading-relaxed max-w-2xl">
-          Local-first setup, explicit spec creation, backend-native retrieval, provider-selected execution, a single tools reference, and the pricing shape that preserves open-source trust.
+          Start with the true beginner guide first, then go deeper into spec creation, providers and models, skills, execution, memory, and the operator surfaces.
         </p>
       </div>
 
       <div className="flex flex-col sm:flex-row gap-3 mb-8">
-        <Link href="/download" className="inline-flex items-center justify-center gap-2 px-5 py-3 bg-white text-zinc-950 rounded-lg font-medium hover:bg-zinc-200 transition-colors">
+        <Link href="/docs/getting-started" className="inline-flex items-center justify-center gap-2 px-5 py-3 bg-white text-zinc-950 rounded-lg font-medium hover:bg-zinc-200 transition-colors">
+          Start the beginner guide
+          <ArrowRight className="w-4 h-4" />
+        </Link>
+        <Link href="/download" className="inline-flex items-center justify-center gap-2 px-5 py-3 border border-white/10 text-white rounded-lg font-medium hover:bg-white/5 transition-colors">
           <Download className="w-4 h-4" />
           Install Rorca
         </Link>
-        <a href="https://github.com/getrorca/rorca#readme" target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 px-5 py-3 border border-white/10 text-white rounded-lg font-medium hover:bg-white/5 transition-colors">
+        <a href="https://github.com/getrorca/rorca#readme" target="_blank" rel="noreferrer" className="inline-flex items-center justify-center gap-2 px-5 py-3 border border-white/10 text-zinc-300 rounded-lg font-medium hover:bg-white/5 transition-colors">
           <Github className="w-4 h-4" />
           View README
         </a>
-        <Link href="/docs/spec-creation" className="inline-flex items-center justify-center gap-2 px-5 py-3 border border-white/10 text-zinc-300 rounded-lg font-medium hover:bg-white/5 transition-colors">
-          Explicit create-spec flow
-          <ArrowRight className="w-4 h-4" />
-        </Link>
       </div>
 
       <div className="flex flex-wrap gap-2 mb-12 text-xs text-zinc-400">
@@ -48,29 +48,41 @@ export default function DocsPage() {
         <span className="inline-flex items-center rounded-full border border-white/8 bg-black/20 px-3 py-1">Pi CLI = provider-authenticated</span>
       </div>
 
+      <section className="rounded-2xl border border-cyan-500/20 bg-cyan-500/10 p-6 mb-8">
+        <p className="text-sm uppercase tracking-[0.24em] text-zinc-500 mb-4">New to Rorca?</p>
+        <h2 className="text-2xl font-medium mb-3">Read the beginner guide before choosing a surface.</h2>
+        <p className="text-zinc-300 leading-relaxed mb-4 max-w-3xl">
+          If you do not yet understand workspaces, providers, models, skills, specs, story selection, and runs, start with the dashboard-first guide. It explains how to get from a local repo to a real first execution without assuming you already think in Rorca concepts.
+        </p>
+        <Link href="/docs/getting-started" className="inline-flex items-center gap-2 px-4 py-2 rounded-lg bg-white text-zinc-950 font-medium hover:bg-zinc-200 transition-colors">
+          Open the getting started guide
+          <ArrowRight className="w-4 h-4" />
+        </Link>
+      </section>
+
       <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-12">
         <p className="text-sm uppercase tracking-[0.24em] text-zinc-500 mb-4">Start here by surface</p>
         <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
-          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+          <Link href="/docs/cli" className="rounded-xl border border-white/10 bg-black/20 p-4 hover:border-zinc-700 transition-colors">
             <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">CLI</div>
             <div className="text-white font-medium mb-2">Local setup and orchestration</div>
-            <p className="text-zinc-400 leading-relaxed">Use <code className="text-zinc-300">rorca start</code>, <code className="text-zinc-300">rorca tui</code>, <code className="text-zinc-300">rorca forge</code>, and <code className="text-zinc-300">rorca run</code> for local operator work.</p>
-          </div>
-          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+            <p className="text-zinc-400 leading-relaxed">Use <code className="text-zinc-300">rorca start</code>, <code className="text-zinc-300">rorca forge</code>, <code className="text-zinc-300">rorca run</code>, <code className="text-zinc-300">rorca attach</code>, and the execution-engine flags from the dedicated CLI guide.</p>
+          </Link>
+          <Link href="/docs/tui" className="rounded-xl border border-white/10 bg-black/20 p-4 hover:border-zinc-700 transition-colors">
             <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">TUI</div>
-            <div className="text-white font-medium mb-2">Board, watch, workspace</div>
-            <p className="text-zinc-400 leading-relaxed">Open the embedded terminal UI with <code className="text-zinc-300">rorca tui</code>, then use <code className="text-zinc-300">w</code>, <code className="text-zinc-300">s</code>, <code className="text-zinc-300">Tab</code>, and <code className="text-zinc-300">Esc</code>.</p>
-          </div>
+            <div className="text-white font-medium mb-2">Board, watch, model picker, workspace</div>
+            <p className="text-zinc-400 leading-relaxed">Open the embedded terminal UI with <code className="text-zinc-300">rorca tui</code>, then learn board mode, live streams, agent/model switching, recall, and story editing from the dedicated TUI guide.</p>
+          </Link>
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
             <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">MCP</div>
             <div className="text-white font-medium mb-2">Explicit tool contract</div>
             <p className="text-zinc-400 leading-relaxed">Use <code className="text-zinc-300">rorca_create_spec</code>, <code className="text-zinc-300">rorca_get_context</code>, and <code className="text-zinc-300">rorca_pipeline_status</code> when a client or skill should call Rorca directly.</p>
           </div>
-          <div className="rounded-xl border border-white/10 bg-black/20 p-4">
+          <Link href="/docs/pi-extension" className="rounded-xl border border-white/10 bg-black/20 p-4 hover:border-zinc-700 transition-colors">
             <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Pi extension</div>
             <div className="text-white font-medium mb-2">Pi-native slash commands</div>
-            <p className="text-zinc-400 leading-relaxed">Install with <code className="text-zinc-300">rorca pi install</code>, then inside Pi start with <code className="text-zinc-300">/rorca-help</code>. If Pi was already open, run <code className="text-zinc-300">/reload</code>.</p>
-          </div>
+            <p className="text-zinc-400 leading-relaxed">Install with <code className="text-zinc-300">rorca pi install</code>, then use <code className="text-zinc-300">/rorca-run</code>, <code className="text-zinc-300">/rorca-watch</code>, <code className="text-zinc-300">/rorca-retry</code>, and the extension guide for the full Pi-native operator flow.</p>
+          </Link>
         </div>
       </section>
 
@@ -120,7 +132,10 @@ export default function DocsPage() {
           <Link href="/architecture" className="block hover:text-white transition-colors">/architecture — control-plane overview</Link>
           <Link href="/memory" className="block hover:text-white transition-colors">/memory — retrieval and graph story</Link>
           <Link href="/execution" className="block hover:text-white transition-colors">/execution — provider-selected runtime story</Link>
-          <Link href="/docs/tools" className="block hover:text-white transition-colors">/docs/tools — CLI, TUI, MCP, and Pi extension reference</Link>
+          <Link href="/docs/cli" className="block hover:text-white transition-colors">/docs/cli — standalone CLI deep guide</Link>
+          <Link href="/docs/tui" className="block hover:text-white transition-colors">/docs/tui — embedded TUI deep guide</Link>
+          <Link href="/docs/pi-extension" className="block hover:text-white transition-colors">/docs/pi-extension — Pi extension deep guide</Link>
+          <Link href="/docs/tools" className="block hover:text-white transition-colors">/docs/tools — reference index across all operator surfaces</Link>
           <Link href="/pricing" className="block hover:text-white transition-colors">/pricing — public packaging surface</Link>
         </div>
       </section>
