@@ -3,7 +3,6 @@ import { readFileSync } from 'fs';
 import { resolve } from 'path';
 import { Nav } from '@/components/Nav';
 import { Footer } from '@/components/Footer';
-import { motion } from 'framer-motion';
 
 interface ChangelogEntry {
   version: string;
@@ -145,29 +144,22 @@ export default function ChangelogPage() {
 
       <div className="pt-32 pb-20 px-6 sm:px-12 mx-auto max-w-4xl w-full flex-1">
         {/* Header */}
-        <motion.div
-          initial={{ opacity: 0, y: 20 }}
-          animate={{ opacity: 1, y: 0 }}
-          className="mb-20 text-center"
-        >
+        <div className="mb-20 text-center">
           <h1 className="text-4xl md:text-6xl font-medium tracking-tight mb-6">
             Release <span className="text-accent">Notes</span>.
           </h1>
           <p className="text-zinc-400 text-lg leading-relaxed">
             Track updates, improvements, and fixes to Rorca.
           </p>
-        </motion.div>
+        </div>
 
         {/* Changelog Entries */}
         {entries.length > 0 ? (
           <div className="space-y-12">
             {entries.map((entry, index) => (
-              <motion.section
+              <section
                 key={entry.dateSlug}
                 id={entry.dateSlug}
-                initial={{ opacity: 0, y: 20 }}
-                animate={{ opacity: 1, y: 0 }}
-                transition={{ delay: index * 0.1 }}
                 className="scroll-mt-32 border-l-2 border-accent/30 pl-6 md:pl-8"
               >
                 {/* Version Header */}
@@ -225,7 +217,7 @@ export default function ChangelogPage() {
                     }
                   )}
                 </div>
-              </motion.section>
+              </section>
             ))}
           </div>
         ) : (
