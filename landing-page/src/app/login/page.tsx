@@ -6,6 +6,7 @@ import { motion } from 'framer-motion';
 import { Nav } from '@/components/Nav';
 import { Footer } from '@/components/Footer';
 import { trackAuthComplete } from '@/lib/analytics';
+import { buildApiUrl } from '@/lib/api-base';
 
 const GITHUB_CLIENT_ID = process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID;
 
@@ -63,7 +64,7 @@ export default function LoginPage() {
         setErrors({});
         setIsLoading(true);
         try {
-            const res = await fetch('http://localhost:3030/api/auth/login', {
+            const res = await fetch(buildApiUrl('/api/auth/login'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ email, password }),

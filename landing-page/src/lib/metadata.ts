@@ -4,19 +4,14 @@ export const SITE_NAME = 'Rorca';
 
 /**
  * Base URL for constructing absolute OG image URLs.
- * Falls back to localhost for local dev if NEXT_PUBLIC_BASE_URL is not set.
+ * Falls back to the public site URL when a dedicated base URL is not set.
  */
 function resolveBaseUrl(): string {
-  const envUrl = process.env.NEXT_PUBLIC_BASE_URL;
-  if (!envUrl) {
-    if (typeof process !== 'undefined' && process.env.NODE_ENV !== 'test') {
-      console.warn(
-        '[rorca] NEXT_PUBLIC_BASE_URL is not set — OG image URLs will use http://localhost:3002 prefix'
-      );
-    }
-    return 'http://localhost:3002';
-  }
-  return envUrl;
+  return (
+    process.env.NEXT_PUBLIC_BASE_URL?.trim() ||
+    process.env.NEXT_PUBLIC_SITE_URL?.trim() ||
+    'https://rorca.app'
+  );
 }
 
 export const SITE_URL = process.env.NEXT_PUBLIC_SITE_URL || 'https://rorca.app';
@@ -104,44 +99,44 @@ export function buildMetadata(page: PageMetadata): Metadata {
 
 export const PAGES_METADATA: Record<string, PageMetadata> = {
   home: {
-    title: 'AI Spec Orchestration. Ship features autonomously.',
+    title: 'Spec-first AI orchestration. Ship features autonomously.',
     description:
-      'Rorca turns a plain-English brief into a structured spec, then executes every story as an isolated subprocess — no context limits, runs to completion.',
+      'Rorca turns a brief into a structured spec, persists explicit drafts, and executes stories with backend-native retrieval, telemetry, and feedback.',
     path: '/',
     ogKey: 'home',
   },
   architecture: {
     title: 'Architecture',
     description:
-      'How Rorca orchestrates AI agents: Direction Stack (L1–L5 context cascade), spec lifecycle, pipeline execution, and the three agent paths.',
+      'How Rorca layers the Direction Stack, explicit spec persistence, retrieval, and execution into one control plane.',
     path: '/architecture',
     ogKey: 'architecture',
   },
   execution: {
     title: 'Execution',
     description:
-      'Three first-class execution engines — Claude Code, OpenCode, Codex CLI. Model cascading saves 40–60% vs all-Opus. Wave-parallel runs independent stories concurrently across isolated git worktrees.',
+      'How Rorca runs approved work story by story across Claude Code, OpenCode, Codex, and Pi CLI through one orchestration contract.',
     path: '/execution',
     ogKey: 'execution',
   },
   download: {
     title: 'Download',
     description:
-      'Download Rorca for macOS or Linux. Self-hosted, one-command install. Bring your own Claude subscription or API key.',
+      'Install Rorca locally with one command. Self-hosted, Postgres-ready, and built for dashboard, backend, and worker workflows.',
     path: '/download',
     ogKey: 'download',
   },
   memory: {
     title: 'Memory',
     description:
-      'How Rorca remembers and applies knowledge: tiered memory retrieval (CAG→RAG→Graph), virtual context routing via micromatch globs, and LLM-matched skills injection per story.',
+      'How Rorca combines cached context, retrieval, graph links, and feedback to keep context relevant.',
     path: '/memory',
     ogKey: 'memory',
   },
   pricing: {
     title: 'Pricing',
     description:
-      'Free for spec generation. $15/mo for full pipeline execution. $30/mo for unlimited workspaces and teams. Self-hosted is free forever.',
+      'Free local Rorca, plus managed, shared, and governed deployment options as the product expands.',
     path: '/pricing',
     ogKey: 'pricing',
   },

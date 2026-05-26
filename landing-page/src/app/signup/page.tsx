@@ -6,6 +6,7 @@ import { motion } from 'framer-motion';
 import { Nav } from '@/components/Nav';
 import { Footer } from '@/components/Footer';
 import { trackAuthComplete } from '@/lib/analytics';
+import { buildApiUrl } from '@/lib/api-base';
 
 const GITHUB_CLIENT_ID = process.env.NEXT_PUBLIC_GITHUB_CLIENT_ID;
 
@@ -66,7 +67,7 @@ export default function SignupPage() {
         setErrors({});
         setIsLoading(true);
         try {
-            const res = await fetch('http://localhost:3030/api/auth/register', {
+            const res = await fetch(buildApiUrl('/api/auth/register'), {
                 method: 'POST',
                 headers: { 'Content-Type': 'application/json' },
                 body: JSON.stringify({ name, email, password }),

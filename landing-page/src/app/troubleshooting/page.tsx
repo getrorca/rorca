@@ -286,7 +286,7 @@ export default function TroubleshootingPage() {
         >
           <div className="inline-flex items-center gap-2 px-3 py-1 rounded-full border border-white/10 bg-white/5 text-xs font-medium text-zinc-400 mb-6">
             <HelpCircle className="w-3.5 h-3.5" />
-            Having trouble? We're here to help.
+            Having trouble? We&apos;re here to help.
           </div>
           <h1 className="text-4xl md:text-5xl font-medium tracking-tight mb-5">
             Installation Troubleshooting
@@ -404,7 +404,7 @@ export default function TroubleshootingPage() {
         >
           <h2 className="text-xl font-medium mb-4">Still not working?</h2>
           <p className="text-zinc-400 text-sm mb-6 max-w-xl mx-auto leading-relaxed">
-            If your issue isn't listed above or the fix didn't work, we're here to help. Open an issue on GitHub with your error message and we'll get back to you quickly.
+            If your issue isn&apos;t listed above or the fix didn&apos;t work, we&apos;re here to help. Open an issue on GitHub with your error message and we&apos;ll get back to you quickly.
           </p>
           <a
             href="https://github.com/getrorca/rorca/issues"
