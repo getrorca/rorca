@@ -4,7 +4,7 @@ import { buildMetadata, SITE_URL } from '@/lib/metadata';
 
 export const metadata: Metadata = buildMetadata({
   title: 'Tools & commands',
-  description: 'A newcomer-friendly reference for the Rorca CLI, embedded TUI, MCP tools, and Pi extension slash commands.',
+  description: 'Reference index for the Rorca CLI, embedded TUI, MCP tools, and Pi extension, with links into the dense operator guides.',
   path: '/docs/tools',
   ogImage: `${SITE_URL}/og/home.png`,
 });
@@ -80,11 +80,11 @@ const piCommands = [
   { cmd: '/rorca-help', desc: 'Print the extension command list.' },
   { cmd: '/rorca-create-spec <brief|@file> [--workspace <id>] [--approve] [--run] [--queue] [--model <model>]', desc: 'Preferred skill-first create-spec command.' },
   { cmd: '/rorca-approve <spec-slug> [--workspace <id>]', desc: 'Approve a spec.' },
-  { cmd: '/rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--no-watch]', desc: 'Trigger an approved spec with Pi.' },
+  { cmd: '/rorca-run <spec-slug> [--workspace <id>] [--story <id>] [--queue] [--model <model>] [--sequential] [--no-watch]', desc: 'Trigger an approved spec with Pi.' },
   { cmd: '/rorca-status [runId|workspaceId] [--workspace <id>]', desc: 'Inspect one run or recent runs.' },
   { cmd: '/rorca-watch [runId]', desc: 'Watch the latest or specified run.' },
   { cmd: '/rorca-attach [runId]', desc: 'Alias for /rorca-watch.' },
-  { cmd: '/rorca-retry <runId> [storyId...] [--no-watch]', desc: 'Retry failed stories in a run.' },
+  { cmd: '/rorca-retry <runId> [storyId...] [--sequential] [--no-watch]', desc: 'Retry failed stories in a run.' },
   { cmd: '/rorca-mcp-status', desc: 'Check MCP bridge status.' },
 ];
 
@@ -108,11 +108,29 @@ export default function DocsToolsPage() {
         <p className="text-xs uppercase tracking-[0.24em] text-zinc-500 mb-4">Reference</p>
         <h1 className="text-4xl md:text-5xl font-medium tracking-tight mb-4">Tools & commands</h1>
         <p className="text-zinc-400 text-lg leading-relaxed max-w-3xl">
-          One page for newcomers who want the full surface area: the Rorca CLI, the embedded TUI, the MCP tool inventory after the skills refactor, and the Pi extension install + slash-command flow.
+          This page is the cross-surface index. Use it to find the command names quickly, then jump into the dedicated in-depth guides for the CLI, embedded TUI, and Pi extension when you need the full operator story.
         </p>
       </div>
 
       <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-8">
+        <h2 className="text-2xl font-medium mb-4">Read these deep guides next</h2>
+        <div className="grid gap-4 md:grid-cols-3 mb-8">
+          <Link href="/docs/cli" className="rounded-xl border border-white/10 bg-black/20 p-4 hover:border-zinc-700 transition-colors">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">CLI</div>
+            <div className="text-white font-medium mb-2">Standalone operator guide</div>
+            <p className="text-zinc-400 leading-relaxed">Flags, engine examples, sequential mode, forge/run patterns, attach, doctor, auth, MCP, and DB helpers.</p>
+          </Link>
+          <Link href="/docs/tui" className="rounded-xl border border-white/10 bg-black/20 p-4 hover:border-zinc-700 transition-colors">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">TUI</div>
+            <div className="text-white font-medium mb-2">Embedded control-room guide</div>
+            <p className="text-zinc-400 leading-relaxed">Board mode, live substreams, model picker, recall, and story editing in the terminal UI.</p>
+          </Link>
+          <Link href="/docs/pi-extension" className="rounded-xl border border-white/10 bg-black/20 p-4 hover:border-zinc-700 transition-colors">
+            <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Pi extension</div>
+            <div className="text-white font-medium mb-2">Pi-native slash-command guide</div>
+            <p className="text-zinc-400 leading-relaxed">Install, reload, run, retry, watch, status, sequential mode, and Pi-specific execution caveats.</p>
+          </Link>
+        </div>
         <h2 className="text-2xl font-medium mb-4">Which surface should I use?</h2>
         <div className="grid gap-4 md:grid-cols-2">
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
@@ -178,7 +196,8 @@ export default function DocsToolsPage() {
             <pre className="overflow-x-auto text-sm text-zinc-200 leading-relaxed"><code>{`rorca start
 rorca tui
 rorca forge "Add a docs-only story"
-rorca run zz-my-spec`}</code></pre>
+rorca run zz-my-spec --agent codex --model gpt-5.4
+rorca run zz-my-spec --story US-001 --sequential`}</code></pre>
           </div>
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
             <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">TUI</div>
@@ -197,6 +216,7 @@ stories: [...]`}</code></pre>
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
             <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Pi extension</div>
             <pre className="overflow-x-auto text-sm text-zinc-200 leading-relaxed"><code>{`/rorca-create-spec @brief.md --workspace rorca --approve --run
+/rorca-run zz-my-spec --workspace rorca --story US-001 --sequential
 /rorca-watch
 /rorca-status`}</code></pre>
           </div>
