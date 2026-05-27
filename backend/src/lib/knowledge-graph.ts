@@ -548,17 +548,34 @@ export async function queryRelated(
   edgeTypes?: EdgeType[],
 ): Promise<CypherResult[]> {
   if (!(await isGraphAvailable())) return [];
-  // Build the relationship pattern
-  const edgeFilter = edgeTypes && edgeTypes.length > 0
-    ? `:${edgeTypes.join('|')}`
-    : '';
+
+  // Apache AGE accepts variable-length single-type traversals like
+  // [:DEPENDS_ON*1..2] but rejects Neo4j-style alternation such as
+  // [:DEPENDS_ON|TOUCHES*1..2]. When multiple edge types are requested,
+  // fan out into one query per type and merge the results in memory.
+  if (edgeTypes && edgeTypes.length > 1) {
+    const results = await Promise.all(
+      edgeTypes.map((edgeType) => queryRelated(nodeType, nodeId, depth, [edgeType])),
+    );
+    const deduped = new Map<string, CypherResult>();
+    for (const resultSet of results) {
+      for (const row of resultSet) {
+        const key = `${row.label}:${String(row.id)}:${JSON.stringify(row.properties)}`;
+        if (!deduped.has(key)) deduped.set(key, row);
+      }
+    }
+    return [...deduped.values()];
+  }
 
   // Determine the ID property name based on node type
   const idProp = nodeType === 'File' ? 'path' : nodeType === 'Convention' || nodeType === 'Skill' ? 'name' : 'id';
+  const edgeFilter = edgeTypes && edgeTypes.length === 1
+    ? `:${edgeTypes[0]}`
+    : '';
 
   const cypher = `
     MATCH (start:${nodeType} {${idProp}: '${escCypher(nodeId)}'})
-          -[${edgeFilter} *1..${depth}]-
+          -[${edgeFilter}*1..${depth}]-
           (related)
     RETURN DISTINCT related
   `;
@@ -579,7 +596,7 @@ export async function queryRelated(
       };
     });
   } catch (err) {
-    logger.error({ err, nodeType, nodeId }, '[knowledge-graph] queryRelated failed');
+    logger.error({ err, nodeType, nodeId, edgeTypes }, '[knowledge-graph] queryRelated failed');
     return [];
   }
 }
