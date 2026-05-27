@@ -143,6 +143,21 @@ interface McpToolDefinition {
   capturedOperation: OpenAPIOperation;
 }
 
+export interface PublishedMcpTool {
+  name: string;
+  description: string;
+  category: string;
+  inputSchema: Record<string, unknown>;
+  requiredParams: string[];
+}
+
+interface McpFriendlyAlias {
+  toolName: string;
+  description: string;
+  method: string;
+  path: string;
+}
+
 interface McpHttpServerOptions {
   resolveSessionTier?: (sessionId: string | undefined) => McpTier | undefined;
   getSessionRemoteAddr?: (sessionId: string | undefined) => string | undefined;
@@ -333,13 +348,14 @@ function openApiTypeToZod(prop: OpenAPIPropertySchema, required: boolean): z.Zod
   return schema;
 }
 
-function buildZodInputShape(
-  operation: OpenAPIOperation,
-): Record<string, z.ZodType> {
-  const shape: Record<string, z.ZodType> = {};
+function collectInputSchemaParts(operation: OpenAPIOperation): {
+  properties: Record<string, OpenAPIPropertySchema>;
+  requiredParams: string[];
+} {
+  const properties: Record<string, OpenAPIPropertySchema> = {};
+  const requiredParams = new Set<string>();
   const requiredBodyFields = new Set<string>();
 
-  // Collect required body fields
   const jsonContent = operation.requestBody?.content?.['application/json'];
   if (jsonContent?.schema?.required) {
     for (const r of jsonContent.schema.required) {
@@ -347,41 +363,230 @@ function buildZodInputShape(
     }
   }
 
-  // Path and query parameters
   if (operation.parameters) {
     for (const param of operation.parameters) {
       if (param.in === 'header' || param.in === 'cookie') continue;
 
-      const propSchema: OpenAPIPropertySchema = {
+      properties[param.name] = {
         type: param.schema?.type || 'string',
         description: param.description || param.schema?.description,
         enum: param.schema?.enum,
         items: param.schema?.items,
       };
 
-      // workspaceId is auto-injected by executeApiCall when missing — mark optional
-      // in MCP schema so the SDK doesn't reject calls without it.
-      const isRequired = param.name === 'workspaceId' ? false : param.required === true;
-      shape[param.name] = openApiTypeToZod(propSchema, isRequired);
+      if (param.required === true && param.name !== 'workspaceId') {
+        requiredParams.add(param.name);
+      }
     }
   }
 
-  // Request body properties
   if (jsonContent?.schema?.properties) {
     for (const [propName, propSchema] of Object.entries(jsonContent.schema.properties)) {
-      shape[propName] = openApiTypeToZod(propSchema, requiredBodyFields.has(propName));
+      properties[propName] = {
+        type: propSchema.type,
+        description: propSchema.description,
+        enum: propSchema.enum,
+        default: propSchema.default,
+        format: propSchema.format,
+        nullable: propSchema.nullable,
+        items: propSchema.items,
+        minimum: propSchema.minimum,
+        maximum: propSchema.maximum,
+      };
+      if (requiredBodyFields.has(propName)) {
+        requiredParams.add(propName);
+      }
     }
   }
 
-  // multipart/form-data
   const formContent = operation.requestBody?.content?.['multipart/form-data'];
   if (formContent?.schema?.properties) {
     for (const [propName, propSchema] of Object.entries(formContent.schema.properties)) {
-      shape[propName] = openApiTypeToZod(propSchema, false);
+      properties[propName] = {
+        type: propSchema.type,
+        description: propSchema.description,
+        enum: propSchema.enum,
+        default: propSchema.default,
+        format: propSchema.format,
+        nullable: propSchema.nullable,
+        items: propSchema.items,
+        minimum: propSchema.minimum,
+        maximum: propSchema.maximum,
+      };
     }
   }
 
+  return {
+    properties,
+    requiredParams: Array.from(requiredParams),
+  };
+}
+
+function buildZodInputShape(
+  operation: OpenAPIOperation,
+): Record<string, z.ZodType> {
+  const shape: Record<string, z.ZodType> = {};
+  const { properties, requiredParams } = collectInputSchemaParts(operation);
+  const requiredSet = new Set(requiredParams);
+
+  for (const [propName, propSchema] of Object.entries(properties)) {
+    shape[propName] = openApiTypeToZod(propSchema, requiredSet.has(propName));
+  }
+
   return shape;
+}
+
+function inferMcpToolCategory(definition: Pick<McpToolDefinition, 'capturedPath' | 'capturedOperation'>): string {
+  const firstTag = definition.capturedOperation.tags?.[0]?.trim();
+  if (firstTag) {
+    const lower = firstTag.toLowerCase();
+    if (lower === 'pipeline' || lower === 'specs') return 'Specs & Pipeline';
+    if (lower === 'direction') return 'Direction Stack';
+    if (lower === 'memory' || lower === 'recall') return 'Memory';
+    if (lower === 'workspace' || lower === 'workspaces') return 'Workspaces';
+    return firstTag;
+  }
+
+  if (definition.capturedPath.startsWith('/api/specs') || definition.capturedPath.startsWith('/api/pipeline')) return 'Specs & Pipeline';
+  if (definition.capturedPath.startsWith('/api/direction')) return 'Direction Stack';
+  if (definition.capturedPath.startsWith('/api/workspaces')) return 'Workspaces';
+  if (definition.capturedPath.startsWith('/api/memory') || definition.capturedPath.startsWith('/api/recall')) return 'Memory';
+
+  const segment = definition.capturedPath.replace(/^\/api\//, '').split('/')[0] || 'Other';
+  return segment
+    .split('-')
+    .map((part) => part.charAt(0).toUpperCase() + part.slice(1))
+    .join(' ');
+}
+
+export const MCP_FRIENDLY_ALIASES: readonly McpFriendlyAlias[] = [
+  {
+    toolName: 'rorca_get_context',
+    description: 'Friendly alias for direction-stack synthesis when a caller needs project context before drafting.',
+    method: 'POST',
+    path: '/api/direction/synthesize',
+  },
+  {
+    toolName: 'rorca_generate_spec',
+    description: 'Friendly alias for legacy/fallback brief-to-spec generation where Rorca does the drafting.',
+    method: 'POST',
+    path: '/api/specs/generate',
+  },
+  {
+    toolName: 'rorca_create_spec',
+    description: 'Canonical explicit spec-creation alias: create a Rorca spec from caller-drafted content via backend validation and persistence.',
+    method: 'POST',
+    path: '/api/specs/persist',
+  },
+  {
+    toolName: 'rorca_persist_spec',
+    description: 'Compatibility alias for explicit spec persistence; prefer rorca_create_spec as the cross-client command/tool name.',
+    method: 'POST',
+    path: '/api/specs/persist',
+  },
+  {
+    toolName: 'rorca_list_specs',
+    description: 'Friendly alias for listing specs in a workspace.',
+    method: 'GET',
+    path: '/api/specs',
+  },
+  {
+    toolName: 'rorca_approve_spec',
+    description: 'Friendly alias for approving a pending spec.',
+    method: 'POST',
+    path: '/api/specs/{specId}/approve',
+  },
+  {
+    toolName: 'rorca_pipeline_status',
+    description: 'Friendly alias for listing recent pipeline runs and their current status.',
+    method: 'GET',
+    path: '/api/pipeline/runs',
+  },
+  {
+    toolName: 'rorca_edit_story',
+    description: 'Friendly alias for editing a single story inside a spec.',
+    method: 'PATCH',
+    path: '/api/specs/{specId}/stories/{storyId}',
+  },
+  {
+    toolName: 'rorca_search_stories',
+    description: 'Friendly alias for cross-spec story search.',
+    method: 'GET',
+    path: '/api/specs/search-stories',
+  },
+  {
+    toolName: 'rorca_add_stories',
+    description: 'Friendly alias for appending generated stories to a spec.',
+    method: 'POST',
+    path: '/api/specs/{specId}/add-stories',
+  },
+  {
+    toolName: 'rorca_delete_story',
+    description: 'Friendly alias for deleting a story from a spec.',
+    method: 'DELETE',
+    path: '/api/specs/{specId}/stories/{storyId}',
+  },
+  {
+    toolName: 'rorca_enrich_spec',
+    description: 'Legacy alias for spec enrichment via the async spec-job bridge.',
+    method: 'POST',
+    path: '/api/specs/{specId}/enrich',
+  },
+  {
+    toolName: 'rorca_match_skills',
+    description: 'Legacy alias for spec skill matching via the async spec-job bridge.',
+    method: 'POST',
+    path: '/api/specs/{specId}/match-skills',
+  },
+  {
+    toolName: 'rorca_suggest_skills',
+    description: 'Legacy alias for spec skill suggestions via the async spec-job bridge.',
+    method: 'POST',
+    path: '/api/specs/{specId}/suggest-skills',
+  },
+  {
+    toolName: 'rorca_save_memory',
+    description: 'Friendly alias for saving a memory entry to the workspace ledger.',
+    method: 'POST',
+    path: '/api/memory',
+  },
+  {
+    toolName: 'rorca_get_memories',
+    description: 'Friendly alias for browsing paginated memory entries for a workspace.',
+    method: 'GET',
+    path: '/api/memory/items',
+  },
+] as const;
+
+export function getPublishedMcpTools(spec: OpenAPISpec): PublishedMcpTool[] {
+  const definitions = getMcpToolDefinitions(spec);
+  const tools: PublishedMcpTool[] = definitions.map((definition) => {
+    const { properties, requiredParams } = collectInputSchemaParts(definition.capturedOperation);
+    return {
+      name: definition.toolName,
+      description: definition.description,
+      category: inferMcpToolCategory(definition),
+      inputSchema: properties,
+      requiredParams,
+    };
+  });
+
+  const definitionByRoute = new Map(definitions.map((definition) => [`${definition.capturedMethod} ${definition.capturedPath}`, definition]));
+  for (const alias of MCP_FRIENDLY_ALIASES) {
+    const definition = definitionByRoute.get(`${alias.method} ${alias.path}`);
+    if (!definition) continue;
+
+    const { properties, requiredParams } = collectInputSchemaParts(definition.capturedOperation);
+    tools.push({
+      name: alias.toolName,
+      description: alias.description,
+      category: inferMcpToolCategory(definition),
+      inputSchema: properties,
+      requiredParams,
+    });
+  }
+
+  return tools;
 }
 
 // ─── Route filtering ────────────────────────────────────────────────────────
@@ -761,95 +966,9 @@ export function createMcpHttpServer(spec: OpenAPISpec, options: McpHttpServerOpt
   }
 
   const definitionByRoute = new Map(definitions.map((definition) => [`${definition.capturedMethod} ${definition.capturedPath}`, definition]));
-  const legacyAliases = [
-    {
-      toolName: 'rorca_get_context',
-      description: 'Friendly alias for direction-stack synthesis when a caller needs project context before drafting.',
-      method: 'POST',
-      path: '/api/direction/synthesize',
-    },
-    {
-      toolName: 'rorca_generate_spec',
-      description: 'Friendly alias for legacy/fallback brief-to-spec generation where Rorca does the drafting.',
-      method: 'POST',
-      path: '/api/specs/generate',
-    },
-    {
-      toolName: 'rorca_create_spec',
-      description: 'Canonical explicit spec-creation alias: create a Rorca spec from caller-drafted content via backend validation and persistence.',
-      method: 'POST',
-      path: '/api/specs/persist',
-    },
-    {
-      toolName: 'rorca_persist_spec',
-      description: 'Compatibility alias for explicit spec persistence; prefer rorca_create_spec as the cross-client command/tool name.',
-      method: 'POST',
-      path: '/api/specs/persist',
-    },
-    {
-      toolName: 'rorca_list_specs',
-      description: 'Friendly alias for listing specs in a workspace.',
-      method: 'GET',
-      path: '/api/specs',
-    },
-    {
-      toolName: 'rorca_approve_spec',
-      description: 'Friendly alias for approving a pending spec.',
-      method: 'POST',
-      path: '/api/specs/{specId}/approve',
-    },
-    {
-      toolName: 'rorca_pipeline_status',
-      description: 'Friendly alias for listing recent pipeline runs and their current status.',
-      method: 'GET',
-      path: '/api/pipeline/runs',
-    },
-    {
-      toolName: 'rorca_edit_story',
-      description: 'Friendly alias for editing a single story inside a spec.',
-      method: 'PATCH',
-      path: '/api/specs/{specId}/stories/{storyId}',
-    },
-    {
-      toolName: 'rorca_search_stories',
-      description: 'Friendly alias for cross-spec story search.',
-      method: 'GET',
-      path: '/api/specs/search-stories',
-    },
-    {
-      toolName: 'rorca_add_stories',
-      description: 'Friendly alias for appending generated stories to a spec.',
-      method: 'POST',
-      path: '/api/specs/{specId}/add-stories',
-    },
-    {
-      toolName: 'rorca_delete_story',
-      description: 'Friendly alias for deleting a story from a spec.',
-      method: 'DELETE',
-      path: '/api/specs/{specId}/stories/{storyId}',
-    },
-    {
-      toolName: 'rorca_enrich_spec',
-      description: 'Legacy alias for spec enrichment via the async spec-job bridge.',
-      method: 'POST',
-      path: '/api/specs/{specId}/enrich',
-    },
-    {
-      toolName: 'rorca_match_skills',
-      description: 'Legacy alias for spec skill matching via the async spec-job bridge.',
-      method: 'POST',
-      path: '/api/specs/{specId}/match-skills',
-    },
-    {
-      toolName: 'rorca_suggest_skills',
-      description: 'Legacy alias for spec skill suggestions via the async spec-job bridge.',
-      method: 'POST',
-      path: '/api/specs/{specId}/suggest-skills',
-    },
-  ] as const;
 
   let aliasCount = 0;
-  for (const alias of legacyAliases) {
+  for (const alias of MCP_FRIENDLY_ALIASES) {
     const definition = definitionByRoute.get(`${alias.method} ${alias.path}`);
     if (definition) {
       registerDefinition(definition, {
