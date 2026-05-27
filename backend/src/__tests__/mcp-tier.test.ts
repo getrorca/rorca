@@ -96,7 +96,7 @@ describe('MCP tier exposure', () => {
     ]);
   });
 
-  it('enforces admin tier again inside tool dispatch', async () => {
+  it('enforces admin tier again inside tool dispatch for admin MCP overrides while allowing public tools', async () => {
     const spec = {
       paths: {
         '/api/specs': {
@@ -106,22 +106,12 @@ describe('MCP tier exposure', () => {
             parameters: [],
           },
         },
-        '/api/pipeline/trigger': {
-          post: {
-            summary: 'Trigger run',
-            'x-rorca-tier': 'public',
-            requestBody: {
-              content: {
-                'application/json': {
-                  schema: {
-                    type: 'object',
-                    properties: {
-                      specId: { type: 'string' },
-                    },
-                  },
-                },
-              },
-            },
+        '/api/admin/mcp-audit': {
+          get: {
+            summary: 'List MCP audit entries',
+            'x-rorca-tier': 'admin',
+            'x-mcp-tier': 'admin',
+            parameters: [],
           },
         },
       },
@@ -143,7 +133,7 @@ describe('MCP tier exposure', () => {
     const publicResult = await publicTools.rorca_specs.handler({}, { sessionId: 'public-session', requestId: '1' });
     expect(publicResult.isError).toBeUndefined();
 
-    const deniedResult = await publicTools.rorca_pipeline_trigger.handler({ specId: 'spec-1' }, { sessionId: 'public-session', requestId: '2' });
+    const deniedResult = await publicTools.rorca_admin_mcp_audit.handler({}, { sessionId: 'public-session', requestId: '2' });
     expect(deniedResult.isError).toBe(true);
     expect(deniedResult.content[0].text).toContain('requires admin tier');
 
@@ -151,7 +141,7 @@ describe('MCP tier exposure', () => {
       resolveSessionTier: () => 'admin',
     });
     const adminTools = (adminServer as any)._registeredTools as Record<string, { handler: Function }>;
-    const adminResult = await adminTools.rorca_pipeline_trigger.handler({ specId: 'spec-1' }, { sessionId: 'admin-session', requestId: '3' });
+    const adminResult = await adminTools.rorca_admin_mcp_audit.handler({}, { sessionId: 'admin-session', requestId: '3' });
     expect(adminResult.isError).toBeUndefined();
   });
 
@@ -191,8 +181,8 @@ describe('MCP tier exposure', () => {
         ok: true,
         status: 202,
         headers: { get: () => 'application/json' },
-        json: async () => ({ jobId: 'job-123', status: 'pending' }),
-        text: async () => '{"jobId":"job-123","status":"pending"}',
+        json: async () => ({ jobId: 'job-123', pollUrl: '/api/spec-jobs/job-123', status: 'pending' }),
+        text: async () => '{"jobId":"job-123","pollUrl":"/api/spec-jobs/job-123","status":"pending"}',
       })
       .mockResolvedValueOnce({
         ok: true,
@@ -301,8 +291,8 @@ describe('MCP tier exposure', () => {
         ok: true,
         status: 202,
         headers: { get: () => 'application/json' },
-        json: async () => ({ jobId: 'job-456', status: 'pending' }),
-        text: async () => '{"jobId":"job-456","status":"pending"}',
+        json: async () => ({ jobId: 'job-456', pollUrl: '/api/spec-jobs/job-456', status: 'pending' }),
+        text: async () => '{"jobId":"job-456","pollUrl":"/api/spec-jobs/job-456","status":"pending"}',
       })
       .mockResolvedValueOnce({
         ok: true,

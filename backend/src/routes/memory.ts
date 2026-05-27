@@ -132,6 +132,9 @@ async function emitMemoryCreatedWalEvent(params: {
  *   get:
  *     tags: [Memory]
  *     summary: List memory entries for a workspace
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only workspace memory listing is a safe local automation surface for CLI and MCP callers."
+ *     x-rorca-public-api: true
  *     operationId: listMemoryEntries
  *     description: Returns structured memory ledger entries from MEMORY.md for a workspace. Can filter by category or return the N most recent entries.
  *     parameters:
@@ -209,6 +212,9 @@ router.get('/', async (req: Request, res: Response) => {
  *   post:
  *     tags: [Memory]
  *     summary: Append a new memory entry
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Saving local project memory is a core open-source workflow with no billing or admin side effects."
+ *     x-rorca-public-api: true
  *     operationId: createMemoryEntry
  *     description: Appends a new structured entry to the workspace MEMORY.md ledger file with the current date.
  *     requestBody:
@@ -890,6 +896,9 @@ router.get('/rejected', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Memory]
  *     summary: Get memory context snippet for agent prompt injection
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Memory context snippets are read-only project intelligence used by local agents and MCP clients."
+ *     x-rorca-public-api: true
  *     operationId: getMemoryContextSnippet
  *     description: Generates a formatted context snippet from recent memory entries suitable for injection into agent prompts. Returns a compact markdown section with token estimate.
  *     parameters:
@@ -931,6 +940,9 @@ router.get('/context', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Memory]
  *     summary: List available memory categories
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Memory category discovery is read-only schema metadata for local automation and MCP callers."
+ *     x-rorca-public-api: true
  *     operationId: listMemoryCategories
  *     description: Returns the list of valid memory entry categories that can be used when creating or filtering entries.
  *     responses:
@@ -1344,6 +1356,9 @@ router.post('/deduplicate', async (req: Request, res: Response) => {
  *   get:
  *     tags: [Memory]
  *     summary: Paginated memory list — use for browsing, filtering, or "show me the last N memories"
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Paginated workspace memory browsing is a safe read-only surface for CLI and MCP workflows."
+ *     x-rorca-public-api: true
  *     description: >
  *       USE THIS for paginated listing ("show last 50 memories", "list all Architecture memories", "memories from run #42").
  *       Returns memories sorted by pinned-first then newest, with category/confidence/run filters.

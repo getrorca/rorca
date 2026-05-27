@@ -46,6 +46,8 @@ describe('MCP server integration', () => {
       expect(toolNames).toContain('rorca_edit_story');
       expect(toolNames).toContain('rorca_add_stories');
       expect(toolNames).toContain('rorca_delete_story');
+      expect(toolNames).toContain('rorca_save_memory');
+      expect(toolNames).toContain('rorca_get_memories');
       done();
     }, 6000);
   }, 15000);
