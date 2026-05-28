@@ -96,8 +96,8 @@ export default function LoginPage() {
   }
 
   return (
-    <div className="min-h-screen bg-gray-900 px-4 py-10 text-white">
-      <div className="mx-auto flex min-h-[calc(100vh-5rem)] max-w-sm items-center justify-center">
+    <div className="flex min-h-screen w-full items-center justify-center bg-gray-900 px-4 py-10 text-white">
+      <div className="w-full max-w-sm">
         <div className="w-full rounded-xl border border-gray-800 bg-gray-900 shadow-2xl shadow-black/30">
           <div className="px-6 pt-8 text-center">
             <RorcaLogo size={48} variant="gradient" className="mx-auto mb-3" />

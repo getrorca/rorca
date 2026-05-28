@@ -174,7 +174,7 @@ function AppRoutes() {
     );
   }
 
-  // Show login page when user is not authenticated
+  // Public auth routes
   if (!isAuthenticated) {
     if (location.pathname === '/auth/register') {
       return (
@@ -185,14 +185,19 @@ function AppRoutes() {
         </Suspense>
       );
     }
-    // Default: login page
-    return (
-      <Suspense fallback={<BoardSkeleton />}>
-        <PublicOnlyRoute>
-          <LoginPage />
-        </PublicOnlyRoute>
-      </Suspense>
-    );
+
+    if (location.pathname === '/auth/login') {
+      return (
+        <Suspense fallback={<BoardSkeleton />}>
+          <PublicOnlyRoute>
+            <LoginPage />
+          </PublicOnlyRoute>
+        </Suspense>
+      );
+    }
+
+    const returnTo = encodeURIComponent(`${location.pathname}${location.search}`);
+    return <Navigate to={`/auth/login?returnTo=${returnTo}`} replace />;
   }
 
   return (
