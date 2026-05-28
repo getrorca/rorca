@@ -66,6 +66,8 @@ interface DisplayModelOption {
   speedTier: 'fast' | 'medium' | 'slow';
   costTier: 'free' | 'low' | 'medium' | 'high' | 'premium';
   recommended: boolean;
+  available?: boolean;
+  availabilityNote?: string | null;
 }
 
 interface ModelTestResult {
@@ -375,7 +377,7 @@ export function ProviderSettingsTab() {
   }, []);
 
   return (
-    <div className="w-full">
+    <div className="w-full min-w-0">
       {/* (1) Status bar */}
       <StatusBar />
 
@@ -401,8 +403,8 @@ export function ProviderSettingsTab() {
         </div>
       </div>
 
-      {/* Section cards — space-y-4 provides visual separation, no border dividers */}
-      <div className="space-y-4 pt-4">
+      {/* Section cards — use the available width aggressively on large screens */}
+      <div className="space-y-5 pt-4">
         {/* (1) Connections Hub + Embeddings side-by-side grid */}
         <div
           ref={el => {
@@ -410,13 +412,15 @@ export function ProviderSettingsTab() {
             // 'embeddings' tab maps to this same row
             sectionRefs.current['embeddings'] = el;
           }}
-          className="grid grid-cols-1 lg:grid-cols-2 gap-4 items-start"
+          className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-start"
         >
           {/* Connections Hub card */}
-          <ConnectionsHubSection />
+          <div className="min-w-0 xl:col-span-7 2xl:col-span-8">
+            <ConnectionsHubSection />
+          </div>
 
           {/* Embeddings / Semantic Engine card */}
-          <div className="rounded-xl border border-border bg-panel p-5">
+          <div className="min-w-0 xl:col-span-5 2xl:col-span-4 rounded-xl border border-border bg-panel p-5">
             <div className="flex items-center gap-2 mb-4">
               <Database size={15} className="text-accent flex-shrink-0" />
               <span className="text-sm font-semibold text-[var(--text)]">Semantic Engine</span>
@@ -435,14 +439,16 @@ export function ProviderSettingsTab() {
           <ModelBrowserContainer />
         </div>
 
-        {/* (4) Reasoning Defaults card */}
-        <div ref={el => { sectionRefs.current['reasoning'] = el; }}>
-          <ReasoningDefaultsSection />
-        </div>
+        <div className="grid grid-cols-1 xl:grid-cols-12 gap-4 items-start">
+          {/* (4) Reasoning Defaults card */}
+          <div ref={el => { sectionRefs.current['reasoning'] = el; }} className="min-w-0 xl:col-span-8 2xl:col-span-9">
+            <ReasoningDefaultsSection />
+          </div>
 
-        {/* (6) Display card */}
-        <div ref={el => { sectionRefs.current['display'] = el; }}>
-          <DisplaySection />
+          {/* (6) Display card */}
+          <div ref={el => { sectionRefs.current['display'] = el; }} className="min-w-0 xl:col-span-4 2xl:col-span-3">
+            <DisplaySection />
+          </div>
         </div>
       </div>
     </div>
@@ -1972,14 +1978,19 @@ function ModelCard({ model, isSelected, isWorkspaceOverride, onSelect, onTest, t
 }) {
   const speed = SPEED_LABELS[model.speedTier] ?? SPEED_LABELS.medium;
   const cost = COST_LABELS[model.costTier] ?? COST_LABELS.medium;
+  const isAvailable = model.available !== false;
 
   return (
     <div
-      className={`border rounded p-3 transition-colors cursor-pointer ${isSelected
-          ? 'border-accent/60 bg-accent/5'
-          : 'border-border bg-bg hover:border-accent/30'
-        }`}
-      onClick={onSelect}
+      className={`border rounded p-3 transition-colors ${
+        !isAvailable
+          ? 'border-border bg-bg/50 opacity-60 cursor-not-allowed'
+          : isSelected
+            ? 'border-accent/60 bg-accent/5 cursor-pointer'
+            : 'border-border bg-bg hover:border-accent/30 cursor-pointer'
+      }`}
+      onClick={() => { if (isAvailable) onSelect(); }}
+      title={!isAvailable ? (model.availabilityNote ?? 'Configure this provider to use the model.') : undefined}
     >
       <div className="flex items-start justify-between gap-2">
         <div className="min-w-0 flex-1">
@@ -1996,6 +2007,11 @@ function ModelCard({ model, isSelected, isWorkspaceOverride, onSelect, onTest, t
                 Workspace
               </span>
             )}
+            {!isAvailable && (
+              <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-500/10 text-amber-400">
+                Configure provider
+              </span>
+            )}
           </div>
           <div className="flex items-center gap-3 mt-1.5 text-[11px] text-muted">
             <span title="Context window">{formatContextWindow(model.contextWindow)} ctx</span>
@@ -2004,8 +2020,8 @@ function ModelCard({ model, isSelected, isWorkspaceOverride, onSelect, onTest, t
           </div>
         </div>
         <button
-          onClick={e => { e.stopPropagation(); onTest(); }}
-          disabled={isTesting}
+          onClick={e => { e.stopPropagation(); if (isAvailable) onTest(); }}
+          disabled={isTesting || !isAvailable}
           className="flex items-center gap-1 px-2 py-1 text-[11px] border border-border rounded hover:border-accent/40 text-muted hover:text-[var(--text)] transition-colors disabled:opacity-50 shrink-0"
           title="Send a test prompt to this model"
         >
@@ -2358,7 +2374,7 @@ function ModelBrowserSection({
           </button>
         </div>
       ) : (
-        <div className="grid grid-cols-1 md:grid-cols-2 lg:grid-cols-3 gap-3 mt-4">
+        <div className="grid gap-3 mt-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 300px), 1fr))' }}>
           {filtered.map(m => (
             <ModelCard
               key={m.id}
