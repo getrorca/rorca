@@ -1087,6 +1087,10 @@ async function startPiRpcServer(
   ];
   logger.info(`[pi-rpc] Resolved Pi model selection: requested=${model ?? 'default'} provider=${piSelection.provider ?? 'default'} model=${piSelection.model ?? 'default'} extensions=${explicitExtensions.length > 0 ? explicitExtensions.join(',') : 'none'} mcp=${mcpServersSignature || 'none'}`);
   const env = buildCleanEnv();
+  if (mcpServers?.rorca) {
+    env.RORCA_PI_MCP_URL = mcpServers.rorca;
+    env.RORCA_PI_API_URL = mcpServers.rorca.replace(/\/mcp\/?$/, '');
+  }
   if (mcpServers?.playwright) env.RORCA_PI_PLAYWRIGHT_MCP_URL = mcpServers.playwright;
   if (mcpServers?.['chrome-devtools']) env.RORCA_PI_CHROME_MCP_URL = mcpServers['chrome-devtools'];
   const child = spawn(PI_BIN, args, {
@@ -1556,24 +1560,21 @@ function buildPrompt(
     ? 'AGENTS.md in the workspace root contains the Rorca direction stack with project standards and context. Follow its guidance for all implementation decisions.\n'
     : '';
 
-  // Claude agents use rorca_save_memory MCP tool — instruct them to save discoveries to DB, not MEMORY.md
-  const claudeMemoryInstruction = (!agentType || agentType === 'claude')
+  // MCP-first memory capture: save directly to Rorca when the tool is available.
+  // OpenCode/Codex retain the proposed_memories.json fallback for sessions where MCP is unavailable.
+  const memoryInstruction = (!agentType || ['claude', 'pi', 'opencode', 'codex'].includes(agentType))
     ? [
       '## Memory Instructions',
-      'When you discover something worth remembering (a bug fix, architectural decision, convention, or pattern), use the rorca_save_memory MCP tool to save it.',
-      'Do NOT edit MEMORY.md directly — it is a read-only generated file that will be overwritten before the next story.',
+      'Preferred: if the rorca_save_memory MCP tool is available in this session, use it to save discoveries directly to Rorca.',
       'Call rorca_save_memory with: category (Architecture|Convention|Bug Fix|Decision|Pattern|Gotcha), title (short summary), rule (the actionable lesson), context (why it matters), source (story ID).',
-    ].join('\n')
-    : '';
-
-  // US-005: OpenCode/Codex agents have no MCP — instruct them to write proposed memories to a JSON file
-  const nonClaudeMemoryInstruction = (agentType === 'opencode' || agentType === 'codex')
-    ? [
-      '## Memory Instructions',
-      'When you discover something worth remembering, append a JSON object to the file .rorca/proposed_memories.json in the workspace root.',
-      'The file is a JSON array. If the file does not exist, create it with [].',
-      'Each object must have: { "category": "Architecture|Convention|Bug Fix|Decision|Pattern|Gotcha", "title": "short summary", "rule": "the actionable lesson", "context": "why it matters", "source": "<storyId>" }.',
-      'Do NOT edit MEMORY.md directly — it is read-only and generated automatically.',
+      ...(agentType === 'opencode' || agentType === 'codex'
+        ? [
+          'Fallback: if rorca_save_memory is unavailable, append a JSON object to the file .rorca/proposed_memories.json in the workspace root.',
+          'The file is a JSON array. If the file does not exist, create it with [].',
+          'Each object must have: { "category": "Architecture|Convention|Bug Fix|Decision|Pattern|Gotcha", "title": "short summary", "rule": "the actionable lesson", "context": "why it matters", "source": "<storyId>" }.',
+        ]
+        : []),
+      'Do NOT edit MEMORY.md directly — it is a read-only generated file that will be overwritten before the next story.',
     ].join('\n')
     : '';
 
@@ -1626,8 +1627,7 @@ function buildPrompt(
       '- Skip running the tests — every test must actually execute and pass',
       '- Write placeholder/todo tests — all tests must have real assertions',
       personaSection,
-      claudeMemoryInstruction,
-      nonClaudeMemoryInstruction,
+      memoryInstruction,
       '', '---', '',
       `Your task (${story.id}): ${story.title}`,
       '', story.description, acSection,
@@ -1658,6 +1658,7 @@ function buildPrompt(
       '- If a target file does not need changes, move to the next listed file.',
       '- Before ending, run a minimal validation command if you changed code.',
       personaSection,
+      memoryInstruction,
       '', '---', '',
       `Task (${story.id}): ${story.title}`,
       story.description,
@@ -1686,8 +1687,7 @@ function buildPrompt(
     '4. Run the smallest useful validation commands after editing.',
     '5. If you cannot complete the task, explain the concrete blocker with file-level evidence.',
     personaSection,
-    claudeMemoryInstruction,
-    nonClaudeMemoryInstruction,
+    memoryInstruction,
     '', '---', '',
     `Your task (${story.id}):`,
     story.description,
@@ -2119,6 +2119,7 @@ function spawnOpenCode(
     const startTime = Date.now();
 
     let openCodeMcpConfigPath: string | null = null;
+    const openCodeInjectedMcpNames: string[] = [];
     if (mcpServers && Object.keys(mcpServers).length > 0) {
       openCodeMcpConfigPath = path.join(cwd, 'opencode.json');
       // Preserve any existing opencode.json content
@@ -2129,6 +2130,7 @@ function spawnOpenCode(
       const mcpEntries: Record<string, unknown> = existingConfig.mcp as Record<string, unknown> ?? {};
       for (const [name, url] of Object.entries(mcpServers)) {
         mcpEntries[name] = { type: 'remote', url, enabled: true };
+        openCodeInjectedMcpNames.push(name);
       }
       const merged = { ...existingConfig, mcp: mcpEntries };
       fs.writeFileSync(openCodeMcpConfigPath, JSON.stringify(merged, null, 2), 'utf8');
@@ -2244,7 +2246,9 @@ function spawnOpenCode(
         try {
           const current: Record<string, unknown> = JSON.parse(fs.readFileSync(openCodeMcpConfigPath, 'utf8'));
           const currentMcp = (current.mcp ?? {}) as Record<string, unknown>;
-          delete currentMcp.playwright;
+          for (const injectedName of openCodeInjectedMcpNames) {
+            delete currentMcp[injectedName];
+          }
           if (Object.keys(currentMcp).length === 0) {
             delete current.mcp;
           } else {
@@ -4306,8 +4310,11 @@ async function executeStory(
   // Rate limit retry loop
   try {
     while (true) {
-      // Build the MCP servers map — only include entries that are actually available.
-      const mcpServers: Record<string, string> = {};
+      // Build the MCP servers map.
+      // Rorca MCP is the preferred direct memory/control-plane path for agents that support remote MCP.
+      const mcpServers: Record<string, string> = {
+        rorca: `http://127.0.0.1:${config.port}/mcp`,
+      };
       if (browserMcpUrl) mcpServers['playwright'] = browserMcpUrl;
       if (chromeMcpUrl) mcpServers['chrome-devtools'] = chromeMcpUrl;
 
@@ -4668,7 +4675,7 @@ async function executeStory(
       }
 
       // US-006: Rebuild MEMORY.md from DB so it includes any memories saved during this story
-      // (via MCP tool for claude, or proposed_memories.json for opencode/codex above).
+      // (via rorca_save_memory for MCP-capable agents, or proposed_memories.json fallback for opencode/codex).
       // Called before gitCommitStory so the updated MEMORY.md is included in the story's commit.
       if (workspaceId) {
         try {

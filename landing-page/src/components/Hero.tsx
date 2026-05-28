@@ -57,7 +57,7 @@ export function Hero() {
         transition={{ duration: 0.7, delay: 0.18, ease: 'easeOut' }}
         className="mt-7 max-w-3xl rounded-2xl border border-white/10 bg-white/[0.03] px-5 py-4 text-sm sm:text-base text-zinc-300 leading-relaxed"
       >
-        Writing specs for AI-assisted development is context engineering by design: the same artifact that frames model reasoning also becomes the executable unit Rorca reviews, persists, and runs.
+        Specs are the context: they capture what the model needs to know, and they become the executable artifact Rorca can review and run.
       </motion.div>
 
       <motion.div
