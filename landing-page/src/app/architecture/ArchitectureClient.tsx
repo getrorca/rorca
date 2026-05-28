@@ -45,6 +45,21 @@ export default function ArchitectureClient() {
                     </figcaption>
                 </motion.figure>
 
+                <motion.section
+                    initial={{ opacity: 0, y: 24 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.55, delay: 0.12 }}
+                    className="mb-24 rounded-[2rem] border border-white/10 bg-zinc-950/60 p-8"
+                >
+                    <h2 className="text-2xl font-medium mb-4">How execution is isolated</h2>
+                    <p className="text-zinc-300 text-lg leading-relaxed mb-4 max-w-4xl">
+                        Rorca is the long-lived orchestrator. For each story attempt, it compiles the relevant spec context, prepares repo and dependency state, and then hands that unit of work to the selected provider CLI as a separate subprocess.
+                    </p>
+                    <p className="text-zinc-400 leading-relaxed max-w-4xl">
+                        The provider subprocess does the coding work, emits logs and exit status, and exits. Rorca keeps the pipeline state, retries, evidence, and dependency flow consistent across those subprocesses.
+                    </p>
+                </motion.section>
+
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
                     {/* Floating Navigation (Left) */}
                     <div className="lg:col-span-3 hidden lg:block sticky top-32 h-fit">

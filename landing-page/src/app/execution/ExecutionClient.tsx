@@ -49,6 +49,15 @@ export default function ComputeClient() {
                             <p className="text-zinc-400 text-lg mb-8 leading-relaxed">
                                 Every story runs through the CLI provider the user selected. Rorca doesn’t replace Claude Code, OpenCode, Codex, or Pi — it attaches to them, then loops through the spec using that provider’s own tools, prompts, approvals, and subprocess model while Rorca manages orchestration and feedback.
                             </p>
+                            <div className="mb-8 rounded-2xl border border-white/10 bg-zinc-950/60 p-6">
+                                <h3 className="text-lg font-medium text-white mb-3">What “attach to the CLI” means</h3>
+                                <p className="text-zinc-300 leading-relaxed mb-3">
+                                    Rorca is the long-lived control plane, not the thing doing the coding inside one permanent provider shell. For each story attempt, Rorca prepares story context and repo state, then spawns an isolated subprocess through the selected provider CLI.
+                                </p>
+                                <p className="text-zinc-400 leading-relaxed">
+                                    That subprocess performs the work, streams output, returns an exit result, and exits. Rorca keeps retries, dependencies, and run evidence consistent across those subprocesses.
+                                </p>
+                            </div>
                             <div className="grid grid-cols-1 md:grid-cols-2 gap-4">
                                 {/* Claude */}
                                 <div className="p-6 bg-zinc-900 border border-white/10 rounded-xl flex flex-col">
