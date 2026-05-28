@@ -95,7 +95,7 @@ export default function RegisterPage() {
   }
 
   return (
-    <div className="flex min-h-screen items-center justify-center bg-bg px-4">
+    <div className="flex min-h-screen w-full items-center justify-center bg-bg px-4 py-10">
       <div className="w-full max-w-sm">
         <div className="mb-8 flex flex-col items-center">
           <RorcaLogo size={48} variant="gradient" className="mb-3" />
