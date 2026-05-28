@@ -423,8 +423,9 @@ router.get('/models', async (req: Request, res: Response, next: NextFunction) =>
       configuredProviders.push('openai-compat');
     }
 
-    // Start with hardcoded models for non-openrouter providers
-    let models: ModelInfo[] = getModelsForProviders(configuredProviders);
+    // Show the full known catalog in the picker.
+    // Availability is annotated per model so the UI can disable providers the user has not configured yet.
+    let models: ModelInfo[] = [...ALL_MODELS];
 
     // If OpenRouter is configured, fetch live catalog from their API
     if (configuredProviders.includes('openrouter')) {
@@ -462,6 +463,9 @@ router.get('/models', async (req: Request, res: Response, next: NextFunction) =>
     res.json({
       models: models.map(info => {
         const cap = detectCapability(info.id, (info as any).metadata);
+        const available = info.providerType === 'anthropic'
+          ? configuredProviders.includes('claude-cli') || configuredProviders.includes('anthropic')
+          : configuredProviders.includes(info.providerType);
         return {
           id: info.id,
           label: info.label,
@@ -473,6 +477,14 @@ router.get('/models', async (req: Request, res: Response, next: NextFunction) =>
           speedTier: info.speedTier,
           costTier: info.costTier,
           recommended: info.id === recommendedId,
+          available,
+          availabilityNote: available
+            ? null
+            : info.providerType === 'openai-compat'
+              ? 'Configure an OpenAI-compatible provider to use this model.'
+              : info.providerType === 'openrouter'
+                ? 'Configure OpenRouter to use this model.'
+                : 'Configure an Anthropic provider to use this model.',
           supportsReasoning: cap.supportsReasoning,
           effortLevels: cap.effortLevels,
         };
