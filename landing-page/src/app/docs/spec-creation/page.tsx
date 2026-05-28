@@ -21,6 +21,25 @@ export default function DocsSpecCreationPage() {
       </div>
 
       <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-8">
+        <h2 className="text-2xl font-medium mb-4">Why spec-driven?</h2>
+        <p className="text-zinc-300 leading-relaxed mb-4">
+          The future of AI software development is likely spec-driven.
+        </p>
+        <div className="rounded-xl border border-white/10 bg-black/20 p-4 mb-5 text-zinc-200 leading-relaxed">
+          Specs are the context: they capture what the model needs to know, and they become the executable artifact Rorca can review and run.
+        </div>
+        <p className="text-zinc-400 mb-3">Some of the benefits:</p>
+        <ul className="space-y-2 text-zinc-300 leading-relaxed list-disc list-inside">
+          <li>Fewer hallucinations</li>
+          <li>Context management/engineering framework</li>
+          <li>Higher-level abstraction (managing architecture vs lines of code, most of the time)</li>
+          <li>Rapid prototyping and tooling</li>
+          <li>Automated validation</li>
+          <li>Token efficiency</li>
+        </ul>
+      </section>
+
+      <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-8">
         <h2 className="text-2xl font-medium mb-4">Canonical contract</h2>
         <div className="grid gap-4 md:grid-cols-3 text-sm">
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
