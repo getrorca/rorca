@@ -16,7 +16,6 @@ import { Github } from '../components/icons/GithubIcon';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { useGlobalToast } from '../contexts/ToastContext';
-import { createEnvVar, listEnvVars, updateEnvVar } from '../api/workspaces';
 import AgentsEditorSection from '../components/AgentsEditorSection';
 import ContextRoutingSettings from '../components/ContextRoutingSettings';
 import ContextFilesEditor from '../components/ContextFilesEditor';
@@ -38,28 +37,6 @@ interface DirectionLayers {
   l1: { content: string | null };
   l2: { content: string | null };
   l3: { content: string | null; preferredModel: string | null };
-}
-
-const TERMINAL_MAX_SESSIONS_STORAGE_KEY = 'rorca:terminal:maxSessions';
-const DEFAULT_TERMINAL_MAX_SESSIONS = 5;
-const DEFAULT_TERMINAL_IDLE_TIMEOUT_MINUTES = 30;
-
-function clampTerminalNumber(value: number, min: number, max: number): number {
-  return Math.min(max, Math.max(min, value));
-}
-
-function readStoredMaxSessions(): number {
-  try {
-    const stored = localStorage.getItem(TERMINAL_MAX_SESSIONS_STORAGE_KEY);
-    const parsed = stored ? Number.parseInt(stored, 10) : NaN;
-    if (Number.isFinite(parsed)) {
-      return clampTerminalNumber(parsed, 1, 10);
-    }
-  } catch {
-    // Ignore localStorage read errors
-  }
-
-  return DEFAULT_TERMINAL_MAX_SESSIONS;
 }
 
 interface ModelOption {
@@ -193,145 +170,6 @@ export default function WorkspaceSettingsPanel() {
 export interface WsSectionProps {
   workspaceId: string;
   showToast: (message: string, type?: 'success' | 'error' | 'warning' | 'info') => void;
-}
-
-function TerminalSettingsSection({ workspaceId, showToast }: WsSectionProps) {
-  const [loading, setLoading] = useState(true);
-  const [saving, setSaving] = useState(false);
-  const [saved, setSaved] = useState(false);
-  const [maxSessions, setMaxSessions] = useState(String(DEFAULT_TERMINAL_MAX_SESSIONS));
-  const [idleTimeoutMinutes, setIdleTimeoutMinutes] = useState(String(DEFAULT_TERMINAL_IDLE_TIMEOUT_MINUTES));
-  const [originalMaxSessions, setOriginalMaxSessions] = useState(DEFAULT_TERMINAL_MAX_SESSIONS);
-  const [originalIdleTimeoutMinutes, setOriginalIdleTimeoutMinutes] = useState(DEFAULT_TERMINAL_IDLE_TIMEOUT_MINUTES);
-
-  useEffect(() => {
-    let cancelled = false;
-
-    const loadSettings = async () => {
-      setLoading(true);
-      try {
-        const storedMaxSessions = readStoredMaxSessions();
-        const envData = await listEnvVars(workspaceId);
-        const timeoutVar = envData.envVars.find((envVar) => envVar.key === 'TERMINAL_IDLE_TIMEOUT_MINUTES');
-        const parsedTimeout = timeoutVar?.value
-          ? clampTerminalNumber(Number.parseInt(timeoutVar.value, 10), 5, 120)
-          : DEFAULT_TERMINAL_IDLE_TIMEOUT_MINUTES;
-
-        if (cancelled) return;
-
-        setOriginalMaxSessions(storedMaxSessions);
-        setMaxSessions(String(storedMaxSessions));
-        setOriginalIdleTimeoutMinutes(parsedTimeout);
-        setIdleTimeoutMinutes(String(parsedTimeout));
-      } catch {
-        if (cancelled) return;
-        const storedMaxSessions = readStoredMaxSessions();
-        setOriginalMaxSessions(storedMaxSessions);
-        setMaxSessions(String(storedMaxSessions));
-        setOriginalIdleTimeoutMinutes(DEFAULT_TERMINAL_IDLE_TIMEOUT_MINUTES);
-        setIdleTimeoutMinutes(String(DEFAULT_TERMINAL_IDLE_TIMEOUT_MINUTES));
-      } finally {
-        if (!cancelled) setLoading(false);
-      }
-    };
-
-    void loadSettings();
-    return () => {
-      cancelled = true;
-    };
-  }, [workspaceId]);
-
-  const normalizedMaxSessions = clampTerminalNumber(Number.parseInt(maxSessions, 10) || DEFAULT_TERMINAL_MAX_SESSIONS, 1, 10);
-  const normalizedIdleTimeout = clampTerminalNumber(Number.parseInt(idleTimeoutMinutes, 10) || DEFAULT_TERMINAL_IDLE_TIMEOUT_MINUTES, 5, 120);
-  const hasChanges = normalizedMaxSessions !== originalMaxSessions || normalizedIdleTimeout !== originalIdleTimeoutMinutes;
-
-  const handleSave = async () => {
-    setSaving(true);
-    setSaved(false);
-    try {
-      localStorage.setItem(TERMINAL_MAX_SESSIONS_STORAGE_KEY, String(normalizedMaxSessions));
-
-      const envData = await listEnvVars(workspaceId);
-      const existing = envData.envVars.find((envVar) => envVar.key === 'TERMINAL_IDLE_TIMEOUT_MINUTES');
-
-      if (existing) {
-        await updateEnvVar(workspaceId, 'TERMINAL_IDLE_TIMEOUT_MINUTES', {
-          value: String(normalizedIdleTimeout),
-          isSecret: existing.isSecret,
-        });
-      } else {
-        await createEnvVar(workspaceId, {
-          key: 'TERMINAL_IDLE_TIMEOUT_MINUTES',
-          value: String(normalizedIdleTimeout),
-          isSecret: false,
-        });
-      }
-
-      setOriginalMaxSessions(normalizedMaxSessions);
-      setOriginalIdleTimeoutMinutes(normalizedIdleTimeout);
-      setMaxSessions(String(normalizedMaxSessions));
-      setIdleTimeoutMinutes(String(normalizedIdleTimeout));
-      setSaved(true);
-      showToast('Terminal settings saved');
-      setTimeout(() => setSaved(false), 2000);
-    } catch (err: unknown) {
-      const message = err instanceof Error ? err.message : 'Failed to save terminal settings';
-      showToast(message, 'error');
-    } finally {
-      setSaving(false);
-    }
-  };
-
-  return (
-    <div className="rounded-lg border border-border bg-surface-50 p-4">
-      <div className="flex items-start justify-between gap-4">
-        <div>
-          <h3 className="text-[13px] font-medium text-[var(--text)]">Terminal</h3>
-          <p className="mt-1 text-[12px] text-muted">Configure concurrent terminal sessions and idle timeout.</p>
-        </div>
-        <button
-          type="button"
-          onClick={() => void handleSave()}
-          disabled={loading || saving || !hasChanges}
-          className="inline-flex items-center gap-2 rounded border border-border bg-surface-100 px-3 py-1.5 text-[12px] font-medium text-[var(--text)] transition hover:bg-surface-200 disabled:cursor-not-allowed disabled:opacity-50"
-        >
-          {saving ? <Loader2 size={14} className="animate-spin" /> : saved ? <Check size={14} /> : <Save size={14} />}
-          Save
-        </button>
-      </div>
-
-      <div className="mt-4 grid gap-4 md:grid-cols-2">
-        <div>
-          <label htmlFor="terminal-max-sessions" className="block text-[13px] font-medium text-[var(--text)]">Max concurrent sessions</label>
-          <p className="mt-1 text-[12px] text-muted">Stored in local storage and enforced by the terminal panel.</p>
-          <input
-            id="terminal-max-sessions"
-            type="number"
-            min={1}
-            max={10}
-            value={maxSessions}
-            onChange={(event) => setMaxSessions(event.target.value)}
-            disabled={loading}
-            className="mt-2 w-full border border-border rounded px-2 py-1 bg-surface-100 text-sm text-[var(--text)] outline-none focus:border-accent disabled:opacity-50"
-          />
-        </div>
-        <div>
-          <label htmlFor="terminal-idle-timeout" className="block text-[13px] font-medium text-[var(--text)]">Idle timeout (minutes)</label>
-          <p className="mt-1 text-[12px] text-muted">Saved to workspace env vars as `TERMINAL_IDLE_TIMEOUT_MINUTES`.</p>
-          <input
-            id="terminal-idle-timeout"
-            type="number"
-            min={5}
-            max={120}
-            value={idleTimeoutMinutes}
-            onChange={(event) => setIdleTimeoutMinutes(event.target.value)}
-            disabled={loading}
-            className="mt-2 w-full border border-border rounded px-2 py-1 bg-surface-100 text-sm text-[var(--text)] outline-none focus:border-accent disabled:opacity-50"
-          />
-        </div>
-      </div>
-    </div>
-  );
 }
 
 // ─── Context Section (sub-tabs: Routing | Files) ────────────────────────────
@@ -585,7 +423,6 @@ export function WsGeneralSection({ workspaceId, showToast }: WsSectionProps) {
           </div>
         </div>
       </div>
-      <TerminalSettingsSection workspaceId={workspaceId} showToast={showToast} />
     </div>
   );
 }

@@ -5,10 +5,6 @@
  * See LICENSE file in the project root for full license text.
  */
 
-jest.mock('../lib/pty-manager', () => ({
-  killSessionsForWorkspace: jest.fn(),
-}));
-
 import express from 'express';
 import request from 'supertest';
 import { Pool } from 'pg';
