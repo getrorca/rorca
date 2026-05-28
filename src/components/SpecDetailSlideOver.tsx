@@ -1251,6 +1251,67 @@ interface GenerationLog {
   enriched?: boolean;
 }
 
+export interface GenerationLogPresentation {
+  tone: 'success' | 'error';
+  title: string;
+  badgeLabel: string;
+  badgeClassName: string;
+}
+
+export function getGenerationLogPresentation(log: Pick<GenerationLog, 'status' | 'enriched'>): GenerationLogPresentation {
+  const isEnriched = !!log.enriched;
+
+  if (isEnriched) {
+    return log.status === 'completed'
+      ? {
+          tone: 'success',
+          title: 'Enrichment Succeeded',
+          badgeLabel: 'Enriched',
+          badgeClassName: 'bg-amber-500/15 text-amber-400 border border-amber-500/30',
+        }
+      : {
+          tone: 'error',
+          title: 'Enrichment Failed',
+          badgeLabel: 'Enriched',
+          badgeClassName: 'bg-amber-500/15 text-amber-400 border border-amber-500/30',
+        };
+  }
+
+  if (log.status === 'completed') {
+    return {
+      tone: 'success',
+      title: 'Generation Succeeded',
+      badgeLabel: 'Generated',
+      badgeClassName: 'bg-success/15 text-success border border-success/30',
+    };
+  }
+
+  if (log.status === 'persisted') {
+    return {
+      tone: 'success',
+      title: 'Draft Persisted',
+      badgeLabel: 'Persisted',
+      badgeClassName: 'bg-blue-500/15 text-blue-400 border border-blue-500/30',
+    };
+  }
+
+  if (log.status === 'pending_enrichment') {
+    return {
+      tone: 'success',
+      title: 'Draft Persisted · Enrichment Pending',
+      badgeLabel: 'Persisted',
+      badgeClassName: 'bg-blue-500/15 text-blue-400 border border-blue-500/30',
+    };
+  }
+
+  return {
+    tone: 'error',
+    title: 'Generation Failed',
+    badgeLabel: 'Generated',
+    badgeClassName: 'bg-success/15 text-success border border-success/30',
+  };
+}
+
 /**
  * Parse a context summary from a generation log row.
  * Priority: context_summary_json > context_summary (JSON parse).
@@ -1422,6 +1483,7 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
 
         const contextSummary = parseContextSummary(log);
         const isEnriched = !!log.enriched;
+        const presentation = getGenerationLogPresentation(log);
 
         return (
           <div key={log.id} className="border border-border rounded-lg bg-panel overflow-hidden">
@@ -1436,21 +1498,17 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
             <div className={`px-4 py-3 ${contextSummary ? 'border-t border-border/50 mt-3' : ''}`}>
               <div className="flex items-center justify-between mb-1">
                 <div className="flex items-center gap-2">
-                  {log.status === 'completed' ? (
+                  {presentation.tone === 'success' ? (
                     <CheckCircle2 size={14} className="text-success" />
                   ) : (
                     <XCircle size={14} className="text-error" />
                   )}
                   <span className="text-xs font-medium text-text">
-                    {log.status === 'completed'
-                      ? (isEnriched ? 'Enrichment Succeeded' : 'Generation Succeeded')
-                      : (isEnriched ? 'Enrichment Failed' : 'Generation Failed')}
+                    {presentation.title}
                   </span>
-                  {isEnriched ? (
-                    <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-amber-500/15 text-amber-400 border border-amber-500/30">Enriched</span>
-                  ) : (
-                    <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-success/15 text-success border border-success/30">Generated</span>
-                  )}
+                  <span className={`px-1.5 py-0.5 text-[10px] font-semibold rounded ${presentation.badgeClassName}`}>
+                    {presentation.badgeLabel}
+                  </span>
                   {i === 0 && logs.length > 1 && (
                     <span className="px-1.5 py-0.5 text-[10px] font-semibold rounded bg-accent/15 text-accent">Latest</span>
                   )}

@@ -44,17 +44,20 @@ import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
-import { requirePi, listPiModels } from './pi-detector';
+import { detectPi, requirePi, listPiModels } from './pi-detector';
 import {
-  buildPiDoneChecklist,
   buildPiProgressLogPath,
   buildPiServerSkillFiles,
   buildPiStoryPromptContext,
   ensurePiStoryProgressLog,
-  inferPiCandidateTests,
-  inferPiValidationCommands,
   recordPiStoryProgressLog,
 } from './pi-autonomous-runner';
+import {
+  buildExecutionPacketPromptSection,
+  buildNoopRecoveryPromptSection,
+  buildStoryExecutionPacket,
+  type StoryExecutionPacket,
+} from './story-execution-packet';
 import { isPiExternalOrchestrationEnabled } from './pi-execution-mode';
 import { detectCapability } from './reasoning-detector';
 import {
@@ -82,6 +85,8 @@ import {
   type RetrievalSelection as StoryRetrievalSelection,
 } from './retrieval-outcome';
 import { logger } from './logger';
+import { getCodexAuthState } from './codex-auth';
+import { getClaudeAuthState } from './claude-auth';
 import { autoSynthesizeMemory } from './auto-memory';
 import { writeMemoryMd } from './memory-projection';
 import { getDirectionLayers } from './context-cache';
@@ -329,6 +334,47 @@ interface RerouteInfo {
 }
 
 const reroutedStories = new Map<string, RerouteInfo>();
+
+function canUseEngineFallback(engine: AgentType): boolean {
+  try {
+    switch (engine) {
+      case 'codex':
+        return getCodexAuthState().connected;
+      case 'claude':
+        return getClaudeAuthState().connected;
+      case 'opencode':
+        return detectOpenCode().opencodeInstalled;
+      case 'pi':
+        return detectPi().piInstalled;
+      default:
+        return false;
+    }
+  } catch {
+    return false;
+  }
+}
+
+function resolveNoopRecoveryEngine(
+  cwd: string,
+  currentEngine: AgentType,
+  packet: StoryExecutionPacket,
+): AgentType | null {
+  const orchConfig = loadOrchestrationConfig(cwd);
+  const candidates = [
+    packet.readiness.recommendedFallbackEngine,
+    orchConfig.fallbackEngine,
+    currentEngine === 'pi' ? 'codex' as AgentType : null,
+    currentEngine === 'pi' ? 'claude' as AgentType : null,
+    currentEngine === 'pi' ? 'opencode' as AgentType : null,
+  ].filter((value, index, all): value is AgentType => Boolean(value) && all.indexOf(value) === index);
+
+  for (const candidate of candidates) {
+    if (candidate === currentEngine) continue;
+    if (canUseEngineFallback(candidate)) return candidate;
+  }
+
+  return null;
+}
 
 // ─── Constants ───────────────────────────────────────────────────────────────
 
@@ -1276,6 +1322,7 @@ async function buildPiSessionOptions(
   story: UserStory,
   workspaceId: string | null,
   mode: 'impl' | 'qa' | 'journey',
+  packet: StoryExecutionPacket,
   spec?: SpecJson,
 ): Promise<PiSessionOptions | undefined> {
   if (!workspaceId) return undefined;
@@ -1295,10 +1342,6 @@ async function buildPiSessionOptions(
   });
 
   const progressLogPath = buildPiProgressLogPath(cwd, runId, story.id);
-  const candidateFiles = extractPredictedPaths(story);
-  const candidateTests = inferPiCandidateTests(cwd, candidateFiles);
-  const validationCommands = inferPiValidationCommands(cwd, mode);
-  const doneChecklist = buildPiDoneChecklist(getAcceptance(story), mode);
 
   ensurePiStoryProgressLog(progressLogPath, {
     runId,
@@ -1306,19 +1349,23 @@ async function buildPiSessionOptions(
     storyTitle: story.title,
     acceptanceCriteria: getAcceptance(story),
     mode,
-    doneChecklist,
-    candidateFiles,
-    candidateTests,
-    validationCommands,
+    doneChecklist: packet.doneChecklist,
+    candidateFiles: packet.candidateFiles,
+    candidateTests: packet.candidateTests,
+    validationCommands: packet.validationCommands,
+    expectedArtifacts: packet.expectedArtifacts,
+    readinessWarnings: packet.readiness.warnings,
   });
 
   return {
     progressLogPath,
     directionText: directionText.trim() || undefined,
-    doneChecklist,
-    candidateFiles,
-    candidateTests,
-    validationCommands,
+    doneChecklist: packet.doneChecklist,
+    candidateFiles: packet.candidateFiles,
+    candidateTests: packet.candidateTests,
+    validationCommands: packet.validationCommands,
+    expectedArtifacts: packet.expectedArtifacts,
+    readinessWarnings: packet.readiness.warnings,
   };
 }
 
@@ -1445,19 +1492,6 @@ function extractPipelinePathMappings(story: UserStory): Array<{ originalPath: st
     if (pipelinePath) deduped.set(match, pipelinePath);
   }
   return [...deduped.entries()].map(([originalPath, pipelinePath]) => ({ originalPath, pipelinePath }));
-}
-
-function extractPredictedPaths(story: UserStory): string[] {
-  const text = [
-    story.description ?? '',
-    ...(Array.isArray(story.acceptanceCriteria) ? story.acceptanceCriteria : []),
-  ].join('\n');
-
-  const pathPattern = /(?:src|backend|frontend|lib|components|routes|hooks|panels|db|migrations|\.pi\/extensions)\/[\w\-\/\.]+\.[a-z]+/g;
-  const matches = text.match(pathPattern) ?? [];
-  const mappedPiPaths = extractPipelinePathMappings(story).map(mapping => mapping.pipelinePath);
-  // Deduplicate
-  return [...new Set([...matches, ...mappedPiPaths])];
 }
 
 function getStoryFiles(story: UserStory, agentType?: AgentType): string[] {
@@ -1684,6 +1718,8 @@ interface PiSessionOptions {
   candidateFiles?: string[];
   candidateTests?: string[];
   validationCommands?: string[];
+  expectedArtifacts?: string[];
+  readinessWarnings?: string[];
 }
 
 interface TokenUpdate {
@@ -4061,8 +4097,10 @@ async function executeStory(
   }
   const activeSkillNames = resolvedSkills.map(s => s.name);
 
+  const executionPacket = buildStoryExecutionPacket(effectiveCwd, story, mode);
+
   // PG-023: Unified retrieval for execution-time memory context + graph context + feedback binding
-  const predictedPaths = extractPredictedPaths(story);
+  const predictedPaths = executionPacket.candidateFiles;
   let retrievedMemorySection = '';
   let graphSection = '';
   let graphHits: number | undefined;
@@ -4120,7 +4158,7 @@ async function executeStory(
   }
 
   const piSessionOptions = effectiveAgent === 'pi'
-    ? await buildPiSessionOptions(config.runId, effectiveCwd, story, workspaceId, mode, spec)
+    ? await buildPiSessionOptions(config.runId, effectiveCwd, story, workspaceId, mode, executionPacket, spec)
     : undefined;
   const piServerSkillFiles = effectiveAgent === 'pi'
     ? buildPiServerSkillFiles(effectiveCwd, config.runId).skillFiles
@@ -4139,6 +4177,7 @@ async function executeStory(
     retrievedMemorySection,
     graphSection,
   );
+  promptBody += `\n\n${buildExecutionPacketPromptSection(executionPacket)}`;
 
   if (wantsBrowser && browserMcpUrl) {
     promptBody += [
@@ -4283,11 +4322,7 @@ async function executeStory(
         ? [
             prompt,
             '',
-            '## Retry instruction',
-            `A previous attempt for ${story.id} ended with zero code changes.`,
-            'This retry must not stop after reading generic docs or summarizing the task.',
-            'Read the concrete target files listed under Primary Files, then edit the necessary files in this turn.',
-            'If you truly cannot change code, report the exact blocker and the specific file or command that proved it.',
+            buildNoopRecoveryPromptSection(story.id, executionPacket, retryAttempt + 1, MAX_RETRIES),
           ].join('\n')
         : prompt;
       fs.writeFileSync(promptLogFile, attemptPrompt);
@@ -4512,6 +4547,41 @@ async function executeStory(
               remainingWork: ['Implement the required changes and rerun validation.'],
             });
 
+            const noopFallback = resolveNoopRecoveryEngine(config.cwd, effectiveAgent, executionPacket);
+            if (
+              effectiveAgent === 'pi'
+              && noChangeRetries >= 2
+              && noopFallback
+              && !reroutedStories.has(story.id)
+            ) {
+              logger.warn(`${story.id}: Pi produced no meaningful code changes twice — rerouting to ${noopFallback}`);
+              reroutedStories.set(story.id, {
+                storyId: story.id,
+                fromEngine: effectiveAgent,
+                toEngine: noopFallback,
+                reason: 'no_code_changes',
+              });
+              retryCounts.delete(story.id);
+              if (workspaceId) {
+                await emitWalEvent(config.port, 'story_rerouted', workspaceId, {
+                  run_id: config.runId,
+                  story_id: story.id,
+                  story_title: story.title,
+                  fromEngine: effectiveAgent,
+                  toEngine: noopFallback,
+                  reason: 'no_code_changes',
+                  attempt: noChangeRetries,
+                  readiness_score: executionPacket.readiness.score,
+                }, story.id);
+              }
+              return executeStory(
+                story, config, mode, playbook, logDir, workspaceId, retryCounts,
+                storyCwd, worktreeInfo, undefined, allStories,
+                noopFallback, noopFallback === 'opencode' ? config.attachAddr : null,
+                personaRegistry, waveIndex, spec,
+              );
+            }
+
             if (noChangeRetries < MAX_RETRIES) {
               logger.warn(`${story.id}: Agent exited 0 with no meaningful code changes — retrying (${noChangeRetries}/${MAX_RETRIES - 1} retries used)`);
               continue;
@@ -4618,6 +4688,41 @@ async function executeStory(
         const failureSummary = commitResult.reason === 'git_error'
           ? `Failed to verify or commit meaningful story changes: ${commitResult.message ?? 'unknown git error'}`
           : `Only runtime/metadata files changed (${commitResult.metadataFiles.join(', ') || 'none detected'}).`;
+
+        const noopFallback = resolveNoopRecoveryEngine(config.cwd, effectiveAgent, executionPacket);
+        if (
+          effectiveAgent === 'pi'
+          && noChangeRetries >= 2
+          && noopFallback
+          && !reroutedStories.has(story.id)
+        ) {
+          logger.warn(`${story.id}: Pi produced commit-stage no-op twice — rerouting to ${noopFallback}`);
+          reroutedStories.set(story.id, {
+            storyId: story.id,
+            fromEngine: effectiveAgent,
+            toEngine: noopFallback,
+            reason: failureReason,
+          });
+          retryCounts.delete(story.id);
+          if (workspaceId) {
+            await emitWalEvent(config.port, 'story_rerouted', workspaceId, {
+              run_id: config.runId,
+              story_id: story.id,
+              story_title: story.title,
+              fromEngine: effectiveAgent,
+              toEngine: noopFallback,
+              reason: failureReason,
+              attempt: noChangeRetries,
+              readiness_score: executionPacket.readiness.score,
+            }, story.id);
+          }
+          return executeStory(
+            story, config, mode, playbook, logDir, workspaceId, retryCounts,
+            storyCwd, worktreeInfo, undefined, allStories,
+            noopFallback, noopFallback === 'opencode' ? config.attachAddr : null,
+            personaRegistry, waveIndex, spec,
+          );
+        }
 
         if (noChangeRetries < MAX_RETRIES) {
           logger.warn(`${story.id}: ${failureSummary} — retrying (${noChangeRetries}/${MAX_RETRIES - 1} retries used)`);

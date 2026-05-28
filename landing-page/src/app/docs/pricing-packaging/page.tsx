@@ -54,7 +54,7 @@ export default function DocsPricingPackagingPage() {
       </div>
 
       <section className="rounded-2xl border border-emerald-500/20 bg-emerald-500/10 p-6 mb-10 text-zinc-200 leading-relaxed">
-        Do not gate local UI, CLI, TUI, local execution, or local retrieval behind weak paywalls. That is the adoption wedge and the trust boundary.
+        The local core is designed to be useful on its own: dashboard, CLI/TUI, local MCP, provider attachment, local execution, and local retrieval remain available for single-user local workflows. Paid tiers focus on managed infrastructure, shared workspaces, governance, and enterprise controls.
       </section>
 
       <div className="flex flex-wrap gap-3">
