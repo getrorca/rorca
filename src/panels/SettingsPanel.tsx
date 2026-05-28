@@ -118,6 +118,7 @@ function TabLoader() {
 
 export default function SettingsPanel() {
   const activeTab = useActiveSettingsTab();
+  const isWideLayoutTab = activeTab === 'providers';
 
   return (
     <div
@@ -125,7 +126,7 @@ export default function SettingsPanel() {
       className="h-full flex flex-col overflow-y-auto"
     >
       <h1 className="sr-only">Settings</h1>
-      <div className="p-4 sm:p-6 mx-auto w-full max-w-4xl">
+      <div className={`p-4 sm:p-6 w-full ${isWideLayoutTab ? 'max-w-none' : 'mx-auto max-w-4xl'}`}>
         <Suspense fallback={<TabLoader />}>
           {/* Workspace group */}
           {activeTab === 'general' && <DirectionSettings.WsGeneralSection />}
