@@ -125,6 +125,9 @@ pi --no-extensions -e ./packages/rorca-pi-extension/extensions/rorca/index.ts`}<
           <div className="rounded-xl border border-white/10 bg-black/20 p-4"><div className="text-white font-medium mb-2">Pi CLI</div><p className="text-zinc-400 leading-relaxed">One execution runtime provider that Rorca can use for stories.</p></div>
           <div className="rounded-xl border border-white/10 bg-black/20 p-4"><div className="text-white font-medium mb-2">Rorca backend</div><p className="text-zinc-400 leading-relaxed">Owns spec persistence, pipeline state, retry logic, runs, watch state, and MCP bridge operations.</p></div>
         </div>
+        <div className="mt-4 rounded-xl border border-amber-500/20 bg-amber-500/10 p-4 text-sm text-zinc-200 leading-relaxed">
+          Important execution truth: the Pi extension is not the long-lived worker itself. When you trigger a run, Rorca schedules story work, prepares the story context, and invokes the selected execution runtime as isolated subprocesses per story attempt.
+        </div>
       </section>
 
       <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-8">

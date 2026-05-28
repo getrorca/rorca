@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Image from 'next/image';
 import Link from 'next/link';
 import { ArrowRight, Download, Github } from 'lucide-react';
 import { buildMetadata, SITE_URL } from '@/lib/metadata';
@@ -86,6 +87,151 @@ export default function DocsPage() {
         </div>
       </section>
 
+      <section className="rounded-3xl border border-white/10 bg-zinc-950/70 p-6 md:p-8 mb-12">
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between mb-6">
+          <div>
+            <p className="text-sm uppercase tracking-[0.24em] text-zinc-500 mb-3">The user guide</p>
+            <h2 className="text-2xl md:text-3xl font-medium tracking-tight text-white">Read the product in the same order you’ll use it.</h2>
+          </div>
+          <p className="text-sm text-zinc-400 max-w-2xl leading-relaxed">
+            Install → understand the control plane → pick a surface → create a spec → review → run → watch → learn.
+          </p>
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 gap-5">
+          {[
+            {
+              href: '/docs/getting-started',
+              title: 'Getting started',
+              desc: 'The first-run path for new users: install, connect a workspace, pick a provider, and finish one small successful run.',
+              src: '/docs-images/user-guide/getting-started.png',
+            },
+            {
+              href: '/architecture',
+              title: 'Architecture',
+              desc: 'The full control-plane diagram: surfaces, spec truth, execution truth, and the feedback loop.',
+              src: '/docs-images/user-guide/architecture.png',
+            },
+            {
+              href: '/docs/cli',
+              title: 'CLI guide',
+              desc: 'The standalone operator surface for setup, forge, run, attach, doctor, auth, and MCP workflows.',
+              src: '/docs-images/user-guide/cli.png',
+            },
+            {
+              href: '/docs/pi-extension',
+              title: 'Pi extension',
+              desc: 'Pi-native slash commands for create-spec, run, watch, retry, status, and MCP bridge inspection.',
+              src: '/docs-images/user-guide/pi-extension.png',
+            },
+          ].map((item) => (
+            <Link key={item.href} href={item.href} className="group overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/70 hover:border-white/20 transition-colors">
+              <div className="relative aspect-[16/11] overflow-hidden border-b border-white/10 bg-black/20">
+                <Image
+                  src={item.src}
+                  alt={item.title}
+                  fill
+                  sizes="(min-width: 1024px) 50vw, 100vw"
+                  className="object-cover object-top transition-transform duration-500 group-hover:scale-[1.01]"
+                />
+              </div>
+              <div className="p-5">
+                <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Guide</div>
+                <div className="text-xl font-medium text-white mb-2 tracking-tight">{item.title}</div>
+                <p className="text-sm text-zinc-400 leading-relaxed">{item.desc}</p>
+              </div>
+            </Link>
+          ))}
+        </div>
+      </section>
+
+      <section className="rounded-3xl border border-white/10 bg-zinc-950/70 p-6 md:p-8 mb-12">
+        <div className="flex flex-col gap-3 md:flex-row md:items-end md:justify-between mb-6">
+          <div>
+            <p className="text-sm uppercase tracking-[0.24em] text-zinc-500 mb-3">Product in action</p>
+            <h2 className="text-2xl md:text-3xl font-medium tracking-tight text-white">Real screens from the actual app, not mockups.</h2>
+          </div>
+          <div className="max-w-2xl">
+            <p className="text-sm text-zinc-400 leading-relaxed mb-3">
+              These are live captures of the dashboard surfaces users actually move through: specs, settings, review, runs, and marketplace.
+            </p>
+            <Link href="/docs/product-tour" className="inline-flex items-center gap-2 text-sm font-medium text-cyan-200 hover:text-white transition-colors">
+              Open the guided product tour
+              <ArrowRight className="w-4 h-4" />
+            </Link>
+          </div>
+        </div>
+
+        <div className="overflow-hidden rounded-2xl border border-white/10 bg-black/30 mb-5">
+          <video
+            className="w-full"
+            src="/docs-images/product-tour/rorca-product-tour.mp4"
+            poster="/docs-images/product-surfaces/specs-home.png"
+            controls
+            muted
+            loop
+            playsInline
+          />
+        </div>
+
+        <div className="grid grid-cols-1 md:grid-cols-2 xl:grid-cols-3 gap-5">
+          {[
+            {
+              title: 'Specs board',
+              desc: 'The real board view with draft, in-progress, and done columns.',
+              src: '/docs-images/product-surfaces/specs-home.png',
+            },
+            {
+              title: 'Providers & Models',
+              desc: 'Workspace settings with provider connections and model routing.',
+              src: '/docs-images/product-surfaces/settings-providers.png',
+            },
+            {
+              title: 'Spec review',
+              desc: 'Pending spec review with stories, criteria, and action buttons.',
+              src: '/docs-images/product-surfaces/spec-review.png',
+            },
+            {
+              title: 'Run progress',
+              desc: 'A live run view showing streaming execution trace and story status.',
+              src: '/docs-images/product-surfaces/run-view-running.png',
+            },
+            {
+              title: 'Marketplace',
+              desc: 'Skills marketplace with search, install actions, and installed library.',
+              src: '/docs-images/product-surfaces/marketplace.png',
+            },
+            {
+              title: 'GitHub integration',
+              desc: 'Repository webhook setup, Actions workflow download, CI autofix, and PR automation settings.',
+              src: '/docs-images/product-surfaces/github-settings.png',
+            },
+            {
+              title: 'Retry inspection',
+              desc: 'A failed story view that shows the smallest safe scope for retry planning.',
+              src: '/docs-images/product-surfaces/run-view-stories.png',
+            },
+          ].map((item) => (
+            <div key={item.title} className="overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/70">
+              <div className="relative aspect-[16/10] overflow-hidden border-b border-white/10 bg-black/20">
+                <Image
+                  src={item.src}
+                  alt={item.title}
+                  fill
+                  sizes="(min-width: 1280px) 33vw, (min-width: 768px) 50vw, 100vw"
+                  className="object-cover object-top"
+                />
+              </div>
+              <div className="p-4">
+                <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Surface</div>
+                <div className="text-lg font-medium text-white mb-2 tracking-tight">{item.title}</div>
+                <p className="text-sm text-zinc-400 leading-relaxed">{item.desc}</p>
+              </div>
+            </div>
+          ))}
+        </div>
+      </section>
+
       <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-12">
         <p className="text-sm uppercase tracking-[0.24em] text-zinc-500 mb-4">Auth model + provider matrix</p>
         <div className="grid gap-4 md:grid-cols-2 xl:grid-cols-4">
@@ -132,6 +278,7 @@ export default function DocsPage() {
           <Link href="/architecture" className="block hover:text-white transition-colors">/architecture — control-plane overview</Link>
           <Link href="/memory" className="block hover:text-white transition-colors">/memory — retrieval and graph story</Link>
           <Link href="/execution" className="block hover:text-white transition-colors">/execution — provider-selected runtime story</Link>
+          <Link href="/docs/product-tour" className="block hover:text-white transition-colors">/docs/product-tour — guided product demo, MP4, GIF, and screenshots</Link>
           <Link href="/docs/cli" className="block hover:text-white transition-colors">/docs/cli — standalone CLI deep guide</Link>
           <Link href="/docs/tui" className="block hover:text-white transition-colors">/docs/tui — embedded TUI deep guide</Link>
           <Link href="/docs/pi-extension" className="block hover:text-white transition-colors">/docs/pi-extension — Pi extension deep guide</Link>

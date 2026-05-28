@@ -44,6 +44,29 @@ export default function DocsArchitecturePage() {
         </div>
       </section>
 
+      <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-8">
+        <h2 className="text-2xl font-medium mb-4">How story execution actually runs</h2>
+        <p className="text-zinc-300 leading-relaxed mb-4">
+          Execution is isolated per story attempt. Rorca is the long-lived control plane: it resolves the spec, synthesizes context, prepares worktree state, and selects the configured runtime. The actual coding work then runs in a separate subprocess through the selected provider CLI, which emits logs, artifacts, and exit status back to Rorca before that subprocess exits.
+        </p>
+        <p className="text-zinc-400 leading-relaxed mb-6">
+          In other words, Rorca orchestrates the pipeline and keeps run state consistent, but Claude Code, OpenCode, Codex, or Pi is what performs the story work for that attempt.
+        </p>
+        <figure className="overflow-hidden rounded-2xl border border-white/10 bg-black/20 p-3">
+          <Image
+            src="/diagrams/rorca-story-subprocess-flow.svg"
+            alt="Diagram showing a run request entering the Rorca control plane, which compiles context and worktree state, spawns isolated provider CLI subprocesses for story attempts, and records evidence back into pipeline state."
+            width={1600}
+            height={900}
+            sizes="(min-width: 1024px) 896px, 100vw"
+            className="h-auto w-full rounded-xl"
+          />
+          <figcaption className="px-3 pb-2 pt-3 text-sm text-zinc-500">
+            Rorca keeps the orchestration loop alive across attempts; each story attempt is handed to a provider CLI subprocess with story-scoped context.
+          </figcaption>
+        </figure>
+      </section>
+
       <section className="mb-8">
         <h2 className="text-2xl font-medium mb-4">Skill-first create-spec flow</h2>
         <div className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 font-mono text-sm text-zinc-300 overflow-x-auto">

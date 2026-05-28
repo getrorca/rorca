@@ -15,6 +15,13 @@ export const docsNav: DocsNavItem[] = [
     eyebrow: 'Start here first',
   },
   {
+    href: '/docs/product-tour',
+    title: 'Product tour',
+    shortTitle: 'Product tour',
+    description: 'An Arcade-style product walkthrough with real screenshots, a short MP4, a shareable GIF, and step-by-step captures.',
+    eyebrow: 'Guided visual demo',
+  },
+  {
     href: '/docs/spec-creation',
     title: 'Spec creation',
     shortTitle: 'Spec creation',
@@ -41,6 +48,13 @@ export const docsNav: DocsNavItem[] = [
     shortTitle: 'Execution',
     description: 'Execution CLI selection, orchestration modes, and cross-surface run behavior.',
     eyebrow: 'Provider-selected runtime',
+  },
+  {
+    href: '/docs/github',
+    title: 'GitHub integration guide',
+    shortTitle: 'GitHub',
+    description: 'Connect a workspace repository, configure webhooks, enable auto-PR, workflow dispatch, CI autofix, and PR templates.',
+    eyebrow: 'Repo automation surface',
   },
   {
     href: '/docs/cli',
