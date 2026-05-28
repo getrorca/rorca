@@ -44,7 +44,6 @@ import vaultRouter from './routes/vault';
 import usersRouter from './routes/users';
 import authRouter from './routes/auth';
 import { authRequired, LOCAL_ADMIN, resolveAuthUserFromToken } from './lib/auth-utils';
-import { supabaseAdmin } from './lib/supabase';
 import onboardingRouter from './routes/onboarding';
 import backupsRouter from './routes/backups';
 import healthRouter from './routes/health';
@@ -79,7 +78,7 @@ import fileWatchRouter from './routes/file-watch';
 import { errorHandler } from './lib/error-handler';
 import { csrfProtection } from './lib/csrf';
 import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
-import { execute, queryOne } from './db/index';
+import { queryOne } from './db/index';
 import runQueueRouter from './routes/run-queue';
 import configRouter from './routes/config';
 import copilotRouter from './routes/copilot';
@@ -113,12 +112,7 @@ import { startCommitStatusPoster } from './lib/commit-status-poster';
 import { startCheckRunPoster } from './lib/check-run-poster';
 import attachmentsRouter from './routes/attachments';
 import mcpToolsRouter from './routes/mcp-tools';
-import terminalRouter, { validateWsToken } from './routes/terminal';
 import { initBoss } from './lib/pg-boss';
-import { WebSocketServer, WebSocket } from 'ws';
-import * as ptyManager from './lib/pty-manager';
-import http from 'http';
-import { AuthError } from './lib/errors';
 import {
   ensureMcpToken,
   isAllowedMcpOrigin,
@@ -129,28 +123,6 @@ import {
 import { summarizeRorcaTiers } from './lib/tier-auth';
 import { planGate } from './lib/plan-gate';
 
-const OSC_TITLE_REGEX = /\x1b\][02];([^\x07\x1b]*)(?:\x07|\x1b\\)/g;
-const OSC_SEQUENCE_REGEX = /\x1b\][02];[^\x07\x1b]*(?:\x07|\x1b\\)/g;
-
-function extractOscTitles(data: string): string[] {
-  const titles: string[] = [];
-  for (const match of data.matchAll(OSC_TITLE_REGEX)) {
-    const title = match[1]?.trim();
-    if (typeof title === 'string') {
-      titles.push(title);
-    }
-  }
-  return titles;
-}
-
-function hasBellOutsideOsc(data: string): boolean {
-  if (!data.includes('\x07')) {
-    return false;
-  }
-
-  const withoutOsc = data.replace(OSC_SEQUENCE_REGEX, '');
-  return withoutOsc.includes('\x07');
-}
 
 // OC-002: Fail-fast if RORCA_AGENT=opencode but binary is missing
 if (agentType === 'opencode') {
@@ -439,14 +411,12 @@ app.use('/api/conventions', conventionsRouter);
 app.use('/api/packs', packsRouter);
 app.use('/api/skills', skillsRouter);
 app.use('/api/attachments', attachmentsRouter);
-app.use('/api/terminal', terminalRouter); // OCT-002: PTY session management
 app.use('/api/personas', personasRouter);
 app.use('/api/marketplace', marketplaceRouter);
 app.use('/api/search', searchRouter);
 app.use('/api/recall', recallRouter);
 app.use('/api/graph', graphRouter);
 app.use('/api/workflow-router', workflowRouterRouter);
-app.use('/api/terminal', terminalRouter);
 
 // V2-094: Centralized error handler (must be after all routes)
 app.use(errorHandler);
@@ -579,11 +549,6 @@ if (process.env.NODE_ENV !== 'test') {
   const listenPort = Number(PORT);
   const httpServer = app.listen(listenPort, bindHost, () => {
     logger.info(`Rorca backend listening on ${bindHost}:${PORT}`);
-    execute(
-      `UPDATE terminal_sessions
-       SET status = 'killed', exited_at = NOW()
-       WHERE status = 'active'`
-    ).catch(err => logger.error({ err }, '[terminal] Startup cleanup failed'));
     initRateLimiterCache().catch(err => logger.error({ err }, '[RateLimiter] Cache init failed'));
     runQueryPlanAudit().catch(err => logger.error({ err }, '[QueryAudit] Startup audit failed'));
     queryOne('SELECT id FROM workspaces LIMIT 1').then(row => {
@@ -611,176 +576,6 @@ if (process.env.NODE_ENV !== 'test') {
     startWalListener();
   });
 
-  // OCT-002/OCT-021: WebSocket server for PTY I/O with origin validation and connection tokens
-  // Security model (OCT-021):
-  // 1. Origin validation — rejects cross-origin connections (DNS rebinding defense)
-  // 2. Short-lived wsToken (60s TTL) — prevents sessionId enumeration
-  // 3. Secure binding (127.0.0.1 by default) — local-only unless RORCA_BIND_HOST=0.0.0.0
-  // 4. Security headers — X-Content-Type-Options: nosniff, X-Frame-Options: DENY
-  const ALLOWED_WS_ORIGINS = [
-    'http://localhost:5210',
-    'http://127.0.0.1:5210',
-    'http://localhost:3030',
-    'http://127.0.0.1:3030',
-  ];
-
-  const wss = new WebSocketServer({
-    server: httpServer,
-    path: '/ws/terminal',
-    // OCT-021: Verify client origin to prevent cross-origin WebSocket attacks (DNS rebinding)
-    verifyClient: ({ origin, req }, done) => {
-      // Allow connections from allowed origins or when origin header is absent (local tools)
-      if (!origin || ALLOWED_WS_ORIGINS.includes(origin)) {
-        done(true);
-      } else {
-        logger.warn({ origin }, '[ws] Rejected WebSocket connection from disallowed origin');
-        done(false, 403, 'Forbidden');
-      }
-    },
-  });
-
-  httpServer.on('headers', (headers, req) => {
-    if (req.url?.startsWith('/ws/terminal')) {
-      headers.push('X-Content-Type-Options: nosniff');
-    }
-  });
-
-  wss.on('connection', async (ws: WebSocket, req: http.IncomingMessage) => {
-    // OCT-021: Extract and validate wsToken (short-lived connection token)
-    const url = new URL(req.url || '', `http://${req.headers.host}`);
-    const wsToken = url.searchParams.get('wsToken');
-
-    if (!wsToken) {
-      ws.send(JSON.stringify({ type: 'error', message: 'Missing wsToken parameter' }));
-      ws.close();
-      return;
-    }
-
-    const authHeader = req.headers.authorization;
-    const token = authHeader?.startsWith('Bearer ') ? authHeader.slice(7).trim() : null;
-    let wsUserId: string | undefined;
-    if (token && process.env.SUPABASE_URL?.trim()) {
-      try {
-        const { data, error } = await supabaseAdmin.auth.getUser(token);
-        if (!error && data.user?.id) {
-          wsUserId = data.user.id;
-        }
-      } catch {
-      }
-    }
-
-    const sessionId = validateWsToken(wsToken, wsUserId);
-    if (!sessionId) {
-      ws.send(JSON.stringify({ type: 'error', message: 'Invalid or expired wsToken' }));
-      ws.close();
-      return;
-    }
-
-    // Look up the session
-    const session = ptyManager.getSession(sessionId);
-    if (!session) {
-      ws.send(JSON.stringify({ type: 'error', message: 'Session not found' }));
-      ws.close();
-      return;
-    }
-
-    logger.info(`[ws] Client connected to session ${sessionId}`);
-    ptyManager.attachSocket(sessionId, ws);
-
-    // Subscribe to PTY output
-    const dataListener = session.ptyProcess.onData((data: string) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        try {
-          const titles = extractOscTitles(data);
-          const shouldEmitBell = hasBellOutsideOsc(data);
-          const { cleanData, shellEvents } = ptyManager.processSessionOutput(sessionId, data);
-          session.nextSequence += 1;
-          ws.send(JSON.stringify({ type: 'output', data: cleanData, sequence: session.nextSequence }));
-          for (const title of titles) {
-            ws.send(JSON.stringify({ type: 'title_change', title }));
-          }
-          if (shouldEmitBell) {
-            ws.send(JSON.stringify({ type: 'bell' }));
-          }
-          for (const shellEvent of shellEvents) {
-            ws.send(JSON.stringify(shellEvent));
-          }
-        } catch (err) {
-          logger.error({ err, sessionId }, '[ws] Failed to send PTY output to client');
-        }
-      }
-    });
-
-    // Subscribe to PTY exit
-    const exitListener = session.ptyProcess.onExit(({ exitCode }: { exitCode: number }) => {
-      if (ws.readyState === WebSocket.OPEN) {
-        try {
-          ws.send(JSON.stringify({ type: 'exit', exitCode }));
-          ws.close();
-        } catch (err) {
-          logger.error({ err, sessionId }, '[ws] Failed to send exit message to client');
-        }
-      }
-    });
-
-    // Handle incoming messages from client
-    ws.on('message', (rawMessage: Buffer | string) => {
-      try {
-        if (ptyManager.isInputTooLarge(rawMessage)) {
-          if (ws.readyState === WebSocket.OPEN) {
-            ws.send(JSON.stringify({ type: 'error', message: 'Input too large' }));
-          }
-          return;
-        }
-
-        const message = JSON.parse(rawMessage.toString());
-
-        switch (message.type) {
-          case 'input':
-            if (typeof message.data === 'string') {
-              session.ptyProcess.write(message.data);
-            }
-            break;
-
-          case 'resize':
-            if (typeof message.rows === 'number' && typeof message.cols === 'number') {
-              ptyManager.resizeSession(sessionId, message.rows, message.cols);
-            }
-            break;
-
-          case 'ping':
-            if (ws.readyState === WebSocket.OPEN) {
-              ws.send(JSON.stringify({ type: 'pong' }));
-            }
-            break;
-
-          default:
-            logger.warn({ type: message.type, sessionId }, '[ws] Unknown message type');
-        }
-      } catch (err) {
-        logger.warn({ err, sessionId }, '[ws] Failed to parse incoming message — ignoring');
-      }
-    });
-
-    // Handle WebSocket errors
-    ws.on('error', (err) => {
-      logger.error({ err, sessionId }, '[ws] WebSocket error');
-      dataListener.dispose();
-      exitListener.dispose();
-      ptyManager.detachSocket(sessionId, ws);
-    });
-
-    // Handle WebSocket close
-    ws.on('close', () => {
-      logger.info(`[ws] Client disconnected from session ${sessionId}`);
-      dataListener.dispose();
-      exitListener.dispose();
-      ptyManager.detachSocket(sessionId, ws);
-    });
-  });
-
-  logger.info('[ws] WebSocket server mounted at /ws/terminal');
-
   let shuttingDown = false;
   const shutdown = async (signal: 'SIGTERM' | 'SIGINT') => {
     if (shuttingDown) {
@@ -789,12 +584,6 @@ if (process.env.NODE_ENV !== 'test') {
 
     shuttingDown = true;
     logger.info({ signal }, '[server] Graceful shutdown started');
-
-    try {
-      await ptyManager.shutdownAll();
-    } catch (err) {
-      logger.error({ err, signal }, '[server] PTY shutdown failed during graceful shutdown');
-    }
 
     httpServer.close(() => {
       logger.info({ signal }, '[server] HTTP server closed');

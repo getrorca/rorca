@@ -12,11 +12,6 @@ import type { Express } from 'express';
 import request from 'supertest';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, execute } from '../../db/index';
-import * as ptyManager from '../../lib/pty-manager';
-
-jest.mock('../../lib/pty-manager', () => ({
-  killSessionsForWorkspace: jest.fn(),
-}));
 
 let app: Express;
 let tmpDir: string;
@@ -114,7 +109,6 @@ test('DELETE /api/workspaces/:id returns 204 and workspace is gone', async () =>
 
   const delRes = await request(app).delete('/api/workspaces/ws-test-1').set('Authorization', `Bearer ${authToken}`);
   expect(delRes.status).toBe(204);
-  expect(ptyManager.killSessionsForWorkspace).toHaveBeenCalledWith('ws-test-1');
 
   const getRes = await request(app).get('/api/workspaces/ws-test-1').set('Authorization', `Bearer ${authToken}`);
   expect(getRes.status).toBe(404);

@@ -6,12 +6,11 @@
  */
 
 import { useState, useEffect, useRef, useCallback, useMemo, useDeferredValue } from 'react';
-import { Search, ArrowRight, Clock, Command, Hammer, Trash2, Menu, Bot, Plus } from 'lucide-react';
+import { Search, ArrowRight, Clock, Command, Hammer, Trash2, Menu } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import { NAV_ITEMS, type PanelId } from './Sidebar';
 import { useFocusTrap } from '../hooks/useFocusTrap';
-import { useTerminalDrawer } from '../contexts/TerminalDrawerContext';
 
 /* ─── Types ───────────────────────────────────────────────────────── */
 
@@ -155,7 +154,6 @@ function clearRecent() {
 /* ─── Component ───────────────────────────────────────────────────── */
 
 export default function CommandPalette({ onNavigate, onClose, activePanel, activeRunId, onSendToForge }: CommandPaletteProps) {
-  const { open, toggle } = useTerminalDrawer();
   const [query, setQuery] = useState('');
   const deferredQuery = useDeferredValue(query);
   const [selectedIdx, setSelectedIdx] = useState(0);
@@ -270,37 +268,6 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
       action: () => { window.dispatchEvent(new Event('rorca:toggle-drawer')); onClose(); },
     });
     items.push({
-      id: 'terminal-toggle',
-      label: 'Toggle OpenCode Terminal',
-      category: 'action',
-      description: 'Open or close the terminal drawer',
-      shortcut: 'Cmd+J',
-      icon: Bot,
-      keywords: ['terminal', 'opencode', 'shell', 'ai', 'chat', 'tty'],
-      group: 'Terminal',
-      action: () => { toggle(); onClose(); },
-    });
-    items.push({
-      id: 'terminal-open',
-      label: 'Open OpenCode Terminal',
-      category: 'action',
-      description: 'Open the terminal drawer',
-      icon: Bot,
-      keywords: ['terminal', 'opencode', 'open'],
-      group: 'Terminal',
-      action: () => { open(); onClose(); },
-    });
-    items.push({
-      id: 'terminal-new-session',
-      label: 'New OpenCode Session',
-      category: 'action',
-      description: 'Start another terminal session',
-      icon: Plus,
-      keywords: ['terminal', 'new', 'session', 'opencode'],
-      group: 'Terminal',
-      action: () => { window.dispatchEvent(new CustomEvent('rorca:terminal-new-session')); onClose(); },
-    });
-    items.push({
       id: 'action:open-execution-trace',
       label: 'Open Execution Trace',
       category: 'action',
@@ -395,7 +362,7 @@ export default function CommandPalette({ onNavigate, onClose, activePanel, activ
     });
 
     return items;
-  }, [specs, archiveSpecs, runs, onNavigate, onClose, workspaceId, toggle]);
+  }, [specs, archiveSpecs, runs, onNavigate, onClose, workspaceId]);
 
   // Determine context key for boosting
   const contextKey = activeRunId != null ? 'run-view' : activePanel;

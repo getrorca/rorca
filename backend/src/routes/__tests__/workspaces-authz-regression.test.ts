@@ -47,7 +47,6 @@ jest.mock('../../lib/workspace-scaffold', () => ({ generateScaffoldPreview: jest
 jest.mock('../../lib/logger', () => ({ logger: { info: jest.fn(), warn: jest.fn(), error: jest.fn() } }));
 jest.mock('../../lib/require-plan', () => ({ requirePlan: () => (_req: any, _res: any, next: any) => next() }));
 jest.mock('../../lib/domain-inference', () => ({ inferDomain: jest.fn() }));
-jest.mock('../../lib/pty-manager', () => ({ killSessionsForWorkspace: jest.fn() }));
 
 const { queryOne } = require('../../db/index');
 const workspacesRouter = require('../workspaces').default;
