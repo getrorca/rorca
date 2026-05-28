@@ -63,13 +63,17 @@ describe('pi-autonomous-runner', () => {
       candidateFiles: ['backend/src/lib/pi-autonomous-runner.ts'],
       candidateTests: ['backend/src/lib/__tests__/pi-autonomous-runner.test.ts'],
       validationCommands: ['cd backend && npx tsc --noEmit'],
+      expectedArtifacts: ['tests', 'backend route changes'],
+      readinessWarnings: ['No concrete file targets were named.'],
     });
 
     const created = fs.readFileSync(progressPath, 'utf8');
     expect(created).toContain('## Done Definition');
     expect(created).toContain('## Candidate Files');
     expect(created).toContain('## Candidate Tests');
+    expect(created).toContain('## Expected Artifacts');
     expect(created).toContain('## Validation Plan');
+    expect(created).toContain('## Execution Risks');
     expect(created).toContain('Implement Pi runner');
     expect(created).toContain('backend/src/lib/pi-autonomous-runner.ts');
 
@@ -185,6 +189,8 @@ describe('pi-autonomous-runner', () => {
       candidateFiles: ['backend/src/lib/execution-engine.ts'],
       candidateTests: ['backend/src/lib/__tests__/pi-autonomous-runner.test.ts'],
       validationCommands: ['cd backend && npx tsc --noEmit'],
+      expectedArtifacts: ['tests'],
+      readinessWarnings: ['Story reads like analysis/baseline work and may cause non-edit attempts.'],
       directionText: 'L1\nL2\nL3',
     });
 
@@ -194,6 +200,8 @@ describe('pi-autonomous-runner', () => {
     expect(context).toContain('## Likely Files / Modules');
     expect(context).toContain('## Likely Tests');
     expect(context).toContain('## Validation Plan');
+    expect(context).toContain('## Expected Artifacts');
+    expect(context).toContain('## Execution Risks');
     expect(context).toContain('=== RORCA DIRECTION STACK ===');
     expect(context).toContain('L1\nL2\nL3');
   });

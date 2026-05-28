@@ -1,0 +1,187 @@
+<svg width="2400" height="1350" viewBox="0 0 2400 1350" fill="none" xmlns="http://www.w3.org/2000/svg">
+  <defs>
+    <linearGradient id="pageBg" x1="0" y1="0" x2="2400" y2="1350" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#09090B"/>
+      <stop offset="1" stop-color="#111113"/>
+    </linearGradient>
+    <linearGradient id="specFill" x1="820" y1="0" x2="1130" y2="220" gradientUnits="userSpaceOnUse">
+      <stop stop-color="#8B5CF6"/>
+      <stop offset="1" stop-color="#6D28D9"/>
+    </linearGradient>
+    <filter id="cardShadow" x="-10%" y="-10%" width="120%" height="130%">
+      <feDropShadow dx="0" dy="12" stdDeviation="18" flood-color="#000000" flood-opacity="0.10"/>
+    </filter>
+    <marker id="arrowViolet" markerWidth="14" markerHeight="14" refX="10" refY="7" orient="auto" markerUnits="strokeWidth">
+      <path d="M2 2L10 7L2 12" stroke="#8B5CF6" stroke-width="2.4" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrowSlate" markerWidth="14" markerHeight="14" refX="10" refY="7" orient="auto" markerUnits="strokeWidth">
+      <path d="M2 2L10 7L2 12" stroke="#64748B" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <marker id="arrowTeal" markerWidth="14" markerHeight="14" refX="10" refY="7" orient="auto" markerUnits="strokeWidth">
+      <path d="M2 2L10 7L2 12" stroke="#0F766E" stroke-width="2.2" stroke-linecap="round" stroke-linejoin="round"/>
+    </marker>
+    <style>
+      .sans { font-family: Inter, ui-sans-serif, system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif; }
+      .mono { font-family: ui-monospace, SFMono-Regular, Menlo, Monaco, Consolas, "Liberation Mono", "Courier New", monospace; }
+      .h1 { fill: #FAFAFA; font-weight: 650; }
+      .subtitle { fill: #A1A1AA; font-weight: 500; }
+      .ink { fill: #18181B; }
+      .muted { fill: #71717A; }
+      .soft { fill: #A1A1AA; }
+      .violet { fill: #7C3AED; }
+      .teal { fill: #0F766E; }
+      .smallcaps { letter-spacing: .15em; text-transform: uppercase; }
+      .icon { fill: none; stroke-linecap: round; stroke-linejoin: round; stroke-width: 2.2; }
+    </style>
+  </defs>
+
+  <rect width="2400" height="1350" fill="url(#pageBg)"/>
+
+  <text x="1200" y="92" text-anchor="middle" class="sans h1" font-size="58">How Rorca Works</text>
+  <text x="1200" y="138" text-anchor="middle" class="sans subtitle" font-size="24">A clean linear loop: author a canonical spec, execute stories, and turn results into better context.</text>
+
+  <rect x="120" y="178" width="2160" height="1035" rx="38" fill="#F7F7F8" filter="url(#cardShadow)"/>
+  <rect x="121" y="179" width="2158" height="1033" rx="37" stroke="white" stroke-opacity="0.85"/>
+  <rect x="156" y="214" width="2090" height="965" rx="28" fill="#FFFFFF" stroke="#E4E4E7"/>
+
+  <!-- surface row -->
+  <text x="210" y="276" class="mono smallcaps soft" font-size="15">start from any surface</text>
+  <rect x="520" y="235" width="265" height="72" rx="18" fill="#FAFAFA" stroke="#E4E4E7"/>
+  <rect x="815" y="235" width="265" height="72" rx="18" fill="#FAFAFA" stroke="#E4E4E7"/>
+  <rect x="1110" y="235" width="265" height="72" rx="18" fill="#F5F3FF" stroke="#DDD6FE"/>
+  <rect x="1405" y="235" width="265" height="72" rx="18" fill="#F5F3FF" stroke="#DDD6FE"/>
+  <text x="652" y="264" text-anchor="middle" class="sans ink" font-size="21" font-weight="650">Dashboard</text>
+  <text x="652" y="290" text-anchor="middle" class="mono muted" font-size="13">review · kanban · watch</text>
+  <text x="947" y="264" text-anchor="middle" class="sans ink" font-size="21" font-weight="650">CLI / TUI</text>
+  <text x="947" y="290" text-anchor="middle" class="mono muted" font-size="13">forge · run · status</text>
+  <text x="1242" y="264" text-anchor="middle" class="sans violet" font-size="21" font-weight="650">MCP tools</text>
+  <text x="1242" y="290" text-anchor="middle" class="mono muted" font-size="13">stable contract</text>
+  <text x="1537" y="264" text-anchor="middle" class="sans violet" font-size="21" font-weight="650">Pi extension</text>
+  <text x="1537" y="290" text-anchor="middle" class="mono muted" font-size="13">skills · bridge · runtime</text>
+  <text x="1960" y="265" text-anchor="middle" class="sans ink" font-size="19" font-weight="650">Many surfaces.</text>
+  <text x="1960" y="292" text-anchor="middle" class="sans muted" font-size="17">One backend contract.</text>
+  <path d="M520 335H1670" stroke="#D4D4D8" stroke-dasharray="8 12"/>
+
+  <text x="210" y="415" class="mono smallcaps soft" font-size="15">canonical operating path</text>
+
+  <!-- main cards -->
+  <g filter="url(#cardShadow)">
+    <rect x="200" y="480" width="210" height="140" rx="26" fill="#FFFFFF" stroke="#E4E4E7"/>
+    <rect x="490" y="470" width="265" height="160" rx="28" fill="#FAFAFA" stroke="#DDD6FE"/>
+    <rect x="845" y="440" width="310" height="220" rx="32" fill="url(#specFill)"/>
+    <rect x="1240" y="480" width="215" height="140" rx="26" fill="#FFFFFF" stroke="#E4E4E7"/>
+    <rect x="1535" y="480" width="240" height="140" rx="26" fill="#FFFFFF" stroke="#E4E4E7"/>
+    <rect x="1845" y="470" width="270" height="160" rx="28" fill="#FFFFFF" stroke="#E4E4E7"/>
+  </g>
+
+  <!-- icon chips -->
+  <g>
+    <rect x="280" y="500" width="50" height="50" rx="14" fill="#F8FAFC" stroke="#E2E8F0"/>
+    <path class="icon" d="M296 510H316L326 520V540H296V510Z M316 510V520H326 M302 528H319 M302 536H316" stroke="#64748B"/>
+
+    <rect x="597" y="492" width="50" height="50" rx="14" fill="#F5F3FF" stroke="#DDD6FE"/>
+    <path class="icon" d="M622 502L627 515L640 520L627 525L622 538L617 525L604 520L617 515L622 502Z M637 503L639 508L644 510L639 512L637 517L635 512L630 510L635 508L637 503Z" stroke="#7C3AED"/>
+
+    <rect x="975" y="462" width="50" height="50" rx="14" fill="#FFFFFF" fill-opacity="0.14" stroke="#EDE9FE" stroke-opacity="0.5"/>
+    <path class="icon" d="M987 472H1008L1018 482V502H987V472Z M1008 472V482H1018 M994 494L1000 500L1012 488" stroke="#FFFFFF"/>
+
+    <rect x="1322" y="500" width="50" height="50" rx="14" fill="#F8FAFC" stroke="#E2E8F0"/>
+    <path class="icon" d="M1347 510C1358 510 1366 518 1366 529C1366 540 1358 548 1347 548C1336 548 1328 540 1328 529C1328 518 1336 510 1347 510Z M1338 529L1344 535L1357 522" stroke="#64748B"/>
+
+    <rect x="1630" y="500" width="50" height="50" rx="14" fill="#F8FAFC" stroke="#E2E8F0"/>
+    <path class="icon" d="M1643 514H1668 M1643 526H1668 M1643 538H1668 M1638 514H1638.5 M1638 526H1638.5 M1638 538H1638.5" stroke="#64748B"/>
+
+    <rect x="1955" y="492" width="50" height="50" rx="14" fill="#F8FAFC" stroke="#E2E8F0"/>
+    <path class="icon" d="M1967 508H1993V532H1967V508Z M1973 516L1980 522L1973 528 M1983 528H1990" stroke="#64748B"/>
+  </g>
+
+  <text x="305" y="578" text-anchor="middle" class="sans ink" font-size="26" font-weight="700">Brief</text>
+  <text x="305" y="606" text-anchor="middle" class="sans muted" font-size="15">plain English / PRD</text>
+
+  <text x="622" y="565" text-anchor="middle" class="sans violet" font-size="24" font-weight="700">Skill-first forge</text>
+  <text x="622" y="597" text-anchor="middle" class="sans muted" font-size="15">caller or skill drafts</text>
+  <text x="622" y="622" text-anchor="middle" class="sans muted" font-size="15">Rorca validates shape</text>
+
+  <text x="1000" y="540" text-anchor="middle" fill="#FFFFFF" class="sans" font-size="30" font-weight="750">Canonical spec</text>
+  <text x="1000" y="581" text-anchor="middle" fill="#EDE9FE" class="sans" font-size="16">persisted source of truth</text>
+  <text x="1000" y="610" text-anchor="middle" fill="#DDD6FE" class="sans" font-size="15">stories · criteria · dependencies</text>
+  <text x="1000" y="638" text-anchor="middle" fill="#DDD6FE" class="sans" font-size="15">skills · context · annotations</text>
+
+  <text x="1347" y="578" text-anchor="middle" class="sans ink" font-size="25" font-weight="700">Review</text>
+  <text x="1347" y="607" text-anchor="middle" class="sans muted" font-size="15">approve · edit safely</text>
+
+  <text x="1655" y="578" text-anchor="middle" class="sans ink" font-size="25" font-weight="700">Queue</text>
+  <text x="1655" y="607" text-anchor="middle" class="sans muted" font-size="15">pg-boss story jobs</text>
+
+  <text x="1980" y="565" text-anchor="middle" class="sans ink" font-size="25" font-weight="700">Execute</text>
+  <text x="1980" y="595" text-anchor="middle" class="sans muted" font-size="14">Claude Code · OpenCode</text>
+  <text x="1980" y="619" text-anchor="middle" class="sans muted" font-size="14">Codex · Pi · native tools</text>
+
+  <path d="M410 550H480" stroke="#8B5CF6" stroke-width="3" stroke-linecap="round" marker-end="url(#arrowViolet)"/>
+  <path d="M755 550H835" stroke="#8B5CF6" stroke-width="3" stroke-linecap="round" marker-end="url(#arrowViolet)"/>
+  <path d="M1155 550H1230" stroke="#8B5CF6" stroke-width="3" stroke-linecap="round" marker-end="url(#arrowViolet)"/>
+  <path d="M1455 550H1525" stroke="#8B5CF6" stroke-width="3" stroke-linecap="round" marker-end="url(#arrowViolet)"/>
+  <path d="M1775 550H1835" stroke="#8B5CF6" stroke-width="3" stroke-linecap="round" marker-end="url(#arrowViolet)"/>
+
+  <!-- context lane -->
+  <text x="210" y="755" class="mono smallcaps soft" font-size="15">context retrieval before the run</text>
+  <rect x="360" y="788" width="820" height="76" rx="20" fill="#F0FDFA" stroke="#99F6E4"/>
+  <rect x="388" y="807" width="38" height="38" rx="12" fill="#CCFBF1" stroke="#99F6E4"/>
+  <path class="icon" d="M398 819H416 M398 827H416 M398 835H416 M402 815L407 810L412 815" stroke="#0F766E"/>
+  <text x="770" y="820" text-anchor="middle" class="sans teal" font-size="21" font-weight="700">Context engine</text>
+  <text x="770" y="850" text-anchor="middle" class="sans muted" font-size="15">Direction Stack · skills/personas · CAG · RAG/pgvector · Knowledge Graph</text>
+  <path d="M620 788C610 728 612 674 622 640" stroke="#0F766E" stroke-width="2" stroke-dasharray="8 10" marker-end="url(#arrowTeal)"/>
+  <path d="M995 788C1000 736 1000 700 1000 670" stroke="#0F766E" stroke-width="2" stroke-dasharray="8 10" marker-end="url(#arrowTeal)"/>
+
+  <!-- state/output -->
+  <rect x="1280" y="780" width="455" height="92" rx="20" fill="#FAFAFA" stroke="#E4E4E7"/>
+  <rect x="1305" y="807" width="38" height="38" rx="12" fill="#F8FAFC" stroke="#E2E8F0"/>
+  <path class="icon" d="M1314 816C1314 812 1334 812 1334 816V836C1334 840 1314 840 1314 836V816Z M1314 816C1314 820 1334 820 1334 816 M1314 826C1314 830 1334 830 1334 826" stroke="#64748B"/>
+  <text x="1507" y="815" text-anchor="middle" class="sans ink" font-size="21" font-weight="700">System of record</text>
+  <text x="1507" y="845" text-anchor="middle" class="sans muted" font-size="15">Postgres · pgvector · Apache AGE · WAL · MCP audit</text>
+  <path d="M1000 660C1060 735 1205 790 1270 825" stroke="#64748B" stroke-width="2" marker-end="url(#arrowSlate)"/>
+
+  <rect x="1845" y="780" width="260" height="92" rx="20" fill="#F0FDFA" stroke="#99F6E4"/>
+  <rect x="1868" y="807" width="38" height="38" rx="12" fill="#CCFBF1" stroke="#99F6E4"/>
+  <path class="icon" d="M1887 814V838 M1876 826H1898 M1876 826L1882 820 M1898 826L1892 832" stroke="#0F766E"/>
+  <text x="1975" y="815" text-anchor="middle" class="sans teal" font-size="21" font-weight="700">Git commit / PR</text>
+  <text x="1975" y="845" text-anchor="middle" class="sans muted" font-size="15">reviewable shipped work</text>
+  <path d="M1980 630V770" stroke="#0F766E" stroke-width="2.4" marker-end="url(#arrowTeal)"/>
+  <path d="M1845 826H1745" stroke="#64748B" stroke-width="2" marker-end="url(#arrowSlate)"/>
+
+  <!-- feedback lane -->
+  <text x="210" y="980" class="mono smallcaps soft" font-size="15">feedback after the run</text>
+  <g filter="url(#cardShadow)">
+    <rect x="360" y="1018" width="225" height="92" rx="20" fill="#F0FDFA" stroke="#99F6E4"/>
+    <rect x="670" y="1018" width="245" height="92" rx="20" fill="#F0FDFA" stroke="#99F6E4"/>
+    <rect x="1000" y="1018" width="245" height="92" rx="20" fill="#F0FDFA" stroke="#99F6E4"/>
+    <rect x="1330" y="1018" width="245" height="92" rx="20" fill="#F0FDFA" stroke="#99F6E4"/>
+    <rect x="1660" y="1018" width="245" height="92" rx="20" fill="#F8FAFC" stroke="#E2E8F0"/>
+  </g>
+  <path class="icon" d="M388 1064H402L408 1048L418 1081L426 1064H442" stroke="#0F766E"/>
+  <path class="icon" d="M704 1052H735C742 1052 746 1056 746 1064C746 1072 742 1076 735 1076H704V1052Z M712 1060H732 M712 1068H728" stroke="#0F766E"/>
+  <path class="icon" d="M1032 1064C1032 1058 1037 1053 1043 1053C1049 1053 1054 1058 1054 1064C1054 1070 1049 1075 1043 1075C1037 1075 1032 1070 1032 1064Z M1088 1054C1094 1054 1099 1059 1099 1065C1099 1071 1094 1076 1088 1076C1082 1076 1077 1071 1077 1065C1077 1059 1082 1054 1088 1054Z M1054 1064H1077 M1060 1058L1072 1052 M1061 1070L1072 1077" stroke="#0F766E"/>
+  <path class="icon" d="M1365 1058C1365 1050 1371 1044 1379 1044C1387 1044 1393 1050 1393 1058C1393 1066 1387 1072 1379 1072C1371 1072 1365 1066 1365 1058Z M1389 1068L1402 1081" stroke="#0F766E"/>
+  <path class="icon" d="M1694 1052H1726V1075H1706L1694 1085V1052Z" stroke="#64748B"/>
+
+  <text x="444" y="1053" class="sans teal" font-size="18" font-weight="700">Run evidence</text>
+  <text x="444" y="1082" class="sans muted" font-size="14">logs · diffs · outcomes</text>
+  <text x="755" y="1053" class="sans teal" font-size="18" font-weight="700">Memory synthesis</text>
+  <text x="755" y="1082" class="sans muted" font-size="14">decisions · patterns</text>
+  <text x="1085" y="1053" class="sans teal" font-size="18" font-weight="700">Knowledge graph</text>
+  <text x="1085" y="1082" class="sans muted" font-size="14">Story ↔ File ↔ Skill</text>
+  <text x="1415" y="1053" class="sans teal" font-size="18" font-weight="700">Retrieval router</text>
+  <text x="1415" y="1082" class="sans muted" font-size="14">CAG + RAG + KG</text>
+  <text x="1745" y="1053" class="sans ink" font-size="18" font-weight="700">Next prompt</text>
+  <text x="1745" y="1082" class="sans muted" font-size="14">smaller · more relevant</text>
+  <path d="M585 1064H660" stroke="#0F766E" stroke-width="2.8" marker-end="url(#arrowTeal)"/>
+  <path d="M915 1064H990" stroke="#0F766E" stroke-width="2.8" marker-end="url(#arrowTeal)"/>
+  <path d="M1245 1064H1320" stroke="#0F766E" stroke-width="2.8" marker-end="url(#arrowTeal)"/>
+  <path d="M1575 1064H1650" stroke="#0F766E" stroke-width="2.8" marker-end="url(#arrowTeal)"/>
+  <path d="M1782 1018C1710 955 1290 925 770 864" stroke="#0F766E" stroke-width="2" stroke-dasharray="8 10" marker-end="url(#arrowTeal)"/>
+  <rect x="910" y="910" width="710" height="38" rx="14" fill="#FFFFFF"/>
+  <text x="1265" y="935" text-anchor="middle" class="sans teal" font-size="17">successful and failed runs both improve future context</text>
+
+  <rect x="270" y="1138" width="1860" height="62" rx="18" fill="#18181B"/>
+  <text x="1200" y="1177" text-anchor="middle" fill="#E4E4E7" class="sans" font-size="20" font-weight="600">Rorca is the control plane: surfaces create specs, workers execute stories, and memory/graph feedback improves the next run.</text>
+</svg>
