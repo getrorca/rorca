@@ -320,7 +320,6 @@ const PROVIDER_TABS = [
   { id: 'workflow-router', label: 'Workflow Router' },
   { id: 'model-browser', label: 'Model Browser' },
   { id: 'embeddings', label: 'Embeddings' },
-  { id: 'routing', label: 'Routing' },
   { id: 'reasoning', label: 'Reasoning' },
   { id: 'display', label: 'Display' },
 ] as const;
@@ -337,7 +336,6 @@ export function ProviderSettingsTab() {
     'workflow-router': null,
     'model-browser': null,
     'embeddings': null,
-    'routing': null,
     'reasoning': null,
     'display': null,
   });
@@ -353,8 +351,8 @@ export function ProviderSettingsTab() {
     const observers: IntersectionObserver[] = [];
     const visibilityMap: Record<string, number> = {};
 
-    // Observe the 5 distinct DOM sections (embeddings shares connections' ref)
-    const observedTabs: ProviderTabId[] = ['connections', 'workflow-router', 'model-browser', 'routing', 'reasoning', 'display'];
+    // Observe the distinct DOM sections (embeddings shares connections' ref)
+    const observedTabs: ProviderTabId[] = ['connections', 'workflow-router', 'model-browser', 'reasoning', 'display'];
     observedTabs.forEach((id) => {
       const el = sectionRefs.current[id];
       if (!el) return;
@@ -2166,6 +2164,9 @@ function ModelBrowserContainer() {
 
 type SortOption = 'best' | 'cost-asc' | 'cost-desc' | 'context' | 'speed';
 
+const DEFAULT_MODEL_BROWSER_LIMIT = 24;
+const FILTERED_MODEL_BROWSER_LIMIT = 48;
+
 function ModelBrowserSection({
   models,
   effectiveModel,
@@ -2202,6 +2203,7 @@ function ModelBrowserSection({
   onTestModel: (id: string) => void;
 }) {
   const [sortBy, setSortBy] = useState<SortOption>('best');
+  const [showAllResults, setShowAllResults] = useState(false);
 
   const SPEED_ORDER: Record<string, number> = { fast: 0, medium: 1, slow: 2 };
 
@@ -2256,12 +2258,22 @@ function ModelBrowserSection({
     }
   }, [models, searchText, activeProvider, activeCostTier, activeSpeedTier, sortBy]);
 
+  const hasActiveNarrowing = !!searchText.trim() || activeProvider !== 'All' || activeCostTier !== 'All' || activeSpeedTier !== 'All';
+  const resultLimit = hasActiveNarrowing ? FILTERED_MODEL_BROWSER_LIMIT : DEFAULT_MODEL_BROWSER_LIMIT;
+  const displayedModels = showAllResults ? filtered : filtered.slice(0, resultLimit);
+  const hiddenModelCount = Math.max(0, filtered.length - displayedModels.length);
+
+  useEffect(() => {
+    setShowAllResults(false);
+  }, [searchText, activeProvider, activeCostTier, activeSpeedTier, sortBy]);
+
   const clearFilters = () => {
     setSearchText('');
     setActiveProvider('All');
     setActiveCostTier('All');
     setActiveSpeedTier('All');
     setSortBy('best');
+    setShowAllResults(false);
   };
 
   const totalProviderCount = providerTabCounts['All'] ?? models.length;
@@ -2346,8 +2358,17 @@ function ModelBrowserSection({
       </div>
 
       {/* Result count + sort */}
-      <div className="flex items-center justify-between mb-3">
-        <span className="text-xs text-muted">{filtered.length} models</span>
+      <div className="flex items-center justify-between gap-3 mb-3">
+        <div className="min-w-0">
+          <span className="text-xs text-muted">
+            Showing {displayedModels.length} of {filtered.length} models
+          </span>
+          {hiddenModelCount > 0 && (
+            <span className="ml-2 text-[11px] text-muted/60">
+              Search or filter to narrow the catalog.
+            </span>
+          )}
+        </div>
         <select
           value={sortBy}
           onChange={e => setSortBy(e.target.value as SortOption)}
@@ -2374,20 +2395,33 @@ function ModelBrowserSection({
           </button>
         </div>
       ) : (
-        <div className="grid gap-3 mt-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 300px), 1fr))' }}>
-          {filtered.map(m => (
-            <ModelCard
-              key={m.id}
-              model={m}
-              isSelected={m.id === effectiveModel}
-              isWorkspaceOverride={m.id === workspaceModel}
-              onSelect={() => onSelectModel(m)}
-              onTest={() => onTestModel(m.id)}
-              testResult={testResult}
-              isTesting={testingModel === m.id}
-            />
-          ))}
-        </div>
+        <>
+          <div className="grid gap-3 mt-4" style={{ gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 300px), 1fr))' }}>
+            {displayedModels.map(m => (
+              <ModelCard
+                key={m.id}
+                model={m}
+                isSelected={m.id === effectiveModel}
+                isWorkspaceOverride={m.id === workspaceModel}
+                onSelect={() => onSelectModel(m)}
+                onTest={() => onTestModel(m.id)}
+                testResult={testResult}
+                isTesting={testingModel === m.id}
+              />
+            ))}
+          </div>
+          {hiddenModelCount > 0 && (
+            <div className="mt-4 flex items-center justify-center">
+              <button
+                type="button"
+                onClick={() => setShowAllResults(true)}
+                className="px-4 py-2 text-xs font-medium rounded-lg border border-border bg-bg text-muted hover:text-text hover:border-accent/40 transition-colors"
+              >
+                Show all {filtered.length} models
+              </button>
+            </div>
+          )}
+        </>
       )}
     </div>
   );
