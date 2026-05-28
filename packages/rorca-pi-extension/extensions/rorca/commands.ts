@@ -2,21 +2,15 @@ import type { ExtensionContext } from "@mariozechner/pi-coding-agent";
 import { RorcaApiClient } from "./api.js";
 import { parseApproveCommand, parseForgeCommand, parseRetryCommand, parseRunCommand, parseStatusCommand, resolveBriefInput, tokenizeArgs } from "./args.js";
 import { buildWatchSnapshot, formatRunList, formatRunNotify } from "./format.js";
+import { type RorcaSkillWorkflowRequest } from "./skill-launcher.js";
 import type { ExtensionState, PiModel, SpecDetail, Workspace } from "./types.js";
 import { RunWatchController } from "./watch.js";
 
 export type CommandDependencies = {
   api: RorcaApiClient;
   watch: RunWatchController;
-  dispatchSkillSpecCreation(input: {
-    workspaceId: string;
-    brief: string;
-    briefSource: string;
-    autoApprove: boolean;
-    autoRun: boolean;
-    queue: boolean;
-    modelOverride?: string;
-  }): void;
+  dispatchSkillWorkflow(input: RorcaSkillWorkflowRequest): void;
+  canLaunchSkillWorkflow?(input: RorcaSkillWorkflowRequest): Promise<boolean>;
   getState(): ExtensionState;
   updateState(patch: Partial<ExtensionState>): void;
 };
@@ -26,11 +20,6 @@ async function pickWorkspace(ctx: ExtensionContext, workspaces: Workspace[]): Pr
   const selected = await ctx.ui.select("Select a Rorca workspace", labels);
   if (!selected) return undefined;
   return selected.split(" — ")[0];
-}
-
-function storyLines(spec: SpecDetail): string[] {
-  const stories = Array.isArray(spec.userStories) ? spec.userStories : Array.isArray(spec.stories) ? spec.stories : [];
-  return stories.slice(0, 12).map((story) => `- ${story.id}: ${story.title}`);
 }
 
 async function resolveWorkspace(ctx: ExtensionContext, deps: CommandDependencies, workspaceId?: string): Promise<Workspace> {
@@ -101,6 +90,11 @@ async function handleTriggeredRun(runId: number, queued: boolean | undefined, au
   }
 }
 
+async function canUseSkillWorkflow(deps: CommandDependencies, input: RorcaSkillWorkflowRequest): Promise<boolean> {
+  if (!deps.canLaunchSkillWorkflow) return true;
+  return deps.canLaunchSkillWorkflow(input);
+}
+
 async function dispatchSkillFirstCreateSpec(
   args: string,
   ctx: ExtensionContext,
@@ -114,16 +108,56 @@ async function dispatchSkillFirstCreateSpec(
   if (options?.deprecationNotice) {
     ctx.ui.notify(options.deprecationNotice, "warning");
   }
-  deps.dispatchSkillSpecCreation({
+
+  const autoApprove = options?.forceApprove ?? parsed.options.approve;
+  const autoRun = options?.forceRun ?? parsed.options.run;
+  const skillInput: RorcaSkillWorkflowRequest = {
+    workflow: "forge",
+    skillName: autoApprove && autoRun ? "rorca-forge-run" : "rorca-forge",
     workspaceId: workspace.id,
     brief,
     briefSource: sourceLabel,
-    autoApprove: options?.forceApprove ?? parsed.options.approve,
-    autoRun: options?.forceRun ?? parsed.options.run,
+    autoApprove,
+    autoRun,
     queue: parsed.options.queue,
     modelOverride: parsed.options.model,
+  };
+
+  if (await canUseSkillWorkflow(deps, skillInput)) {
+    deps.dispatchSkillWorkflow(skillInput);
+    ctx.ui.notify(`Dispatched skill-first spec creation in workspace ${workspace.id}`, "info");
+    return;
+  }
+
+  ctx.ui.notify("Rorca MCP bridge unavailable; falling back to the shared backend forge workflow.", "warning");
+  const forged = await deps.api.forgeSpec({
+    workspaceId: workspace.id,
+    brief,
+    model: parsed.options.model,
   });
-  ctx.ui.notify(`Dispatched skill-first spec creation in workspace ${workspace.id}`, "info");
+  deps.updateState({ workspaceId: workspace.id, lastSpecSlug: forged.slug });
+  ctx.ui.notify(`Saved ${forged.slug} via shared backend forge`, "success");
+
+  if (autoApprove || autoRun) {
+    await deps.api.approveSpec(forged.slug, workspace.id);
+    ctx.ui.notify(`Approved ${forged.slug}`, "success");
+  }
+
+  if (autoRun) {
+    const trigger = await deps.api.triggerRun({
+      specSlug: forged.slug,
+      workspaceId: workspace.id,
+      queue: parsed.options.queue,
+      model: parsed.options.model,
+      includeGraph: true,
+    });
+
+    if (trigger.conflict) {
+      throw new Error(`Workspace busy. Active run: ${trigger.activeRunId}`);
+    }
+
+    await handleTriggeredRun(trigger.runId, trigger.queued, parsed.options.autoWatch, ctx, deps, `Triggered ${forged.slug}`);
+  }
 }
 
 export function registerRorcaCommands(registerCommand: (name: string, description: string, handler: (args: string, ctx: ExtensionContext) => Promise<void>) => void, deps: CommandDependencies): void {
@@ -153,8 +187,23 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
   registerCommand("rorca-approve", "Approve the last or specified Rorca spec", async (args, ctx) => {
     const parsed = parseApproveCommand(args, deps.getState().lastSpecSlug);
     const workspace = await resolveWorkspace(ctx, deps, parsed.workspaceId);
-    await deps.api.approveSpec(parsed.specSlug, workspace.id);
     deps.updateState({ workspaceId: workspace.id, lastSpecSlug: parsed.specSlug });
+
+    const skillInput: RorcaSkillWorkflowRequest = {
+      workflow: "approve",
+      skillName: "rorca-approve",
+      workspaceId: workspace.id,
+      specSlug: parsed.specSlug,
+    };
+
+    if (await canUseSkillWorkflow(deps, skillInput)) {
+      deps.dispatchSkillWorkflow(skillInput);
+      ctx.ui.notify(`Dispatched skill-guided approval for ${parsed.specSlug}`, "info");
+      return;
+    }
+
+    ctx.ui.notify("Rorca MCP bridge unavailable; falling back to direct approval.", "warning");
+    await deps.api.approveSpec(parsed.specSlug, workspace.id);
     ctx.ui.notify(`Approved ${parsed.specSlug}`, "success");
   });
 
@@ -170,6 +219,28 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
   registerCommand("rorca-run", "Trigger an approved Rorca spec with Pi", async (args, ctx) => {
     const parsed = parseRunCommand(args);
     const workspace = await resolveWorkspace(ctx, deps, parsed.workspaceId);
+    deps.updateState({ workspaceId: workspace.id, lastSpecSlug: parsed.specSlug });
+
+    const skillInput: RorcaSkillWorkflowRequest = {
+      workflow: "run",
+      skillName: "rorca-run-operator",
+      workspaceId: workspace.id,
+      specSlug: parsed.specSlug,
+      specPath: `forge/specs/approved/${parsed.specSlug}.json`,
+      storyId: parsed.storyId,
+      queue: parsed.queue,
+      forceSequential: parsed.forceSequential,
+      modelOverride: parsed.model,
+      watchAfterLaunch: parsed.autoWatch,
+    };
+
+    if (await canUseSkillWorkflow(deps, skillInput)) {
+      deps.dispatchSkillWorkflow(skillInput);
+      ctx.ui.notify(`Dispatched skill-guided run planning for ${parsed.specSlug}`, "info");
+      return;
+    }
+
+    ctx.ui.notify("Rorca MCP bridge unavailable; falling back to direct run trigger.", "warning");
     const spec = await deps.api.getSpec(parsed.specSlug, workspace.id);
     const resolvedModel = parsed.model ?? await resolvePiModelForRun(spec, deps, ctx);
     const trigger = await deps.api.triggerRun({
@@ -186,7 +257,6 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
       throw new Error(`Workspace busy. Active run: ${trigger.activeRunId}`);
     }
 
-    deps.updateState({ workspaceId: workspace.id, lastSpecSlug: parsed.specSlug });
     await handleTriggeredRun(trigger.runId, trigger.queued, parsed.autoWatch, ctx, deps, `Triggered ${parsed.specSlug}`);
   });
 
@@ -240,6 +310,22 @@ export function registerRorcaCommands(registerCommand: (name: string, descriptio
 
   registerCommand("rorca-retry", "Retry failed stories in a Rorca run", async (args, ctx) => {
     const parsed = parseRetryCommand(args, deps.getState().lastRunId);
+    const skillInput: RorcaSkillWorkflowRequest = {
+      workflow: "retry",
+      skillName: "rorca-retry-planner",
+      runId: parsed.runId,
+      storyIds: parsed.storyIds,
+      forceSequential: parsed.forceSequential,
+      watchAfterLaunch: parsed.autoWatch,
+    };
+
+    if (await canUseSkillWorkflow(deps, skillInput)) {
+      deps.dispatchSkillWorkflow(skillInput);
+      ctx.ui.notify(`Dispatched skill-guided retry planning for run ${parsed.runId}`, "info");
+      return;
+    }
+
+    ctx.ui.notify("Rorca MCP bridge unavailable; falling back to direct retry.", "warning");
     const result = await deps.api.retryRun(parsed.runId, parsed.storyIds, {
       forceSequential: parsed.forceSequential,
     });

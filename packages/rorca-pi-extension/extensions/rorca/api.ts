@@ -1,4 +1,5 @@
 import type {
+  ForgeSpecResponse,
   GenerateSpecResponse,
   GeneratedSpecStatus,
   HealthResponse,
@@ -60,6 +61,24 @@ export class RorcaApiClient {
     return this.fetchJson<GenerateSpecResponse>("/api/specs/generate", {
       method: "POST",
       body: JSON.stringify({ workspaceId, brief, agentOverride: "pi" }),
+    }, 120_000);
+  }
+
+  async forgeSpec(input: {
+    workspaceId: string;
+    brief: string;
+    model?: string;
+    storyCount?: number;
+  }): Promise<ForgeSpecResponse> {
+    return this.fetchJson<ForgeSpecResponse>("/api/specs/forge", {
+      method: "POST",
+      body: JSON.stringify({
+        workspaceId: input.workspaceId,
+        brief: input.brief,
+        agentOverride: "pi",
+        ...(input.model ? { model: input.model } : {}),
+        ...(typeof input.storyCount === "number" ? { storyCount: input.storyCount } : {}),
+      }),
     }, 120_000);
   }
 

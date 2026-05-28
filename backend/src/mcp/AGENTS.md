@@ -20,10 +20,9 @@ The MCP server hits Rorca's HTTP API internally: `RORCA_API_URL` env var (defaul
 | `rorca_list_specs` | `workspaceId`, `status?` (pending/approved) | Array of spec summaries |
 | `rorca_list_workspaces` | (none) | All registered workspaces |
 | `rorca_pipeline_status` | `workspaceId?`, `runId?` | Current/recent pipeline runs with story results |
-| `rorca_trigger_run` | `workspaceId`, `specId`, `dryRun?`, `autoWorktree?` | Start pipeline run for approved spec |
+| `rorca_trigger_run` | `workspaceId`, `specPath`, `storyId?`, `modelOverride?`, `includeGraph?`, `forceSequential?` | Start pipeline run for approved spec |
 | `rorca_run_status` | `runId` | Detailed run status with per-story progress |
-| `rorca_usage_stats` | `workspaceId`, `from?`, `to?`, `groupBy?` | Token usage and cost summary |
-| `rorca_retry_story` | `runId`, `storyIds?` | Retry failed stories in a completed run |
+| `rorca_retry_story` | `runId`, `storyIds?`, `forceSequential?` | Retry failed stories in a completed run |
 | `rorca_list_runs` | `workspaceId`, `limit?` | Recent pipeline runs with status summary |
 | `rorca_edit_story` | `workspaceId`, `specId`, `storyId`, fields | Update a single story in a spec |
 | `rorca_search_stories` | `workspaceId`, `query` | Cross-spec story search |

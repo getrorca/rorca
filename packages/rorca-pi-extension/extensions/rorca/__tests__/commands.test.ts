@@ -47,7 +47,7 @@ describe("rorca pi extension commands", () => {
 
   it("dispatches skill-first explicit spec creation", async () => {
     const { commands, register } = createRegistry();
-    const dispatchSkillSpecCreation = vi.fn();
+    const dispatchSkillWorkflow = vi.fn();
     let state: ExtensionState = {};
     const api = {
       resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
@@ -56,7 +56,8 @@ describe("rorca pi extension commands", () => {
     registerRorcaCommands(register, {
       api,
       watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
-      dispatchSkillSpecCreation,
+      dispatchSkillWorkflow,
+      canLaunchSkillWorkflow: vi.fn(async () => true),
       getState: () => state,
       updateState: (patch) => {
         state = { ...state, ...patch };
@@ -66,7 +67,9 @@ describe("rorca pi extension commands", () => {
     const { ctx, notifications } = createContext();
     await commands.get("rorca-create-spec")!("Ship OAuth login --workspace cashflow --approve --run --queue --model openai-codex/gpt-5.4", ctx);
 
-    expect(dispatchSkillSpecCreation).toHaveBeenCalledWith({
+    expect(dispatchSkillWorkflow).toHaveBeenCalledWith({
+      workflow: "forge",
+      skillName: "rorca-forge-run",
       workspaceId: "cashflow",
       brief: "Ship OAuth login",
       briefSource: "inline",
@@ -79,9 +82,9 @@ describe("rorca pi extension commands", () => {
     expect(notifications.at(-1)?.message).toContain("Dispatched skill-first spec creation");
   });
 
-  it("maps forge-run compatibility alias onto the skill-first create-spec flow", async () => {
+  it("maps forge-run compatibility alias onto the dedicated forge-run skill path", async () => {
     const { commands, register } = createRegistry();
-    const dispatchSkillSpecCreation = vi.fn();
+    const dispatchSkillWorkflow = vi.fn();
     let state: ExtensionState = {};
     const api = {
       resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
@@ -90,7 +93,8 @@ describe("rorca pi extension commands", () => {
     registerRorcaCommands(register, {
       api,
       watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
-      dispatchSkillSpecCreation,
+      dispatchSkillWorkflow,
+      canLaunchSkillWorkflow: vi.fn(async () => true),
       getState: () => state,
       updateState: (patch) => {
         state = { ...state, ...patch };
@@ -100,7 +104,9 @@ describe("rorca pi extension commands", () => {
     const { ctx, notifications } = createContext();
     await commands.get("rorca-forge-run")!("Ship OAuth login --workspace cashflow --queue", ctx);
 
-    expect(dispatchSkillSpecCreation).toHaveBeenCalledWith({
+    expect(dispatchSkillWorkflow).toHaveBeenCalledWith({
+      workflow: "forge",
+      skillName: "rorca-forge-run",
       workspaceId: "cashflow",
       brief: "Ship OAuth login",
       briefSource: "inline",
@@ -114,26 +120,164 @@ describe("rorca pi extension commands", () => {
     expect(notifications.at(-1)?.message).toContain("Dispatched skill-first spec creation");
   });
 
-  it("forwards sequential mode on /rorca-run", async () => {
+  it("dispatches the run-operator skill when MCP tools are available", async () => {
     const { commands, register } = createRegistry();
+    const dispatchSkillWorkflow = vi.fn();
     let state: ExtensionState = {};
     const api = {
       resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
-      getSpec: vi.fn(async () => ({ id: "oauth-login", model: "openai-codex/gpt-5.4" })),
-      triggerRun: vi.fn(async () => ({ runId: 101, queued: false })),
     } as any;
 
     registerRorcaCommands(register, {
       api,
       watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
-      dispatchSkillSpecCreation: vi.fn(),
+      dispatchSkillWorkflow,
+      canLaunchSkillWorkflow: vi.fn(async () => true),
       getState: () => state,
       updateState: (patch) => {
         state = { ...state, ...patch };
       },
     });
 
-    const { ctx } = createContext();
+    const { ctx, notifications } = createContext();
+    await commands.get("rorca-run")!("oauth-login --workspace cashflow --sequential", ctx);
+
+    expect(dispatchSkillWorkflow).toHaveBeenCalledWith({
+      workflow: "run",
+      skillName: "rorca-run-operator",
+      workspaceId: "cashflow",
+      specSlug: "oauth-login",
+      specPath: "forge/specs/approved/oauth-login.json",
+      storyId: undefined,
+      queue: false,
+      forceSequential: true,
+      modelOverride: undefined,
+      watchAfterLaunch: true,
+    });
+    expect(notifications.at(-1)?.message).toContain("Dispatched skill-guided run planning");
+  });
+
+  it("dispatches the retry-planner skill when MCP tools are available", async () => {
+    const { commands, register } = createRegistry();
+    const dispatchSkillWorkflow = vi.fn();
+    let state: ExtensionState = { lastRunId: 77 };
+    const api = {} as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillWorkflow,
+      canLaunchSkillWorkflow: vi.fn(async () => true),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx, notifications } = createContext();
+    await commands.get("rorca-retry")!("77 US-001 --sequential --no-watch", ctx);
+
+    expect(dispatchSkillWorkflow).toHaveBeenCalledWith({
+      workflow: "retry",
+      skillName: "rorca-retry-planner",
+      runId: 77,
+      storyIds: ["US-001"],
+      forceSequential: true,
+      watchAfterLaunch: false,
+    });
+    expect(notifications.at(-1)?.message).toContain("Dispatched skill-guided retry planning");
+  });
+
+  it("falls back to the shared backend forge workflow when MCP tools are unavailable", async () => {
+    const { commands, register } = createRegistry();
+    const watchStart = vi.fn();
+    let state: ExtensionState = {};
+    const api = {
+      resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
+      forgeSpec: vi.fn(async () => ({ slug: "oauth-login" })),
+      approveSpec: vi.fn(async () => undefined),
+      triggerRun: vi.fn(async () => ({ runId: 301, queued: true })),
+    } as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: watchStart, stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillWorkflow: vi.fn(),
+      canLaunchSkillWorkflow: vi.fn(async () => false),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx, notifications } = createContext();
+    await commands.get("rorca-create-spec")!("Ship OAuth login --workspace cashflow --approve --run --queue", ctx);
+
+    expect(api.forgeSpec).toHaveBeenCalledWith({
+      workspaceId: "cashflow",
+      brief: "Ship OAuth login",
+      model: undefined,
+    });
+    expect(api.approveSpec).toHaveBeenCalledWith("oauth-login", "cashflow");
+    expect(api.triggerRun).toHaveBeenCalledWith({
+      specSlug: "oauth-login",
+      workspaceId: "cashflow",
+      queue: true,
+      model: undefined,
+      includeGraph: true,
+    });
+    expect(watchStart).toHaveBeenCalledWith(301, ctx);
+    expect(notifications[0]?.message).toContain("falling back to the shared backend forge workflow");
+  });
+
+  it("falls back to direct approval when MCP tools are unavailable", async () => {
+    const { commands, register } = createRegistry();
+    let state: ExtensionState = {};
+    const api = {
+      resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
+      approveSpec: vi.fn(async () => undefined),
+    } as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillWorkflow: vi.fn(),
+      canLaunchSkillWorkflow: vi.fn(async () => false),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx, notifications } = createContext();
+    await commands.get("rorca-approve")!("oauth-login --workspace cashflow", ctx);
+
+    expect(api.approveSpec).toHaveBeenCalledWith("oauth-login", "cashflow");
+    expect(notifications[0]?.message).toContain("falling back to direct approval");
+  });
+
+  it("falls back to direct run triggering when MCP tools are unavailable", async () => {
+    const { commands, register } = createRegistry();
+    const watchStart = vi.fn();
+    let state: ExtensionState = {};
+    const api = {
+      resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
+      getSpec: vi.fn(async () => ({ id: "oauth-login", model: "openai-codex/gpt-5.4" })),
+      triggerRun: vi.fn(async () => ({ runId: 401, queued: false })),
+    } as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: watchStart, stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillWorkflow: vi.fn(),
+      canLaunchSkillWorkflow: vi.fn(async () => false),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx, notifications } = createContext();
     await commands.get("rorca-run")!("oauth-login --workspace cashflow --sequential", ctx);
 
     expect(api.triggerRun).toHaveBeenCalledWith({
@@ -145,31 +289,37 @@ describe("rorca pi extension commands", () => {
       includeGraph: true,
       forceSequential: true,
     });
+    expect(watchStart).toHaveBeenCalledWith(401, ctx);
+    expect(notifications[0]?.message).toContain("falling back to direct run trigger");
   });
 
-  it("forwards sequential mode on /rorca-retry", async () => {
+  it("falls back to direct retry when MCP tools are unavailable", async () => {
     const { commands, register } = createRegistry();
+    const watchStart = vi.fn();
     let state: ExtensionState = { lastRunId: 77 };
     const api = {
-      retryRun: vi.fn(async () => ({ ok: true, queued: true, runId: 102 })),
+      retryRun: vi.fn(async () => ({ ok: true, queued: true, runId: 501 })),
     } as any;
 
     registerRorcaCommands(register, {
       api,
-      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
-      dispatchSkillSpecCreation: vi.fn(),
+      watch: { start: watchStart, stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillWorkflow: vi.fn(),
+      canLaunchSkillWorkflow: vi.fn(async () => false),
       getState: () => state,
       updateState: (patch) => {
         state = { ...state, ...patch };
       },
     });
 
-    const { ctx } = createContext();
+    const { ctx, notifications } = createContext();
     await commands.get("rorca-retry")!("77 US-001 --sequential --no-watch", ctx);
 
     expect(api.retryRun).toHaveBeenCalledWith(77, ["US-001"], {
       forceSequential: true,
     });
+    expect(watchStart).not.toHaveBeenCalled();
+    expect(notifications[0]?.message).toContain("falling back to direct retry");
   });
 
   it("shows run status details", async () => {
@@ -196,7 +346,7 @@ describe("rorca pi extension commands", () => {
     registerRorcaCommands(register, {
       api,
       watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
-      dispatchSkillSpecCreation: vi.fn(),
+      dispatchSkillWorkflow: vi.fn(),
       getState: () => state,
       updateState: (patch) => {
         state = { ...state, ...patch };

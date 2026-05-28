@@ -142,9 +142,9 @@ Usage:
 ```
 
 Behavior:
-- dispatches `/skill:rorca-forge`
-- Pi/skill performs the drafting
-- Rorca persists the explicit draft through the structured persistence flow
+- prefers dispatching `/skill:rorca-forge` (or `/skill:rorca-forge-run` when both `--approve` and `--run` are requested)
+- Pi/skill performs the drafting and uses Rorca MCP tools for canonical persistence
+- if the Rorca MCP bridge is unavailable, falls back to the shared backend `/api/specs/forge` workflow
 - this is the preferred explicit and reliable create-spec command in Pi
 
 Examples:
@@ -166,6 +166,10 @@ They are no longer the public first-class path. Prefer `/rorca-create-spec` for 
 
 ## `/rorca-approve`
 Approve the specified spec, or the last generated spec if omitted from local state.
+
+Behavior:
+- prefers dispatching `/skill:rorca-approve`
+- falls back to direct REST approval if the MCP bridge is unavailable
 
 Usage:
 
@@ -189,11 +193,13 @@ Usage:
 ```
 
 Behavior:
-- always triggers with `agentOverride: "pi"`
-- defaults `includeGraph` to `true`
+- prefers dispatching `/skill:rorca-run-operator`
+- skill path passes workspace/spec scope, optional story targeting, queue mode, graph inclusion, and model override into the workflow prompt
+- if the MCP bridge is unavailable, falls back to direct REST triggering with `agentOverride: "pi"`
+- fallback defaults `includeGraph` to `true`
 - if `--story <id>` is provided, the trigger uses the single-story path
-- if `--sequential` is provided, the trigger sends `forceSequential: true`
-- if `--model` is omitted, the extension chooses a preferred local Pi model
+- if `--sequential` is provided, the fallback sends `forceSequential: true`
+- if `--model` is omitted during fallback, the extension chooses a preferred local Pi model
 
 Examples:
 
@@ -250,6 +256,10 @@ Usage:
 
 ## `/rorca-retry`
 Retry a run, optionally limited to specific story ids.
+
+Behavior:
+- prefers dispatching `/skill:rorca-retry-planner`
+- falls back to direct REST retry if the MCP bridge is unavailable
 
 Usage:
 

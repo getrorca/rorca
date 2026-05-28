@@ -97,6 +97,16 @@ export class RorcaMcpBridge {
     return { toolCount: bridge.tools.length, url: this.mcpUrl };
   }
 
+  async listToolNames(): Promise<string[]> {
+    const bridge = await this.getBridge();
+    return bridge.tools.map((tool) => tool.name);
+  }
+
+  async supportsToolGroups(toolGroups: string[][]): Promise<boolean> {
+    const names = new Set(await this.listToolNames());
+    return toolGroups.every((group) => group.some((name) => names.has(name)));
+  }
+
   async dispose(): Promise<void> {
     if (!this.sessionId) return;
     try {
