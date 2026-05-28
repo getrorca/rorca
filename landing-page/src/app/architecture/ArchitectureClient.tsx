@@ -1,5 +1,6 @@
 'use client';
 
+import Image from 'next/image';
 import { motion } from 'framer-motion';
 import { Nav } from '@/components/Nav';
 import { Footer } from '@/components/Footer';
@@ -23,6 +24,26 @@ export default function ArchitectureClient() {
                         A spec-driven pipeline backed by PostgreSQL 16, a 5-layer context cascade, Apache AGE knowledge graph, skill-first MCP tools, and real-time WAL event telemetry.
                     </p>
                 </motion.div>
+
+                <motion.figure
+                    initial={{ opacity: 0, y: 24 }}
+                    animate={{ opacity: 1, y: 0 }}
+                    transition={{ duration: 0.55, delay: 0.08 }}
+                    className="mb-24 overflow-hidden rounded-[2rem] border border-white/10 bg-zinc-950/70 p-2 shadow-2xl shadow-black/40"
+                >
+                    <Image
+                        src="/diagrams/rorca-linear-flow-clean-icons-aqua.png"
+                        alt="Linear diagram showing how Rorca turns operator surfaces into canonical specs, queued story execution, Git commits, and memory plus knowledge graph feedback."
+                        width={2400}
+                        height={1350}
+                        priority
+                        sizes="(min-width: 1280px) 1280px, 100vw"
+                        className="h-auto w-full rounded-[1.5rem]"
+                    />
+                    <figcaption className="px-4 pb-3 pt-4 text-sm text-zinc-500">
+                        The full loop: surfaces create spec truth, workers execute story truth, and memory/graph feedback improves the next run.
+                    </figcaption>
+                </motion.figure>
 
                 <div className="grid grid-cols-1 lg:grid-cols-12 gap-12">
                     {/* Floating Navigation (Left) */}
@@ -168,9 +189,9 @@ export default function ArchitectureClient() {
                             <div className="flex items-start gap-4 p-5 bg-zinc-900/50 border border-accent/20 rounded-xl mb-8">
                                 <div className="w-2 h-2 rounded-full bg-accent mt-1.5 flex-shrink-0" />
                                 <div>
-                                    <p className="text-sm font-medium text-zinc-200 mb-1">Compatible with Claude Code, Pi, and MCP-capable clients</p>
+                                    <p className="text-sm font-medium text-zinc-200 mb-1">Works across Rorca surfaces and provider runtimes</p>
                                     <p className="text-sm text-zinc-400 leading-relaxed">
-                                        The explicit create-spec flow works because the caller keeps the draft in its own context, then hands a finished spec to Rorca. That is why the architecture is reliable across clients instead of depending on prompt guessing.
+                                        Specs can be created from the dashboard, CLI/TUI, Pi extension, MCP tools, or another client that calls the Rorca API. Execution then attaches to the selected runtime — Claude Code, OpenCode, Codex, or Pi — while the backend keeps spec state, retrieval, telemetry, and memory consistent.
                                     </p>
                                 </div>
                             </div>
@@ -196,13 +217,13 @@ export default function ArchitectureClient() {
                             </div>
 
                             <div className="mb-6">
-                                <p className="text-sm text-zinc-500 mb-4">Pi and Claude Code also have dedicated skill-first entrypoints:</p>
+                                <p className="text-sm text-zinc-500 mb-4">Common operator entrypoints use the same backend contract:</p>
                                 <div className="grid grid-cols-1 md:grid-cols-2 gap-2">
                                     {[
                                         '/rorca-create-spec',
                                         '/skill:rorca-forge',
-                                        '/rorca-forge (legacy fallback)',
-                                        '/rorca-forge-run (legacy fallback)',
+                                        '/rorca-run',
+                                        '/rorca-watch',
                                     ].map((cmd) => (
                                         <div key={cmd} className="px-3 py-2 bg-zinc-950 border border-white/5 rounded-lg flex items-center justify-between gap-2">
                                             <span className="text-xs font-mono text-fizz">{cmd}</span>

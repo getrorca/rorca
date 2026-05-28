@@ -141,7 +141,7 @@ export default function DocsToolsPage() {
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
             <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Machine-facing contract</div>
             <div className="text-white font-medium mb-2">MCP tools</div>
-            <p className="text-zinc-400 leading-relaxed">Use MCP when a client or skill should explicitly call Rorca tools. After the skills refactor, <code className="text-zinc-300">rorca_create_spec</code> is the canonical create-spec tool.</p>
+            <p className="text-zinc-400 leading-relaxed">Use MCP when a client or skill should explicitly call Rorca tools. The preferred spec-authoring path is <code className="text-zinc-300">rorca_create_spec</code> for explicit draft persistence; <code className="text-zinc-300">rorca_generate_spec</code> remains available as a backend-drafting fallback.</p>
           </div>
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
             <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">Pi-native operator surface</div>
@@ -208,7 +208,8 @@ rorca run zz-my-spec --story US-001 --sequential`}</code></pre>
           </div>
           <div className="rounded-xl border border-white/10 bg-black/20 p-4">
             <div className="text-xs uppercase tracking-[0.22em] text-zinc-500 mb-2">MCP</div>
-            <pre className="overflow-x-auto text-sm text-zinc-200 leading-relaxed"><code>{`Tool: rorca_create_spec
+            <pre className="overflow-x-auto text-sm text-zinc-200 leading-relaxed"><code>{`# preferred explicit-draft flow
+Tool: rorca_create_spec
 workspaceId: rorca
 title: Add a docs-only story
 stories: [...]`}</code></pre>
@@ -246,7 +247,7 @@ stories: [...]`}</code></pre>
       <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-8">
         <h2 className="text-2xl font-medium mb-4">MCP tools</h2>
         <p className="text-zinc-400 leading-relaxed mb-6">
-          These are the canonical backend tools exposed through the MCP HTTP surface and bridged into supported clients. The list is also visible from <code className="text-zinc-300">GET /api/mcp/tools</code>.
+          These are the backend tools exposed through the MCP HTTP surface and bridged into supported clients. The live list is also visible from <code className="text-zinc-300">GET /api/mcp/tools</code>. Not every tool has equal priority in day-to-day flows: some are canonical, some remain compatibility aliases, and some are legacy fallbacks.
         </p>
         <div className="space-y-6">
           {mcpGroups.map((group) => (
@@ -262,8 +263,10 @@ stories: [...]`}</code></pre>
             </div>
           ))}
         </div>
-        <div className="mt-6 rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-zinc-200 leading-relaxed">
-          The canonical create-spec path is <code className="text-zinc-100">rorca_create_spec</code>. <code className="text-zinc-100">rorca_persist_spec</code> remains a compatibility alias, and <code className="text-zinc-100">rorca_generate_spec</code> remains the explicit backend-drafting fallback.
+        <div className="mt-6 rounded-xl border border-emerald-500/20 bg-emerald-500/10 p-4 text-sm text-zinc-200 leading-relaxed space-y-2">
+          <p><strong className="text-zinc-100">Preferred:</strong> fetch context if needed, draft in the caller/skill, then persist with <code className="text-zinc-100">rorca_create_spec</code>.</p>
+          <p><strong className="text-zinc-100">Compatibility alias:</strong> <code className="text-zinc-100">rorca_persist_spec</code> points at the same explicit-draft persistence path.</p>
+          <p><strong className="text-zinc-100">Legacy/fallback:</strong> <code className="text-zinc-100">rorca_generate_spec</code> still exists when you explicitly want Rorca to draft server-side, but it is no longer the primary product-wide authoring flow.</p>
         </div>
       </section>
 

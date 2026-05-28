@@ -38,6 +38,7 @@ import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedS
 import { readRunState, type RunState } from '../lib/run-state';
 import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
+import { buildStoryExecutionPacket, detectExecutionModeFromSpec } from '../lib/story-execution-packet';
 import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
@@ -203,6 +204,47 @@ async function resolveLogPath(runId: number): Promise<string | null> {
 /** True if the given PID is still alive */
 function isPidAlive(pid: number): boolean {
   try { process.kill(pid, 0); return true; } catch { return false; }
+}
+
+function buildExecutionReadinessSummary(
+  workspacePath: string,
+  specJson: Record<string, unknown>,
+): {
+  mode: 'impl' | 'qa' | 'journey';
+  averageScore: number;
+  riskyStoryCount: number;
+  stories: Array<{
+    storyId: string;
+    storyTitle: string;
+    score: number;
+    grade: 'strong' | 'fair' | 'weak';
+    warnings: string[];
+    recommendedFallbackEngine: 'claude' | 'opencode' | 'codex' | 'pi' | null;
+  }>;
+} {
+  const mode = detectExecutionModeFromSpec(specJson as { mode?: string; phases?: unknown });
+  const stories = ((specJson.userStories ?? []) as CapabilityStory[]).map((story) => {
+    const packet = buildStoryExecutionPacket(workspacePath, story, mode);
+    return {
+      storyId: story.id,
+      storyTitle: story.title,
+      score: packet.readiness.score,
+      grade: packet.readiness.grade,
+      warnings: packet.readiness.warnings,
+      recommendedFallbackEngine: packet.readiness.recommendedFallbackEngine,
+    };
+  });
+
+  const averageScore = stories.length > 0
+    ? Math.round(stories.reduce((sum, story) => sum + story.score, 0) / stories.length)
+    : 0;
+
+  return {
+    mode,
+    averageScore,
+    riskyStoryCount: stories.filter(story => story.grade === 'weak').length,
+    stories,
+  };
 }
 
 // ─── Fallback Result Syncer ──────────────────────────────────────────────────
@@ -1005,6 +1047,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
     const resolvedAgent = activeAgent;
     const report = checkSpec(stories, resolvedAgent);
     const orchConfig = loadOrchestrationConfig(workspace.path);
+    const executionReadiness = buildExecutionReadinessSummary(workspace.path, specJson);
 
     let browserMcpAvailable = false;
     try {
@@ -1025,6 +1068,7 @@ router.post('/preflight', async (req: Request, res: Response) => {
         missingTools: s.result.missingTools,
         warnings: s.result.warnings,
       })),
+      executionReadiness,
       browserMcpAvailable,
       browserMcpPort: 4040,
     });
@@ -1347,6 +1391,18 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       }
     }
 
+    // Shared execution-readiness summary — surfaces concrete execution quality signals
+    // to the UI/API before the run starts. This is advisory for manual runs; the
+    // execution-engine enforces the no-op recovery path during execution.
+    if (fs.existsSync(path.join(workspace.path, specPath))) {
+      try {
+        const specJsonForReadiness = JSON.parse(fs.readFileSync(path.join(workspace.path, specPath), 'utf8'));
+        (req as any)._executionReadiness = buildExecutionReadinessSummary(workspace.path, specJsonForReadiness);
+      } catch {
+        // Non-fatal — let the trigger proceed
+      }
+    }
+
     // CA-006: Pre-execution convention drift check
     // If .rorca/config.json has execution.driftCheck: true, run drift detection
     // and block the pipeline if error-severity violations exist.
@@ -1431,11 +1487,13 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
            VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel]);
         const queuedId = queueResult!.id;
 
+        const executionReadiness = (req as any)._executionReadiness;
         res.status(202).json({
           queued: true,
           runId: queuedId,
           queuePosition: position,
           ...(existingQueued ? { warning: `Spec "${specSlugForQueue}" is already queued (run #${existingQueued.id}). This creates an additional queued run.` } : {}),
+          ...(executionReadiness ? { executionReadiness } : {}),
         });
         return;
       }
@@ -1851,6 +1909,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
     // OC-031: Include capability warnings in trigger response
     const capWarnings = (req as any)._capabilityWarnings;
     const capMode = (req as any)._capabilityMismatchMode;
+    const executionReadiness = (req as any)._executionReadiness;
     res.status(201).json({
       ok: true,
       runId,
@@ -1862,6 +1921,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       agentType: resolvedAgentType,
       agentModel: finalAgentModel,
       ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
+      ...(executionReadiness ? { executionReadiness } : {}),
       ...(orchestration ? { orchestration } : {}),
     });
   } catch (error: any) {

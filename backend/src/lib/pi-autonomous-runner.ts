@@ -25,6 +25,8 @@ export interface PiProgressLogSeed {
   candidateFiles?: string[];
   candidateTests?: string[];
   validationCommands?: string[];
+  expectedArtifacts?: string[];
+  readinessWarnings?: string[];
 }
 
 export interface PiStoryPromptContext {
@@ -36,6 +38,8 @@ export interface PiStoryPromptContext {
   candidateFiles?: string[];
   candidateTests?: string[];
   validationCommands?: string[];
+  expectedArtifacts?: string[];
+  readinessWarnings?: string[];
 }
 
 export interface PiProgressLogUpdate {
@@ -369,7 +373,9 @@ export function ensurePiStoryProgressLog(filePath: string, seed: PiProgressLogSe
   appendSectionBlock(parts, 'Done Definition', uniqueItems(seed.doneChecklist ?? []));
   appendSectionBlock(parts, 'Candidate Files', uniqueItems(seed.candidateFiles ?? []));
   appendSectionBlock(parts, 'Candidate Tests', uniqueItems(seed.candidateTests ?? []));
+  appendSectionBlock(parts, 'Expected Artifacts', uniqueItems(seed.expectedArtifacts ?? []));
   appendSectionBlock(parts, 'Validation Plan', uniqueItems(seed.validationCommands ?? []));
+  appendSectionBlock(parts, 'Execution Risks', uniqueItems(seed.readinessWarnings ?? []));
   appendSectionBlock(parts, 'Completed Work', ['Initialised progress log.']);
   appendSectionBlock(parts, 'Remaining Work', [
     'Create an implementation plan.',
@@ -437,6 +443,18 @@ export function buildPiStoryPromptContext(context: PiStoryPromptContext): string
   if ((context.validationCommands?.length ?? 0) > 0) {
     lines.push('## Validation Plan');
     for (const item of uniqueItems(context.validationCommands ?? [])) lines.push(`- ${item}`);
+    lines.push('');
+  }
+
+  if ((context.expectedArtifacts?.length ?? 0) > 0) {
+    lines.push('## Expected Artifacts');
+    for (const item of uniqueItems(context.expectedArtifacts ?? [])) lines.push(`- ${item}`);
+    lines.push('');
+  }
+
+  if ((context.readinessWarnings?.length ?? 0) > 0) {
+    lines.push('## Execution Risks');
+    for (const item of uniqueItems(context.readinessWarnings ?? [])) lines.push(`- ${item}`);
     lines.push('');
   }
 

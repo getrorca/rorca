@@ -1,4 +1,5 @@
 import type { Metadata } from 'next';
+import Image from 'next/image';
 import Link from 'next/link';
 import { buildMetadata, SITE_URL } from '@/lib/metadata';
 
@@ -17,6 +18,21 @@ export default function DocsArchitecturePage() {
       <p className="text-zinc-400 text-lg leading-relaxed max-w-3xl mb-10">
         The core story is not “three execution engines.” It is a spec-first orchestration model with explicit persistence, a Direction Stack, backend-native retrieval, and story-by-story execution through the provider CLI the operator selected.
       </p>
+
+      <figure className="mb-10 overflow-hidden rounded-2xl border border-white/10 bg-zinc-950/70 p-2 shadow-2xl shadow-black/30">
+        <Image
+          src="/diagrams/rorca-linear-flow-clean-icons-aqua.png"
+          alt="Linear diagram showing Rorca surfaces creating canonical specs, executing queued stories, and feeding run evidence back into memory and graph retrieval."
+          width={2400}
+          height={1350}
+          priority
+          sizes="(min-width: 1024px) 896px, 100vw"
+          className="h-auto w-full rounded-xl"
+        />
+        <figcaption className="px-3 pb-2 pt-3 text-sm text-zinc-500">
+          The same loop powers the dashboard, CLI/TUI, MCP tools, Pi extension, and provider-backed execution runtimes.
+        </figcaption>
+      </figure>
 
       <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-8">
         <h2 className="text-2xl font-medium mb-4">The four moving parts</h2>
