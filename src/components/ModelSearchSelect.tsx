@@ -30,6 +30,8 @@ export interface ModelOption {
   speedTier?: string;
   costTier?: string;
   recommended: boolean;
+  available?: boolean;
+  availabilityNote?: string | null;
   /** Whether this model supports reasoning/thinking. */
   supportsReasoning?: boolean;
   /** Effort levels supported by this model (e.g. ['low', 'medium', 'high', 'max']). */
@@ -144,7 +146,8 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
       ? models.filter(m =>
           m.label.toLowerCase().includes(q) ||
           m.provider.toLowerCase().includes(q) ||
-          m.id.toLowerCase().includes(q)
+          m.id.toLowerCase().includes(q) ||
+          (m.availabilityNote ?? '').toLowerCase().includes(q)
         )
       : models;
 
@@ -307,6 +310,11 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
         {selected ? (
           <div className="flex items-center gap-2 min-w-0 flex-1">
             <span className="truncate font-medium">{selected.label}</span>
+            {selected.available === false && (
+              <span className="shrink-0 text-[9px] px-1.5 py-0.5 rounded bg-amber-500/10 text-amber-400 font-medium">
+                Unavailable
+              </span>
+            )}
             <span className="shrink-0 text-[10px] px-1.5 py-0.5 rounded bg-surface-200 text-muted font-mono">
               {formatCost(selected.costPer1kInput)}/1K
             </span>
@@ -357,6 +365,10 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
                 Clear
               </button>
             )}
+          </div>
+
+          <div className="px-3 py-2 border-b border-[var(--border)] bg-[var(--bg)] text-[11px] text-muted/70">
+            Showing the full model catalog. Models from unconfigured providers are disabled.
           </div>
 
           {/* Model list */}
@@ -442,6 +454,7 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
                         const idx = flatIdx;
                         const isSelected = m.id === value;
                         const isHighlighted = idx === highlightIdx;
+                        const isAvailable = m.available !== false;
                         return (
                           <button
                             key={m.id}
@@ -449,12 +462,20 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
                             type="button"
                             role="option"
                             aria-selected={isSelected}
-                            onClick={() => { onChange(m.id); setOpen(false); }}
+                            aria-disabled={!isAvailable}
+                            disabled={!isAvailable}
+                            title={!isAvailable ? (m.availabilityNote ?? 'This provider is not configured.') : undefined}
+                            onClick={() => {
+                              if (!isAvailable) return;
+                              onChange(m.id); setOpen(false);
+                            }}
                             onMouseEnter={() => setHighlightIdx(idx)}
                             className={`w-full text-left px-3 py-1.5 text-[13px] transition-colors flex items-center gap-2 ${
-                              isHighlighted
-                                ? 'bg-accent/8 text-[var(--text)]'
-                                : 'text-[var(--text)]/80 hover:bg-[var(--surface-100)]'
+                              !isAvailable
+                                ? 'text-muted/35 cursor-not-allowed bg-transparent'
+                                : isHighlighted
+                                  ? 'bg-accent/8 text-[var(--text)]'
+                                  : 'text-[var(--text)]/80 hover:bg-[var(--surface-100)]'
                             }`}
                           >
                             <span className="w-3.5 shrink-0">
@@ -471,7 +492,12 @@ export default function ModelSearchSelect({ models, value, defaultModelId, onCha
                                     : 'Supports native reasoning'}
                                   className="shrink-0"
                                 >
-                                  <Brain size={11} className="text-violet-400" />
+                                  <Brain size={11} className={isAvailable ? 'text-violet-400' : 'text-violet-400/40'} />
+                                </span>
+                              )}
+                              {!isAvailable && (
+                                <span className="shrink-0 text-[9px] px-1 py-0.5 rounded bg-amber-500/10 text-amber-400 font-medium">
+                                  Configure provider
                                 </span>
                               )}
                               {m.id === defaultModelId && (

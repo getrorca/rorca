@@ -2102,6 +2102,7 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
 
   // Model
   const [availableModels, setAvailableModels] = useState<ModelOption[]>([]);
+  const [configuredProviders, setConfiguredProviders] = useState<string[]>([]);
   const [selectedModel, setSelectedModel] = useState(() => {
     try { return localStorage.getItem('rorca:forge:model') ?? ''; } catch { return ''; }
   });
@@ -2365,13 +2366,14 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
   useEffect(() => {
     if (!workspaceId) return;
     Promise.all([
-      apiFetch<{ models: ModelOption[]; defaultModel: string }>(`/api/direction/models?workspaceId=${workspaceId}`),
+      apiFetch<{ models: ModelOption[]; defaultModel: string; configuredProviders?: string[] }>(`/api/direction/models?workspaceId=${workspaceId}`),
       apiFetch<{ provider: string }>(`/api/vault/keys/default-provider?workspaceId=${workspaceId}`),
       apiFetch<{ agentType: AgentType; agentModel: string | null; modelDisplayName: string | null; opencodeInstalled?: boolean; codexInstalled?: boolean }>('/api/config'),
       apiFetch<{ models: Array<{ id: string; name: string; provider: string; contextWindow: number; costPer1kInput?: number; costPer1kOutput?: number; speedTier?: string; costTier?: string }> }>('/api/config/opencode-models'),
       apiFetch<{ model: string | null }>('/api/workflow-router/resolved/spec_generation').catch(() => null),
     ]).then(([modelData, providerData, configData, ocModels, resolvedWf]) => {
       setAvailableModels(modelData.models);
+      setConfiguredProviders(modelData.configuredProviders ?? []);
       // Workflow router model takes priority over direction models default
       const wrModel = resolvedWf?.model ?? null;
       setDefaultModelId(wrModel || modelData.defaultModel);
@@ -3049,6 +3051,9 @@ function NewSpecForm({ onClose, onNavigate, onNavigateToRun, initialBrief }: {
               <div>
                 <label className="block text-xs font-medium text-muted mb-1.5">Spec Generation Model</label>
                 <ModelSearchSelect models={availableModels} value={selectedModel || defaultModelId || ''} defaultModelId={defaultModelId} onChange={setSelectedModel} />
+                <p className="mt-1.5 text-[11px] text-muted/70">
+                  Showing the full model catalog. Configured providers: {configuredProviders.length > 0 ? configuredProviders.join(', ') : 'none'}.
+                </p>
               </div>
 
               {/* Story Count */}
