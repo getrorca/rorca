@@ -69,6 +69,19 @@ export default function DocsExecutionPage() {
       </section>
 
       <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-8">
+        <h2 className="text-2xl font-medium mb-4">How execution actually runs</h2>
+        <p className="text-zinc-300 leading-relaxed mb-4">
+          Rorca does not do the coding work inside one long-lived provider session of its own. For each story attempt, Rorca prepares execution context, resolves dependency and worktree state, selects the configured runtime CLI, and spawns an isolated subprocess for that unit of work.
+        </p>
+        <p className="text-zinc-400 leading-relaxed mb-4">
+          That subprocess runs through the selected provider CLI against the story&apos;s attached repo state, emits logs and artifacts, and then exits. Rorca tracks status, retries, fallbacks, dependencies, and evidence across those subprocesses, but the selected provider CLI is the thing actually performing the coding work.
+        </p>
+        <div className="rounded-xl border border-white/10 bg-black/20 p-4 font-mono text-sm text-zinc-300 overflow-x-auto">
+          run request → Rorca compiles context + worktree state → provider CLI subprocess per story attempt → logs / artifacts / exit status → pipeline state
+        </div>
+      </section>
+
+      <section className="rounded-2xl border border-white/10 bg-zinc-950/60 p-6 mb-8">
         <h2 className="text-2xl font-medium mb-4">Execution engine examples</h2>
         <div className="grid gap-4 lg:grid-cols-2">
           {engineExamples.map((engine) => (
