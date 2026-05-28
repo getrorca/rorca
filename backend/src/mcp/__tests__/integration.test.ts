@@ -43,6 +43,11 @@ describe('MCP server integration', () => {
       expect(toolNames).toContain('rorca_list_specs');
       expect(toolNames).toContain('rorca_approve_spec');
       expect(toolNames).toContain('rorca_pipeline_status');
+      expect(toolNames).toContain('rorca_list_workspaces');
+      expect(toolNames).toContain('rorca_trigger_run');
+      expect(toolNames).toContain('rorca_run_status');
+      expect(toolNames).toContain('rorca_retry_story');
+      expect(toolNames).toContain('rorca_list_runs');
       expect(toolNames).toContain('rorca_edit_story');
       expect(toolNames).toContain('rorca_add_stories');
       expect(toolNames).toContain('rorca_delete_story');

@@ -31,6 +31,13 @@ export type GenerateSpecResponse = {
   jobId?: string;
 };
 
+export type ForgeSpecResponse = {
+  slug: string;
+  provider?: string | null;
+  model?: string | null;
+  draftingAgent?: string | null;
+};
+
 export type GeneratedSpecStatus = {
   jobId: string;
   status: string;

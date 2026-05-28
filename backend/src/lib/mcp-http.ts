@@ -503,6 +503,36 @@ export const MCP_FRIENDLY_ALIASES: readonly McpFriendlyAlias[] = [
     path: '/api/pipeline/runs',
   },
   {
+    toolName: 'rorca_list_workspaces',
+    description: 'Friendly alias for listing visible workspaces.',
+    method: 'GET',
+    path: '/api/workspaces',
+  },
+  {
+    toolName: 'rorca_trigger_run',
+    description: 'Friendly alias for triggering a pipeline run from an approved spec.',
+    method: 'POST',
+    path: '/api/pipeline/trigger',
+  },
+  {
+    toolName: 'rorca_run_status',
+    description: 'Friendly alias for loading detailed status for a single pipeline run.',
+    method: 'GET',
+    path: '/api/pipeline/runs/{runId}',
+  },
+  {
+    toolName: 'rorca_retry_story',
+    description: 'Friendly alias for retrying failed stories from a prior pipeline run.',
+    method: 'POST',
+    path: '/api/pipeline/runs/{runId}/retry',
+  },
+  {
+    toolName: 'rorca_list_runs',
+    description: 'Friendly alias for listing pipeline runs in a workspace.',
+    method: 'GET',
+    path: '/api/pipeline/runs',
+  },
+  {
     toolName: 'rorca_edit_story',
     description: 'Friendly alias for editing a single story inside a spec.',
     method: 'PATCH',

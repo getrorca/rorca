@@ -31,7 +31,9 @@ Do more operator reasoning when:
 ## Tool policy
 
 - use structured reads for spec/run/status context
-- use structured mutation for run triggering
+- use retrieval tools (`rorca_recall`, `rorca_search`) when prior failures, conventions, or workspace gotchas may change run scope
+- use structured mutation for run triggering (`rorca_trigger_run` / `rorca_pipeline_trigger`)
+- if the trigger tool expects `specPath`, use `forge/specs/approved/<slug>.json`
 - prefer MCP or internal adapters where available
 - do not invent run ids or statuses
 

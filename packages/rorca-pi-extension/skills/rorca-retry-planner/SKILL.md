@@ -35,7 +35,8 @@ Prefer broader retry scope when:
 ## Tool policy
 
 - use structured reads for run details, story outcomes, and context
-- use structured mutation to trigger the retry
+- use retrieval tools (`rorca_recall`, `rorca_search`) when you need prior failure context, conventions, or architecture memories to decide retry scope
+- use structured mutation to trigger the retry (`rorca_retry_story` / `rorca_pipeline_runs_by_runId_retry`)
 - prefer MCP or internal adapters where available
 
 ## Output contract
