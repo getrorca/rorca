@@ -17,7 +17,7 @@ export function DocsSidebar() {
             className={`block rounded-xl border px-4 py-3 transition-colors ${pathname === '/docs' ? 'border-white/20 bg-white/5 text-white' : 'border-transparent text-zinc-400 hover:border-white/10 hover:bg-white/[0.03] hover:text-white'}`}
           >
             <div className="text-sm font-medium">Overview</div>
-            <div className="mt-1 text-xs text-zinc-500">Start here and branch into the current docs sections.</div>
+            <div className="mt-1 text-xs text-zinc-500">Start here and branch into the guides below.</div>
           </Link>
           {docsNav.map((item) => {
             const active = pathname === item.href;
@@ -34,14 +34,6 @@ export function DocsSidebar() {
           })}
         </div>
 
-        <div className="mt-5 border-t border-white/5 pt-5 text-sm text-zinc-400 leading-relaxed">
-          <p className="mb-3">
-            Current docs are anchored to the product-truth matrix and the explicit create-spec contract.
-          </p>
-          <a href="https://github.com/getrorca/rorca#readme" target="_blank" rel="noreferrer" className="text-fizz hover:text-white transition-colors font-medium">
-            View README
-          </a>
-        </div>
       </div>
     </aside>
   );
