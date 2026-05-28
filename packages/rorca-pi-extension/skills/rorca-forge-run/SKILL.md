@@ -44,6 +44,8 @@ Before triggering a run:
 - resolve or honor the requested execution model if applicable
 - honor story-specific targeting if present
 - make sure the run trigger returns a canonical run id
+- prefer `rorca_approve_spec` then `rorca_trigger_run` / `rorca_pipeline_trigger`
+- if the trigger tool expects `specPath`, use `forge/specs/approved/<slug>.json`
 
 Do not claim a run was triggered unless a canonical run id or equivalent confirmed result was returned.
 
@@ -53,6 +55,7 @@ Do not claim a run was triggered unless a canonical run id or equivalent confirm
 - prefer MCP where that is the primary structured tool surface
 - internal backend adapters are acceptable when this workflow is launched from backend-owned flows
 - use REST only as explicit fallback when allowed by the launcher
+- preferred tool sequence: retrieve context -> draft -> `rorca_create_spec` -> verify saved spec -> `rorca_approve_spec` -> `rorca_trigger_run`
 
 ## Output contract
 
@@ -63,6 +66,7 @@ At the end, provide:
 - whether the run is queued or active if known
 - short summary of drafted stories
 - key caveats or assumptions
+- if `watchAfterLaunch` was requested, explicitly suggest `/rorca-watch <runId>` once you know the run id
 
 ## Final reminder
 

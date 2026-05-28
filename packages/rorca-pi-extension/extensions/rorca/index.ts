@@ -2,39 +2,10 @@ import type { ExtensionAPI, ExtensionContext } from "@mariozechner/pi-coding-age
 import { RorcaApiClient } from "./api.js";
 import { RorcaMcpBridge } from "./bridge.js";
 import { registerRorcaCommands } from "./commands.js";
+import { formatSkillLaunchPrompt, getRequiredToolGroups, type RorcaSkillWorkflowRequest } from "./skill-launcher.js";
 import { mergeState, restoreState, STATE_ENTRY_TYPE } from "./state.js";
 import type { ExtensionState } from "./types.js";
 import { RunWatchController } from "./watch.js";
-
-function formatSkillSpecCreationPrompt(input: {
-  workspaceId: string;
-  brief: string;
-  briefSource: string;
-  autoApprove: boolean;
-  autoRun: boolean;
-  queue: boolean;
-  modelOverride?: string;
-}): string {
-  const indentedBrief = input.brief
-    .split("\n")
-    .map((line) => `  ${line}`)
-    .join("\n");
-
-  return [
-    "/skill:rorca-forge",
-    `workspaceId: ${input.workspaceId}`,
-    `briefSource: ${input.briefSource}`,
-    `preferMcp: true`,
-    `allowRestFallback: false`,
-    `autoApprove: ${input.autoApprove}`,
-    `autoRun: ${input.autoRun}`,
-    `queue: ${input.queue}`,
-    ...(input.modelOverride ? [`modelOverride: ${input.modelOverride}`] : []),
-    `availableToolAliases: [rorca_create_spec, rorca_persist_spec, rorca_get_context, rorca_approve_spec, rorca_trigger_run]`,
-    "brief: |",
-    indentedBrief,
-  ].join("\n");
-}
 
 export default function rorcaPiExtension(pi: ExtensionAPI): void {
   const api = new RorcaApiClient();
@@ -82,8 +53,15 @@ export default function rorcaPiExtension(pi: ExtensionAPI): void {
   registerRorcaCommands(registerCommand, {
     api,
     watch,
-    dispatchSkillSpecCreation: (input) => {
-      pi.sendUserMessage(formatSkillSpecCreationPrompt(input));
+    dispatchSkillWorkflow: (input: RorcaSkillWorkflowRequest) => {
+      pi.sendUserMessage(formatSkillLaunchPrompt(input));
+    },
+    canLaunchSkillWorkflow: async (input: RorcaSkillWorkflowRequest) => {
+      try {
+        return await bridge.supportsToolGroups(getRequiredToolGroups(input));
+      } catch {
+        return false;
+      }
     },
     getState: () => state,
     updateState,

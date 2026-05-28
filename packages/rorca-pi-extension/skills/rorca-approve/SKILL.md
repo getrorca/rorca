@@ -31,8 +31,9 @@ Focus on meaningful issues such as:
 
 ## Tool policy
 
-- use structured reads to inspect the spec
-- use structured mutation to approve it
+- use structured reads to inspect the spec (`rorca_get_specs_by_specId` or equivalent)
+- use retrieval tools like `rorca_recall` / `rorca_search` only when they materially improve readiness judgment
+- use structured mutation to approve it (`rorca_approve_spec` or equivalent)
 - prefer MCP or internal adapters over ad-hoc fallback paths
 
 ## Output contract

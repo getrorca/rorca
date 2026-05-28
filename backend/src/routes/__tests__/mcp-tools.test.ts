@@ -38,6 +38,8 @@ describe('GET /api/mcp/tools', () => {
     const names = res.body.tools.map((tool: { name: string }) => tool.name);
     expect(names).toContain('rorca_save_memory');
     expect(names).toContain('rorca_get_memories');
+    expect(names).toContain('rorca_trigger_run');
+    expect(names).toContain('rorca_retry_story');
     expect(names).not.toContain('rorca_log_decision');
 
     const saveMemory = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_save_memory');
@@ -45,5 +47,10 @@ describe('GET /api/mcp/tools', () => {
       category: 'Memory',
     });
     expect(saveMemory.requiredParams).toEqual(expect.arrayContaining(['category', 'title', 'rule']));
+
+    const triggerRun = res.body.tools.find((tool: { name: string }) => tool.name === 'rorca_trigger_run');
+    expect(triggerRun).toMatchObject({
+      category: 'Specs & Pipeline',
+    });
   });
 });

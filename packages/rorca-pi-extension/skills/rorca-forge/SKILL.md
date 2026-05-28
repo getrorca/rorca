@@ -66,10 +66,10 @@ Use tools/internal operations to gather context such as:
 Use structured operations for:
 - `rorca_create_spec` as the canonical explicit create-spec path when available
 - `rorca_persist_spec` as a compatibility alias for the same persistence contract
-- update spec from explicit content
-- patch stories if needed
-- approve the spec if instructed
-- fetch the saved spec afterward
+- `rorca_get_specs_by_specId` or `rorca_list_specs` to verify what was saved
+- `rorca_approve_spec` / `rorca_specs_by_specId_approve` if approval was requested
+- `rorca_trigger_run` / `rorca_pipeline_trigger` only when the launcher explicitly requested auto-run
+- patch stories if needed before approval
 
 ### MCP vs internal adapters vs REST
 - prefer MCP when running in an environment where MCP is the primary structured tool surface
@@ -94,6 +94,10 @@ Instead:
 
 ### Canonical loop
 `skill thinks -> tool fetches memories/context -> skill evaluates relevance/gaps/conflicts -> tool fetches more if needed -> skill drafts better spec`
+
+Do not treat the first retrieval result as authoritative.
+State clearly when evidence is weak, stale, or contradictory.
+If retrieval is weak, narrow the question and fetch again before drafting.
 
 ### Use retrieval deliberately
 You may need to decide between:
@@ -180,9 +184,11 @@ Your responsibility is to produce the best draft possible and then hand it off c
 Once you have a complete draft:
 1. persist it using `rorca_create_spec` when available, otherwise `rorca_persist_spec`
 2. prefer enrichment enabled where available
-3. if possible, read the saved spec back
+3. read the saved spec back via `rorca_get_specs_by_specId` if possible
 4. verify that a real slug/id exists
 5. verify that the saved story set broadly matches the draft
+6. if `autoApprove` is true, approve via `rorca_approve_spec`
+7. if `autoRun` is true, trigger via `rorca_trigger_run` or `rorca_pipeline_trigger` using the canonical approved spec path
 
 Do not claim the spec was saved unless a structured operation confirms it.
 
