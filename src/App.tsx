@@ -34,11 +34,9 @@ import {
   SettingsFormSkeleton,
 } from './components/skeletons';
 import SlideOver from './components/SlideOver';
-import TerminalDrawer from './components/TerminalDrawer';
 import { useFileWatchSSE } from './hooks/useFileWatchSSE';
 import { usePipelineRuns } from './hooks/usePipelineRuns';
-import { useAppNavigate, useActivePanel, PANEL_ROUTES } from './routes';
-import { TerminalDrawerProvider, useTerminalDrawer } from './contexts/TerminalDrawerContext';
+import { useAppNavigate, useActivePanel } from './routes';
 
 // — Lazy-loaded pages (not part of initial bundle) —
 const PublicReviewPage = lazy(() => import('./pages/PublicReviewPage'));
@@ -63,7 +61,6 @@ const SettingsPanel = lazy(() => import('./panels/SettingsPanel'));
 const RunViewPanel = lazy(() => import('./panels/RunViewPanel'));
 const SpecReviewPanel = lazy(() => import('./panels/SpecReviewPanel'));
 const MarketplacePanel = lazy(() => import('./panels/MarketplacePanel'));
-const TerminalPanel = lazy(() => import('./panels/TerminalPanel'));
 
 // SettingsTab type — imported from SettingsPanel module
 type SettingsTab = import('./panels/SettingsPanel').SettingsTab;
@@ -119,7 +116,6 @@ function GlobalErrorWiring() {
 const PANEL_LABELS: Record<PanelId, string> = {
   specs: 'Specs',
   runs: 'Runs',
-  terminal: 'Terminal',
   analytics: 'Analytics',
   direction: 'Direction',
   settings: 'Settings',
@@ -236,8 +232,6 @@ function AppRoutes() {
         <Route path="specs" element={<PanelRoute panel="specs" />} />
         {/* Runs — pipeline queue + run view */}
         <Route path="runs" element={<PanelRoute panel="runs" />} />
-        {/* Terminal — OpenCode interactive PTY, fullscreen panel mode */}
-        <Route path="terminal" element={<PanelRoute panel="terminal" />} />
         {/* Direction — tabbed: Direction + Team + Memory + Rules */}
         <Route path="direction" element={<PanelRoute panel="direction" />} />
         {/* Analytics — unified panel (ULT-005) */}
@@ -259,6 +253,7 @@ function AppRoutes() {
         <Route path="pipeline" element={<Navigate to="/runs" replace />} />
         <Route path="worktrees" element={<Navigate to="/runs" replace />} />
         <Route path="compare" element={<Navigate to="/runs" replace />} />
+        <Route path="terminal" element={<Navigate to="/runs" replace />} />
         <Route path="team-direction" element={<Navigate to="/direction" replace />} />
         <Route path="memory" element={<Navigate to="/direction" replace />} />
         <Route path="usage" element={<Navigate to="/analytics" replace />} />
@@ -299,8 +294,6 @@ function getPanelSkeleton(panel: PanelId) {
       return <SettingsFormSkeleton />;
     case 'marketplace':
       return <BoardSkeleton />;
-    case 'terminal':
-      return <div className="flex-1 bg-[#0d1117]" />;
     default: return <BoardSkeleton />;
   }
 }
@@ -362,11 +355,6 @@ function ActivePanel({ id, onNavigate, onNavigateToRun, reviewSpecId, onNavigate
     case 'marketplace':
       return <MarketplacePanel onNavigate={onNavigate} />;
 
-    case 'terminal':
-      // TerminalPanel is always-mounted in AppLayout to preserve PTY session state.
-      // Nothing to render here — the always-mounted instance handles display.
-      return null;
-
     default: return null;
   }
 }
@@ -409,7 +397,6 @@ function AppLayout() {
   const [queueCount, setQueueCount] = useState(0);
   const [pendingSpecsCount, setPendingSpecsCount] = useState(0);
   useBreakpoint();
-  const { toggle: toggleTerminalDrawer } = useTerminalDrawer();
   // Derive activeRunId from URL path /runs/:runId
   const runMatch = location.pathname.match(/^\/runs\/(\d+)/);
   const activeRunId = runMatch ? Number(runMatch[1]) : null;
@@ -518,24 +505,6 @@ function AppLayout() {
 
   useHotkeys(hotkeys);
 
-  useEffect(() => {
-    const handleKeyDown = (event: KeyboardEvent) => {
-      if ((event.metaKey || event.ctrlKey) && event.key.toLowerCase() === 'j') {
-        event.preventDefault();
-        toggleTerminalDrawer();
-        return;
-      }
-
-      if (event.ctrlKey && event.code === 'Backquote') {
-        event.preventDefault();
-        toggleTerminalDrawer();
-      }
-    };
-
-    window.addEventListener('keydown', handleKeyDown);
-    return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [toggleTerminalDrawer]);
-
   const contextValue = useMemo<AppContentContextValue>(() => ({
     navigateToRun,
     navigateBackFromRun,
@@ -576,14 +545,7 @@ function AppLayout() {
           window.dispatchEvent(new CustomEvent('rorca:open-wizard'));
         }} />
         {/* Router-driven panel content */}
-        {/* Terminal panel is always mounted to preserve PTY session state across navigation.
-            Visibility is controlled via CSS — hidden when not on /terminal route. */}
-        <div className={location.pathname === '/terminal' ? 'contents' : 'hidden'}>
-          <Suspense fallback={<div className="flex-1 bg-[#0d1117]" />}>
-            <TerminalPanel mode="panel" />
-          </Suspense>
-        </div>
-        {location.pathname !== '/terminal' && <Outlet />}
+        <Outlet />
 
         {/* Slide-over Overlays */}
         <SlideOver isOpen={reviewSpecId !== null} onClose={navigateBackFromRun} hideHeader={true}>
@@ -609,7 +571,6 @@ function AppLayout() {
             <KeyboardShortcutsPanel onClose={() => setShowShortcutsOverlay(false)} />
           </Suspense>
         )}
-        <TerminalDrawer />
       </Shell>
     </AppContentContext.Provider>
   );
@@ -620,18 +581,16 @@ function App() {
     <ThemeProvider>
       <HelpTipsProvider>
         <ToastProvider>
-          <TerminalDrawerProvider>
-            <AuthProvider>
-              <CapabilitiesProvider>
-                <WorkspaceProvider>
-                  <NotificationProvider>
-                    <GlobalErrorWiring />
-                    <AppRoutes />
-                  </NotificationProvider>
-                </WorkspaceProvider>
-              </CapabilitiesProvider>
-            </AuthProvider>
-          </TerminalDrawerProvider>
+          <AuthProvider>
+            <CapabilitiesProvider>
+              <WorkspaceProvider>
+                <NotificationProvider>
+                  <GlobalErrorWiring />
+                  <AppRoutes />
+                </NotificationProvider>
+              </WorkspaceProvider>
+            </CapabilitiesProvider>
+          </AuthProvider>
         </ToastProvider>
       </HelpTipsProvider>
     </ThemeProvider>

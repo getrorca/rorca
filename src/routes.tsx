@@ -26,12 +26,11 @@ const VALID_SETTINGS_TABS: readonly SettingsTab[] = [
 
 /**
  * Maps every PanelId to its URL path segment.
- * ULT-022: 5 primary panels + run-view + spec-review.
+ * ULT-022: primary panels + run-view + spec-review.
  */
 export const PANEL_ROUTES: Record<PanelId, string> = {
   specs: '/specs',
   runs: '/runs',
-  terminal: '/terminal',
   analytics: '/analytics',
   direction: '/direction',
   settings: '/settings',
@@ -48,7 +47,6 @@ export function pathToPanelId(pathname: string): PanelId {
   if (/^\/settings(\/|$)/.test(pathname)) return 'settings';
   if (pathname === '/specs') return 'specs';
   if (pathname === '/runs') return 'runs';
-  if (pathname === '/terminal') return 'terminal';
   if (pathname === '/direction') return 'direction';
   if (pathname === '/marketplace') return 'marketplace';
   return 'specs';
