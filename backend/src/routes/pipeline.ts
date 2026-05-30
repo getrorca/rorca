@@ -46,6 +46,7 @@ import { detectDrift, isDriftCheckEnabled, hasBlockingViolations, type DriftRepo
 import { synthesizeRunMemory } from '../lib/auto-memory';
 import * as piDetector from '../lib/pi-detector';
 import { logger } from '../lib/logger';
+import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
 import { getBoss } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
 import { authRequired } from '../lib/auth-utils';
@@ -1639,35 +1640,14 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         } else {
           await git.raw(['worktree', 'add', '-b', branchName, worktreePath, 'HEAD']);
         }
+      }
 
-        // Copy .env files — gitignored so never present in worktrees, but required
-        // for database connections, API keys, and other runtime config.
-        const envFilesToCopy = ['.env', 'backend/.env'];
-        for (const rel of envFilesToCopy) {
-          const src = path.join(workspace.path, rel);
-          const dst = path.join(worktreePath, rel);
-          if (fs.existsSync(src) && !fs.existsSync(dst)) {
-            try {
-              // Ensure parent directory exists (e.g. backend/)
-              const dstDir = path.dirname(dst);
-              if (!fs.existsSync(dstDir)) fs.mkdirSync(dstDir, { recursive: true });
-              fs.copyFileSync(src, dst);
-              logger.info(`  [worktree] Copied ${rel} to worktree`);
-            } catch (envErr: unknown) {
-              logger.warn(`  [worktree] Failed to copy ${rel}: ${(envErr as Error).message}`);
-            }
-          }
-        }
-
-        // Add run-tracking files to .gitignore so they don't create noise in commits
-        const worktreeGitignore = path.join(worktreePath, '.gitignore');
-        const trackingPatterns = '\n# Rorca run-tracking files (parallel-safe)\nprogress.txt\n.rorca/run-state.json\n.rorca/memory/health-log.json\n';
-        try {
-          const existing = fs.existsSync(worktreeGitignore) ? fs.readFileSync(worktreeGitignore, 'utf-8') : '';
-          if (!existing.includes('progress.txt')) {
-            fs.appendFileSync(worktreeGitignore, trackingPatterns);
-          }
-        } catch { /* non-fatal */ }
+      const runtimeSupport = ensureWorktreeRuntimeSupport(workspace.path, worktreePath);
+      for (const rel of runtimeSupport.linkedDirs) {
+        logger.info(`  [worktree] Linked ${rel} into worktree`);
+      }
+      for (const rel of runtimeSupport.copiedEnvFiles) {
+        logger.info(`  [worktree] Copied ${rel} to worktree`);
       }
 
       cwd = worktreePath;
