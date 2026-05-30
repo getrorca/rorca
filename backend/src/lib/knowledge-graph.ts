@@ -28,6 +28,7 @@ import * as path from 'path';
 import { pool, query } from '../db/index';
 import { logger } from './logger';
 import type { PoolClient } from 'pg';
+import { checkAge, getAgeUnavailableBody } from './age-guard';
 
 // ── Graph Availability Flag ─────────────────────────────────────────────────
 
@@ -41,6 +42,28 @@ import type { PoolClient } from 'pg';
 let _graphAvailable: boolean | null = null;
 let _graphAvailableCheckedAt = 0;
 const GRAPH_AVAILABLE_NEGATIVE_TTL_MS = 60_000; // re-check every 60s on negative result
+const RORCA_V2_GRAPH = 'rorca_v2';
+const RORCA_V2_KEYED_NODE_LABELS = ['Story', 'File', 'Spec', 'Memory', 'Convention', 'Skill'] as const;
+
+export type RorcaV2KeyedNodeLabel = typeof RORCA_V2_KEYED_NODE_LABELS[number];
+
+export interface GraphBootstrapUnavailable {
+  available: false;
+  statusCode: 503;
+  error: string;
+  code: 'AGE_NOT_INSTALLED';
+  mode: 'lite';
+  hint: string;
+}
+
+export interface GraphBootstrapReady {
+  available: true;
+  graphName: typeof RORCA_V2_GRAPH;
+  labels: RorcaV2KeyedNodeLabel[];
+  keyIndexes: string[];
+}
+
+export type GraphBootstrapResult = GraphBootstrapReady | GraphBootstrapUnavailable;
 
 /**
  * Check if Apache AGE is available on the current Postgres instance.
@@ -151,6 +174,101 @@ async function setupAgeSession(client: PoolClient): Promise<void> {
   logger.debug('[knowledge-graph] setupAgeSession: running LOAD age + SET search_path');
   await client.query("LOAD 'age'");
   await client.query("SET search_path = ag_catalog, \"$user\", public");
+}
+
+function quoteIdent(identifier: string): string {
+  return `"${identifier.replace(/"/g, '""')}"`;
+}
+
+function rorcaV2KeyIndexName(label: RorcaV2KeyedNodeLabel): string {
+  return `idx_${RORCA_V2_GRAPH}_${label.toLowerCase()}_key`;
+}
+
+async function ensureGraphExists(client: PoolClient, graphName: string): Promise<void> {
+  const existing = await client.query(
+    'SELECT 1 FROM ag_catalog.ag_graph WHERE name = $1',
+    [graphName],
+  );
+  if (existing.rowCount === 0) {
+    await client.query('SELECT create_graph($1)', [graphName]);
+  }
+}
+
+async function ensureVertexLabelExists(
+  client: PoolClient,
+  graphName: string,
+  label: RorcaV2KeyedNodeLabel,
+): Promise<void> {
+  const existing = await client.query(
+    `SELECT 1 FROM ag_catalog.ag_label
+     WHERE graph = (SELECT graphid FROM ag_catalog.ag_graph WHERE name = $1)
+       AND name = $2
+       AND kind = 'v'`,
+    [graphName, label],
+  );
+  if (existing.rowCount === 0) {
+    await client.query('SELECT create_vlabel($1, $2)', [graphName, label]);
+  }
+}
+
+async function ensureCanonicalKeyIndex(
+  client: PoolClient,
+  graphName: typeof RORCA_V2_GRAPH,
+  label: RorcaV2KeyedNodeLabel,
+): Promise<string> {
+  const indexName = rorcaV2KeyIndexName(label);
+  await client.query(
+    `CREATE INDEX IF NOT EXISTS ${quoteIdent(indexName)}
+     ON ${quoteIdent(graphName)}.${quoteIdent(label)}
+     USING btree (agtype_access_operator(properties, '"key"'::agtype))`,
+  );
+  return indexName;
+}
+
+/**
+ * Explicit bootstrap for the next-generation graph projection.
+ *
+ * This intentionally does not change any existing runtime reads/writes, which
+ * still target the legacy `rorca` graph. AGE does not provide Neo4j-style
+ * property uniqueness constraints in the current stack, so the strongest
+ * compatible lookup support here is an idempotent btree expression index over
+ * each label table's canonical `properties.key` value.
+ */
+export async function initRorcaV2Graph(): Promise<GraphBootstrapResult> {
+  if (!(await checkAge())) {
+    return {
+      available: false,
+      statusCode: 503,
+      ...getAgeUnavailableBody(),
+    };
+  }
+
+  const client = await pool.connect();
+  try {
+    await setupAgeSession(client);
+    await ensureGraphExists(client, RORCA_V2_GRAPH);
+
+    const keyIndexes: string[] = [];
+    for (const label of RORCA_V2_KEYED_NODE_LABELS) {
+      await ensureVertexLabelExists(client, RORCA_V2_GRAPH, label);
+      keyIndexes.push(await ensureCanonicalKeyIndex(client, RORCA_V2_GRAPH, label));
+    }
+
+    logger.info(
+      { graphName: RORCA_V2_GRAPH, labels: RORCA_V2_KEYED_NODE_LABELS, keyIndexes },
+      '[knowledge-graph] rorca_v2 graph bootstrap complete',
+    );
+
+    return {
+      available: true,
+      graphName: RORCA_V2_GRAPH,
+      labels: [...RORCA_V2_KEYED_NODE_LABELS],
+      keyIndexes,
+    };
+  } finally {
+    await client.query('SET search_path = rorca, public');
+    client.release();
+  }
 }
 
 // ── Cypher Query Helper ─────────────────────────────────────────────────────
