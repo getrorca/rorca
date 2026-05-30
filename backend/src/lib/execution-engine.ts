@@ -107,6 +107,7 @@ import {
   migrateProgressTxt,
   getResumeContext,
 } from './run-state';
+import { ensureWorktreeRuntimeSupport } from './worktree-runtime';
 
 // ─── Types ───────────────────────────────────────────────────────────────────
 
@@ -1009,6 +1010,10 @@ function serializeJsonLine(value: unknown): string {
   return JSON.stringify(value) + '\n';
 }
 
+export function shouldResolvePiRpcStory(eventType: string): boolean {
+  return eventType === 'agent_end';
+}
+
 function attachJsonlLineReader(stream: Readable, onLine: (line: string) => void): () => void {
   const decoder = new StringDecoder('utf8');
   let buffer = '';
@@ -1192,7 +1197,16 @@ async function startPiRpcServer(
     if (_piRpcServer === server) {
       _piRpcServer = null;
     }
-    failPending(`pi RPC server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`);
+    const exitMessage = `pi RPC server exited unexpectedly (code=${code ?? 'null'}, signal=${signal ?? 'null'})`;
+    failPending(exitMessage);
+    for (const listener of [...server.eventListeners]) {
+      try {
+        listener({ type: 'error', message: exitMessage });
+      } catch (error: unknown) {
+        const message = error instanceof Error ? error.message : String(error);
+        server.stderr += `\n[pi-rpc] Event listener error: ${message}`;
+      }
+    }
   });
 
   await new Promise(resolve => setTimeout(resolve, 200));
@@ -2543,47 +2557,37 @@ async function spawnPiRpc(
         if (usage) {
           const costInfo = (usage.cost as Record<string, unknown> | undefined);
           const hasUsageData = usage.input != null || usage.output != null || costInfo?.total != null;
-          if (!hasUsageData) {
-            if (!settled) {
-              settled = true;
-              resolve?.();
-            }
-            return;
+          if (hasUsageData) {
+            const input = Number(usage.input ?? 0);
+            const output = Number(usage.output ?? 0);
+            const cost = Number(costInfo?.total ?? 0);
+            const turnInput = input - cumulativeInput;
+            const turnOutput = output - cumulativeOutput;
+            const turnCostUsd = cost - cumulativeCostUsd;
+            cumulativeInput = input;
+            cumulativeOutput = output;
+            cumulativeCostUsd = cost;
+            turnCount++;
+            writeOutput(
+              `[Token] input=${turnInput > 0 ? turnInput : input} output=${turnOutput > 0 ? turnOutput : output} ` +
+              `cost=${turnCostUsd >= 0 ? turnCostUsd : cost} cumulative_input=${cumulativeInput} ` +
+              `cumulative_output=${cumulativeOutput} cumulative_cost=${cumulativeCostUsd} turn=${turnCount}\n`,
+            );
+            onTokenUpdate?.({
+              inputTokens: turnInput > 0 ? turnInput : input,
+              outputTokens: turnOutput > 0 ? turnOutput : output,
+              turn: turnCount,
+              cumulativeInput,
+              cumulativeOutput,
+              costUsd: turnCostUsd >= 0 ? turnCostUsd : cost,
+              cumulativeCostUsd,
+            });
           }
-
-          const input = Number(usage.input ?? 0);
-          const output = Number(usage.output ?? 0);
-          const cost = Number(costInfo?.total ?? 0);
-          const turnInput = input - cumulativeInput;
-          const turnOutput = output - cumulativeOutput;
-          const turnCostUsd = cost - cumulativeCostUsd;
-          cumulativeInput = input;
-          cumulativeOutput = output;
-          cumulativeCostUsd = cost;
-          turnCount++;
-          writeOutput(
-            `[Token] input=${turnInput > 0 ? turnInput : input} output=${turnOutput > 0 ? turnOutput : output} ` +
-            `cost=${turnCostUsd >= 0 ? turnCostUsd : cost} cumulative_input=${cumulativeInput} ` +
-            `cumulative_output=${cumulativeOutput} cumulative_cost=${cumulativeCostUsd} turn=${turnCount}\n`,
-          );
-          onTokenUpdate?.({
-            inputTokens: turnInput > 0 ? turnInput : input,
-            outputTokens: turnOutput > 0 ? turnOutput : output,
-            turn: turnCount,
-            cumulativeInput,
-            cumulativeOutput,
-            costUsd: turnCostUsd >= 0 ? turnCostUsd : cost,
-            cumulativeCostUsd,
-          });
-        }
-        if (!settled) {
-          settled = true;
-          resolve?.();
         }
         return;
       }
 
-      if (eventType === 'agent_end' && !settled) {
+      if (shouldResolvePiRpcStory(eventType) && !settled) {
         settled = true;
         resolve?.();
         return;
@@ -3275,38 +3279,12 @@ function createStoryWorktree(
       { cwd: workspaceCwd, stdio: 'pipe', timeout: 30_000 },
     );
 
-    // Symlink node_modules from parent so agents can run `npx tsc`, `npm test`, etc.
-    // git worktree excludes node_modules (gitignored) — without this, every `npx` call
-    // downloads packages fresh, causing type-check failures and story cascade failures.
-    const dirsToLink = ['node_modules', 'backend/node_modules'];
-    for (const rel of dirsToLink) {
-      const src = path.join(workspaceCwd, rel);
-      const dst = path.join(worktreePath, rel);
-      if (fs.existsSync(src) && !fs.existsSync(dst)) {
-        try {
-          fs.symlinkSync(src, dst, 'dir');
-        } catch {
-          // Non-fatal — agent can still run npm install if needed
-        }
-      }
+    const runtimeSupport = ensureWorktreeRuntimeSupport(workspaceCwd, worktreePath);
+    for (const rel of runtimeSupport.linkedDirs) {
+      logger.info(`  [worktree] Linked ${rel} into story worktree`);
     }
-
-    // Copy .env files — gitignored so never present in worktrees, but required
-    // for database connections, API keys, and other runtime config.
-    const envFilesToCopy = ['.env', 'backend/.env'];
-    for (const rel of envFilesToCopy) {
-      const src = path.join(workspaceCwd, rel);
-      const dst = path.join(worktreePath, rel);
-      if (fs.existsSync(src) && !fs.existsSync(dst)) {
-        try {
-          const dstDir = path.dirname(dst);
-          if (!fs.existsSync(dstDir)) fs.mkdirSync(dstDir, { recursive: true });
-          fs.copyFileSync(src, dst);
-          logger.info(`  [worktree] Copied ${rel} to story worktree`);
-        } catch {
-          // Non-fatal — story may still work if env vars come from process env
-        }
-      }
+    for (const rel of runtimeSupport.copiedEnvFiles) {
+      logger.info(`  [worktree] Copied ${rel} to story worktree`);
     }
 
     logger.info(`  [worktree] Created ${worktreePath} (${branchName})`);
@@ -4625,12 +4603,6 @@ async function executeStory(
         logger.warn(`${story.id}: Failed to inspect working tree for meaningful changes: ${err?.message ?? String(err)}`);
       }
 
-      recordPiProgress({
-        completedWork: ['Engine marked the story passed after validation gates succeeded.'],
-        modifiedFiles: meaningfulChanges,
-        keyDecisions: [`Validated with agent ${effectiveAgent}${currentModel ? ` using model ${currentModel}` : ''}.`],
-        validationResults: ['Story passed execution and validation gates.'],
-      });
       // US-005: Ingest proposed memories from opencode/codex agents (file-based fallback for non-MCP agents)
       // Moved before writeMemoryMd so newly proposed memories appear in the rebuilt MEMORY.md
       if (workspaceId) {
