@@ -52,6 +52,7 @@ interface OpenCodeFixture {
 const fixtureDir = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../backend/src/lib/__tests__/fixtures');
 const codexFixturePath = path.join(fixtureDir, 'codex-parity.json');
 const openCodeFixturePath = path.join(fixtureDir, 'opencode-parity.json');
+const piFixturePath = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '../../backend/src/__tests__/fixtures/pi/pi-parity.jsonl');
 
 type ParsedStep = NonNullable<ReturnType<typeof parseVerboseLine>>;
 
@@ -117,6 +118,46 @@ describe('Codex run terminal parity helpers', () => {
     expect(rendered).toContain('\x1b[33mwarning\x1b[0m: fixture stderr interleave');
     expect(rendered).toContain('Plain output with no semantic prefix still renders.');
     expect(rendered).not.toContain('\\u001b');
+  });
+});
+
+describe('Pi run terminal parity helpers', () => {
+  it('renders the captured Pi JSONL fixture as transcript output without leaking raw JSON lines', () => {
+    const lines = fs.readFileSync(piFixturePath, 'utf8').trimEnd().split('\n');
+    const rendered = lines
+      .map((line: string) => formatStreamJsonForDisplay(line))
+      .filter((line: string | null): line is string => line !== null)
+      .join('\n');
+
+    expect(rendered).toContain('[Planning] Inspecting the fixed Pi JSONL fixture before replaying terminal updates.');
+    expect(rendered).toContain('[Read] README.md');
+    expect(rendered).toContain('→ Loading 1/3\r\x1b[2KLoading 2/3\r\x1b[2KLoading 3/3\r\x1b[A\x1b[2K\x1b[32mPASS\x1b[0m byte ordering preserved \x1b[?1049hALT SCREEN\x1b[?1049l');
+    expect(rendered).toContain('[Write] notes.txt');
+    expect(rendered).toContain('[Completed] Pi fixture replay complete.');
+    expect(rendered).not.toContain('"type":"tool_call"');
+    expect(rendered).not.toContain('\\u001b');
+  });
+
+  it('derives semantic Pi steps from the same JSONL fixture in transcript order', () => {
+    const lines = fs.readFileSync(piFixturePath, 'utf8').trimEnd().split('\n');
+    const steps = lines
+      .map((line: string) => parseVerboseLine(line))
+      .filter((step: ReturnType<typeof parseVerboseLine>): step is ParsedStep => step !== null);
+
+    expect(steps.map((step) => step.type)).toEqual(['plan', 'read', 'read', 'bash', 'bash', 'write', 'write', 'commit']);
+    expect(steps[0]).toMatchObject({
+      type: 'plan',
+      label: 'Reasoning',
+      detail: 'Inspecting the fixed Pi JSONL fixture before replaying terminal updates.',
+    });
+    expect(steps[3]).toMatchObject({ type: 'bash', label: 'Emit overwrite semantics', toolName: 'bash' });
+    expect(steps[4]).toMatchObject({
+      type: 'bash',
+      label: 'bash result',
+      durationMs: 18,
+      toolName: 'bash',
+    });
+    expect(steps[7]).toMatchObject({ type: 'commit', label: 'Run completed' });
   });
 });
 
