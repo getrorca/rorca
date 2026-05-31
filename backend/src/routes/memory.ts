@@ -36,6 +36,7 @@ import { invalidateMemory } from '../lib/context-cache';
 import { deduplicateMemory } from '../lib/memory-dedup';
 import { embedText, prepareText } from '../lib/embedding-pipeline';
 import { NotFoundError, ValidationError } from '../lib/errors';
+import { resolveStoryMemoryProvenance } from '../lib/memory-provenance';
 
 const router = Router();
 
@@ -88,6 +89,48 @@ function inferStoryIdFromSource(source: string): string | null {
   return null;
 }
 
+function normalizeRelatedFiles(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  return [...new Set(value.filter((file): file is string => typeof file === 'string' && file.trim().length > 0))];
+}
+
+async function emitMemoryWalEvent(params: {
+  eventType: 'memory_created' | 'memory_deleted' | 'memory_restored';
+  workspaceId: string;
+  memoryId: string;
+  category?: string;
+  content?: string;
+  storyId?: string | null;
+  specId?: string | null;
+  relatedFiles?: string[];
+}): Promise<void> {
+  try {
+    const walPayload = JSON.stringify({
+      id: params.memoryId,
+      ...(params.content ? { text: params.content } : {}),
+      ...(params.category ? { category: params.category } : {}),
+      ...(params.relatedFiles ? { relatedFiles: params.relatedFiles } : {}),
+    });
+    const walEvent = await queryOne<{ id: number }>(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [params.eventType, params.workspaceId, params.specId ?? null, params.storyId ?? null, walPayload],
+    );
+    if (walEvent) {
+      broadcastAll({
+        id: walEvent.id,
+        event_type: params.eventType,
+        workspace_id: params.workspaceId,
+        spec_id: params.specId ?? null,
+        story_id: params.storyId ?? null,
+        payload: walPayload,
+        ts: new Date().toISOString(),
+      } as any);
+    }
+  } catch {
+    // Best-effort WAL event — don't block memory lifecycle operations
+  }
+}
+
 async function emitMemoryCreatedWalEvent(params: {
   workspaceId: string;
   memoryId: string;
@@ -97,31 +140,16 @@ async function emitMemoryCreatedWalEvent(params: {
   specId?: string | null;
   relatedFiles?: string[];
 }): Promise<void> {
-  try {
-    const walPayload = JSON.stringify({
-      id: params.memoryId,
-      text: params.content,
-      category: params.category,
-      relatedFiles: params.relatedFiles ?? [],
-    });
-    const walEvent = await queryOne<{ id: number }>(
-      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      ['memory_created', params.workspaceId, params.specId ?? null, params.storyId ?? null, walPayload],
-    );
-    if (walEvent) {
-      broadcastAll({
-        id: walEvent.id,
-        event_type: 'memory_created',
-        workspace_id: params.workspaceId,
-        spec_id: params.specId ?? null,
-        story_id: params.storyId ?? null,
-        payload: walPayload,
-        ts: new Date().toISOString(),
-      } as any);
-    }
-  } catch {
-    // Best-effort WAL event — don't block memory creation
-  }
+  await emitMemoryWalEvent({
+    eventType: 'memory_created',
+    workspaceId: params.workspaceId,
+    memoryId: params.memoryId,
+    category: params.category,
+    content: params.content,
+    storyId: params.storyId,
+    specId: params.specId,
+    relatedFiles: params.relatedFiles,
+  });
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
@@ -231,6 +259,9 @@ router.get('/', async (req: Request, res: Response) => {
  *               rule: { type: string, description: "The rule or insight to remember" }
  *               context: { type: string, description: "Optional additional context" }
  *               source: { type: string, description: "Optional source story ID (e.g. US-001)" }
+ *               sourceSpecId: { type: string, description: "Optional owning spec slug for provenance completeness" }
+ *               sourceRunId: { type: integer, description: "Optional owning run ID for provenance completeness" }
+ *               relatedFiles: { type: array, items: { type: string }, description: "Optional file scope for deterministic ABOUT edge reconstruction" }
  *     responses:
  *       201:
  *         description: Memory entry created
@@ -253,7 +284,7 @@ router.get('/', async (req: Request, res: Response) => {
  *       404: { description: "Workspace not found" }
  */
 router.post('/', async (req: Request, res: Response) => {
-  const { workspaceId, category, title, rule, context, source, sourceType } = req.body;
+  const { workspaceId, category, title, rule, context, source, sourceType, relatedFiles, sourceSpecId, sourceRunId } = req.body;
 
   if (!workspaceId || !category || !title || !rule) {
     throw new ValidationError('workspaceId, category, title, and rule are required');
@@ -271,6 +302,15 @@ router.post('/', async (req: Request, res: Response) => {
 
   const wsPath = await getWorkspacePath(workspaceId);
   if (!wsPath) throw new NotFoundError('Workspace not found');
+
+  const normalizedRelatedFiles = normalizeRelatedFiles(relatedFiles);
+  const inferredStoryId = inferStoryIdFromSource(source ?? '');
+  const normalizedSourceRunId = toRunId(sourceRunId);
+  const inferredProvenance = await resolveStoryMemoryProvenance(normalizedSourceRunId, inferredStoryId);
+  const resolvedSourceSpecId = sourceSpecId ?? inferredProvenance.sourceSpecId;
+  const resolvedRelatedFiles = normalizedRelatedFiles.length > 0
+    ? normalizedRelatedFiles
+    : inferredProvenance.relatedFiles;
 
   const entry: MemoryEntry = {
     date: todayDate(),
@@ -298,9 +338,21 @@ router.post('/', async (req: Request, res: Response) => {
   if (embeddingStr) {
     try {
       const row = await queryOne<{ id: string }>(
-        `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type, source)
-         VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8) RETURNING id`,
-        [workspaceId, category, `${title}: ${rule}`, 'high', '[]', embeddingStr, resolvedSourceType, source ?? null],
+        `INSERT INTO memories (workspace_id, category, content, source_story_id, source_spec_id, source_run_id, confidence, related_files, embedding, source_type, source)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10, $11) RETURNING id`,
+        [
+          workspaceId,
+          category,
+          `${title}: ${rule}`,
+          inferredStoryId,
+          resolvedSourceSpecId,
+          normalizedSourceRunId,
+          'high',
+          JSON.stringify(resolvedRelatedFiles),
+          embeddingStr,
+          resolvedSourceType,
+          source ?? null,
+        ],
       );
       insertedId = row?.id;
     } catch {
@@ -309,9 +361,20 @@ router.post('/', async (req: Request, res: Response) => {
   }
   if (!insertedId) {
     const row = await queryOne<{ id: string }>(
-      `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type, source)
-       VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-      [workspaceId, category, `${title}: ${rule}`, 'high', '[]', resolvedSourceType, source ?? null],
+      `INSERT INTO memories (workspace_id, category, content, source_story_id, source_spec_id, source_run_id, confidence, related_files, source_type, source)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+      [
+        workspaceId,
+        category,
+        `${title}: ${rule}`,
+        inferredStoryId,
+        resolvedSourceSpecId,
+        normalizedSourceRunId,
+        'high',
+        JSON.stringify(resolvedRelatedFiles),
+        resolvedSourceType,
+        source ?? null,
+      ],
     );
     insertedId = row?.id;
   }
@@ -322,8 +385,9 @@ router.post('/', async (req: Request, res: Response) => {
       memoryId: insertedId,
       category,
       content: `${title}: ${rule}`,
-      storyId: inferStoryIdFromSource(source ?? ''),
-      relatedFiles: [],
+      storyId: inferredStoryId,
+      specId: resolvedSourceSpecId,
+      relatedFiles: resolvedRelatedFiles,
     });
   }
 
@@ -629,6 +693,16 @@ router.post('/proposals', async (req: Request, res: Response) => {
   const results: Array<{ proposalId: string; action: string; success: boolean }> = [];
 
   for (const p of proposals) {
+    const proposalMetadata = p.action === 'reject'
+      ? null
+      : await queryOne<{ source_story: string | null; run_id: number | string | null }>(
+        `SELECT source_story, run_id FROM memory_proposals WHERE proposal_id = $1 AND workspace_id = $2`,
+        [p.proposalId, workspaceId],
+      );
+    const proposalStoryId = proposalMetadata?.source_story ?? inferStoryIdFromSource(p.entry.source ?? '');
+    const proposalRunId = toRunId(proposalMetadata?.run_id);
+    const proposalProvenance = await resolveStoryMemoryProvenance(proposalRunId, proposalStoryId);
+
     if (p.action === 'approve') {
       const entryToAppend: MemoryEntry = {
         ...p.entry,
@@ -653,9 +727,21 @@ router.post('/proposals', async (req: Request, res: Response) => {
       if (embeddingStr) {
         try {
           proposalRow = await queryOne<{ id: string }>(
-            `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type, source)
-             VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8) RETURNING id`,
-            [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', embeddingStr, 'synthesis', entryToAppend.source || null],
+            `INSERT INTO memories (workspace_id, category, content, source_story_id, source_spec_id, source_run_id, confidence, related_files, embedding, source_type, source)
+             VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10, $11) RETURNING id`,
+            [
+              workspaceId,
+              entryToAppend.category,
+              `${entryToAppend.title}: ${entryToAppend.rule}`,
+              proposalStoryId,
+              proposalProvenance.sourceSpecId,
+              proposalRunId,
+              'high',
+              JSON.stringify(proposalProvenance.relatedFiles),
+              embeddingStr,
+              'synthesis',
+              entryToAppend.source || null,
+            ],
           );
         } catch {
           // embedding column may not exist (pgvector not installed) — fall through
@@ -663,9 +749,20 @@ router.post('/proposals', async (req: Request, res: Response) => {
       }
       if (!proposalRow) {
         proposalRow = await queryOne<{ id: string }>(
-          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type, source)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-          [workspaceId, entryToAppend.category, `${entryToAppend.title}: ${entryToAppend.rule}`, 'high', '[]', 'synthesis', entryToAppend.source || null],
+          `INSERT INTO memories (workspace_id, category, content, source_story_id, source_spec_id, source_run_id, confidence, related_files, source_type, source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+          [
+            workspaceId,
+            entryToAppend.category,
+            `${entryToAppend.title}: ${entryToAppend.rule}`,
+            proposalStoryId,
+            proposalProvenance.sourceSpecId,
+            proposalRunId,
+            'high',
+            JSON.stringify(proposalProvenance.relatedFiles),
+            'synthesis',
+            entryToAppend.source || null,
+          ],
         );
       }
       if (proposalRow?.id) {
@@ -674,8 +771,9 @@ router.post('/proposals', async (req: Request, res: Response) => {
           memoryId: proposalRow.id,
           category: entryToAppend.category,
           content: `${entryToAppend.title}: ${entryToAppend.rule}`,
-          specId: null,
-          relatedFiles: [],
+          storyId: proposalStoryId,
+          specId: proposalProvenance.sourceSpecId,
+          relatedFiles: proposalProvenance.relatedFiles,
         });
       }
 
@@ -712,15 +810,38 @@ router.post('/proposals', async (req: Request, res: Response) => {
       let proposalRow: { id: string } | undefined;
       if (editEmbeddingStr) {
         proposalRow = await queryOne<{ id: string }>(
-          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, embedding, source_type, source)
-           VALUES ($1, $2, $3, $4, $5, $6::vector, $7, $8) RETURNING id`,
-          [workspaceId, edited.category, `${edited.title}: ${edited.rule}`, 'high', '[]', editEmbeddingStr, 'synthesis', edited.source || null],
+          `INSERT INTO memories (workspace_id, category, content, source_story_id, source_spec_id, source_run_id, confidence, related_files, embedding, source_type, source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector, $10, $11) RETURNING id`,
+          [
+            workspaceId,
+            edited.category,
+            `${edited.title}: ${edited.rule}`,
+            proposalStoryId,
+            proposalProvenance.sourceSpecId,
+            proposalRunId,
+            'high',
+            JSON.stringify(proposalProvenance.relatedFiles),
+            editEmbeddingStr,
+            'synthesis',
+            edited.source || null,
+          ],
         );
       } else {
         proposalRow = await queryOne<{ id: string }>(
-          `INSERT INTO memories (workspace_id, category, content, confidence, related_files, source_type, source)
-           VALUES ($1, $2, $3, $4, $5, $6, $7) RETURNING id`,
-          [workspaceId, edited.category, `${edited.title}: ${edited.rule}`, 'high', '[]', 'synthesis', edited.source || null],
+          `INSERT INTO memories (workspace_id, category, content, source_story_id, source_spec_id, source_run_id, confidence, related_files, source_type, source)
+           VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10) RETURNING id`,
+          [
+            workspaceId,
+            edited.category,
+            `${edited.title}: ${edited.rule}`,
+            proposalStoryId,
+            proposalProvenance.sourceSpecId,
+            proposalRunId,
+            'high',
+            JSON.stringify(proposalProvenance.relatedFiles),
+            'synthesis',
+            edited.source || null,
+          ],
         );
       }
 
@@ -730,8 +851,9 @@ router.post('/proposals', async (req: Request, res: Response) => {
           memoryId: proposalRow.id,
           category: edited.category,
           content: `${edited.title}: ${edited.rule}`,
-          specId: null,
-          relatedFiles: [],
+          storyId: proposalStoryId,
+          specId: proposalProvenance.sourceSpecId,
+          relatedFiles: proposalProvenance.relatedFiles,
         });
       }
 
@@ -1413,6 +1535,7 @@ router.post('/deduplicate', async (req: Request, res: Response) => {
  *                       category: { type: string }
  *                       content: { type: string }
  *                       sourceStoryId: { type: string, nullable: true }
+ *                       sourceSpecId: { type: string, nullable: true }
  *                       sourceRunId: { type: integer, nullable: true }
  *                       confidence: { type: string, enum: [high, medium, low] }
  *                       relatedFiles: { type: array, items: { type: string } }
@@ -1435,7 +1558,7 @@ router.get('/items', async (req: Request, res: Response) => {
   const page = Math.max(parseInt(req.query.page as string, 10) || 1, 1);
   const offset = (page - 1) * pageSize;
 
-  let sql = `SELECT id, workspace_id, category, content, source_story_id, source_run_id,
+  let sql = `SELECT id, workspace_id, category, content, source_story_id, source_spec_id, source_run_id,
              confidence, related_files, pinned, source_type, created_at
              FROM memories WHERE workspace_id = $1 AND deleted_at IS NULL`;
   const params: (string | number)[] = [workspaceId as string];
@@ -1480,6 +1603,7 @@ router.get('/items', async (req: Request, res: Response) => {
     category: string;
     content: string;
     source_story_id: string | null;
+    source_spec_id: string | null;
     source_run_id: number | string | null;
     confidence: string;
     related_files: string;
@@ -1511,6 +1635,7 @@ router.get('/items', async (req: Request, res: Response) => {
     category: r.category,
     content: r.content,
     sourceStoryId: r.source_story_id,
+    sourceSpecId: r.source_spec_id,
     sourceRunId: toRunId(r.source_run_id),
     confidence: r.confidence,
     relatedFiles: typeof r.related_files === 'string' ? JSON.parse(r.related_files) : r.related_files,
@@ -1605,12 +1730,12 @@ router.patch('/items/:id', async (req: Request, res: Response) => {
 
   params.push(id);
   const sql = `UPDATE memories SET ${setClauses.join(', ')} WHERE id = $${paramIdx} RETURNING
-    id, workspace_id, category, content, source_story_id, source_run_id,
+    id, workspace_id, category, content, source_story_id, source_spec_id, source_run_id,
     confidence, related_files, pinned, created_at`;
 
   const updated = await queryOne<{
     id: number; workspace_id: string; category: string; content: string;
-    source_story_id: string | null; source_run_id: number | string | null;
+    source_story_id: string | null; source_spec_id: string | null; source_run_id: number | string | null;
     confidence: string; related_files: string; pinned: boolean; created_at: string;
   }>(sql, params);
 
@@ -1622,6 +1747,7 @@ router.patch('/items/:id', async (req: Request, res: Response) => {
     category: updated!.category,
     content: updated!.content,
     sourceStoryId: updated!.source_story_id,
+    sourceSpecId: updated!.source_spec_id,
     sourceRunId: toRunId(updated!.source_run_id),
     confidence: updated!.confidence,
     relatedFiles: typeof updated!.related_files === 'string' ? JSON.parse(updated!.related_files) : updated!.related_files,
@@ -1659,6 +1785,11 @@ router.delete('/items/:id', async (req: Request, res: Response) => {
   if (!existing) throw new NotFoundError('Memory not found');
 
   await execute('UPDATE memories SET deleted_at = NOW() WHERE id = $1', [id]);
+  await emitMemoryWalEvent({
+    eventType: 'memory_deleted',
+    workspaceId: existing.workspace_id,
+    memoryId: String(existing.id),
+  });
   invalidateMemory(existing.workspace_id);
 
   res.json({ deleted: true, id });
@@ -1693,6 +1824,11 @@ router.post('/items/:id/undelete', async (req: Request, res: Response) => {
   if (!existing) throw new NotFoundError('Memory not found or not deleted');
 
   await execute('UPDATE memories SET deleted_at = NULL WHERE id = $1', [id]);
+  await emitMemoryWalEvent({
+    eventType: 'memory_restored',
+    workspaceId: existing.workspace_id,
+    memoryId: String(existing.id),
+  });
   invalidateMemory(existing.workspace_id);
 
   res.json({ restored: true, id });
@@ -1728,6 +1864,12 @@ router.post('/items/bulk', async (req: Request, res: Response) => {
 
   // Build numbered placeholders for IN clause
   const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ');
+  const targetRows = action === 'delete'
+    ? await dbQuery<{ id: number; workspace_id: string }>(
+      `SELECT id, workspace_id FROM memories WHERE id IN (${placeholders}) AND deleted_at IS NULL`,
+      ids,
+    )
+    : [];
 
   let sql: string;
   if (action === 'delete') {
@@ -1749,6 +1891,14 @@ router.post('/items/bulk', async (req: Request, res: Response) => {
   );
   for (const ws of wsRows) {
     invalidateMemory(ws.workspace_id);
+  }
+
+  if (action === 'delete') {
+    await Promise.all(targetRows.map((row) => emitMemoryWalEvent({
+      eventType: 'memory_deleted',
+      workspaceId: row.workspace_id,
+      memoryId: String(row.id),
+    })));
   }
 
   res.json({ affected: result.rowCount, action });

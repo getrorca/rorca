@@ -15,12 +15,15 @@
  *   - Conflict detection: in-progress stories touching the same files
  *
  * Results are cached in context-cache.ts (warm tier, TTL 2 min)
- * keyed by storyId + predicted paths hash.
+ * keyed by workspace/spec/story scope + predicted paths hash.
  */
 
 import { createHash } from 'crypto';
 import {
+  buildFileNodeKey,
+  buildStoryNodeKey,
   graphStats,
+  normalizeGraphFilePath,
   parseAgtype,
 } from './knowledge-graph';
 import { get, set } from './context-cache';
@@ -58,14 +61,22 @@ export interface GraphContext {
 
 // ─── Cache Key ──────────────────────────────────────────────────────────────
 
-function buildCacheKey(storyId: string, predictedPaths: string[], workspaceId: string | number): string {
+export function buildGraphContextCacheKey(
+  storyId: string,
+  predictedPaths: string[],
+  workspaceId: string | number,
+  specId?: string,
+): string {
+  const normalizedPaths = [...new Set(
+    predictedPaths
+      .map(normalizeGraphFilePath)
+      .filter(Boolean),
+  )].sort();
   const hash = createHash('md5')
-    .update(String(workspaceId))
-    .update('\n')
-    .update(predictedPaths.slice().sort().join('\n'))
+    .update(normalizedPaths.join('\n'))
     .digest('hex')
     .slice(0, 12);
-  return `graph-context:${workspaceId}:${storyId}:${hash}`;
+  return `graph-context:${workspaceId}:${specId || 'no-spec'}:${storyId}:${hash}`;
 }
 
 // ─── Cypher Helpers (use knowledge-graph.ts internals via pool) ─────────────
@@ -126,17 +137,28 @@ async function cypherQuery<T = Record<string, unknown>>(
  * @param predictedPaths - File paths this story is predicted to touch
  * @param workspaceId - Workspace ID for scoping queries
  * @param maxDepth - Max traversal depth (default 2)
+ * @param specId - Spec ID for canonical story scoping when available
  */
 export async function getGraphContext(
   storyId: string,
   predictedPaths: string[],
   workspaceId: string | number,
   maxDepth: number = 2,
+  specId?: string,
 ): Promise<GraphContext> {
   const start = Date.now();
 
+  const normalizedPredictedPaths = [...new Set(
+    predictedPaths
+      .map(normalizeGraphFilePath)
+      .filter(Boolean),
+  )];
+  const currentStoryKey = specId
+    ? buildStoryNodeKey(String(workspaceId), specId, storyId)
+    : undefined;
+
   // Check cache first
-  const cacheKey = buildCacheKey(storyId, predictedPaths, workspaceId);
+  const cacheKey = buildGraphContextCacheKey(storyId, normalizedPredictedPaths, workspaceId, specId);
   const cached = get<GraphContext>(cacheKey);
   if (cached) {
     logger.debug({ storyId, cacheKey }, '[graph-context] cache HIT');
@@ -167,19 +189,21 @@ export async function getGraphContext(
   const uniqueNodes = new Set<string>();
 
   // Process each predicted path (limit to 10 to bound query count)
-  for (const filePath of predictedPaths.slice(0, 10)) {
+  for (const filePath of normalizedPredictedPaths.slice(0, 10)) {
     try {
+      const fileKey = buildFileNodeKey(String(workspaceId), filePath);
+
       // 1. Path-based memory traversal:
       //    File <- TOUCHES - Story - LEARNED_FROM -> Memory
-      await findRelatedMemories(filePath, storyId, maxDepth, result, uniqueNodes);
+      await findRelatedMemories(filePath, fileKey, storyId, currentStoryKey, maxDepth, result, uniqueNodes);
 
       // 2. Convention lookup:
       //    File <- APPLIES_TO - Convention
-      await findConventions(filePath, result);
+      await findConventions(filePath, fileKey, result);
 
       // 3. File history:
       //    File <- TOUCHES - Story (collect all stories that touched this file)
-      await buildFileHistory(filePath, result);
+      await buildFileHistory(filePath, fileKey, result);
     } catch (err) {
       logger.warn({ err, filePath, storyId }, '[graph-context] traversal error for path');
     }
@@ -187,7 +211,7 @@ export async function getGraphContext(
 
   // 4. Conflict detection: find in-progress stories touching the same files
   try {
-    await detectConflicts(storyId, predictedPaths, result);
+    await detectConflicts(storyId, currentStoryKey, normalizedPredictedPaths, workspaceId, result);
   } catch (err) {
     logger.warn({ err, storyId }, '[graph-context] conflict detection failed');
   }
@@ -232,7 +256,7 @@ export async function getGraphContext(
   logger.info(
     {
       storyId,
-      paths: predictedPaths.length,
+      paths: normalizedPredictedPaths.length,
       memories: result.relatedMemories.length,
       conventions: result.relatedConventions.length,
       files: result.fileHistory.length,
@@ -258,7 +282,9 @@ export async function getGraphContext(
  */
 async function findRelatedMemories(
   filePath: string,
+  fileKey: string,
   currentStoryId: string,
+  currentStoryKey: string | undefined,
   maxDepth: number,
   result: GraphContext,
   uniqueNodes: Set<string>,
@@ -269,8 +295,8 @@ async function findRelatedMemories(
     sid: unknown;
     stitle: unknown;
   }>(
-    `MATCH (f:File {path: '${escCypher(filePath)}'})<-[:TOUCHES]-(s:Story)-[:LEARNED_FROM]->(m:Memory)
-     WHERE s.id <> '${escCypher(currentStoryId)}'
+    `MATCH (f:File {key: '${escCypher(fileKey)}'})<-[:TOUCHES]-(s:Story)-[:LEARNED_FROM]->(m:Memory)
+     WHERE ${currentStoryKey ? `s.key <> '${escCypher(currentStoryKey)}'` : `s.id <> '${escCypher(currentStoryId)}'`}
      RETURN m.id, s.id, s.title`,
     [
       { name: 'mid', type: 'agtype' },
@@ -306,9 +332,9 @@ async function findRelatedMemories(
       mid: unknown;
       fpath: unknown;
     }>(
-      `MATCH (f:File {path: '${escCypher(filePath)}'})<-[:TOUCHES]-(s:Story)-[:TOUCHES]->(f2:File)<-[:ABOUT]-(m:Memory)
-       WHERE f2.path <> '${escCypher(filePath)}'
-         AND s.id <> '${escCypher(currentStoryId)}'
+      `MATCH (f:File {key: '${escCypher(fileKey)}'})<-[:TOUCHES]-(s:Story)-[:TOUCHES]->(f2:File)<-[:ABOUT]-(m:Memory)
+       WHERE f2.key <> '${escCypher(fileKey)}'
+         AND ${currentStoryKey ? `s.key <> '${escCypher(currentStoryKey)}'` : `s.id <> '${escCypher(currentStoryId)}'`}
        RETURN DISTINCT m.id, f2.path`,
       [
         { name: 'mid', type: 'agtype' },
@@ -340,6 +366,7 @@ async function findRelatedMemories(
  */
 async function findConventions(
   filePath: string,
+  fileKey: string,
   result: GraphContext,
 ): Promise<void> {
   const rows = await cypherQuery<{
@@ -347,7 +374,7 @@ async function findConventions(
     source: unknown;
     layer: unknown;
   }>(
-    `MATCH (c:Convention)-[:APPLIES_TO]->(f:File {path: '${escCypher(filePath)}'})
+    `MATCH (c:Convention)-[:APPLIES_TO]->(f:File {key: '${escCypher(fileKey)}'})
      RETURN c.name, c.source, c.layer`,
     [
       { name: 'name', type: 'agtype' },
@@ -374,13 +401,14 @@ async function findConventions(
  */
 async function buildFileHistory(
   filePath: string,
+  fileKey: string,
   result: GraphContext,
 ): Promise<void> {
   const rows = await cypherQuery<{
     sid: unknown;
     specid: unknown;
   }>(
-    `MATCH (s:Story)-[:TOUCHES]->(f:File {path: '${escCypher(filePath)}'})
+    `MATCH (s:Story)-[:TOUCHES]->(f:File {key: '${escCypher(fileKey)}'})
      RETURN s.id, s.specId`,
     [
       { name: 'sid', type: 'agtype' },
@@ -402,21 +430,24 @@ async function buildFileHistory(
 
 /**
  * Detect if another in-progress story is touching the same files.
- * Cypher: MATCH (s1:Story {id})-[:TOUCHES]->(f:File)<-[:TOUCHES]-(s2:Story)
- *         WHERE s1 <> s2 AND s2.status = 'running'
+ * Uses canonical story/file keys when spec/workspace scope is available.
  */
 async function detectConflicts(
   storyId: string,
+  currentStoryKey: string | undefined,
   predictedPaths: string[],
+  workspaceId: string | number,
   result: GraphContext,
 ): Promise<void> {
   for (const filePath of predictedPaths.slice(0, 10)) {
+    const fileKey = buildFileNodeKey(String(workspaceId), filePath);
     const conflicts = await cypherQuery<{
       s2id: unknown;
       fpath: unknown;
     }>(
-      `MATCH (s:Story)-[:TOUCHES]->(f:File {path: '${escCypher(filePath)}'})<-[:TOUCHES]-(s2:Story)
-       WHERE s.id <> s2.id AND s2.status = 'running'
+      `MATCH (f:File {key: '${escCypher(fileKey)}'})<-[:TOUCHES]-(s2:Story)
+       WHERE ${currentStoryKey ? `s2.key <> '${escCypher(currentStoryKey)}'` : `s2.id <> '${escCypher(storyId)}'`}
+         AND s2.status = 'running'
        RETURN s2.id, f.path`,
       [
         { name: 's2id', type: 'agtype' },
@@ -428,7 +459,6 @@ async function detectConflicts(
       const conflictId = String(row.s2id ?? '');
       if (!conflictId || conflictId === storyId) continue;
 
-      // Add as a memory entry with conflict relationship
       result.relatedMemories.push({
         memoryId: `conflict:${conflictId}:${filePath}`,
         text: `WARNING: Story ${conflictId} (status: running) is also touching ${filePath}`,

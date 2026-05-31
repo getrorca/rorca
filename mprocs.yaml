@@ -1,0 +1,24 @@
+procs:
+  frontend:
+    shell: "npx vite --port 5210"
+    cwd: .
+    env:
+      NODE_ENV: development
+
+  backend:
+    shell: "npx tsx src/server.ts"
+    cwd: backend
+    env:
+      NODE_ENV: development
+
+  worker:
+    shell: "npx tsx src/worker-supervisor.ts"
+    cwd: backend
+    env:
+      NODE_ENV: development
+
+  landing:
+    shell: "npx next dev --port 3002"
+    cwd: landing-page
+    env:
+      NODE_ENV: development

@@ -416,6 +416,7 @@ export async function collectStoryFileTouches(runId: number, storyId: string): P
 export interface StoryNode {
   id: string;
   specId: string;
+  workspaceId: string;
   title: string;
   status: string;
 }
@@ -454,6 +455,36 @@ export interface SkillNode {
   source: string;
 }
 
+export function normalizeGraphFilePath(filePath: string): string {
+  const normalized = path.posix.normalize((filePath || '').trim().replace(/\\/g, '/'));
+  if (normalized === '.' || normalized === '') return '';
+  return normalized.replace(/^\.\//, '');
+}
+
+export function buildStoryNodeKey(workspaceId: string, specId: string, storyId: string): string {
+  return `story:${workspaceId}::${specId}::${storyId}`;
+}
+
+export function buildFileNodeKey(workspaceId: string, filePath: string): string {
+  return `file:${workspaceId}::${normalizeGraphFilePath(filePath)}`;
+}
+
+export function buildSpecNodeKey(workspaceId: string, specId: string): string {
+  return `spec:${workspaceId}::${specId}`;
+}
+
+export function buildMemoryNodeKey(workspaceId: string, memoryId: string): string {
+  return `memory:${workspaceId}::${memoryId}`;
+}
+
+export function buildConventionNodeKey(workspaceId: string, conventionName: string): string {
+  return `convention:${workspaceId}::${conventionName}`;
+}
+
+export function buildSkillNodeKey(skillName: string, source?: string): string {
+  return `skill:${source || 'default'}::${skillName}`;
+}
+
 /**
  * Add or update a Story vertex in the knowledge graph.
  * Uses MERGE to be idempotent.
@@ -461,134 +492,210 @@ export interface SkillNode {
  */
 export async function addStoryNode(story: StoryNode): Promise<void> {
   if (!(await isGraphAvailable())) return;
+  const storyKey = buildStoryNodeKey(story.workspaceId, story.specId, story.id);
   const cypher = `
-    MERGE (s:Story {id: '${escCypher(story.id)}'})
-    SET s.specId = '${escCypher(story.specId)}',
+    MERGE (s:Story {key: '${escCypher(storyKey)}'})
+    SET s.id = '${escCypher(story.id)}',
+        s.storyId = '${escCypher(story.id)}',
+        s.specId = '${escCypher(story.specId)}',
+        s.workspaceId = '${escCypher(story.workspaceId)}',
+        s.workspace_id = '${escCypher(story.workspaceId)}',
         s.title = '${escCypher(story.title)}',
         s.status = '${escCypher(story.status)}'
   `;
   await cypherMutate(cypher);
-  logger.debug({ storyId: story.id }, '[knowledge-graph] Story node upserted');
+  logger.debug({ storyId: story.id, storyKey }, '[knowledge-graph] Story node upserted');
 }
 
 /**
  * Add a File vertex (if not exists) and create a TOUCHES edge from a Story.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addFileTouch(storyId: string, filePath: string, workspaceId?: string): Promise<void> {
+export async function addFileTouch(
+  storyId: string,
+  filePath: string,
+  workspaceId: string,
+  specId: string,
+): Promise<void> {
   if (!(await isGraphAvailable())) return;
-  const wsId = workspaceId || '';
+  const normalizedPath = normalizeGraphFilePath(filePath);
   const cypher = `
-    MERGE (s:Story {id: '${escCypher(storyId)}'})
-    MERGE (f:File {path: '${escCypher(filePath)}'})
-    ON CREATE SET f.workspace_id = '${escCypher(wsId)}'
+    MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
+    ON CREATE SET s.id = '${escCypher(storyId)}',
+                  s.storyId = '${escCypher(storyId)}',
+                  s.specId = '${escCypher(specId)}',
+                  s.workspaceId = '${escCypher(workspaceId)}',
+                  s.workspace_id = '${escCypher(workspaceId)}'
+    MERGE (f:File {key: '${escCypher(buildFileNodeKey(workspaceId, normalizedPath))}'})
+    SET f.path = '${escCypher(normalizedPath)}',
+        f.workspaceId = '${escCypher(workspaceId)}',
+        f.workspace_id = '${escCypher(workspaceId)}'
     MERGE (s)-[r:TOUCHES]->(f)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ storyId, filePath }, '[knowledge-graph] File touch edge added');
+  logger.debug({ storyId, filePath: normalizedPath, workspaceId, specId }, '[knowledge-graph] File touch edge added');
 }
 
 /**
  * Link a Memory entry to the Story that produced it.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addMemoryLink(memoryId: string, storyId: string, category?: string): Promise<void> {
+export async function addMemoryLink(
+  memoryId: string,
+  storyId: string,
+  specId: string,
+  workspaceId: string,
+  category?: string,
+): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cat = category || '';
   const cypher = `
-    MERGE (m:Memory {id: '${escCypher(memoryId)}'})
-    ON CREATE SET m.category = '${escCypher(cat)}',
-                  m.created_at = '${new Date().toISOString()}'
-    MERGE (s:Story {id: '${escCypher(storyId)}'})
+    MERGE (m:Memory {key: '${escCypher(buildMemoryNodeKey(workspaceId, memoryId))}'})
+    ON CREATE SET m.created_at = '${new Date().toISOString()}'
+    SET m.id = '${escCypher(memoryId)}',
+        m.category = COALESCE(m.category, '${escCypher(cat)}'),
+        m.workspaceId = '${escCypher(workspaceId)}'
+    MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
+    ON CREATE SET s.id = '${escCypher(storyId)}',
+                  s.storyId = '${escCypher(storyId)}',
+                  s.specId = '${escCypher(specId)}',
+                  s.workspaceId = '${escCypher(workspaceId)}',
+                  s.workspace_id = '${escCypher(workspaceId)}'
     MERGE (m)-[r:LEARNED_FROM]->(s)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ memoryId, storyId }, '[knowledge-graph] Memory link added');
+  logger.debug({ memoryId, storyId, specId, workspaceId }, '[knowledge-graph] Memory link added');
 }
 
 /**
  * Link a Memory entry to a specific File it references.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addMemoryAboutFile(memoryId: string, filePath: string): Promise<void> {
+export async function addMemoryAboutFile(
+  memoryId: string,
+  filePath: string,
+  workspaceId: string,
+): Promise<void> {
   if (!(await isGraphAvailable())) return;
+  const normalizedPath = normalizeGraphFilePath(filePath);
   const cypher = `
-    MERGE (m:Memory {id: '${escCypher(memoryId)}'})
-    MERGE (f:File {path: '${escCypher(filePath)}'})
+    MERGE (m:Memory {key: '${escCypher(buildMemoryNodeKey(workspaceId, memoryId))}'})
+    SET m.id = '${escCypher(memoryId)}',
+        m.workspaceId = '${escCypher(workspaceId)}'
+    MERGE (f:File {key: '${escCypher(buildFileNodeKey(workspaceId, normalizedPath))}'})
+    SET f.path = '${escCypher(normalizedPath)}',
+        f.workspaceId = '${escCypher(workspaceId)}',
+        f.workspace_id = '${escCypher(workspaceId)}'
     MERGE (m)-[r:ABOUT]->(f)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ memoryId, filePath }, '[knowledge-graph] Memory-about-file edge added');
+  logger.debug({ memoryId, filePath: normalizedPath, workspaceId }, '[knowledge-graph] Memory-about-file edge added');
 }
 
 /**
  * Link a Memory entry to the Spec that produced it.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addMemorySourceSpec(memoryId: string, specId: string): Promise<void> {
+export async function addMemorySourceSpec(memoryId: string, specId: string, workspaceId: string): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cypher = `
-    MERGE (m:Memory {id: '${escCypher(memoryId)}'})
-    MERGE (sp:Spec {id: '${escCypher(specId)}'})
+    MERGE (m:Memory {key: '${escCypher(buildMemoryNodeKey(workspaceId, memoryId))}'})
+    SET m.id = '${escCypher(memoryId)}',
+        m.workspaceId = '${escCypher(workspaceId)}'
+    MERGE (sp:Spec {key: '${escCypher(buildSpecNodeKey(workspaceId, specId))}'})
+    ON CREATE SET sp.id = '${escCypher(specId)}',
+                  sp.specId = '${escCypher(specId)}',
+                  sp.workspaceId = '${escCypher(workspaceId)}',
+                  sp.workspace_id = '${escCypher(workspaceId)}'
     MERGE (m)-[r:FROM_SPEC]->(sp)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ memoryId, specId }, '[knowledge-graph] Memory-from-spec edge added');
+  logger.debug({ memoryId, specId, workspaceId }, '[knowledge-graph] Memory-from-spec edge added');
 }
 
 /**
  * Link a Convention to a File pattern it governs.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addConventionLink(conventionName: string, filePath: string, source?: string, layer?: string): Promise<void> {
+export async function addConventionLink(
+  conventionName: string,
+  filePath: string,
+  workspaceId: string,
+  source?: string,
+  layer?: string,
+): Promise<void> {
   if (!(await isGraphAvailable())) return;
+  const normalizedPath = normalizeGraphFilePath(filePath);
   const cypher = `
-    MERGE (c:Convention {name: '${escCypher(conventionName)}'})
-    ON CREATE SET c.source = '${escCypher(source || '')}',
-                  c.layer = '${escCypher(layer || '')}'
-    MERGE (f:File {path: '${escCypher(filePath)}'})
+    MERGE (c:Convention {key: '${escCypher(buildConventionNodeKey(workspaceId, conventionName))}'})
+    SET c.name = '${escCypher(conventionName)}',
+        c.source = '${escCypher(source || '')}',
+        c.layer = '${escCypher(layer || '')}',
+        c.workspaceId = '${escCypher(workspaceId)}'
+    MERGE (f:File {key: '${escCypher(buildFileNodeKey(workspaceId, normalizedPath))}'})
+    SET f.path = '${escCypher(normalizedPath)}',
+        f.workspaceId = '${escCypher(workspaceId)}',
+        f.workspace_id = '${escCypher(workspaceId)}'
     MERGE (c)-[r:APPLIES_TO]->(f)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ conventionName, filePath }, '[knowledge-graph] Convention link added');
+  logger.debug({ conventionName, filePath: normalizedPath, workspaceId }, '[knowledge-graph] Convention link added');
 }
 
 /**
  * Mark a Convention as violated by a Story.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addConventionViolation(conventionName: string, storyId: string): Promise<void> {
+export async function addConventionViolation(
+  conventionName: string,
+  storyId: string,
+  specId: string,
+  workspaceId: string,
+): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cypher = `
-    MERGE (c:Convention {name: '${escCypher(conventionName)}'})
-    MERGE (s:Story {id: '${escCypher(storyId)}'})
+    MERGE (c:Convention {key: '${escCypher(buildConventionNodeKey(workspaceId, conventionName))}'})
+    SET c.name = '${escCypher(conventionName)}',
+        c.workspaceId = '${escCypher(workspaceId)}'
+    MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
+    ON CREATE SET s.id = '${escCypher(storyId)}',
+                  s.storyId = '${escCypher(storyId)}',
+                  s.specId = '${escCypher(specId)}',
+                  s.workspaceId = '${escCypher(workspaceId)}',
+                  s.workspace_id = '${escCypher(workspaceId)}'
     MERGE (c)-[r:VIOLATED_BY]->(s)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ conventionName, storyId }, '[knowledge-graph] Convention violation edge added');
+  logger.debug({ conventionName, storyId, specId, workspaceId }, '[knowledge-graph] Convention violation edge added');
 }
 
 /**
  * Track which Skill was injected/used in a Story.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addSkillUsage(skillName: string, storyId: string, source?: string): Promise<void> {
+export async function addSkillUsage(skillName: string, storyId: string, specId: string, workspaceId: string, source?: string): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cypher = `
-    MERGE (sk:Skill {name: '${escCypher(skillName)}'})
-    ON CREATE SET sk.source = '${escCypher(source || '')}'
-    MERGE (s:Story {id: '${escCypher(storyId)}'})
+    MERGE (sk:Skill {key: '${escCypher(buildSkillNodeKey(skillName, source))}'})
+    SET sk.name = '${escCypher(skillName)}',
+        sk.source = '${escCypher(source || '')}'
+    MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
+    ON CREATE SET s.id = '${escCypher(storyId)}',
+                  s.storyId = '${escCypher(storyId)}',
+                  s.specId = '${escCypher(specId)}',
+                  s.workspaceId = '${escCypher(workspaceId)}',
+                  s.workspace_id = '${escCypher(workspaceId)}'
     MERGE (sk)-[r:USED_IN]->(s)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ skillName, storyId }, '[knowledge-graph] Skill usage edge added');
+  logger.debug({ skillName, storyId, specId }, '[knowledge-graph] Skill usage edge added');
 }
 
 /**
@@ -598,27 +705,39 @@ export async function addSkillUsage(skillName: string, storyId: string, source?:
 export async function addSpecNode(spec: SpecNode): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cypher = `
-    MERGE (sp:Spec {id: '${escCypher(spec.id)}'})
-    SET sp.title = '${escCypher(spec.title)}',
+    MERGE (sp:Spec {key: '${escCypher(buildSpecNodeKey(spec.workspace_id, spec.id))}'})
+    SET sp.id = '${escCypher(spec.id)}',
+        sp.specId = '${escCypher(spec.id)}',
+        sp.title = '${escCypher(spec.title)}',
         sp.status = '${escCypher(spec.status)}',
+        sp.workspaceId = '${escCypher(spec.workspace_id)}',
         sp.workspace_id = '${escCypher(spec.workspace_id)}'
     MERGE (w:Workspace {id: '${escCypher(spec.workspace_id)}'})
     MERGE (sp)-[r:IN_WORKSPACE]->(w)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ specId: spec.id }, '[knowledge-graph] Spec node upserted');
+  logger.debug({ specId: spec.id, workspaceId: spec.workspace_id }, '[knowledge-graph] Spec node upserted');
 }
 
 /**
  * Add Story BELONGS_TO Spec edge.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addStoryToSpec(storyId: string, specId: string): Promise<void> {
+export async function addStoryToSpec(storyId: string, specId: string, workspaceId: string): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cypher = `
-    MERGE (s:Story {id: '${escCypher(storyId)}'})
-    MERGE (sp:Spec {id: '${escCypher(specId)}'})
+    MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
+    ON CREATE SET s.id = '${escCypher(storyId)}',
+                  s.storyId = '${escCypher(storyId)}',
+                  s.specId = '${escCypher(specId)}',
+                  s.workspaceId = '${escCypher(workspaceId)}',
+                  s.workspace_id = '${escCypher(workspaceId)}'
+    MERGE (sp:Spec {key: '${escCypher(buildSpecNodeKey(workspaceId, specId))}'})
+    ON CREATE SET sp.id = '${escCypher(specId)}',
+                  sp.specId = '${escCypher(specId)}',
+                  sp.workspaceId = '${escCypher(workspaceId)}',
+                  sp.workspace_id = '${escCypher(workspaceId)}'
     MERGE (s)-[r:BELONGS_TO]->(sp)
     ${evidenceEdgeSet('r')}
   `;
@@ -629,11 +748,21 @@ export async function addStoryToSpec(storyId: string, specId: string): Promise<v
  * Add Story DEPENDS_ON Story edges from the spec JSON dependsOn field.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addStoryDependency(storyId: string, dependsOnId: string): Promise<void> {
+export async function addStoryDependency(storyId: string, dependsOnId: string, specId: string, workspaceId: string): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cypher = `
-    MERGE (s:Story {id: '${escCypher(storyId)}'})
-    MERGE (d:Story {id: '${escCypher(dependsOnId)}'})
+    MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
+    ON CREATE SET s.id = '${escCypher(storyId)}',
+                  s.storyId = '${escCypher(storyId)}',
+                  s.specId = '${escCypher(specId)}',
+                  s.workspaceId = '${escCypher(workspaceId)}',
+                  s.workspace_id = '${escCypher(workspaceId)}'
+    MERGE (d:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, dependsOnId))}'})
+    ON CREATE SET d.id = '${escCypher(dependsOnId)}',
+                  d.storyId = '${escCypher(dependsOnId)}',
+                  d.specId = '${escCypher(specId)}',
+                  d.workspaceId = '${escCypher(workspaceId)}',
+                  d.workspace_id = '${escCypher(workspaceId)}'
     MERGE (s)-[r:DEPENDS_ON]->(d)
     ${evidenceEdgeSet('r')}
   `;
@@ -651,6 +780,71 @@ export interface CypherResult {
   properties: Record<string, unknown>;
 }
 
+export interface GraphQueryScope {
+  workspaceId?: string;
+  specId?: string;
+}
+
+export interface GraphNodeLookup {
+  property: string;
+  value: string;
+  normalizedNodeId: string;
+}
+
+export function buildScopedGraphNodeLookup(
+  nodeType: NodeType,
+  nodeId: string,
+  scope: GraphQueryScope = {},
+): GraphNodeLookup {
+  const normalizedNodeId = nodeType === 'File' ? normalizeGraphFilePath(nodeId) : nodeId;
+
+  if (nodeType === 'Story' && scope.workspaceId && scope.specId) {
+    return {
+      property: 'key',
+      value: buildStoryNodeKey(scope.workspaceId, scope.specId, normalizedNodeId),
+      normalizedNodeId,
+    };
+  }
+
+  if (nodeType === 'File' && scope.workspaceId) {
+    return {
+      property: 'key',
+      value: buildFileNodeKey(scope.workspaceId, normalizedNodeId),
+      normalizedNodeId,
+    };
+  }
+
+  if (nodeType === 'Spec' && scope.workspaceId) {
+    return {
+      property: 'key',
+      value: buildSpecNodeKey(scope.workspaceId, normalizedNodeId),
+      normalizedNodeId,
+    };
+  }
+
+  if (nodeType === 'Memory' && scope.workspaceId) {
+    return {
+      property: 'key',
+      value: buildMemoryNodeKey(scope.workspaceId, normalizedNodeId),
+      normalizedNodeId,
+    };
+  }
+
+  if (nodeType === 'Convention' && scope.workspaceId) {
+    return {
+      property: 'key',
+      value: buildConventionNodeKey(scope.workspaceId, normalizedNodeId),
+      normalizedNodeId,
+    };
+  }
+
+  return {
+    property: nodeType === 'File' ? 'path' : nodeType === 'Convention' || nodeType === 'Skill' ? 'name' : 'id',
+    value: normalizedNodeId,
+    normalizedNodeId,
+  };
+}
+
 /**
  * Query nodes related to a given node, optionally filtering by edge types and depth.
  *
@@ -664,6 +858,7 @@ export async function queryRelated(
   nodeId: string,
   depth: number = 1,
   edgeTypes?: EdgeType[],
+  scope?: GraphQueryScope,
 ): Promise<CypherResult[]> {
   if (!(await isGraphAvailable())) return [];
 
@@ -673,7 +868,7 @@ export async function queryRelated(
   // fan out into one query per type and merge the results in memory.
   if (edgeTypes && edgeTypes.length > 1) {
     const results = await Promise.all(
-      edgeTypes.map((edgeType) => queryRelated(nodeType, nodeId, depth, [edgeType])),
+      edgeTypes.map((edgeType) => queryRelated(nodeType, nodeId, depth, [edgeType], scope)),
     );
     const deduped = new Map<string, CypherResult>();
     for (const resultSet of results) {
@@ -685,14 +880,13 @@ export async function queryRelated(
     return [...deduped.values()];
   }
 
-  // Determine the ID property name based on node type
-  const idProp = nodeType === 'File' ? 'path' : nodeType === 'Convention' || nodeType === 'Skill' ? 'name' : 'id';
+  const lookup = buildScopedGraphNodeLookup(nodeType, nodeId, scope);
   const edgeFilter = edgeTypes && edgeTypes.length === 1
     ? `:${edgeTypes[0]}`
     : '';
 
   const cypher = `
-    MATCH (start:${nodeType} {${idProp}: '${escCypher(nodeId)}'})
+    MATCH (start:${nodeType} {${lookup.property}: '${escCypher(lookup.value)}'})
           -[${edgeFilter}*1..${depth}]-
           (related)
     RETURN DISTINCT related
@@ -714,7 +908,7 @@ export async function queryRelated(
       };
     });
   } catch (err) {
-    logger.error({ err, nodeType, nodeId, edgeTypes }, '[knowledge-graph] queryRelated failed');
+    logger.error({ err, nodeType, nodeId: lookup.normalizedNodeId, edgeTypes, scope }, '[knowledge-graph] queryRelated failed');
     return [];
   }
 }
@@ -731,7 +925,7 @@ export interface ImpactResult {
  * Fan-out query: find all stories, specs, and conventions connected to a file path.
  * Useful for understanding the blast radius of changes to a file.
  */
-export async function queryImpact(filePath: string): Promise<ImpactResult> {
+export async function queryImpact(filePath: string, workspaceId?: string): Promise<ImpactResult> {
   const result: ImpactResult = {
     stories: [],
     specs: [],
@@ -740,10 +934,12 @@ export async function queryImpact(filePath: string): Promise<ImpactResult> {
 
   if (!(await isGraphAvailable())) return result;
 
+  const fileLookup = buildScopedGraphNodeLookup('File', filePath, { workspaceId });
+
   try {
     // Stories that touch this file
     const storyRows = await cypherQuery<{ id: unknown; title: unknown; specId: unknown }>(
-      `MATCH (s:Story)-[:TOUCHES]->(f:File {path: '${escCypher(filePath)}'})
+      `MATCH (s:Story)-[:TOUCHES]->(f:File {${fileLookup.property}: '${escCypher(fileLookup.value)}'})
        RETURN s.id, s.title, s.specId`,
       [
         { name: 'id', type: 'agtype' },
@@ -759,7 +955,7 @@ export async function queryImpact(filePath: string): Promise<ImpactResult> {
 
     // Specs connected through stories that touch this file
     const specRows = await cypherQuery<{ id: unknown; title: unknown }>(
-      `MATCH (s:Story)-[:TOUCHES]->(f:File {path: '${escCypher(filePath)}'})
+      `MATCH (s:Story)-[:TOUCHES]->(f:File {${fileLookup.property}: '${escCypher(fileLookup.value)}'})
        MATCH (s)-[:BELONGS_TO]->(sp:Spec)
        RETURN DISTINCT sp.id, sp.title`,
       [
@@ -774,7 +970,7 @@ export async function queryImpact(filePath: string): Promise<ImpactResult> {
 
     // Conventions that apply to this file
     const convRows = await cypherQuery<{ name: unknown; source: unknown }>(
-      `MATCH (c:Convention)-[:APPLIES_TO]->(f:File {path: '${escCypher(filePath)}'})
+      `MATCH (c:Convention)-[:APPLIES_TO]->(f:File {${fileLookup.property}: '${escCypher(fileLookup.value)}'})
        RETURN c.name, c.source`,
       [
         { name: 'name', type: 'agtype' },
@@ -786,7 +982,7 @@ export async function queryImpact(filePath: string): Promise<ImpactResult> {
       source: String(parseAgtype(r.source) ?? ''),
     }));
   } catch (err) {
-    logger.error({ err, filePath }, '[knowledge-graph] queryImpact failed');
+    logger.error({ err, filePath: fileLookup.normalizedNodeId, workspaceId }, '[knowledge-graph] queryImpact failed');
   }
 
   return result;
@@ -841,19 +1037,20 @@ export async function populateFromRun(
       await addStoryNode({
         id: sr.story_id,
         specId,
+        workspaceId: String(workspaceId),
         title: sr.story_id,
         status: sr.status,
       });
       nodesCreated++;
 
       // Story belongs to spec
-      await addStoryToSpec(sr.story_id, specId);
+      await addStoryToSpec(sr.story_id, specId, String(workspaceId));
       edgesCreated++;
 
       // Mine real file paths from the story output chunks written by story-log-follower.
       const filePaths = await collectStoryFileTouches(runId, sr.story_id);
       for (const filePath of filePaths) {
-        await addFileTouch(sr.story_id, filePath, String(workspaceId));
+        await addFileTouch(sr.story_id, filePath, String(workspaceId), specId);
         edgesCreated++;
       }
     }
@@ -894,17 +1091,18 @@ export async function populateFromSpec(
       await addStoryNode({
         id: story.id,
         specId,
+        workspaceId: String(workspaceId),
         title: story.title,
         status: 'pending',
       });
 
       // Story belongs to spec
-      await addStoryToSpec(story.id, specId);
+      await addStoryToSpec(story.id, specId, String(workspaceId));
 
       // Story depends on other stories
       if (story.dependsOn) {
         for (const depId of story.dependsOn) {
-          await addStoryDependency(story.id, depId);
+          await addStoryDependency(story.id, depId, specId, String(workspaceId));
         }
       }
     }
@@ -958,12 +1156,12 @@ export async function populateConventionsFromConfig(
       const matchedFiles = micromatch(workspaceFiles, scope.path);
 
       for (const injectFile of scope.inject) {
-        await addConventionLink(injectFile, '', 'config.json', 'scope');
+        await addConventionLink(injectFile, '', workspaceId, 'config.json', 'scope');
         nodesCreated++;
 
         // Link convention to each matched file
         for (const filePath of matchedFiles) {
-          await addConventionLink(injectFile, filePath, 'config.json', 'scope');
+          await addConventionLink(injectFile, filePath, workspaceId, 'config.json', 'scope');
           edgesCreated++;
         }
       }
@@ -971,7 +1169,7 @@ export async function populateConventionsFromConfig(
 
     // 2. Global conventions: always-injected files
     for (const globalFile of globals) {
-      await addConventionLink(globalFile, '', 'config.json', 'global');
+      await addConventionLink(globalFile, '', workspaceId, 'config.json', 'global');
       nodesCreated++;
     }
 
@@ -1018,6 +1216,199 @@ function listFilesRecursive(dir: string, base: string, maxDepth = 5, depth = 0):
     // Permission errors, broken symlinks — skip silently
   }
   return results;
+}
+
+export type WorkspaceProjectionPrunableLabel = 'Story' | 'Spec' | 'Memory' | 'File';
+
+export interface WorkspaceProjectionState {
+  specIds: string[];
+  stories: Array<{ specId: string; storyId: string }>;
+  memoryIds: string[];
+  filePaths: string[];
+}
+
+export interface WorkspaceProjectionPruneBucket {
+  label: WorkspaceProjectionPrunableLabel;
+  keyPrefix: string;
+  activeKeys: string[];
+  additionalWhere?: string;
+}
+
+export interface WorkspaceProjectionPruneResult {
+  active: Record<WorkspaceProjectionPrunableLabel, number>;
+  pruned: Record<WorkspaceProjectionPrunableLabel, number>;
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
+function uniqueSortedStories(
+  stories: Array<{ specId: string; storyId: string }>,
+): Array<{ specId: string; storyId: string }> {
+  return [...new Map(
+    stories.map((story) => [`${story.specId}::${story.storyId}`, story] as const),
+  ).values()].sort((a, b) => {
+    const specCompare = a.specId.localeCompare(b.specId);
+    return specCompare !== 0 ? specCompare : a.storyId.localeCompare(b.storyId);
+  });
+}
+
+function listWorkspaceSpecFiles(workspacePath: string): Array<{ specId: string; filePath: string }> {
+  const specsRoot = path.join(workspacePath, 'forge', 'specs');
+  const candidates = [
+    path.join(specsRoot, 'approved'),
+    path.join(specsRoot, 'pending'),
+  ];
+
+  const specFiles = new Map<string, string>();
+  for (const dir of candidates) {
+    try {
+      for (const fileName of fs.readdirSync(dir)) {
+        if (!fileName.endsWith('.json')) continue;
+        const specId = fileName.replace(/\.json$/, '');
+        if (!specFiles.has(specId)) {
+          specFiles.set(specId, path.join(dir, fileName));
+        }
+      }
+    } catch {
+      // Missing spec dir is fine.
+    }
+  }
+
+  return [...specFiles.entries()].map(([specId, filePath]) => ({ specId, filePath }));
+}
+
+export function buildWorkspaceProjectionPrunePlan(
+  workspaceId: string,
+  state: WorkspaceProjectionState,
+): WorkspaceProjectionPruneBucket[] {
+  return [
+    {
+      label: 'Story',
+      keyPrefix: `story:${workspaceId}::`,
+      activeKeys: uniqueSorted(
+        state.stories.map(({ specId, storyId }) => buildStoryNodeKey(workspaceId, specId, storyId)),
+      ),
+    },
+    {
+      label: 'Spec',
+      keyPrefix: `spec:${workspaceId}::`,
+      activeKeys: uniqueSorted(state.specIds.map((specId) => buildSpecNodeKey(workspaceId, specId))),
+    },
+    {
+      label: 'Memory',
+      keyPrefix: `memory:${workspaceId}::`,
+      activeKeys: uniqueSorted(state.memoryIds.map((memoryId) => buildMemoryNodeKey(workspaceId, memoryId))),
+    },
+    {
+      label: 'File',
+      keyPrefix: `file:${workspaceId}::`,
+      activeKeys: uniqueSorted(state.filePaths.map((filePath) => buildFileNodeKey(workspaceId, filePath))),
+      additionalWhere: "COALESCE(n.path, '') <> ''",
+    },
+  ];
+}
+
+export async function collectWorkspaceProjectionState(
+  workspaceId: string,
+  workspacePath: string,
+): Promise<WorkspaceProjectionState | null> {
+  if (!workspaceId || !workspacePath || !fs.existsSync(workspacePath)) {
+    return null;
+  }
+
+  const specIds: string[] = [];
+  const stories: Array<{ specId: string; storyId: string }> = [];
+
+  for (const { specId, filePath } of listWorkspaceSpecFiles(workspacePath)) {
+    specIds.push(specId);
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as {
+        userStories?: Array<{ id?: unknown }>;
+      };
+      for (const story of parsed.userStories ?? []) {
+        if (typeof story.id === 'string' && story.id.trim().length > 0) {
+          stories.push({ specId, storyId: story.id.trim() });
+        }
+      }
+    } catch {
+      logger.warn({ workspaceId, specId, filePath }, '[knowledge-graph] Skipping projection reconciliation because an active spec could not be parsed safely');
+      return null;
+    }
+  }
+
+  const memoryRows = await query<{ id: string | number }>(
+    `SELECT id
+       FROM memories
+      WHERE workspace_id = $1 AND deleted_at IS NULL`,
+    [workspaceId],
+  );
+
+  const filePaths = uniqueSorted(
+    listFilesRecursive(workspacePath, workspacePath).map((filePath) => normalizeGraphFilePath(filePath)),
+  );
+
+  return {
+    specIds: uniqueSorted(specIds),
+    stories: uniqueSortedStories(stories),
+    memoryIds: uniqueSorted(memoryRows.map((row) => String(row.id))),
+    filePaths,
+  };
+}
+
+function toCypherStringList(values: string[]): string {
+  return `[${values.map((value) => `'${escCypher(value)}'`).join(', ')}]`;
+}
+
+async function pruneScopedWorkspaceNodes(bucket: WorkspaceProjectionPruneBucket): Promise<number> {
+  const activeKeysClause = bucket.activeKeys.length > 0
+    ? ` AND NOT n.key IN ${toCypherStringList(bucket.activeKeys)}`
+    : '';
+  const additionalWhereClause = bucket.additionalWhere ? ` AND ${bucket.additionalWhere}` : '';
+
+  const rows = await cypherQuery<{ cnt: unknown }>(
+    `MATCH (n:${bucket.label})
+     WHERE n.key STARTS WITH '${escCypher(bucket.keyPrefix)}'${additionalWhereClause}${activeKeysClause}
+     WITH collect(n) AS doomed, count(n) AS cnt
+     FOREACH (node IN doomed | DETACH DELETE node)
+     RETURN cnt`,
+    [{ name: 'cnt', type: 'agtype' }],
+  );
+
+  return Number(parseAgtype(rows[0]?.cnt) ?? 0);
+}
+
+export async function reconcileWorkspaceGraphProjection(
+  workspaceId: string,
+  workspacePath: string,
+): Promise<WorkspaceProjectionPruneResult> {
+  const empty: WorkspaceProjectionPruneResult = {
+    active: { Story: 0, Spec: 0, Memory: 0, File: 0 },
+    pruned: { Story: 0, Spec: 0, Memory: 0, File: 0 },
+  };
+
+  if (!(await isGraphAvailable())) return empty;
+
+  const state = await collectWorkspaceProjectionState(workspaceId, workspacePath);
+  if (!state) {
+    logger.warn({ workspaceId, workspacePath }, '[knowledge-graph] Skipping projection reconciliation without readable workspace state');
+    return empty;
+  }
+
+  const plan = buildWorkspaceProjectionPrunePlan(workspaceId, state);
+  const active = plan.reduce((acc, bucket) => {
+    acc[bucket.label] = bucket.activeKeys.length;
+    return acc;
+  }, { Story: 0, Spec: 0, Memory: 0, File: 0 } as Record<WorkspaceProjectionPrunableLabel, number>);
+
+  const pruned = { Story: 0, Spec: 0, Memory: 0, File: 0 } as Record<WorkspaceProjectionPrunableLabel, number>;
+  for (const bucket of plan) {
+    pruned[bucket.label] = await pruneScopedWorkspaceNodes(bucket);
+  }
+
+  logger.info({ workspaceId, active, pruned }, '[knowledge-graph] Workspace projection reconciliation complete');
+  return { active, pruned };
 }
 
 // ── Graph Health Check ──────────────────────────────────────────────────────
@@ -1174,16 +1565,17 @@ export interface SpecKnowledgeGraphResult {
  * and related stories from other specs connected via DEPENDS_ON or TOUCHES.
  * PG-019: Returns empty arrays if AGE is unavailable.
  */
-export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowledgeGraphResult> {
+export async function querySpecKnowledgeGraph(specId: string, workspaceId?: string): Promise<SpecKnowledgeGraphResult> {
   const empty: SpecKnowledgeGraphResult = { memories: [], conventions: [], relatedStories: [] };
   if (!(await isGraphAvailable())) return empty;
 
-  const safeSpecId = escCypher(specId);
+  const specLookup = buildScopedGraphNodeLookup('Spec', specId, { workspaceId });
+  const safeSpecLookupValue = escCypher(specLookup.value);
 
   try {
     // 1. Memory nodes linked to this spec's stories via LEARNED_FROM
     const learnedRows = await cypherQuery<{ mid: unknown; cat: unknown; sid: unknown }>(
-      `MATCH (m:Memory)-[:LEARNED_FROM]->(s:Story)-[:BELONGS_TO]->(sp:Spec {id: '${safeSpecId}'})
+      `MATCH (m:Memory)-[:LEARNED_FROM]->(s:Story)-[:BELONGS_TO]->(sp:Spec {${specLookup.property}: '${safeSpecLookupValue}'})
        RETURN m.id, m.category, s.id`,
       [
         { name: 'mid', type: 'agtype' },
@@ -1193,7 +1585,7 @@ export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowl
     );
 
     const sourceSpecRows = await cypherQuery<{ mid: unknown; cat: unknown }>(
-      `MATCH (m:Memory)-[:FROM_SPEC]->(sp:Spec {id: '${safeSpecId}'})
+      `MATCH (m:Memory)-[:FROM_SPEC]->(sp:Spec {${specLookup.property}: '${safeSpecLookupValue}'})
        RETURN m.id, m.category`,
       [
         { name: 'mid', type: 'agtype' },
@@ -1218,7 +1610,7 @@ export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowl
 
     // 2. Convention nodes that APPLIES_TO files touched by this spec's stories
     const conventionRows = await cypherQuery<{ cname: unknown; csrc: unknown; fpath: unknown }>(
-      `MATCH (c:Convention)-[:APPLIES_TO]->(f:File)<-[:TOUCHES]-(s:Story)-[:BELONGS_TO]->(sp:Spec {id: '${safeSpecId}'})
+      `MATCH (c:Convention)-[:APPLIES_TO]->(f:File)<-[:TOUCHES]-(s:Story)-[:BELONGS_TO]->(sp:Spec {${specLookup.property}: '${safeSpecLookupValue}'})
        RETURN DISTINCT c.name, c.source, f.path`,
       [
         { name: 'cname', type: 'agtype' },
@@ -1236,9 +1628,9 @@ export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowl
 
     // 3. Related stories from OTHER specs connected via DEPENDS_ON or TOUCHES
     const relatedRows = await cypherQuery<{ rid: unknown; rspec: unknown; rtitle: unknown; rel: unknown }>(
-      `MATCH (s:Story)-[:BELONGS_TO]->(sp:Spec {id: '${safeSpecId}'})
+      `MATCH (s:Story)-[:BELONGS_TO]->(sp:Spec {${specLookup.property}: '${safeSpecLookupValue}'})
        MATCH (s)-[:TOUCHES]->(f:File)<-[:TOUCHES]-(r:Story)-[:BELONGS_TO]->(rsp:Spec)
-       WHERE rsp.id <> '${safeSpecId}'
+       WHERE rsp.${specLookup.property} <> '${safeSpecLookupValue}'
        RETURN DISTINCT r.id, rsp.id, r.title, 'TOUCHES'`,
       [
         { name: 'rid', type: 'agtype' },
@@ -1256,13 +1648,19 @@ export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowl
     }));
 
     logger.debug(
-      { specId, memories: memories.length, conventions: conventions.length, relatedStories: relatedStories.length },
+      {
+        specId,
+        workspaceId: workspaceId ?? null,
+        memories: memories.length,
+        conventions: conventions.length,
+        relatedStories: relatedStories.length,
+      },
       '[knowledge-graph] querySpecKnowledgeGraph complete',
     );
 
     return { memories, conventions, relatedStories };
   } catch (err) {
-    logger.warn({ err, specId }, '[knowledge-graph] querySpecKnowledgeGraph failed');
+    logger.warn({ err, specId, workspaceId: workspaceId ?? null }, '[knowledge-graph] querySpecKnowledgeGraph failed');
     return empty;
   }
 }

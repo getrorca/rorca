@@ -88,7 +88,7 @@ describe('GET /api/memory', () => {
 // ─── POST /api/memory ─────────────────────────────────────────────────────
 
 describe('POST /api/memory', () => {
-  test('appends a valid memory entry, writes MEMORY.md, and emits a graph WAL event', async () => {
+  test('appends a valid memory entry, preserves provenance, and emits a graph WAL event', async () => {
     const res = await request(app)
       .post('/api/memory')
       .set('Authorization', `Bearer ${authToken}`)
@@ -99,6 +99,9 @@ describe('POST /api/memory', () => {
         rule: 'Always enable WAL mode for concurrent reads.',
         context: 'Prevents read locks during writes.',
         source: 'US-123',
+        sourceSpecId: 'spec-memory-test',
+        sourceRunId: 42,
+        relatedFiles: ['src/db/sqlite.ts', 'src/db/sqlite.ts', 'docs/sqlite.md'],
       });
 
     expect(res.status).toBe(201);
@@ -111,22 +114,39 @@ describe('POST /api/memory', () => {
     const content = fs.readFileSync(memoryPath, 'utf-8');
     expect(content).toContain('Use SQLite WAL mode');
 
-    // The memory row should be recorded with synthesized source_type and WAL metadata.
-    const memoryRow = await queryOne<{ source_type: string; source: string | null }>(
-      `SELECT source_type, source FROM memories WHERE workspace_id = $1 AND content LIKE $2 ORDER BY id DESC LIMIT 1`,
+    // The memory row should retain explicit provenance needed for graph rebuilds.
+    const memoryRow = await queryOne<{
+      source_type: string;
+      source: string | null;
+      source_story_id: string | null;
+      source_spec_id: string | null;
+      source_run_id: number | string | null;
+      related_files: string[];
+    }>(
+      `SELECT source_type, source, source_story_id, source_spec_id, source_run_id, related_files
+         FROM memories WHERE workspace_id = $1 AND content LIKE $2 ORDER BY id DESC LIMIT 1`,
       [workspaceId, '%Use SQLite WAL mode%'],
     );
     expect(memoryRow).toBeDefined();
     expect(memoryRow!.source_type).toBe('synthesis');
     expect(memoryRow!.source).toBe('US-123');
+    expect(memoryRow!.source_story_id).toBe('US-123');
+    expect(memoryRow!.source_spec_id).toBe('spec-memory-test');
+    expect(Number(memoryRow!.source_run_id)).toBe(42);
+    expect(memoryRow!.related_files).toEqual(['src/db/sqlite.ts', 'docs/sqlite.md']);
 
-    const walRow = await queryOne<{ event_type: string; story_id: string | null; payload: string }>(
-      `SELECT event_type, story_id, payload FROM wal_events WHERE workspace_id = $1 AND event_type = 'memory_created' ORDER BY id DESC LIMIT 1`,
+    const walRow = await queryOne<{ event_type: string; story_id: string | null; spec_id: string | null; payload: string | Record<string, unknown> }>(
+      `SELECT event_type, story_id, spec_id, payload FROM wal_events WHERE workspace_id = $1 AND event_type = 'memory_created' ORDER BY id DESC LIMIT 1`,
       [workspaceId],
     );
     expect(walRow).toBeDefined();
     expect(walRow!.event_type).toBe('memory_created');
     expect(walRow!.story_id).toBe('US-123');
+    expect(walRow!.spec_id).toBe('spec-memory-test');
+    const walPayload = typeof walRow!.payload === 'string' ? JSON.parse(walRow!.payload) : walRow!.payload;
+    expect(walPayload).toMatchObject({
+      relatedFiles: ['src/db/sqlite.ts', 'docs/sqlite.md'],
+    });
   });
 
   test('returns 400 when required fields are missing', async () => {
