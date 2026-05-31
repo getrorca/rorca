@@ -1,0 +1,57 @@
+{
+  "fixture": "codex-parity",
+  "storyId": "TP-006",
+  "agentType": "codex",
+  "codexVersion": "codex 0.25.0",
+  "captureCommand": "COLUMNS=80 LINES=24 codex exec --dangerously-bypass-approvals-and-sandbox --model gpt-5.4",
+  "terminalWidth": 80,
+  "workspace": "fixtures/codex-parity-workspace",
+  "prompt": "Explain the replay semantics of this fixed Codex terminal parity fixture.",
+  "tokenUsage": {
+    "inputTokens": 1337,
+    "outputTokens": 233,
+    "costUsd": null
+  },
+  "chunks": [
+    {
+      "sequence": 1,
+      "stream": "stdout",
+      "base64": "W1BsYW5uaW5nXSBFdmFsdWF0ZSByZXBsYXkgZmlkZWxpdHkNG1syS1tQbGFubmluZ10gRXZhbHVhdGUgcmVwbGF5IGZpZGVsaXR5IChzdGVwIDEvMikK"
+    },
+    {
+      "sequence": 2,
+      "stream": "stderr",
+      "base64": "G1szM213YXJuaW5nG1swbTogZml4dHVyZSBzdGRlcnIgaW50ZXJsZWF2ZQo="
+    },
+    {
+      "sequence": 3,
+      "stream": "stdout",
+      "base64": "W1JlYWRdIFJFQURNRS5tZAo="
+    },
+    {
+      "sequence": 4,
+      "stream": "stdout",
+      "base64": "UHJvZ3Jlc3MgMS8zDRtbMktQcm9ncmVzcyAyLzMNG1syS1Byb2dyZXNzIDMvMwo="
+    },
+    {
+      "sequence": 5,
+      "stream": "stdout",
+      "base64": "G1szMm1QQVNTG1swbSBieXRlIG9yZGVyaW5nIHByZXNlcnZlZAo="
+    },
+    {
+      "sequence": 6,
+      "stream": "stdout",
+      "base64": "G1s/MTA0OWhBTFQgU0NSRUVOG1s/MTA0OWwK"
+    },
+    {
+      "sequence": 7,
+      "stream": "stdout",
+      "base64": "UGxhaW4gb3V0cHV0IHdpdGggbm8gc2VtYW50aWMgcHJlZml4IHN0aWxsIHJlbmRlcnMuCg=="
+    },
+    {
+      "sequence": 8,
+      "stream": "stdout",
+      "base64": "W1dyaXRlXSBub3Rlcy50eHQK"
+    }
+  ]
+}
