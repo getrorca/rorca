@@ -746,6 +746,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
           flushTimerRef.current = null;
         }
         if (lineBufferRef.current) {
+          const finalStep = parseVerboseLine(lineBufferRef.current);
+          if (finalStep) {
+            setSteps(prev => [...prev, finalStep]);
+          }
           const formatted = formatStreamJsonForDisplay(lineBufferRef.current);
           if (formatted !== null) {
             pendingTextRef.current += formatted + '\n';

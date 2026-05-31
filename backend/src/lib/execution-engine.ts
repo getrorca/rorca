@@ -2634,6 +2634,17 @@ function spawnOpenCode(
     // tool_result (full file contents as escaped JSON) produce giant JSON blobs
     // in the terminal — skip them.
     let ocLineBuf = '';
+    const forwardOpenCodeStdoutLine = (line: string): void => {
+      const trimmed = line.trim();
+      if (!trimmed) return;
+      try {
+        const ev = JSON.parse(trimmed);
+        if (ev.type === 'step_finish' || ev.type === 'step_start' || ev.type === 'tool_result') return;
+        process.stdout.write(trimmed + '\n');
+      } catch {
+        process.stdout.write(line + '\n');
+      }
+    };
     child.stdout?.on('data', (chunk: Buffer) => {
       watchdog.reset();
       logStream.write(chunk); // full raw log always
@@ -2641,16 +2652,13 @@ function spawnOpenCode(
       const lines = ocLineBuf.split('\n');
       ocLineBuf = lines.pop() ?? '';
       for (const line of lines) {
-        const trimmed = line.trim();
-        if (!trimmed) continue;
-        try {
-          const ev = JSON.parse(trimmed);
-          if (ev.type === 'step_finish' || ev.type === 'step_start' || ev.type === 'tool_result') continue;
-          process.stdout.write(trimmed + '\n');
-        } catch {
-          process.stdout.write(line + '\n');
-        }
+        forwardOpenCodeStdoutLine(line);
       }
+    });
+    child.stdout?.on('end', () => {
+      if (!ocLineBuf.trim()) return;
+      forwardOpenCodeStdoutLine(ocLineBuf);
+      ocLineBuf = '';
     });
 
     const stderrChunks: Buffer[] = [];
