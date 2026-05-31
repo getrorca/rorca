@@ -4103,9 +4103,10 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const runRow = await queryOne('SELECT agent_type, agent, agent_model, status, terminal_mode FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null; status: string; terminal_mode: string | null } | undefined;
   const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
   const terminalMode = normalizeTerminalMode(runRow?.terminal_mode);
+  const isPty = terminalMode === 'pty';
 
   // Emit run metadata so frontend knows which renderer to use
-  res.write(`event: run_meta\ndata: ${JSON.stringify({ agentType: agent, agentModel: runRow?.agent_model ?? null, terminalMode, terminal_mode: terminalMode })}\n\n`);
+  res.write(`event: run_meta\ndata: ${JSON.stringify({ agentType: agent, agentModel: runRow?.agent_model ?? null, terminalMode, terminal_mode: terminalMode, isPty })}\n\n`);
 
   // ── Replay all existing chunks (late-join support) ────────────────────────
   interface ChunkRow { sequence: number; chunk: Buffer }

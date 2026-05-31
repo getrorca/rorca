@@ -1152,6 +1152,47 @@ describe('GET /api/pipeline/runs/:runId/output', () => {
     expect(res.status).toBe(200);
     expect(String(res.body)).toContain('event: run_meta');
     expect(String(res.body)).toContain('"terminal_mode":"ansi-html"');
+    expect(String(res.body)).toContain('"isPty":false');
+  });
+
+  test('replays transcript chunks and semantic_step events for non-PTY runs', async () => {
+    const inserted = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/output-replay.json', 'ws-pipe', 'done')
+       RETURNING id`,
+    );
+    const runId = inserted!.id;
+
+    const chunkOne = Buffer.from('{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"src/foo.ts"}}]}}\n', 'utf8');
+    const chunkTwo = Buffer.from('plain transcript line\n', 'utf8');
+
+    await execute(
+      `INSERT INTO run_output_chunks (run_id, chunk, sequence)
+       VALUES ($1, $2, 0), ($1, $3, 1)`,
+      [runId, chunkOne, chunkTwo],
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .buffer(true)
+      .parse((stream, cb) => {
+        let data = '';
+        stream.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+        stream.on('end', () => cb(null, data));
+      });
+
+    const body = String(res.body);
+    expect(res.status).toBe(200);
+    expect(body).toContain('event: run_meta');
+    expect(body).toContain('"terminal_mode":"ansi-html"');
+    expect(body).toContain('"isPty":false');
+    expect(body).toContain(`event: chunk\ndata: ${chunkOne.toString('base64')}`);
+    expect(body).toContain(`event: chunk\ndata: ${chunkTwo.toString('base64')}`);
+    expect(body).toContain('event: semantic_step');
+    expect(body).toContain('"type":"read"');
+    expect(body).toContain('"label":"Read src/foo.ts"');
+    expect(body).toContain('event: done');
   });
 });
 
