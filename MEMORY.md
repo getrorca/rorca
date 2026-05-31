@@ -3698,3 +3698,12 @@ Alternatives considered: 1) Promise.all — rejected because one job throwing wo
 
 ## 2026-05-31 [Spec Observation] The inclusion of GR2-006 (evaluation fixtures, benchmarks, rollout controls) and GR2-007 (performance and cache safety budgets) as separate stories suggests the codebase lacks a mature testing and performance monitoring framework for graph-backed features. Anti-echo-chamber guardrails (GR2-004) imply prior issues with ranking producing repetitive or skewed results.
 > Rule: The inclusion of GR2-006 (evaluation fixtures, benchmarks, rollout controls) and GR2-007 (performance and cache safety budgets) as separate stories suggests the codebase lacks a mature testing and performance monitoring framework for graph-backed features. Anti-echo-chamber guardrails (GR2-004) imply prior issues with ranking producing repetitive or skewed results.
+
+## 2026-05-31 [Gotcha] Sequential pipeline runs only advance if each story is launched explicitly: A single pipeline trigger with storyId set runs only that story; to execute a spec strictly sequentially, launch one story at a time and wait for completion before starting the next.
+> Rule: Sequential pipeline runs only advance if each story is launched explicitly: A single pipeline trigger with storyId set runs only that story; to execute a spec strictly sequentially, launch one story at a time and wait for completion before starting the next.
+
+## 2026-05-31 [Decision] Merge Phase 1 only after the worktree is green and code changes are committed: Treat the feature branch as merge-ready only when the pipeline is green and the worktree contains no code changes beyond intended run artifacts.
+> Rule: Merge Phase 1 only after the worktree is green and code changes are committed: Treat the feature branch as merge-ready only when the pipeline is green and the worktree contains no code changes beyond intended run artifacts.
+
+## 2026-05-31 [Pattern] Use explicit workspace-scoped memory saves for session learnings: When capturing session learnings, post them directly to the workspace memory ledger with a clear category, short title, actionable rule, and source context.
+> Rule: Use explicit workspace-scoped memory saves for session learnings: When capturing session learnings, post them directly to the workspace memory ledger with a clear category, short title, actionable rule, and source context.

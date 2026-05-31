@@ -1,3 +1,4 @@
+/// <reference types="node" />
 /**
  * Copyright (c) 2026 Rorca Inc.
  * SPDX-License-Identifier: BUSL-1.1
@@ -82,6 +83,11 @@ export function formatStreamJsonForDisplay(line: string): string | null {
       return parts.length > 0 ? parts.join('\n') : null;
     }
 
+    if (ev.type === 'assistant' && typeof ev.content === 'string') {
+      const text = ev.content.trim();
+      return text ? `[Planning] ${text}` : null;
+    }
+
     if (ev.type === 'result') {
       if (ev.subtype === 'success') {
         const result = typeof ev.result === 'string' ? ev.result.slice(0, 300) : '';
@@ -91,6 +97,18 @@ export function formatStreamJsonForDisplay(line: string): string | null {
         return `\n❌ Error: ${ev.error ?? 'unknown'}`;
       }
       return null;
+    }
+
+    if (ev.type === 'completion') {
+      const result = String(ev.content ?? ev.result ?? '').trim();
+      const exitCode = typeof ev.exit_code === 'number'
+        ? ev.exit_code
+        : typeof ev.exitCode === 'number'
+          ? ev.exitCode
+          : 0;
+      return exitCode === 0
+        ? `[Completed] ${result || 'Run completed'}`
+        : `[Completed] Exit code: ${exitCode}${result ? ` — ${result}` : ''}`;
     }
 
     if (ev.type === 'user' || ev.type === 'step_start' || ev.type === 'step_finish') return null;
@@ -125,8 +143,32 @@ export function formatStreamJsonForDisplay(line: string): string | null {
       }
     }
 
+    if (ev.type === 'tool_call') {
+      const tool = String(ev.tool ?? ev.name ?? '').toLowerCase();
+      const input = (ev.args ?? ev.input ?? {}) as Record<string, unknown>;
+      const filePath = String(input.file_path ?? input.path ?? input.url ?? '');
+      const command = String(input.command ?? '');
+      const pattern = String(input.pattern ?? input.query ?? '');
+      switch (tool) {
+        case 'read': return `[Read] ${filePath}`;
+        case 'write': return `[Write] ${filePath}`;
+        case 'edit': return `[Edit] ${filePath}`;
+        case 'bash': return `[Bash] ${command || String(input.description ?? 'Bash')}`;
+        case 'glob': return `[Search] glob ${pattern}`;
+        case 'grep': return `[Search] grep ${pattern}${input.path ? ` in ${String(input.path)}` : ''}`;
+        case 'webfetch': return `[Read] ${filePath}`;
+        case 'websearch': return `[Search] websearch ${pattern}`;
+        default: return tool ? `[Tool] ${tool}` : null;
+      }
+    }
+
+    if (ev.type === 'tool_result') {
+      const output = String(ev.content ?? ev.result ?? '').trim();
+      return output ? `  → ${output.split('\n')[0].slice(0, 200)}` : null;
+    }
+
     if (ev.type === 'error') {
-      const errData = ev.error ?? ev.part?.error ?? ev.data ?? {};
+      const errData = ev.error ?? ev.part?.error ?? ev.data ?? ev.message ?? {};
       const msg = typeof errData === 'string'
         ? errData
         : errData.message ?? errData.name ?? JSON.stringify(errData).slice(0, 300);
@@ -194,6 +236,7 @@ export function parseVerboseLine(line: string): RunTerminalSemanticStep | null {
   if (clean.startsWith('{')) {
     try {
       const ev = JSON.parse(clean) as any;
+      const ts = typeof ev.timestamp === 'string' ? ev.timestamp : new Date().toISOString();
       if (ev.type === 'fixture_meta') return null;
 
       if (ev.type === 'tool_use' && ev.part) {
@@ -228,20 +271,107 @@ export function parseVerboseLine(line: string): RunTerminalSemanticStep | null {
           case 'websearch': label = `WebSearch: ${pattern}`; break;
           default: label = tool || 'Unknown tool';
         }
-        return { type: toolMap[tool] ?? 'unknown', label: label.slice(0, 100), ts: new Date().toISOString(), toolName: tool };
+        return { type: toolMap[tool] ?? 'unknown', label: label.slice(0, 100), ts, toolName: tool };
+      }
+
+      if (ev.type === 'tool_call') {
+        const tool = String(ev.tool ?? ev.name ?? '').toLowerCase();
+        const input = (ev.args ?? ev.input ?? {}) as Record<string, unknown>;
+        const filePath = String(input.file_path ?? input.path ?? input.url ?? '');
+        const command = String(input.command ?? '');
+        const pattern = String(input.pattern ?? input.query ?? '');
+        const toolMap: Record<string, RunTerminalSemanticStep['type']> = {
+          read: 'read',
+          write: 'write',
+          edit: 'edit',
+          bash: 'bash',
+          glob: 'search',
+          grep: 'search',
+          webfetch: 'read',
+          websearch: 'search',
+        };
+        let label: string;
+        let detail: string | undefined;
+        switch (tool) {
+          case 'read': label = `Read ${filePath}`; break;
+          case 'write': label = `Write ${filePath}`; break;
+          case 'edit': label = `Edit ${filePath}`; break;
+          case 'bash':
+            label = String(input.description ?? '').trim() || command.slice(0, 100) || 'Bash';
+            detail = command || undefined;
+            break;
+          case 'glob': label = `Glob: ${pattern}`; break;
+          case 'grep':
+            label = `Grep: ${pattern}`;
+            detail = typeof input.path === 'string' ? input.path : undefined;
+            break;
+          case 'webfetch': label = `Read ${filePath}`; break;
+          case 'websearch': label = `WebSearch: ${pattern}`; break;
+          default: label = tool || 'Unknown tool';
+        }
+        return { type: toolMap[tool] ?? 'unknown', label: label.slice(0, 100), detail, ts, toolName: tool };
+      }
+
+      if (ev.type === 'tool_result') {
+        const tool = String(ev.tool ?? ev.name ?? '').toLowerCase();
+        const output = String(ev.content ?? ev.result ?? '').trim();
+        const durationMs = typeof ev.duration_ms === 'number' ? ev.duration_ms : undefined;
+        const toolMap: Record<string, RunTerminalSemanticStep['type']> = {
+          read: 'read',
+          write: 'write',
+          edit: 'edit',
+          bash: 'bash',
+          glob: 'search',
+          grep: 'search',
+          webfetch: 'read',
+          websearch: 'search',
+        };
+        if (!tool) return null;
+        return {
+          type: toolMap[tool] ?? 'unknown',
+          label: `${tool} result`.slice(0, 100),
+          detail: output.slice(0, 500) || undefined,
+          output: output.slice(0, 2000) || undefined,
+          durationMs,
+          ts,
+          toolName: tool,
+        };
+      }
+
+      if (ev.type === 'assistant' && typeof ev.content === 'string') {
+        const text = ev.content.trim();
+        if (text.length > 10) {
+          return { type: 'plan', label: 'Reasoning', detail: text.slice(0, 200), ts };
+        }
+      }
+
+      if (ev.type === 'completion') {
+        const exitCode = typeof ev.exit_code === 'number'
+          ? ev.exit_code
+          : typeof ev.exitCode === 'number'
+            ? ev.exitCode
+            : 0;
+        const detail = String(ev.content ?? ev.result ?? '').trim();
+        return {
+          type: exitCode === 0 ? 'commit' : 'unknown',
+          label: exitCode === 0 ? 'Run completed' : 'Failed',
+          detail: detail || undefined,
+          ts,
+          isError: exitCode !== 0 || undefined,
+        };
       }
 
       if (ev.type === 'text' && ev.part?.text) {
         const text = String(ev.part.text).trim();
         if (text.length > 10) {
-          return { type: 'plan', label: text.slice(0, 80), ts: new Date().toISOString() };
+          return { type: 'plan', label: text.slice(0, 80), ts };
         }
       }
 
       if (ev.type === 'error') {
-        const errData = ev.error ?? ev.data ?? {};
+        const errData = ev.error ?? ev.data ?? ev.message ?? {};
         const msg = typeof errData === 'string' ? errData : errData.message ?? errData.name ?? 'Unknown error';
-        return { type: 'unknown', label: `Error: ${String(msg).slice(0, 80)}`, ts: new Date().toISOString(), isError: true };
+        return { type: 'unknown', label: `Error: ${String(msg).slice(0, 80)}`, detail: String(msg).slice(0, 200), ts, isError: true };
       }
     } catch {
       // fall through to regex matching
