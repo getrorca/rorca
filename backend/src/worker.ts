@@ -727,7 +727,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
     }
 
     const payload: PipelineRunJobPayloadType = parsed.data;
-    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, specificStory, includeGraph, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
+    const { runId, specPath, workspacePath, agent, model, worktreePath, envOverrides, startFromStoryId, specificStory, includeGraph, terminalMode, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort } = payload;
 
     if (payload.agent === 'pi' && isPiExternalOrchestrationEnabled()) {
       const runRow = await queryOne<{ workspace_id: number }>(
@@ -842,6 +842,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       '--port', backendPort,
       '--parallelism', String(parallelism ?? 1),
       '--agent', agent,
+      '--terminal-mode', terminalMode,
     ];
     if (model) {
       engineArgs.push('--model', model);
@@ -888,6 +889,7 @@ async function handlePipelineRun(jobs: PgBoss.Job<Record<string, unknown>>[]): P
       ...inheritedEnv,
       ...envOverrides,
       RORCA_PROCESS_ROLE: 'engine',
+      RORCA_TERMINAL_MODE: terminalMode,
     };
 
     logger.info({ runId, agent, model, cwd }, '[worker] Spawning execution-engine.ts');
@@ -1286,16 +1288,16 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     // Effective working directory (worktree or main workspace)
     const cwd = worktreePath ?? workspacePath;
 
-    // 2. Look up workspace_id and parallelism from the NEW run row (created by route handler)
-    const runRow = await queryOne<{ workspace_id: string; parallelism: number }>(
-      'SELECT workspace_id, parallelism FROM pipeline_runs WHERE id = $1',
+    // 2. Look up workspace_id, parallelism, and terminal mode from the NEW run row (created by route handler)
+    const runRow = await queryOne<{ workspace_id: string; parallelism: number; terminal_mode: string | null }>(
+      'SELECT workspace_id, parallelism, terminal_mode FROM pipeline_runs WHERE id = $1',
       [runId],
     );
     if (!runRow) {
       logger.error({ jobId, runId }, '[worker] pipeline:retry run row not found — skipping');
       return;
     }
-    const { workspace_id: workspaceId, parallelism } = runRow;
+    const { workspace_id: workspaceId, parallelism, terminal_mode: terminalMode } = runRow;
 
     // 3. Mark the new run as running — set worker_id so orphan sweep knows this run belongs to us
     await execute(
@@ -1333,6 +1335,7 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
       '--port', backendPort,
       '--parallelism', String(parallelism ?? 1),
       '--agent', agent,
+      '--terminal-mode', terminalMode ?? 'ansi-html',
     ];
     if (model) {
       engineArgs.push('--model', model);
@@ -1345,7 +1348,12 @@ async function handlePipelineRetry(jobs: PgBoss.Job<Record<string, unknown>>[]):
     // Spread process.env first so child inherits PATH, HOME, DATABASE_URL, etc.
     // Strip the 4 Claude vars that must not propagate to nested invocations.
     const { CLAUDECODE: _a, CLAUDE_CODE_ENTRYPOINT: _b, CLAUDE_AGENT_SDK_VERSION: _c, CLAUDE_CODE_ENABLE_SDK_FILE_CHECKPOINTING: _d, ...inheritedEnvRetry } = process.env as Record<string, string>;
-    const env = { ...inheritedEnvRetry, ...envOverrides, RORCA_PROCESS_ROLE: 'engine' };
+    const env = {
+      ...inheritedEnvRetry,
+      ...envOverrides,
+      RORCA_PROCESS_ROLE: 'engine',
+      RORCA_TERMINAL_MODE: terminalMode ?? 'ansi-html',
+    };
 
     logger.info({ runId, agent, model, cwd }, '[worker] Spawning execution-engine.ts for retry');
 

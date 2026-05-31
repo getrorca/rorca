@@ -42,6 +42,7 @@ import { StringDecoder } from 'string_decoder';
 import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
+import { normalizeTerminalMode, type TerminalMode } from './terminal-mode';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
 import { detectPi, requirePi, listPiModels } from './pi-detector';
@@ -200,6 +201,8 @@ interface EngineConfig {
   agentType: AgentType;
   agentModel: string | null;
   attachAddr: string | null;
+  /** Terminal renderer mode for this run. */
+  terminalMode: TerminalMode;
   /** Set when engine runs inside a git worktree (autoWorktree=true). Full path to worktree dir. */
   worktreePath: string | null;
   /** Git branch name of the worktree (e.g. 'feat/my-spec-1234567890'). */
@@ -5664,6 +5667,7 @@ function parseArgs(): EngineConfig {
   let cliAgent: string | undefined;
   let cliModel: string | undefined;
   let attachAddr: string | null = null;
+  let terminalMode: TerminalMode = normalizeTerminalMode(process.env.RORCA_TERMINAL_MODE);
   let worktreePath: string | null = null;
   let branchName: string | null = null;
   let workspacePath: string | null = null;
@@ -5705,6 +5709,9 @@ function parseArgs(): EngineConfig {
       case '--attach':
         attachAddr = args[++i];
         break;
+      case '--terminal-mode':
+        terminalMode = normalizeTerminalMode(args[++i]);
+        break;
       case '--worktree-path':
         worktreePath = args[++i];
         break;
@@ -5745,7 +5752,7 @@ function parseArgs(): EngineConfig {
   }
 
   if (!jsonPath || !cwd || !runId) {
-    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>] [--reasoning-effort <low|medium|high|max>]');
+    logger.error('Usage: execution-engine.ts --json <path> --cwd <path> --run-id <number> [--story <id>] [--dry-run] [--port <number>] [--parallelism <N>] [--agent <type>] [--model <model>] [--attach <addr>] [--terminal-mode <ansi-html|pty>] [--worktree-path <path>] [--branch-name <branch>] [--workspace-path <path>] [--start-from <story-id>] [--include-graph] [--thinking] [--thinking-enabled <bool>] [--thinking-budget <tokens>] [--effort <low|medium|high>] [--effort-level <low|medium|high>] [--reasoning-effort <low|medium|high|max>]');
     process.exit(1);
   }
 
@@ -5754,7 +5761,7 @@ function parseArgs(): EngineConfig {
   const agentType: AgentType = (cliAgent as AgentType) ?? envConfig.agentType;
   const agentModel: string | null = cliModel ?? envConfig.agentModel;
 
-  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel };
+  return { jsonPath, cwd, runId, specificStory, dryRun, port, parallelism, agentType, agentModel, attachAddr, terminalMode, worktreePath, branchName, workspacePath, startFromStoryId, includeGraph, thinkingEnabled, thinkingBudget, effortLevel };
 }
 
 // ─── Entry point ─────────────────────────────────────────────────────────────

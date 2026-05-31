@@ -38,6 +38,11 @@ jest.mock('../../lib/pg-boss', () => ({
   }),
 }));
 
+jest.mock('../../lib/pty-manager', () => ({
+  PTY_AVAILABLE: true,
+  PTY_UNAVAILABLE_HINT: 'Run: cd backend && npm rebuild node-pty',
+}));
+
 let app: Express;
 let tmpDir: string;
 let wsDir: string;
@@ -1058,6 +1063,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.status).toBe(200);
     expect(res.body.agentType).toBe('claude');
     expect(res.body.agentModel).toBeNull();
+    expect(res.body.terminal_mode).toBe('ansi-html');
+    expect(res.body.run.terminal_mode).toBe('ansi-html');
   });
 
   test('pipeline_runs table has agent_type and agent_model columns', async () => {
@@ -1067,6 +1074,7 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(colNames).toContain('agent_model');
     expect(colNames).toContain('agent');
     expect(colNames).toContain('opencode_server_pid');
+    expect(colNames).toContain('terminal_mode');
   });
 
   test('trigger response includes agentType and agentModel', async () => {
@@ -1080,6 +1088,70 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.status).toBe(201);
     expect(res.body).toHaveProperty('agentType');
     expect(res.body).toHaveProperty('agentModel');
+  });
+
+  test('trigger accepts terminal_mode=pty, persists it, and forwards it to pg-boss', async () => {
+    seedSpec('approved', 'terminal-mode-pty');
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specPath: 'forge/specs/approved/terminal-mode-pty.json', workspaceId: 'ws-pipe', terminal_mode: 'pty' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.terminal_mode).toBe('pty');
+
+    const run = await queryOne<{ terminal_mode: string }>(`SELECT terminal_mode FROM pipeline_runs WHERE id = $1`, [res.body.runId]);
+    expect(run?.terminal_mode).toBe('pty');
+
+    expect(mockSend).toHaveBeenCalledWith(
+      'pipeline:run',
+      expect.objectContaining({ terminalMode: 'pty' }),
+      expect.any(Object),
+    );
+  });
+
+  test('trigger rejects unknown terminal_mode with 400', async () => {
+    seedSpec('approved', 'terminal-mode-invalid');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specPath: 'forge/specs/approved/terminal-mode-invalid.json', workspaceId: 'ws-pipe', terminal_mode: 'bogus' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Invalid terminal_mode');
+  });
+});
+
+// ─── GET /api/pipeline/runs/:runId/output ───────────────────────────────────
+
+describe('GET /api/pipeline/runs/:runId/output', () => {
+  test('emits run_meta with normalized terminal_mode for replay clients', async () => {
+    const inserted = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/output-meta.json', 'ws-pipe', 'done')
+       RETURNING id`,
+    );
+    const runId = inserted!.id;
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .buffer(true)
+      .parse((stream, cb) => {
+        let data = '';
+        stream.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+        stream.on('end', () => cb(null, data));
+      });
+
+    expect(res.status).toBe(200);
+    expect(String(res.body)).toContain('event: run_meta');
+    expect(String(res.body)).toContain('"terminal_mode":"ansi-html"');
   });
 });
 
