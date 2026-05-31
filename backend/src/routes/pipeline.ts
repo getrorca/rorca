@@ -4059,7 +4059,7 @@ router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
  *     tags: [Pipeline]
  *     summary: Stream raw terminal output (SSE)
  *     operationId: streamPipelineOutput
- *     description: Server-Sent Events stream of base64-encoded terminal output. Late joiners receive full buffer replay from run_output_chunks table.
+ *     description: Server-Sent Events stream of base64-encoded terminal output. Transcript runs replay from run_output_chunks; PTY runs replay from the dedicated PTY capture store so late joiners can rebuild the terminal from byte 0.
  *     parameters:
  *       - in: path
  *         name: runId
