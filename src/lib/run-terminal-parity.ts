@@ -155,9 +155,41 @@ const VERBOSE_PATTERNS: [RegExp, RunTerminalSemanticStep['type']][] = [
   [/(?:feat|fix|chore|test|refactor|style|docs|build)(?:\([^)]*\))?:/i, 'commit'],
 ];
 
+function normalizeSemanticLine(line: string): string {
+  return stripAnsi(line).split('\r').at(-1)?.trim() ?? '';
+}
+
 export function parseVerboseLine(line: string): RunTerminalSemanticStep | null {
-  const clean = stripAnsi(line).trim();
+  const clean = normalizeSemanticLine(line);
   if (!clean || clean.length < 4) return null;
+
+  const bracketed = clean.match(/^\[([A-Za-z]+)\]\s*(.*)$/);
+  if (bracketed) {
+    const [, rawPrefix, rawDetail] = bracketed;
+    const prefix = rawPrefix.toLowerCase();
+    const detail = rawDetail.trim();
+    switch (prefix) {
+      case 'read':
+        return { type: 'read', label: `Read ${detail}`.trim(), detail: detail || undefined, ts: new Date().toISOString(), toolName: 'read' };
+      case 'write':
+        return { type: 'write', label: `Write ${detail}`.trim(), detail: detail || undefined, ts: new Date().toISOString(), toolName: 'write' };
+      case 'edit':
+        return { type: 'edit', label: `Edit ${detail}`.trim(), detail: detail || undefined, ts: new Date().toISOString(), toolName: 'edit' };
+      case 'planning':
+      case 'plan':
+        return { type: 'plan', label: detail ? `Task: ${detail.slice(0, 60)}` : 'Reasoning', detail: detail || undefined, ts: new Date().toISOString(), toolName: prefix };
+      case 'command':
+      case 'bash':
+        return { type: 'bash', label: detail || 'Bash', detail: detail || undefined, ts: new Date().toISOString(), toolName: prefix };
+      case 'grep':
+      case 'search':
+        return { type: 'search', label: `${rawPrefix} ${detail}`.trim(), detail: detail || undefined, ts: new Date().toISOString(), toolName: prefix };
+      case 'test':
+        return { type: 'test', label: detail ? `Test ${detail}` : 'Test', detail: detail || undefined, ts: new Date().toISOString(), toolName: prefix };
+      default:
+        return null;
+    }
+  }
 
   if (clean.startsWith('{')) {
     try {

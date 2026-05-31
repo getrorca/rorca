@@ -39,6 +39,21 @@ jest.mock('../../lib/pty-manager', () => ({
 }));
 
 const fixturePath = path.join(__dirname, '..', '..', 'lib', '__tests__', 'fixtures', 'claude-code-parity.jsonl');
+const codexFixturePath = path.join(__dirname, '..', '..', 'lib', '__tests__', 'fixtures', 'codex-parity.json');
+
+interface CodexFixtureChunk {
+  sequence: number;
+  stream: 'stdout' | 'stderr';
+  base64: string;
+}
+
+interface CodexFixture {
+  fixture: string;
+  agentType: string;
+  codexVersion: string;
+  terminalWidth: number;
+  chunks: CodexFixtureChunk[];
+}
 
 let app: Express;
 let tmpDir: string;
@@ -73,18 +88,27 @@ afterAll(async () => {
   delete process.env.NODE_ENV;
 });
 
-async function seedRun(terminalMode: 'ansi-html' | 'pty'): Promise<number> {
+async function seedRun(terminalMode: 'ansi-html' | 'pty', agentType = 'claude'): Promise<number> {
   const row = await queryOne<{ id: number }>(
-    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, pid, terminal_mode)
-     VALUES ($1, $2, $3, $4, $5)
+    `INSERT INTO pipeline_runs (spec_path, workspace_id, status, pid, terminal_mode, agent_type)
+     VALUES ($1, $2, $3, $4, $5, $6)
      RETURNING id`,
-    ['forge/specs/approved/test-spec.json', 'ws-output', 'done', null, terminalMode],
+    ['forge/specs/approved/test-spec.json', 'ws-output', 'done', null, terminalMode, agentType],
   );
   return row!.id;
 }
 
 function readFixtureBytes(): Buffer {
   return fs.readFileSync(fixturePath);
+}
+
+function readCodexFixture(): CodexFixture {
+  return JSON.parse(fs.readFileSync(codexFixturePath, 'utf8')) as CodexFixture;
+}
+
+function readCodexFixtureBytes(): Buffer {
+  const fixture = readCodexFixture();
+  return Buffer.concat(fixture.chunks.map((chunk) => Buffer.from(chunk.base64, 'base64')));
 }
 
 function extractPtyBytesFromFixture(): Buffer {
@@ -185,6 +209,73 @@ describe('GET /api/pipeline/runs/:runId/output parity replay', () => {
     expect(text).toContain('\x1b[A');
     expect(text).toContain('\x1b[32mPASS\x1b[0m');
     expect(text).toContain('\x1b[?1049hALT SCREEN\x1b[?1049l');
+    expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"terminalMode":"pty"');
+  });
+
+  test('replays Codex transcript bytes in order and emits heuristic semantic steps', async () => {
+    const runId = await seedRun('ansi-html', 'codex');
+    const fixture = readCodexFixture();
+
+    for (const chunk of [fixture.chunks[3], fixture.chunks[1], fixture.chunks[0], fixture.chunks[7], fixture.chunks[2], fixture.chunks[6], fixture.chunks[5], fixture.chunks[4]]) {
+      await execute(`INSERT INTO run_output_chunks (run_id, sequence, chunk) VALUES ($1, $2, $3)`, [
+        runId,
+        chunk.sequence,
+        Buffer.from(chunk.base64, 'base64'),
+      ]);
+    }
+
+    const body = await streamOutput(runId);
+    const events = parseSseEvents(body);
+    const chunkEvents = events.filter((event) => event.event === 'chunk');
+    const semanticEvents = events.filter((event) => event.event === 'semantic_step');
+    const replayed = Buffer.concat(chunkEvents.map((event) => Buffer.from(event.data, 'base64')));
+    const semanticLabels = semanticEvents.map((event) => JSON.parse(event.data).label);
+
+    expect(chunkEvents.map((event) => event.id)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8']);
+    expect(replayed).toEqual(readCodexFixtureBytes());
+    expect(replayed.toString('utf8')).toContain('\x1b[33mwarning\x1b[0m: fixture stderr interleave');
+    expect(replayed.toString('utf8')).toContain('\r\x1b[2K');
+    expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"agentType":"codex"');
+    expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"terminalMode":"ansi-html"');
+    expect(semanticLabels).toEqual([
+      'Task: Evaluate replay fidelity (step 1/2)',
+      'Read README.md',
+      'Write notes.txt',
+    ]);
+  });
+
+  test('replays Codex PTY bytes without changing stdout/stderr interleaving or ANSI redraw controls', async () => {
+    const runId = await seedRun('pty', 'codex');
+    const fixture = readCodexFixture();
+    const raw = readCodexFixtureBytes();
+
+    await execute(
+      `INSERT INTO run_pty_sessions
+        (run_id, workspace_id, cwd, agent_type, cols, rows, child_pid, status, started_at, last_output_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NOW())`,
+      [runId, 'ws-output', wsDir, 'codex', fixture.terminalWidth, 24, null, 'exited'],
+    );
+    for (const chunk of [fixture.chunks[2], fixture.chunks[0], fixture.chunks[7], fixture.chunks[5], fixture.chunks[1], fixture.chunks[4], fixture.chunks[3], fixture.chunks[6]]) {
+      await execute(`INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, $2, $3)`, [
+        runId,
+        chunk.sequence,
+        Buffer.from(chunk.base64, 'base64'),
+      ]);
+    }
+
+    const body = await streamOutput(runId);
+    const events = parseSseEvents(body);
+    const chunkEvents = events.filter((event) => event.event === 'chunk');
+    const replayed = Buffer.concat(chunkEvents.map((event) => Buffer.from(event.data, 'base64')));
+    const text = replayed.toString('utf8');
+
+    expect(chunkEvents.map((event) => event.id)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8']);
+    expect(replayed).toEqual(raw);
+    expect(text).toContain('\x1b[33mwarning\x1b[0m: fixture stderr interleave');
+    expect(text).toContain('\r\x1b[2K');
+    expect(text).toContain('\x1b[32mPASS\x1b[0m byte ordering preserved');
+    expect(text).toContain('\x1b[?1049hALT SCREEN\x1b[?1049l');
+    expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"agentType":"codex"');
     expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"terminalMode":"pty"');
   });
 });
