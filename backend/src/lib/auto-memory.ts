@@ -20,6 +20,7 @@ import { embedText, prepareText } from './embedding-pipeline';
 import { logger } from './logger';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { resolveWorkflowConfig } from './workflow-config-resolver';
+import { resolveStoryMemoryProvenance } from './memory-provenance';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -39,6 +40,10 @@ interface MemoryEntry {
   content: string;
   confidence: 'high' | 'medium' | 'low';
   relatedFiles: string[];
+}
+
+function normalizeRelatedFiles(files: string[]): string[] {
+  return [...new Set(files.filter((file): file is string => typeof file === 'string' && file.trim().length > 0))];
 }
 
 // ─── Synthesis Prompt ───────────────────────────────────────────────────────
@@ -96,7 +101,7 @@ export async function autoSynthesizeMemory(
   storyOutput: string,
   status: 'passed' | 'failed',
   runId?: number,
-  port?: number,
+  _port?: number,
 ): Promise<void> {
   const t0 = Date.now();
 
@@ -159,6 +164,8 @@ export async function autoSynthesizeMemory(
 
     if (entries.length === 0) return;
 
+    const { sourceSpecId, relatedFiles: knownRelatedFiles } = await resolveStoryMemoryProvenance(runId, storyId);
+
     // ── Store entries with embeddings ────────────────────────────────────
     const categories: string[] = [];
 
@@ -172,29 +179,40 @@ export async function autoSynthesizeMemory(
       }
 
       const embeddingStr = embedding ? `[${embedding.join(',')}]` : null;
+      const relatedFiles = normalizeRelatedFiles([
+        ...entry.relatedFiles,
+        ...knownRelatedFiles,
+      ]);
 
       const inserted = await queryOne<{ id: number }>(
-        `INSERT INTO memories (workspace_id, category, content, source_story_id, source_run_id, confidence, related_files, embedding)
-         VALUES ($1, $2, $3, $4, $5, $6, $7, $8::vector) RETURNING id`,
+        `INSERT INTO memories (workspace_id, category, content, source_story_id, source_spec_id, source_run_id, confidence, related_files, embedding)
+         VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9::vector) RETURNING id`,
         [
           workspaceId,
           entry.category,
           entry.content,
           storyId,
+          sourceSpecId,
           runId ?? null,
           entry.confidence,
-          JSON.stringify(entry.relatedFiles),
+          JSON.stringify(relatedFiles),
           embeddingStr,
         ],
       );
 
       // Emit memory_created WAL event (persisted + broadcast)
       if (inserted) {
-        const walPayload = JSON.stringify({ id: inserted.id, text: entry.content, category: entry.category });
+        const walPayload = JSON.stringify({
+          id: inserted.id,
+          text: entry.content,
+          category: entry.category,
+          relatedFiles,
+          source_spec_id: sourceSpecId,
+        });
         try {
           const walEvent = await queryOne<WalEvent>(
             `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
-            ['memory_created', workspaceId, null, storyId, walPayload],
+            ['memory_created', workspaceId, sourceSpecId, storyId, walPayload],
           );
           if (walEvent) broadcastAll(walEvent);
         } catch {
@@ -359,7 +377,13 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
 
       // Emit memory_created WAL event (persisted + broadcast)
       if (inserted) {
-        const walPayload = JSON.stringify({ id: inserted.id, text: entry.content, category: entry.category });
+        const walPayload = JSON.stringify({
+          id: inserted.id,
+          text: entry.content,
+          category: entry.category,
+          relatedFiles: entry.relatedFiles,
+          source_spec_id: specId,
+        });
         try {
           const walEvent = await queryOne<WalEvent>(
             `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
@@ -601,7 +625,12 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
 
       // Emit memory_created WAL event (persisted + broadcast)
       if (inserted) {
-        const walPayload = JSON.stringify({ id: inserted.id, text: entry.content, category: entry.category });
+        const walPayload = JSON.stringify({
+          id: inserted.id,
+          text: entry.content,
+          category: entry.category,
+          relatedFiles: entry.relatedFiles,
+        });
         try {
           const walEvent = await queryOne<WalEvent>(
             `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING *`,
