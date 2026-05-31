@@ -1243,6 +1243,17 @@ function uniqueSorted(values: string[]): string[] {
   return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
 }
 
+function uniqueSortedStories(
+  stories: Array<{ specId: string; storyId: string }>,
+): Array<{ specId: string; storyId: string }> {
+  return [...new Map(
+    stories.map((story) => [`${story.specId}::${story.storyId}`, story] as const),
+  ).values()].sort((a, b) => {
+    const specCompare = a.specId.localeCompare(b.specId);
+    return specCompare !== 0 ? specCompare : a.storyId.localeCompare(b.storyId);
+  });
+}
+
 function listWorkspaceSpecFiles(workspacePath: string): Array<{ specId: string; filePath: string }> {
   const specsRoot = path.join(workspacePath, 'forge', 'specs');
   const candidates = [
@@ -1340,7 +1351,7 @@ export async function collectWorkspaceProjectionState(
 
   return {
     specIds: uniqueSorted(specIds),
-    stories,
+    stories: uniqueSortedStories(stories),
     memoryIds: uniqueSorted(memoryRows.map((row) => String(row.id))),
     filePaths,
   };
