@@ -41,6 +41,7 @@ export interface MockRun {
   finished_at: string | null;
   agent_type?: string;
   agent_model?: string | null;
+  terminal_mode?: 'ansi-html' | 'pty';
 }
 
 // ─── Providers wrapper ────────────────────────────────────────────────────────
@@ -201,6 +202,7 @@ export function createMockRun(overrides: Partial<MockRun> = {}): MockRun {
     finished_at: new Date().toISOString(),
     agent_type: 'claude',
     agent_model: null,
+    terminal_mode: 'ansi-html',
     ...overrides,
   };
 }

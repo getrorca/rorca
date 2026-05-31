@@ -27,6 +27,7 @@ export interface RunTerminalHandle {
 interface RunTerminalProps {
   runId: number;
   workspaceId?: string | null;
+  terminalMode?: TerminalMode;
 }
 
 type TerminalMode = 'ansi-html' | 'pty';
@@ -634,6 +635,7 @@ const HTML_LINE_PREFIX = '\x01';
 // ─── Flush buffer interval ───────────────────────────────────────────────────
 
 const FLUSH_INTERVAL_MS = 80;
+const PTY_RESIZE_DEBOUNCE_MS = 100;
 const SCROLL_LOCK_THRESHOLD = 50;
 const MAX_LINES = 20_000;
 
@@ -669,7 +671,7 @@ function trimOldestLines(html: string): string {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId, workspaceId }, ref) {
+const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId, workspaceId, terminalMode: rendererMode = 'ansi-html' }, ref) {
   const preRef = useRef<HTMLPreElement>(null);
   const ptyContainerRef = useRef<HTMLDivElement>(null);
   const xtermRef = useRef<Terminal | null>(null);
@@ -694,8 +696,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
   // Agent type detected from backend run_meta SSE event
   const [agentType, setAgentType] = useState<'claude' | 'opencode' | 'codex'>('claude');
-  const [terminalMode, setTerminalMode] = useState<TerminalMode>('ansi-html');
-  const terminalModeRef = useRef<TerminalMode>('ansi-html');
+  const [terminalMode, setTerminalMode] = useState<TerminalMode>(rendererMode);
+  const terminalModeRef = useRef<TerminalMode>(rendererMode);
+  const [ptyReady, setPtyReady] = useState(rendererMode !== 'pty');
 
   // Toggle state — persisted per run in localStorage
   const [mode, setMode] = useState<'raw' | 'semantic'>(() => loadMode(runId));
@@ -712,11 +715,23 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     terminalModeRef.current = terminalMode;
   }, [terminalMode]);
 
+  useEffect(() => {
+    terminalModeRef.current = rendererMode;
+    setTerminalMode(rendererMode);
+    setPtyReady(rendererMode !== 'pty');
+  }, [rendererMode]);
+
   // Persist mode changes
   const handleSetMode = useCallback((m: 'raw' | 'semantic') => {
     setMode(m);
     try { localStorage.setItem(lsKey(runId), m); } catch { /* noop */ }
   }, [runId]);
+
+  useEffect(() => {
+    if (terminalMode === 'pty' && mode !== 'raw') {
+      handleSetMode('raw');
+    }
+  }, [handleSetMode, mode, terminalMode]);
 
   // Recreate ansi-to-html converters when theme changes.
   // ansiConverter: escapeXML=true for raw terminal lines (ANSI codes, plain text).
@@ -737,6 +752,14 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     }
   }, [runId]);
 
+  const writePtyChunk = useCallback((chunk: Uint8Array) => {
+    if (xtermRef.current) {
+      xtermRef.current.write(chunk as Parameters<Terminal['write']>[0]);
+      return;
+    }
+    pendingPtyChunksRef.current.push(chunk);
+  }, []);
+
   useEffect(() => {
     if (terminalMode !== 'pty' || !ptyContainerRef.current) return;
 
@@ -746,6 +769,8 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       lineHeight: 1.3,
       convertEol: false,
       cursorBlink: true,
+      scrollback: 10_000,
+      allowProposedApi: false,
       theme: getPtyTheme(resolved),
     });
     const fitAddon = new FitAddon();
@@ -755,9 +780,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     xtermRef.current = terminal;
     fitAddonRef.current = fitAddon;
     for (const chunk of pendingPtyChunksRef.current) {
-      terminal.write(chunk as unknown as string);
+      terminal.write(chunk as Parameters<Terminal['write']>[0]);
     }
     pendingPtyChunksRef.current = [];
+    setPtyReady(true);
 
     const syncSize = () => {
       if (!fitAddonRef.current || !xtermRef.current) return;
@@ -772,7 +798,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     syncSize();
     const observer = new ResizeObserver(() => {
       if (resizeDebounceRef.current) clearTimeout(resizeDebounceRef.current);
-      resizeDebounceRef.current = setTimeout(syncSize, 80);
+      resizeDebounceRef.current = setTimeout(syncSize, PTY_RESIZE_DEBOUNCE_MS);
     });
     observer.observe(ptyContainerRef.current);
 
@@ -891,13 +917,14 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     accumulatedHtmlRef.current = '';
     seenStoryIdsRef.current = new Set();
     lineBufferRef.current = '';
-    terminalModeRef.current = 'ansi-html';
+    terminalModeRef.current = rendererMode;
     pendingPtyChunksRef.current = [];
     setAgentType('claude');
     setSteps([]);
     setExpandedSet(new Set());
     setStreamDone(false);
-    setTerminalMode('ansi-html');
+    setTerminalMode(rendererMode);
+    if (rendererMode === 'pty' && !ptyReady) return;
     xtermRef.current?.clear();
     if (flushTimerRef.current !== null) {
       clearTimeout(flushTimerRef.current);
@@ -915,16 +942,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     // Listen for run metadata (agent type detection)
     es.addEventListener('run_meta', (e: MessageEvent) => {
       try {
-        const meta = JSON.parse(e.data) as { agentType?: string; terminalMode?: TerminalMode; terminal_mode?: TerminalMode; isPty?: boolean };
+        const meta = JSON.parse(e.data) as { agentType?: string };
         if (meta.agentType === 'opencode' || meta.agentType === 'codex') {
           setAgentType(meta.agentType);
-        }
-        const nextMode = meta.terminalMode ?? meta.terminal_mode;
-        const isPty = meta.isPty ?? nextMode === 'pty';
-        terminalModeRef.current = isPty ? 'pty' : 'ansi-html';
-        setTerminalMode(isPty ? 'pty' : 'ansi-html');
-        if (isPty) {
-          setMode('raw');
         }
       } catch { /* ignore */ }
     });
@@ -936,8 +956,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
 
         if (terminalModeRef.current === 'pty') {
-          if (xtermRef.current) xtermRef.current.write(bytes as unknown as string);
-          else pendingPtyChunksRef.current.push(bytes);
+          writePtyChunk(bytes);
           return;
         }
 
@@ -1035,7 +1054,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         flushTimerRef.current = null;
       }
     };
-  }, [runId, ansiConverter, ansiConverterNoEscape, workspaceId, scheduleFlush]);
+  }, [runId, ansiConverter, ansiConverterNoEscape, ptyReady, rendererMode, scheduleFlush, workspaceId, writePtyChunk]);
 
   // Track scroll position for auto-scroll on raw <pre>
   const handlePreScroll = useCallback(() => {

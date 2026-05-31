@@ -110,7 +110,9 @@ afterEach(async () => {
   // may try to use the pool AFTER closePool() is called.
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 300));
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  if (tmpDir) {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 afterAll(async () => {
@@ -1192,6 +1194,47 @@ describe('GET /api/pipeline/runs/:runId/output', () => {
     expect(body).toContain('event: semantic_step');
     expect(body).toContain('"type":"read"');
     expect(body).toContain('"label":"Read src/foo.ts"');
+    expect(body).toContain('event: done');
+  });
+
+  test('replays PTY chunks from the dedicated capture store from byte 0', async () => {
+    const inserted = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, terminal_mode, agent, agent_type)
+       VALUES ('forge/specs/approved/output-pty.json', 'ws-pipe', 'done', 'pty', 'claude', 'claude')
+       RETURNING id`,
+    );
+    const runId = inserted!.id;
+
+    const chunk = Buffer.from('\u001b[32mpty hello\u001b[0m\r\n', 'utf8');
+
+    await execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status, total_output_bytes)
+       VALUES ($1, 'ws-pipe', '/tmp/workspace', 'claude', 'exited', $2)`,
+      [runId, chunk.length],
+    );
+    await execute(
+      `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk)
+       VALUES ($1, 0, $2)`,
+      [runId, chunk],
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .buffer(true)
+      .parse((stream, cb) => {
+        let data = '';
+        stream.on('data', (part: Buffer) => { data += part.toString(); });
+        stream.on('end', () => cb(null, data));
+      });
+
+    const body = String(res.body);
+    expect(res.status).toBe(200);
+    expect(body).toContain('event: run_meta');
+    expect(body).toContain('"terminal_mode":"pty"');
+    expect(body).toContain('"isPty":true');
+    expect(body).toContain(`event: chunk\ndata: ${chunk.toString('base64')}`);
+    expect(body).not.toContain('event: semantic_step');
     expect(body).toContain('event: done');
   });
 });
