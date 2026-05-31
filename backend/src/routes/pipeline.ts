@@ -190,6 +190,10 @@ function emitSemanticSteps(text: string, agent: string, res: Response): void {
   }
 }
 
+function writeOutputChunkEvent(res: Response, sequence: number, chunk: Buffer): void {
+  res.write(`id: ${sequence}\nevent: chunk\ndata: ${chunk.toString('base64')}\n\n`);
+}
+
 /** Legacy tmp-based log path (used as fallback for old runs) */
 const tmpLogPath = (runId: number) => path.join(os.tmpdir(), `rorca-run-${runId}.log`);
 
@@ -4117,7 +4121,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
     const existingChunks = await listRunPtyChunks(runId);
     for (const row of existingChunks) {
       const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-      res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
+      writeOutputChunkEvent(res, row.sequence, chunkBuf);
       lastSequence = row.sequence;
     }
   } else {
@@ -4128,7 +4132,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
     for (const row of existingChunks) {
       const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-      res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
+      writeOutputChunkEvent(res, row.sequence, chunkBuf);
       emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
       lastSequence = row.sequence;
     }
@@ -4150,7 +4154,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
         const newChunks = await listRunPtyChunks(runId, lastSequence);
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
+          writeOutputChunkEvent(res, row.sequence, chunkBuf);
           lastSequence = row.sequence;
         }
       } else {
@@ -4161,7 +4165,7 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
         for (const row of newChunks) {
           const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-          res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
+          writeOutputChunkEvent(res, row.sequence, chunkBuf);
           emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
           lastSequence = row.sequence;
         }
