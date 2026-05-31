@@ -2,7 +2,7 @@
   "specId": "Rorca Graph Identity Phase 1 Remaining",
   "runId": 20260316000340,
   "startedAt": "2026-05-31T21:58:50.668Z",
-  "lastUpdatedAt": "2026-05-31T22:12:55.037Z",
+  "lastUpdatedAt": "2026-05-31T22:37:16.545Z",
   "completedStories": [
     {
       "storyId": "GI-003",
@@ -23,11 +23,31 @@
       "agentType": "pi",
       "model": "openai-codex/gpt-5.4",
       "elapsedMs": 700153
+    },
+    {
+      "storyId": "GI-005",
+      "title": "Scope graph retrieval, query, and cache flows to canonical identity",
+      "status": "passed",
+      "startedAt": "2026-05-31T22:12:57.947Z",
+      "finishedAt": "2026-05-31T22:27:29.922Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 871975
+    },
+    {
+      "storyId": "GI-006",
+      "title": "Add projection lifecycle cleanup via deletion sync or reconciliation pruning",
+      "status": "passed",
+      "startedAt": "2026-05-31T22:27:44.448Z",
+      "finishedAt": "2026-05-31T22:37:03.260Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 558812
     }
   ],
   "failedStories": [],
   "skippedStories": [],
-  "currentStory": "GI-005",
+  "currentStory": "GI-007",
   "decisions": [],
   "resumedFromStory": "GI-003"
 }

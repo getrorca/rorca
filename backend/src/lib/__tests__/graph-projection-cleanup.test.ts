@@ -36,6 +36,7 @@ jest.mock('../logger', () => ({
 
 import {
   buildWorkspaceProjectionPrunePlan,
+  collectWorkspaceProjectionState,
   reconcileWorkspaceGraphProjection,
 } from '../knowledge-graph';
 
@@ -89,6 +90,61 @@ describe('graph projection cleanup', () => {
         additionalWhere: "COALESCE(n.path, '') <> ''",
       },
     ]);
+  });
+
+  it('derives deterministic workspace projection state from spec files and relational memories', async () => {
+    const workspacePath = fs.mkdtempSync(path.join(os.tmpdir(), 'rorca-graph-state-'));
+    try {
+      fs.mkdirSync(path.join(workspacePath, 'forge', 'specs', 'approved'), { recursive: true });
+      fs.mkdirSync(path.join(workspacePath, 'forge', 'specs', 'pending'), { recursive: true });
+      fs.mkdirSync(path.join(workspacePath, 'src', 'nested'), { recursive: true });
+      fs.writeFileSync(
+        path.join(workspacePath, 'forge', 'specs', 'approved', 'spec-a.json'),
+        JSON.stringify({
+          userStories: [
+            { id: 'US-002', title: 'Approved story' },
+            { id: 'US-001', title: 'Approved story earlier id' },
+          ],
+        }),
+      );
+      fs.writeFileSync(
+        path.join(workspacePath, 'forge', 'specs', 'pending', 'spec-a.json'),
+        JSON.stringify({ userStories: [{ id: 'US-999', title: 'Pending duplicate should not win' }] }),
+      );
+      fs.writeFileSync(
+        path.join(workspacePath, 'forge', 'specs', 'pending', 'spec-b.json'),
+        JSON.stringify({ userStories: [{ id: 'US-010', title: 'Pending story' }] }),
+      );
+      fs.writeFileSync(path.join(workspacePath, 'src', 'app.ts'), 'export const app = true;\n');
+      fs.writeFileSync(path.join(workspacePath, 'src', 'nested', 'util.ts'), 'export const util = true;\n');
+
+      mockQuery.mockResolvedValue([{ id: 7 }, { id: '2' }, { id: 7 }]);
+
+      const state = await collectWorkspaceProjectionState('ws-1', workspacePath);
+
+      expect(state).toEqual({
+        specIds: ['spec-a', 'spec-b'],
+        stories: [
+          { specId: 'spec-a', storyId: 'US-001' },
+          { specId: 'spec-a', storyId: 'US-002' },
+          { specId: 'spec-b', storyId: 'US-010' },
+        ],
+        memoryIds: ['2', '7'],
+        filePaths: [
+          'forge/specs/approved/spec-a.json',
+          'forge/specs/pending/spec-a.json',
+          'forge/specs/pending/spec-b.json',
+          'src/app.ts',
+          'src/nested/util.ts',
+        ],
+      });
+      expect(mockQuery).toHaveBeenCalledWith(
+        expect.stringContaining('FROM memories'),
+        ['ws-1'],
+      );
+    } finally {
+      fs.rmSync(workspacePath, { recursive: true, force: true });
+    }
   });
 
   it('reconciles workspace-scoped stale projection nodes by canonical key', async () => {
