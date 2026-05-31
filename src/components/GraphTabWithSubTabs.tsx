@@ -73,7 +73,7 @@ function CollapsibleSection({ title, icon: Icon, count, children }: {
 
 /* ─── Knowledge Graph Content ─────────────────────────────────────── */
 
-function KnowledgeGraphContent({ specId }: { specId: string }) {
+function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; workspaceId: string }) {
   const [data, setData] = useState<KnowledgeGraphResponse | null>(null);
   const [loading, setLoading] = useState(true);
   const [error, setError] = useState<string | null>(null);
@@ -82,14 +82,14 @@ function KnowledgeGraphContent({ specId }: { specId: string }) {
     setLoading(true);
     setError(null);
     try {
-      const resp = await apiFetch<KnowledgeGraphResponse>(`/api/specs/${specId}/knowledge-graph`);
+      const resp = await apiFetch<KnowledgeGraphResponse>(`/api/specs/${specId}/knowledge-graph?workspaceId=${encodeURIComponent(workspaceId)}`);
       setData(resp);
     } catch (err: any) {
       setError(err.message ?? 'Failed to load knowledge graph');
     } finally {
       setLoading(false);
     }
-  }, [specId]);
+  }, [specId, workspaceId]);
 
   useEffect(() => { fetchData(); }, [fetchData]);
 
@@ -235,7 +235,7 @@ export function GraphTabWithSubTabs({ specId, workspaceId }: { specId: string; w
       {/* Sub-tab content */}
       <div className="flex-1 overflow-y-auto">
         {subTab === 'dependencies' && <DependencyGraph specId={specId} workspaceId={workspaceId} />}
-        {subTab === 'knowledge' && <KnowledgeGraphContent specId={specId} />}
+        {subTab === 'knowledge' && <KnowledgeGraphContent specId={specId} workspaceId={workspaceId} />}
       </div>
     </div>
   );

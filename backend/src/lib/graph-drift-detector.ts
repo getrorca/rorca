@@ -133,7 +133,7 @@ function parseAgtype<T = unknown>(value: unknown): T {
  */
 export async function detectDrift(
   specId: string,
-  _workspaceId: number,
+  workspaceId: number,
 ): Promise<GraphDriftReport> {
   const violations: GraphDriftViolation[] = [];
   const impactMap = new Map<string, ImpactAnalysisEntry>();
@@ -164,7 +164,7 @@ export async function detectDrift(
 
       // Record VIOLATED_BY edge in graph
       try {
-        await addConventionViolation(hit.conventionName, hit.storyId);
+        await addConventionViolation(hit.conventionName, hit.storyId, specId, String(workspaceId));
       } catch (err) {
         logger.warn({ err, convention: hit.conventionName, story: hit.storyId },
           '[graph-drift] Failed to record VIOLATED_BY edge');

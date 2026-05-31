@@ -7322,7 +7322,11 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
     fs.renameSync(pendingFile, approvedFile);
 
     // Emit WAL event
-    await execute(`INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_approved', $1, 'user', $2)`, [specId, JSON.stringify({ workspaceId })]);
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('spec_approved', $1, $2, 'user', $3) RETURNING *`,
+      [specId, workspaceId, JSON.stringify({ workspaceId })],
+    );
+    if (walEvent) broadcastAll(walEvent);
 
     res.json({ ok: true, approvedPath: approvedFile });
   } catch (error: any) {
@@ -7890,7 +7894,11 @@ router.delete('/:specId', async (req: Request, res: Response) => {
     // Clean up generation logs for this spec
     await execute(`DELETE FROM spec_generation_logs WHERE spec_slug = $1`, [specId]);
 
-    await execute(`INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_deleted', $1, 'user', $2)`, [specId, JSON.stringify({ workspaceId })]);
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('spec_deleted', $1, $2, 'user', $3) RETURNING *`,
+      [specId, workspaceId, JSON.stringify({ workspaceId })],
+    );
+    if (walEvent) broadcastAll(walEvent);
 
     res.json({ ok: true });
   } catch (error: any) {
@@ -8545,6 +8553,11 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
  *         name: specId
  *         required: true
  *         schema: { type: string }
+ *       - in: query
+ *         name: workspaceId
+ *         required: false
+ *         schema: { type: string }
+ *         description: Optional workspace scope used to resolve canonical spec/story/file graph identities when the same local IDs exist in multiple workspaces.
  *     responses:
  *       200:
  *         description: Knowledge graph data
@@ -8586,8 +8599,9 @@ router.get('/:specId/graph', async (req: Request, res: Response) => {
 router.get('/:specId/knowledge-graph', requireAge(), async (req: Request, res: Response) => {
   try {
     const specId = req.params.specId as string;
+    const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
 
-    const result = await querySpecKnowledgeGraph(specId);
+    const result = await querySpecKnowledgeGraph(specId, workspaceId);
     res.json({ available: true, ...result });
   } catch (error: any) {
     handleRouteError(res, error, '[Specs] Knowledge Graph');
