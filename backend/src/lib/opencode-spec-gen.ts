@@ -113,7 +113,7 @@ function buildSpecGenPrompt(opts: {
     storyCount === 0
       ? `- Number stories sequentially starting from ${storyPrefix}-001`
       : `- Generate exactly ${storyCount} stories`,
-    '- Each story needs 3-5 specific testable acceptanceCriteria',
+    '- Acceptance criteria should fully and unambiguously specify the story; use as many as needed for completeness, with no fixed target count.',
     '- dependsOn lists story IDs this story requires first (empty array if none)',
     '- Analyze story CONTENT to determine dependencies — shared state, APIs, UI components, DB schemas',
     '- Each story must have a "complexity" field: integer 1-5',

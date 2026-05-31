@@ -317,7 +317,7 @@ describe('POST /api/pipeline/quick-run — context injection', () => {
     expect(prompt.trimStart()).toMatch(/^=== INSTRUCTIONS: READ THIS FIRST ===/);
   });
 
-  test('(6) acceptance criteria limit in prompt is "8"', async () => {
+  test('(6) acceptance criteria prompt uses no fixed numeric cap', async () => {
     // Arrange: minimal context — just verify instructions text
     const dirStack = require('../../lib/direction-stack');
     jest.spyOn(dirStack, 'synthesize').mockReturnValue('');
@@ -337,7 +337,7 @@ describe('POST /api/pipeline/quick-run — context injection', () => {
     expect(mockChatComplete).toHaveBeenCalledTimes(1);
     const prompt: string = mockChatComplete.mock.calls[0][0][0].content;
 
-    // Must state max 8 acceptance criteria
-    expect(prompt).toContain('at most 8 acceptance criteria');
+    // Must not state a max acceptance-criteria cap
+    expect(prompt).toContain('use as many as needed for completeness, with no fixed target count');
   });
 });

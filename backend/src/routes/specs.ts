@@ -1376,7 +1376,7 @@ function buildSkillFirstPrompt(input: {
     '',
     'Rules:',
     exactStoryRule,
-    '- Each story needs 3-5 concrete, testable acceptance criteria.',
+    '- Acceptance criteria should fully and unambiguously specify the story; use as many as needed for completeness, with no fixed target count.',
     '- Determine dependencies from real implementation order. If story B uses code, APIs, schemas, auth, or components created in story A, then B dependsOn [A].',
     '- Stories should be concrete and implementation-ready, not vague product prose.',
     '- Each story must include a complexity score from 1-5.',
@@ -2361,7 +2361,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       storyCount === 0
         ? `- Number stories sequentially starting from ${storyPrefix}-001`
         : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
-      '- Each story needs 3-5 specific testable acceptanceCriteria',
+      '- Acceptance criteria should fully and unambiguously specify the story; use as many as needed for completeness, with no fixed target count.',
       '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
       '- IMPORTANT: Analyze story CONTENT to determine dependencies — if story B references a component, API, or data model introduced in story A, then B dependsOn [A]. Consider: shared state/data, API endpoints one story creates that another consumes, UI components built in one story and used in another, database tables/schemas, authentication/authorization flows',
       '- Stories should be concrete and implementable, not vague',
@@ -2437,7 +2437,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
       storyCount === 0
         ? `- Number stories sequentially starting from ${storyPrefix}-001`
         : `- Generate exactly ${storyCount} stories, numbered ${storyPrefix}-001 through ${storyPrefix}-${String(storyCount).padStart(3, '0')}`,
-      '- Each story needs 3-5 specific testable acceptanceCriteria',
+      '- Acceptance criteria should fully and unambiguously specify the story; use as many as needed for completeness, with no fixed target count.',
       '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
       '- IMPORTANT: Analyze story CONTENT to determine dependencies — if story B references a component, API, or data model introduced in story A, then B dependsOn [A]. Consider: shared state/data, API endpoints one story creates that another consumes, UI components built in one story and used in another, database tables/schemas, authentication/authorization flows',
       '- Stories should be concrete and implementable, not vague',
@@ -2633,7 +2633,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         'Rules:',
         `- Number stories sequentially starting from ${storyPrefix}-001`,
         '- Generate 10-20 coarse stories covering the full scope of the brief',
-        '- Each story needs 3-5 specific testable acceptanceCriteria',
+        '- Acceptance criteria should fully and unambiguously specify the story; use as many as needed for completeness, with no fixed target count.',
         '- dependsOn lists story IDs this story requires to be done first (empty array if none)',
         '- IMPORTANT: Analyze story CONTENT to determine dependencies',
         '- Stories should represent feature areas, not micro-tasks',
@@ -2714,7 +2714,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         synthesized,
         '---',
         'TASK: You are given a high-level spec with coarse user stories from Pass 1 (PM Agent).',
-        'Your job is to DECOMPOSE each coarse story into 2-5 atomic micro-stories with exhaustive acceptance criteria.',
+        'Your job is to DECOMPOSE each coarse story into 2-5 atomic micro-stories with exhaustive acceptance criteria. Use as many acceptance criteria as needed to fully and unambiguously specify each micro-story.',
         'The output replaces the Pass 1 stories entirely — produce a flat array of all micro-stories.',
         '',
         `Spec title: ${effectiveTitle}`,
@@ -2740,7 +2740,7 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
         'Rules:',
         `- Re-number ALL stories sequentially starting from ${storyPrefix}-001`,
         '- Each coarse story from Pass 1 should become 2-5 atomic micro-stories',
-        '- Each micro-story needs 3-8 specific, binary, testable acceptanceCriteria',
+        '- Each micro-story should include enough specific, binary, testable acceptanceCriteria to make implementation unambiguous; use as many as needed for completeness, with no fixed target count.',
         '- For UI stories: describe ALL visual states (loading, success, error, empty) with exact copy',
         '- For API stories: specify HTTP method, path, request/response shapes, status codes',
         '- dependsOn must reference IDs from YOUR output (the new micro-story IDs), not Pass 1 IDs',
@@ -10777,7 +10777,7 @@ router.get('/:specId/assignments', async (req: Request, res: Response) => {
  *     tags: [Specs]
  *     summary: AI-suggest additional acceptance criteria
  *     operationId: enhanceStoryCriteria
- *     description: Uses LLM to suggest 3-5 additional acceptance criteria for a story, covering edge cases, error handling, and performance. Considers related stories (dependencies and dependents) for consistency. Returns suggestions as a preview without saving.
+ *     description: Uses LLM to suggest additional acceptance criteria for a story, covering edge cases, error handling, and performance. Considers related stories (dependencies and dependents) for consistency. Returns suggestions as a preview without saving.
  *     parameters:
  *       - in: path
  *         name: specId
@@ -10888,7 +10888,7 @@ router.post('/:specId/stories/:storyId/enhance-criteria', async (req: Request, r
       `Related stories for consistency:`,
       relatedContext,
       '',
-      'Generate 3-5 NEW acceptance criteria that:',
+      'Generate additional acceptance criteria that:',
       '- Are specific, measurable, and testable',
       '- Cover edge cases, error handling, or performance not already addressed',
       '- Are consistent with related stories in tone and granularity',

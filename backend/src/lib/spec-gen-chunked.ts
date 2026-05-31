@@ -219,7 +219,7 @@ function buildChunkPrompt(
     '',
     'Rules:',
     `- Generate exactly ${epic.storyCount} stories from ${epic.idStart} to ${epic.idEnd}`,
-    '- Each story needs 3-5 specific testable acceptanceCriteria',
+    '- Acceptance criteria should fully and unambiguously specify the story; use as many as needed for completeness, with no fixed target count.',
     '- dependsOn may reference IDs from this epic OR from dependent epics listed above',
     '- Stories should be concrete and implementable',
     '- complexity: 1-5 (1=trivial, 2=simple, 3=moderate, 4=complex, 5=epic)',
