@@ -40,6 +40,7 @@ jest.mock('../../lib/pty-manager', () => ({
 
 const fixturePath = path.join(__dirname, '..', '..', 'lib', '__tests__', 'fixtures', 'claude-code-parity.jsonl');
 const codexFixturePath = path.join(__dirname, '..', '..', 'lib', '__tests__', 'fixtures', 'codex-parity.json');
+const piFixturePath = path.join(__dirname, '..', '..', '__tests__', 'fixtures', 'pi', 'pi-parity.jsonl');
 
 interface CodexFixtureChunk {
   sequence: number;
@@ -109,6 +110,16 @@ function readCodexFixture(): CodexFixture {
 function readCodexFixtureBytes(): Buffer {
   const fixture = readCodexFixture();
   return Buffer.concat(fixture.chunks.map((chunk) => Buffer.from(chunk.base64, 'base64')));
+}
+
+function readPiFixtureBytes(): Buffer {
+  return fs.readFileSync(piFixturePath);
+}
+
+function readPiFixtureLineChunks(): Buffer[] {
+  const source = fs.readFileSync(piFixturePath, 'utf8');
+  const lines = source.match(/[^\n]*\n|[^\n]+$/g) ?? [];
+  return lines.map((line) => Buffer.from(line, 'utf8'));
 }
 
 function extractPtyBytesFromFixture(): Buffer {
@@ -209,6 +220,81 @@ describe('GET /api/pipeline/runs/:runId/output parity replay', () => {
     expect(text).toContain('\x1b[A');
     expect(text).toContain('\x1b[32mPASS\x1b[0m');
     expect(text).toContain('\x1b[?1049hALT SCREEN\x1b[?1049l');
+    expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"terminalMode":"pty"');
+  });
+
+  test('replays Pi transcript chunks from the captured JSONL fixture and emits OpenCode-style semantic steps', async () => {
+    const runId = await seedRun('ansi-html', 'pi');
+    const raw = readPiFixtureBytes();
+    const chunks = readPiFixtureLineChunks();
+
+    for (const entry of [
+      { sequence: 5, chunk: chunks[4] },
+      { sequence: 2, chunk: chunks[1] },
+      { sequence: 1, chunk: chunks[0] },
+      { sequence: 8, chunk: chunks[7] },
+      { sequence: 4, chunk: chunks[3] },
+      { sequence: 7, chunk: chunks[6] },
+      { sequence: 3, chunk: chunks[2] },
+      { sequence: 6, chunk: chunks[5] },
+      { sequence: 9, chunk: chunks[8] },
+    ]) {
+      await execute(`INSERT INTO run_output_chunks (run_id, sequence, chunk) VALUES ($1, $2, $3)`, [runId, entry.sequence, entry.chunk]);
+    }
+
+    const body = await streamOutput(runId);
+    const events = parseSseEvents(body);
+    const chunkEvents = events.filter((event) => event.event === 'chunk');
+    const semanticEvents = events.filter((event) => event.event === 'semantic_step');
+    const replayed = Buffer.concat(chunkEvents.map((event) => Buffer.from(event.data, 'base64')));
+    const semanticLabels = semanticEvents.map((event) => JSON.parse(event.data).label);
+
+    expect(chunkEvents.map((event) => event.id)).toEqual(['1', '2', '3', '4', '5', '6', '7', '8', '9']);
+    expect(replayed).toEqual(raw);
+    expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"agentType":"pi"');
+    expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"terminalMode":"ansi-html"');
+    expect(semanticLabels).toEqual([
+      'Reasoning',
+      'Read README.md',
+      'read result',
+      'Emit overwrite semantics',
+      'bash result',
+      'Write notes.txt',
+      'write result',
+      'Run completed',
+    ]);
+  });
+
+  test('replays Pi PTY bytes from the same JSONL fixture without reordering or normalizing them', async () => {
+    const runId = await seedRun('pty', 'pi');
+    const raw = readPiFixtureBytes();
+    const first = raw.subarray(0, 420);
+    const second = raw.subarray(420, 840);
+    const third = raw.subarray(840);
+
+    await execute(
+      `INSERT INTO run_pty_sessions
+        (run_id, workspace_id, cwd, agent_type, cols, rows, child_pid, status, started_at, last_output_at, updated_at)
+       VALUES ($1, $2, $3, $4, $5, $6, $7, $8, NOW(), NOW(), NOW())`,
+      [runId, 'ws-output', wsDir, 'pi', 80, 24, null, 'exited'],
+    );
+    await execute(`INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, $2, $3)`, [runId, 3, third]);
+    await execute(`INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, $2, $3)`, [runId, 1, first]);
+    await execute(`INSERT INTO run_pty_output_chunks (run_id, sequence, chunk) VALUES ($1, $2, $3)`, [runId, 2, second]);
+
+    const body = await streamOutput(runId);
+    const events = parseSseEvents(body);
+    const chunkEvents = events.filter((event) => event.event === 'chunk');
+    const replayed = Buffer.concat(chunkEvents.map((event) => Buffer.from(event.data, 'base64')));
+    const text = replayed.toString('utf8');
+
+    expect(chunkEvents.map((event) => event.id)).toEqual(['1', '2', '3']);
+    expect(replayed).toEqual(raw);
+    expect(text).toContain('"tool":"bash"');
+    expect(text).toContain('Loading 1/3\\r\\u001b[2KLoading 2/3');
+    expect(text).toContain('\\u001b[32mPASS\\u001b[0m byte ordering preserved');
+    expect(text).toContain('\\u001b[?1049hALT SCREEN\\u001b[?1049l');
+    expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"agentType":"pi"');
     expect(events.find((event) => event.event === 'run_meta')?.data).toContain('"terminalMode":"pty"');
   });
 

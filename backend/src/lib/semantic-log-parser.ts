@@ -322,7 +322,7 @@ export function parseCodexLine(line: string): SemanticStep[] {
  * Falls back to claude parser if agent is unknown.
  */
 export function parseLine(line: string, agent: string): SemanticStep[] {
-  if (agent === 'opencode') {
+  if (agent === 'opencode' || agent === 'pi') {
     return parseOpenCodeLine(line);
   }
   if (agent === 'codex') {
