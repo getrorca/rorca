@@ -915,14 +915,15 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     // Listen for run metadata (agent type detection)
     es.addEventListener('run_meta', (e: MessageEvent) => {
       try {
-        const meta = JSON.parse(e.data) as { agentType?: string; terminalMode?: TerminalMode; terminal_mode?: TerminalMode };
+        const meta = JSON.parse(e.data) as { agentType?: string; terminalMode?: TerminalMode; terminal_mode?: TerminalMode; isPty?: boolean };
         if (meta.agentType === 'opencode' || meta.agentType === 'codex') {
           setAgentType(meta.agentType);
         }
         const nextMode = meta.terminalMode ?? meta.terminal_mode;
-        if (nextMode === 'pty') {
-          terminalModeRef.current = 'pty';
-          setTerminalMode('pty');
+        const isPty = meta.isPty ?? nextMode === 'pty';
+        terminalModeRef.current = isPty ? 'pty' : 'ansi-html';
+        setTerminalMode(isPty ? 'pty' : 'ansi-html');
+        if (isPty) {
           setMode('raw');
         }
       } catch { /* ignore */ }
