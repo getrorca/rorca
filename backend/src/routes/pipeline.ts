@@ -53,6 +53,11 @@ import { authRequired } from '../lib/auth-utils';
 import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
 import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
 import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
+import {
+  getRunPtySessionStatus,
+  listRunPtyChunks,
+  requestRunPtyResize,
+} from '../lib/run-pty-store';
 import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
@@ -3980,9 +3985,71 @@ router.delete('/runs/:runId', async (req: Request, res: Response) => {
   }
 });
 
+// ─── POST /api/pipeline/runs/:runId/pty/resize ───────────────────────────────
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/pty/resize:
+ *   post:
+ *     tags: [Pipeline]
+ *     summary: Resize the live PTY terminal for a running pipeline run
+ *     operationId: resizePipelineRunPty
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Terminal resize is a local run-control operation for an already-running user-owned pipeline."
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *     requestBody:
+ *       required: true
+ *       content:
+ *         application/json:
+ *           schema:
+ *             type: object
+ *             required: [cols, rows]
+ *             properties:
+ *               cols: { type: integer, minimum: 1 }
+ *               rows: { type: integer, minimum: 1 }
+ *     responses:
+ *       200: { description: PTY resize request recorded }
+ */
+router.post('/runs/:runId/pty/resize', async (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    const cols = parseInt(String(req.body?.cols), 10);
+    const rows = parseInt(String(req.body?.rows), 10);
+
+    if (isNaN(runId)) throw new ValidationError('Invalid runId');
+    if (!Number.isInteger(cols) || cols <= 0 || !Number.isInteger(rows) || rows <= 0) {
+      throw new ValidationError('cols and rows must be positive integers');
+    }
+    if (!PTY_AVAILABLE) {
+      throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
+    }
+
+    const run = await queryOne<{ terminal_mode: string | null; status: string }>(
+      'SELECT terminal_mode, status FROM pipeline_runs WHERE id = $1',
+      [runId],
+    );
+    if (!run) throw new NotFoundError('Run not found');
+    if (normalizeTerminalMode(run.terminal_mode) !== 'pty') {
+      throw new ConflictError('Run is not using PTY terminal mode');
+    }
+    if (['done', 'failed', 'cancelled'].includes(run.status)) {
+      throw new ConflictError('Run is no longer active');
+    }
+
+    await requestRunPtyResize(runId, cols, rows);
+    res.json({ ok: true, runId, cols, rows });
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] Resize PTY run');
+  }
+});
+
 // ─── GET /api/pipeline/runs/:runId/output — Raw terminal output SSE ──────────
-// Streams raw stdout/stderr (with ANSI codes) to xterm.js on the frontend.
-// Output is stored in run_output_chunks table (persisted across backend restarts).
+// Streams raw stdout/stderr (with ANSI codes) to the active terminal renderer.
+// ANSI/HTML runs replay from run_output_chunks; PTY runs replay from run_pty_output_chunks.
 // Late-joiners receive full replay of all existing chunks, then live updates via polling.
 
 /**
@@ -4042,21 +4109,31 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
 
   // ── Replay all existing chunks (late-join support) ────────────────────────
   interface ChunkRow { sequence: number; chunk: Buffer }
-  const existingChunks = await query<ChunkRow>(
-    'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 ORDER BY sequence ASC',
-    [runId],
-  );
-
+  const terminalStatuses = ['done', 'failed', 'cancelled'];
   let lastSequence = 0;
-  for (const row of existingChunks) {
-    const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-    res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
-    emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
-    lastSequence = row.sequence;
+
+  if (terminalMode === 'pty') {
+    const existingChunks = await listRunPtyChunks(runId);
+    for (const row of existingChunks) {
+      const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
+      res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
+      lastSequence = row.sequence;
+    }
+  } else {
+    const existingChunks = await query<ChunkRow>(
+      'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 ORDER BY sequence ASC',
+      [runId],
+    );
+
+    for (const row of existingChunks) {
+      const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
+      res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
+      emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
+      lastSequence = row.sequence;
+    }
   }
 
   // ── If the run is already terminal, close immediately ────────────────────
-  const terminalStatuses = ['done', 'failed', 'cancelled'];
   if (runRow && terminalStatuses.includes(runRow.status)) {
     clearInterval(hb);
     res.write('event: done\ndata: \n\n');
@@ -4068,24 +4145,33 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   // Checks every 200 ms; uses lastSequence to fetch only new rows efficiently.
   const pollInterval = setInterval(async () => {
     try {
-      const newChunks = await query<ChunkRow>(
-        'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC',
-        [runId, lastSequence],
-      );
+      if (terminalMode === 'pty') {
+        const newChunks = await listRunPtyChunks(runId, lastSequence);
+        for (const row of newChunks) {
+          const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
+          res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
+          lastSequence = row.sequence;
+        }
+      } else {
+        const newChunks = await query<ChunkRow>(
+          'SELECT sequence, chunk FROM run_output_chunks WHERE run_id = $1 AND sequence > $2 ORDER BY sequence ASC',
+          [runId, lastSequence],
+        );
 
-      for (const row of newChunks) {
-        const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
-        res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
-        emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
-        lastSequence = row.sequence;
+        for (const row of newChunks) {
+          const chunkBuf = Buffer.isBuffer(row.chunk) ? row.chunk : Buffer.from(row.chunk);
+          res.write(`event: chunk\ndata: ${chunkBuf.toString('base64')}\n\n`);
+          emitSemanticSteps(chunkBuf.toString('utf8'), agent, res);
+          lastSequence = row.sequence;
+        }
       }
 
-      // Check if run has reached a terminal state
-      const statusRow = await queryOne<{ status: string }>(
-        'SELECT status FROM pipeline_runs WHERE id = $1',
-        [runId],
-      );
-      if (!statusRow || terminalStatuses.includes(statusRow.status)) {
+      const [statusRow, ptyStatus] = await Promise.all([
+        queryOne<{ status: string }>('SELECT status FROM pipeline_runs WHERE id = $1', [runId]),
+        terminalMode === 'pty' ? getRunPtySessionStatus(runId) : Promise.resolve(null),
+      ]);
+      const ptyTerminal = terminalMode === 'pty' && ptyStatus !== null && ptyStatus !== 'active';
+      if (!statusRow || terminalStatuses.includes(statusRow.status) || ptyTerminal) {
         clearInterval(pollInterval);
         clearInterval(hb);
         res.write('event: done\ndata: \n\n');
