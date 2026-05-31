@@ -94,6 +94,43 @@ function normalizeRelatedFiles(value: unknown): string[] {
   return [...new Set(value.filter((file): file is string => typeof file === 'string' && file.trim().length > 0))];
 }
 
+async function emitMemoryWalEvent(params: {
+  eventType: 'memory_created' | 'memory_deleted' | 'memory_restored';
+  workspaceId: string;
+  memoryId: string;
+  category?: string;
+  content?: string;
+  storyId?: string | null;
+  specId?: string | null;
+  relatedFiles?: string[];
+}): Promise<void> {
+  try {
+    const walPayload = JSON.stringify({
+      id: params.memoryId,
+      ...(params.content ? { text: params.content } : {}),
+      ...(params.category ? { category: params.category } : {}),
+      ...(params.relatedFiles ? { relatedFiles: params.relatedFiles } : {}),
+    });
+    const walEvent = await queryOne<{ id: number }>(
+      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
+      [params.eventType, params.workspaceId, params.specId ?? null, params.storyId ?? null, walPayload],
+    );
+    if (walEvent) {
+      broadcastAll({
+        id: walEvent.id,
+        event_type: params.eventType,
+        workspace_id: params.workspaceId,
+        spec_id: params.specId ?? null,
+        story_id: params.storyId ?? null,
+        payload: walPayload,
+        ts: new Date().toISOString(),
+      } as any);
+    }
+  } catch {
+    // Best-effort WAL event — don't block memory lifecycle operations
+  }
+}
+
 async function emitMemoryCreatedWalEvent(params: {
   workspaceId: string;
   memoryId: string;
@@ -103,31 +140,16 @@ async function emitMemoryCreatedWalEvent(params: {
   specId?: string | null;
   relatedFiles?: string[];
 }): Promise<void> {
-  try {
-    const walPayload = JSON.stringify({
-      id: params.memoryId,
-      text: params.content,
-      category: params.category,
-      relatedFiles: params.relatedFiles ?? [],
-    });
-    const walEvent = await queryOne<{ id: number }>(
-      `INSERT INTO wal_events (event_type, workspace_id, spec_id, story_id, payload) VALUES ($1, $2, $3, $4, $5) RETURNING id`,
-      ['memory_created', params.workspaceId, params.specId ?? null, params.storyId ?? null, walPayload],
-    );
-    if (walEvent) {
-      broadcastAll({
-        id: walEvent.id,
-        event_type: 'memory_created',
-        workspace_id: params.workspaceId,
-        spec_id: params.specId ?? null,
-        story_id: params.storyId ?? null,
-        payload: walPayload,
-        ts: new Date().toISOString(),
-      } as any);
-    }
-  } catch {
-    // Best-effort WAL event — don't block memory creation
-  }
+  await emitMemoryWalEvent({
+    eventType: 'memory_created',
+    workspaceId: params.workspaceId,
+    memoryId: params.memoryId,
+    category: params.category,
+    content: params.content,
+    storyId: params.storyId,
+    specId: params.specId,
+    relatedFiles: params.relatedFiles,
+  });
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
@@ -1763,6 +1785,11 @@ router.delete('/items/:id', async (req: Request, res: Response) => {
   if (!existing) throw new NotFoundError('Memory not found');
 
   await execute('UPDATE memories SET deleted_at = NOW() WHERE id = $1', [id]);
+  await emitMemoryWalEvent({
+    eventType: 'memory_deleted',
+    workspaceId: existing.workspace_id,
+    memoryId: String(existing.id),
+  });
   invalidateMemory(existing.workspace_id);
 
   res.json({ deleted: true, id });
@@ -1797,6 +1824,11 @@ router.post('/items/:id/undelete', async (req: Request, res: Response) => {
   if (!existing) throw new NotFoundError('Memory not found or not deleted');
 
   await execute('UPDATE memories SET deleted_at = NULL WHERE id = $1', [id]);
+  await emitMemoryWalEvent({
+    eventType: 'memory_restored',
+    workspaceId: existing.workspace_id,
+    memoryId: String(existing.id),
+  });
   invalidateMemory(existing.workspace_id);
 
   res.json({ restored: true, id });
@@ -1832,6 +1864,12 @@ router.post('/items/bulk', async (req: Request, res: Response) => {
 
   // Build numbered placeholders for IN clause
   const placeholders = ids.map((_, i) => `$${i + 1}`).join(', ');
+  const targetRows = action === 'delete'
+    ? await dbQuery<{ id: number; workspace_id: string }>(
+      `SELECT id, workspace_id FROM memories WHERE id IN (${placeholders}) AND deleted_at IS NULL`,
+      ids,
+    )
+    : [];
 
   let sql: string;
   if (action === 'delete') {
@@ -1853,6 +1891,14 @@ router.post('/items/bulk', async (req: Request, res: Response) => {
   );
   for (const ws of wsRows) {
     invalidateMemory(ws.workspace_id);
+  }
+
+  if (action === 'delete') {
+    await Promise.all(targetRows.map((row) => emitMemoryWalEvent({
+      eventType: 'memory_deleted',
+      workspaceId: row.workspace_id,
+      memoryId: String(row.id),
+    })));
   }
 
   res.json({ affected: result.rowCount, action });

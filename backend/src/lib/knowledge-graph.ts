@@ -1218,6 +1218,188 @@ function listFilesRecursive(dir: string, base: string, maxDepth = 5, depth = 0):
   return results;
 }
 
+export type WorkspaceProjectionPrunableLabel = 'Story' | 'Spec' | 'Memory' | 'File';
+
+export interface WorkspaceProjectionState {
+  specIds: string[];
+  stories: Array<{ specId: string; storyId: string }>;
+  memoryIds: string[];
+  filePaths: string[];
+}
+
+export interface WorkspaceProjectionPruneBucket {
+  label: WorkspaceProjectionPrunableLabel;
+  keyPrefix: string;
+  activeKeys: string[];
+  additionalWhere?: string;
+}
+
+export interface WorkspaceProjectionPruneResult {
+  active: Record<WorkspaceProjectionPrunableLabel, number>;
+  pruned: Record<WorkspaceProjectionPrunableLabel, number>;
+}
+
+function uniqueSorted(values: string[]): string[] {
+  return [...new Set(values.filter(Boolean))].sort((a, b) => a.localeCompare(b));
+}
+
+function listWorkspaceSpecFiles(workspacePath: string): Array<{ specId: string; filePath: string }> {
+  const specsRoot = path.join(workspacePath, 'forge', 'specs');
+  const candidates = [
+    path.join(specsRoot, 'approved'),
+    path.join(specsRoot, 'pending'),
+  ];
+
+  const specFiles = new Map<string, string>();
+  for (const dir of candidates) {
+    try {
+      for (const fileName of fs.readdirSync(dir)) {
+        if (!fileName.endsWith('.json')) continue;
+        const specId = fileName.replace(/\.json$/, '');
+        if (!specFiles.has(specId)) {
+          specFiles.set(specId, path.join(dir, fileName));
+        }
+      }
+    } catch {
+      // Missing spec dir is fine.
+    }
+  }
+
+  return [...specFiles.entries()].map(([specId, filePath]) => ({ specId, filePath }));
+}
+
+export function buildWorkspaceProjectionPrunePlan(
+  workspaceId: string,
+  state: WorkspaceProjectionState,
+): WorkspaceProjectionPruneBucket[] {
+  return [
+    {
+      label: 'Story',
+      keyPrefix: `story:${workspaceId}::`,
+      activeKeys: uniqueSorted(
+        state.stories.map(({ specId, storyId }) => buildStoryNodeKey(workspaceId, specId, storyId)),
+      ),
+    },
+    {
+      label: 'Spec',
+      keyPrefix: `spec:${workspaceId}::`,
+      activeKeys: uniqueSorted(state.specIds.map((specId) => buildSpecNodeKey(workspaceId, specId))),
+    },
+    {
+      label: 'Memory',
+      keyPrefix: `memory:${workspaceId}::`,
+      activeKeys: uniqueSorted(state.memoryIds.map((memoryId) => buildMemoryNodeKey(workspaceId, memoryId))),
+    },
+    {
+      label: 'File',
+      keyPrefix: `file:${workspaceId}::`,
+      activeKeys: uniqueSorted(state.filePaths.map((filePath) => buildFileNodeKey(workspaceId, filePath))),
+      additionalWhere: "COALESCE(n.path, '') <> ''",
+    },
+  ];
+}
+
+export async function collectWorkspaceProjectionState(
+  workspaceId: string,
+  workspacePath: string,
+): Promise<WorkspaceProjectionState | null> {
+  if (!workspaceId || !workspacePath || !fs.existsSync(workspacePath)) {
+    return null;
+  }
+
+  const specIds: string[] = [];
+  const stories: Array<{ specId: string; storyId: string }> = [];
+
+  for (const { specId, filePath } of listWorkspaceSpecFiles(workspacePath)) {
+    specIds.push(specId);
+    try {
+      const parsed = JSON.parse(fs.readFileSync(filePath, 'utf-8')) as {
+        userStories?: Array<{ id?: unknown }>;
+      };
+      for (const story of parsed.userStories ?? []) {
+        if (typeof story.id === 'string' && story.id.trim().length > 0) {
+          stories.push({ specId, storyId: story.id.trim() });
+        }
+      }
+    } catch {
+      logger.warn({ workspaceId, specId, filePath }, '[knowledge-graph] Skipping projection reconciliation because an active spec could not be parsed safely');
+      return null;
+    }
+  }
+
+  const memoryRows = await query<{ id: string | number }>(
+    `SELECT id
+       FROM memories
+      WHERE workspace_id = $1 AND deleted_at IS NULL`,
+    [workspaceId],
+  );
+
+  const filePaths = uniqueSorted(
+    listFilesRecursive(workspacePath, workspacePath).map((filePath) => normalizeGraphFilePath(filePath)),
+  );
+
+  return {
+    specIds: uniqueSorted(specIds),
+    stories,
+    memoryIds: uniqueSorted(memoryRows.map((row) => String(row.id))),
+    filePaths,
+  };
+}
+
+function toCypherStringList(values: string[]): string {
+  return `[${values.map((value) => `'${escCypher(value)}'`).join(', ')}]`;
+}
+
+async function pruneScopedWorkspaceNodes(bucket: WorkspaceProjectionPruneBucket): Promise<number> {
+  const activeKeysClause = bucket.activeKeys.length > 0
+    ? ` AND NOT n.key IN ${toCypherStringList(bucket.activeKeys)}`
+    : '';
+  const additionalWhereClause = bucket.additionalWhere ? ` AND ${bucket.additionalWhere}` : '';
+
+  const rows = await cypherQuery<{ cnt: unknown }>(
+    `MATCH (n:${bucket.label})
+     WHERE n.key STARTS WITH '${escCypher(bucket.keyPrefix)}'${additionalWhereClause}${activeKeysClause}
+     WITH collect(n) AS doomed, count(n) AS cnt
+     FOREACH (node IN doomed | DETACH DELETE node)
+     RETURN cnt`,
+    [{ name: 'cnt', type: 'agtype' }],
+  );
+
+  return Number(parseAgtype(rows[0]?.cnt) ?? 0);
+}
+
+export async function reconcileWorkspaceGraphProjection(
+  workspaceId: string,
+  workspacePath: string,
+): Promise<WorkspaceProjectionPruneResult> {
+  const empty: WorkspaceProjectionPruneResult = {
+    active: { Story: 0, Spec: 0, Memory: 0, File: 0 },
+    pruned: { Story: 0, Spec: 0, Memory: 0, File: 0 },
+  };
+
+  if (!(await isGraphAvailable())) return empty;
+
+  const state = await collectWorkspaceProjectionState(workspaceId, workspacePath);
+  if (!state) {
+    logger.warn({ workspaceId, workspacePath }, '[knowledge-graph] Skipping projection reconciliation without readable workspace state');
+    return empty;
+  }
+
+  const plan = buildWorkspaceProjectionPrunePlan(workspaceId, state);
+  const active = plan.reduce((acc, bucket) => {
+    acc[bucket.label] = bucket.activeKeys.length;
+    return acc;
+  }, { Story: 0, Spec: 0, Memory: 0, File: 0 } as Record<WorkspaceProjectionPrunableLabel, number>);
+
+  const pruned = { Story: 0, Spec: 0, Memory: 0, File: 0 } as Record<WorkspaceProjectionPrunableLabel, number>;
+  for (const bucket of plan) {
+    pruned[bucket.label] = await pruneScopedWorkspaceNodes(bucket);
+  }
+
+  logger.info({ workspaceId, active, pruned }, '[knowledge-graph] Workspace projection reconciliation complete');
+  return { active, pruned };
+}
+
 // ── Graph Health Check ──────────────────────────────────────────────────────
 
 export interface GraphStats {

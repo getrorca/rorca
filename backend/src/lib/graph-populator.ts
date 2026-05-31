@@ -15,6 +15,8 @@
  *   - memory_created / memory_auto_saved → Memory-[:LEARNED_FROM]->Story and Memory-[:FROM_SPEC]->Spec edges
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { subscribe, type WalEvent } from './sse-hub';
 import {
   isGraphAvailable,
@@ -29,6 +31,7 @@ import {
   addMemorySourceSpec,
   collectStoryFileTouches,
   normalizeGraphFilePath,
+  reconcileWorkspaceGraphProjection,
 } from './knowledge-graph';
 import { queryOne } from '../db/index';
 import { logger } from './logger';
@@ -62,7 +65,15 @@ async function handleWalEvent(event: WalEvent): Promise<void> {
       break;
     case 'memory_created':
     case 'memory_auto_saved':
+    case 'memory_restored':
       await handleMemoryCreated(event);
+      break;
+    case 'story_deleted':
+      await handleStoryDeleted(event);
+      break;
+    case 'spec_deleted':
+    case 'memory_deleted':
+      await handleWorkspaceCleanup(event);
       break;
     default:
       break;
@@ -277,6 +288,91 @@ async function handleMemoryCreated(event: WalEvent): Promise<void> {
 
 // ── Existing handlers ───────────────────────────────────────────────────────
 
+function resolveWorkspaceIdFromEvent(event: WalEvent, payload?: Record<string, unknown>): string {
+  return event.workspace_id || String(payload?.workspaceId || payload?.workspace_id || '');
+}
+
+async function getWorkspacePath(workspaceId: string): Promise<string> {
+  if (!workspaceId) return '';
+  const workspace = await queryOne<{ path: string }>(
+    'SELECT path FROM workspaces WHERE id = $1',
+    [workspaceId],
+  );
+  return workspace?.path || '';
+}
+
+async function reconcileWorkspaceProjection(workspaceId: string): Promise<void> {
+  const workspacePath = await getWorkspacePath(workspaceId);
+  if (!workspacePath) return;
+  await reconcileWorkspaceGraphProjection(workspaceId, workspacePath);
+}
+
+async function syncSpecProjectionFromWorkspace(workspaceId: string, specId: string): Promise<boolean> {
+  const workspacePath = await getWorkspacePath(workspaceId);
+  if (!workspacePath || !specId) return false;
+
+  const approvedPath = path.join(workspacePath, 'forge', 'specs', 'approved', `${specId}.json`);
+  const pendingPath = path.join(workspacePath, 'forge', 'specs', 'pending', `${specId}.json`);
+  const specPath = fs.existsSync(approvedPath) ? approvedPath : pendingPath;
+  if (!fs.existsSync(specPath)) return false;
+
+  try {
+    const parsed = JSON.parse(fs.readFileSync(specPath, 'utf-8')) as {
+      userStories?: Array<{ id: string; title: string; dependsOn?: string[] }>;
+    };
+    if (!parsed.userStories || parsed.userStories.length === 0) return false;
+
+    await populateFromSpec(
+      specId,
+      workspaceId,
+      parsed.userStories.map((story) => ({
+        id: story.id,
+        title: story.title,
+        dependsOn: story.dependsOn,
+      })),
+    );
+    await populateConventionsFromConfig(workspaceId, workspacePath);
+    return true;
+  } catch (err) {
+    logger.warn({ err, workspaceId, specId, specPath }, '[graph-populator] Failed to sync spec projection from workspace file');
+    return false;
+  }
+}
+
+async function handleStoryDeleted(event: WalEvent): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(event.payload || '{}') as Record<string, unknown>;
+  } catch {
+    // ignore malformed payloads
+  }
+
+  const workspaceId = resolveWorkspaceIdFromEvent(event, payload);
+  const specId = event.spec_id || String(payload.specId || payload.spec_id || '');
+  if (!workspaceId || !specId) return;
+
+  await syncSpecProjectionFromWorkspace(workspaceId, specId);
+  await reconcileWorkspaceProjection(workspaceId);
+}
+
+async function handleWorkspaceCleanup(event: WalEvent): Promise<void> {
+  if (!(await isGraphAvailable())) return;
+
+  let payload: Record<string, unknown> = {};
+  try {
+    payload = JSON.parse(event.payload || '{}') as Record<string, unknown>;
+  } catch {
+    // ignore malformed payloads
+  }
+
+  const workspaceId = resolveWorkspaceIdFromEvent(event, payload);
+  if (!workspaceId) return;
+
+  await reconcileWorkspaceProjection(workspaceId);
+}
+
 async function handleRunFinished(event: WalEvent): Promise<void> {
   logger.info(
     { eventType: event.event_type, specId: event.spec_id, workspaceId: event.workspace_id },
@@ -307,6 +403,7 @@ async function handleRunFinished(event: WalEvent): Promise<void> {
   if (!specId) return;
 
   await populateFromRun(payload.run_id, specId, run.workspace_id);
+  await reconcileWorkspaceProjection(run.workspace_id);
 }
 
 async function handleSpecApproved(event: WalEvent): Promise<void> {
@@ -316,45 +413,19 @@ async function handleSpecApproved(event: WalEvent): Promise<void> {
   );
   if (!(await isGraphAvailable())) return;
 
-  if (!event.spec_id || !event.workspace_id) return;
-
-  // Try to load spec stories from the database (spec_versions table)
-  const version = await queryOne<{ content: string }>(
-    `SELECT content FROM spec_versions
-     WHERE spec_id = $1
-     ORDER BY version DESC LIMIT 1`,
-    [event.spec_id],
-  );
-
-  if (!version?.content) return;
-
-  let parsed: { userStories?: Array<{ id: string; title: string; dependsOn?: string[] }> };
+  let payload: Record<string, unknown> = {};
   try {
-    parsed = JSON.parse(version.content);
+    payload = JSON.parse(event.payload || '{}') as Record<string, unknown>;
   } catch {
-    return;
+    // ignore malformed payloads
   }
 
-  if (!parsed.userStories || parsed.userStories.length === 0) return;
+  const workspaceId = resolveWorkspaceIdFromEvent(event, payload);
+  const specId = event.spec_id || String(payload.specId || payload.spec_id || '');
+  if (!workspaceId || !specId) return;
 
-  await populateFromSpec(
-    event.spec_id,
-    event.workspace_id,
-    parsed.userStories.map(s => ({
-      id: s.id,
-      title: s.title,
-      dependsOn: s.dependsOn,
-    })),
-  );
-
-  // SW-008: Populate convention nodes from .rorca/config.json
-  const workspace = await queryOne<{ path: string }>(
-    'SELECT path FROM workspaces WHERE id = $1',
-    [event.workspace_id],
-  );
-  if (workspace?.path) {
-    await populateConventionsFromConfig(event.workspace_id, workspace.path);
-  }
+  await syncSpecProjectionFromWorkspace(workspaceId, specId);
+  await reconcileWorkspaceProjection(workspaceId);
 }
 
 function extractSpecId(specPath: string): string {

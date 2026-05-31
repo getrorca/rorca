@@ -7322,7 +7322,11 @@ router.post('/:specId/approve', async (req: Request, res: Response) => {
     fs.renameSync(pendingFile, approvedFile);
 
     // Emit WAL event
-    await execute(`INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_approved', $1, 'user', $2)`, [specId, JSON.stringify({ workspaceId })]);
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('spec_approved', $1, $2, 'user', $3) RETURNING *`,
+      [specId, workspaceId, JSON.stringify({ workspaceId })],
+    );
+    if (walEvent) broadcastAll(walEvent);
 
     res.json({ ok: true, approvedPath: approvedFile });
   } catch (error: any) {
@@ -7890,7 +7894,11 @@ router.delete('/:specId', async (req: Request, res: Response) => {
     // Clean up generation logs for this spec
     await execute(`DELETE FROM spec_generation_logs WHERE spec_slug = $1`, [specId]);
 
-    await execute(`INSERT INTO wal_events (event_type, spec_id, actor, payload) VALUES ('spec_deleted', $1, 'user', $2)`, [specId, JSON.stringify({ workspaceId })]);
+    const walEvent = await queryOne<WalEvent>(
+      `INSERT INTO wal_events (event_type, spec_id, workspace_id, actor, payload) VALUES ('spec_deleted', $1, $2, 'user', $3) RETURNING *`,
+      [specId, workspaceId, JSON.stringify({ workspaceId })],
+    );
+    if (walEvent) broadcastAll(walEvent);
 
     res.json({ ok: true });
   } catch (error: any) {
