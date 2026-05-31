@@ -27,6 +27,7 @@ jest.mock('../logger', () => ({
 }));
 
 import { collectStoryFileTouches } from '../knowledge-graph';
+import { projectMemoryRelationships } from '../graph-populator';
 import { hybridSearch } from '../search';
 
 describe('Phase 1 GraphRAG hardening', () => {
@@ -54,6 +55,20 @@ describe('Phase 1 GraphRAG hardening', () => {
       expect.stringContaining('story_output_chunks'),
       [42, 'US-001'],
     );
+  });
+
+  it('reconstructs LEARNED_FROM, FROM_SPEC, and ABOUT links from stored memory provenance', () => {
+    expect(projectMemoryRelationships({
+      category: 'Pattern',
+      source_story_id: 'US-001',
+      source_spec_id: 'spec-graph',
+      related_files: '["./src/foo.ts","src/foo.ts","docs/notes.md"]',
+    })).toEqual([
+      { type: 'LEARNED_FROM', target: 'US-001' },
+      { type: 'FROM_SPEC', target: 'spec-graph' },
+      { type: 'ABOUT', target: 'src/foo.ts' },
+      { type: 'ABOUT', target: 'docs/notes.md' },
+    ]);
   });
 
   it('hybridSearch skips semantic work in keyword-only mode', async () => {

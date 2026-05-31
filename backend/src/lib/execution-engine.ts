@@ -4632,6 +4632,13 @@ async function executeStory(
                       rule: e.rule ?? '',
                       context: e.context ?? '',
                       source: e.source ?? story.id,
+                      sourceSpecId: typeof e.sourceSpecId === 'string' ? e.sourceSpecId : path.basename(config.jsonPath, '.json'),
+                      sourceRunId: config.runId,
+                      relatedFiles: Array.isArray(e.relatedFiles)
+                        ? e.relatedFiles
+                        : Array.isArray(e.related_files)
+                          ? e.related_files
+                          : undefined,
                     }),
                   });
                 } catch (postErr: any) {
