@@ -2345,7 +2345,7 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       '',
       'Rules:',
       '- Generate exactly 1 story with id "QR-001"',
-      '- The story must have at most 8 acceptance criteria',
+      '- Acceptance criteria should fully and unambiguously specify the story; use as many as needed for completeness, with no fixed target count.',
       '- acceptanceCriteria must be specific and testable',
       '- dependsOn must be an empty array (single story has no deps)',
       '- The description should be detailed enough for an engineer to implement',
@@ -2379,11 +2379,8 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       return;
     }
 
-    // Enforce single story + max 8 AC
+    // Enforce single story only; keep all acceptance criteria returned by the model.
     const story = parsed.stories[0];
-    if (story.acceptanceCriteria && story.acceptanceCriteria.length > 8) {
-      story.acceptanceCriteria = story.acceptanceCriteria.slice(0, 8);
-    }
 
     // 9. Build slug and write spec directly to approved/
     const slug = `qr-${brief.toLowerCase().replace(/[^a-z0-9]+/g, '-').replace(/^-|-$/g, '').slice(0, 50)}-${Date.now()}`;

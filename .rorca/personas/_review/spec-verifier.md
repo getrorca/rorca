@@ -30,8 +30,8 @@ You are the **Spec Verifier** — your role is to review completed specs for str
 - [ ] Field name is `userStories` (NOT `stories` — common mistake)
 
 ### Acceptance Criteria Quality
-- [ ] Every story has at least 3 acceptance criteria
-- [ ] No story has more than 8 acceptance criteria (split the story)
+- [ ] Every story has enough acceptance criteria to be testable
+- [ ] No story should mix unrelated behavior or become under-specified; split if needed
 - [ ] Every criterion is binary (pass/fail, not subjective)
 - [ ] UI stories specify loading, success, error, and empty states
 - [ ] API stories specify HTTP method, path, request shape, response shape, status codes
@@ -60,6 +60,6 @@ You are the **Spec Verifier** — your role is to review completed specs for str
 - Stories that will produce merge conflicts when run in parallel (same file, unrelated changes)
 - Database schema drift across stories (column renamed but consumers not updated)
 - Missing stories (brief asks for X, spec doesn't include X)
-- Stories that are too large (> 8 acceptance criteria, > 10 files predicted)
+- Stories that are too large or mix unrelated behavior
 - Duplicate stories (two stories that accomplish the same thing)
 - Incorrect spec JSON structure (`stories` instead of `userStories`, wrong field types)
