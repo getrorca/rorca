@@ -28,6 +28,7 @@ import {
   addMemoryAboutFile,
   addMemorySourceSpec,
   collectStoryFileTouches,
+  normalizeGraphFilePath,
 } from './knowledge-graph';
 import { queryOne } from '../db/index';
 import { logger } from './logger';
@@ -149,6 +150,57 @@ async function handleStoryCompleted(event: WalEvent, status: 'pass' | 'fail'): P
 
 // ── Memory graph population (SW-005) ────────────────────────────────────────
 
+interface MemoryProjectionRow {
+  category: string | null;
+  source_story_id: string | null;
+  source_spec_id: string | null;
+  related_files: string[] | string | null;
+}
+
+function parseMemoryRelatedFiles(value: string[] | string | null | undefined): string[] {
+  const raw = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? (() => {
+          try {
+            const parsed = JSON.parse(value) as unknown;
+            return Array.isArray(parsed) ? parsed : [];
+          } catch {
+            return [];
+          }
+        })()
+      : [];
+
+  return [...new Set(raw
+    .filter((file): file is string => typeof file === 'string' && file.trim().length > 0)
+    .map(file => normalizeGraphFilePath(file))
+    .filter(Boolean))];
+}
+
+export function projectMemoryRelationships(row: MemoryProjectionRow): Array<
+  | { type: 'LEARNED_FROM'; target: string }
+  | { type: 'FROM_SPEC'; target: string }
+  | { type: 'ABOUT'; target: string }
+> {
+  const relationships: Array<
+    | { type: 'LEARNED_FROM'; target: string }
+    | { type: 'FROM_SPEC'; target: string }
+    | { type: 'ABOUT'; target: string }
+  > = [];
+
+  if (row.source_story_id) {
+    relationships.push({ type: 'LEARNED_FROM', target: row.source_story_id });
+  }
+  if (row.source_spec_id) {
+    relationships.push({ type: 'FROM_SPEC', target: row.source_spec_id });
+  }
+  for (const filePath of parseMemoryRelatedFiles(row.related_files)) {
+    relationships.push({ type: 'ABOUT', target: filePath });
+  }
+
+  return relationships;
+}
+
 async function handleMemoryCreated(event: WalEvent): Promise<void> {
   logger.info(
     { eventType: event.event_type, storyId: event.story_id, specId: event.spec_id },
@@ -156,26 +208,52 @@ async function handleMemoryCreated(event: WalEvent): Promise<void> {
   );
   if (!(await isGraphAvailable())) return;
 
-  let payload: { storyId?: string; categories?: string[]; id?: string; category?: string; relatedFiles?: string[]; related_files?: string[]; specId?: string; source_spec_id?: string };
+  let payload: { storyId?: string; categories?: string[]; id?: string | number; category?: string; relatedFiles?: string[]; related_files?: string[]; specId?: string; source_spec_id?: string };
   try {
     payload = JSON.parse(event.payload || '{}');
   } catch {
     return;
   }
 
-  const sourceStoryId = event.story_id || payload.storyId || '';
-  const sourceSpecId = event.spec_id || payload.specId || payload.source_spec_id || '';
   const workspaceId = event.workspace_id || '';
-  if (!sourceStoryId && !sourceSpecId) return;
+  const memoryId = String(payload.id || `mem-${event.id}`);
   if (!workspaceId) {
-    logger.warn({ memoryId: payload.id || `mem-${event.id}` }, '[graph-populator] skipping memory graph write without workspaceId');
+    logger.warn({ memoryId }, '[graph-populator] skipping memory graph write without workspaceId');
     return;
   }
 
+  const persisted = /^\d+$/.test(memoryId)
+    ? await queryOne<MemoryProjectionRow>(
+      `SELECT category, source_story_id, source_spec_id, related_files
+         FROM memories
+        WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL`,
+      [memoryId, workspaceId],
+    )
+    : undefined;
+
+  const fallbackRow: MemoryProjectionRow = {
+    category: payload.category ?? null,
+    source_story_id: event.story_id || payload.storyId || null,
+    source_spec_id: event.spec_id || payload.specId || payload.source_spec_id || null,
+    related_files: [
+      ...(payload.relatedFiles ?? []),
+      ...(payload.related_files ?? []),
+    ],
+  };
+
+  const projection = projectMemoryRelationships(persisted ?? fallbackRow);
+  const sourceStoryId = projection.find((edge) => edge.type === 'LEARNED_FROM')?.target || '';
+  const sourceSpecId = projection.find((edge) => edge.type === 'FROM_SPEC')?.target || '';
+  const relatedFiles = projection
+    .filter((edge): edge is { type: 'ABOUT'; target: string } => edge.type === 'ABOUT')
+    .map(edge => edge.target);
+
+  if (!sourceStoryId && !sourceSpecId) return;
+
   // memory_auto_saved has categories array; memory_created may have a single category
-  const categories = payload.categories || (payload.category ? [payload.category] : ['unknown']);
-  const memoryId = payload.id || `mem-${event.id}`;
-  const relatedFiles = [...new Set([...(payload.relatedFiles ?? []), ...(payload.related_files ?? [])])].filter(Boolean);
+  const categories = persisted?.category
+    ? [persisted.category]
+    : payload.categories || (payload.category ? [payload.category] : ['unknown']);
 
   if (sourceStoryId) {
     for (const category of categories) {
@@ -192,7 +270,7 @@ async function handleMemoryCreated(event: WalEvent): Promise<void> {
   }
 
   logger.info(
-    { memoryId, sourceStoryId, sourceSpecId, categories, relatedFiles },
+    { memoryId, sourceStoryId, sourceSpecId, categories, relatedFiles, provenance: persisted ? 'db' : 'wal' },
     '[graph-populator] Memory graph edges created',
   );
 }
@@ -285,3 +363,8 @@ function extractSpecId(specPath: string): string {
   const basename = specPath.split('/').pop() || '';
   return basename.replace(/\.json$/, '');
 }
+
+export const __testables = {
+  handleMemoryCreated,
+  projectMemoryRelationships,
+};
