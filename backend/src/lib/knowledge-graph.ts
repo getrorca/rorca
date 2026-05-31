@@ -780,6 +780,71 @@ export interface CypherResult {
   properties: Record<string, unknown>;
 }
 
+export interface GraphQueryScope {
+  workspaceId?: string;
+  specId?: string;
+}
+
+export interface GraphNodeLookup {
+  property: string;
+  value: string;
+  normalizedNodeId: string;
+}
+
+export function buildScopedGraphNodeLookup(
+  nodeType: NodeType,
+  nodeId: string,
+  scope: GraphQueryScope = {},
+): GraphNodeLookup {
+  const normalizedNodeId = nodeType === 'File' ? normalizeGraphFilePath(nodeId) : nodeId;
+
+  if (nodeType === 'Story' && scope.workspaceId && scope.specId) {
+    return {
+      property: 'key',
+      value: buildStoryNodeKey(scope.workspaceId, scope.specId, normalizedNodeId),
+      normalizedNodeId,
+    };
+  }
+
+  if (nodeType === 'File' && scope.workspaceId) {
+    return {
+      property: 'key',
+      value: buildFileNodeKey(scope.workspaceId, normalizedNodeId),
+      normalizedNodeId,
+    };
+  }
+
+  if (nodeType === 'Spec' && scope.workspaceId) {
+    return {
+      property: 'key',
+      value: buildSpecNodeKey(scope.workspaceId, normalizedNodeId),
+      normalizedNodeId,
+    };
+  }
+
+  if (nodeType === 'Memory' && scope.workspaceId) {
+    return {
+      property: 'key',
+      value: buildMemoryNodeKey(scope.workspaceId, normalizedNodeId),
+      normalizedNodeId,
+    };
+  }
+
+  if (nodeType === 'Convention' && scope.workspaceId) {
+    return {
+      property: 'key',
+      value: buildConventionNodeKey(scope.workspaceId, normalizedNodeId),
+      normalizedNodeId,
+    };
+  }
+
+  return {
+    property: nodeType === 'File' ? 'path' : nodeType === 'Convention' || nodeType === 'Skill' ? 'name' : 'id',
+    value: normalizedNodeId,
+    normalizedNodeId,
+  };
+}
+
 /**
  * Query nodes related to a given node, optionally filtering by edge types and depth.
  *
@@ -793,6 +858,7 @@ export async function queryRelated(
   nodeId: string,
   depth: number = 1,
   edgeTypes?: EdgeType[],
+  scope?: GraphQueryScope,
 ): Promise<CypherResult[]> {
   if (!(await isGraphAvailable())) return [];
 
@@ -802,7 +868,7 @@ export async function queryRelated(
   // fan out into one query per type and merge the results in memory.
   if (edgeTypes && edgeTypes.length > 1) {
     const results = await Promise.all(
-      edgeTypes.map((edgeType) => queryRelated(nodeType, nodeId, depth, [edgeType])),
+      edgeTypes.map((edgeType) => queryRelated(nodeType, nodeId, depth, [edgeType], scope)),
     );
     const deduped = new Map<string, CypherResult>();
     for (const resultSet of results) {
@@ -814,14 +880,13 @@ export async function queryRelated(
     return [...deduped.values()];
   }
 
-  // Determine the ID property name based on node type
-  const idProp = nodeType === 'File' ? 'path' : nodeType === 'Convention' || nodeType === 'Skill' ? 'name' : 'id';
+  const lookup = buildScopedGraphNodeLookup(nodeType, nodeId, scope);
   const edgeFilter = edgeTypes && edgeTypes.length === 1
     ? `:${edgeTypes[0]}`
     : '';
 
   const cypher = `
-    MATCH (start:${nodeType} {${idProp}: '${escCypher(nodeId)}'})
+    MATCH (start:${nodeType} {${lookup.property}: '${escCypher(lookup.value)}'})
           -[${edgeFilter}*1..${depth}]-
           (related)
     RETURN DISTINCT related
@@ -843,7 +908,7 @@ export async function queryRelated(
       };
     });
   } catch (err) {
-    logger.error({ err, nodeType, nodeId, edgeTypes }, '[knowledge-graph] queryRelated failed');
+    logger.error({ err, nodeType, nodeId: lookup.normalizedNodeId, edgeTypes, scope }, '[knowledge-graph] queryRelated failed');
     return [];
   }
 }
@@ -860,7 +925,7 @@ export interface ImpactResult {
  * Fan-out query: find all stories, specs, and conventions connected to a file path.
  * Useful for understanding the blast radius of changes to a file.
  */
-export async function queryImpact(filePath: string): Promise<ImpactResult> {
+export async function queryImpact(filePath: string, workspaceId?: string): Promise<ImpactResult> {
   const result: ImpactResult = {
     stories: [],
     specs: [],
@@ -869,10 +934,12 @@ export async function queryImpact(filePath: string): Promise<ImpactResult> {
 
   if (!(await isGraphAvailable())) return result;
 
+  const fileLookup = buildScopedGraphNodeLookup('File', filePath, { workspaceId });
+
   try {
     // Stories that touch this file
     const storyRows = await cypherQuery<{ id: unknown; title: unknown; specId: unknown }>(
-      `MATCH (s:Story)-[:TOUCHES]->(f:File {path: '${escCypher(filePath)}'})
+      `MATCH (s:Story)-[:TOUCHES]->(f:File {${fileLookup.property}: '${escCypher(fileLookup.value)}'})
        RETURN s.id, s.title, s.specId`,
       [
         { name: 'id', type: 'agtype' },
@@ -888,7 +955,7 @@ export async function queryImpact(filePath: string): Promise<ImpactResult> {
 
     // Specs connected through stories that touch this file
     const specRows = await cypherQuery<{ id: unknown; title: unknown }>(
-      `MATCH (s:Story)-[:TOUCHES]->(f:File {path: '${escCypher(filePath)}'})
+      `MATCH (s:Story)-[:TOUCHES]->(f:File {${fileLookup.property}: '${escCypher(fileLookup.value)}'})
        MATCH (s)-[:BELONGS_TO]->(sp:Spec)
        RETURN DISTINCT sp.id, sp.title`,
       [
@@ -903,7 +970,7 @@ export async function queryImpact(filePath: string): Promise<ImpactResult> {
 
     // Conventions that apply to this file
     const convRows = await cypherQuery<{ name: unknown; source: unknown }>(
-      `MATCH (c:Convention)-[:APPLIES_TO]->(f:File {path: '${escCypher(filePath)}'})
+      `MATCH (c:Convention)-[:APPLIES_TO]->(f:File {${fileLookup.property}: '${escCypher(fileLookup.value)}'})
        RETURN c.name, c.source`,
       [
         { name: 'name', type: 'agtype' },
@@ -915,7 +982,7 @@ export async function queryImpact(filePath: string): Promise<ImpactResult> {
       source: String(parseAgtype(r.source) ?? ''),
     }));
   } catch (err) {
-    logger.error({ err, filePath }, '[knowledge-graph] queryImpact failed');
+    logger.error({ err, filePath: fileLookup.normalizedNodeId, workspaceId }, '[knowledge-graph] queryImpact failed');
   }
 
   return result;
@@ -1305,16 +1372,17 @@ export interface SpecKnowledgeGraphResult {
  * and related stories from other specs connected via DEPENDS_ON or TOUCHES.
  * PG-019: Returns empty arrays if AGE is unavailable.
  */
-export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowledgeGraphResult> {
+export async function querySpecKnowledgeGraph(specId: string, workspaceId?: string): Promise<SpecKnowledgeGraphResult> {
   const empty: SpecKnowledgeGraphResult = { memories: [], conventions: [], relatedStories: [] };
   if (!(await isGraphAvailable())) return empty;
 
-  const safeSpecId = escCypher(specId);
+  const specLookup = buildScopedGraphNodeLookup('Spec', specId, { workspaceId });
+  const safeSpecLookupValue = escCypher(specLookup.value);
 
   try {
     // 1. Memory nodes linked to this spec's stories via LEARNED_FROM
     const learnedRows = await cypherQuery<{ mid: unknown; cat: unknown; sid: unknown }>(
-      `MATCH (m:Memory)-[:LEARNED_FROM]->(s:Story)-[:BELONGS_TO]->(sp:Spec {id: '${safeSpecId}'})
+      `MATCH (m:Memory)-[:LEARNED_FROM]->(s:Story)-[:BELONGS_TO]->(sp:Spec {${specLookup.property}: '${safeSpecLookupValue}'})
        RETURN m.id, m.category, s.id`,
       [
         { name: 'mid', type: 'agtype' },
@@ -1324,7 +1392,7 @@ export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowl
     );
 
     const sourceSpecRows = await cypherQuery<{ mid: unknown; cat: unknown }>(
-      `MATCH (m:Memory)-[:FROM_SPEC]->(sp:Spec {id: '${safeSpecId}'})
+      `MATCH (m:Memory)-[:FROM_SPEC]->(sp:Spec {${specLookup.property}: '${safeSpecLookupValue}'})
        RETURN m.id, m.category`,
       [
         { name: 'mid', type: 'agtype' },
@@ -1349,7 +1417,7 @@ export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowl
 
     // 2. Convention nodes that APPLIES_TO files touched by this spec's stories
     const conventionRows = await cypherQuery<{ cname: unknown; csrc: unknown; fpath: unknown }>(
-      `MATCH (c:Convention)-[:APPLIES_TO]->(f:File)<-[:TOUCHES]-(s:Story)-[:BELONGS_TO]->(sp:Spec {id: '${safeSpecId}'})
+      `MATCH (c:Convention)-[:APPLIES_TO]->(f:File)<-[:TOUCHES]-(s:Story)-[:BELONGS_TO]->(sp:Spec {${specLookup.property}: '${safeSpecLookupValue}'})
        RETURN DISTINCT c.name, c.source, f.path`,
       [
         { name: 'cname', type: 'agtype' },
@@ -1367,9 +1435,9 @@ export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowl
 
     // 3. Related stories from OTHER specs connected via DEPENDS_ON or TOUCHES
     const relatedRows = await cypherQuery<{ rid: unknown; rspec: unknown; rtitle: unknown; rel: unknown }>(
-      `MATCH (s:Story)-[:BELONGS_TO]->(sp:Spec {id: '${safeSpecId}'})
+      `MATCH (s:Story)-[:BELONGS_TO]->(sp:Spec {${specLookup.property}: '${safeSpecLookupValue}'})
        MATCH (s)-[:TOUCHES]->(f:File)<-[:TOUCHES]-(r:Story)-[:BELONGS_TO]->(rsp:Spec)
-       WHERE rsp.id <> '${safeSpecId}'
+       WHERE rsp.${specLookup.property} <> '${safeSpecLookupValue}'
        RETURN DISTINCT r.id, rsp.id, r.title, 'TOUCHES'`,
       [
         { name: 'rid', type: 'agtype' },
@@ -1387,13 +1455,19 @@ export async function querySpecKnowledgeGraph(specId: string): Promise<SpecKnowl
     }));
 
     logger.debug(
-      { specId, memories: memories.length, conventions: conventions.length, relatedStories: relatedStories.length },
+      {
+        specId,
+        workspaceId: workspaceId ?? null,
+        memories: memories.length,
+        conventions: conventions.length,
+        relatedStories: relatedStories.length,
+      },
       '[knowledge-graph] querySpecKnowledgeGraph complete',
     );
 
     return { memories, conventions, relatedStories };
   } catch (err) {
-    logger.warn({ err, specId }, '[knowledge-graph] querySpecKnowledgeGraph failed');
+    logger.warn({ err, specId, workspaceId: workspaceId ?? null }, '[knowledge-graph] querySpecKnowledgeGraph failed');
     return empty;
   }
 }

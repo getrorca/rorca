@@ -1,12 +1,33 @@
 {
   "specId": "Rorca Graph Identity Phase 1 Remaining",
-  "runId": 20260316000339,
-  "startedAt": "2026-05-31T21:34:15.944Z",
-  "lastUpdatedAt": "2026-05-31T21:34:16.760Z",
-  "completedStories": [],
+  "runId": 20260316000340,
+  "startedAt": "2026-05-31T21:58:50.668Z",
+  "lastUpdatedAt": "2026-05-31T22:12:55.037Z",
+  "completedStories": [
+    {
+      "storyId": "GI-003",
+      "title": "Re-key graph writes to canonical identity while preserving current semantics",
+      "status": "passed",
+      "startedAt": "2026-05-31T21:34:19.764Z",
+      "finishedAt": "2026-05-31T21:42:17.153Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 477389
+    },
+    {
+      "storyId": "GI-004",
+      "title": "Complete memory provenance for graph reconstruction from relational truth",
+      "status": "passed",
+      "startedAt": "2026-05-31T22:01:01.550Z",
+      "finishedAt": "2026-05-31T22:12:41.703Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 700153
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
-  "currentStory": "GI-003",
+  "currentStory": "GI-005",
   "decisions": [],
-  "resumedFromStory": null
+  "resumedFromStory": "GI-003"
 }

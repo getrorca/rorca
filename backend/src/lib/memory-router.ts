@@ -29,10 +29,7 @@ import {
 import { hybridSearch, type SearchResult } from './search';
 import { logger } from './logger';
 import { queryRelated, queryImpact, graphStats } from './knowledge-graph';
-import {
-  getGraphContext,
-  formatGraphContext,
-} from './graph-context';
+import { getGraphContext } from './graph-context';
 import {
   rankRetrievalCandidates,
   type RetrievalCandidateInput,
@@ -109,6 +106,8 @@ export interface RetrieveContextOptions {
   predictedPaths?: string[];
   /** Current story ID for graph traversal context */
   storyId?: string;
+  /** Current spec ID for canonical graph scoping */
+  specId?: string;
 }
 
 // ─── Constants ──────────────────────────────────────────────────────────────
@@ -540,9 +539,10 @@ export async function retrieveContext(
     try {
       // PG-016: Use getGraphContext() for deep traversal when predictedPaths provided
       const currentStoryId = options?.storyId ?? '';
+      const currentSpecId = options?.specId;
 
       if (predictedPaths.length > 0 && currentStoryId) {
-        const fullCtx = await getGraphContext(currentStoryId, predictedPaths, workspaceId);
+        const fullCtx = await getGraphContext(currentStoryId, predictedPaths, workspaceId, 2, currentSpecId);
 
         // Map full graph context to the simpler GraphContext for backward compat
         const relatedStories: GraphContext['relatedStories'] = fullCtx.fileHistory.flatMap(fh =>
@@ -604,7 +604,7 @@ export async function retrieveContext(
           const conventionLinks: GraphContext['conventionLinks'] = [];
 
           for (const fp of filePaths.slice(0, 5)) {
-            const impact = await queryImpact(fp);
+            const impact = await queryImpact(fp, wsId);
             for (const s of impact.stories) {
               if (!relatedStories.some(rs => rs.id === s.id)) {
                 relatedStories.push({ id: s.id, title: s.title, relevance: 0.8 });
@@ -619,7 +619,10 @@ export async function retrieveContext(
           }
 
           for (const sid of storyIds.slice(0, 5)) {
-            const related = await queryRelated('Story', sid, 2, ['DEPENDS_ON', 'TOUCHES']);
+            const related = await queryRelated('Story', sid, 2, ['DEPENDS_ON', 'TOUCHES'], {
+              workspaceId: wsId,
+              specId: currentSpecId,
+            });
             for (const r of related) {
               const props = r.properties as Record<string, string>;
               if (r.label === 'Story' && props.id && !relatedStories.some(rs => rs.id === props.id)) {

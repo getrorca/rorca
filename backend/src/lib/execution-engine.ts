@@ -4093,11 +4093,13 @@ async function executeStory(
 
   if (workspaceId) {
     try {
+      const currentSpecId = path.basename(config.jsonPath, '.json');
       const retrieved = await retrieveContext(workspaceId, buildStoryText(story), {
         maxTokens: 6000,
         includeGraph: config.includeGraph,
         predictedPaths,
         storyId: story.id,
+        specId: currentSpecId,
       });
 
       retrievedMemorySection = formatRetrievedMemorySection(retrieved);

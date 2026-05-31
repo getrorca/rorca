@@ -352,6 +352,7 @@ export async function buildContextForStory(
     includeGraph: graphAvailable,
     predictedPaths,
     storyId: story?.id,
+    specId,
   });
 
   const inferredSkills = inferSkillsFromStack(echolocate(workspace.path).stack);
