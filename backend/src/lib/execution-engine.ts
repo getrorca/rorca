@@ -43,6 +43,15 @@ import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
 import { normalizeTerminalMode, type TerminalMode } from './terminal-mode';
+import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from './pty-manager';
+import {
+  appendRunPtyOutput,
+  claimLatestRunPtyResize,
+  completeRunPtySession,
+  initializeRunPtySequence,
+  logRunPtyStoreError,
+  startRunPtySession,
+} from './run-pty-store';
 import { detectOpenCode, requireOpenCode } from './opencode-detector';
 import { requireCodex } from './codex-detector';
 import { detectPi, requirePi, listPiModels } from './pi-detector';
@@ -1752,6 +1761,416 @@ interface TokenUpdate {
 /** Callback for real-time token usage updates during agent execution. */
 type TokenUpdateCallback = (update: TokenUpdate) => void;
 
+interface PtyRunOptions {
+  enabled: boolean;
+  runId: number;
+  workspaceId: string;
+  agentType: AgentType;
+  cols: number;
+  rows: number;
+}
+
+interface PtyProcessLike {
+  pid: number;
+  write(data: string): void;
+  resize(cols: number, rows: number): void;
+  kill(signal?: string): void;
+  onData(listener: (data: string | Uint8Array) => void): { dispose(): void };
+  onExit(listener: (event: { exitCode: number; signal?: number }) => void): { dispose(): void };
+}
+
+interface NodePtyLike {
+  spawn(
+    file: string,
+    args: string[],
+    options: {
+      name: string;
+      cols: number;
+      rows: number;
+      cwd: string;
+      env: Record<string, string>;
+      encoding?: string | null;
+    },
+  ): PtyProcessLike;
+}
+
+interface PtyCommand {
+  command: string;
+  args: string[];
+  env: Record<string, string>;
+  prompt: string;
+  cleanup?: () => void;
+}
+
+const DEFAULT_PTY_COLS = 120;
+const DEFAULT_PTY_ROWS = 36;
+
+function loadNodePty(): NodePtyLike {
+  if (!PTY_AVAILABLE) {
+    throw new Error(`PTY_NOT_AVAILABLE: ${PTY_UNAVAILABLE_HINT}`);
+  }
+  return require('node-pty') as NodePtyLike;
+}
+
+function toBuffer(chunk: string | Uint8Array): Buffer {
+  if (Buffer.isBuffer(chunk)) return chunk;
+  if (typeof chunk === 'string') return Buffer.from(chunk, 'utf8');
+  return Buffer.from(chunk);
+}
+
+function killProcessGroup(pid: number | null | undefined, signal: NodeJS.Signals): void {
+  if (!pid || pid <= 0 || process.platform === 'win32') return;
+  try {
+    process.kill(-pid, signal);
+  } catch {
+    // ignore — process group may already be gone or unsupported
+  }
+}
+
+function buildPtyCommand(
+  agentType: AgentType,
+  prompt: string,
+  cwd: string,
+  agentModel: string | null,
+  attachAddr: string | null,
+  thinkingEnabled?: boolean,
+  thinkingBudget?: number,
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
+  mcpServers?: Record<string, string>,
+  piServerSkillFiles: string[] = [],
+): PtyCommand {
+  switch (agentType) {
+    case 'claude': {
+      const env = buildCleanEnv();
+      let mcpConfigPath: string | null = null;
+      if (mcpServers && Object.keys(mcpServers).length > 0) {
+        const mcpConfig: Record<string, unknown> = { mcpServers: {} };
+        let hasStdioServers = false;
+        for (const [name, url] of Object.entries(mcpServers)) {
+          if (name === 'chrome-devtools' && _chromeMcpCmd) {
+            (mcpConfig.mcpServers as Record<string, unknown>)[name] = { command: _chromeMcpCmd, args: _chromeMcpArgs };
+            hasStdioServers = true;
+          } else if (name === 'playwright') {
+            (mcpConfig.mcpServers as Record<string, unknown>)[name] = { command: 'npx', args: ['@playwright/mcp@latest'] };
+            hasStdioServers = true;
+          }
+          void url;
+        }
+        if (hasStdioServers) {
+          mcpConfigPath = path.join(os.tmpdir(), `rorca-claude-mcp-${Date.now()}.json`);
+          fs.writeFileSync(mcpConfigPath, JSON.stringify(mcpConfig, null, 2), 'utf8');
+        }
+      }
+      return {
+        command: CLAUDE_BIN,
+        args: [
+          '--dangerously-skip-permissions',
+          '--print',
+          '--verbose',
+          '--output-format', 'stream-json',
+          ...(agentModel && /^claude-/.test(agentModel) && !agentModel.includes('/') ? ['--model', agentModel] : []),
+          ...(thinkingEnabled ? ['--thinking'] : []),
+          ...(thinkingBudget && thinkingBudget > 0 ? ['--thinking-budget', String(thinkingBudget)] : []),
+          ...(effortLevel ? ['--effort', effortLevel] : []),
+          ...(mcpConfigPath ? ['--mcp-config', mcpConfigPath] : []),
+        ],
+        env,
+        prompt,
+        cleanup: () => {
+          if (mcpConfigPath) {
+            try { fs.unlinkSync(mcpConfigPath); } catch { /* ignore */ }
+          }
+        },
+      };
+    }
+    case 'opencode': {
+      const env = {
+        ...buildCleanEnv(),
+        ...buildOpenCodeReasoningEnv(agentModel, thinkingEnabled, thinkingBudget, effortLevel),
+      };
+      let openCodeMcpConfigPath: string | null = null;
+      const openCodeInjectedMcpNames: string[] = [];
+      if (mcpServers && Object.keys(mcpServers).length > 0) {
+        openCodeMcpConfigPath = path.join(cwd, 'opencode.json');
+        let existingConfig: Record<string, unknown> = {};
+        if (fs.existsSync(openCodeMcpConfigPath)) {
+          try { existingConfig = JSON.parse(fs.readFileSync(openCodeMcpConfigPath, 'utf8')); } catch { /* ignore */ }
+        }
+        const mcpEntries: Record<string, unknown> = existingConfig.mcp as Record<string, unknown> ?? {};
+        for (const [name, url] of Object.entries(mcpServers)) {
+          mcpEntries[name] = { type: 'remote', url, enabled: true };
+          openCodeInjectedMcpNames.push(name);
+        }
+        fs.writeFileSync(openCodeMcpConfigPath, JSON.stringify({ ...existingConfig, mcp: mcpEntries }, null, 2), 'utf8');
+      }
+      const status = detectOpenCode();
+      return {
+        command: status.opencodeBinPath ?? 'opencode',
+        args: [
+          'run',
+          '--format', 'json',
+          ...(attachAddr ? ['--attach', attachAddr] : []),
+          ...(agentModel ? ['--model', normalizeOpenCodeModel(agentModel)] : []),
+        ],
+        env,
+        prompt,
+        cleanup: () => {
+          if (!openCodeMcpConfigPath) return;
+          try {
+            const current: Record<string, unknown> = JSON.parse(fs.readFileSync(openCodeMcpConfigPath, 'utf8'));
+            const currentMcp = (current.mcp ?? {}) as Record<string, unknown>;
+            for (const injectedName of openCodeInjectedMcpNames) {
+              delete currentMcp[injectedName];
+            }
+            if (Object.keys(currentMcp).length === 0) delete current.mcp;
+            else current.mcp = currentMcp;
+            if (Object.keys(current).length === 0) fs.unlinkSync(openCodeMcpConfigPath);
+            else fs.writeFileSync(openCodeMcpConfigPath, JSON.stringify(current, null, 2), 'utf8');
+          } catch { /* ignore cleanup errors */ }
+        },
+      };
+    }
+    case 'codex': {
+      const env = buildCleanEnv();
+      const codexMcpRegisteredNames: string[] = [];
+      if (mcpServers && Object.keys(mcpServers).length > 0) {
+        for (const [name, url] of Object.entries(mcpServers)) {
+          try {
+            execSync(`${CODEX_BIN} mcp add ${name} --url ${url}`, { stdio: 'pipe' });
+            codexMcpRegisteredNames.push(name);
+          } catch { /* ignore registration failures in PTY mode */ }
+        }
+      }
+      return {
+        command: CODEX_BIN,
+        args: ['exec', '--dangerously-bypass-approvals-and-sandbox', ...(agentModel ? ['--model', agentModel] : [])],
+        env,
+        prompt,
+        cleanup: () => {
+          for (const name of codexMcpRegisteredNames) {
+            try { execSync(`${CODEX_BIN} mcp remove ${name}`, { stdio: 'pipe' }); } catch { /* ignore */ }
+          }
+        },
+      };
+    }
+    case 'pi': {
+      const piSelection = resolvePiCliSelection(agentModel);
+      return {
+        command: PI_BIN,
+        args: [
+          'run',
+          '--jsonl',
+          '--no-extensions',
+          '--tools', 'read,bash,edit,write,grep,find,ls',
+          '--append-system-prompt', 'You are running inside a non-interactive autonomous execution pipeline. Complete feasible coding tasks by reading files, editing code, and validating results in the same turn. Do not stop after inspection or planning only. If you end the turn without making code changes, it will be treated as failure unless you clearly report a concrete blocker with file-level evidence.',
+          ...resolvePiExtensionPaths().flatMap(extensionPath => ['--extension', extensionPath]),
+          ...(piSelection.provider ? ['--provider', piSelection.provider] : []),
+          ...(piSelection.model ? ['--model', piSelection.model] : []),
+          ...piServerSkillFiles.flatMap(skillFile => ['--skill', skillFile]),
+        ],
+        env: buildCleanEnv(),
+        prompt,
+      };
+    }
+  }
+}
+
+async function spawnAgentViaPty(
+  ptyOptions: PtyRunOptions,
+  prompt: string,
+  cwd: string,
+  timeoutMs: number,
+  logFile: string,
+  agentModel: string | null,
+  attachAddr: string | null,
+  thinkingEnabled?: boolean,
+  thinkingBudget?: number,
+  effortLevel?: 'low' | 'medium' | 'high' | 'max' | 'xhigh',
+  mcpServers?: Record<string, string>,
+  piServerSkillFiles: string[] = [],
+): Promise<AgentResult> {
+  return new Promise(async (resolve) => {
+    const startTime = Date.now();
+    const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+    const stderrChunks: Buffer[] = [];
+    let stderrSize = 0;
+    const MAX_STDERR = 4096;
+    let settled = false;
+    let exitCode: number | null = null;
+    let exitSignal: string | null = null;
+    let watchdogFired = false;
+    let finishedWrites = Promise.resolve();
+    let resizeTimer: ReturnType<typeof setInterval> | null = null;
+    let runTimer: ReturnType<typeof setTimeout> | null = null;
+    let forceKillTimer: ReturnType<typeof setTimeout> | null = null;
+    let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
+    let pty: PtyProcessLike | null = null;
+    let ptyCommand: PtyCommand | null = null;
+    const finalize = async (): Promise<void> => {
+      if (settled) return;
+      settled = true;
+      if (resizeTimer) clearInterval(resizeTimer);
+      if (runTimer) clearTimeout(runTimer);
+      if (forceKillTimer) clearTimeout(forceKillTimer);
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      try {
+        await finishedWrites;
+      } catch {
+        // best effort — error already logged
+      }
+      logStream.end();
+      ptyCommand?.cleanup?.();
+      const status = watchdogFired
+        ? 'timed_out'
+        : exitCode === 0 && !exitSignal
+          ? 'exited'
+          : exitSignal
+            ? 'killed'
+            : 'failed';
+      try { pty?.kill(); } catch { /* already gone */ }
+      killProcessGroup(pty?.pid, 'SIGTERM');
+      try {
+        await completeRunPtySession(ptyOptions.runId, status, exitCode, exitSignal);
+      } catch (err: unknown) {
+        logRunPtyStoreError('Failed to complete PTY session', ptyOptions.runId, err);
+      }
+      resolve({
+        exitCode: watchdogFired ? 124 : (exitCode ?? 1),
+        stderrTail: Buffer.concat(stderrChunks).toString('utf8'),
+        elapsedMs: Date.now() - startTime,
+      });
+    };
+
+    const recordStderr = (buf: Buffer): void => {
+      stderrChunks.push(buf);
+      stderrSize += buf.length;
+      while (stderrSize > MAX_STDERR && stderrChunks.length > 1) {
+        const removed = stderrChunks.shift()!;
+        stderrSize -= removed.length;
+      }
+    };
+
+    const resetInactivity = (): void => {
+      if (inactivityTimer) clearTimeout(inactivityTimer);
+      inactivityTimer = setTimeout(() => {
+        watchdogFired = true;
+        const msg = Buffer.from(`[System] PTY watchdog triggered: No output received for ${Math.round(LLM_IDLE_TIMEOUT_MS / 60_000)} minutes. Killing process...\n`);
+        recordStderr(msg);
+        logStream.write(msg);
+        if (sequenceRef) {
+          finishedWrites = finishedWrites
+            .then(() => appendRunPtyOutput(ptyOptions.runId, msg, sequenceRef))
+            .catch((err: unknown) => logRunPtyStoreError('Failed to persist PTY watchdog message', ptyOptions.runId, err));
+        }
+        if (pty) {
+          try { pty.kill('SIGTERM'); } catch { /* ignore */ }
+          killProcessGroup(pty.pid, 'SIGTERM');
+          forceKillTimer = setTimeout(() => {
+            try { pty?.kill('SIGKILL'); } catch { /* ignore */ }
+            killProcessGroup(pty?.pid, 'SIGKILL');
+          }, 10_000);
+        }
+      }, LLM_IDLE_TIMEOUT_MS);
+    };
+
+    let sequenceRef: { value: number } | null = null;
+
+    try {
+      sequenceRef = await initializeRunPtySequence(ptyOptions.runId);
+      ptyCommand = buildPtyCommand(
+        ptyOptions.agentType,
+        prompt,
+        cwd,
+        agentModel,
+        attachAddr,
+        thinkingEnabled,
+        thinkingBudget,
+        effortLevel,
+        mcpServers,
+        piServerSkillFiles,
+      );
+      const nodePty = loadNodePty();
+      pty = nodePty.spawn(ptyCommand.command, ptyCommand.args, {
+        name: 'xterm-256color',
+        cols: ptyOptions.cols,
+        rows: ptyOptions.rows,
+        cwd,
+        env: ptyCommand.env,
+        encoding: null,
+      });
+      await startRunPtySession({
+        runId: ptyOptions.runId,
+        workspaceId: ptyOptions.workspaceId,
+        cwd,
+        agentType: ptyOptions.agentType,
+        cols: ptyOptions.cols,
+        rows: ptyOptions.rows,
+        childPid: pty.pid ?? null,
+      });
+      resetInactivity();
+      resizeTimer = setInterval(() => {
+        void (async () => {
+          if (!pty) return;
+          try {
+            const resize = await claimLatestRunPtyResize(ptyOptions.runId);
+            if (resize) {
+              pty.resize(resize.cols, resize.rows);
+            }
+          } catch (err: unknown) {
+            logRunPtyStoreError('Failed to apply PTY resize request', ptyOptions.runId, err);
+          }
+        })();
+      }, 250);
+      resizeTimer.unref?.();
+
+      pty.onData((chunk) => {
+        const buf = toBuffer(chunk);
+        if (buf.length === 0) return;
+        resetInactivity();
+        logStream.write(buf);
+        recordStderr(buf);
+        if (!sequenceRef) return;
+        finishedWrites = finishedWrites
+          .then(() => appendRunPtyOutput(ptyOptions.runId, buf, sequenceRef))
+          .catch((err: unknown) => logRunPtyStoreError('Failed to persist PTY output chunk', ptyOptions.runId, err));
+      });
+
+      pty.onExit((event) => {
+        exitCode = event.exitCode;
+        exitSignal = event.signal != null ? String(event.signal) : null;
+        void finalize();
+      });
+
+      pty.write(ptyCommand.prompt);
+      if (!ptyCommand.prompt.endsWith('\n')) {
+        pty.write('\r\n');
+      }
+      pty.write('\u0004');
+
+      runTimer = setTimeout(() => {
+        if (!pty || settled) return;
+        watchdogFired = true;
+        try { pty.kill('SIGTERM'); } catch { /* ignore */ }
+        killProcessGroup(pty.pid, 'SIGTERM');
+        forceKillTimer = setTimeout(() => {
+          try { pty?.kill('SIGKILL'); } catch { /* ignore */ }
+          killProcessGroup(pty?.pid, 'SIGKILL');
+        }, 10_000);
+      }, timeoutMs);
+    } catch (err: unknown) {
+      const message = err instanceof Error ? err.message : String(err);
+      recordStderr(Buffer.from(message));
+      logger.error(`[engine] Failed to spawn ${ptyOptions.agentType} PTY process: ${message}`);
+      try {
+        await completeRunPtySession(ptyOptions.runId, 'failed', 1, null);
+      } catch { /* ignore */ }
+      logStream.end();
+      ptyCommand?.cleanup?.();
+      resolve({ exitCode: 1, stderrTail: message, elapsedMs: Date.now() - startTime });
+    }
+  });
+}
+
 // ─── Idle Watchdog ──────────────────────────────────────────────────────────
 
 /** Default idle timeout: 15 minutes. Overridden by LLM_IDLE_TIMEOUT_MS env var. */
@@ -1833,7 +2252,25 @@ function runAgent(
   onSessionReady?: (piSessionId: string | undefined) => void | Promise<void>,
   piServerSkillFiles?: string[],
   piSessionOptions?: PiSessionOptions,
+  ptyOptions?: PtyRunOptions,
 ): Promise<AgentResult> {
+  if (ptyOptions?.enabled) {
+    return spawnAgentViaPty(
+      ptyOptions,
+      prompt,
+      cwd,
+      timeoutMs,
+      logFile,
+      agentModel,
+      attachAddr,
+      thinkingEnabled,
+      thinkingBudget,
+      effortLevel,
+      mcpServers,
+      piServerSkillFiles,
+    );
+  }
+
   switch (agentType) {
     case 'claude':
       return spawnClaude(prompt, cwd, timeoutMs, logFile, agentModel, onTokenUpdate, thinkingEnabled, thinkingBudget, effortLevel, mcpServers);
@@ -4238,7 +4675,7 @@ async function executeStory(
     }, story.id);
   };
 
-  if (effectiveAgent !== 'pi') {
+  if (effectiveAgent !== 'pi' || config.terminalMode === 'pty') {
     await emitStoryStarted();
   }
 
@@ -4316,6 +4753,16 @@ async function executeStory(
       fs.writeFileSync(promptLogFile, attemptPrompt);
 
       logger.info(`[agent] Launching ${effectiveAgent} for ${story.id}`);
+      const ptyOptions = config.terminalMode === 'pty' && workspaceId
+        ? {
+            enabled: true,
+            runId: config.runId,
+            workspaceId,
+            agentType: effectiveAgent,
+            cols: DEFAULT_PTY_COLS,
+            rows: DEFAULT_PTY_ROWS,
+          } satisfies PtyRunOptions
+        : undefined;
       const result = await runAgent(
         effectiveAgent,
         attemptPrompt,
@@ -4333,6 +4780,7 @@ async function executeStory(
         effectiveAgent === 'pi' ? emitStoryStarted : undefined,
         piServerSkillFiles,
         piSessionOptions,
+        ptyOptions,
       );
 
     // Extract token usage from log file after agent exits
@@ -5097,6 +5545,10 @@ async function main(): Promise<void> {
   if (heartbeatInterval) heartbeatInterval.unref(); // don't prevent clean exit
 
   logger.info(`[engine] Agent: ${config.agentType}${config.agentModel ? ` (model: ${config.agentModel})` : ''}`);
+  logger.info(`[engine] Terminal mode: ${config.terminalMode}`);
+  if (config.terminalMode === 'pty' && !PTY_AVAILABLE) {
+    throw new Error(`PTY_NOT_AVAILABLE: ${PTY_UNAVAILABLE_HINT}`);
+  }
   if (config.attachAddr) logger.info(`[engine] OpenCode attach: ${config.attachAddr}`);
 
   if (!fs.existsSync(config.jsonPath)) {
