@@ -50,7 +50,9 @@ import { ensureWorktreeRuntimeSupport } from '../lib/worktree-runtime';
 import { getBoss } from '../lib/pg-boss';
 import { getLatestWorkerHeartbeat, isWorkerHeartbeatStale } from '../lib/worker-heartbeat';
 import { authRequired } from '../lib/auth-utils';
-import { ConflictError, ForbiddenError, NotFoundError, UnprocessableError, ValidationError } from '../lib/errors';
+import { ConflictError, ForbiddenError, NotFoundError, ServiceUnavailableError, UnprocessableError, ValidationError } from '../lib/errors';
+import { DEFAULT_TERMINAL_MODE, invalidTerminalModeMessage, isTerminalMode, normalizeTerminalMode, type TerminalMode } from '../lib/terminal-mode';
+import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from '../lib/pty-manager';
 import { sweepOrphanProcesses, type OrphanSweepResult } from '../worker';
 
 // ── Claude binary + env-var stripping for agentic conflict resolution ─────────
@@ -982,6 +984,30 @@ interface PipelineRunRow {
   triggered_via: 'queue' | 'run_now';
   auto_worktree: boolean;
   include_graph: boolean;
+  terminal_mode: TerminalMode | null;
+}
+
+function resolveRequestedTerminalMode(value: string | null | undefined): TerminalMode {
+  if (value === null || value === undefined) {
+    return DEFAULT_TERMINAL_MODE;
+  }
+  if (!isTerminalMode(value)) {
+    throw new ValidationError(invalidTerminalModeMessage(value));
+  }
+  return value;
+}
+
+function assertTerminalModeAvailable(mode: TerminalMode): void {
+  if (mode === 'pty' && !PTY_AVAILABLE) {
+    throw new ServiceUnavailableError(`PTY terminal mode is unavailable on this server. ${PTY_UNAVAILABLE_HINT}`);
+  }
+}
+
+function normalizePipelineRun<T extends { terminal_mode?: string | null }>(run: T): Omit<T, 'terminal_mode'> & { terminal_mode: TerminalMode } {
+  return {
+    ...run,
+    terminal_mode: normalizeTerminalMode(run.terminal_mode),
+  };
 }
 
 interface StoryResultRow {
@@ -1112,6 +1138,12 @@ router.post('/preflight', async (req: Request, res: Response) => {
  *               thinkingBudget: { type: integer, description: "Budget for extended reasoning" }
  *               effortLevel: { type: string, enum: [low, medium, high, max, xhigh], description: "Reasoning effort level hint for supported agents" }
  *               forceRerun: { type: boolean, description: "Force rerun even if an identical idempotent request already exists" }
+ *               terminal_mode:
+ *                 type: string
+ *                 enum: [ansi-html, pty]
+ *                 nullable: true
+ *                 default: ansi-html
+ *                 description: "Run-level terminal renderer mode. null/missing resolves to ansi-html for backward compatibility."
  *     responses:
  *       200:
  *         description: Pipeline started or conflict detected
@@ -1152,11 +1184,13 @@ const PipelineTriggerSchema = z.object({
   effortLevel: z.enum(['low', 'medium', 'high', 'max', 'xhigh']).optional(),
   reasoningEffort: z.string().optional(),
   forceRerun: z.boolean().optional(),
+  terminal_mode: z.string().nullable().optional(),
+  terminalMode: z.string().nullable().optional(),
 });
 
 router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, forceRerun } = req.body;
+    const { specPath, workspaceId, autoWorktree, autoMerge, mergeStrategy, dryRun, triggerType, forceSequential, queuedRunId, includeGraph, agentOverride, modelOverride, storyId, thinkingEnabled, thinkingBudget, effortLevel, reasoningEffort, forceRerun, terminal_mode, terminalMode } = req.body;
 
     // 1. Look up workspace path
     const workspace = await queryOne('SELECT * FROM workspaces WHERE id = $1', [workspaceId]) as
@@ -1165,6 +1199,9 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       throw new NotFoundError('Workspace not found');
       return;
     }
+
+    const resolvedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
+    assertTerminalModeAvailable(resolvedTerminalMode);
 
     // Plan enforcement is handled by requirePlan middleware once billing-launch spec is complete.
 
@@ -1484,8 +1521,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
         const existingQueued = await queryOne<{ id: number }>(`SELECT id FROM pipeline_runs WHERE workspace_id = $1 AND status = 'queued' AND spec_path = $2 LIMIT 1`, [workspaceId, specPath]);
 
         const position = queueCount + 1;
-        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model)
-           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel]);
+        const queueResult = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, queued_at, queue_position, triggered_via, auto_worktree, agent, agent_type, agent_model, terminal_mode)
+           VALUES ($1, $2, 'queued', $3, NOW(), $4, 'queue', $5, $6, $7, $8, $9) RETURNING id`, [specPath, workspaceId, triggerType === 'scheduled' ? 'scheduled' : 'manual', position, !!autoWorktree, resolvedAgentType, resolvedAgentType, finalAgentModel, resolvedTerminalMode]);
         const queuedId = queueResult!.id;
 
         const executionReadiness = (req as any)._executionReadiness;
@@ -1493,6 +1530,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
           queued: true,
           runId: queuedId,
           queuePosition: position,
+          terminalMode: resolvedTerminalMode,
+          terminal_mode: resolvedTerminalMode,
           ...(existingQueued ? { warning: `Spec "${specSlugForQueue}" is already queued (run #${existingQueued.id}). This creates an additional queued run.` } : {}),
           ...(executionReadiness ? { executionReadiness } : {}),
         });
@@ -1537,10 +1576,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       const specId = path.basename(specPath, '.json');
       const runResult = await queryOne<{ id: number }>(
         `INSERT INTO pipeline_runs
-           (spec_path, workspace_id, status, trigger_type, agent, agent_type, agent_model, started_at, finished_at, pid, triggered_via)
-         VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7)
+           (spec_path, workspace_id, status, trigger_type, agent, agent_type, agent_model, started_at, finished_at, pid, triggered_via, terminal_mode)
+         VALUES ($1, $2, 'pi_native', $3, $4, $5, $6, NULL, NULL, NULL, $7, $8)
          RETURNING id`,
-        [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia],
+        [specPath, workspaceId, validTriggerType, resolvedAgentType, resolvedAgentType, finalAgentModel, triggeredVia, resolvedTerminalMode],
       );
       const runId = runResult!.id;
 
@@ -1561,6 +1600,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       res.status(200).json({
         runId,
         status: 'pi_native',
+        terminalMode: resolvedTerminalMode,
+        terminal_mode: resolvedTerminalMode,
         expectsExternalOrchestration: true,
       });
       return;
@@ -1689,10 +1730,10 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       // Promote queued run to running — worker will actually execute it
       await execute(`UPDATE pipeline_runs SET status = 'queued', queued_at = NOW(),
          parallelism = $1, agent = $2, agent_type = $3, agent_model = $4,
-         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12 WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, queuedRunId, resolvedMergeStrategy]);
+         branch_name = $5, worktree_path = $6, auto_merge = $7, triggered_via = $8, auto_worktree = $9, include_graph = $10, merge_strategy = $12, terminal_mode = $13 WHERE id = $11 AND status = 'queued'`, [parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, queuedRunId, resolvedMergeStrategy, resolvedTerminalMode]);
       runId = queuedRunId;
     } else {
-      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy]);
+      const runResult = await queryOne<{ id: number }>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, parallelism, agent, agent_type, agent_model, queued_at, branch_name, worktree_path, auto_merge, triggered_via, auto_worktree, include_graph, merge_strategy, terminal_mode) VALUES ($1, $2, 'queued', $3, $4, $5, $6, $7, NOW(), $8, $9, $10, $11, $12, $13, $14, $15) RETURNING id`, [specPath, workspaceId, validTriggerType, parallelism, resolvedAgentType, resolvedAgentType, finalAgentModel, branchName, worktreePath, computedAutoMerge, triggeredVia, needsWorktree, includeGraph ?? false, resolvedMergeStrategy, resolvedTerminalMode]);
       runId = runResult!.id;
     }
 
@@ -1858,6 +1899,7 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       model: finalAgentModel ?? null,
       worktreePath: worktreePath ?? null,
       branchName: branchName ?? null,
+      terminalMode: resolvedTerminalMode,
       autoWorktree: needsWorktree,
       autoMerge: computedAutoMerge,
       mergeStrategy: resolvedMergeStrategy,
@@ -1900,6 +1942,8 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       branchName,
       agentType: resolvedAgentType,
       agentModel: finalAgentModel,
+      terminalMode: resolvedTerminalMode,
+      terminal_mode: resolvedTerminalMode,
       ...(capWarnings ? { capabilityWarnings: capWarnings, capabilityMismatchMode: capMode } : {}),
       ...(executionReadiness ? { executionReadiness } : {}),
       ...(orchestration ? { orchestration } : {}),
@@ -2608,6 +2652,11 @@ router.post('/quick-run', async (req: Request, res: Response) => {
  *             properties:
  *               specPath: { type: string, description: "Relative spec path within the workspace" }
  *               workspaceId: { type: string, description: "Workspace ID" }
+ *               terminal_mode:
+ *                 type: string
+ *                 enum: [ansi-html, pty]
+ *                 nullable: true
+ *                 default: ansi-html
  *     responses:
  *       201:
  *         description: Pipeline run created
@@ -2622,25 +2671,29 @@ router.post('/quick-run', async (req: Request, res: Response) => {
  */
 router.post('/runs', async (req: Request, res: Response) => {
   try {
-    const { specPath, workspaceId } = req.body;
+    const { specPath, workspaceId, terminal_mode, terminalMode } = req.body as { specPath?: string; workspaceId?: string; terminal_mode?: string | null; terminalMode?: string | null };
 
     if (!specPath || !workspaceId) {
       throw new ValidationError('Missing required fields: specPath, workspaceId');
       return;
     }
 
-    const result = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status) VALUES ($1, $2, 'running') RETURNING id`, [specPath, workspaceId]);
+    const resolvedTerminalMode = resolveRequestedTerminalMode(terminal_mode ?? terminalMode);
+    assertTerminalModeAvailable(resolvedTerminalMode);
+
+    const result = await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, terminal_mode) VALUES ($1, $2, 'running', $3) RETURNING id`, [specPath, workspaceId, resolvedTerminalMode]);
 
     const runId = result!.id;
 
-    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow;
+    const runRow = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow;
+    const run = normalizePipelineRun(runRow);
 
     // Insert WAL event and broadcast to SSE subscribers
     const walEvent = await queryOne<WalEvent>(`INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('run_started', $1, $2) RETURNING *`, [workspaceId, JSON.stringify({ run_id: runId, spec_path: specPath })]);
 
     broadcastAll(walEvent!);
 
-    res.status(201).json({ run });
+    res.status(201).json({ run, terminalMode: run.terminal_mode, terminal_mode: run.terminal_mode });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Create run');
   }
@@ -2689,10 +2742,11 @@ router.get('/runs', authRequired, async (req: Request, res: Response) => {
       'SELECT COUNT(*)::int as total FROM pipeline_runs WHERE workspace_id = $1',
       [workspaceId]
     ))?.total ?? 0;
-    const items = await query<PipelineRunRow>(
+    const rows = await query<PipelineRunRow>(
       'SELECT * FROM pipeline_runs WHERE workspace_id = $1 ORDER BY id DESC LIMIT $2 OFFSET $3',
       [workspaceId, limit, offset]
     );
+    const items = rows.map((row) => normalizePipelineRun(row));
 
     res.json({ items, total, limit, offset });
   } catch (error: any) {
@@ -2767,11 +2821,14 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
     }
 
     // Fetch both runs
-    const run1 = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [run1Id]) as PipelineRunRow | undefined;
-    const run2 = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [run2Id]) as PipelineRunRow | undefined;
+    const run1Row = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [run1Id]) as PipelineRunRow | undefined;
+    const run2Row = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [run2Id]) as PipelineRunRow | undefined;
 
-    if (!run1) { throw new NotFoundError(`Run ${run1Id} not found`); return; }
-    if (!run2) { throw new NotFoundError(`Run ${run2Id} not found`); return; }
+    if (!run1Row) { throw new NotFoundError(`Run ${run1Id} not found`); return; }
+    if (!run2Row) { throw new NotFoundError(`Run ${run2Id} not found`); return; }
+
+    const run1 = normalizePipelineRun(run1Row);
+    const run2 = normalizePipelineRun(run2Row);
 
     // Fetch story results for both runs (latest per story_id by highest id)
     const stories1All = await query('SELECT * FROM story_results WHERE run_id = $1 ORDER BY id ASC', [run1Id]) as StoryResultRow[];
@@ -2918,6 +2975,10 @@ router.get('/runs/compare', async (req: Request, res: Response) => {
  *                 stories:
  *                   type: array
  *                   items: { $ref: '#/components/schemas/StoryResult' }
+ *                 terminal_mode:
+ *                   type: string
+ *                   enum: [ansi-html, pty]
+ *                   description: "Normalized run terminal renderer mode. Missing/null historical values resolve to ansi-html."
  *                 worktreePath: { type: string, nullable: true, description: "Worktree path (if run uses worktree isolation)" }
  *                 branchName: { type: string, nullable: true, description: "Git branch name (if run uses worktree isolation)" }
  *       404: { description: "Run not found" }
@@ -2930,12 +2991,13 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       return;
     }
 
-    const run = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
+    const runRow = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [runId]) as PipelineRunRow | undefined;
 
-    if (!run) {
+    if (!runRow) {
       throw new NotFoundError('Run not found');
       return;
     }
+    const run = normalizePipelineRun(runRow);
 
     const stories = await query('SELECT * FROM story_results WHERE run_id = $1 ORDER BY id ASC', [runId]) as StoryResultRow[];
 
@@ -3055,6 +3117,8 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
       specModel,
       agentType: run.agent_type ?? null,
       agentModel: run.agent_model || null,
+      terminalMode: run.terminal_mode,
+      terminal_mode: run.terminal_mode,
       // US-004: Expose worktree fields at top level for easy frontend access
       worktreePath: run.worktree_path || null,
       branchName: run.branch_name || null,
@@ -3122,12 +3186,13 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     const { storyIds, forceSequential } = req.body as { storyIds?: string[]; forceSequential?: boolean };
 
     // 1. Fetch the original run
-    const originalRun = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [originalRunId]) as PipelineRunRow | undefined;
+    const originalRunRow = await queryOne('SELECT * FROM pipeline_runs WHERE id = $1', [originalRunId]) as PipelineRunRow | undefined;
 
-    if (!originalRun) {
+    if (!originalRunRow) {
       throw new NotFoundError('Run not found');
       return;
     }
+    const originalRun = normalizePipelineRun(originalRunRow);
 
     // Only retry runs that have terminal failure states
     if (!['failed', 'done', 'partial_failure'].includes(originalRun.status)) {
@@ -3223,18 +3288,20 @@ router.post('/runs/:runId/retry', async (req: Request, res: Response) => {
     // 7. Create a NEW pipeline_run linked to the original via retried_from_run_id
     //    Hotfix: allow callers to explicitly force sequential retry execution.
     const newRunResult = forceSequential
-      ? await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id, parallelism)
-         VALUES ($1, $2, 'running', 'retry', $3, $4, $5, 1) RETURNING id`, [originalRun.spec_path,
+      ? await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id, parallelism, terminal_mode)
+         VALUES ($1, $2, 'running', 'retry', $3, $4, $5, 1, $6) RETURNING id`, [originalRun.spec_path,
         originalRun.workspace_id,
         originalRun.branch_name,
         originalRun.worktree_path,
-        originalRunId,])
-      : await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id)
-         VALUES ($1, $2, 'running', 'retry', $3, $4, $5) RETURNING id`, [originalRun.spec_path,
+        originalRunId,
+        originalRun.terminal_mode,])
+      : await queryOne<{id: number}>(`INSERT INTO pipeline_runs (spec_path, workspace_id, status, trigger_type, branch_name, worktree_path, retried_from_run_id, terminal_mode)
+         VALUES ($1, $2, 'running', 'retry', $3, $4, $5, $6) RETURNING id`, [originalRun.spec_path,
         originalRun.workspace_id,
         originalRun.branch_name,
         originalRun.worktree_path,
-        originalRunId,]);
+        originalRunId,
+        originalRun.terminal_mode,]);
     const newRunId = newRunResult!.id;
 
     // 8. Copy successful story results from the original run to the new run
@@ -3966,11 +4033,12 @@ router.get('/runs/:runId/output', async (req: Request, res: Response) => {
   const hb = setInterval(() => res.write(': hb\n\n'), 15_000);
 
   // Resolve agent type for semantic parsing (defaults to 'claude')
-  const runRow = await queryOne('SELECT agent_type, agent, agent_model, status FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null; status: string } | undefined;
+  const runRow = await queryOne('SELECT agent_type, agent, agent_model, status, terminal_mode FROM pipeline_runs WHERE id = $1', [runId]) as { agent_type: string; agent: string; agent_model: string | null; status: string; terminal_mode: string | null } | undefined;
   const agent = runRow?.agent_type ?? runRow?.agent ?? 'claude';
+  const terminalMode = normalizeTerminalMode(runRow?.terminal_mode);
 
   // Emit run metadata so frontend knows which renderer to use
-  res.write(`event: run_meta\ndata: ${JSON.stringify({ agentType: agent, agentModel: runRow?.agent_model ?? null })}\n\n`);
+  res.write(`event: run_meta\ndata: ${JSON.stringify({ agentType: agent, agentModel: runRow?.agent_model ?? null, terminalMode, terminal_mode: terminalMode })}\n\n`);
 
   // ── Replay all existing chunks (late-join support) ────────────────────────
   interface ChunkRow { sequence: number; chunk: Buffer }
@@ -5657,8 +5725,9 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       agent_model: string | null;
       branch_name: string | null;
       worktree_path: string | null;
+      terminal_mode: TerminalMode | null;
     }>(
-      `SELECT id, spec_path, workspace_id, status, agent, agent_type, agent_model, branch_name, worktree_path
+      `SELECT id, spec_path, workspace_id, status, agent, agent_type, agent_model, branch_name, worktree_path, terminal_mode
        FROM pipeline_runs WHERE id = $1`,
       [originalRunId],
     );
@@ -5686,8 +5755,8 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
     // Create new pipeline_run linked to original
     const newRunRow = await queryOne<{ id: number }>(
       `INSERT INTO pipeline_runs
-         (spec_path, workspace_id, status, trigger_type, retried_from_run_id, agent, agent_type, agent_model, queued_at)
-       VALUES ($1, $2, 'queued', 'dlq-retry', $3, $4, $5, $6, NOW())
+         (spec_path, workspace_id, status, trigger_type, retried_from_run_id, agent, agent_type, agent_model, queued_at, terminal_mode)
+       VALUES ($1, $2, 'queued', 'dlq-retry', $3, $4, $5, $6, NOW(), $7)
        RETURNING id`,
       [
         originalRun.spec_path,
@@ -5696,6 +5765,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
         originalRun.agent,
         originalRun.agent_type,
         originalRun.agent_model,
+        normalizeTerminalMode(originalRun.terminal_mode),
       ],
     );
     if (!newRunRow) throw new Error('Failed to create new run row');
@@ -5710,6 +5780,7 @@ router.post('/runs/:id/dlq/retry', async (req: Request, res: Response) => {
       model: originalRun.agent_model ?? null,
       worktreePath: originalRun.worktree_path ?? null,
       branchName: originalRun.branch_name ?? null,
+      terminalMode: normalizeTerminalMode(originalRun.terminal_mode),
       autoWorktree: false,
       autoMerge: false,
       envOverrides: {},

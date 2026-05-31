@@ -18,6 +18,7 @@
  */
 
 import { z } from 'zod';
+import { TerminalModeSchema } from './terminal-mode';
 
 // ── pipeline:run ─────────────────────────────────────────────────────────────
 
@@ -43,6 +44,7 @@ export const PipelineRunJobPayload = z.object({
   model: z.string().nullable(),
   worktreePath: z.string().nullable(),
   branchName: z.string().nullable(),
+  terminalMode: TerminalModeSchema.optional().default('ansi-html'),
   autoWorktree: z.boolean().optional().default(false),
   autoMerge: z.boolean().optional().default(false),
   mergeStrategy: MergeStrategyEnum.optional().default('direct'),
