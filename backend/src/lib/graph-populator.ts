@@ -88,22 +88,36 @@ async function handleStoryCompleted(event: WalEvent, status: 'pass' | 'fail'): P
   if (!storyId) return;
 
   const runId = payload.run_id;
-  const workspaceId = event.workspace_id || '';
-  const specId = event.spec_id || '';
+  let workspaceId = event.workspace_id || '';
+  let specId = event.spec_id || '';
   const title = payload.story_title || storyId;
+
+  if (runId && (!workspaceId || !specId)) {
+    const run = await queryOne<{ spec_path: string; workspace_id: string }>(
+      'SELECT spec_path, workspace_id FROM pipeline_runs WHERE id = $1',
+      [runId],
+    );
+    workspaceId = workspaceId || run?.workspace_id || '';
+    specId = specId || extractSpecId(run?.spec_path || '');
+  }
+
+  if (!specId || !workspaceId) {
+    logger.warn({ storyId, runId, specId, workspaceId }, '[graph-populator] skipping story graph write without canonical scope');
+    return;
+  }
 
   let nodesCreated = 0;
   let edgesCreated = 0;
 
   // 1. Add story node
-  await addStoryNode({ id: storyId, specId, title, status });
+  await addStoryNode({ id: storyId, specId, workspaceId, title, status });
   nodesCreated++;
 
   // 2. Mine real file paths from story output chunks instead of commit SHAs.
   if (runId) {
     const filePaths = await collectStoryFileTouches(runId, storyId);
     for (const filePath of filePaths) {
-      await addFileTouch(storyId, filePath, workspaceId);
+      await addFileTouch(storyId, filePath, workspaceId, specId);
       edgesCreated++;
     }
   }
@@ -118,7 +132,7 @@ async function handleStoryCompleted(event: WalEvent, status: 'pass' | 'fail'): P
       try {
         const skills: string[] = JSON.parse(sr.active_skills);
         for (const skillName of skills) {
-          await addSkillUsage(skillName, storyId, 'auto-match');
+          await addSkillUsage(skillName, storyId, specId, workspaceId, 'auto-match');
           edgesCreated++;
         }
       } catch {
@@ -151,7 +165,12 @@ async function handleMemoryCreated(event: WalEvent): Promise<void> {
 
   const sourceStoryId = event.story_id || payload.storyId || '';
   const sourceSpecId = event.spec_id || payload.specId || payload.source_spec_id || '';
+  const workspaceId = event.workspace_id || '';
   if (!sourceStoryId && !sourceSpecId) return;
+  if (!workspaceId) {
+    logger.warn({ memoryId: payload.id || `mem-${event.id}` }, '[graph-populator] skipping memory graph write without workspaceId');
+    return;
+  }
 
   // memory_auto_saved has categories array; memory_created may have a single category
   const categories = payload.categories || (payload.category ? [payload.category] : ['unknown']);
@@ -160,16 +179,16 @@ async function handleMemoryCreated(event: WalEvent): Promise<void> {
 
   if (sourceStoryId) {
     for (const category of categories) {
-      await addMemoryLink(memoryId, sourceStoryId, category);
+      await addMemoryLink(memoryId, sourceStoryId, sourceSpecId, workspaceId, category);
     }
   }
 
   if (sourceSpecId) {
-    await addMemorySourceSpec(memoryId, sourceSpecId);
+    await addMemorySourceSpec(memoryId, sourceSpecId, workspaceId);
   }
 
   for (const filePath of relatedFiles) {
-    await addMemoryAboutFile(memoryId, filePath);
+    await addMemoryAboutFile(memoryId, filePath, workspaceId);
   }
 
   logger.info(

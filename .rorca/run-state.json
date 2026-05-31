@@ -1,11 +1,12 @@
 {
-  "specId": "",
-  "runId": 0,
-  "startedAt": "",
-  "lastUpdatedAt": "2026-05-06T18:52:28.344Z",
+  "specId": "Rorca Graph Identity Phase 1 Remaining",
+  "runId": 20260316000339,
+  "startedAt": "2026-05-31T21:34:15.944Z",
+  "lastUpdatedAt": "2026-05-31T21:34:16.760Z",
   "completedStories": [],
   "failedStories": [],
   "skippedStories": [],
-  "currentStory": null,
-  "decisions": []
+  "currentStory": "GI-003",
+  "decisions": [],
+  "resumedFromStory": null
 }

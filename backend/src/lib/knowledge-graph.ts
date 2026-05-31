@@ -416,6 +416,7 @@ export async function collectStoryFileTouches(runId: number, storyId: string): P
 export interface StoryNode {
   id: string;
   specId: string;
+  workspaceId: string;
   title: string;
   status: string;
 }
@@ -454,6 +455,36 @@ export interface SkillNode {
   source: string;
 }
 
+export function normalizeGraphFilePath(filePath: string): string {
+  const normalized = path.posix.normalize((filePath || '').trim().replace(/\\/g, '/'));
+  if (normalized === '.' || normalized === '') return '';
+  return normalized.replace(/^\.\//, '');
+}
+
+export function buildStoryNodeKey(workspaceId: string, specId: string, storyId: string): string {
+  return `story:${workspaceId}::${specId}::${storyId}`;
+}
+
+export function buildFileNodeKey(workspaceId: string, filePath: string): string {
+  return `file:${workspaceId}::${normalizeGraphFilePath(filePath)}`;
+}
+
+export function buildSpecNodeKey(workspaceId: string, specId: string): string {
+  return `spec:${workspaceId}::${specId}`;
+}
+
+export function buildMemoryNodeKey(workspaceId: string, memoryId: string): string {
+  return `memory:${workspaceId}::${memoryId}`;
+}
+
+export function buildConventionNodeKey(workspaceId: string, conventionName: string): string {
+  return `convention:${workspaceId}::${conventionName}`;
+}
+
+export function buildSkillNodeKey(skillName: string, source?: string): string {
+  return `skill:${source || 'default'}::${skillName}`;
+}
+
 /**
  * Add or update a Story vertex in the knowledge graph.
  * Uses MERGE to be idempotent.
@@ -461,134 +492,210 @@ export interface SkillNode {
  */
 export async function addStoryNode(story: StoryNode): Promise<void> {
   if (!(await isGraphAvailable())) return;
+  const storyKey = buildStoryNodeKey(story.workspaceId, story.specId, story.id);
   const cypher = `
-    MERGE (s:Story {id: '${escCypher(story.id)}'})
-    SET s.specId = '${escCypher(story.specId)}',
+    MERGE (s:Story {key: '${escCypher(storyKey)}'})
+    SET s.id = '${escCypher(story.id)}',
+        s.storyId = '${escCypher(story.id)}',
+        s.specId = '${escCypher(story.specId)}',
+        s.workspaceId = '${escCypher(story.workspaceId)}',
+        s.workspace_id = '${escCypher(story.workspaceId)}',
         s.title = '${escCypher(story.title)}',
         s.status = '${escCypher(story.status)}'
   `;
   await cypherMutate(cypher);
-  logger.debug({ storyId: story.id }, '[knowledge-graph] Story node upserted');
+  logger.debug({ storyId: story.id, storyKey }, '[knowledge-graph] Story node upserted');
 }
 
 /**
  * Add a File vertex (if not exists) and create a TOUCHES edge from a Story.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addFileTouch(storyId: string, filePath: string, workspaceId?: string): Promise<void> {
+export async function addFileTouch(
+  storyId: string,
+  filePath: string,
+  workspaceId: string,
+  specId: string,
+): Promise<void> {
   if (!(await isGraphAvailable())) return;
-  const wsId = workspaceId || '';
+  const normalizedPath = normalizeGraphFilePath(filePath);
   const cypher = `
-    MERGE (s:Story {id: '${escCypher(storyId)}'})
-    MERGE (f:File {path: '${escCypher(filePath)}'})
-    ON CREATE SET f.workspace_id = '${escCypher(wsId)}'
+    MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
+    ON CREATE SET s.id = '${escCypher(storyId)}',
+                  s.storyId = '${escCypher(storyId)}',
+                  s.specId = '${escCypher(specId)}',
+                  s.workspaceId = '${escCypher(workspaceId)}',
+                  s.workspace_id = '${escCypher(workspaceId)}'
+    MERGE (f:File {key: '${escCypher(buildFileNodeKey(workspaceId, normalizedPath))}'})
+    SET f.path = '${escCypher(normalizedPath)}',
+        f.workspaceId = '${escCypher(workspaceId)}',
+        f.workspace_id = '${escCypher(workspaceId)}'
     MERGE (s)-[r:TOUCHES]->(f)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ storyId, filePath }, '[knowledge-graph] File touch edge added');
+  logger.debug({ storyId, filePath: normalizedPath, workspaceId, specId }, '[knowledge-graph] File touch edge added');
 }
 
 /**
  * Link a Memory entry to the Story that produced it.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addMemoryLink(memoryId: string, storyId: string, category?: string): Promise<void> {
+export async function addMemoryLink(
+  memoryId: string,
+  storyId: string,
+  specId: string,
+  workspaceId: string,
+  category?: string,
+): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cat = category || '';
   const cypher = `
-    MERGE (m:Memory {id: '${escCypher(memoryId)}'})
-    ON CREATE SET m.category = '${escCypher(cat)}',
-                  m.created_at = '${new Date().toISOString()}'
-    MERGE (s:Story {id: '${escCypher(storyId)}'})
+    MERGE (m:Memory {key: '${escCypher(buildMemoryNodeKey(workspaceId, memoryId))}'})
+    ON CREATE SET m.created_at = '${new Date().toISOString()}'
+    SET m.id = '${escCypher(memoryId)}',
+        m.category = COALESCE(m.category, '${escCypher(cat)}'),
+        m.workspaceId = '${escCypher(workspaceId)}'
+    MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
+    ON CREATE SET s.id = '${escCypher(storyId)}',
+                  s.storyId = '${escCypher(storyId)}',
+                  s.specId = '${escCypher(specId)}',
+                  s.workspaceId = '${escCypher(workspaceId)}',
+                  s.workspace_id = '${escCypher(workspaceId)}'
     MERGE (m)-[r:LEARNED_FROM]->(s)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ memoryId, storyId }, '[knowledge-graph] Memory link added');
+  logger.debug({ memoryId, storyId, specId, workspaceId }, '[knowledge-graph] Memory link added');
 }
 
 /**
  * Link a Memory entry to a specific File it references.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addMemoryAboutFile(memoryId: string, filePath: string): Promise<void> {
+export async function addMemoryAboutFile(
+  memoryId: string,
+  filePath: string,
+  workspaceId: string,
+): Promise<void> {
   if (!(await isGraphAvailable())) return;
+  const normalizedPath = normalizeGraphFilePath(filePath);
   const cypher = `
-    MERGE (m:Memory {id: '${escCypher(memoryId)}'})
-    MERGE (f:File {path: '${escCypher(filePath)}'})
+    MERGE (m:Memory {key: '${escCypher(buildMemoryNodeKey(workspaceId, memoryId))}'})
+    SET m.id = '${escCypher(memoryId)}',
+        m.workspaceId = '${escCypher(workspaceId)}'
+    MERGE (f:File {key: '${escCypher(buildFileNodeKey(workspaceId, normalizedPath))}'})
+    SET f.path = '${escCypher(normalizedPath)}',
+        f.workspaceId = '${escCypher(workspaceId)}',
+        f.workspace_id = '${escCypher(workspaceId)}'
     MERGE (m)-[r:ABOUT]->(f)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ memoryId, filePath }, '[knowledge-graph] Memory-about-file edge added');
+  logger.debug({ memoryId, filePath: normalizedPath, workspaceId }, '[knowledge-graph] Memory-about-file edge added');
 }
 
 /**
  * Link a Memory entry to the Spec that produced it.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addMemorySourceSpec(memoryId: string, specId: string): Promise<void> {
+export async function addMemorySourceSpec(memoryId: string, specId: string, workspaceId: string): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cypher = `
-    MERGE (m:Memory {id: '${escCypher(memoryId)}'})
-    MERGE (sp:Spec {id: '${escCypher(specId)}'})
+    MERGE (m:Memory {key: '${escCypher(buildMemoryNodeKey(workspaceId, memoryId))}'})
+    SET m.id = '${escCypher(memoryId)}',
+        m.workspaceId = '${escCypher(workspaceId)}'
+    MERGE (sp:Spec {key: '${escCypher(buildSpecNodeKey(workspaceId, specId))}'})
+    ON CREATE SET sp.id = '${escCypher(specId)}',
+                  sp.specId = '${escCypher(specId)}',
+                  sp.workspaceId = '${escCypher(workspaceId)}',
+                  sp.workspace_id = '${escCypher(workspaceId)}'
     MERGE (m)-[r:FROM_SPEC]->(sp)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ memoryId, specId }, '[knowledge-graph] Memory-from-spec edge added');
+  logger.debug({ memoryId, specId, workspaceId }, '[knowledge-graph] Memory-from-spec edge added');
 }
 
 /**
  * Link a Convention to a File pattern it governs.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addConventionLink(conventionName: string, filePath: string, source?: string, layer?: string): Promise<void> {
+export async function addConventionLink(
+  conventionName: string,
+  filePath: string,
+  workspaceId: string,
+  source?: string,
+  layer?: string,
+): Promise<void> {
   if (!(await isGraphAvailable())) return;
+  const normalizedPath = normalizeGraphFilePath(filePath);
   const cypher = `
-    MERGE (c:Convention {name: '${escCypher(conventionName)}'})
-    ON CREATE SET c.source = '${escCypher(source || '')}',
-                  c.layer = '${escCypher(layer || '')}'
-    MERGE (f:File {path: '${escCypher(filePath)}'})
+    MERGE (c:Convention {key: '${escCypher(buildConventionNodeKey(workspaceId, conventionName))}'})
+    SET c.name = '${escCypher(conventionName)}',
+        c.source = '${escCypher(source || '')}',
+        c.layer = '${escCypher(layer || '')}',
+        c.workspaceId = '${escCypher(workspaceId)}'
+    MERGE (f:File {key: '${escCypher(buildFileNodeKey(workspaceId, normalizedPath))}'})
+    SET f.path = '${escCypher(normalizedPath)}',
+        f.workspaceId = '${escCypher(workspaceId)}',
+        f.workspace_id = '${escCypher(workspaceId)}'
     MERGE (c)-[r:APPLIES_TO]->(f)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ conventionName, filePath }, '[knowledge-graph] Convention link added');
+  logger.debug({ conventionName, filePath: normalizedPath, workspaceId }, '[knowledge-graph] Convention link added');
 }
 
 /**
  * Mark a Convention as violated by a Story.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addConventionViolation(conventionName: string, storyId: string): Promise<void> {
+export async function addConventionViolation(
+  conventionName: string,
+  storyId: string,
+  specId: string,
+  workspaceId: string,
+): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cypher = `
-    MERGE (c:Convention {name: '${escCypher(conventionName)}'})
-    MERGE (s:Story {id: '${escCypher(storyId)}'})
+    MERGE (c:Convention {key: '${escCypher(buildConventionNodeKey(workspaceId, conventionName))}'})
+    SET c.name = '${escCypher(conventionName)}',
+        c.workspaceId = '${escCypher(workspaceId)}'
+    MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
+    ON CREATE SET s.id = '${escCypher(storyId)}',
+                  s.storyId = '${escCypher(storyId)}',
+                  s.specId = '${escCypher(specId)}',
+                  s.workspaceId = '${escCypher(workspaceId)}',
+                  s.workspace_id = '${escCypher(workspaceId)}'
     MERGE (c)-[r:VIOLATED_BY]->(s)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ conventionName, storyId }, '[knowledge-graph] Convention violation edge added');
+  logger.debug({ conventionName, storyId, specId, workspaceId }, '[knowledge-graph] Convention violation edge added');
 }
 
 /**
  * Track which Skill was injected/used in a Story.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addSkillUsage(skillName: string, storyId: string, source?: string): Promise<void> {
+export async function addSkillUsage(skillName: string, storyId: string, specId: string, workspaceId: string, source?: string): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cypher = `
-    MERGE (sk:Skill {name: '${escCypher(skillName)}'})
-    ON CREATE SET sk.source = '${escCypher(source || '')}'
-    MERGE (s:Story {id: '${escCypher(storyId)}'})
+    MERGE (sk:Skill {key: '${escCypher(buildSkillNodeKey(skillName, source))}'})
+    SET sk.name = '${escCypher(skillName)}',
+        sk.source = '${escCypher(source || '')}'
+    MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
+    ON CREATE SET s.id = '${escCypher(storyId)}',
+                  s.storyId = '${escCypher(storyId)}',
+                  s.specId = '${escCypher(specId)}',
+                  s.workspaceId = '${escCypher(workspaceId)}',
+                  s.workspace_id = '${escCypher(workspaceId)}'
     MERGE (sk)-[r:USED_IN]->(s)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ skillName, storyId }, '[knowledge-graph] Skill usage edge added');
+  logger.debug({ skillName, storyId, specId }, '[knowledge-graph] Skill usage edge added');
 }
 
 /**
@@ -598,27 +705,39 @@ export async function addSkillUsage(skillName: string, storyId: string, source?:
 export async function addSpecNode(spec: SpecNode): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cypher = `
-    MERGE (sp:Spec {id: '${escCypher(spec.id)}'})
-    SET sp.title = '${escCypher(spec.title)}',
+    MERGE (sp:Spec {key: '${escCypher(buildSpecNodeKey(spec.workspace_id, spec.id))}'})
+    SET sp.id = '${escCypher(spec.id)}',
+        sp.specId = '${escCypher(spec.id)}',
+        sp.title = '${escCypher(spec.title)}',
         sp.status = '${escCypher(spec.status)}',
+        sp.workspaceId = '${escCypher(spec.workspace_id)}',
         sp.workspace_id = '${escCypher(spec.workspace_id)}'
     MERGE (w:Workspace {id: '${escCypher(spec.workspace_id)}'})
     MERGE (sp)-[r:IN_WORKSPACE]->(w)
     ${evidenceEdgeSet('r')}
   `;
   await cypherMutate(cypher);
-  logger.debug({ specId: spec.id }, '[knowledge-graph] Spec node upserted');
+  logger.debug({ specId: spec.id, workspaceId: spec.workspace_id }, '[knowledge-graph] Spec node upserted');
 }
 
 /**
  * Add Story BELONGS_TO Spec edge.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addStoryToSpec(storyId: string, specId: string): Promise<void> {
+export async function addStoryToSpec(storyId: string, specId: string, workspaceId: string): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cypher = `
-    MERGE (s:Story {id: '${escCypher(storyId)}'})
-    MERGE (sp:Spec {id: '${escCypher(specId)}'})
+    MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
+    ON CREATE SET s.id = '${escCypher(storyId)}',
+                  s.storyId = '${escCypher(storyId)}',
+                  s.specId = '${escCypher(specId)}',
+                  s.workspaceId = '${escCypher(workspaceId)}',
+                  s.workspace_id = '${escCypher(workspaceId)}'
+    MERGE (sp:Spec {key: '${escCypher(buildSpecNodeKey(workspaceId, specId))}'})
+    ON CREATE SET sp.id = '${escCypher(specId)}',
+                  sp.specId = '${escCypher(specId)}',
+                  sp.workspaceId = '${escCypher(workspaceId)}',
+                  sp.workspace_id = '${escCypher(workspaceId)}'
     MERGE (s)-[r:BELONGS_TO]->(sp)
     ${evidenceEdgeSet('r')}
   `;
@@ -629,11 +748,21 @@ export async function addStoryToSpec(storyId: string, specId: string): Promise<v
  * Add Story DEPENDS_ON Story edges from the spec JSON dependsOn field.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addStoryDependency(storyId: string, dependsOnId: string): Promise<void> {
+export async function addStoryDependency(storyId: string, dependsOnId: string, specId: string, workspaceId: string): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cypher = `
-    MERGE (s:Story {id: '${escCypher(storyId)}'})
-    MERGE (d:Story {id: '${escCypher(dependsOnId)}'})
+    MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
+    ON CREATE SET s.id = '${escCypher(storyId)}',
+                  s.storyId = '${escCypher(storyId)}',
+                  s.specId = '${escCypher(specId)}',
+                  s.workspaceId = '${escCypher(workspaceId)}',
+                  s.workspace_id = '${escCypher(workspaceId)}'
+    MERGE (d:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, dependsOnId))}'})
+    ON CREATE SET d.id = '${escCypher(dependsOnId)}',
+                  d.storyId = '${escCypher(dependsOnId)}',
+                  d.specId = '${escCypher(specId)}',
+                  d.workspaceId = '${escCypher(workspaceId)}',
+                  d.workspace_id = '${escCypher(workspaceId)}'
     MERGE (s)-[r:DEPENDS_ON]->(d)
     ${evidenceEdgeSet('r')}
   `;
@@ -841,19 +970,20 @@ export async function populateFromRun(
       await addStoryNode({
         id: sr.story_id,
         specId,
+        workspaceId: String(workspaceId),
         title: sr.story_id,
         status: sr.status,
       });
       nodesCreated++;
 
       // Story belongs to spec
-      await addStoryToSpec(sr.story_id, specId);
+      await addStoryToSpec(sr.story_id, specId, String(workspaceId));
       edgesCreated++;
 
       // Mine real file paths from the story output chunks written by story-log-follower.
       const filePaths = await collectStoryFileTouches(runId, sr.story_id);
       for (const filePath of filePaths) {
-        await addFileTouch(sr.story_id, filePath, String(workspaceId));
+        await addFileTouch(sr.story_id, filePath, String(workspaceId), specId);
         edgesCreated++;
       }
     }
@@ -894,17 +1024,18 @@ export async function populateFromSpec(
       await addStoryNode({
         id: story.id,
         specId,
+        workspaceId: String(workspaceId),
         title: story.title,
         status: 'pending',
       });
 
       // Story belongs to spec
-      await addStoryToSpec(story.id, specId);
+      await addStoryToSpec(story.id, specId, String(workspaceId));
 
       // Story depends on other stories
       if (story.dependsOn) {
         for (const depId of story.dependsOn) {
-          await addStoryDependency(story.id, depId);
+          await addStoryDependency(story.id, depId, specId, String(workspaceId));
         }
       }
     }
@@ -958,12 +1089,12 @@ export async function populateConventionsFromConfig(
       const matchedFiles = micromatch(workspaceFiles, scope.path);
 
       for (const injectFile of scope.inject) {
-        await addConventionLink(injectFile, '', 'config.json', 'scope');
+        await addConventionLink(injectFile, '', workspaceId, 'config.json', 'scope');
         nodesCreated++;
 
         // Link convention to each matched file
         for (const filePath of matchedFiles) {
-          await addConventionLink(injectFile, filePath, 'config.json', 'scope');
+          await addConventionLink(injectFile, filePath, workspaceId, 'config.json', 'scope');
           edgesCreated++;
         }
       }
@@ -971,7 +1102,7 @@ export async function populateConventionsFromConfig(
 
     // 2. Global conventions: always-injected files
     for (const globalFile of globals) {
-      await addConventionLink(globalFile, '', 'config.json', 'global');
+      await addConventionLink(globalFile, '', workspaceId, 'config.json', 'global');
       nodesCreated++;
     }
 
