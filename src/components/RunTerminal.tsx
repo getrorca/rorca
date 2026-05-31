@@ -18,6 +18,12 @@ import {
 } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { apiFetch, BASE_URL } from '../lib/apiFetch';
+import {
+  HTML_LINE_PREFIX,
+  formatStreamJsonForDisplay,
+  parseVerboseLine,
+  decodeBase64Chunk,
+} from '../lib/run-terminal-parity';
 
 export interface RunTerminalHandle {
   scrollToStory: (storyId: string) => void;
@@ -147,270 +153,7 @@ function getPtyTheme(mode: 'light' | 'dark') {
       };
 }
 
-// ─── Markdown → HTML converter (for terminal display) ────────────────────────
-
-/**
- * Convert basic markdown to HTML for terminal display.
- * Must be called on RAW text BEFORE ansi-to-html, because ansi-to-html
- * replaces \n with <br> tags, breaking ^/$ multiline anchors.
- * We HTML-escape the text ourselves first, then apply markdown patterns.
- */
-function markdownToHtml(text: string): string {
-  // HTML-escape first so our injected tags aren't re-escaped downstream.
-  // We set escapeXML:false on the ansi converter when using this path,
-  // OR we call this before the ansi converter on plain text segments.
-  const escaped = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-
-  return escaped
-    // Headings: ### text (at line start)
-    .replace(/^#{1,3}\s+(.+)$/gm, '<span style="color:#93c5fd;font-weight:bold">$1</span>')
-    // Bold **text**
-    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-    // Bold __text__
-    .replace(/__(.+?)__/g, '<b>$1</b>')
-    // Italic *text* (single asterisk, not double)
-    .replace(/\*([^*\n]+?)\*/g, '<i>$1</i>')
-    // Inline code `code`
-    .replace(/`([^`\n]+)`/g, '<code style="background:rgba(255,255,255,0.08);padding:0 3px;border-radius:3px;color:#fbbf24">$1</code>')
-    // Horizontal rule ---
-    .replace(/^[-]{3,}\s*$/gm, '<span style="color:#4b5563">────────────────────────────────</span>')
-    // Bullet list items: "- item" or "– item" at line start
-    .replace(/^[-–]\s+(.+)$/gm, '  <span style="color:#6b7280">•</span> $1');
-}
-
-// ─── stream-json → readable text formatter (for Raw terminal display) ────────
-
-/**
- * Convert a Claude `--output-format stream-json` line to human-readable text.
- * Returns null to suppress the line entirely (e.g. system init, tool results).
- * Returns the original line for non-JSON content (run-loop output, etc.).
- */
-function formatStreamJsonForDisplay(line: string): string | null {
-  const trimmed = line.trim();
-  if (!trimmed) return '';
-  if (!trimmed.startsWith('{')) return line; // Not JSON — pass through
-
-  try {
-    const ev = JSON.parse(trimmed);
-
-    // System init — suppress
-    if (ev.type === 'system') return null;
-
-    // Assistant message with content blocks (tool_use + text)
-    if (ev.type === 'assistant' && ev.message?.content) {
-      const parts: string[] = [];
-      for (const block of ev.message.content) {
-        if (block.type === 'text' && block.text) {
-          // Convert markdown → HTML, prefix so flushBuffer skips XML escaping
-          const text = block.text.trim();
-          if (text) {
-            const truncated = text.length > 500 ? text.slice(0, 500) + '...' : text;
-            // markdownToHtml already HTML-escapes the text, so prefix each output line
-            const converted = markdownToHtml(truncated);
-            parts.push(...converted.split('\n').map(l => HTML_LINE_PREFIX + l));
-          }
-        } else if (block.type === 'tool_use') {
-          const name: string = block.name ?? '';
-          const input = block.input ?? {};
-          switch (name) {
-            case 'Read':     parts.push(`📖 Read ${input.file_path ?? ''}`); break;
-            case 'Write':    parts.push(`📝 Write ${input.file_path ?? ''}`); break;
-            case 'Edit':     parts.push(`✏️  Edit ${input.file_path ?? ''}`); break;
-            case 'Bash':     parts.push(`🔧 Bash: ${(input.command ?? '').slice(0, 200)}`); break;
-            case 'Glob':     parts.push(`🔍 Glob: ${input.pattern ?? ''}`); break;
-            case 'Grep':     parts.push(`🔍 Grep: ${input.pattern ?? ''}`); break;
-            case 'Task':     parts.push(`🧠 Task: ${input.description ?? ''}`); break;
-            case 'TodoWrite': parts.push('📋 TodoWrite'); break;
-            case 'WebFetch': parts.push(`🌐 WebFetch: ${input.url ?? ''}`); break;
-            case 'WebSearch': parts.push(`🌐 WebSearch: ${input.query ?? ''}`); break;
-            default:         parts.push(`🔧 ${name}`);
-          }
-        }
-      }
-      return parts.length > 0 ? parts.join('\n') : null;
-    }
-
-    // Result event (final summary)
-    if (ev.type === 'result') {
-      if (ev.subtype === 'success') {
-        const r = typeof ev.result === 'string' ? ev.result.slice(0, 300) : '';
-        return `\n✅ Completed${r ? ': ' + r.split('\n')[0].slice(0, 200) : ''}`;
-      }
-      if (ev.subtype === 'error') {
-        return `\n❌ Error: ${ev.error ?? 'unknown'}`;
-      }
-      return null;
-    }
-
-    // User message (prompt injection by run-loop) — suppress
-    if (ev.type === 'user') return null;
-
-    // ── OpenCode --format json events ──────────────────────────────────────
-    // Step lifecycle — always suppress first (step_finish can be large JSON)
-    if (ev.type === 'step_start' || ev.type === 'step_finish') return null;
-
-    // Text output from the model — blank line before for visual breathing room
-    if (ev.type === 'text' && ev.part?.text) {
-      const text = (ev.part.text as string).trim();
-      if (!text) return null;
-      // Don't truncate — model text is the primary signal, show it all
-      const converted = markdownToHtml(text);
-      // Prepend a blank line so each model response is visually separated
-      const lines = converted.split('\n').map((l: string) => HTML_LINE_PREFIX + l);
-      return '\n' + lines.join('\n') + '\n';
-    }
-
-    // Tool calls — render with icons like Claude's output
-    if (ev.type === 'tool_use' && ev.part) {
-      const tool: string = ev.part.tool ?? ev.part.state?.tool ?? '';
-      const state = ev.part.state ?? {};
-      const input = state.input ?? {};
-      const status: string = state.status ?? '';
-      // Only show completed tool calls (not pending — those show twice otherwise)
-      if (status === 'pending') return null;
-      const fp: string = input.filePath ?? input.file_path ?? input.path ?? '';
-      const cmd: string = input.command ?? '';
-      const pattern: string = input.pattern ?? input.query ?? '';
-      // Shorten path to last 2 segments for readability
-      const shortFp = fp ? fp.split('/').slice(-2).join('/') : '';
-      switch (tool) {
-        case 'read':      return `  📖 Read ${shortFp}`;
-        case 'write':     return `  📝 Write ${shortFp}`;
-        case 'edit':      return `  ✏️  Edit ${shortFp}`;
-        case 'bash':      return `  🔧 ${cmd.split('\n')[0].slice(0, 160)}`;
-        case 'glob':      return `  🔍 Glob ${pattern}`;
-        case 'grep':      return `  🔍 Grep ${pattern}`;
-        case 'webfetch':  return `  🌐 ${input.url ?? ''}`;
-        case 'websearch': return `  🔍 ${pattern}`;
-        default:          return tool ? `  🔧 ${tool}${shortFp ? ' ' + shortFp : ''}` : null;
-      }
-    }
-
-    // Error events — show prominently with spacing
-    if (ev.type === 'error') {
-      const errData = ev.error ?? ev.part?.error ?? ev.data ?? {};
-      const msg = typeof errData === 'string' ? errData
-        : (errData as any).message ?? (errData as any).name ?? JSON.stringify(errData).slice(0, 300);
-      return `\n❌ ${msg}\n`;
-    }
-
-    // Anything else — suppress unknown JSON events
-    return null;
-  } catch {
-    // Not valid JSON despite starting with { — pass through
-    return line;
-  }
-}
-
-// ─── Verbose text parser (claude --verbose output format) ────────────────────
-
-/** Strip ANSI escape codes */
-function stripAnsi(s: string): string {
-
-  return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
-}
-
-// Patterns ordered by priority — first match wins.
-// Claude --verbose emits lines like "  🔍 Glob: pattern" or "  📖 Read: /path"
-const VERBOSE_PATTERNS: [RegExp, SemanticStep['type']][] = [
-  [/(?:📖\s*)?Read(?:ing)?\s*[:\s]\s*(.+)/i,         'read'],
-  [/(?:📝\s*|✏️\s*|📄\s*)?Writ(?:e|ing)\s*[:\s]\s*(.+)/i, 'write'],
-  [/(?:✏️\s*|📝\s*)?Edit(?:ing)?\s*[:\s]\s*(.+)/i,   'edit'],
-  [/(?:🔧\s*)Bash\s*[:\s]\s*(.*)/i,                   'bash'],
-  [/(?:🔍\s*)Glob\s*[:\s]\s*(.*)/i,                   'search'],
-  [/(?:🔍\s*)Grep\s*[:\s]\s*(.*)/i,                   'search'],
-  [/(?:🔧\s*)Task\s*[:\s]\s*(.*)/i,                   'plan'],
-  [/ULTRATHINK|Let me think|Let me analyze/i,          'plan'],
-  [/(?:feat|fix|chore|test|refactor|style|docs|build)(?:\([^)]*\))?:/i, 'commit'],
-];
-
-/** Parse a single line into a SemanticStep. Handles both Claude --verbose text and OpenCode JSON. */
-function parseVerboseLine(line: string): SemanticStep | null {
-  const clean = stripAnsi(line).trim();
-  if (!clean || clean.length < 4) return null;
-
-  // ── OpenCode JSON event parsing ──
-  if (clean.startsWith('{')) {
-    try {
-      const ev = JSON.parse(clean);
-
-      // OpenCode tool_use event → semantic step
-      if (ev.type === 'tool_use' && ev.part) {
-        const tool: string = ev.part.tool ?? '';
-        const state = ev.part.state ?? {};
-        const input = state.input ?? {};
-        const status: string = state.status ?? '';
-        if (status === 'pending') return null;
-        const fp: string = input.filePath ?? input.file_path ?? '';
-        const shortFp = fp.split('/').slice(-2).join('/');
-        const cmd: string = input.command ?? '';
-        const pattern: string = input.pattern ?? input.query ?? '';
-
-        const TOOL_MAP: Record<string, SemanticStep['type']> = {
-          read: 'read', write: 'write', edit: 'edit', bash: 'bash',
-          glob: 'search', grep: 'search', webfetch: 'unknown', websearch: 'search',
-        };
-        const stepType = TOOL_MAP[tool] ?? 'unknown';
-        let label: string;
-        switch (tool) {
-          case 'read':      label = `Read ${shortFp}`; break;
-          case 'write':     label = `Write ${shortFp}`; break;
-          case 'edit':      label = `Edit ${shortFp}`; break;
-          case 'bash':      label = cmd.slice(0, 100) || 'Bash'; break;
-          case 'glob':      label = `Glob: ${pattern}`; break;
-          case 'grep':      label = `Grep: ${pattern}`; break;
-          case 'webfetch':  label = `WebFetch: ${(input.url ?? '').slice(0, 80)}`; break;
-          case 'websearch': label = `WebSearch: ${pattern}`; break;
-          default:          label = tool || 'Unknown tool';
-        }
-        return { type: stepType, label: label.slice(0, 100), ts: new Date().toISOString(), toolName: tool };
-      }
-
-      // OpenCode text event → plan step (model is reasoning/responding)
-      if (ev.type === 'text' && ev.part?.text) {
-        const text = (ev.part.text as string).trim();
-        if (text.length > 10) {
-          return { type: 'plan', label: text.slice(0, 80), ts: new Date().toISOString() };
-        }
-      }
-
-      // OpenCode error → error step
-      if (ev.type === 'error') {
-        const errData = ev.error ?? ev.data ?? {};
-        const msg = typeof errData === 'string' ? errData
-          : errData.message ?? errData.name ?? 'Unknown error';
-        return { type: 'unknown', label: `Error: ${String(msg).slice(0, 80)}`, ts: new Date().toISOString(), isError: true };
-      }
-    } catch {
-      // Not valid JSON — fall through to regex matching
-    }
-  }
-
-  // ── Claude --verbose text patterns ──
-  for (const [pattern, type] of VERBOSE_PATTERNS) {
-    const m = clean.match(pattern);
-    if (m) {
-      const captured = m[1]?.trim() ?? '';
-      let label: string;
-      switch (type) {
-        case 'read':    label = `Read ${captured}`.slice(0, 100); break;
-        case 'write':   label = `Write ${captured}`.slice(0, 100); break;
-        case 'edit':    label = `Edit ${captured}`.slice(0, 100); break;
-        case 'bash':    label = captured.slice(0, 100) || 'Bash'; break;
-        case 'search':  label = `${clean.match(/(?:Glob|Grep)/i)?.[0] ?? 'Search'} ${captured}`.slice(0, 100); break;
-        case 'plan':    label = captured ? `Task: ${captured.slice(0, 60)}` : 'Reasoning'; break;
-        case 'commit':  label = clean.slice(0, 80); break;
-        default:        label = clean.slice(0, 80);
-      }
-      return { type, label, ts: new Date().toISOString() };
-    }
-  }
-  return null;
-}
-
+// ─── Transcript + semantic replay helpers live in src/lib/run-terminal-parity.ts ─
 // ─── Story ID detection ──────────────────────────────────────────────────────
 
 /** Match story IDs like US-001, CIE-014, SL-003 etc. in text */
@@ -629,8 +372,7 @@ function createAnsiConverter(theme: 'light' | 'dark', escapeXml = true): AnsiToH
   });
 }
 
-// Lines with this prefix are pre-converted HTML — skip XML escaping in the ANSI converter.
-const HTML_LINE_PREFIX = '\x01';
+// HTML_LINE_PREFIX is shared with the parity helper so transcript tests and UI use identical replay semantics.
 
 // ─── Flush buffer interval ───────────────────────────────────────────────────
 
@@ -951,9 +693,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
     es.addEventListener('chunk', (e: MessageEvent) => {
       try {
-        const binary = atob(e.data);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const bytes = decodeBase64Chunk(e.data);
 
         if (terminalModeRef.current === 'pty') {
           writePtyChunk(bytes);

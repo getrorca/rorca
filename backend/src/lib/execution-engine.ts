@@ -2058,8 +2058,9 @@ async function spawnAgentViaPty(
         recordStderr(msg);
         logStream.write(msg);
         if (sequenceRef) {
+          const activeSequenceRef = sequenceRef;
           finishedWrites = finishedWrites
-            .then(() => appendRunPtyOutput(ptyOptions.runId, msg, sequenceRef))
+            .then(() => appendRunPtyOutput(ptyOptions.runId, msg, activeSequenceRef))
             .catch((err: unknown) => logRunPtyStoreError('Failed to persist PTY watchdog message', ptyOptions.runId, err));
         }
         if (pty) {
@@ -2130,8 +2131,9 @@ async function spawnAgentViaPty(
         logStream.write(buf);
         recordStderr(buf);
         if (!sequenceRef) return;
+        const activeSequenceRef = sequenceRef;
         finishedWrites = finishedWrites
-          .then(() => appendRunPtyOutput(ptyOptions.runId, buf, sequenceRef))
+          .then(() => appendRunPtyOutput(ptyOptions.runId, buf, activeSequenceRef))
           .catch((err: unknown) => logRunPtyStoreError('Failed to persist PTY output chunk', ptyOptions.runId, err));
       });
 
