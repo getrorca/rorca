@@ -6,7 +6,7 @@
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { CheckCircle2, XCircle, Loader2, Share2, Database } from 'lucide-react';
+import { CheckCircle2, XCircle, Loader2, Share2, Database, ListOrdered, RefreshCw } from 'lucide-react';
 import { apiFetch } from '../../lib/apiFetch';
 import { useWorkspace } from '../../contexts/WorkspaceContext';
 import { useWalSSE, type WalEvent } from '../../hooks/useWalSSE';
@@ -25,11 +25,61 @@ interface PopulateResponse {
   totalItems: number;
 }
 
+interface ScoreBreakdown {
+  total: number;
+  semantic: number;
+  structural: number;
+  graph: number;
+  provenance: number;
+  recency: number;
+  pinned: number;
+  skills: number;
+  historical: number;
+  diversityPenalty: number;
+  echoChamberPenalty: number;
+  repetitionPenalty: number;
+  duplicationPenalty: number;
+}
+
+interface CandidateExplainability {
+  scoringVersion: string;
+  retrievalMode: string;
+  scoreBreakdown: ScoreBreakdown;
+  provenanceEdges: string[];
+  provenanceConfidence: string | null;
+  provenanceSourceType: string | null;
+  provenanceSource: string | null;
+  graphSignalCount: number;
+  rankReasons: string[];
+}
+
+interface RetrievalDebugCandidate {
+  key: string;
+  finalScore: number;
+  explainability?: CandidateExplainability;
+}
+
+interface RetrievalDebugEvent {
+  id: string;
+  queryPreview: string;
+  scoringVersion: string | null;
+  retrievalMode: string | null;
+  candidates: RetrievalDebugCandidate[];
+}
+
+interface RetrievalDebugResponse {
+  events: RetrievalDebugEvent[];
+}
+
 /* ─── Helpers ─────────────────────────────────────────────────────────────── */
 
 function formatTimestamp(iso: string | null): string {
   if (!iso) return '—';
   return new Date(iso).toLocaleString();
+}
+
+function formatScore(score: number): string {
+  return score >= 0 ? `+${score.toFixed(3)}` : score.toFixed(3);
 }
 
 /* ─── Component ───────────────────────────────────────────────────────────── */
@@ -45,6 +95,10 @@ export function KnowledgeGraphSection() {
   const [populateTotal, setPopulateTotal] = useState(0);
   const [populateCompleted, setPopulateCompleted] = useState(0);
   const [populateError, setPopulateError] = useState<string | null>(null);
+
+  const [debugEvent, setDebugEvent] = useState<RetrievalDebugEvent | null>(null);
+  const [debugLoading, setDebugLoading] = useState(false);
+  const [debugError, setDebugError] = useState<string | null>(null);
 
   const fetchStats = useCallback(async () => {
     try {
@@ -94,6 +148,21 @@ export function KnowledgeGraphSection() {
     }
   }, [workspaceId, fetchStats]));
 
+  const loadRankingDebug = useCallback(async () => {
+    if (!workspaceId) return;
+    setDebugLoading(true);
+    setDebugError(null);
+    try {
+      const data = await apiFetch<RetrievalDebugResponse>(`/api/graph/retrieval-telemetry?workspaceId=${encodeURIComponent(workspaceId)}&limit=1`);
+      setDebugEvent(data.events[0] ?? null);
+    } catch (err: unknown) {
+      setDebugError(err instanceof Error ? err.message : 'Failed to load ranking debug');
+      setDebugEvent(null);
+    } finally {
+      setDebugLoading(false);
+    }
+  }, [workspaceId]);
+
   async function handlePopulate() {
     if (!workspaceId || populating) return;
     setPopulateError(null);
@@ -118,6 +187,11 @@ export function KnowledgeGraphSection() {
       }
     }
   }
+
+  useEffect(() => {
+    setDebugEvent(null);
+    setDebugError(null);
+  }, [workspaceId]);
 
   const progressPct = populateTotal > 0
     ? Math.round((populateCompleted / populateTotal) * 100)
@@ -190,7 +264,7 @@ export function KnowledgeGraphSection() {
                 </div>
 
                 {/* Populate Graph button + progress */}
-                <div className="mt-4">
+                <div className="mt-4 space-y-4">
                   {populating ? (
                     <div className="space-y-2">
                       <div className="flex items-center justify-between text-xs text-muted">
@@ -222,6 +296,90 @@ export function KnowledgeGraphSection() {
                       )}
                     </div>
                   )}
+
+                  <div className="border-t border-border pt-4 space-y-3">
+                    <div className="flex flex-col gap-2 sm:flex-row sm:items-center sm:justify-between">
+                      <div>
+                        <p className="text-sm font-medium text-[var(--text)]">Ranking debug</p>
+                        <p className="text-xs text-muted">Inspect why the latest ranked graph candidates won for this workspace.</p>
+                      </div>
+                      <button
+                        onClick={loadRankingDebug}
+                        disabled={!workspaceId || debugLoading}
+                        className="inline-flex items-center justify-center gap-1.5 px-3 py-1.5 text-xs font-medium rounded-md bg-surface text-primary border border-border hover:bg-bg transition-colors disabled:opacity-50 disabled:cursor-not-allowed"
+                      >
+                        {debugLoading ? <Loader2 className="w-3.5 h-3.5 animate-spin" /> : <RefreshCw className="w-3.5 h-3.5" />}
+                        Load Debug
+                      </button>
+                    </div>
+
+                    {debugError && (
+                      <div className="rounded-lg border border-red-500/20 bg-red-500/5 p-3 text-xs text-red-300">
+                        {debugError}
+                      </div>
+                    )}
+
+                    {!debugLoading && !debugError && !debugEvent && (
+                      <div className="rounded-lg border border-dashed border-border p-3 text-xs text-muted">
+                        No debug data loaded yet.
+                      </div>
+                    )}
+
+                    {debugEvent && (
+                      <div className="space-y-3 rounded-lg border border-border bg-surface p-3">
+                        <div className="space-y-1">
+                          <div className="flex items-center gap-2 text-sm font-medium text-[var(--text)]">
+                            <ListOrdered className="w-4 h-4 text-muted" />
+                            Latest retrieval event
+                          </div>
+                          <p className="text-xs text-muted">{debugEvent.queryPreview || 'No query preview available.'}</p>
+                          <div className="flex flex-wrap gap-2 text-[11px] text-muted">
+                            <span className="rounded-full border border-border px-2 py-0.5">mode: {debugEvent.retrievalMode ?? 'unknown'}</span>
+                            <span className="rounded-full border border-border px-2 py-0.5">scoring: {debugEvent.scoringVersion ?? 'unknown'}</span>
+                          </div>
+                        </div>
+
+                        {debugEvent.candidates.length === 0 ? (
+                          <div className="rounded-lg border border-dashed border-border p-3 text-xs text-muted">
+                            No ranked candidates were captured for this event.
+                          </div>
+                        ) : (
+                          <div className="space-y-3">
+                            {debugEvent.candidates.slice(0, 3).map((candidate) => (
+                              <div key={candidate.key} className="rounded-lg border border-border bg-bg p-3">
+                                <div className="flex flex-wrap items-center justify-between gap-2">
+                                  <p className="text-xs font-mono text-primary break-all">{candidate.key}</p>
+                                  <span className="text-xs font-medium text-[var(--text)]">score {candidate.finalScore.toFixed(3)}</span>
+                                </div>
+
+                                {!candidate.explainability ? (
+                                  <p className="mt-2 text-xs text-muted">No debug data for this candidate.</p>
+                                ) : (
+                                  <div className="mt-3 space-y-3">
+                                    <div className="grid grid-cols-2 sm:grid-cols-3 gap-2 text-xs">
+                                      {Object.entries(candidate.explainability.scoreBreakdown).map(([label, value]) => (
+                                        <div key={label} className="rounded-md border border-border bg-surface px-2 py-1.5">
+                                          <p className="text-[10px] uppercase tracking-wide text-muted">{label}</p>
+                                          <p className="font-mono text-primary">{formatScore(value)}</p>
+                                        </div>
+                                      ))}
+                                    </div>
+                                    <div className="space-y-1 text-xs text-muted">
+                                      <p>Edges: {candidate.explainability.provenanceEdges.length > 0 ? candidate.explainability.provenanceEdges.join(', ') : 'No graph edges recorded'}</p>
+                                      <p>Provenance: {candidate.explainability.provenanceSourceType ?? 'unknown'} / {candidate.explainability.provenanceConfidence ?? 'unknown'}</p>
+                                      {candidate.explainability.rankReasons.length > 0 && (
+                                        <p>Why it ranked: {candidate.explainability.rankReasons.join(' • ')}</p>
+                                      )}
+                                    </div>
+                                  </div>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
+                      </div>
+                    )}
+                  </div>
                 </div>
               </>
             ) : (

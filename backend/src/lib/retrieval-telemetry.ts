@@ -6,7 +6,7 @@
  */
 
 import { execute, query } from '../db/index';
-import type { GraphRagScoreContract } from './retrieval-pipeline';
+import type { GraphRagCandidateExplainability, GraphRagScoreContract } from './retrieval-pipeline';
 import { logger } from './logger';
 
 export interface RetrievalTelemetryCandidate {
@@ -26,6 +26,7 @@ export interface RetrievalTelemetryCandidate {
   conflictsWith: string[];
   supersededBy?: string;
   scoring?: GraphRagScoreContract;
+  explainability?: GraphRagCandidateExplainability;
 }
 
 export interface RetrievalTelemetryEvent {
@@ -152,6 +153,9 @@ function normalizeCandidates(value: unknown): RetrievalTelemetryCandidate[] {
       supersededBy: typeof row.supersededBy === 'string' ? row.supersededBy : undefined,
       scoring: row.scoring && typeof row.scoring === 'object'
         ? row.scoring as GraphRagScoreContract
+        : undefined,
+      explainability: row.explainability && typeof row.explainability === 'object'
+        ? row.explainability as GraphRagCandidateExplainability
         : undefined,
     }];
   });

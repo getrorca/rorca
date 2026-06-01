@@ -167,6 +167,42 @@ export interface GraphRagScoreContract {
   rerank: GraphRagRerankMetadata;
 }
 
+export type GraphRagRetrievalMode = 'semantic-only' | 'semantic-only-lite' | 'graph-reranked';
+
+export interface GraphRagExplainabilityScoreBreakdown {
+  total: number;
+  semantic: number;
+  structural: number;
+  graph: number;
+  provenance: number;
+  recency: number;
+  pinned: number;
+  skills: number;
+  historical: number;
+  diversityPenalty: number;
+  echoChamberPenalty: number;
+  repetitionPenalty: number;
+  duplicationPenalty: number;
+}
+
+export interface GraphRagCandidateExplainability {
+  scoringVersion: GraphRagScoreSchemaVersion;
+  retrievalMode: GraphRagRetrievalMode;
+  scoreBreakdown: GraphRagExplainabilityScoreBreakdown;
+  provenanceEdges: string[];
+  provenanceConfidence: string | null;
+  provenanceSourceType: string | null;
+  provenanceSource: string | null;
+  graphNodeType: GraphRagProximityComponent['nodeType'];
+  graphSignalCount: number;
+  rankReasons: string[];
+  preRerankPosition: number | null;
+  finalPosition: number | null;
+  rerankedBy: 'graph' | 'semantic';
+  tieBreak: GraphRagTieBreak;
+  validationIssues: string[];
+}
+
 export interface RankedRetrievalCandidate extends RetrievalCandidateInput {
   key: string;
   tokenCount: number;
@@ -294,6 +330,111 @@ const RETRIEVAL_SCORE_WEIGHTS = {
   skillAlignment: 0.08,
   historicalUsefulness: 0.07,
 } as const;
+
+function weightedContribution(score: number, weight: number, multiplier = 1): number {
+  return roundScore(score * weight * multiplier);
+}
+
+function summarizeProvenanceEdges(candidate: Pick<RetrievalCandidateInput, 'graphSignals' | 'graphRelationship'>): string[] {
+  const signals = candidate.graphSignals ?? [];
+  if (signals.length === 0) {
+    return candidate.graphRelationship ? [`${candidate.graphRelationship} x1`] : [];
+  }
+
+  const counts = new Map<string, number>();
+  for (const signal of signals) {
+    const relationship = signal.relationship || candidate.graphRelationship || 'RELATED_TO';
+    counts.set(relationship, (counts.get(relationship) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([relationship, count]) => `${relationship} x${count}`);
+}
+
+export function inferGraphRagRetrievalMode(scoring: Pick<GraphRagScoreContract, 'breakdown' | 'rerank'>): GraphRagRetrievalMode {
+  if (scoring.rerank.appliedGraphScoreWeight > 0) {
+    return 'graph-reranked';
+  }
+  if (
+    scoring.rerank.requestedGraphScoreWeight > 0
+    && scoring.breakdown.directGraphProximity.proximityUnavailable
+  ) {
+    return 'semantic-only-lite';
+  }
+  return 'semantic-only';
+}
+
+export function buildGraphRagExplainability(
+  candidate: Pick<RetrievalCandidateInput, 'graphSignals' | 'graphRelationship'> & {
+    scoring: GraphRagScoreContract;
+    reasons?: string[];
+  },
+): GraphRagCandidateExplainability {
+  const { scoring } = candidate;
+  const semanticMultiplier = 1 - scoring.rerank.appliedGraphScoreWeight;
+  const scoreBreakdown: GraphRagExplainabilityScoreBreakdown = {
+    total: roundScore(scoring.score),
+    semantic: weightedContribution(
+      scoring.breakdown.retrievalSignal.score,
+      RETRIEVAL_SCORE_WEIGHTS.retrievalSignal,
+      semanticMultiplier,
+    ),
+    structural: weightedContribution(
+      scoring.breakdown.scopeStrength.score,
+      RETRIEVAL_SCORE_WEIGHTS.scopeStrength,
+      semanticMultiplier,
+    ),
+    graph: roundScore(scoring.breakdown.directGraphProximity.score * scoring.rerank.appliedGraphScoreWeight),
+    provenance: weightedContribution(
+      scoring.breakdown.provenanceConfidence.score,
+      RETRIEVAL_SCORE_WEIGHTS.provenanceConfidence,
+      semanticMultiplier,
+    ),
+    recency: weightedContribution(
+      scoring.breakdown.recency.score,
+      RETRIEVAL_SCORE_WEIGHTS.recency,
+      semanticMultiplier,
+    ),
+    pinned: weightedContribution(
+      scoring.breakdown.pinnedStatus.score,
+      RETRIEVAL_SCORE_WEIGHTS.pinnedStatus,
+      semanticMultiplier,
+    ),
+    skills: weightedContribution(
+      scoring.breakdown.skillAlignment.score,
+      RETRIEVAL_SCORE_WEIGHTS.skillAlignment,
+      semanticMultiplier,
+    ),
+    historical: weightedContribution(
+      scoring.breakdown.historicalUsefulness.score,
+      RETRIEVAL_SCORE_WEIGHTS.historicalUsefulness,
+      semanticMultiplier,
+    ),
+    diversityPenalty: roundScore(-1 * scoring.breakdown.diversityPenalty.score * semanticMultiplier),
+    echoChamberPenalty: roundScore(-1 * scoring.breakdown.echoChamberPenalty.score * semanticMultiplier),
+    repetitionPenalty: roundScore(-1 * scoring.breakdown.repetitionPenalty.score * semanticMultiplier),
+    duplicationPenalty: roundScore(-1 * scoring.breakdown.duplicationPenalty.score * semanticMultiplier),
+  };
+
+  return {
+    scoringVersion: scoring.schemaVersion,
+    retrievalMode: inferGraphRagRetrievalMode(scoring),
+    scoreBreakdown,
+    provenanceEdges: summarizeProvenanceEdges(candidate),
+    provenanceConfidence: scoring.breakdown.provenanceConfidence.confidence,
+    provenanceSourceType: scoring.breakdown.provenanceConfidence.sourceType,
+    provenanceSource: scoring.breakdown.provenanceConfidence.source,
+    graphNodeType: scoring.breakdown.directGraphProximity.nodeType ?? 'unknown',
+    graphSignalCount: scoring.breakdown.directGraphProximity.signalCount ?? candidate.graphSignals?.length ?? 0,
+    rankReasons: candidate.reasons ?? [],
+    preRerankPosition: scoring.rerank.preRerankPosition,
+    finalPosition: scoring.rerank.finalPosition,
+    rerankedBy: scoring.rerank.rerankedBy,
+    tieBreak: scoring.tieBreak,
+    validationIssues: scoring.validation.issues,
+  };
+}
 
 const DUPLICATION_PENALTIES = {
   contradiction: 0.08,

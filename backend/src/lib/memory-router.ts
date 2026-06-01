@@ -39,8 +39,10 @@ import {
 } from './knowledge-graph';
 import { getGraphContext } from './graph-context';
 import {
+  buildGraphRagExplainability,
   rankRetrievalCandidates,
   type GraphProjectionSignal,
+  type GraphRagCandidateExplainability,
   type GraphRagScoreContract,
   type RetrievalCandidateInput,
 } from './retrieval-pipeline';
@@ -62,6 +64,7 @@ export interface MemoryEntryResult {
   preRerankPosition?: number | null;
   rerankedBy?: 'graph' | 'semantic';
   scoring?: GraphRagScoreContract;
+  explainability?: GraphRagCandidateExplainability;
 }
 
 export interface SkillContent {
@@ -136,6 +139,7 @@ export interface RetrieveContextOptions {
   includeGraph?: boolean;
   graphScoreWeight?: number;
   workspacePath?: string;
+  explain?: boolean;
   /** Predicted file paths for graph traversal (PG-016) */
   predictedPaths?: string[];
   /** Current story ID for graph traversal context */
@@ -896,7 +900,8 @@ export async function retrieveContext(
     canonicalKey: candidate.canonicalKey,
     preRerankPosition: candidate.preRerankPosition,
     rerankedBy: candidate.rerankedBy,
-    scoring: candidate.scoring,
+    scoring: options?.explain ? candidate.scoring : undefined,
+    explainability: options?.explain ? buildGraphRagExplainability(candidate) : undefined,
   }));
   memoryTokensUsed = ranked.selected.reduce((sum, candidate) => sum + candidate.tokenCount, 0);
 
@@ -961,6 +966,7 @@ export async function retrieveContext(
       conflictsWith: candidate.conflictsWith,
       supersededBy: candidate.supersededBy,
       scoring: candidate.scoring,
+      explainability: buildGraphRagExplainability(candidate),
     })),
     latencyMs,
     retrievalTier: tier,
