@@ -1,0 +1,368 @@
+{
+  "shareable": [
+    {
+      "path": "backend/",
+      "reason": "Core backend implementation is shared between OSS and OpenCore unless a more specific review/block rule overrides it."
+    },
+    {
+      "path": "src/",
+      "reason": "Core dashboard implementation is shared between OSS and OpenCore unless a more specific review/block rule overrides it."
+    },
+    {
+      "path": "bin/",
+      "reason": "CLI entrypoints are part of the shared product surface."
+    },
+    {
+      "path": "packages/rorca-cli/",
+      "reason": "CLI package changes should usually flow into OpenCore."
+    },
+    {
+      "path": "packages/rorca-pi-extension/",
+      "reason": "Pi extension changes are shared operator surface."
+    },
+    {
+      "path": "packages/rorca-public-contract/",
+      "reason": "Extracted public-contract package is a shared OSS/OpenCore boundary package."
+    },
+    {
+      "path": "public/",
+      "reason": "Shared product static assets are safe to mirror unless private docs/website rules override them."
+    },
+    {
+      "path": "scripts/build-public-contract.ts",
+      "reason": "Public contract generation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/check-contract-stability.ts",
+      "reason": "Public contract validation is shared release infrastructure."
+    },
+    {
+      "path": "scripts/check-rorca-tier-annotations.ts",
+      "reason": "Tier annotation validation is shared backend governance."
+    },
+    {
+      "path": "scripts/check-swagger-coverage.ts",
+      "reason": "Swagger coverage validation is shared backend governance."
+    },
+    {
+      "path": "scripts/public-contract-lib.ts",
+      "reason": "Shared library behind public contract generation."
+    },
+    {
+      "path": "scripts/check-opencore-export.ts",
+      "reason": "Export checker is part of the split bridge and should stay available to OpenCore maintainers."
+    },
+    {
+      "path": "config/open-core-boundaries.json",
+      "reason": "Boundary manifest defines the OSS ↔ OpenCore bridge policy."
+    },
+    {
+      "path": "docs/OPEN_API_CONTRACT.md",
+      "reason": "Public API contract docs should stay in sync across repos."
+    },
+    {
+      "path": "docs/openapi-public-snapshot.json",
+      "reason": "Public API snapshot is part of the shared contract surface."
+    },
+    {
+      "path": "docs/contract-breaking-changes.md",
+      "reason": "Contract break markers inform both repos."
+    },
+    {
+      "path": ".github/workflows/secret-scan.yml",
+      "reason": "Shared repo safety automation can be imported into OpenCore if desired."
+    },
+    {
+      "path": "eslint.config.js",
+      "reason": "Shared lint baseline can flow into OpenCore."
+    },
+    {
+      "path": "eslint.config.mjs",
+      "reason": "Shared lint baseline can flow into OpenCore."
+    },
+    {
+      "path": "scripts/check-license-boundaries.ts",
+      "reason": "License boundary validation is part of the split infrastructure."
+    },
+    {
+      "path": "scripts/check-license-headers.ts",
+      "reason": "License validation infrastructure can be shared."
+    },
+    {
+      "path": "scripts/license-utils.ts",
+      "reason": "Shared helper for license validation infrastructure."
+    }
+  ],
+  "review": [
+    {
+      "path": "package.json",
+      "reason": "Root package metadata diverges across OSS and OpenCore. Review before importing."
+    },
+    {
+      "path": "package-lock.json",
+      "reason": "Root dependency graph diverges across OSS and OpenCore. Review before importing."
+    },
+    {
+      "path": "backend/package.json",
+      "reason": "Backend package metadata diverges across OSS and OpenCore. Review before importing."
+    },
+    {
+      "path": "backend/package-lock.json",
+      "reason": "Backend dependency graph diverges across OSS and OpenCore. Review before importing."
+    },
+    {
+      "path": "CHANGELOG.md",
+      "reason": "Release notes may diverge between OSS and OpenCore repos."
+    },
+    {
+      "path": "README.md",
+      "reason": "OSS README and OpenCore README have intentionally different positioning and licensing language."
+    },
+    {
+      "path": "LICENSE",
+      "reason": "OSS and OpenCore licenses intentionally differ."
+    },
+    {
+      "path": "LICENSE-NOTICES.md",
+      "reason": "OSS and OpenCore notices intentionally differ."
+    },
+    {
+      "path": ".env.example",
+      "reason": "Env examples often diverge between OSS and OpenCore deployment modes."
+    },
+    {
+      "path": ".env.local.example",
+      "reason": "Local env examples often diverge between OSS and OpenCore development setups."
+    },
+    {
+      "path": ".github/CODEOWNERS",
+      "reason": "Ownership rules often diverge between public and private repos."
+    },
+    {
+      "path": ".gitignore",
+      "reason": "Ignore rules may diverge between OSS and OpenCore local workflows."
+    },
+    {
+      "path": ".gitleaks.toml",
+      "reason": "Secret scanning policy may diverge between public and private repos."
+    },
+    {
+      "path": "AGENTS.md",
+      "reason": "Agent instructions diverge across the OSS and OpenCore repos."
+    },
+    {
+      "path": "DEPLOYMENT.md",
+      "reason": "Deployment guidance diverges between OSS and OpenCore environments."
+    },
+    {
+      "path": "SECURITY.md",
+      "reason": "Security disclosure text diverges between public and private repos."
+    },
+    {
+      "path": "docs/SECURITY-MODEL.md",
+      "reason": "Security model docs diverge between OSS and OpenCore."
+    },
+    {
+      "path": "backend/src/routes/auth.ts",
+      "reason": "Hosted identity/auth behavior is OpenCore-sensitive."
+    },
+    {
+      "path": "backend/src/routes/workspace-github.ts",
+      "reason": "GitHub account-linking/OAuth behavior is boundary-sensitive."
+    },
+    {
+      "path": "backend/src/routes/users.ts",
+      "reason": "User deletion/account cleanup behavior is boundary-sensitive."
+    },
+    {
+      "path": "backend/src/routes/workspaces.ts",
+      "reason": "Workspace ownership/membership logic diverges between OSS and OpenCore."
+    },
+    {
+      "path": "backend/src/routes/config.ts",
+      "reason": "Provider/auth/config surfaces may diverge between OSS and OpenCore."
+    },
+    {
+      "path": "backend/src/routes/vault.ts",
+      "reason": "Vault/secret behavior is commercial-boundary-sensitive."
+    },
+    {
+      "path": "backend/src/routes/copilot.ts",
+      "reason": "Hosted assistant integration behavior is commercial-boundary-sensitive."
+    },
+    {
+      "path": "backend/src/lib/auth-utils.ts",
+      "reason": "Authentication fallback logic is central to the split boundary."
+    },
+    {
+      "path": "backend/src/lib/get-user.ts",
+      "reason": "Current-user resolution diverges across OSS and OpenCore."
+    },
+    {
+      "path": "backend/src/lib/require-plan.ts",
+      "reason": "Plan/entitlement behavior is OpenCore-owned."
+    },
+    {
+      "path": "backend/src/server.ts",
+      "reason": "Route mounting and auth/license bootstrapping are boundary-sensitive."
+    },
+    {
+      "path": "backend/src/db/pg-migrations/",
+      "reason": "Database schema changes need deliberate review because OpenCore keeps extra tables/features."
+    },
+    {
+      "path": "src/contexts/AuthContext.tsx",
+      "reason": "Frontend auth state is boundary-sensitive."
+    },
+    {
+      "path": "src/lib/supabase.ts",
+      "reason": "Supabase/auth client wiring is boundary-sensitive."
+    },
+    {
+      "path": "src/lib/apiFetch.ts",
+      "reason": "Client auth/header behavior is boundary-sensitive."
+    },
+    {
+      "path": "src/pages/auth/",
+      "reason": "Hosted auth screens belong to the split boundary."
+    },
+    {
+      "path": "src/pages/InviteAcceptPage.tsx",
+      "reason": "Invite/member flows are OpenCore-sensitive."
+    },
+    {
+      "path": "src/routes.tsx",
+      "reason": "Route wiring often reflects auth/OpenCore-only surfaces."
+    },
+    {
+      "path": "src/components/PricingModal.tsx",
+      "reason": "Pricing/upgrade messaging diverges between OSS and OpenCore."
+    },
+    {
+      "path": "src/components/UpgradePrompt.tsx",
+      "reason": "Pricing/upgrade messaging diverges between OSS and OpenCore."
+    },
+    {
+      "path": "src/components/EmailVerificationBanner.tsx",
+      "reason": "Email verification/auth UX is boundary-sensitive."
+    },
+    {
+      "path": "src/panels/settings/AccountSettingsTab.tsx",
+      "reason": "Account surfaces diverge between OSS and OpenCore."
+    },
+    {
+      "path": "src/panels/settings/ProviderSettingsTab.tsx",
+      "reason": "Provider setup can include hosted/OpenCore-specific options."
+    },
+    {
+      "path": "src/panels/settings/ApiKeysSection.tsx",
+      "reason": "Credential storage/UX differs between OSS and OpenCore."
+    },
+    {
+      "path": "tests/auth.spec.ts",
+      "reason": "Browser auth coverage is boundary-sensitive and should be reviewed before importing."
+    },
+    {
+      "path": "deploy/",
+      "reason": "Deployment manifests often diverge between OSS and OpenCore environments."
+    }
+  ],
+  "blocked": [
+    {
+      "path": ".claude/",
+      "reason": "Local/internal Claude tooling is not part of the OSS ↔ OpenCore bridge."
+    },
+    {
+      "path": ".opencode/",
+      "reason": "Local/internal OpenCode tooling is not part of the OSS ↔ OpenCore bridge."
+    },
+    {
+      "path": ".pi/",
+      "reason": "Local/internal Pi tooling is not part of the OSS ↔ OpenCore bridge."
+    },
+    {
+      "path": ".rorca/",
+      "reason": "Private progress/memory artifacts must not be mirrored through the bridge."
+    },
+    {
+      "path": "CLAUDE.md",
+      "reason": "Local/internal Claude guidance is not part of the OSS ↔ OpenCore bridge."
+    },
+    {
+      "path": "MEMORY.md",
+      "reason": "Private memory artifacts must not be mirrored through the bridge."
+    },
+    {
+      "path": ".env",
+      "reason": "Secret env files are never bridgeable."
+    },
+    {
+      "path": ".env.local",
+      "reason": "Secret env files are never bridgeable."
+    },
+    {
+      "path": "backend/.env",
+      "reason": "Secret env files are never bridgeable."
+    },
+    {
+      "path": "backend/backups/",
+      "reason": "Database backups must never flow through the code bridge."
+    },
+    {
+      "path": "test-results/",
+      "reason": "Generated test artifacts must never flow through the code bridge."
+    },
+    {
+      "path": "landing-page/",
+      "reason": "Website/docs live in rorca-website, not in the code bridge."
+    },
+    {
+      "path": "go-to-market/",
+      "reason": "Private GTM planning does not belong in the code bridge."
+    },
+    {
+      "path": "default-personas/",
+      "reason": "Private/internal persona packs do not belong in the code bridge."
+    },
+    {
+      "path": "forge/logs/",
+      "reason": "Generated forge logs are private/internal artifacts."
+    },
+    {
+      "path": "forge/specs/",
+      "reason": "Private spec artifacts should not be mirrored through the bridge."
+    },
+    {
+      "path": "docs/opencore/",
+      "reason": "OpenCore planning docs live only in the private repo."
+    },
+    {
+      "path": "docs/docs-imagery-plan.md",
+      "reason": "Website planning belongs outside the bridge."
+    },
+    {
+      "path": "docs/screenshot-capture-runbook.md",
+      "reason": "Website planning belongs outside the bridge."
+    },
+    {
+      "path": "docs/website-screenshot-placement-plan.md",
+      "reason": "Website planning belongs outside the bridge."
+    },
+    {
+      "path": "docs/user-guide-implementation-progress.md",
+      "reason": "Website/docs implementation progress belongs outside the bridge."
+    },
+    {
+      "path": "docs/duckbrain-gap-analysis.md",
+      "reason": "Private/internal analysis docs should not be mirrored automatically."
+    },
+    {
+      "path": "scripts/sync-opencore-push.mjs",
+      "reason": "The one-command bridge is an OSS source-side helper and should not be imported into OpenCore."
+    },
+    {
+      "path": "diagrams/",
+      "reason": "Private planning diagrams should not be bridge-synced by default."
+    }
+  ]
+}
