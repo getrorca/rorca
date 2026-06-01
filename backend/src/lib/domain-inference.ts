@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -50,7 +50,7 @@ const DOMAIN_SIGNALS: Array<{ domain: DomainType; deps: string[]; dirs: string[]
   },
   {
     domain: 'saas',
-    deps: ['next', 'nuxt', 'remix', '@supabase/supabase-js', 'firebase', 'auth0', '@auth0/nextjs-auth0', 'lucia', 'next-auth', 'clerk'],
+    deps: ['next', 'nuxt', 'remix', 'firebase', 'auth0', '@auth0/nextjs-auth0', 'lucia', 'next-auth', 'clerk'],
     dirs: ['apps', 'services'],
     readmeKeywords: ['saas', 'software as a service', 'subscription', 'multi-tenant', 'dashboard'],
   },

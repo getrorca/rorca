@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -52,7 +52,7 @@ interface WorkspaceRow {
 
 // ─── Helpers ─────────────────────────────────────────────────────────────────
 
-/** Get GitHub OAuth token. Returns null if not connected. */
+/** Get GitHub token. Returns null if not configured. */
 async function getGithubToken(): Promise<string | null> {
   const row = await queryOne<GitHubConnectionRow>(
     'SELECT encrypted_token FROM github_connections LIMIT 1',

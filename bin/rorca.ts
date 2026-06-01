@@ -233,9 +233,7 @@ const PI_PROVIDER_LABELS: Record<string, string> = {
   codex: 'ChatGPT Plus/Pro',
   anthropic: 'Claude',
   claude: 'Claude',
-  github: 'GitHub Copilot',
-  copilot: 'GitHub Copilot',
-  'github copilot': 'GitHub Copilot',
+  github: 'GitHub',
   google: 'Gemini',
   gemini: 'Gemini',
   openrouter: 'OpenRouter',
@@ -244,7 +242,7 @@ const PI_PROVIDER_LABELS: Record<string, string> = {
 const PI_PROVIDER_ORDER = [
   'ChatGPT Plus/Pro',
   'Claude',
-  'GitHub Copilot',
+  'GitHub',
   'Gemini',
   'OpenRouter',
 ] as const;

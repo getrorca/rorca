@@ -1,35 +1,20 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
-import { createClient } from '@supabase/supabase-js';
+export const authClient = {
+  getSession: async () => ({ data: { session: null }, error: null }),
+  onAuthStateChange: () => ({ data: { subscription: { unsubscribe() {} } } }),
+  signOut: async () => ({ error: null }),
+};
 
-/*
- * Security model: Supabase OAuth uses PKCE. The PKCE code verifier MUST be persisted
- * across the OAuth redirect (the full-page redirect to GitHub and back destroys
- * in-memory state), so we let the SDK use its default localStorage. Session tokens
- * are stored there as well; `detectSessionInUrl` is enabled for the callback page
- * to complete the exchange.
- */
+export const supabase = {
+  auth: authClient,
+};
 
-const supabaseUrl = import.meta.env.VITE_SUPABASE_URL;
-const supabaseAnonKey = import.meta.env.VITE_SUPABASE_ANON_KEY;
-
-export const supabase = createClient(
-  supabaseUrl || 'http://localhost:54321',
-  supabaseAnonKey || 'placeholder-anon-key',
-  {
-    auth: {
-      flowType: 'pkce',
-      persistSession: true,
-      autoRefreshToken: true,
-      detectSessionInUrl: true,
-    },
-  }
-);
-
-export { createClient };
-export type * from '@supabase/supabase-js';
+export function createClient() {
+  return supabase;
+}

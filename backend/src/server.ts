@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -30,17 +30,11 @@ import templatesRouter from './routes/templates';
 import storiesRouter from './routes/stories';
 import schedulesRouter from './routes/schedules';
 import envVarsRouter from './routes/env-vars';
-import workspaceGithubRouter from './routes/workspace-github';
-import workspaceIntegrationsRouter from './routes/workspace-integrations';
-import integrationAuditLogRouter from './routes/integration-audit-log';
 import webhooksRouter from './routes/webhooks';
 import githubChecksRouter from './routes/github-checks';
-import teamsRouter from './routes/teams';
-import invitesRouter from './routes/invites';
 import activityRouter from './routes/activity';
 import analyticsRouter from './routes/analytics';
 import budgetRouter from './routes/budget';
-import vaultRouter from './routes/vault';
 import usersRouter from './routes/users';
 import authRouter from './routes/auth';
 import { authRequired, LOCAL_ADMIN, resolveAuthUserFromToken } from './lib/auth-utils';
@@ -58,7 +52,6 @@ import agentHooksRouter from './routes/agent-hooks';
 import agentProfilesRouter from './routes/agent-profiles';
 import notificationsRouter from './routes/notifications';
 import settingsRouter from './routes/settings';
-import billingRouter, { webhookRouter as billingWebhookRouter } from './routes/billing';
 import { fireAgentHooks } from './lib/agent-hook-runner';
 import { startNotificationDispatcher } from './lib/notification-dispatcher';
 import { registerDraftPrSubscriber } from './lib/draft-pr-subscriber';
@@ -81,7 +74,6 @@ import { queryTimerMiddleware, runQueryPlanAudit } from './lib/query-timer';
 import { queryOne } from './db/index';
 import runQueueRouter from './routes/run-queue';
 import configRouter from './routes/config';
-import copilotRouter from './routes/copilot';
 import memoryRouter from './routes/memory';
 import crossWorkspaceMemoryRouter from './routes/cross-workspace-memory';
 import agentsRouter from './routes/agents';
@@ -193,7 +185,7 @@ app.use(cors({
 app.use(express.json({
   verify: (req, _res, buf) => {
     const url = (req as express.Request).originalUrl || '';
-    if (url.startsWith('/api/webhooks/') || url.startsWith('/api/billing/webhook')) {
+    if (url.startsWith('/api/webhooks/')) {
       (req as any).rawBody = buf;
     }
   },
@@ -250,8 +242,6 @@ app.use('/api/docs', swaggerUi.serve, swaggerUi.setup(swaggerSpec, {
 // Rate limit public routes by IP (unauthenticated tier)
 app.use('/api/auth', rateLimiter, authRouter);
 app.use('/api/webhooks', webhooksRouter);
-app.use('/api/billing', billingWebhookRouter); // Stripe webhook (no auth, needs raw body)
-app.use('/api/invites', rateLimiter, invitesRouter);
 // EQ-007: Public review routes (no auth required — accessed via shareable token)
 app.use('/api/review', rateLimiter, publicReviewRouter);
 if (BACKGROUND_RUNTIME_ENABLED) {
@@ -385,24 +375,17 @@ app.use('/api/workspaces/:id/budget', budgetRouter);
 app.use('/api/workspaces/:id/agent-hooks', agentHooksRouter);
 app.use('/api/workspaces/:id/agent-profiles', agentProfilesRouter);
 app.use('/api/workspaces/:id/ci-autofix', ciAutofixRouter);
-app.use('/api/workspaces/:id/github', workspaceGithubRouter);
-app.use('/api/workspaces/:id/integrations', workspaceIntegrationsRouter);
-app.use('/api/workspaces/:id/integrations', integrationAuditLogRouter);
 app.use('/api/workspaces', workspaceDriftRouter);
 app.use('/api/github/checks', githubChecksRouter);
-app.use('/api/teams', teamsRouter);
 app.use('/api/activity', activityRouter);
 app.use('/api/analytics', analyticsRouter);
-app.use('/api/vault/keys', vaultRouter);
 app.use('/api/users', usersRouter);
 app.use('/api/onboarding', onboardingRouter);
 app.use('/api/admin', backupsRouter);
 app.use('/api/notifications', notificationsRouter);
 app.use('/api/settings', settingsRouter);
-app.use('/api/billing', billingRouter);
 app.use('/api/run-queue', runQueueRouter);
 app.use('/api/config', configRouter);
-app.use('/api/copilot', copilotRouter);
 app.use('/api/memory', memoryRouter);
 app.use('/api/memory/cross-workspace', crossWorkspaceMemoryRouter);
 app.use('/api/agents', agentsRouter);
@@ -527,20 +510,7 @@ if (process.env.NODE_ENV !== 'test') {
         logger.warn(`License: RORCA_LICENSE_KEY set but invalid — ${err.message || 'verification failed'}`);
       }
     } else {
-      // Check for trial via DB
-      const { queryOne: qo } = require('./db/index');
-      (qo(
-        `SELECT trial_ends_at, plan FROM subscriptions WHERE status = 'trialing' AND trial_ends_at > NOW() LIMIT 1`
-      ) as Promise<{ trial_ends_at: string; plan: string } | undefined>).then((trial) => {
-        if (trial) {
-          const days = Math.max(0, Math.ceil((new Date(trial.trial_ends_at).getTime() - Date.now()) / (1000 * 60 * 60 * 24)));
-          logger.info(`License: trial (${days} days remaining)`);
-        } else {
-          logger.info('License: not configured');
-        }
-      }).catch(() => {
-        logger.info('License: not configured');
-      });
+      logger.info('License: OSS local-first mode');
     }
   })();
 

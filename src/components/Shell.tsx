@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -230,31 +230,15 @@ export function ShowTipsToggle() {
   );
 }
 
-const PLAN_COLORS: Record<string, string> = {
-  free: 'text-muted bg-bg border-border',
-  solo: 'text-blue-600 bg-blue-500/10 border-blue-500/30',
-  pro: 'text-accent bg-accent/10 border-accent/30',
-  team: 'text-purple-600 bg-purple-500/10 border-purple-500/30',
-};
-
 export function PlanBadge() {
-  const { user } = useAuth();
-  const [showPricing, setShowPricing] = useState(false);
-  const plan = ((user?.app_metadata?.plan as string | undefined) || 'free') as keyof typeof PLAN_COLORS;
-  const colors = PLAN_COLORS[plan] || PLAN_COLORS.free;
-
   return (
-    <>
-      <button
-        onClick={() => plan === 'free' ? setShowPricing(true) : undefined}
-        className={`flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold uppercase tracking-wider border transition-colors ${colors} ${plan === 'free' ? 'cursor-pointer hover:border-accent' : 'cursor-default'}`}
-        title={plan === 'free' ? 'Click to upgrade' : `${plan} plan`}
-      >
-        {plan !== 'free' && <Zap size={10} />}
-        {plan}
-      </button>
-      {showPricing && <PricingModal onClose={() => setShowPricing(false)} />}
-    </>
+    <span
+      className="flex items-center gap-1 px-2 py-1 rounded text-[11px] font-semibold uppercase tracking-wider border border-emerald-500/30 bg-emerald-500/10 text-emerald-400"
+      title="Apache-2.0 OSS edition"
+    >
+      <Zap size={10} />
+      OSS
+    </span>
   );
 }
 

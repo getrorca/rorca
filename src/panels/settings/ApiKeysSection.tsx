@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -131,7 +131,6 @@ export default function ApiKeysSection() {
                 <option value="anthropic">Anthropic</option>
                 <option value="google">Google</option>
                 <option value="openrouter">OpenRouter</option>
-                <option value="github">GitHub Copilot</option>
               </select>
             </div>
             <div>

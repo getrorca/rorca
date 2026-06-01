@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -134,13 +134,8 @@ router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan(
     try {
       await withUserClient(req, async (client) => {
         await client.query(
-          'INSERT INTO workspaces (id, label, path, domains) VALUES ($1, $2, $3, $4)',
-          [id, label, path, JSON.stringify(domains)]
-        );
-
-        await client.query(
-          'INSERT INTO workspace_members (workspace_id, user_auth_id, role) VALUES ($1, $2, $3)',
-          [id, req.user!.supabaseId, 'owner']
+          'INSERT INTO workspaces (id, label, path, domains, owner_id) VALUES ($1, $2, $3, $4, $5)',
+          [id, label, path, JSON.stringify(domains), req.user?.id ?? 'local-admin']
         );
       });
     } catch (err: any) {
@@ -155,27 +150,6 @@ router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan(
       "INSERT INTO wal_events (event_type, workspace_id) VALUES ('workspace_create', $1)",
       [id]
     );
-
-    // BL-002: Auto-provision 14-day Pro trial on first workspace registration
-    try {
-      const existingSub = await queryOne<{ id: string }>(
-        'SELECT id FROM subscriptions LIMIT 1'
-      );
-      if (!existingSub) {
-        const trialId = `trial_${Date.now()}_${Math.random().toString(36).slice(2, 8)}`;
-        const user = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
-        if (user) {
-          await execute(
-            `INSERT INTO subscriptions (id, user_id, stripe_customer_id, plan, status, trial_started_at, trial_ends_at)
-             VALUES ($1, $2, '', 'pro', 'trialing', NOW(), NOW() + INTERVAL '14 days')`,
-            [trialId, user.id]
-          );
-          await execute('UPDATE users SET plan = $1 WHERE id = $2', ['pro', user.id]);
-        }
-      }
-    } catch (trialErr) {
-      logger.warn({ err: trialErr }, 'Failed to provision trial — non-fatal');
-    }
 
     // V2-070: Auto-create default agent profile using workspace's L3 direction content
     const l3Row = await queryOne<{ content_yaml: string }>(

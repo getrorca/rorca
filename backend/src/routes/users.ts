@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -16,7 +16,6 @@ import { ValidationError, AuthError, ConflictError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
 import { validateBody } from '../lib/validate';
 import { authRequired } from '../lib/auth-utils';
-import { supabaseAdmin } from '../lib/supabase';
 
 const router = Router();
 
@@ -112,35 +111,11 @@ const deleteMeSchema = z.object({
  *       401:
  *         description: Not authenticated
  */
-router.delete('/me', authRequired, async (req: Request, res: Response) => {
-  try {
-    const authReq = req as Request & { user?: { id: string; email?: string | null; supabaseId?: string | null } };
-    const parsed = deleteMeSchema.safeParse(req.body);
-    if (!parsed.success) {
-      throw new ValidationError('Validation failed', {
-        details: JSON.stringify(parsed.error.issues),
-      });
-    }
-    const { confirmation } = parsed.data;
-
-    if (!authReq.user?.supabaseId || !authReq.user.email) {
-      throw new AuthError('Authentication required');
-    }
-
-    if (confirmation !== 'DELETE' && confirmation !== authReq.user.email) {
-      throw new ValidationError('Confirmation must match DELETE or your email address');
-    }
-
-    const { error } = await supabaseAdmin.auth.admin.deleteUser(authReq.user.supabaseId);
-
-    if (error) {
-      throw new ConflictError(error.message);
-    }
-
-    res.json({ message: 'Account deleted successfully' });
-  } catch (error: any) {
-    handleRouteError(res, error, '[Users] Delete me');
-  }
+router.delete('/me', authRequired, async (_req: Request, res: Response) => {
+  res.status(501).json({
+    error: 'Hosted account deletion is not available in the OSS edition.',
+    code: 'OSS_LOCAL_MODE_ONLY',
+  });
 });
 
 interface AssignmentDbRow {
@@ -341,9 +316,8 @@ router.get('/workspace-members', async (req: Request, res: Response) => {
  *     summary: Permanently delete user account
  *     operationId: deleteMyAccount
  *     description: |
- *       Hard-deletes personal data (vault_keys, github_connections,
- *       notification_subscriptions, notification_history, billing).
- *       Anonymizes operational records (pipeline_runs.triggered_by → 'deleted_user',
+ *       Hard-deletes personal data stored by the OSS edition and anonymizes
+ *       operational records (pipeline_runs.triggered_by → 'deleted_user',
  *       story_comments.user_id → NULL). Requires password confirmation.
  *     requestBody:
  *       required: true
@@ -420,12 +394,8 @@ router.delete('/me', validateBody(deleteBodySchema), async (req: Request, res: R
     // Most have ON DELETE CASCADE, but explicit deletion ensures completeness
     // and works even if FK cascades are changed later.
     await client.query('DELETE FROM api_key_vault WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM github_connections WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM notification_subscriptions WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM notification_history WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM subscriptions WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM user_settings WHERE user_id = $1', [userId]);
-    await client.query('DELETE FROM integration_credentials WHERE user_id = $1', [userId]);
     await client.query('DELETE FROM provider_defaults WHERE user_id = $1', [userId]);
 
     // Delete the user row last — CASCADE handles any remaining FKs

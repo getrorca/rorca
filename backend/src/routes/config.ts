@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -66,8 +66,6 @@ const OPENCODE_MODELS: OpenCodeModel[] = [
   { id: 'openrouter/auto', name: 'Auto (Best Available)', provider: 'OpenRouter', contextWindow: 200000, costPer1kInput: 0, costPer1kOutput: 0, speedTier: 'medium', costTier: 'medium' },
   { id: 'openrouter/deepseek/deepseek-r1', name: 'DeepSeek R1', provider: 'OpenRouter', contextWindow: 131072, costPer1kInput: 0.00055, costPer1kOutput: 0.0022, speedTier: 'medium', costTier: 'low' },
   { id: 'openrouter/meta-llama/llama-4-maverick', name: 'Llama 4 Maverick', provider: 'OpenRouter', contextWindow: 1048576, costPer1kInput: 0.0005, costPer1kOutput: 0.0015, speedTier: 'medium', costTier: 'low' },
-  // GitHub Copilot (subscription-based — no API key, uses OAuth token)
-  { id: 'github/copilot', name: 'GitHub Copilot', provider: 'GitHub Copilot', contextWindow: 128000, costPer1kInput: 0, costPer1kOutput: 0, speedTier: 'medium', costTier: 'free' },
   // Local
   { id: 'ollama/llama3.3', name: 'Llama 3.3 (Ollama)', provider: 'Local', contextWindow: 131072, costPer1kInput: 0, costPer1kOutput: 0, speedTier: 'medium', costTier: 'free' },
   { id: 'ollama/deepseek-r1:14b', name: 'DeepSeek R1 14B (Ollama)', provider: 'Local', contextWindow: 131072, costPer1kInput: 0, costPer1kOutput: 0, speedTier: 'slow', costTier: 'free' },
@@ -80,7 +78,6 @@ const PROVIDER_KEY_MAP: Record<string, string[]> = {
   Google: ['openai-compat'],
   Anthropic: ['anthropic'],
   OpenRouter: ['openrouter'],
-  'GitHub Copilot': [], // Uses OAuth token from integration_credentials, not vault
   Local: [], // No API key required
 };
 
@@ -105,8 +102,6 @@ router.get('/', async (_req: Request, res: Response) => {
   // Determine if user has an API key for the selected model's provider
   let hasApiKey = true; // claude doesn't need one
   let modelDisplayName: string | null = null;
-  let copilotConnected = false;
-  let copilotUsername: string | null = null;
 
   if (activeAgent === 'opencode') {
     if (activeModel) {
@@ -124,39 +119,20 @@ router.get('/', async (_req: Request, res: Response) => {
         modelDisplayName = modelEntry?.name ?? activeModel.split('/').pop() ?? activeModel;
       }
       if (modelEntry) {
-        if (modelEntry.provider === 'GitHub Copilot') {
-          // Copilot uses integration_credentials, not api_key_vault
-          const copilotRow = await queryOne<{ provider_username: string | null }>(
-            `SELECT provider_username FROM integration_credentials WHERE provider = 'github_copilot' LIMIT 1`
+        const requiredProviders = PROVIDER_KEY_MAP[modelEntry.provider] ?? [];
+        if (requiredProviders.length > 0) {
+          const placeholders = requiredProviders.map((_, i) => `$${i + 1}`).join(',');
+          const row = await queryOne<Record<string, unknown>>(
+            `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`,
+            requiredProviders
           );
-          hasApiKey = !!copilotRow;
-          copilotConnected = !!copilotRow;
-          copilotUsername = copilotRow?.provider_username ?? null;
-        } else {
-          const requiredProviders = PROVIDER_KEY_MAP[modelEntry.provider] ?? [];
-          if (requiredProviders.length > 0) {
-            const placeholders = requiredProviders.map((_, i) => `$${i + 1}`).join(',');
-            const row = await queryOne<Record<string, unknown>>(
-              `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`,
-              requiredProviders
-            );
-            hasApiKey = !!row;
-          }
-          // Local models don't need a key
+          hasApiKey = !!row;
         }
+        // Local models don't need a key
       }
     } else {
       hasApiKey = false; // No model configured at all
     }
-  }
-
-  // Always check Copilot connection status for UI display
-  if (!copilotConnected) {
-    const copilotRow = await queryOne<{ provider_username: string | null }>(
-      `SELECT provider_username FROM integration_credentials WHERE provider = 'github_copilot' LIMIT 1`
-    );
-    copilotConnected = !!copilotRow;
-    copilotUsername = copilotRow?.provider_username ?? null;
   }
 
   // Check if OpenRouter key is available via env var (even if not in vault)
@@ -167,8 +143,6 @@ router.get('/', async (_req: Request, res: Response) => {
     agentModel: activeModel,
     modelDisplayName,
     hasApiKey,
-    copilotConnected,
-    copilotUsername,
     opencodeInstalled: opencode.opencodeInstalled,
     opencodeVersion: opencode.opencodeVersion,
     codexInstalled: codex.codexInstalled,
@@ -652,28 +626,17 @@ router.put('/agent', async (req: Request, res: Response) => {
 
     const modelEntry = OPENCODE_MODELS.find(m => m.id === effectiveModel);
     if (modelEntry) {
-      if (modelEntry.provider === 'GitHub Copilot') {
-        // Copilot uses integration_credentials, not api_key_vault
-        const copilotRow = await queryOne<Record<string, unknown>>(
-          `SELECT 1 FROM integration_credentials WHERE provider = 'github_copilot' LIMIT 1`
+      const requiredProviders = PROVIDER_KEY_MAP[modelEntry.provider] ?? [];
+      if (requiredProviders.length > 0) {
+        // Check if user has any vault key for the required providers
+        const placeholders = requiredProviders.map((_, i) => `$${i + 1}`).join(',');
+        const hasKey = await queryOne<Record<string, unknown>>(
+          `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`,
+          requiredProviders,
         );
-        if (!copilotRow) {
-          throw new ValidationError('GitHub Copilot requires connecting your GitHub account first. Use "Sign in with GitHub" below.');
+        if (!hasKey) {
+          throw new ValidationError(`Model "${effectiveModel}" requires a ${modelEntry.provider} API key. Add one in Provider Configuration above.`);
           return;
-        }
-      } else {
-        const requiredProviders = PROVIDER_KEY_MAP[modelEntry.provider] ?? [];
-        if (requiredProviders.length > 0) {
-          // Check if user has any vault key for the required providers
-          const placeholders = requiredProviders.map((_, i) => `$${i + 1}`).join(',');
-          const hasKey = await queryOne<Record<string, unknown>>(
-            `SELECT 1 FROM api_key_vault WHERE provider IN (${placeholders}) LIMIT 1`,
-            requiredProviders
-          );
-          if (!hasKey) {
-            throw new ValidationError(`Model "${effectiveModel}" requires a ${modelEntry.provider} API key. Add one in Provider Configuration above.`);
-            return;
-          }
         }
       }
     }

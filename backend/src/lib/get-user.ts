@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -19,7 +19,6 @@ interface UserRow {
   email: string;
   role: string;
   plan: string | null;
-  auth_id: string | null;
 }
 
 const USER_CACHE_TTL_MS = parseInt(process.env.RORCA_USER_CACHE_TTL_MS || String(5 * 60 * 1000), 10);
@@ -59,11 +58,11 @@ export async function getEffectiveUser(req: Request): Promise<AuthUser | null> {
   }
 
   const row = await queryOne<UserRow>(
-    `SELECT id, email, role, plan, auth_id
+    `SELECT id, email, role, plan
      FROM users
-     WHERE id = $1 OR auth_id = $2::uuid
+     WHERE id = $1
      LIMIT 1`,
-    [req.user.id, req.user.supabaseId || null],
+    [req.user.id],
   );
 
   if (!row) {
@@ -73,7 +72,7 @@ export async function getEffectiveUser(req: Request): Promise<AuthUser | null> {
   const effectiveUser: AuthUser = {
     id: row.id,
     email: row.email,
-    supabaseId: row.auth_id ?? req.user.supabaseId,
+    supabaseId: req.user.supabaseId,
     role: row.role ?? req.user.role ?? 'user',
     plan: row.plan ?? 'free',
   };

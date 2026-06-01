@@ -1,41 +1,49 @@
-# Security Model
+# OSS Security Model
 
-## Trust Model
+This document describes the intended security posture of the future Apache 2.0 `rorca` repo.
 
-The Rorca CLI (open-source, MIT-licensed) is treated as untrusted client code. Any user can fork it, modify it, and run modified versions. The Rorca backend (BSL-1.1) enforces all authorization, plan-gating, and capability checks server-side.
+## Trust model
 
-CLI-side checks exist only for UX. They may display current plan information, show upgrade hints early, or explain why a request failed, but they cannot grant access to paid or admin features.
+- The OSS edition is **local-first** and **self-hostable**.
+- The OSS codebase should be treated as **operator-controlled and modifiable**.
+- Local UI checks and defaults are product ergonomics, not strong anti-tamper enforcement.
 
-## Authorization Rules
+## Identity boundary
 
-- Plan and role decisions come from the backend, not from the CLI.
-- The authoritative plan source is `users.plan` in the database, optionally overridden by a cryptographically signed self-hosted license key.
-- Request headers such as `X-Plan` are never trusted for authorization.
-- JWT plan claims are never trusted for authorization. JWTs identify the user; the backend resolves plan from the database at request time, with a bounded cache.
-- MCP tokens do not bypass plan or admin checks. Paid routes are excluded from MCP exposure by default.
+The Apache 2.0 OSS repo should **not** ship hosted identity infrastructure such as:
+- Supabase auth
+- hosted GitHub web sign-in
+- other SaaS-style account/session systems
 
-## Thin Client Pattern
+Those belong in `rorca-opencore`.
 
-The CLI should behave as a thin HTTP client:
+## GitHub access in OSS
 
-```ts
-try {
-  await fetchPaidEndpoint();
-} catch (error) {
-  if (error.status === 402) {
-    showUpgradeMessage();
-  }
-}
-```
+Rorca still needs to interact with user repositories in the OSS edition.
+That capability should remain available through local/operator-managed credentials such as:
+- GitHub personal access tokens (PATs)
+- local git credentials already configured on the machine
+- local CLI auth flows managed by developer tools
 
-Correct pattern:
+GitHub repository capability stays in OSS.
+GitHub web-login identity does not.
 
-- Attempt the backend call.
-- Let the backend return `200`, `402`, or `403`.
-- Render a helpful message client-side after the backend decision.
+## Local dashboard protection
 
-Incorrect pattern:
+If an OSS dashboard needs protection outside pure localhost use, prefer a minimal local-only control such as:
+- a static API key
+- a locally managed shared secret
+- network-level protection provided by the operator
 
-- Reading `user.plan` in the CLI and skipping feature execution locally.
-- Treating a client-side flag as authorization.
-- Sending spoofable headers and assuming the backend will trust them.
+Do not require hosted identity infrastructure just to run the local OSS product.
+
+## Commercial enforcement
+
+The OSS repo should not be treated as a secure place to enforce:
+- billing
+- subscriptions
+- seat limits
+- enterprise RBAC
+- hosted entitlements
+
+Those controls belong in `rorca-opencore` and other infrastructure under operator/company control.

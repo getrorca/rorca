@@ -1,13 +1,12 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
 import { useState } from 'react';
 import { X, Terminal, Key, Zap, Globe, CheckCircle2, Copy, ExternalLink } from 'lucide-react';
-import { Github } from './icons/GithubIcon';
 
 // ─── Provider Setup Steps ─────────────────────────────────────────────────────
 
@@ -92,20 +91,6 @@ const PROVIDER_GUIDES: ProviderGuide[] = [
     modelExamples: ['ollama/llama3', 'ollama/codellama', 'ollama/deepseek-coder'],
     notes: 'Completely free, runs on your machine. No data leaves your network. Quality depends on hardware — 16GB+ RAM recommended for 7B+ models.',
   },
-  {
-    id: 'copilot',
-    name: 'GitHub Copilot',
-    badge: 'Subscription',
-    badgeColor: 'bg-purple-500/15 text-purple-400',
-    steps: [
-      { title: 'Have a Copilot subscription', content: 'You need an active GitHub Copilot Individual or Business subscription.' },
-      { title: 'Connect GitHub', content: 'In Settings > Execution Engine, click "Sign in with GitHub". Authorize the OAuth app.' },
-      { title: 'Select Copilot model', content: 'Choose "GitHub Copilot" from the model dropdown in the Execution Engine section.' },
-      { title: 'Save', content: 'Click "Save Engine Configuration". The status should show "GitHub Copilot" with a Subscription badge.' },
-    ],
-    modelExamples: ['github/copilot'],
-    notes: 'Uses your existing Copilot subscription — no per-token API billing. Requires GitHub OAuth sign-in.',
-  },
 ];
 
 // ─── Component ────────────────────────────────────────────────────────────────
@@ -182,7 +167,7 @@ export default function OpenCodeSetupGuide({ onClose }: { onClose: () => void })
                   }`}
                 >
                   <span className="flex items-center gap-2">
-                    {p.id === 'copilot' ? <Github size={12} /> : p.id === 'ollama' ? <Terminal size={12} /> : <Key size={12} />}
+                    {p.id === 'ollama' ? <Terminal size={12} /> : <Key size={12} />}
                     {p.name}
                   </span>
                   <span className={`px-1.5 py-0.5 text-[9px] font-semibold rounded ${p.badgeColor}`}>

@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -9,83 +9,51 @@ import {
   createContext,
   useCallback,
   useContext,
-  useEffect,
   useMemo,
-  useState,
   type ReactNode,
 } from 'react';
-import type { Session, User } from '@supabase/supabase-js';
-import { supabase } from '../lib/supabase';
+
+export interface LocalAuthUser {
+  id: string;
+  email: string;
+  role: 'admin';
+  user_metadata: { full_name: string };
+  app_metadata: { plan: 'oss' };
+  email_confirmed_at: string;
+}
 
 interface AuthContextValue {
-  user: User | null;
-  session: Session | null;
+  user: LocalAuthUser | null;
+  session: { access_token: string } | null;
   isAuthenticated: boolean;
   isLoading: boolean;
   signOut: () => Promise<void>;
 }
 
+const LOCAL_USER: LocalAuthUser = {
+  id: 'local-admin',
+  email: 'admin@rorca.local',
+  role: 'admin',
+  user_metadata: { full_name: 'Local Operator' },
+  app_metadata: { plan: 'oss' },
+  email_confirmed_at: new Date(0).toISOString(),
+};
+
+const LOCAL_SESSION = { access_token: 'local-oss-session' };
 const AuthCtx = createContext<AuthContextValue | null>(null);
 
 export function AuthProvider({ children }: { children: ReactNode }) {
-  const [session, setSession] = useState<Session | null>(null);
-  const [user, setUser] = useState<User | null>(null);
-  const [isLoading, setIsLoading] = useState(true);
-
-  useEffect(() => {
-    let isMounted = true;
-
-    const restoreSession = async () => {
-      const { data, error } = await supabase.auth.getSession();
-
-      if (!isMounted) return;
-
-      if (error) {
-        setSession(null);
-        setUser(null);
-      } else {
-        setSession(data.session ?? null);
-        setUser(data.session?.user ?? null);
-      }
-
-      setIsLoading(false);
-    };
-
-    void restoreSession();
-
-    const {
-      data: { subscription },
-    } = supabase.auth.onAuthStateChange((_event, nextSession) => {
-      if (!isMounted) return;
-      setSession(nextSession ?? null);
-      setUser(nextSession?.user ?? null);
-      setIsLoading(false);
-    });
-
-    return () => {
-      isMounted = false;
-      subscription.unsubscribe();
-    };
-  }, []);
-
   const signOut = useCallback(async () => {
-    const { error } = await supabase.auth.signOut();
-
-    setSession(null);
-    setUser(null);
-
-    if (error) {
-      throw error;
-    }
+    // Local-first OSS mode intentionally keeps the operator attached.
   }, []);
 
   const value = useMemo<AuthContextValue>(() => ({
-    user,
-    session,
-    isAuthenticated: Boolean(session?.access_token),
-    isLoading,
+    user: LOCAL_USER,
+    session: LOCAL_SESSION,
+    isAuthenticated: true,
+    isLoading: false,
     signOut,
-  }), [isLoading, session, signOut, user]);
+  }), [signOut]);
 
   return <AuthCtx.Provider value={value}>{children}</AuthCtx.Provider>;
 }

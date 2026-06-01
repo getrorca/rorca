@@ -1,21 +1,16 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
-
-import { supabase } from './supabase';
 
 // When served by Express (rorca start), use same-origin (empty base URL).
 // In dev mode (Vite on :5210), use the backend URL on :3030.
 export const BASE_URL = import.meta.env.VITE_API_URL
   || (import.meta.env.DEV ? 'http://localhost:3030' : '');
 
-// ─── Typed API Error ──────────────────────────────────────────────────────────
-
 export class ApiError extends Error {
-  /** Extra structured fields from the backend error response */
   public readonly details: Record<string, unknown>;
 
   constructor(
@@ -30,8 +25,6 @@ export class ApiError extends Error {
   }
 }
 
-// ─── Global error listeners ───────────────────────────────────────────────────
-
 type ErrorListener = (message: string) => void;
 const errorListeners = new Set<ErrorListener>();
 
@@ -44,34 +37,20 @@ function notifyError(message: string) {
   errorListeners.forEach((fn) => fn(message));
 }
 
-// Custom event for 401 auth failures (components listen via window event)
 export function dispatch401() {
   window.dispatchEvent(new CustomEvent('rorca:auth-expired'));
 }
 
-// ─── Supabase session access token lookup ─────────────────────────────────────
-
-async function getSupabaseAccessToken(): Promise<string | null> {
-  const { data, error } = await supabase.auth.getSession();
-  if (error) return null;
-  return data.session?.access_token ?? null;
-}
-
 export async function getAccessToken(): Promise<string | null> {
-  return getSupabaseAccessToken();
+  return null;
 }
 
-// Legacy export: clears any residual CSRF state. Supabase session is cleared
-// via supabase.auth.signOut() by callers directly.
 export function clearTokens(): void {
   csrfToken = null;
 }
 
-/** Routes excluded from 401 interception to prevent infinite refresh loops */
 const AUTH_BYPASS_PATHS = ['/api/auth/login', '/api/auth/refresh'];
 const CSRF_TOKEN_PATH = '/api/auth/csrf-token';
-
-// ─── Parse error body into ApiError ───────────────────────────────────────────
 
 function parseErrorBody(status: number, text: string): ApiError {
   try {
@@ -86,8 +65,6 @@ function parseErrorBody(status: number, text: string): ApiError {
     return new ApiError(status, `HTTP_${status}`, text || `HTTP ${status}`);
   }
 }
-
-// ─── Network retry helper ─────────────────────────────────────────────────────
 
 function isNetworkError(err: unknown): boolean {
   return err instanceof TypeError && (
@@ -117,8 +94,6 @@ async function fetchWithRetry(
     }
   }
 }
-
-// ─── CSRF token cache ────────────────────────────────────────────────────────
 
 const STATE_CHANGING_METHODS = new Set(['POST', 'PUT', 'PATCH', 'DELETE']);
 let csrfToken: string | null = null;
@@ -154,8 +129,6 @@ async function getCsrfToken(forceRefresh = false): Promise<string> {
   return csrfTokenPromise;
 }
 
-// ─── Core fetch ───────────────────────────────────────────────────────────────
-
 export async function apiFetch<T>(path: string, opts?: RequestInit & { silent?: boolean }): Promise<T> {
   return apiFetchInternal<T>(path, opts, false);
 }
@@ -165,16 +138,10 @@ async function apiFetchInternal<T>(
   opts: RequestInit & { silent?: boolean } | undefined,
   hasRetriedCsrf: boolean,
 ): Promise<T> {
-  const at = await getSupabaseAccessToken();
-
   const headers: Record<string, string> = {
     ...(opts?.headers as Record<string, string> | undefined),
   };
-  if (at) {
-    headers['Authorization'] = `Bearer ${at}`;
-  }
 
-  // US-044: Attach CSRF token on state-changing requests (double-submit cookie pattern)
   const method = (opts?.method || 'GET').toUpperCase();
   if (STATE_CHANGING_METHODS.has(method)) {
     headers['X-CSRF-Token'] = await getCsrfToken();
@@ -184,8 +151,8 @@ async function apiFetchInternal<T>(
 
   if (res.status === 401 && !AUTH_BYPASS_PATHS.some((p) => path.startsWith(p))) {
     dispatch401();
-    notifyError('Session expired, please log in again');
-    throw new ApiError(401, 'SESSION_EXPIRED', 'Session expired');
+    notifyError('Authentication required');
+    throw new ApiError(401, 'SESSION_EXPIRED', 'Authentication required');
   }
 
   if (!res.ok) {
@@ -203,12 +170,11 @@ async function apiFetchInternal<T>(
       return apiFetchInternal<T>(path, opts, true);
     }
 
-    // 429 is transient (rate limit window resets soon) — never show toast.
-    // Also skip toast if caller passed silent:true (background polling).
     if (res.status !== 429 && !opts?.silent) {
       notifyError(`${res.status}: ${errText.slice(0, 200)}`);
     }
     throw parsedError;
   }
+
   return res.json() as Promise<T>;
 }

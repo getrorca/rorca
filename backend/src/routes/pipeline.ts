@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -22,7 +22,6 @@ import { chatComplete, DEFAULT_MODEL, resolveVaultProvider } from '../lib/llm-cl
 import { getWorkspaceEnvVars } from './env-vars';
 import { checkBudgetThresholds } from './budget';
 import { getVaultKey } from './vault';
-import { getCopilotToken } from './copilot';
 import type { AuthUser } from '../lib/auth-utils';
 import type { AgentProfileRow } from './agent-profiles';
 import { handleRouteError } from '../lib/async-handler';
@@ -1793,13 +1792,6 @@ router.post('/trigger', validateBody(PipelineTriggerSchema), async (req: Request
       }
     }
 
-    // Inject GitHub Copilot token when using github/copilot model
-    if (finalAgentModel === 'github/copilot' && pipelineUser) {
-      const copilotToken = await getCopilotToken(pipelineUser.id);
-      if (copilotToken) {
-        envOverrides['GITHUB_TOKEN'] = copilotToken;
-      }
-    }
 
     // Inject active agent profile (system prompt + allowed tools + model override)
     const activeProfile = await queryOne('SELECT * FROM agent_profiles WHERE workspace_id = $1 AND is_active = true LIMIT 1', [workspaceId]) as AgentProfileRow | undefined;
@@ -2502,12 +2494,6 @@ router.post('/quick-run', async (req: Request, res: Response) => {
       const openrouterVaultKey = await getVaultKey(user.id, 'openrouter');
       if (openrouterVaultKey) env['OPENROUTER_API_KEY'] = openrouterVaultKey.key;
 
-      // Inject Copilot token when using github/copilot model
-      const resolvedModel = activeModel;
-      if (resolvedModel === 'github/copilot') {
-        const copilotToken = await getCopilotToken(user.id);
-        if (copilotToken) env['GITHUB_TOKEN'] = copilotToken;
-      }
     }
 
     // Inject agent profile

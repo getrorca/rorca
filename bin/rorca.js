@@ -38,9 +38,7 @@ const PI_PROVIDER_LABELS = {
     codex: 'ChatGPT Plus/Pro',
     anthropic: 'Claude',
     claude: 'Claude',
-    github: 'GitHub Copilot',
-    copilot: 'GitHub Copilot',
-    'github copilot': 'GitHub Copilot',
+    github: 'GitHub',
     google: 'Gemini',
     gemini: 'Gemini',
     openrouter: 'OpenRouter',
@@ -48,7 +46,7 @@ const PI_PROVIDER_LABELS = {
 const PI_PROVIDER_ORDER = [
     'ChatGPT Plus/Pro',
     'Claude',
-    'GitHub Copilot',
+    'GitHub',
     'Gemini',
     'OpenRouter',
 ];

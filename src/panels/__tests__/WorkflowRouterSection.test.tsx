@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -174,8 +174,6 @@ interface CliStatusFixture {
   codexVersion: string | null;
   piInstalled: boolean;
   piVersion: string | null;
-  copilotConnected: boolean;
-  copilotUsername: null;
 }
 
 const CLI_STATUS_ALL_INSTALLED: CliStatusFixture = {
@@ -191,8 +189,6 @@ const CLI_STATUS_ALL_INSTALLED: CliStatusFixture = {
   codexVersion: '1.0.0',
   piInstalled: true,
   piVersion: '1.2.3',
-  copilotConnected: false,
-  copilotUsername: null,
 };
 
 const CLI_STATUS_CLAUDE_ONLY: CliStatusFixture = {
@@ -208,8 +204,6 @@ const CLI_STATUS_CLAUDE_ONLY: CliStatusFixture = {
   codexVersion: null,
   piInstalled: false,
   piVersion: null,
-  copilotConnected: false,
-  copilotUsername: null,
 };
 
 /**

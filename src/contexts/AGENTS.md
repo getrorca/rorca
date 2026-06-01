@@ -40,7 +40,7 @@ Active runs polled every 15s from `GET /api/pipeline/runs?workspaceId=...&limit=
 - `settings` uses `PUT /api/workspaces/:id/pipeline-config` (replaces full config, not PATCH)
 
 ## AuthContext.tsx
-Manages JWT auth state with token refresh and GitHub OAuth.
+Manages local single-user auth state for the OSS edition.
 
 **What it provides:**
 ```typescript
@@ -50,7 +50,7 @@ const {
   loading,              // boolean — true during initial session check
   login,                // (email, password) => Promise<void>
   register,             // (email, password, displayName) => Promise<void>
-  loginWithGitHub,      // () => void — redirects to GitHub OAuth
+  loginWithGitHub,      // legacy placeholder — OSS edition does not expose hosted sign-in
   logout,               // () => Promise<void>
 } = useAuth();
 ```

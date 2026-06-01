@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -205,9 +205,8 @@ const options: swaggerJsdoc.Options = {
       { name: 'WAL', description: 'Write-ahead log event stream' },
       { name: 'Context', description: 'Context extraction for direction layers' },
       { name: 'Analytics', description: 'Usage analytics, costs, velocity, and export' },
-      { name: 'Teams', description: 'Team management and RBAC' },
       { name: 'Health', description: 'Health check' },
-      { name: 'GitHub', description: 'GitHub integration, OAuth, and webhooks' },
+      { name: 'GitHub', description: 'GitHub repository integration and webhooks' },
       { name: 'Vault', description: 'Encrypted API key vault management' },
       { name: 'Agent Profiles', description: 'Named agent configurations (model, temperature, etc.)' },
       { name: 'Agent Hooks', description: 'Pre/post story lifecycle hook management' },
@@ -215,10 +214,8 @@ const options: swaggerJsdoc.Options = {
       { name: 'Settings', description: 'User settings and preferences' },
       { name: 'Webhooks', description: 'Incoming webhook receivers (GitHub, etc.)' },
       { name: 'Environment Variables', description: 'Per-workspace environment variable injection' },
-      { name: 'Users', description: 'User management and workspace membership' },
-      { name: 'Billing', description: 'Stripe subscription and invoice management' },
+      { name: 'Users', description: 'Local user profile and account operations' },
       { name: 'Budget', description: 'Workspace spending limits and budget configuration' },
-      { name: 'Copilot', description: 'GitHub Copilot OAuth integration' },
       { name: 'Activity', description: 'Activity feed and audit trail' },
       { name: 'Onboarding', description: 'Onboarding wizard state management' },
       { name: 'Admin', description: 'Administrative operations (backups, maintenance)' },

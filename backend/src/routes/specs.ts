@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -4198,7 +4198,7 @@ router.get(['/forge/batch/:batchId/stream', '/generate/batch/:batchId/stream'], 
  *     operationId: listSpecs
  *     description: Lists specs for a workspace filtered by status, tags, review status, and assignee. Returns paginated results sorted by generatedAt descending.
  *     x-rorca-tier: public
- *     x-rorca-rationale: "Read-only spec listing for local CLI, MCP, and web clients. Stable open-core surface with no billing or admin action."
+ *     x-rorca-rationale: "Read-only spec listing for local CLI, MCP, and web clients. Stable open-source surface with no write or operator-only side effects."
  *     x-rorca-public-api: true
  *     parameters:
  *       - in: query
@@ -9625,16 +9625,13 @@ router.post('/:specId/import/github-issues', async (req: Request, res: Response)
       return;
     }
 
-    // Resolve GitHub token from OAuth connections
-    const tokenRow = await queryOne('SELECT encrypted_token FROM github_connections LIMIT 1') as GitHubConnectionRow | undefined;
+    // Resolve GitHub token from local credentials or environment
+    const githubToken = process.env.GITHUB_TOKEN?.trim() || process.env.GH_TOKEN?.trim();
 
-    if (!tokenRow) {
-      throw new ValidationError('No GitHub OAuth token available. Connect your GitHub account first.');
+    if (!githubToken) {
+      throw new ValidationError('No GitHub token available. Set GITHUB_TOKEN or GH_TOKEN for repository actions.');
       return;
     }
-
-    const { decryptToken } = await import('../lib/auth-utils');
-    const githubToken = decryptToken(tokenRow.encrypted_token);
 
     // Find the spec on disk
     const { pendingDir, approvedDir } = specsDirs(workspace.path);

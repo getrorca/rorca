@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -10,7 +10,6 @@
 
 export * as specsApi from './specs';
 export * as pipelineApi from './pipeline';
-export * as authApi from './auth';
 export * as workspacesApi from './workspaces';
 export * as analyticsApi from './analytics';
 export * as directionApi from './direction';
