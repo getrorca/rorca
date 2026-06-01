@@ -2,7 +2,7 @@
   "specId": "Rorca GraphRAG Phase 2 Scoring and Reranking",
   "runId": 20260316000347,
   "startedAt": "2026-05-31T23:56:39.394Z",
-  "lastUpdatedAt": "2026-06-01T01:08:42.282Z",
+  "lastUpdatedAt": "2026-06-01T01:35:51.913Z",
   "completedStories": [
     {
       "storyId": "GR2-001",
@@ -43,11 +43,31 @@
       "agentType": "pi",
       "model": "openai-codex/gpt-5.4",
       "elapsedMs": 1223723
+    },
+    {
+      "storyId": "GR2-005",
+      "title": "Add score explainability and debug surfaces",
+      "status": "passed",
+      "startedAt": "2026-06-01T01:08:48.641Z",
+      "finishedAt": "2026-06-01T01:23:33.624Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 884983
+    },
+    {
+      "storyId": "GR2-006",
+      "title": "Build evaluation fixtures, regression benchmarks, and rollout controls",
+      "status": "passed",
+      "startedAt": "2026-06-01T01:23:52.505Z",
+      "finishedAt": "2026-06-01T01:35:38.557Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 706052
     }
   ],
   "failedStories": [],
   "skippedStories": [],
-  "currentStory": "GR2-005",
+  "currentStory": "GR2-007",
   "decisions": [],
   "resumedFromStory": null
 }

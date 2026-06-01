@@ -16,6 +16,17 @@ But the current implementation is **not yet state-of-the-art graph RAG**. The bi
 
 The Pi extension also amplifies the issue because it always runs with `includeGraph: true`, so any graph inefficiency or inaccuracy affects everyday Pi-driven runs.
 
+## Phase 2 production guardrails (current contract)
+
+These safeguards are now part of the implementation contract and should be preserved during future tuning:
+
+- **Explicit rerank budget**: `backend/src/lib/ranking-benchmark.ts` exports `MAX_GRAPH_RERANK_DURATION_MS = 50`, and `backend/src/lib/__tests__/ranking-benchmark.test.ts` fails CI if the benchmark fixture exceeds it.
+- **Bounded graph-context hot path**: `backend/src/lib/graph-context.ts` caps traversal to `MAX_GRAPH_CONTEXT_PREDICTED_PATHS = 10` and uses batched `f.key IN [...]` Cypher queries instead of per-file query loops or unbounded `MATCH (n)` scans.
+- **Canonical cache scope**: graph-context cache keys are `graph-context:<workspace>:<spec|no-spec>:<story>:<paths-hash>`, so duplicate local story/spec/file IDs in other workspaces cannot collide.
+- **Observable invalidation**: graph-context cache invalidation is wired to WAL lifecycle events (`spec_approved`, `story_passed`, `story_failed`, `worktree_merged`, plus delete/memory lifecycle events) and to explicit projection rebuild flows (`POST /api/graph/populate`, `POST /api/admin/graph-backfill`).
+- **Lite-mode behavior**: when AGE is unavailable, GraphRAG stays semantic-only and graph context falls back to recency-sorted Postgres memories rather than throwing.
+- **Search-path hygiene**: AGE reads still require `setupAgeSession()` + `SET search_path = rorca, public` in `finally`; removing that discipline will poison pooled connections.
+
 ---
 
 ## What the stack does today
