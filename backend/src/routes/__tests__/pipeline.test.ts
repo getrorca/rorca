@@ -10,6 +10,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
+import { gzipSync } from 'zlib';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
 
@@ -36,6 +37,11 @@ jest.mock('../../lib/pg-boss', () => ({
     work: jest.fn(),
     stop: jest.fn().mockResolvedValue(undefined),
   }),
+}));
+
+jest.mock('../../lib/pty-manager', () => ({
+  PTY_AVAILABLE: true,
+  PTY_UNAVAILABLE_HINT: 'Run: cd backend && npm rebuild node-pty',
 }));
 
 let app: Express;
@@ -105,7 +111,9 @@ afterEach(async () => {
   // may try to use the pool AFTER closePool() is called.
   await new Promise((r) => setImmediate(r));
   await new Promise((r) => setTimeout(r, 300));
-  fs.rmSync(tmpDir, { recursive: true, force: true });
+  if (tmpDir) {
+    fs.rmSync(tmpDir, { recursive: true, force: true });
+  }
 });
 
 afterAll(async () => {
@@ -1058,6 +1066,8 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.status).toBe(200);
     expect(res.body.agentType).toBe('claude');
     expect(res.body.agentModel).toBeNull();
+    expect(res.body.terminal_mode).toBe('ansi-html');
+    expect(res.body.run.terminal_mode).toBe('ansi-html');
   });
 
   test('pipeline_runs table has agent_type and agent_model columns', async () => {
@@ -1067,6 +1077,7 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(colNames).toContain('agent_model');
     expect(colNames).toContain('agent');
     expect(colNames).toContain('opencode_server_pid');
+    expect(colNames).toContain('terminal_mode');
   });
 
   test('trigger response includes agentType and agentModel', async () => {
@@ -1080,6 +1091,153 @@ describe('OC-006: Pipeline trigger agent integration', () => {
     expect(res.status).toBe(201);
     expect(res.body).toHaveProperty('agentType');
     expect(res.body).toHaveProperty('agentModel');
+  });
+
+  test('trigger accepts terminal_mode=pty, persists it, and forwards it to pg-boss', async () => {
+    seedSpec('approved', 'terminal-mode-pty');
+
+    const pgBossMock = jest.requireMock('../../lib/pg-boss');
+    const mockSend = pgBossMock.getBoss().send as jest.Mock;
+    mockSend.mockClear();
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specPath: 'forge/specs/approved/terminal-mode-pty.json', workspaceId: 'ws-pipe', terminal_mode: 'pty' });
+
+    expect(res.status).toBe(201);
+    expect(res.body.terminal_mode).toBe('pty');
+
+    const run = await queryOne<{ terminal_mode: string }>(`SELECT terminal_mode FROM pipeline_runs WHERE id = $1`, [res.body.runId]);
+    expect(run?.terminal_mode).toBe('pty');
+
+    expect(mockSend).toHaveBeenCalledWith(
+      'pipeline:run',
+      expect.objectContaining({ terminalMode: 'pty' }),
+      expect.any(Object),
+    );
+  });
+
+  test('trigger rejects unknown terminal_mode with 400', async () => {
+    seedSpec('approved', 'terminal-mode-invalid');
+
+    const res = await request(app)
+      .post('/api/pipeline/trigger')
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ specPath: 'forge/specs/approved/terminal-mode-invalid.json', workspaceId: 'ws-pipe', terminal_mode: 'bogus' });
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toContain('Invalid terminal_mode');
+  });
+});
+
+// ─── GET /api/pipeline/runs/:runId/output ───────────────────────────────────
+
+describe('GET /api/pipeline/runs/:runId/output', () => {
+  test('emits run_meta with normalized terminal_mode for replay clients', async () => {
+    const inserted = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/output-meta.json', 'ws-pipe', 'done')
+       RETURNING id`,
+    );
+    const runId = inserted!.id;
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .buffer(true)
+      .parse((stream, cb) => {
+        let data = '';
+        stream.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+        stream.on('end', () => cb(null, data));
+      });
+
+    expect(res.status).toBe(200);
+    expect(String(res.body)).toContain('event: run_meta');
+    expect(String(res.body)).toContain('"terminal_mode":"ansi-html"');
+    expect(String(res.body)).toContain('"isPty":false');
+  });
+
+  test('replays transcript chunks and semantic_step events for non-PTY runs', async () => {
+    const inserted = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status)
+       VALUES ('forge/specs/approved/output-replay.json', 'ws-pipe', 'done')
+       RETURNING id`,
+    );
+    const runId = inserted!.id;
+
+    const chunkOne = Buffer.from('{"type":"assistant","message":{"content":[{"type":"tool_use","name":"Read","input":{"file_path":"src/foo.ts"}}]}}\n', 'utf8');
+    const chunkTwo = Buffer.from('plain transcript line\n', 'utf8');
+
+    await execute(
+      `INSERT INTO run_output_chunks (run_id, chunk, sequence)
+       VALUES ($1, $2, 0), ($1, $3, 1)`,
+      [runId, chunkOne, chunkTwo],
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .buffer(true)
+      .parse((stream, cb) => {
+        let data = '';
+        stream.on('data', (chunk: Buffer) => { data += chunk.toString(); });
+        stream.on('end', () => cb(null, data));
+      });
+
+    const body = String(res.body);
+    expect(res.status).toBe(200);
+    expect(body).toContain('event: run_meta');
+    expect(body).toContain('"terminal_mode":"ansi-html"');
+    expect(body).toContain('"isPty":false');
+    expect(body).toContain(`event: chunk\ndata: ${chunkOne.toString('base64')}`);
+    expect(body).toContain(`event: chunk\ndata: ${chunkTwo.toString('base64')}`);
+    expect(body).toContain('event: semantic_step');
+    expect(body).toContain('"type":"read"');
+    expect(body).toContain('"label":"Read src/foo.ts"');
+    expect(body).toContain('event: done');
+  });
+
+  test('replays gzip-compressed PTY chunks from the dedicated capture store from byte 0', async () => {
+    const inserted = await queryOne<{ id: number }>(
+      `INSERT INTO pipeline_runs (spec_path, workspace_id, status, terminal_mode, agent, agent_type)
+       VALUES ('forge/specs/approved/output-pty.json', 'ws-pipe', 'done', 'pty', 'claude', 'claude')
+       RETURNING id`,
+    );
+    const runId = inserted!.id;
+
+    const chunk = Buffer.from('\u001b[32mpty hello\u001b[0m\r\n', 'utf8');
+    const compressedChunk = gzipSync(chunk);
+
+    await execute(
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status, total_output_bytes, total_stored_bytes)
+       VALUES ($1, 'ws-pipe', '/tmp/workspace', 'claude', 'exited', $2, $3)`,
+      [runId, chunk.length, compressedChunk.length],
+    );
+    await execute(
+      `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk, compression, byte_length, stored_byte_length)
+       VALUES ($1, 1, $2, 'gzip', $3, $4)`,
+      [runId, compressedChunk, chunk.length, compressedChunk.length],
+    );
+
+    const res = await request(app)
+      .get(`/api/pipeline/runs/${runId}/output`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .buffer(true)
+      .parse((stream, cb) => {
+        let data = '';
+        stream.on('data', (part: Buffer) => { data += part.toString(); });
+        stream.on('end', () => cb(null, data));
+      });
+
+    const body = String(res.body);
+    expect(res.status).toBe(200);
+    expect(body).toContain('event: run_meta');
+    expect(body).toContain('"terminal_mode":"pty"');
+    expect(body).toContain('"isPty":true');
+    expect(body).toContain(`event: chunk\ndata: ${chunk.toString('base64')}`);
+    expect(body).not.toContain('event: semantic_step');
+    expect(body).toContain('event: done');
   });
 });
 

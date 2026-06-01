@@ -9,6 +9,8 @@
     "dev:worker": "npx tsx src/worker.ts",
     "build": "tsc",
     "test": "node --max-old-space-size=8192 node_modules/.bin/jest",
+    "test:golden": "node scripts/run-golden-tests.js",
+    "test:golden:update": "node scripts/run-golden-tests.js --update-golden",
     "mcp": "npx tsx src/mcp/server.ts",
     "lint": "npx eslint src/",
     "worker": "npx tsx src/worker-supervisor.ts",

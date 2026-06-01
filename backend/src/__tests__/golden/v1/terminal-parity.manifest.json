@@ -1,0 +1,86 @@
+{
+  "version": 1,
+  "updateMode": "Explicit only: npm run test:golden:update -- --update-golden or RORCA_UPDATE_GOLDEN=1 npx jest --testPathPattern=golden",
+  "engines": {
+    "claude": {
+      "engine": "claude",
+      "agentType": "claude",
+      "captureFormat": "stream-json",
+      "fixturePath": "src/lib/__tests__/fixtures/claude-code-parity.jsonl",
+      "pinnedVersion": "claude-code 1.0.27",
+      "terminal": {
+        "cols": 80,
+        "rows": 24
+      },
+      "availability": {
+        "requiresAuth": false,
+        "skipReason": "claude CLI unavailable"
+      },
+      "byteLength": 161,
+      "chunkCount": 3,
+      "normalizedSha256": "9cc062c4c4971454b997ea028f03a4137925bc00649ff59d0298ba6e0a0e7633",
+      "eventOrderSha256": "6d8268e8391e9f809e66cc44c5c884aaa1e621b3f3792cd8bcfd7ef204811284",
+      "terminalStateSha256": "b4e59f76c3df9aa100e7bf7850da76529f7e22557444e449415685d06f808b31"
+    },
+    "codex": {
+      "engine": "codex",
+      "agentType": "codex",
+      "captureFormat": "raw",
+      "fixturePath": "src/lib/__tests__/fixtures/codex-parity.json",
+      "pinnedVersion": "codex 0.25.0",
+      "terminal": {
+        "cols": 80,
+        "rows": 24
+      },
+      "availability": {
+        "requiresAuth": false,
+        "skipReason": "codex CLI unavailable"
+      },
+      "byteLength": 330,
+      "chunkCount": 8,
+      "normalizedSha256": "5fd728b0f79c7fc1b02945f825f42225029f35a783a02a5188f388302d8cea2f",
+      "eventOrderSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855",
+      "terminalStateSha256": "d950c88b8da471266e1182598e9d37a06be6c893f4453b49f6db2386a83727f7"
+    },
+    "opencode": {
+      "engine": "opencode",
+      "agentType": "opencode",
+      "captureFormat": "json",
+      "fixturePath": "src/lib/__tests__/fixtures/opencode-parity.json",
+      "pinnedVersion": "opencode 0.1.0",
+      "terminal": {
+        "cols": 80,
+        "rows": 24
+      },
+      "availability": {
+        "requiresAuth": false,
+        "skipReason": "opencode CLI unavailable"
+      },
+      "byteLength": 1045,
+      "chunkCount": 4,
+      "normalizedSha256": "6a542cb66cf4532a9f22e39446a193e15fc9e14ef44146d20487f2cbf61ef628",
+      "eventOrderSha256": "c78594a67484b202a24c93346a802ae18eec60c361cacd18d5dc7869d0f34773",
+      "terminalStateSha256": "e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    "pi": {
+      "engine": "pi",
+      "agentType": "pi",
+      "captureFormat": "jsonl",
+      "fixturePath": "src/__tests__/fixtures/pi/pi-parity.jsonl",
+      "pinnedVersion": "pi 0.67.0",
+      "terminal": {
+        "cols": 80,
+        "rows": 24
+      },
+      "availability": {
+        "requiresAuth": true,
+        "skipReason": "pi installed but no provider auth available (run: pi auth login)"
+      },
+      "byteLength": 1955,
+      "chunkCount": 3,
+      "normalizedSha256": "531b31b7aac0a89cf3c6e17f9eae1db0d84238b093d4d3baaec1886d4c15804f",
+      "eventOrderSha256": "aeedec2d4e9389591eea139295d0ad25a170fb8e04d0a9d4dc3637959b6a6385",
+      "terminalStateSha256": "7ac384f5a0ff8da17351184a916c5a2be0e8d3a59bff77469cba944c5ed7866c"
+    }
+  }
+}
