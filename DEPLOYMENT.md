@@ -13,7 +13,7 @@ Step-by-step instructions for deploying Rorca to a production server.
 ## 1. Clone and Configure
 
 ```bash
-git clone https://github.com/your-org/rorca.git /opt/rorca
+git clone https://github.com/getrorca/rorca.git /opt/rorca
 cd /opt/rorca
 ```
 
@@ -29,7 +29,7 @@ cp deploy/env.production.example .env
 |----------|---------|-------|
 | `JWT_SECRET` | (generate below) | Auth token signing key |
 | `CORS_ORIGIN` | `https://app.rorca.dev` | Exact frontend URL |
-| `RORCA_BASE_URL` | `https://app.rorca.dev` | OAuth callbacks |
+| `RORCA_BASE_URL` | `https://app.rorca.dev` | Absolute frontend URL used for generated links and browser-facing callbacks |
 
 Generate a secure JWT secret:
 

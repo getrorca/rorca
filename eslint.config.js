@@ -9,7 +9,6 @@ export default [
       'dist/**',
       'backend/**',
       'rorca-vscode/**',
-      'vscode-extension/**',
       'e2e/**',
       '*.config.js',
       '*.config.ts',
