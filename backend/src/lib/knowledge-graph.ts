@@ -318,14 +318,25 @@ async function cypherQuery<T = Record<string, unknown>>(
 /**
  * Execute a Cypher mutation (MERGE/CREATE) that returns no results.
  */
-async function cypherMutate(cypher: string): Promise<void> {
-  const sql = `SELECT * FROM cypher('rorca', $$ ${cypher} $$) AS (v agtype)`;
+const CYPHER_NOW_PLACEHOLDER = '__RORCA_PG_NOW__';
 
+async function resolveCypherNow(client: PoolClient, cypher: string): Promise<string> {
+  if (!cypher.includes(CYPHER_NOW_PLACEHOLDER)) {
+    return cypher;
+  }
+  const now = await client.query<{ now: string }>('SELECT NOW()::text AS now');
+  const literal = escCypher(now.rows[0]?.now ?? new Date().toISOString());
+  return cypher.replaceAll(CYPHER_NOW_PLACEHOLDER, literal);
+}
+
+async function cypherMutate(cypher: string): Promise<void> {
   const p = pool;
   logger.debug('[knowledge-graph] cypherMutate: acquiring pool client');
   const client = await p.connect();
   try {
     await setupAgeSession(client);
+    const resolvedCypher = await resolveCypherNow(client, cypher);
+    const sql = `SELECT * FROM cypher('rorca', $$ ${resolvedCypher} $$) AS (v agtype)`;
     await client.query(sql);
     logger.debug('[knowledge-graph] cypherMutate: mutation complete');
   } catch (err) {
@@ -354,12 +365,14 @@ function escCypher(value: string): string {
 }
 
 function evidenceEdgeSet(alias: string): string {
-  const now = new Date().toISOString();
   return `
     ON CREATE SET ${alias}.evidenceCount = 1,
-                  ${alias}.lastSeenAt = '${now}'
+                  ${alias}.created_at = '${CYPHER_NOW_PLACEHOLDER}',
+                  ${alias}.updated_at = '${CYPHER_NOW_PLACEHOLDER}',
+                  ${alias}.lastSeenAt = '${CYPHER_NOW_PLACEHOLDER}'
     ON MATCH SET ${alias}.evidenceCount = COALESCE(${alias}.evidenceCount, 0) + 1,
-                 ${alias}.lastSeenAt = '${now}'
+                 ${alias}.updated_at = '${CYPHER_NOW_PLACEHOLDER}',
+                 ${alias}.lastSeenAt = '${CYPHER_NOW_PLACEHOLDER}'
   `;
 }
 
@@ -430,6 +443,12 @@ export interface MemoryNode {
   id: string;
   category: string;
   created_at: string;
+}
+
+export interface MemoryProjectionMetadata {
+  pinned?: boolean;
+  createdAt?: string | null;
+  updatedAt?: string | null;
 }
 
 export interface SpecNode {
@@ -547,15 +566,21 @@ export async function addMemoryLink(
   specId: string,
   workspaceId: string,
   category?: string,
+  metadata: MemoryProjectionMetadata = {},
 ): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const cat = category || '';
+  const createdAt = escCypher(metadata.createdAt || CYPHER_NOW_PLACEHOLDER);
+  const updatedAt = escCypher(metadata.updatedAt || metadata.createdAt || CYPHER_NOW_PLACEHOLDER);
   const cypher = `
     MERGE (m:Memory {key: '${escCypher(buildMemoryNodeKey(workspaceId, memoryId))}'})
-    ON CREATE SET m.created_at = '${new Date().toISOString()}'
+    ON CREATE SET m.created_at = '${createdAt}'
     SET m.id = '${escCypher(memoryId)}',
         m.category = COALESCE(m.category, '${escCypher(cat)}'),
-        m.workspaceId = '${escCypher(workspaceId)}'
+        m.workspaceId = '${escCypher(workspaceId)}',
+        m.workspace_id = '${escCypher(workspaceId)}',
+        m.updated_at = '${updatedAt}',
+        m.pinned = ${metadata.pinned ? 'true' : 'false'}
     MERGE (s:Story {key: '${escCypher(buildStoryNodeKey(workspaceId, specId, storyId))}'})
     ON CREATE SET s.id = '${escCypher(storyId)}',
                   s.storyId = '${escCypher(storyId)}',
@@ -577,13 +602,20 @@ export async function addMemoryAboutFile(
   memoryId: string,
   filePath: string,
   workspaceId: string,
+  metadata: MemoryProjectionMetadata = {},
 ): Promise<void> {
   if (!(await isGraphAvailable())) return;
   const normalizedPath = normalizeGraphFilePath(filePath);
+  const createdAt = escCypher(metadata.createdAt || CYPHER_NOW_PLACEHOLDER);
+  const updatedAt = escCypher(metadata.updatedAt || metadata.createdAt || CYPHER_NOW_PLACEHOLDER);
   const cypher = `
     MERGE (m:Memory {key: '${escCypher(buildMemoryNodeKey(workspaceId, memoryId))}'})
+    ON CREATE SET m.created_at = '${createdAt}'
     SET m.id = '${escCypher(memoryId)}',
-        m.workspaceId = '${escCypher(workspaceId)}'
+        m.workspaceId = '${escCypher(workspaceId)}',
+        m.workspace_id = '${escCypher(workspaceId)}',
+        m.updated_at = '${updatedAt}',
+        m.pinned = ${metadata.pinned ? 'true' : 'false'}
     MERGE (f:File {key: '${escCypher(buildFileNodeKey(workspaceId, normalizedPath))}'})
     SET f.path = '${escCypher(normalizedPath)}',
         f.workspaceId = '${escCypher(workspaceId)}',
@@ -599,12 +631,23 @@ export async function addMemoryAboutFile(
  * Link a Memory entry to the Spec that produced it.
  * PG-019: No-op if AGE is unavailable.
  */
-export async function addMemorySourceSpec(memoryId: string, specId: string, workspaceId: string): Promise<void> {
+export async function addMemorySourceSpec(
+  memoryId: string,
+  specId: string,
+  workspaceId: string,
+  metadata: MemoryProjectionMetadata = {},
+): Promise<void> {
   if (!(await isGraphAvailable())) return;
+  const createdAt = escCypher(metadata.createdAt || CYPHER_NOW_PLACEHOLDER);
+  const updatedAt = escCypher(metadata.updatedAt || metadata.createdAt || CYPHER_NOW_PLACEHOLDER);
   const cypher = `
     MERGE (m:Memory {key: '${escCypher(buildMemoryNodeKey(workspaceId, memoryId))}'})
+    ON CREATE SET m.created_at = '${createdAt}'
     SET m.id = '${escCypher(memoryId)}',
-        m.workspaceId = '${escCypher(workspaceId)}'
+        m.workspaceId = '${escCypher(workspaceId)}',
+        m.workspace_id = '${escCypher(workspaceId)}',
+        m.updated_at = '${updatedAt}',
+        m.pinned = ${metadata.pinned ? 'true' : 'false'}
     MERGE (sp:Spec {key: '${escCypher(buildSpecNodeKey(workspaceId, specId))}'})
     ON CREATE SET sp.id = '${escCypher(specId)}',
                   sp.specId = '${escCypher(specId)}',

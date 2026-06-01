@@ -13,6 +13,7 @@ import {
   normalizeGraphFilePath,
 } from './knowledge-graph';
 import { logger } from './logger';
+import type { RetrievalGuardrailsConfig } from './rorca-config';
 
 export interface RetrievalSkill {
   name: string;
@@ -44,6 +45,7 @@ export interface RetrievalCandidateInput {
   source?: string | null;
   pinned?: boolean;
   createdAt?: string | null;
+  updatedAt?: string | null;
   relatedFiles?: string[];
   relatedFileKeys?: string[];
   sourceStoryId?: string | null;
@@ -65,7 +67,7 @@ export interface MatchedSkill {
   score: number;
 }
 
-export type GraphRagScoreSchemaVersion = 'v1';
+export type GraphRagScoreSchemaVersion = 'v2';
 
 export interface GraphRagScoreComponent {
   score: number;
@@ -127,6 +129,8 @@ export interface GraphRagScoreBreakdown {
   skillAlignment: GraphRagSkillAlignmentComponent;
   historicalUsefulness: GraphRagHistoricalComponent;
   diversityPenalty: GraphRagPenaltyComponent;
+  echoChamberPenalty: GraphRagPenaltyComponent;
+  repetitionPenalty: GraphRagPenaltyComponent;
   duplicationPenalty: GraphRagPenaltyComponent;
 }
 
@@ -205,7 +209,7 @@ export interface GraphRagSurfaceDocumentation {
   details: string;
 }
 
-export const GRAPH_RAG_SCORE_SCHEMA_VERSION: GraphRagScoreSchemaVersion = 'v1';
+export const GRAPH_RAG_SCORE_SCHEMA_VERSION: GraphRagScoreSchemaVersion = 'v2';
 
 export interface GraphRagScoreContractDocumentation {
   schemaVersion: GraphRagScoreSchemaVersion;
@@ -221,9 +225,9 @@ export interface GraphRagScoreContractDocumentation {
 export const GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION: GraphRagScoreContractDocumentation = {
   schemaVersion: GRAPH_RAG_SCORE_SCHEMA_VERSION,
   purpose: 'GraphRAG scoring is a deterministic reranking layer over semantically eligible canonical memory candidates. It never creates identity, scope, or candidate eligibility from graph score values.',
-  ordering: 'Select eligible candidates with the semantic rank score first, then blend semanticRankScore with directGraphProximity by graph weight, then sort by blended score descending, semanticRankScore descending, tieBreak.canonicalKey ascending, tieBreak.sourceStoryKey ascending, tieBreak.storySlug ascending, then tieBreak.candidateId ascending.',
+  ordering: 'Select eligible candidates with the semantic rank score first, subtract duplication/diversity/repetition penalties, enforce the anti-echo-chamber dominance cap during top-N selection, then blend semanticRankScore with directGraphProximity by graph weight, then sort by blended score descending, semanticRankScore descending, tieBreak.canonicalKey ascending, tieBreak.sourceStoryKey ascending, tieBreak.storySlug ascending, then tieBreak.candidateId ascending.',
   scoreRange: { min: 0, max: 1 },
-  liteModeBehavior: 'When Apache AGE is unavailable (lite mode), directGraphProximity.score is forced to 0, directGraphProximity.proximityUnavailable is set to true, and applied graph rerank weight is forced to 0.',
+  liteModeBehavior: 'When Apache AGE is unavailable (lite mode), directGraphProximity.score is forced to 0, directGraphProximity.proximityUnavailable is set to true, applied graph rerank weight is forced to 0, and retrieval falls back to semantic ranking plus recency-sorted Postgres memory context.',
   scoredSurfaces: [
     {
       surface: 'retrieveContext()',
@@ -335,6 +339,17 @@ const GRAPH_STALE_MAX_AGE_DAYS: Record<GraphProjectionNodeType, number> = {
   skill: 365,
 };
 
+const DEFAULT_RETRIEVAL_GUARDRAILS: RetrievalGuardrailsConfig = {
+  version: 1,
+  recencyDecayLambda: 0.0077,
+  dominanceThreshold: 0.4,
+  dominanceTopN: 5,
+  minDiversityFloor: 2,
+  pinnedRecencyFloor: 1,
+  lowConfidenceClusterPenalty: 0.18,
+  highConfidenceExempt: true,
+};
+
 function clamp(value: number, min: number = 0, max: number = 1): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -430,29 +445,32 @@ function inferReferenceTimestamp(explicit: string | undefined, candidates: Retri
   if (explicitTs != null) return explicitTs;
 
   const timestamps = candidates
-    .map(candidate => parseTimestamp(candidate.createdAt))
+    .map(candidate => parseTimestamp(candidate.updatedAt ?? candidate.createdAt))
     .filter((value): value is number => value != null);
 
   return timestamps.length > 0 ? Math.max(...timestamps) : 0;
 }
 
-function recencyScore(candidate: RetrievalCandidateInput, referenceTimestamp: number): number {
-  const candidateTimestamp = parseTimestamp(candidate.createdAt);
-  if (candidateTimestamp == null || referenceTimestamp <= 0) return 0.5;
+function recencyScore(
+  candidate: RetrievalCandidateInput,
+  referenceTimestamp: number,
+  guardrails: RetrievalGuardrailsConfig,
+): number {
+  const candidateTimestamp = parseTimestamp(candidate.updatedAt ?? candidate.createdAt);
+  if (candidateTimestamp == null || referenceTimestamp <= 0) {
+    return candidate.pinned ? guardrails.pinnedRecencyFloor : 0.5;
+  }
 
   const ageMs = Math.max(0, referenceTimestamp - candidateTimestamp);
   const ageDays = ageMs / (1000 * 60 * 60 * 24);
+  const decay = Math.exp(-guardrails.recencyDecayLambda * ageDays);
+  const bounded = roundScore(decay);
 
-  let halfLifeDays = 90;
-  const category = (candidate.category || '').toLowerCase();
-  const sourceType = (candidate.sourceType || '').toLowerCase();
+  if (candidate.pinned) {
+    return roundScore(Math.max(guardrails.pinnedRecencyFloor, bounded));
+  }
 
-  if (category.includes('convention')) halfLifeDays = 365;
-  else if (category.includes('bug')) halfLifeDays = 120;
-  else if (sourceType === 'synthesis') halfLifeDays = 45;
-  else if (sourceType === 'manual' || sourceType === 'mcp') halfLifeDays = 180;
-
-  return roundScore(Math.exp(-Math.log(2) * (ageDays / halfLifeDays)));
+  return bounded;
 }
 
 function fileOverlapScore(predictedFileKeys: string[], relatedFileKeys: string[]): number {
@@ -1003,6 +1021,163 @@ function mmrSimilarity(a: RankedRetrievalCandidate, b: RankedRetrievalCandidate)
   return tokenOverlap(tokenize(a.text), tokenize(b.text));
 }
 
+function resolveGuardrailsConfig(
+  input?: Partial<RetrievalGuardrailsConfig> | null,
+): RetrievalGuardrailsConfig {
+  return {
+    ...DEFAULT_RETRIEVAL_GUARDRAILS,
+    ...(input ?? {}),
+  };
+}
+
+function candidateTimestamp(candidate: RetrievalCandidateInput): number {
+  return parseTimestamp(candidate.updatedAt ?? candidate.createdAt) ?? 0;
+}
+
+function isHighConfidence(candidate: RetrievalCandidateInput): boolean {
+  return (candidate.confidence || '').toLowerCase() === 'high';
+}
+
+function isLowQuality(candidate: RetrievalCandidateInput): boolean {
+  if (candidate.pinned) return false;
+  const confidence = (candidate.confidence || '').toLowerCase();
+  if (confidence === 'low') return true;
+  return confidence !== 'high' && candidate.baseScore < 0.55;
+}
+
+function isDominanceExempt(candidate: RetrievalCandidateInput, guardrails: RetrievalGuardrailsConfig): boolean {
+  return Boolean(candidate.pinned) || (guardrails.highConfidenceExempt && isHighConfidence(candidate));
+}
+
+function primaryClusterKey(candidate: RetrievalCandidateInput): string {
+  if (candidate.relatedFileKeys && candidate.relatedFileKeys.length > 0) {
+    return `cluster:file:${candidate.relatedFileKeys[0]}`;
+  }
+  if (candidate.sourceStoryCanonicalKey) {
+    return `cluster:story:${candidate.sourceStoryCanonicalKey}`;
+  }
+  if (candidate.sourceSpecCanonicalKey) {
+    return `cluster:spec:${candidate.sourceSpecCanonicalKey}`;
+  }
+  if (candidate.sourceRunId != null) {
+    return `cluster:run:${candidate.sourceRunId}`;
+  }
+  if (candidate.source?.trim()) {
+    return `cluster:source:${candidate.source.trim().toLowerCase()}`;
+  }
+  return `cluster:origin:${candidate.origin}:${(candidate.category || 'memory').toLowerCase()}`;
+}
+
+function candidateDominanceBuckets(candidate: RetrievalCandidateInput): string[] {
+  const buckets = new Set<string>([primaryClusterKey(candidate)]);
+  const fileKeys = candidate.relatedFileKeys ?? [];
+  for (const fileKey of fileKeys) {
+    buckets.add(`bucket:file:${fileKey}`);
+  }
+  if (fileKeys.length === 0 && candidate.sourceSpecCanonicalKey) {
+    buckets.add(`bucket:spec:${candidate.sourceSpecCanonicalKey}`);
+  }
+  return [...buckets];
+}
+
+function repetitionGroupKey(candidate: RetrievalCandidateInput): string {
+  return `${primaryClusterKey(candidate)}::${inferSubject(candidate.text) || candidate.id}`;
+}
+
+function compareByQualityThenRecency(a: RankedRetrievalCandidate, b: RankedRetrievalCandidate): number {
+  if (Number(b.pinned) !== Number(a.pinned)) return Number(b.pinned) - Number(a.pinned);
+  if (Number(isHighConfidence(b)) !== Number(isHighConfidence(a))) {
+    return Number(isHighConfidence(b)) - Number(isHighConfidence(a));
+  }
+  if (b.semanticRankScore !== a.semanticRankScore) return b.semanticRankScore - a.semanticRankScore;
+  const tsDiff = candidateTimestamp(b) - candidateTimestamp(a);
+  if (tsDiff !== 0) return tsDiff;
+  return compareTieBreak(a.scoring.tieBreak, b.scoring.tieBreak);
+}
+
+function computeDominancePenalty(
+  selected: RankedRetrievalCandidate[],
+  candidate: RankedRetrievalCandidate,
+  guardrails: RetrievalGuardrailsConfig,
+): { score: number; comparedTo: string | null; similarity: number; blocked: boolean } {
+  if (selected.length === 0 || isDominanceExempt(candidate, guardrails)) {
+    return { score: 0, comparedTo: null, similarity: 0, blocked: false };
+  }
+
+  const projectedWindow = Math.min(guardrails.dominanceTopN, selected.length + 1);
+  if (projectedWindow < guardrails.minDiversityFloor) {
+    return { score: 0, comparedTo: null, similarity: 0, blocked: false };
+  }
+
+  const capWindow = guardrails.dominanceTopN;
+  const cap = Math.max(1, Math.ceil(capWindow * guardrails.dominanceThreshold));
+  const buckets = candidateDominanceBuckets(candidate);
+  const counts = new Map<string, number>();
+  for (const existing of selected.slice(0, projectedWindow - 1)) {
+    for (const bucket of candidateDominanceBuckets(existing)) {
+      counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+    }
+  }
+
+  let blocked = false;
+  let worstRatio = 0;
+  let comparedTo: string | null = null;
+  for (const bucket of buckets) {
+    const projectedCount = (counts.get(bucket) ?? 0) + 1;
+    const ratio = projectedCount / Math.max(projectedWindow, capWindow);
+    if (projectedCount > cap) {
+      blocked = true;
+      if (ratio > worstRatio) {
+        worstRatio = ratio;
+        comparedTo = bucket;
+      }
+    }
+  }
+
+  const score = blocked ? roundScore(Math.min(0.35, worstRatio - guardrails.dominanceThreshold)) : 0;
+  return { score, comparedTo, similarity: roundScore(worstRatio), blocked };
+}
+
+function applyLowConfidenceRepetitionPenalties(
+  candidates: RankedRetrievalCandidate[],
+  guardrails: RetrievalGuardrailsConfig,
+): void {
+  const groups = new Map<string, RankedRetrievalCandidate[]>();
+  for (const candidate of candidates) {
+    if (!candidate.scoring.validation.valid || !isLowQuality(candidate)) continue;
+    const key = repetitionGroupKey(candidate);
+    const existing = groups.get(key) ?? [];
+    existing.push(candidate);
+    groups.set(key, existing);
+  }
+
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    group.sort(compareByQualityThenRecency);
+    const anchor = group[0];
+    const repeatFactor = clamp((group.length - 1) / Math.max(1, guardrails.dominanceTopN - 1));
+
+    for (const repeated of group.slice(1)) {
+      const confidenceFactor = 1 - confidenceScore(repeated.confidence);
+      const ageFactor = anchor.createdAt && repeated.createdAt && candidateTimestamp(anchor) > candidateTimestamp(repeated)
+        ? 1
+        : 0.75;
+      const penalty = roundScore(
+        guardrails.lowConfidenceClusterPenalty
+        * Math.max(0.35, repeatFactor)
+        * Math.max(0.35, confidenceFactor)
+        * ageFactor,
+      );
+      repeated.scoring.breakdown.repetitionPenalty = {
+        score: penalty,
+        comparedTo: anchor.key,
+        similarity: roundScore(tokenOverlap(tokenize(anchor.text), tokenize(repeated.text))),
+      };
+      repeated.reasons.push(`Penalized repeated low-confidence cluster pattern anchored by ${anchor.id}`);
+    }
+  }
+}
+
 function buildValidation(
   candidate: RetrievalCandidateInput,
   canonicalKey: string | undefined,
@@ -1023,7 +1198,9 @@ function buildValidation(
   return { valid: issues.length === 0, issues };
 }
 
-function scorePositiveSignals(breakdown: Omit<GraphRagScoreBreakdown, 'diversityPenalty' | 'duplicationPenalty'>): number {
+function scorePositiveSignals(
+  breakdown: Omit<GraphRagScoreBreakdown, 'diversityPenalty' | 'echoChamberPenalty' | 'repetitionPenalty' | 'duplicationPenalty'>,
+): number {
   return roundScore(
     (breakdown.directGraphProximity.score * RETRIEVAL_SCORE_WEIGHTS.directGraphProximity)
     + (breakdown.scopeStrength.score * RETRIEVAL_SCORE_WEIGHTS.scopeStrength)
@@ -1049,6 +1226,7 @@ export function rankRetrievalCandidates(input: {
   graphProximityAvailable?: boolean;
   graphScoreWeight?: number;
   evaluationTimestamp?: string;
+  guardrails?: Partial<RetrievalGuardrailsConfig>;
 }): RankRetrievalCandidatesResult {
   const predictedPaths = input.predictedPaths ?? [];
   const predictedFileKeys = canonicalFileKeys(input.workspaceId, predictedPaths);
@@ -1058,6 +1236,7 @@ export function rankRetrievalCandidates(input: {
   const appliedGraphScoreWeight = graphProximityAvailable ? requestedGraphScoreWeight : 0;
   const matchedSkills = matchSkillsToQuery(input.queryText, input.skills, predictedPaths);
   const contradictions: Array<[string, string]> = [];
+  const guardrails = resolveGuardrailsConfig(input.guardrails);
   const referenceTimestamp = inferReferenceTimestamp(input.evaluationTimestamp, input.candidates);
 
   const enriched: RankedRetrievalCandidate[] = input.candidates.map((candidate) => {
@@ -1085,7 +1264,7 @@ export function rankRetrievalCandidates(input: {
       storyId: input.storyId,
       predictedFileKeys,
     });
-    const recency = recencyScore(candidate, referenceTimestamp);
+    const recency = recencyScore(candidate, referenceTimestamp, guardrails);
     const provenance = provenanceConfidence(candidate);
     const retrievalSignal = {
       score: retrievalSignalScore(candidate.baseScore, lexical, semantic),
@@ -1154,6 +1333,8 @@ export function rankRetrievalCandidates(input: {
         breakdown: {
           ...positiveBreakdown,
           diversityPenalty: { score: 0, comparedTo: null, similarity: 0 },
+          echoChamberPenalty: { score: 0, comparedTo: null, similarity: 0 },
+          repetitionPenalty: { score: 0, comparedTo: null, similarity: 0 },
           duplicationPenalty: { score: 0, comparedTo: null, similarity: 0 },
         },
         rerank: {
@@ -1181,9 +1362,8 @@ export function rankRetrievalCandidates(input: {
   for (const group of bySubject.values()) {
     if (group.length < 2) continue;
     group.sort((a, b) => {
-      const aTs = parseTimestamp(a.createdAt) ?? 0;
-      const bTs = parseTimestamp(b.createdAt) ?? 0;
-      if (bTs !== aTs) return bTs - aTs;
+      const tsDiff = candidateTimestamp(b) - candidateTimestamp(a);
+      if (tsDiff !== 0) return tsDiff;
       return compareTieBreak(a.scoring.tieBreak, b.scoring.tieBreak);
     });
 
@@ -1222,6 +1402,8 @@ export function rankRetrievalCandidates(input: {
     }
   }
 
+  applyLowConfidenceRepetitionPenalties(enriched, guardrails);
+
   enriched.sort(compareBySemanticRank);
 
   for (let index = 0; index < enriched.length; index++) {
@@ -1254,6 +1436,8 @@ export function rankRetrievalCandidates(input: {
     };
 
     const penalties = candidate.scoring.breakdown.diversityPenalty.score
+      + candidate.scoring.breakdown.echoChamberPenalty.score
+      + candidate.scoring.breakdown.repetitionPenalty.score
       + candidate.scoring.breakdown.duplicationPenalty.score;
     candidate.semanticRankScore = roundScore(candidate.scoring.score - penalties);
     candidate.finalScore = candidate.semanticRankScore;
@@ -1289,6 +1473,19 @@ export function rankRetrievalCandidates(input: {
       candidate.reasons.push('Dropped for low diversity-adjusted score');
       continue;
     }
+
+    const dominancePenalty = computeDominancePenalty(selected, candidate, guardrails);
+    candidate.scoring.breakdown.echoChamberPenalty = {
+      score: dominancePenalty.score,
+      comparedTo: dominancePenalty.comparedTo,
+      similarity: dominancePenalty.similarity,
+    };
+    if (dominancePenalty.blocked) {
+      candidate.decision = 'drop';
+      candidate.reasons.push('Dropped by anti-echo-chamber dominance cap');
+      continue;
+    }
+
     if (tokensUsed + candidate.tokenCount > input.tokenBudget) {
       candidate.decision = 'drop';
       candidate.reasons.push('Dropped for token budget');
