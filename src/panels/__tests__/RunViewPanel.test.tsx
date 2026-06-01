@@ -22,17 +22,24 @@ vi.mock('../../lib/apiFetch', () => ({
 }));
 
 // Mock SSE hook — RunViewPanel subscribes to live WAL events
+const mockUsePipelineSSE = vi.fn((_runId?: string | null, _workspaceId?: string | null): any[] => []);
 vi.mock('../../hooks/usePipelineSSE', () => ({
-  usePipelineSSE: vi.fn(() => []),
+  usePipelineSSE: (runId: string | null, workspaceId?: string | null) => mockUsePipelineSSE(runId, workspaceId),
 }));
 
 // Mock xterm terminal — not available in jsdom
 vi.mock('../../components/RunTerminal', () => ({
-  default: vi.fn(({ runId }: { runId: number }) => (
-    <div data-testid="run-terminal">Terminal for run {runId}</div>
+  default: vi.fn(({ runId, terminalMode }: { runId: number; terminalMode?: string }) => (
+    <div data-testid="run-terminal" data-terminal-mode={terminalMode}>Terminal for run {runId}</div>
   )),
-  RunTerminal: vi.fn(({ runId }: { runId: number }) => (
-    <div data-testid="run-terminal">Terminal for run {runId}</div>
+  RunTerminal: vi.fn(({ runId, terminalMode }: { runId: number; terminalMode?: string }) => (
+    <div data-testid="run-terminal" data-terminal-mode={terminalMode}>Terminal for run {runId}</div>
+  )),
+}));
+
+vi.mock('../../components/MultiPaneTerminal', () => ({
+  default: vi.fn(({ runId }: { runId: number }) => (
+    <div data-testid="multi-pane-terminal">Multi pane terminal for run {runId}</div>
   )),
 }));
 
@@ -95,6 +102,7 @@ afterAll(() => {
 
 beforeEach(() => {
   vi.clearAllMocks();
+  mockUsePipelineSSE.mockReturnValue([]);
   localStorage.setItem('rorca_workspaceId', 'ws-1');
   sessionStorage.setItem('rorca_workspaceId', 'ws-1');
 
@@ -223,6 +231,45 @@ describe('RunViewPanel', () => {
         document.querySelector('[data-testid="run-terminal"]');
       expect(runningEl).toBeInTheDocument();
     }, { timeout: 3000 });
+  });
+
+  it('prefers the native terminal renderer for PTY runs even when multiple stories are active', async () => {
+    const ptyRun = createMockRun({
+      id: 77,
+      status: 'running',
+      workspace_id: 'ws-1',
+      terminal_mode: 'pty',
+      ...({ parallelism: 4 } as any),
+    });
+
+    mockUsePipelineSSE.mockReturnValue([
+      { event_type: 'story_started', story_id: 'US-001', ts: new Date().toISOString() },
+      { event_type: 'story_started', story_id: 'US-002', ts: new Date().toISOString() },
+    ]);
+
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.includes(`/api/pipeline/runs/${ptyRun.id}`)) {
+        return {
+          run: ptyRun,
+          stories: [],
+          specStories: [
+            { id: 'US-001', title: 'One' },
+            { id: 'US-002', title: 'Two' },
+          ],
+          specModel: 'claude-sonnet-4-6',
+        };
+      }
+      return {};
+    });
+
+    renderWithProviders(
+      <RunViewPanel runId={ptyRun.id} onBack={vi.fn()} onNavigate={vi.fn()} />,
+    );
+
+    const terminal = await screen.findByTestId('run-terminal');
+    expect(terminal).toHaveAttribute('data-terminal-mode', 'pty');
+    expect(screen.queryByTestId('multi-pane-terminal')).not.toBeInTheDocument();
   });
 
   it('handles API error gracefully', async () => {

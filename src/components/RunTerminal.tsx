@@ -7,6 +7,9 @@
 
 import { useEffect, useRef, useState, useCallback, useImperativeHandle, forwardRef, useMemo } from 'react';
 import AnsiToHtml from 'ansi-to-html';
+import { Terminal } from '@xterm/xterm';
+import { FitAddon } from '@xterm/addon-fit';
+import '@xterm/xterm/css/xterm.css';
 import {
   Copy, Check, Terminal as TerminalIcon, Layers,
   ChevronDown, ChevronRight,
@@ -14,7 +17,13 @@ import {
   FilePlus, Globe, Clock,
 } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
-import { BASE_URL } from '../lib/apiFetch';
+import { apiFetch, BASE_URL } from '../lib/apiFetch';
+import {
+  HTML_LINE_PREFIX,
+  formatStreamJsonForDisplay,
+  parseVerboseLine,
+  decodeBase64Chunk,
+} from '../lib/run-terminal-parity';
 import { getAgentBadgeLabel, getAgentBadgeToneClassName, normalizeAgentType } from '../lib/agent-display';
 
 export interface RunTerminalHandle {
@@ -25,7 +34,10 @@ export interface RunTerminalHandle {
 interface RunTerminalProps {
   runId: number;
   workspaceId?: string | null;
+  terminalMode?: TerminalMode;
 }
+
+type TerminalMode = 'ansi-html' | 'pty';
 
 // ─── Semantic step type (mirrors backend SemanticStep) ────────────────────────
 
@@ -124,270 +136,25 @@ const ANSI_COLORS_LIGHT: Record<number, string> = {
   15: '#fafafa',  // bright white
 };
 
-// ─── Markdown → HTML converter (for terminal display) ────────────────────────
-
-/**
- * Convert basic markdown to HTML for terminal display.
- * Must be called on RAW text BEFORE ansi-to-html, because ansi-to-html
- * replaces \n with <br> tags, breaking ^/$ multiline anchors.
- * We HTML-escape the text ourselves first, then apply markdown patterns.
- */
-function markdownToHtml(text: string): string {
-  // HTML-escape first so our injected tags aren't re-escaped downstream.
-  // We set escapeXML:false on the ansi converter when using this path,
-  // OR we call this before the ansi converter on plain text segments.
-  const escaped = text
-    .replace(/&/g, '&amp;')
-    .replace(/</g, '&lt;')
-    .replace(/>/g, '&gt;');
-
-  return escaped
-    // Headings: ### text (at line start)
-    .replace(/^#{1,3}\s+(.+)$/gm, '<span style="color:#93c5fd;font-weight:bold">$1</span>')
-    // Bold **text**
-    .replace(/\*\*(.+?)\*\*/g, '<b>$1</b>')
-    // Bold __text__
-    .replace(/__(.+?)__/g, '<b>$1</b>')
-    // Italic *text* (single asterisk, not double)
-    .replace(/\*([^*\n]+?)\*/g, '<i>$1</i>')
-    // Inline code `code`
-    .replace(/`([^`\n]+)`/g, '<code style="background:rgba(255,255,255,0.08);padding:0 3px;border-radius:3px;color:#fbbf24">$1</code>')
-    // Horizontal rule ---
-    .replace(/^[-]{3,}\s*$/gm, '<span style="color:#4b5563">────────────────────────────────</span>')
-    // Bullet list items: "- item" or "– item" at line start
-    .replace(/^[-–]\s+(.+)$/gm, '  <span style="color:#6b7280">•</span> $1');
+function getPtyTheme(mode: 'light' | 'dark') {
+  return mode === 'dark'
+    ? {
+        background: '#0d1117',
+        foreground: '#e6edf3',
+        cursor: '#58a6ff',
+        cursorAccent: '#0d1117',
+        selectionBackground: 'rgba(38,79,120,0.5)',
+      }
+    : {
+        background: '#ffffff',
+        foreground: '#111827',
+        cursor: '#2563eb',
+        cursorAccent: '#ffffff',
+        selectionBackground: 'rgba(147,197,253,0.45)',
+      };
 }
 
-// ─── stream-json → readable text formatter (for Raw terminal display) ────────
-
-/**
- * Convert a Claude `--output-format stream-json` line to human-readable text.
- * Returns null to suppress the line entirely (e.g. system init, tool results).
- * Returns the original line for non-JSON content (run-loop output, etc.).
- */
-function formatStreamJsonForDisplay(line: string): string | null {
-  const trimmed = line.trim();
-  if (!trimmed) return '';
-  if (!trimmed.startsWith('{')) return line; // Not JSON — pass through
-
-  try {
-    const ev = JSON.parse(trimmed);
-
-    // System init — suppress
-    if (ev.type === 'system') return null;
-
-    // Assistant message with content blocks (tool_use + text)
-    if (ev.type === 'assistant' && ev.message?.content) {
-      const parts: string[] = [];
-      for (const block of ev.message.content) {
-        if (block.type === 'text' && block.text) {
-          // Convert markdown → HTML, prefix so flushBuffer skips XML escaping
-          const text = block.text.trim();
-          if (text) {
-            const truncated = text.length > 500 ? text.slice(0, 500) + '...' : text;
-            // markdownToHtml already HTML-escapes the text, so prefix each output line
-            const converted = markdownToHtml(truncated);
-            parts.push(...converted.split('\n').map(l => HTML_LINE_PREFIX + l));
-          }
-        } else if (block.type === 'tool_use') {
-          const name: string = block.name ?? '';
-          const input = block.input ?? {};
-          switch (name) {
-            case 'Read':     parts.push(`📖 Read ${input.file_path ?? ''}`); break;
-            case 'Write':    parts.push(`📝 Write ${input.file_path ?? ''}`); break;
-            case 'Edit':     parts.push(`✏️  Edit ${input.file_path ?? ''}`); break;
-            case 'Bash':     parts.push(`🔧 Bash: ${(input.command ?? '').slice(0, 200)}`); break;
-            case 'Glob':     parts.push(`🔍 Glob: ${input.pattern ?? ''}`); break;
-            case 'Grep':     parts.push(`🔍 Grep: ${input.pattern ?? ''}`); break;
-            case 'Task':     parts.push(`🧠 Task: ${input.description ?? ''}`); break;
-            case 'TodoWrite': parts.push('📋 TodoWrite'); break;
-            case 'WebFetch': parts.push(`🌐 WebFetch: ${input.url ?? ''}`); break;
-            case 'WebSearch': parts.push(`🌐 WebSearch: ${input.query ?? ''}`); break;
-            default:         parts.push(`🔧 ${name}`);
-          }
-        }
-      }
-      return parts.length > 0 ? parts.join('\n') : null;
-    }
-
-    // Result event (final summary)
-    if (ev.type === 'result') {
-      if (ev.subtype === 'success') {
-        const r = typeof ev.result === 'string' ? ev.result.slice(0, 300) : '';
-        return `\n✅ Completed${r ? ': ' + r.split('\n')[0].slice(0, 200) : ''}`;
-      }
-      if (ev.subtype === 'error') {
-        return `\n❌ Error: ${ev.error ?? 'unknown'}`;
-      }
-      return null;
-    }
-
-    // User message (prompt injection by run-loop) — suppress
-    if (ev.type === 'user') return null;
-
-    // ── OpenCode --format json events ──────────────────────────────────────
-    // Step lifecycle — always suppress first (step_finish can be large JSON)
-    if (ev.type === 'step_start' || ev.type === 'step_finish') return null;
-
-    // Text output from the model — blank line before for visual breathing room
-    if (ev.type === 'text' && ev.part?.text) {
-      const text = (ev.part.text as string).trim();
-      if (!text) return null;
-      // Don't truncate — model text is the primary signal, show it all
-      const converted = markdownToHtml(text);
-      // Prepend a blank line so each model response is visually separated
-      const lines = converted.split('\n').map((l: string) => HTML_LINE_PREFIX + l);
-      return '\n' + lines.join('\n') + '\n';
-    }
-
-    // Tool calls — render with icons like Claude's output
-    if (ev.type === 'tool_use' && ev.part) {
-      const tool: string = ev.part.tool ?? ev.part.state?.tool ?? '';
-      const state = ev.part.state ?? {};
-      const input = state.input ?? {};
-      const status: string = state.status ?? '';
-      // Only show completed tool calls (not pending — those show twice otherwise)
-      if (status === 'pending') return null;
-      const fp: string = input.filePath ?? input.file_path ?? input.path ?? '';
-      const cmd: string = input.command ?? '';
-      const pattern: string = input.pattern ?? input.query ?? '';
-      // Shorten path to last 2 segments for readability
-      const shortFp = fp ? fp.split('/').slice(-2).join('/') : '';
-      switch (tool) {
-        case 'read':      return `  📖 Read ${shortFp}`;
-        case 'write':     return `  📝 Write ${shortFp}`;
-        case 'edit':      return `  ✏️  Edit ${shortFp}`;
-        case 'bash':      return `  🔧 ${cmd.split('\n')[0].slice(0, 160)}`;
-        case 'glob':      return `  🔍 Glob ${pattern}`;
-        case 'grep':      return `  🔍 Grep ${pattern}`;
-        case 'webfetch':  return `  🌐 ${input.url ?? ''}`;
-        case 'websearch': return `  🔍 ${pattern}`;
-        default:          return tool ? `  🔧 ${tool}${shortFp ? ' ' + shortFp : ''}` : null;
-      }
-    }
-
-    // Error events — show prominently with spacing
-    if (ev.type === 'error') {
-      const errData = ev.error ?? ev.part?.error ?? ev.data ?? {};
-      const msg = typeof errData === 'string' ? errData
-        : (errData as any).message ?? (errData as any).name ?? JSON.stringify(errData).slice(0, 300);
-      return `\n❌ ${msg}\n`;
-    }
-
-    // Anything else — suppress unknown JSON events
-    return null;
-  } catch {
-    // Not valid JSON despite starting with { — pass through
-    return line;
-  }
-}
-
-// ─── Verbose text parser (claude --verbose output format) ────────────────────
-
-/** Strip ANSI escape codes */
-function stripAnsi(s: string): string {
-
-  return s.replace(/\x1b\[[0-9;]*[a-zA-Z]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
-}
-
-// Patterns ordered by priority — first match wins.
-// Claude --verbose emits lines like "  🔍 Glob: pattern" or "  📖 Read: /path"
-const VERBOSE_PATTERNS: [RegExp, SemanticStep['type']][] = [
-  [/(?:📖\s*)?Read(?:ing)?\s*[:\s]\s*(.+)/i,         'read'],
-  [/(?:📝\s*|✏️\s*|📄\s*)?Writ(?:e|ing)\s*[:\s]\s*(.+)/i, 'write'],
-  [/(?:✏️\s*|📝\s*)?Edit(?:ing)?\s*[:\s]\s*(.+)/i,   'edit'],
-  [/(?:🔧\s*)Bash\s*[:\s]\s*(.*)/i,                   'bash'],
-  [/(?:🔍\s*)Glob\s*[:\s]\s*(.*)/i,                   'search'],
-  [/(?:🔍\s*)Grep\s*[:\s]\s*(.*)/i,                   'search'],
-  [/(?:🔧\s*)Task\s*[:\s]\s*(.*)/i,                   'plan'],
-  [/ULTRATHINK|Let me think|Let me analyze/i,          'plan'],
-  [/(?:feat|fix|chore|test|refactor|style|docs|build)(?:\([^)]*\))?:/i, 'commit'],
-];
-
-/** Parse a single line into a SemanticStep. Handles both Claude --verbose text and OpenCode JSON. */
-function parseVerboseLine(line: string): SemanticStep | null {
-  const clean = stripAnsi(line).trim();
-  if (!clean || clean.length < 4) return null;
-
-  // ── OpenCode JSON event parsing ──
-  if (clean.startsWith('{')) {
-    try {
-      const ev = JSON.parse(clean);
-
-      // OpenCode tool_use event → semantic step
-      if (ev.type === 'tool_use' && ev.part) {
-        const tool: string = ev.part.tool ?? '';
-        const state = ev.part.state ?? {};
-        const input = state.input ?? {};
-        const status: string = state.status ?? '';
-        if (status === 'pending') return null;
-        const fp: string = input.filePath ?? input.file_path ?? '';
-        const shortFp = fp.split('/').slice(-2).join('/');
-        const cmd: string = input.command ?? '';
-        const pattern: string = input.pattern ?? input.query ?? '';
-
-        const TOOL_MAP: Record<string, SemanticStep['type']> = {
-          read: 'read', write: 'write', edit: 'edit', bash: 'bash',
-          glob: 'search', grep: 'search', webfetch: 'unknown', websearch: 'search',
-        };
-        const stepType = TOOL_MAP[tool] ?? 'unknown';
-        let label: string;
-        switch (tool) {
-          case 'read':      label = `Read ${shortFp}`; break;
-          case 'write':     label = `Write ${shortFp}`; break;
-          case 'edit':      label = `Edit ${shortFp}`; break;
-          case 'bash':      label = cmd.slice(0, 100) || 'Bash'; break;
-          case 'glob':      label = `Glob: ${pattern}`; break;
-          case 'grep':      label = `Grep: ${pattern}`; break;
-          case 'webfetch':  label = `WebFetch: ${(input.url ?? '').slice(0, 80)}`; break;
-          case 'websearch': label = `WebSearch: ${pattern}`; break;
-          default:          label = tool || 'Unknown tool';
-        }
-        return { type: stepType, label: label.slice(0, 100), ts: new Date().toISOString(), toolName: tool };
-      }
-
-      // OpenCode text event → plan step (model is reasoning/responding)
-      if (ev.type === 'text' && ev.part?.text) {
-        const text = (ev.part.text as string).trim();
-        if (text.length > 10) {
-          return { type: 'plan', label: text.slice(0, 80), ts: new Date().toISOString() };
-        }
-      }
-
-      // OpenCode error → error step
-      if (ev.type === 'error') {
-        const errData = ev.error ?? ev.data ?? {};
-        const msg = typeof errData === 'string' ? errData
-          : errData.message ?? errData.name ?? 'Unknown error';
-        return { type: 'unknown', label: `Error: ${String(msg).slice(0, 80)}`, ts: new Date().toISOString(), isError: true };
-      }
-    } catch {
-      // Not valid JSON — fall through to regex matching
-    }
-  }
-
-  // ── Claude --verbose text patterns ──
-  for (const [pattern, type] of VERBOSE_PATTERNS) {
-    const m = clean.match(pattern);
-    if (m) {
-      const captured = m[1]?.trim() ?? '';
-      let label: string;
-      switch (type) {
-        case 'read':    label = `Read ${captured}`.slice(0, 100); break;
-        case 'write':   label = `Write ${captured}`.slice(0, 100); break;
-        case 'edit':    label = `Edit ${captured}`.slice(0, 100); break;
-        case 'bash':    label = captured.slice(0, 100) || 'Bash'; break;
-        case 'search':  label = `${clean.match(/(?:Glob|Grep)/i)?.[0] ?? 'Search'} ${captured}`.slice(0, 100); break;
-        case 'plan':    label = captured ? `Task: ${captured.slice(0, 60)}` : 'Reasoning'; break;
-        case 'commit':  label = clean.slice(0, 80); break;
-        default:        label = clean.slice(0, 80);
-      }
-      return { type, label, ts: new Date().toISOString() };
-    }
-  }
-  return null;
-}
-
+// ─── Transcript + semantic replay helpers live in src/lib/run-terminal-parity.ts ─
 // ─── Story ID detection ──────────────────────────────────────────────────────
 
 /** Match story IDs like US-001, CIE-014, SL-003 etc. in text */
@@ -606,12 +373,12 @@ function createAnsiConverter(theme: 'light' | 'dark', escapeXml = true): AnsiToH
   });
 }
 
-// Lines with this prefix are pre-converted HTML — skip XML escaping in the ANSI converter.
-const HTML_LINE_PREFIX = '\x01';
+// HTML_LINE_PREFIX is shared with the parity helper so transcript tests and UI use identical replay semantics.
 
 // ─── Flush buffer interval ───────────────────────────────────────────────────
 
 const FLUSH_INTERVAL_MS = 80;
+const PTY_RESIZE_DEBOUNCE_MS = 100;
 const SCROLL_LOCK_THRESHOLD = 50;
 const MAX_LINES = 20_000;
 
@@ -647,8 +414,13 @@ function trimOldestLines(html: string): string {
 
 // ─── Main Component ───────────────────────────────────────────────────────────
 
-const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId, workspaceId }, ref) {
+const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function RunTerminal({ runId, workspaceId, terminalMode: rendererMode = 'ansi-html' }, ref) {
   const preRef = useRef<HTMLPreElement>(null);
+  const ptyContainerRef = useRef<HTMLDivElement>(null);
+  const xtermRef = useRef<Terminal | null>(null);
+  const fitAddonRef = useRef<FitAddon | null>(null);
+  const pendingPtyChunksRef = useRef<Uint8Array[]>([]);
+  const resizeDebounceRef = useRef<ReturnType<typeof setTimeout> | null>(null);
   const esRef = useRef<EventSource | null>(null);
   const { resolved } = useTheme();
   const [copied, setCopied] = useState(false);
@@ -667,6 +439,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
   // Agent type detected from backend run_meta SSE event
   const [agentType, setAgentType] = useState<string>('claude');
+  const [terminalMode, setTerminalMode] = useState<TerminalMode>(rendererMode);
+  const terminalModeRef = useRef<TerminalMode>(rendererMode);
+  const [ptyReady, setPtyReady] = useState(rendererMode !== 'pty');
 
   // Toggle state — persisted per run in localStorage
   const [mode, setMode] = useState<'raw' | 'semantic'>(() => loadMode(runId));
@@ -679,17 +454,115 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const stepBottomRef = useRef<HTMLDivElement>(null);
   const [streamDone, setStreamDone] = useState(false);
 
+  useEffect(() => {
+    terminalModeRef.current = terminalMode;
+  }, [terminalMode]);
+
+  useEffect(() => {
+    terminalModeRef.current = rendererMode;
+    setTerminalMode(rendererMode);
+    setPtyReady(rendererMode !== 'pty');
+  }, [rendererMode]);
+
   // Persist mode changes
   const handleSetMode = useCallback((m: 'raw' | 'semantic') => {
     setMode(m);
     try { localStorage.setItem(lsKey(runId), m); } catch { /* noop */ }
   }, [runId]);
 
+  useEffect(() => {
+    if (terminalMode === 'pty' && mode !== 'raw') {
+      handleSetMode('raw');
+    }
+  }, [handleSetMode, mode, terminalMode]);
+
   // Recreate ansi-to-html converters when theme changes.
   // ansiConverter: escapeXML=true for raw terminal lines (ANSI codes, plain text).
   // ansiConverterNoEscape: escapeXML=false for lines already HTML-converted by markdownToHtml.
   const ansiConverter = useMemo(() => createAnsiConverter(resolved, true), [resolved]);
   const ansiConverterNoEscape = useMemo(() => createAnsiConverter(resolved, false), [resolved]);
+
+  const postPtyResize = useCallback(async (cols: number, rows: number) => {
+    try {
+      await apiFetch(`/api/pipeline/runs/${runId}/pty/resize`, {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ cols, rows }),
+        silent: true,
+      });
+    } catch {
+      // best effort — resize retries on the next fit cycle
+    }
+  }, [runId]);
+
+  const writePtyChunk = useCallback((chunk: Uint8Array) => {
+    if (xtermRef.current) {
+      xtermRef.current.write(chunk as Parameters<Terminal['write']>[0]);
+      return;
+    }
+    pendingPtyChunksRef.current.push(chunk);
+  }, []);
+
+  useEffect(() => {
+    if (terminalMode !== 'pty' || !ptyContainerRef.current) return;
+
+    const terminal = new Terminal({
+      fontFamily: 'JetBrains Mono, Fira Code, monospace',
+      fontSize: window.innerWidth < 768 ? 10 : 12,
+      lineHeight: 1.3,
+      convertEol: false,
+      cursorBlink: true,
+      scrollback: 10_000,
+      allowProposedApi: false,
+      theme: getPtyTheme(resolved),
+    });
+    const fitAddon = new FitAddon();
+    terminal.loadAddon(fitAddon);
+    terminal.open(ptyContainerRef.current);
+    fitAddon.fit();
+    xtermRef.current = terminal;
+    fitAddonRef.current = fitAddon;
+    for (const chunk of pendingPtyChunksRef.current) {
+      terminal.write(chunk as Parameters<Terminal['write']>[0]);
+    }
+    pendingPtyChunksRef.current = [];
+    setPtyReady(true);
+
+    const syncSize = () => {
+      if (!fitAddonRef.current || !xtermRef.current) return;
+      fitAddonRef.current.fit();
+      const cols = xtermRef.current.cols;
+      const rows = xtermRef.current.rows;
+      if (cols > 0 && rows > 0) {
+        void postPtyResize(cols, rows);
+      }
+    };
+
+    syncSize();
+    const observer = new ResizeObserver(() => {
+      if (resizeDebounceRef.current) clearTimeout(resizeDebounceRef.current);
+      resizeDebounceRef.current = setTimeout(syncSize, PTY_RESIZE_DEBOUNCE_MS);
+    });
+    observer.observe(ptyContainerRef.current);
+
+    return () => {
+      observer.disconnect();
+      if (resizeDebounceRef.current) {
+        clearTimeout(resizeDebounceRef.current);
+        resizeDebounceRef.current = null;
+      }
+      fitAddonRef.current = null;
+      xtermRef.current = null;
+      terminal.dispose();
+    };
+  }, [postPtyResize, terminalMode]);
+
+  useEffect(() => {
+    if (terminalMode === 'pty' && xtermRef.current) {
+      xtermRef.current.options.theme = getPtyTheme(resolved);
+      fitAddonRef.current?.fit();
+    }
+  }, [resolved, terminalMode]);
 
   // Flush pending text buffer → convert via ansi-to-html → append to accumulated HTML.
   // Lines prefixed with HTML_LINE_PREFIX are pre-HTML (markdown already converted) — use no-escape converter.
@@ -751,6 +624,10 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       pre.scrollTop = ratio * totalHeight;
     },
     writeMarker(text: string) {
+      if (terminalMode === 'pty') {
+        xtermRef.current?.writeln(text);
+        return;
+      }
       const markerHtml = `<div style="padding:4px 8px;margin:4px 0;background:rgba(59,130,246,0.15);border-left:3px solid #3b82f6;color:#93c5fd;font-size:11px;font-family:monospace;">${text.replace(/</g, '&lt;').replace(/>/g, '&gt;')}</div>`;
       accumulatedHtmlRef.current += markerHtml;
       accumulatedHtmlRef.current = trimOldestLines(accumulatedHtmlRef.current);
@@ -762,7 +639,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         }
       }
     },
-  }), []);
+  }), [terminalMode]);
 
   const handleCopy = useCallback(async () => {
     const pre = preRef.current;
@@ -783,6 +660,15 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     accumulatedHtmlRef.current = '';
     seenStoryIdsRef.current = new Set();
     lineBufferRef.current = '';
+    terminalModeRef.current = rendererMode;
+    pendingPtyChunksRef.current = [];
+    setAgentType('claude');
+    setSteps([]);
+    setExpandedSet(new Set());
+    setStreamDone(false);
+    setTerminalMode(rendererMode);
+    if (rendererMode === 'pty' && !ptyReady) return;
+    xtermRef.current?.clear();
     if (flushTimerRef.current !== null) {
       clearTimeout(flushTimerRef.current);
       flushTimerRef.current = null;
@@ -808,9 +694,12 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
 
     es.addEventListener('chunk', (e: MessageEvent) => {
       try {
-        const binary = atob(e.data);
-        const bytes = new Uint8Array(binary.length);
-        for (let i = 0; i < binary.length; i++) bytes[i] = binary.charCodeAt(i);
+        const bytes = decodeBase64Chunk(e.data);
+
+        if (terminalModeRef.current === 'pty') {
+          writePtyChunk(bytes);
+          return;
+        }
 
         const text = new TextDecoder().decode(bytes);
 
@@ -823,18 +712,15 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         const newSteps: SemanticStep[] = [];
 
         for (const part of parts) {
-          // Client-side semantic parsing
           const step = parseVerboseLine(part);
           if (step) newSteps.push(step);
 
-          // Format stream-json for readable raw display
           const formatted = formatStreamJsonForDisplay(part);
           if (formatted !== null) {
             displayLines.push(formatted);
           }
         }
 
-        // Append formatted text to pending buffer (NOT converted yet)
         if (displayLines.length > 0) {
           pendingTextRef.current += displayLines.join('\n') + '\n';
           scheduleFlush();
@@ -855,38 +741,41 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     });
 
     es.addEventListener('done', () => {
-      // Flush remaining buffer immediately on done — don't wait for 80ms timer
-      if (flushTimerRef.current !== null) {
-        clearTimeout(flushTimerRef.current);
-        flushTimerRef.current = null;
-      }
-      // Flush any remaining line buffer content
-      if (lineBufferRef.current) {
-        const formatted = formatStreamJsonForDisplay(lineBufferRef.current);
-        if (formatted !== null) {
-          pendingTextRef.current += formatted + '\n';
+      if (terminalModeRef.current !== 'pty') {
+        if (flushTimerRef.current !== null) {
+          clearTimeout(flushTimerRef.current);
+          flushTimerRef.current = null;
         }
-        lineBufferRef.current = '';
-      }
-      // Convert and render remaining pending text
-      const pending = pendingTextRef.current;
-      if (pending) {
-        pendingTextRef.current = '';
-        const lines = pending.split('\n');
-        const htmlLines = lines.map(line => {
-          if (line.startsWith(HTML_LINE_PREFIX)) {
-            return ansiConverterNoEscape.toHtml(line.slice(HTML_LINE_PREFIX.length));
+        if (lineBufferRef.current) {
+          const finalStep = parseVerboseLine(lineBufferRef.current);
+          if (finalStep) {
+            setSteps(prev => [...prev, finalStep]);
           }
-          return ansiConverter.toHtml(line);
-        });
-        let newHtml = injectStoryAnchors(htmlLines.join('\n'), seenStoryIdsRef.current);
-        accumulatedHtmlRef.current += newHtml;
-        accumulatedHtmlRef.current = trimOldestLines(accumulatedHtmlRef.current);
-        const pre = preRef.current;
-        if (pre) {
-          pre.innerHTML = accumulatedHtmlRef.current;
-          if (autoScrollRef.current) {
-            pre.scrollTop = pre.scrollHeight;
+          const formatted = formatStreamJsonForDisplay(lineBufferRef.current);
+          if (formatted !== null) {
+            pendingTextRef.current += formatted + '\n';
+          }
+          lineBufferRef.current = '';
+        }
+        const pending = pendingTextRef.current;
+        if (pending) {
+          pendingTextRef.current = '';
+          const lines = pending.split('\n');
+          const htmlLines = lines.map(line => {
+            if (line.startsWith(HTML_LINE_PREFIX)) {
+              return ansiConverterNoEscape.toHtml(line.slice(HTML_LINE_PREFIX.length));
+            }
+            return ansiConverter.toHtml(line);
+          });
+          const newHtml = injectStoryAnchors(htmlLines.join('\n'), seenStoryIdsRef.current);
+          accumulatedHtmlRef.current += newHtml;
+          accumulatedHtmlRef.current = trimOldestLines(accumulatedHtmlRef.current);
+          const pre = preRef.current;
+          if (pre) {
+            pre.innerHTML = accumulatedHtmlRef.current;
+            if (autoScrollRef.current) {
+              pre.scrollTop = pre.scrollHeight;
+            }
           }
         }
       }
@@ -910,7 +799,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         flushTimerRef.current = null;
       }
     };
-  }, [runId, ansiConverter, ansiConverterNoEscape, workspaceId, scheduleFlush]);
+  }, [runId, ansiConverter, ansiConverterNoEscape, ptyReady, rendererMode, scheduleFlush, workspaceId, writePtyChunk]);
 
   // Track scroll position for auto-scroll on raw <pre>
   const handlePreScroll = useCallback(() => {
@@ -963,19 +852,21 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
             Raw
           </span>
         </button>
-        <button
-          onClick={() => handleSetMode('semantic')}
-          className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
-            mode === 'semantic'
-              ? 'bg-accent/15 text-accent'
-              : 'text-muted hover:text-[var(--text)]'
-          }`}
-        >
-          <span className="flex items-center gap-1">
-            <Layers size={11} />
-            Semantic
-          </span>
-        </button>
+        {terminalMode !== 'pty' && (
+          <button
+            onClick={() => handleSetMode('semantic')}
+            className={`px-2 py-1 text-[11px] font-medium rounded transition-colors ${
+              mode === 'semantic'
+                ? 'bg-accent/15 text-accent'
+                : 'text-muted hover:text-[var(--text)]'
+            }`}
+          >
+            <span className="flex items-center gap-1">
+              <Layers size={11} />
+              Semantic
+            </span>
+          </button>
+        )}
 
         {/* Agent type badge (shown when not claude) */}
         {showAgentBadge && (
@@ -983,9 +874,14 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
             {getAgentBadgeLabel(agentType, null, { showOpenCodeModel: false })}
           </span>
         )}
+        {terminalMode === 'pty' && (
+          <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-emerald-500/15 text-emerald-400 font-medium">
+            Native PTY
+          </span>
+        )}
 
         {/* Copy button (raw mode only) */}
-        {mode === 'raw' && (
+        {terminalMode !== 'pty' && mode === 'raw' && (
           <button
             onClick={handleCopy}
             className="ml-auto p-1.5 rounded-md text-muted hover:text-[var(--text)] transition-colors"
@@ -1000,23 +896,31 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
       {/* ─── Content area ────────────────────────────────────────────────── */}
       <div className="flex-1 min-h-0 relative">
         {/* Raw terminal — ansi-to-html rendered <pre> */}
-        <pre
-          ref={preRef}
-          onScroll={handlePreScroll}
-          className="h-full w-full overflow-y-auto font-mono text-xs leading-[1.3] whitespace-pre-wrap break-words"
-          style={{
-            background: 'var(--terminal-bg)',
-            color: 'var(--terminal-fg)',
-            padding: '8px 12px',
-            margin: 0,
-            display: mode === 'raw' ? 'block' : 'none',
-            fontFamily: '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Monaco, monospace',
-            fontSize: window.innerWidth < 768 ? '10px' : '12px',
-          }}
-        />
+        {terminalMode === 'pty' ? (
+          <div
+            ref={ptyContainerRef}
+            className="h-full w-full overflow-hidden"
+            style={{ background: resolved === 'dark' ? '#0d1117' : '#ffffff' }}
+          />
+        ) : (
+          <pre
+            ref={preRef}
+            onScroll={handlePreScroll}
+            className="h-full w-full overflow-y-auto font-mono text-xs leading-[1.3] whitespace-pre-wrap break-words"
+            style={{
+              background: 'var(--terminal-bg)',
+              color: 'var(--terminal-fg)',
+              padding: '8px 12px',
+              margin: 0,
+              display: mode === 'raw' ? 'block' : 'none',
+              fontFamily: '"JetBrains Mono", "Cascadia Code", "SF Mono", Menlo, Monaco, monospace',
+              fontSize: window.innerWidth < 768 ? '10px' : '12px',
+            }}
+          />
+        )}
 
         {/* Semantic step list */}
-        {mode === 'semantic' && (
+        {terminalMode !== 'pty' && mode === 'semantic' && (
           <div className="h-full flex flex-col">
             {steps.length === 0 ? (
               <div className="flex-1 flex items-center justify-center text-muted text-sm">

@@ -272,14 +272,61 @@ export function parseOpenCodeLine(line: string): SemanticStep[] {
   }
 }
 
+function stripAnsi(text: string): string {
+  return text.replace(/\x1b\[[0-9;?]*[ -/]*[@-~]/g, '').replace(/\x1b\][^\x07]*\x07/g, '');
+}
+
+function normalizeCodexLine(line: string): string {
+  const clean = stripAnsi(line);
+  return clean.split('\r').at(-1)?.trim() ?? '';
+}
+
+export function parseCodexLine(line: string): SemanticStep[] {
+  const clean = normalizeCodexLine(line);
+  if (!clean) return [];
+
+  const match = clean.match(/^\[([A-Za-z]+)\]\s*(.*)$/);
+  if (!match) return [];
+
+  const [, rawPrefix, rawDetail] = match;
+  const prefix = rawPrefix.toLowerCase();
+  const detail = rawDetail.trim();
+  const ts = new Date().toISOString();
+
+  switch (prefix) {
+    case 'read':
+      return [{ type: 'read', label: `Read ${detail}`.trim(), detail: detail || undefined, ts, toolName: 'read' }];
+    case 'write':
+      return [{ type: 'write', label: `Write ${detail}`.trim(), detail: detail || undefined, ts, toolName: 'write' }];
+    case 'edit':
+      return [{ type: 'edit', label: `Edit ${detail}`.trim(), detail: detail || undefined, ts, toolName: 'edit' }];
+    case 'planning':
+    case 'plan':
+      return [{ type: 'plan', label: detail ? `Task: ${detail.slice(0, 60)}` : 'Reasoning', detail: detail || undefined, ts, toolName: prefix }];
+    case 'command':
+    case 'bash':
+      return [{ type: 'bash', label: detail || 'Bash', detail: detail || undefined, ts, toolName: prefix }];
+    case 'grep':
+    case 'search':
+      return [{ type: 'search', label: `${rawPrefix} ${detail}`.trim(), detail: detail || undefined, ts, toolName: prefix }];
+    case 'test':
+      return [{ type: 'test', label: detail ? `Test ${detail}` : 'Test', detail: detail || undefined, ts, toolName: prefix }];
+    default:
+      return [];
+  }
+}
+
 /**
  * Parse a log line using the appropriate parser based on agent type.
  * Returns an array of SemanticStep objects (empty array if nothing to emit).
  * Falls back to claude parser if agent is unknown.
  */
 export function parseLine(line: string, agent: string): SemanticStep[] {
-  if (agent === 'opencode') {
+  if (agent === 'opencode' || agent === 'pi') {
     return parseOpenCodeLine(line);
+  }
+  if (agent === 'codex') {
+    return parseCodexLine(line);
   }
   return parseStreamJsonLine(line);
 }
