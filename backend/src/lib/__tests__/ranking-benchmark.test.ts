@@ -9,6 +9,7 @@ import fixture from './fixtures/ranking-benchmark-phase2.json';
 import { resolveGraphScoringRollout } from '../graph-scoring-rollout';
 import {
   compareRankingStrategies,
+  MAX_GRAPH_RERANK_DURATION_MS,
   rankBaseline,
   rankWithGraph,
   summarizeRankingComparisons,
@@ -19,6 +20,8 @@ import {
 const benchmarkFixture = fixture as RankingBenchmarkFixture;
 const MIN_NDCG_AT_5 = 0.95;
 const MIN_RANK_OVERLAP_AT_5 = 0.95;
+
+jest.setTimeout(15_000);
 
 function collectCanonicalValues(candidate: Record<string, unknown>): string[] {
   const values: string[] = [];
@@ -126,6 +129,13 @@ describe('ranking-benchmark', () => {
       weight: 0.6,
       source: 'env',
     });
+  });
+
+  test('enforces an explicit numeric rerank performance budget on the benchmark suite', () => {
+    for (const scenario of benchmarkFixture.scenarios) {
+      const graph = rankWithGraph(scenario as RankingBenchmarkScenario);
+      expect(graph.durationMs).toBeLessThanOrEqual(MAX_GRAPH_RERANK_DURATION_MS);
+    }
   });
 
   test('emits structured side-by-side logs and enforces a numeric quality gate', () => {

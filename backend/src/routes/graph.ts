@@ -24,6 +24,7 @@ import {
 import { listRetrievalFeedback, summarizeRetrievalFeedback } from '../lib/retrieval-feedback';
 import { checkAge, getAgeUnavailableBody } from '../lib/age-guard';
 import { ForbiddenError, ValidationError } from '../lib/errors';
+import { invalidateGraphContextCacheForWorkspace } from '../lib/graph-context';
 
 const router = Router();
 
@@ -345,6 +346,7 @@ router.post('/populate', async (req: Request, res: Response, next: NextFunction)
     }
 
     // Mark population as active and respond immediately
+    invalidateGraphContextCacheForWorkspace(workspaceId);
     activePopulations.add(workspaceId);
     res.status(202).json({ totalItems });
 
@@ -391,9 +393,11 @@ router.post('/populate', async (req: Request, res: Response, next: NextFunction)
           }
         }
 
+        invalidateGraphContextCacheForWorkspace(workspaceId);
         await emitWal('graph_populate_finished', workspaceId, { totalItems, completed });
         logger.info({ workspaceId, totalItems, completed }, '[graph/populate] Population complete');
       } catch (err) {
+        invalidateGraphContextCacheForWorkspace(workspaceId);
         logger.error({ err, workspaceId }, '[graph/populate] Population failed');
         await emitWal('graph_populate_finished', workspaceId, { totalItems, completed, error: true }).catch(() => {});
       } finally {

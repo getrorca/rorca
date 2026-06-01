@@ -9,6 +9,8 @@ import { logger } from './logger';
 import { ndcgAtK } from './retrieval-evals';
 import { rankRetrievalCandidates, type RetrievalCandidateInput, type RetrievalSkill } from './retrieval-pipeline';
 
+export const MAX_GRAPH_RERANK_DURATION_MS = 50;
+
 export interface RankingBenchmarkScenario {
   id: string;
   storyId: string;
