@@ -21,6 +21,8 @@ import {
   FileText,
 } from 'lucide-react';
 import type { WalEvent } from '../hooks/usePipelineSSE';
+import AgentBadge from './AgentBadge';
+import { normalizeAgentType } from '../lib/agent-display';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -135,7 +137,6 @@ function MetaRow({
 export default function RunMetadataPanel({
   run,
   tokenSummary,
-  specModel,
   totalStories,
   walEvents,
   onKill,
@@ -181,7 +182,6 @@ export default function RunMetadataPanel({
     return Math.round(avgSec * remaining);
   }, [isActive, completedCount, totalStories, elapsedSec]);
 
-  const isClaude = !specModel || specModel.startsWith('claude');
 
   return (
     <div className="shrink-0 border-t border-border bg-panel">
@@ -241,22 +241,12 @@ export default function RunMetadataPanel({
 
       {/* Engine (agent type) */}
       <MetaRow icon={Zap} label="Engine">
-        {(() => {
-          const agent = run.agent_type || 'claude';
-          const isCl = agent === 'claude';
-          return (
-            <div className="flex items-center gap-1.5">
-              <span className={`inline-flex items-center px-1.5 py-0.5 text-[10px] font-semibold rounded ${
-                isCl ? 'bg-blue-500/15 text-blue-400' : 'bg-purple-500/15 text-purple-400'
-              }`}>
-                {isCl ? 'Claude CLI' : 'OpenCode'}
-              </span>
-              {run.agent_model && (
-                <span className="text-[10px] text-muted font-mono">{run.agent_model}</span>
-              )}
-            </div>
-          );
-        })()}
+        <div className="flex items-center gap-1.5">
+          <AgentBadge agentType={run.agent_type} agentModel={run.agent_model} showModelName={false} />
+          {run.agent_model && (
+            <span className="text-[10px] text-muted font-mono">{run.agent_model}</span>
+          )}
+        </div>
       </MetaRow>
 
 
@@ -296,11 +286,17 @@ export default function RunMetadataPanel({
 
       {/* Cost */}
       <MetaRow icon={DollarSign} label="Cost">
-        {isClaude ? (
-          <span className="text-[10px] text-muted">$0.00 (your Claude sub)</span>
-        ) : (
-          <span className="text-[10px] text-muted">API key billing</span>
-        )}
+        {(() => {
+          const agent = normalizeAgentType(run.agent_type);
+          const label = agent === 'claude'
+            ? '$0.00 (your Claude sub)'
+            : agent === 'codex'
+              ? 'ChatGPT subscription'
+              : agent === 'pi'
+                ? 'Pi-managed billing'
+                : 'API key billing';
+          return <span className="text-[10px] text-muted">{label}</span>;
+        })()}
       </MetaRow>
     </div>
   );

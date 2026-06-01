@@ -20,6 +20,7 @@ import MultiPaneTerminal from '../components/MultiPaneTerminal';
 import SplitPane from '../components/SplitPane';
 import RunStoryList from '../components/RunStoryList';
 import RunMetadataPanel from '../components/RunMetadataPanel';
+import AgentBadge from '../components/AgentBadge';
 import InteractiveDependencyGraph from '../components/InteractiveDependencyGraph';
 import type { DerivedStatus } from '../components/InteractiveDependencyGraph';
 import CompareRunsPanel from './CompareRunsPanel';
@@ -1530,13 +1531,7 @@ export default function RunViewPanel({ runId, onBack, onNavigate: _onNavigate }:
                 Parallelism: {run.parallelism}
               </span>
             )}
-            {/* Agent badge */}
-            <span className={`inline-flex items-center gap-1 px-1.5 py-0.5 text-[10px] font-semibold leading-none rounded shrink-0 ${run.agentType === 'opencode' ? 'bg-cyan-500/10 text-cyan-500' : 'bg-orange-500/10 text-orange-500'
-              }`}>
-              {run.agentType === 'opencode'
-                ? run.agentModel?.split('/').pop() || 'OpenCode'
-                : 'Claude'}
-            </span>
+            <AgentBadge agentType={run.agentType} agentModel={run.agentModel} />
             {/* DLQ badge — shown when run's pg-boss job exhausted all retries */}
             {dlqEntry && (
               <button
