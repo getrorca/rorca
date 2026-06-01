@@ -16,7 +16,7 @@ import {
   readTextFile,
   resolveMarkersForChanges,
   snapshotRoutesEqual,
-} from './public-contract-lib';
+} from '../packages/rorca-public-contract/src/index';
 
 const cwd = process.cwd();
 const snapshotFile = 'docs/openapi-public-snapshot.json';
