@@ -49,6 +49,7 @@ import {
 import { persistRetrievalTelemetry, recordRetrievalTelemetry } from './retrieval-telemetry';
 import { getHistoricalUsefulnessMap, recordRetrievalSelection } from './retrieval-feedback';
 import { checkAge } from './age-guard';
+import { resolveGraphScoringRollout } from './graph-scoring-rollout';
 import { loadRorcaConfig, defaultRorcaConfig, type RetrievalGuardrailsConfig } from './rorca-config';
 import { query as dbQuery } from '../db/index';
 
@@ -261,19 +262,6 @@ function parseRelatedFiles(value: string | null): string[] {
   }
 }
 
-function parseGraphScoreWeight(raw: unknown): number | undefined {
-  if (typeof raw === 'number' && Number.isFinite(raw)) {
-    return Math.max(0, Math.min(1, raw));
-  }
-  if (typeof raw === 'string' && raw.trim()) {
-    const parsed = Number(raw.trim());
-    if (Number.isFinite(parsed)) {
-      return Math.max(0, Math.min(1, parsed));
-    }
-  }
-  return undefined;
-}
-
 async function resolveWorkspacePath(workspaceId: string): Promise<string | undefined> {
   try {
     const rows = await dbQuery<WorkspacePathRow>(
@@ -290,14 +278,15 @@ async function resolveRetrievalSettings(
   workspaceId: string,
   options?: RetrieveContextOptions,
 ): Promise<{ graphScoreWeight: number; guardrails: RetrievalGuardrailsConfig }> {
-  const explicitGraphWeight = parseGraphScoreWeight(options?.graphScoreWeight);
-  const envWeight = parseGraphScoreWeight(process.env.RORCA_GRAPH_SCORE_WEIGHT);
   const defaults = defaultRorcaConfig().context.retrieval;
-
   const workspacePath = options?.workspacePath ?? await resolveWorkspacePath(workspaceId);
+
   if (!workspacePath) {
     return {
-      graphScoreWeight: explicitGraphWeight ?? envWeight ?? defaults.graphScoreWeight,
+      graphScoreWeight: resolveGraphScoringRollout({
+        explicitWeight: options?.graphScoreWeight,
+        configWeight: defaults.graphScoreWeight,
+      }).weight,
       guardrails: defaults.guardrails,
     };
   }
@@ -305,13 +294,19 @@ async function resolveRetrievalSettings(
   try {
     const retrieval = loadRorcaConfig(workspacePath).context.retrieval;
     return {
-      graphScoreWeight: explicitGraphWeight ?? envWeight ?? parseGraphScoreWeight(retrieval.graphScoreWeight) ?? 0,
+      graphScoreWeight: resolveGraphScoringRollout({
+        explicitWeight: options?.graphScoreWeight,
+        configWeight: retrieval.graphScoreWeight,
+      }).weight,
       guardrails: retrieval.guardrails,
     };
   } catch (error) {
     logger.warn({ error, workspaceId }, '[memory-router] Failed to load retrieval config — falling back to defaults');
     return {
-      graphScoreWeight: explicitGraphWeight ?? envWeight ?? defaults.graphScoreWeight,
+      graphScoreWeight: resolveGraphScoringRollout({
+        explicitWeight: options?.graphScoreWeight,
+        configWeight: defaults.graphScoreWeight,
+      }).weight,
       guardrails: defaults.guardrails,
     };
   }
