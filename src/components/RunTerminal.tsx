@@ -15,6 +15,7 @@ import {
 } from 'lucide-react';
 import { useTheme } from '../contexts/ThemeContext';
 import { BASE_URL } from '../lib/apiFetch';
+import { getAgentBadgeLabel, getAgentBadgeToneClassName, normalizeAgentType } from '../lib/agent-display';
 
 export interface RunTerminalHandle {
   scrollToStory: (storyId: string) => void;
@@ -665,7 +666,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   const lineBufferRef = useRef('');
 
   // Agent type detected from backend run_meta SSE event
-  const [agentType, setAgentType] = useState<'claude' | 'opencode' | 'codex'>('claude');
+  const [agentType, setAgentType] = useState<string>('claude');
 
   // Toggle state — persisted per run in localStorage
   const [mode, setMode] = useState<'raw' | 'semantic'>(() => loadMode(runId));
@@ -799,7 +800,7 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
     es.addEventListener('run_meta', (e: MessageEvent) => {
       try {
         const meta = JSON.parse(e.data) as { agentType?: string };
-        if (meta.agentType === 'opencode' || meta.agentType === 'codex') {
+        if (typeof meta.agentType === 'string' && meta.agentType.trim()) {
           setAgentType(meta.agentType);
         }
       } catch { /* ignore */ }
@@ -941,7 +942,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
   }, []);
 
   const firstTs = steps.length > 0 ? steps[0].ts : null;
-  const isOpenCode = agentType === 'opencode' || agentType === 'codex';
+  const normalizedAgentType = normalizeAgentType(agentType);
+  const isOpenCode = normalizedAgentType === 'opencode' || normalizedAgentType === 'codex';
+  const showAgentBadge = normalizedAgentType !== 'claude' && normalizedAgentType !== 'unknown';
 
   return (
     <div className="h-full w-full flex flex-col">
@@ -975,9 +978,9 @@ const RunTerminal = forwardRef<RunTerminalHandle, RunTerminalProps>(function Run
         </button>
 
         {/* Agent type badge (shown when not claude) */}
-        {isOpenCode && (
-          <span className="ml-1 text-[10px] px-1.5 py-0.5 rounded bg-cyan-500/15 text-cyan-400 font-medium">
-            OpenCode
+        {showAgentBadge && (
+          <span className={`ml-1 text-[10px] px-1.5 py-0.5 rounded font-medium ${getAgentBadgeToneClassName(agentType)}`}>
+            {getAgentBadgeLabel(agentType, null, { showOpenCodeModel: false })}
           </span>
         )}
 
