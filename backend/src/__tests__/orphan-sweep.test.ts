@@ -50,10 +50,23 @@ import request from 'supertest';
 
 // ── Helpers ───────────────────────────────────────────────────────────────────
 
-type OrphanRunRow = { id: number; pid: number | null; workspace_id: number };
+type OrphanRunRow = {
+  id: number;
+  pid: number | null;
+  workspace_id: number;
+  pty_child_pid?: number | null;
+  pty_status?: string | null;
+};
 
 function makeRun(overrides: Partial<OrphanRunRow> = {}): OrphanRunRow {
-  return { id: 1, pid: 12345, workspace_id: 99, ...overrides };
+  return {
+    id: 1,
+    pid: 12345,
+    workspace_id: 99,
+    pty_child_pid: null,
+    pty_status: null,
+    ...overrides,
+  };
 }
 
 // Build a minimal express app with just the pipeline orphan-sweep route
@@ -207,6 +220,52 @@ describe('sweepOrphanProcesses', () => {
     expect(walCalls.length).toBeGreaterThan(0);
     const storyFailedPayload = JSON.parse(walCalls[0][1][2] as string);
     expect(storyFailedPayload.reason).toBe('orphan_sweep');
+  });
+
+  it('kills orphaned PTY child process groups and marks the PTY session closed', async () => {
+    const run = makeRun({ id: 66, pid: 4444, workspace_id: 8, pty_child_pid: 5555, pty_status: 'active' });
+    mockQuery.mockResolvedValueOnce([run]);
+    mockQuery.mockResolvedValueOnce([]);
+
+    const directSignals = new Map<number, Array<number | string>>();
+    const groupSignals = new Map<number, Array<number | string>>();
+
+    killSpy.mockImplementation((pid: number, sig: number | string) => {
+      const target = pid < 0 ? groupSignals : directSignals;
+      const key = Math.abs(pid);
+      const current = target.get(key) ?? [];
+      current.push(sig);
+      target.set(key, current);
+
+      if (sig === 0) {
+        const signals = target.get(key) ?? [];
+        const direct = directSignals.get(key) ?? [];
+        const grouped = groupSignals.get(key) ?? [];
+        const terminated = signals.includes('SIGKILL') || direct.includes('SIGKILL') || grouped.includes('SIGKILL');
+        if (terminated) {
+          const err = new Error('no such process') as NodeJS.ErrnoException;
+          err.code = 'ESRCH';
+          throw err;
+        }
+        return true as any;
+      }
+
+      return true as any;
+    });
+
+    const promise = sweepOrphanProcesses();
+    await jest.advanceTimersByTimeAsync(5_001);
+    const results = await promise;
+
+    expect(results).toHaveLength(1);
+    expect(results[0]).toMatchObject({ runId: 66, pid: 4444, killed: true, ptyPid: 5555, ptyKilled: true });
+    expect(groupSignals.get(5555)).toEqual(expect.arrayContaining(['SIGTERM', 'SIGKILL']));
+    expect(directSignals.get(5555)).toEqual(expect.arrayContaining(['SIGTERM', 'SIGKILL']));
+
+    expect(mockExecute).toHaveBeenCalledWith(
+      expect.stringContaining('UPDATE run_pty_sessions'),
+      [66, 'SIGKILL'],
+    );
   });
 
   // ── (4) worker_id filtering via SQL ─────────────────────────────────────
