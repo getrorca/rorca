@@ -43,6 +43,15 @@ afterAll(async () => {
   delete process.env.NODE_ENV;
 });
 
+describe('GET /api/recall', () => {
+  it('returns 400 when debug=true is requested without a ranked query', async () => {
+    const res = await request(app).get(`/api/recall?workspaceId=${WS_ID}&debug=true`);
+
+    expect(res.status).toBe(400);
+    expect(res.body.error).toMatch(/debug=true is only supported/i);
+  }, 60_000);
+});
+
 describe('GET /api/recall/dump', () => {
   it('returns 404 for unknown workspace', async () => {
     const res = await request(app).get('/api/recall/dump?workspaceId=nonexistent-ws-999');

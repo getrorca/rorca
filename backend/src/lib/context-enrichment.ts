@@ -34,6 +34,10 @@ export interface ContextEnrichmentMeta {
   tier: ContextRetrievalTier;
   mode: ContextRetrievalMode;
   graphAvailable: boolean;
+  graphScoreWeight: number;
+  graphRerankAppliedWeight: number;
+  graphRerankChanged: boolean;
+  graphRerankedCandidateKeys: string[];
   predictedPaths: string[];
   inferredSkills: string[];
 }
@@ -314,6 +318,10 @@ async function buildDirectionOnlyContext(
       tier: computeTier({ cagHits: memory.length + budgetedSkills.length, ragHits: 0, graphHits: 0 }),
       mode,
       graphAvailable: false,
+      graphScoreWeight: 0,
+      graphRerankAppliedWeight: 0,
+      graphRerankChanged: false,
+      graphRerankedCandidateKeys: [],
       predictedPaths: [],
       inferredSkills,
     },
@@ -350,6 +358,7 @@ export async function buildContextForStory(
   const retrieved = await retrieveContext(workspaceId, storyText, {
     maxTokens,
     includeGraph: graphAvailable,
+    workspacePath: workspace.path,
     predictedPaths,
     storyId: story?.id,
     specId,
@@ -376,6 +385,10 @@ export async function buildContextForStory(
       }),
       mode,
       graphAvailable,
+      graphScoreWeight: retrieved.meta.graphScoreWeight ?? 0,
+      graphRerankAppliedWeight: retrieved.meta.graphRerankAppliedWeight ?? 0,
+      graphRerankChanged: retrieved.meta.graphRerankChanged ?? false,
+      graphRerankedCandidateKeys: retrieved.meta.graphRerankedCandidateKeys ?? [],
       predictedPaths,
       inferredSkills,
     },

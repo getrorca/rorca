@@ -27,9 +27,11 @@ import { synthesizeDirectionStack } from '../lib/direction-stack';
 import { retrieveContext } from '../lib/memory-router';
 import { echolocate } from '../lib/workspace-echolocation';
 import { parseFrontmatter, inferCategory } from '../lib/skill-registry';
-import { ValidationError, NotFoundError } from '../lib/errors';
+import { ForbiddenError, ValidationError, NotFoundError } from '../lib/errors';
 import {
   RecallQuerySchema,
+  type RecallDebugMeta,
+  type RecallMemoryEntry,
   type RecallResponse,
   type DumpResponse,
   type RunSummary,
@@ -168,11 +170,32 @@ async function fetchDirectionStack(
   return { directionStack: synthesized.text, retrievalTier: 'cag' };
 }
 
+function debugKeyBelongsToWorkspace(workspaceId: string, key: string | null | undefined): boolean {
+  if (!key) return true;
+  return key === `workspace:${workspaceId}`
+    || key.includes(`:${workspaceId}::`)
+    || key.startsWith(`invalid:memory:${workspaceId}::`);
+}
+
+function assertWorkspaceScopedDebug(
+  workspaceId: string,
+  memories: RecallMemoryEntry[],
+): void {
+  for (const memory of memories) {
+    const canonicalKey = memory.debug?.tieBreak.canonicalKey;
+    const sourceStoryKey = memory.debug?.tieBreak.sourceStoryKey;
+    if (!debugKeyBelongsToWorkspace(workspaceId, canonicalKey) || !debugKeyBelongsToWorkspace(workspaceId, sourceStoryKey)) {
+      throw new ForbiddenError('Debug retrieval output contained results outside the active workspace scope');
+    }
+  }
+}
+
 async function fetchMemories(
   workspaceId: string,
   category?: string,
   storyText?: string,
-): Promise<{ memories: MemoryEntry[]; retrievalTier: RetrievalTier }> {
+  debug = false,
+): Promise<{ memories: RecallMemoryEntry[]; retrievalTier: RetrievalTier; debugMeta?: RecallDebugMeta }> {
   if (!storyText) {
     // No story text — return most recent 100 memories from DB (was 20, too few for full recall)
     const catFilter = category
@@ -197,7 +220,7 @@ async function fetchMemories(
   }
 
   // Story text provided — use retrieveContext to get scored, ranked memories
-  const ctx = await retrieveContext(workspaceId, storyText, { includeGraph: true });
+  const ctx = await retrieveContext(workspaceId, storyText, { includeGraph: true, explain: debug });
 
   let retrievalTier: RetrievalTier = ctx.meta.tier === 'cache' ? 'cag'
     : ctx.meta.tier === 'search' || ctx.meta.tier === 'hybrid' ? 'rag'
@@ -229,12 +252,18 @@ async function fetchMemories(
 
   // Match scored memory items from retrieveContext against DB rows.
   // Prefer stable IDs from semantic search, then fall back to exact content.
-  const matched: Array<{ entry: MemoryEntry; score: number }> = [];
+  const matched: Array<{ entry: RecallMemoryEntry; score: number }> = [];
   for (const mem of ctx.memory) {
     const row = mem.id ? idToRow.get(mem.id) : undefined;
     const fallbackRow = row ?? contentToRow.get(mem.text);
     if (fallbackRow) {
-      matched.push({ entry: memoryRowToEntry(fallbackRow), score: mem.score });
+      matched.push({
+        entry: {
+          ...memoryRowToEntry(fallbackRow),
+          debug: mem.explainability,
+        },
+        score: mem.score,
+      });
     }
   }
 
@@ -242,7 +271,17 @@ async function fetchMemories(
   matched.sort((a, b) => b.score - a.score);
   const topMemories = matched.slice(0, 30).map(m => m.entry);
 
-  return { memories: topMemories, retrievalTier };
+  assertWorkspaceScopedDebug(workspaceId, topMemories);
+
+  const debugMeta = debug && ctx.memory[0]?.explainability
+    ? {
+        scoringVersion: ctx.memory[0].explainability.scoringVersion,
+        retrievalMode: ctx.memory[0].explainability.retrievalMode,
+        telemetryId: ctx.meta.telemetryId ?? null,
+      }
+    : undefined;
+
+  return { memories: topMemories, retrievalTier, debugMeta };
 }
 
 function memoryRowToEntry(r: MemoryRow): MemoryEntry {
@@ -501,9 +540,12 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
       parsed.error.issues.map(i => i.message).join('; '),
     );
   }
-  const { workspaceId, category, includeRuns, includeHealth, titlesOnly } = parsed.data;
+  const { workspaceId, category, includeRuns, includeHealth, titlesOnly, debug } = parsed.data;
   // `query` is the preferred alias for brief-anchored retrieval; falls back to legacy `storyText`
   const storyText = parsed.data.query ?? parsed.data.storyText;
+  if (debug && !storyText) {
+    throw new ValidationError('debug=true is only supported for ranked recall requests that include query or storyText');
+  }
 
   // Verify workspace exists (required before parallel fetchers)
   const workspace = await queryOne<WorkspaceRow>(
@@ -533,6 +575,9 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
       return result;
     } catch (err) {
       sectionTimings[name] = Date.now() - t0;
+      if (err instanceof ValidationError || err instanceof ForbiddenError) {
+        throw err;
+      }
       console.warn(`[recall] ${name} failed (${sectionTimings[name]}ms):`, (err as Error).message);
       return null;
     }
@@ -550,7 +595,7 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
     // 1. Direction stack synthesis
     timed('directionStack', () => fetchDirectionStack(workspaceId, storyText)),
     // 2. Memories (may trigger 3-tier retrieval if storyText provided)
-    timed('memories', () => fetchMemories(workspaceId, category, storyText)),
+    timed('memories', () => fetchMemories(workspaceId, category, storyText, debug)),
     // 3. Health / echolocation
     timed('health', () => includeHealth ? fetchHealth(workspace.path) : null),
     // 4. Recent completed runs
@@ -594,6 +639,7 @@ router.get('/', async (req: Request, res: Response, next: NextFunction) => {
       latencyMs: 0,
       retrievalTier,
       generatedAt: new Date().toISOString(),
+      ...(debug && memoryResult?.debugMeta ? { debug: memoryResult.debugMeta } : {}),
     },
   };
 

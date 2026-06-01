@@ -80,6 +80,19 @@
       "ledgerPath": ".rorca/memory/MEMORY.md",
       "maxEntries": 500,
       "autoCapture": true
+    },
+    "retrieval": {
+      "graphScoreWeight": 0,
+      "guardrails": {
+        "version": 1,
+        "recencyDecayLambda": 0.0077,
+        "dominanceThreshold": 0.4,
+        "dominanceTopN": 5,
+        "minDiversityFloor": 2,
+        "pinnedRecencyFloor": 1,
+        "lowConfidenceClusterPenalty": 0.18,
+        "highConfidenceExempt": true
+      }
     }
   },
   "teleology": {

@@ -13,6 +13,7 @@
  */
 
 import { z } from 'zod';
+import type { GraphRagCandidateExplainability, GraphRagRetrievalMode, GraphRagScoreSchemaVersion } from '../lib/retrieval-pipeline';
 import type { MemoryEntry } from '../lib/memory-ledger';
 import type { EcholocationReport } from '../lib/workspace-echolocation';
 
@@ -91,16 +92,27 @@ export interface WorkspaceMetadata {
 
 export type RetrievalTier = 'cag' | 'rag' | 'graph' | 'none';
 
+export interface RecallDebugMeta {
+  scoringVersion: GraphRagScoreSchemaVersion;
+  retrievalMode: GraphRagRetrievalMode;
+  telemetryId: string | null;
+}
+
+export interface RecallMemoryEntry extends MemoryEntry {
+  debug?: GraphRagCandidateExplainability;
+}
+
 export interface RecallMeta {
   totalTokens: number;
   latencyMs: number;
   retrievalTier: RetrievalTier;
   generatedAt: string;
+  debug?: RecallDebugMeta;
 }
 
 export interface RecallResponse {
   directionStack: string;
-  memories: MemoryEntry[];
+  memories: RecallMemoryEntry[];
   health: EcholocationReport | null;
   recentRuns: RunSummary[];
   skills: SkillPreview[];
@@ -159,6 +171,11 @@ export const RecallQuerySchema = z.object({
   query: z.string().optional(),
   /** When true, strips full memory content from the response and returns only {date, category, title, source} per entry — ~2K tokens vs ~50K+ for a full dump. Use for spec generation context loading. */
   titlesOnly: z
+    .string()
+    .optional()
+    .default('false')
+    .transform((v) => v === 'true'),
+  debug: z
     .string()
     .optional()
     .default('false')

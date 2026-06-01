@@ -133,6 +133,9 @@ function KnowledgeGraphContent({ specId, workspaceId }: { specId: string; worksp
 
   return (
     <div className="p-3 space-y-3">
+      <div className="rounded-lg border border-border bg-panel/60 px-3 py-2 text-[11px] text-muted">
+        Semantic-only surface: this tab visualizes raw knowledge-graph links and does not yet apply GraphRAG scoring v1. Scored retrieval currently flows through recall, context assembly, and story prompt-building surfaces.
+      </div>
       {data.memories.length > 0 && (
         <CollapsibleSection title="Memories" icon={Brain} count={data.memories.length}>
           <ul className="divide-y divide-border">

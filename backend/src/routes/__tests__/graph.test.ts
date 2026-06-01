@@ -223,6 +223,42 @@ test('returns retrieval telemetry, durable events, and feedback summaries for op
         historicalScore: 0.7,
         reasons: ['Strong lexical overlap'],
         conflictsWith: [],
+        explainability: {
+          scoringVersion: 'v2',
+          retrievalMode: 'graph-reranked',
+          scoreBreakdown: {
+            total: 0.91,
+            semantic: 0.41,
+            structural: 0.16,
+            graph: 0.18,
+            provenance: 0.07,
+            recency: 0.04,
+            pinned: 0,
+            skills: 0.03,
+            historical: 0.02,
+            diversityPenalty: 0,
+            echoChamberPenalty: 0,
+            repetitionPenalty: 0,
+            duplicationPenalty: 0,
+          },
+          provenanceEdges: ['DEPENDS_ON x3', 'CITED_BY x1'],
+          provenanceConfidence: 'high',
+          provenanceSourceType: 'manual',
+          provenanceSource: 'seeded-test',
+          graphNodeType: 'memory',
+          graphSignalCount: 4,
+          rankReasons: ['Strong lexical overlap'],
+          preRerankPosition: 2,
+          finalPosition: 1,
+          rerankedBy: 'graph',
+          tieBreak: {
+            canonicalKey: 'memory:ws-1::42',
+            sourceStoryKey: 'story:ws-1::spec-graph::US-001',
+            storySlug: 'US-001',
+            candidateId: '42',
+          },
+          validationIssues: [],
+        },
       },
     ],
     latencyMs: 14,
@@ -247,6 +283,24 @@ test('returns retrieval telemetry, durable events, and feedback summaries for op
   expect(res.body.workspaceId).toBe('ws-1');
   expect(res.body.events).toHaveLength(1);
   expect(res.body.events[0].selectedCandidateKeys).toContain('memory:42');
+  expect(res.body.events[0].scoringVersion).toBe('v2');
+  expect(res.body.events[0].retrievalMode).toBe('graph-reranked');
+  expect(res.body.events[0].candidates[0].explainability.scoreBreakdown).toEqual({
+    total: 0.91,
+    semantic: 0.41,
+    structural: 0.16,
+    graph: 0.18,
+    provenance: 0.07,
+    recency: 0.04,
+    pinned: 0,
+    skills: 0.03,
+    historical: 0.02,
+    diversityPenalty: 0,
+    echoChamberPenalty: 0,
+    repetitionPenalty: 0,
+    duplicationPenalty: 0,
+  });
+  expect(res.body.events[0].candidates[0].explainability.provenanceEdges).toEqual(['DEPENDS_ON x3', 'CITED_BY x1']);
   expect(res.body.feedback).toHaveLength(1);
   expect(res.body.feedback[0].candidate_key).toBe('memory:42');
   expect(res.body.feedback[0].usefulness_score).toBe(0.8);
@@ -258,4 +312,13 @@ test('returns retrieval telemetry, durable events, and feedback summaries for op
   expect(res.body.summary.telemetry.topMatchedSkills[0]).toEqual({ skill: 'Auth Security', count: 1 });
   expect(res.body.summary.feedback.totalCandidates).toBe(1);
   expect(res.body.summary.feedback.topPerformers[0].candidate_key).toBe('memory:42');
+});
+
+test('requires workspaceId for retrieval telemetry debugging', async () => {
+  const res = await request(app)
+    .get('/api/graph/retrieval-telemetry?limit=5')
+    .set('Authorization', `Bearer ${authToken}`);
+
+  expect(res.status).toBe(400);
+  expect(res.body.error).toMatch(/workspaceId is required/i);
 });

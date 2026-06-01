@@ -6,6 +6,7 @@
  */
 
 import { execute, query } from '../db/index';
+import type { GraphRagCandidateExplainability, GraphRagScoreContract } from './retrieval-pipeline';
 import { logger } from './logger';
 
 export interface RetrievalTelemetryCandidate {
@@ -13,6 +14,9 @@ export interface RetrievalTelemetryCandidate {
   origin: string;
   sourceType?: string;
   finalScore: number;
+  semanticRankScore?: number;
+  preRerankPosition?: number | null;
+  rerankedBy?: 'graph' | 'semantic';
   decision: 'keep' | 'drop' | 'needs-more' | 'conflict';
   freshnessScore: number;
   validatorScore: number;
@@ -21,6 +25,8 @@ export interface RetrievalTelemetryCandidate {
   reasons: string[];
   conflictsWith: string[];
   supersededBy?: string;
+  scoring?: GraphRagScoreContract;
+  explainability?: GraphRagCandidateExplainability;
 }
 
 export interface RetrievalTelemetryEvent {
@@ -135,6 +141,9 @@ function normalizeCandidates(value: unknown): RetrievalTelemetryCandidate[] {
       sourceType: typeof row.sourceType === 'string' ? row.sourceType : undefined,
       finalScore: row.finalScore,
       decision: (row.decision as RetrievalTelemetryCandidate['decision']) || 'drop',
+      semanticRankScore: typeof row.semanticRankScore === 'number' ? row.semanticRankScore : undefined,
+      preRerankPosition: typeof row.preRerankPosition === 'number' ? row.preRerankPosition : null,
+      rerankedBy: row.rerankedBy === 'graph' ? 'graph' : row.rerankedBy === 'semantic' ? 'semantic' : undefined,
       freshnessScore: typeof row.freshnessScore === 'number' ? row.freshnessScore : 0,
       validatorScore: typeof row.validatorScore === 'number' ? row.validatorScore : 0,
       graphScore: typeof row.graphScore === 'number' ? row.graphScore : 0,
@@ -142,6 +151,12 @@ function normalizeCandidates(value: unknown): RetrievalTelemetryCandidate[] {
       reasons: normalizeStringArray(row.reasons),
       conflictsWith: normalizeStringArray(row.conflictsWith),
       supersededBy: typeof row.supersededBy === 'string' ? row.supersededBy : undefined,
+      scoring: row.scoring && typeof row.scoring === 'object'
+        ? row.scoring as GraphRagScoreContract
+        : undefined,
+      explainability: row.explainability && typeof row.explainability === 'object'
+        ? row.explainability as GraphRagCandidateExplainability
+        : undefined,
     }];
   });
 }

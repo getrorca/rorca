@@ -102,6 +102,7 @@ import authE2ERouter from './routes/auth-e2e';
 import { logger } from './lib/logger';
 import pinoHttp from 'pino-http';
 import { startGraphPopulator } from './lib/graph-populator';
+import { startGraphContextCacheInvalidator } from './lib/graph-context';
 import workspaceDriftRouter from './routes/workspace-drift';
 import graphRouter from './routes/graph';
 import workflowRouterRouter from './routes/workflow-router';
@@ -444,6 +445,7 @@ if (BACKGROUND_RUNTIME_ENABLED) {
 
   // PG-015: Subscribe graph populator to WAL events for knowledge graph edges
   startGraphPopulator();
+  startGraphContextCacheInvalidator();
 
   // PG-017: Subscribe drift detector to WAL events for post-run convention drift analysis
   startDriftSubscriber();

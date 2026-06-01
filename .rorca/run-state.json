@@ -1,53 +1,73 @@
 {
-  "specId": "Rorca Graph Identity Phase 1 Remaining",
-  "runId": 20260316000340,
-  "startedAt": "2026-05-31T21:58:50.668Z",
-  "lastUpdatedAt": "2026-05-31T22:37:16.545Z",
+  "specId": "Rorca GraphRAG Phase 2 Scoring and Reranking",
+  "runId": 20260316000347,
+  "startedAt": "2026-05-31T23:56:39.394Z",
+  "lastUpdatedAt": "2026-06-01T01:35:51.913Z",
   "completedStories": [
     {
-      "storyId": "GI-003",
-      "title": "Re-key graph writes to canonical identity while preserving current semantics",
+      "storyId": "GR2-001",
+      "title": "Define the GraphRAG scoring contract and candidate schema",
       "status": "passed",
-      "startedAt": "2026-05-31T21:34:19.764Z",
-      "finishedAt": "2026-05-31T21:42:17.153Z",
+      "startedAt": "2026-05-31T23:56:46.126Z",
+      "finishedAt": "2026-06-01T00:13:11.423Z",
       "agentType": "pi",
       "model": "openai-codex/gpt-5.4",
-      "elapsedMs": 477389
+      "elapsedMs": 985297
     },
     {
-      "storyId": "GI-004",
-      "title": "Complete memory provenance for graph reconstruction from relational truth",
+      "storyId": "GR2-002",
+      "title": "Score graph candidates from canonical projection data",
       "status": "passed",
-      "startedAt": "2026-05-31T22:01:01.550Z",
-      "finishedAt": "2026-05-31T22:12:41.703Z",
+      "startedAt": "2026-06-01T00:13:30.674Z",
+      "finishedAt": "2026-06-01T00:24:48.091Z",
       "agentType": "pi",
       "model": "openai-codex/gpt-5.4",
-      "elapsedMs": 700153
+      "elapsedMs": 677417
     },
     {
-      "storyId": "GI-005",
-      "title": "Scope graph retrieval, query, and cache flows to canonical identity",
+      "storyId": "GR2-003",
+      "title": "Integrate graph scoring into retrieval and reranking flows",
       "status": "passed",
-      "startedAt": "2026-05-31T22:12:57.947Z",
-      "finishedAt": "2026-05-31T22:27:29.922Z",
+      "startedAt": "2026-06-01T00:25:07.335Z",
+      "finishedAt": "2026-06-01T00:47:46.089Z",
       "agentType": "pi",
       "model": "openai-codex/gpt-5.4",
-      "elapsedMs": 871975
+      "elapsedMs": 1358754
     },
     {
-      "storyId": "GI-006",
-      "title": "Add projection lifecycle cleanup via deletion sync or reconciliation pruning",
+      "storyId": "GR2-004",
+      "title": "Add recency decay, pinning, and anti-echo-chamber guardrails",
       "status": "passed",
-      "startedAt": "2026-05-31T22:27:44.448Z",
-      "finishedAt": "2026-05-31T22:37:03.260Z",
+      "startedAt": "2026-06-01T00:48:05.245Z",
+      "finishedAt": "2026-06-01T01:08:28.968Z",
       "agentType": "pi",
       "model": "openai-codex/gpt-5.4",
-      "elapsedMs": 558812
+      "elapsedMs": 1223723
+    },
+    {
+      "storyId": "GR2-005",
+      "title": "Add score explainability and debug surfaces",
+      "status": "passed",
+      "startedAt": "2026-06-01T01:08:48.641Z",
+      "finishedAt": "2026-06-01T01:23:33.624Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 884983
+    },
+    {
+      "storyId": "GR2-006",
+      "title": "Build evaluation fixtures, regression benchmarks, and rollout controls",
+      "status": "passed",
+      "startedAt": "2026-06-01T01:23:52.505Z",
+      "finishedAt": "2026-06-01T01:35:38.557Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 706052
     }
   ],
   "failedStories": [],
   "skippedStories": [],
-  "currentStory": "GI-007",
+  "currentStory": "GR2-007",
   "decisions": [],
-  "resumedFromStory": "GI-003"
+  "resumedFromStory": null
 }

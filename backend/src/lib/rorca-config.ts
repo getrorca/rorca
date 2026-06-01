@@ -55,9 +55,26 @@ const MemoryConfigSchema = z.object({
   autoCapture: z.boolean().default(true),
 });
 
+const RetrievalGuardrailsSchema = z.object({
+  version: z.number().int().min(1).default(1),
+  recencyDecayLambda: z.number().min(0).max(1).default(0.0077),
+  dominanceThreshold: z.number().min(0.1).max(1).default(0.4),
+  dominanceTopN: z.number().int().min(2).max(20).default(5),
+  minDiversityFloor: z.number().int().min(1).max(10).default(2),
+  pinnedRecencyFloor: z.number().min(0).max(1).default(1),
+  lowConfidenceClusterPenalty: z.number().min(0).max(1).default(0.18),
+  highConfidenceExempt: z.boolean().default(true),
+});
+
+const RetrievalConfigSchema = z.object({
+  graphScoreWeight: z.number().min(0).max(1).default(0),
+  guardrails: RetrievalGuardrailsSchema.default(() => RetrievalGuardrailsSchema.parse({})),
+});
+
 const ContextSchema = z.object({
   fileRegistry: z.array(FileRegistryEntrySchema).default([]),
   memory: MemoryConfigSchema.default(() => MemoryConfigSchema.parse({})),
+  retrieval: RetrievalConfigSchema.default(() => RetrievalConfigSchema.parse({})),
 });
 
 const DirectionLayer = z.enum(['L1', 'L2', 'L3', 'L4', 'L5']);
@@ -171,6 +188,8 @@ export type RoutingTag = z.infer<typeof RoutingTagSchema>;
 export type ContextConfig = z.infer<typeof ContextSchema>;
 export type FileRegistryEntry = z.infer<typeof FileRegistryEntrySchema>;
 export type MemoryConfig = z.infer<typeof MemoryConfigSchema>;
+export type RetrievalGuardrailsConfig = z.infer<typeof RetrievalGuardrailsSchema>;
+export type RetrievalConfig = z.infer<typeof RetrievalConfigSchema>;
 export type TeleologyConfig = z.infer<typeof TeleologySchema>;
 export type OrchestrationConfig = z.infer<typeof OrchestrationSchema>;
 export type ExecutionConfig = z.infer<typeof ExecutionSchema>;
