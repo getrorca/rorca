@@ -20,34 +20,34 @@ const mockEcholocate = jest.fn();
 const mockInferSkillsFromStack = jest.fn();
 
 jest.mock('../../db/index', () => ({
-  query: (...args) => mockQuery(...args),
-  queryOne: (...args) => mockQueryOne(...args),
+  query: (...args: unknown[]) => mockQuery(...args),
+  queryOne: (...args: unknown[]) => mockQueryOne(...args),
 }));
 
 jest.mock('../memory-router', () => ({
-  retrieveContext: (...args) => mockRetrieveContext(...args),
+  retrieveContext: (...args: unknown[]) => mockRetrieveContext(...args),
 }));
 
 jest.mock('../context-cache', () => ({
-  getDirectionLayers: (...args) => mockGetDirectionLayers(...args),
-  getInstalledSkills: (...args) => mockGetInstalledSkills(...args),
+  getDirectionLayers: (...args: unknown[]) => mockGetDirectionLayers(...args),
+  getInstalledSkills: (...args: unknown[]) => mockGetInstalledSkills(...args),
 }));
 
 jest.mock('../age-guard', () => ({
-  checkAge: (...args) => mockCheckAge(...args),
+  checkAge: (...args: unknown[]) => mockCheckAge(...args),
 }));
 
 jest.mock('../rorca-config', () => ({
-  loadRorcaConfig: (...args) => mockLoadRorcaConfig(...args),
+  loadRorcaConfig: (...args: unknown[]) => mockLoadRorcaConfig(...args),
 }));
 
 jest.mock('../workspace-echolocation', () => ({
-  echolocate: (...args) => mockEcholocate(...args),
-  inferSkillsFromStack: (...args) => mockInferSkillsFromStack(...args),
+  echolocate: (...args: unknown[]) => mockEcholocate(...args),
+  inferSkillsFromStack: (...args: unknown[]) => mockInferSkillsFromStack(...args),
 }));
 
 describe('context-enrichment', () => {
-  let workspacePath;
+  let workspacePath: string;
 
   beforeEach(() => {
     jest.resetModules();
@@ -107,6 +107,7 @@ describe('context-enrichment', () => {
       expect.stringContaining('Refactor the auth panel'),
       expect.objectContaining({
         includeGraph: false,
+        graphScoreWeight: 0,
         storyId: 'US-001',
       }),
     );
@@ -141,7 +142,7 @@ describe('context-enrichment', () => {
     expect(mockRetrieveContext).not.toHaveBeenCalled();
     expect(result.graphContext).toBeNull();
     expect(result.graphSection).toBe('');
-    expect(result.memory.map((entry) => entry.text)).toEqual([
+    expect(result.memory.map((entry: { text: string }) => entry.text)).toEqual([
       'Pinned memory',
       'Recent memory',
     ]);

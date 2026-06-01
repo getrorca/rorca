@@ -37,6 +37,7 @@ export interface RelatedMemory {
   text: string;
   relationship: string;
   hops: number;
+  matchedPath?: string;
 }
 
 export interface RelatedConvention {
@@ -326,6 +327,7 @@ async function findRelatedMemories(
       text: memText,
       relationship,
       hops: 2,
+      matchedPath: filePath,
     });
   }
 
@@ -359,6 +361,7 @@ async function findRelatedMemories(
         text: memText,
         relationship: `about co-modified file ${aboutPath}`,
         hops: 3,
+        matchedPath: aboutPath,
       });
     }
   }
@@ -468,6 +471,7 @@ async function detectConflicts(
         text: `WARNING: Story ${conflictId} (status: running) is also touching ${filePath}`,
         relationship: 'conflict',
         hops: 1,
+        matchedPath: filePath,
       });
     }
   }
