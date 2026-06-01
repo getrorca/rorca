@@ -1766,7 +1766,27 @@ export type OrphanSweepResult = {
   runId: number;
   pid: number;
   killed: boolean;
+  ptyPid?: number;
+  ptyKilled?: boolean;
 };
+
+function isProcessAlive(pid: number | null | undefined): boolean {
+  if (pid === null || pid === undefined) return false;
+  try {
+    process.kill(pid, 0);
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function signalPtyProcessGroup(pid: number | null | undefined, signal: NodeJS.Signals): void {
+  if (!pid || pid <= 0) return;
+  if (process.platform !== 'win32') {
+    try { process.kill(-pid, signal); } catch { /* fall through to direct PID signal */ }
+  }
+  try { process.kill(pid, signal); } catch { /* already gone */ }
+}
 
 export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
   const results: OrphanSweepResult[] = [];
@@ -1775,6 +1795,8 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
     id: number;
     pid: number | null;
     workspace_id: number | string;
+    pty_child_pid: number | null;
+    pty_status: string | null;
   };
 
   let orphanRuns: OrphanRunRow[];
@@ -1784,11 +1806,17 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
     // just because worker_id != B. The LEFT JOIN ensures runs with a
     // live owning worker are excluded; only truly orphaned runs remain.
     orphanRuns = await query<OrphanRunRow>(
-      `SELECT pr.id, pr.pid, pr.workspace_id
+      `SELECT pr.id,
+              pr.pid,
+              pr.workspace_id,
+              rps.child_pid AS pty_child_pid,
+              rps.status AS pty_status
        FROM pipeline_runs pr
        LEFT JOIN worker_heartbeat wh
          ON pr.worker_id = wh.worker_id
          AND wh.last_seen > NOW() - INTERVAL '90 seconds'
+       LEFT JOIN run_pty_sessions rps
+         ON rps.run_id = pr.id
        WHERE pr.status = 'running'
          AND (pr.worker_id IS NULL OR (pr.worker_id != $1 AND wh.worker_id IS NULL))`,
       [WORKER_ID],
@@ -1808,7 +1836,7 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
   for (const run of orphanRuns) {
     // pg driver returns BIGINT as string — coerce to number for activeProcesses Map lookup
     const runId = Number(run.id);
-    const { pid, workspace_id: workspaceId } = run;
+    const { pid, workspace_id: workspaceId, pty_child_pid: ptyChildPid, pty_status: ptyStatus } = run;
 
     // Belt-and-suspenders: skip runs this worker actively owns in memory
     if (activeProcesses.has(runId)) {
@@ -1817,50 +1845,52 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
     }
 
     let killed = false;
+    let ptyKilled = false;
 
     try {
-      // ── 1. Check PID liveness ──────────────────────────────────────────
-      if (pid !== null && pid !== undefined) {
-        let isAlive = false;
+      // ── 1. Check engine/PTY liveness and terminate both trees ─────────
+      const engineAlive = isProcessAlive(pid);
+      const ptyAlive = ptyStatus === 'active' && isProcessAlive(ptyChildPid);
+
+      if (engineAlive) {
         try {
-          process.kill(pid, 0); // throws if PID is dead (ESRCH) or not ours (EPERM)
-          isAlive = true;
-        } catch (killErr: any) {
-          // ESRCH = no such process (dead), EPERM = not ours (treat as dead)
-          isAlive = false;
+          process.kill(pid!, 'SIGTERM');
+          logger.info({ runId, pid }, '[worker] sweepOrphanProcesses — sent SIGTERM to engine PID');
+        } catch {
+          // process may have died between probe and signal
         }
+      }
 
-        if (isAlive) {
-          // ── 2a. SIGTERM ────────────────────────────────────────────────
+      if (ptyAlive) {
+        signalPtyProcessGroup(ptyChildPid, 'SIGTERM');
+        logger.info({ runId, ptyChildPid }, '[worker] sweepOrphanProcesses — sent SIGTERM to PTY process group');
+      }
+
+      if (engineAlive || ptyAlive) {
+        await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
+      }
+
+      if (engineAlive) {
+        if (isProcessAlive(pid)) {
           try {
-            process.kill(pid, 'SIGTERM');
-            logger.info({ runId, pid }, '[worker] sweepOrphanProcesses — sent SIGTERM');
+            process.kill(pid!, 'SIGKILL');
+            killed = true;
+            logger.info({ runId, pid }, '[worker] sweepOrphanProcesses — sent SIGKILL to engine PID (SIGTERM ignored)');
           } catch {
-            // process may have died between the liveness check and SIGTERM — fine
+            // PID recycled between probe and SIGKILL — harmless
           }
+        } else {
+          killed = true;
+        }
+      }
 
-          // ── 2b. Wait 5s then SIGKILL if still alive ────────────────────
-          await new Promise<void>((resolve) => setTimeout(resolve, 5_000));
-
-          let stillAlive = false;
-          try {
-            process.kill(pid, 0);
-            stillAlive = true;
-          } catch {
-            stillAlive = false;
-          }
-
-          if (stillAlive) {
-            try {
-              process.kill(pid, 'SIGKILL');
-              killed = true;
-              logger.info({ runId, pid }, '[worker] sweepOrphanProcesses — sent SIGKILL (SIGTERM ignored)');
-            } catch {
-              // PID recycled between liveness check and SIGKILL — harmless
-            }
-          } else {
-            killed = true; // SIGTERM was sufficient
-          }
+      if (ptyAlive) {
+        if (isProcessAlive(ptyChildPid)) {
+          signalPtyProcessGroup(ptyChildPid, 'SIGKILL');
+          ptyKilled = true;
+          logger.info({ runId, ptyChildPid }, '[worker] sweepOrphanProcesses — sent SIGKILL to PTY process group (SIGTERM ignored)');
+        } else {
+          ptyKilled = true;
         }
       }
 
@@ -1872,12 +1902,26 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
         [runId],
       );
 
+      if (ptyStatus === 'active') {
+        const ptyExitSignal = ptyKilled ? 'SIGKILL' : ptyAlive ? 'SIGTERM' : null;
+        await execute(
+          `UPDATE run_pty_sessions
+           SET status = 'killed',
+               exit_signal = COALESCE($2, exit_signal),
+               exited_at = COALESCE(exited_at, NOW()),
+               updated_at = NOW()
+           WHERE run_id = $1 AND status = 'active'`,
+          [runId, ptyExitSignal],
+        );
+      }
+
       // ── 4. Emit run_finished WAL event ────────────────────────────────
       await emitWalEvent('run_finished', workspaceId, {
         run_id: runId,
         status: 'failed',
         reason: 'orphan_sweep',
         swept_pid: pid,
+        swept_pty_pid: ptyChildPid,
         swept_at: new Date().toISOString(),
       });
 
@@ -1902,7 +1946,7 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
       }
 
       logger.warn(
-        { runId, pid, killed, incompleteStories: incompleteStories.length },
+        { runId, pid, killed, ptyChildPid, ptyKilled, incompleteStories: incompleteStories.length },
         '[worker] sweepOrphanProcesses — orphan run swept',
       );
 
@@ -1911,9 +1955,9 @@ export async function sweepOrphanProcesses(): Promise<OrphanSweepResult[]> {
         logger.error({ err: qErr, runId }, '[worker] advanceQueue failed after orphan sweep'),
       );
 
-      results.push({ runId, pid: pid ?? 0, killed });
+      results.push({ runId, pid: pid ?? 0, killed, ptyPid: ptyChildPid ?? 0, ptyKilled });
     } catch (err) {
-      logger.error({ err, runId, pid }, '[worker] sweepOrphanProcesses — error processing orphan run, continuing');
+      logger.error({ err, runId, pid, ptyChildPid }, '[worker] sweepOrphanProcesses — error processing orphan run, continuing');
     }
   }
 

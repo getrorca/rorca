@@ -43,7 +43,13 @@ import { compileWaves, isCycleError } from './wave-compiler';
 import type { Wave, UserStory as WaveUserStory } from './wave-compiler';
 import { parseAgentConfig, type AgentType } from './config';
 import { normalizeTerminalMode, type TerminalMode } from './terminal-mode';
-import { PTY_AVAILABLE, PTY_UNAVAILABLE_HINT } from './pty-manager';
+import {
+  PTY_AVAILABLE,
+  PTY_UNAVAILABLE_HINT,
+  registerPtyCleanupTask,
+  runRegisteredPtyCleanupTasks,
+  shutdownPtyProcess,
+} from './pty-manager';
 import {
   appendRunPtyOutput,
   claimLatestRunPtyResize,
@@ -2006,9 +2012,17 @@ async function spawnAgentViaPty(
     let inactivityTimer: ReturnType<typeof setTimeout> | null = null;
     let pty: PtyProcessLike | null = null;
     let ptyCommand: PtyCommand | null = null;
+    let finalizePromise: Promise<void> | null = null;
+    let unregisterPtyCleanupTask: (() => void) | null = null;
+    let resolveExitObserved: (() => void) | null = null;
+    const exitObserved = new Promise<void>((resolve) => {
+      resolveExitObserved = resolve;
+    });
     const finalize = async (): Promise<void> => {
       if (settled) return;
       settled = true;
+      unregisterPtyCleanupTask?.();
+      unregisterPtyCleanupTask = null;
       if (resizeTimer) clearInterval(resizeTimer);
       if (runTimer) clearTimeout(runTimer);
       if (forceKillTimer) clearTimeout(forceKillTimer);
@@ -2039,6 +2053,29 @@ async function spawnAgentViaPty(
         stderrTail: Buffer.concat(stderrChunks).toString('utf8'),
         elapsedMs: Date.now() - startTime,
       });
+    };
+
+    const requestPtyShutdown = async (signal: NodeJS.Signals = 'SIGTERM'): Promise<void> => {
+      if (settled) {
+        if (finalizePromise) await finalizePromise;
+        return;
+      }
+
+      exitSignal ??= signal;
+      await shutdownPtyProcess(pty, {
+        signal,
+        graceMs: 10_000,
+        postKillSettleMs: 250,
+        waitForExit: exitObserved,
+        killProcessGroup,
+      });
+
+      if (!settled) {
+        finalizePromise = finalizePromise ?? finalize();
+      }
+      if (finalizePromise) {
+        await finalizePromise;
+      }
     };
 
     const recordStderr = (buf: Buffer): void => {
@@ -2108,6 +2145,7 @@ async function spawnAgentViaPty(
         rows: ptyOptions.rows,
         childPid: pty.pid ?? null,
       });
+      unregisterPtyCleanupTask = registerPtyCleanupTask(`run-${ptyOptions.runId}`, () => requestPtyShutdown('SIGTERM'));
       resetInactivity();
       resizeTimer = setInterval(() => {
         void (async () => {
@@ -2139,8 +2177,10 @@ async function spawnAgentViaPty(
 
       pty.onExit((event) => {
         exitCode = event.exitCode;
-        exitSignal = event.signal != null ? String(event.signal) : null;
-        void finalize();
+        exitSignal = event.signal != null ? String(event.signal) : exitSignal;
+        resolveExitObserved?.();
+        finalizePromise = finalizePromise ?? finalize();
+        void finalizePromise;
       });
 
       pty.write(ptyCommand.prompt);
@@ -2166,6 +2206,8 @@ async function spawnAgentViaPty(
       try {
         await completeRunPtySession(ptyOptions.runId, 'failed', 1, null);
       } catch { /* ignore */ }
+      unregisterPtyCleanupTask?.();
+      unregisterPtyCleanupTask = null;
       logStream.end();
       ptyCommand?.cleanup?.();
       resolve({ exitCode: 1, stderrTail: message, elapsedMs: Date.now() - startTime });
@@ -5668,6 +5710,7 @@ async function main(): Promise<void> {
     void (async () => {
       logger.info('');
       logger.info('[engine] Received SIGINT — stopping run');
+      await runRegisteredPtyCleanupTasks();
       await cleanupBrowserServers();
       process.exit(130);
     })();
@@ -5676,6 +5719,7 @@ async function main(): Promise<void> {
   process.on('SIGTERM', () => {
     void (async () => {
       logger.error('[engine] Received SIGTERM — terminating run before completion');
+      await runRegisteredPtyCleanupTasks();
       await cleanupBrowserServers();
       process.exit(143);
     })();
