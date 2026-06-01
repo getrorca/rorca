@@ -11,12 +11,20 @@ import { query, queryOne } from '../db/index';
 import { broadcastAll } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 import {
+  buildGraphRagExplainability,
+  GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION,
+} from '../lib/retrieval-pipeline';
+import {
   listPersistedRetrievalTelemetry,
   listRetrievalTelemetry,
   summarizePersistedRetrievalTelemetry,
+  type RetrievalTelemetryCandidate,
+  type RetrievalTelemetryEvent,
 } from '../lib/retrieval-telemetry';
 import { listRetrievalFeedback, summarizeRetrievalFeedback } from '../lib/retrieval-feedback';
 import { checkAge, getAgeUnavailableBody } from '../lib/age-guard';
+import { ForbiddenError, ValidationError } from '../lib/errors';
+import { invalidateGraphContextCacheForWorkspace } from '../lib/graph-context';
 
 const router = Router();
 
@@ -31,6 +39,59 @@ interface GraphStatsResponse {
   edgeCount: number;
   graphName: string;
   lastPopulatedAt: string | null;
+}
+
+function debugKeyBelongsToWorkspace(workspaceId: string, key: string | null | undefined): boolean {
+  if (!key) return true;
+  return key === `workspace:${workspaceId}`
+    || key.includes(`:${workspaceId}::`)
+    || key.startsWith(`invalid:memory:${workspaceId}::`);
+}
+
+function candidateMatchesSpec(candidate: RetrievalTelemetryCandidate, workspaceId: string, specId?: string): boolean {
+  if (!specId) return true;
+  const storyPrefix = `story:${workspaceId}::${specId}::`;
+  return candidate.scoring?.tieBreak.sourceStoryKey?.startsWith(storyPrefix) ?? false;
+}
+
+function attachTelemetryExplainability(
+  event: RetrievalTelemetryEvent,
+  workspaceId: string,
+  specId?: string,
+): RetrievalTelemetryEvent & { scoringVersion: string | null; retrievalMode: string | null } {
+  const candidates = event.candidates
+    .filter(candidate => candidateMatchesSpec(candidate, workspaceId, specId))
+    .map((candidate) => {
+      const explainability = candidate.explainability
+        ?? (candidate.scoring
+          ? buildGraphRagExplainability({
+              scoring: candidate.scoring,
+              reasons: candidate.reasons,
+              graphRelationship: candidate.scoring.breakdown.directGraphProximity.relationship,
+            })
+          : undefined);
+
+      if (
+        explainability
+        && (!debugKeyBelongsToWorkspace(workspaceId, explainability.tieBreak.canonicalKey)
+          || !debugKeyBelongsToWorkspace(workspaceId, explainability.tieBreak.sourceStoryKey))
+      ) {
+        throw new ForbiddenError('Retrieval telemetry contained candidates outside the active workspace scope');
+      }
+
+      return {
+        ...candidate,
+        explainability,
+      };
+    });
+
+  const firstExplainability = candidates.find(candidate => candidate.explainability)?.explainability;
+  return {
+    ...event,
+    candidates,
+    scoringVersion: firstExplainability?.scoringVersion ?? null,
+    retrievalMode: firstExplainability?.retrievalMode ?? null,
+  };
 }
 
 // ─── Routes ─────────────────────────────────────────────────────────────────
@@ -111,7 +172,7 @@ router.get('/stats', async (_req: Request, res: Response, next: NextFunction) =>
  * /api/graph/retrieval-telemetry:
  *   get:
  *     tags: [Graph]
- *     summary: Get recent retrieval telemetry and feedback rows for operator debugging
+ *     summary: Get recent retrieval telemetry, score-contract metadata, and feedback rows for operator debugging
  *     operationId: getRetrievalTelemetry
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Retrieval telemetry exposes operator-only debugging and ranking internals and should remain admin-only."
@@ -126,26 +187,39 @@ router.get('/stats', async (_req: Request, res: Response, next: NextFunction) =>
  *         description: Max telemetry events / feedback rows to return
  *     responses:
  *       200:
- *         description: Recent retrieval telemetry and feedback summary
+ *         description: Recent retrieval telemetry, GraphRAG score-contract metadata (including scored vs semantic-only consumer surfaces), and feedback summary
  */
 router.get('/retrieval-telemetry', async (req: Request, res: Response, next: NextFunction) => {
   try {
     const workspaceId = typeof req.query.workspaceId === 'string' ? req.query.workspaceId : undefined;
+    const specId = typeof req.query.specId === 'string' ? req.query.specId : undefined;
     const parsedLimit = parseInt(String(req.query.limit ?? '20'), 10);
     const limit = Number.isFinite(parsedLimit) ? Math.min(100, Math.max(1, parsedLimit)) : 20;
 
-    const [persistedEvents, telemetrySummary, feedback, feedbackSummary] = await Promise.all([
+    if (!workspaceId) {
+      throw new ValidationError('workspaceId is required for retrieval telemetry debugging');
+    }
+
+    const [persistedEventsRaw, telemetrySummary, feedback, feedbackSummary] = await Promise.all([
       listPersistedRetrievalTelemetry({ workspaceId, limit }),
       summarizePersistedRetrievalTelemetry({ workspaceId }),
       listRetrievalFeedback({ workspaceId, limit }),
       summarizeRetrievalFeedback({ workspaceId }),
     ]);
 
-    const events = listRetrievalTelemetry({ workspaceId, limit });
+    const eventsRaw = listRetrievalTelemetry({ workspaceId, limit });
+    const events = eventsRaw
+      .map(event => attachTelemetryExplainability(event, workspaceId, specId))
+      .filter(event => !specId || event.candidates.length > 0);
+    const persistedEvents = persistedEventsRaw
+      .map(event => attachTelemetryExplainability(event, workspaceId, specId))
+      .filter(event => !specId || event.candidates.length > 0);
 
     res.json({
-      workspaceId: workspaceId ?? null,
+      workspaceId,
+      specId: specId ?? null,
       limit,
+      scoreContract: GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION,
       events,
       persistedEvents,
       feedback,
@@ -272,6 +346,7 @@ router.post('/populate', async (req: Request, res: Response, next: NextFunction)
     }
 
     // Mark population as active and respond immediately
+    invalidateGraphContextCacheForWorkspace(workspaceId);
     activePopulations.add(workspaceId);
     res.status(202).json({ totalItems });
 
@@ -318,9 +393,11 @@ router.post('/populate', async (req: Request, res: Response, next: NextFunction)
           }
         }
 
+        invalidateGraphContextCacheForWorkspace(workspaceId);
         await emitWal('graph_populate_finished', workspaceId, { totalItems, completed });
         logger.info({ workspaceId, totalItems, completed }, '[graph/populate] Population complete');
       } catch (err) {
+        invalidateGraphContextCacheForWorkspace(workspaceId);
         logger.error({ err, workspaceId }, '[graph/populate] Population failed');
         await emitWal('graph_populate_finished', workspaceId, { totalItems, completed, error: true }).catch(() => {});
       } finally {

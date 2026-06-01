@@ -10,7 +10,7 @@ import * as fs from 'fs';
 import * as path from 'path';
 import { createBackup, listBackups, pruneOldBackups } from '../lib/backup';
 import { backfillAll, isBackfillRunning, getQueueStats, getEmbeddingCounts, getProvider } from '../lib/embedding-pipeline';
-import { isGraphAvailable, graphStats, populateFromSpec, populateFromRun } from '../lib/knowledge-graph';
+import { graphStats, populateFromSpec, populateFromRun } from '../lib/knowledge-graph';
 import { query, queryOne } from '../db/index';
 import { logger } from '../lib/logger';
 import { ConflictError, ValidationError } from '../lib/errors';
@@ -19,6 +19,7 @@ import { checkAge, invalidateAgeCache, requireAge } from '../lib/age-guard';
 import { resetGraphAvailability } from '../lib/knowledge-graph';
 import { parsePaginationParams, paginateQuery } from '../lib/paginate';
 import { createSignedLicense } from '../lib/license-verifier';
+import { invalidateGraphContextCache } from '../lib/graph-context';
 
 const router = Router();
 
@@ -282,6 +283,7 @@ router.get('/embedding-provider', (_req: Request, res: Response) => {
  */
 router.post('/graph-backfill', requireAge(), async (_req: Request, res: Response) => {
   try {
+    invalidateGraphContextCache();
     let specsProcessed = 0;
     let runsProcessed = 0;
 
@@ -341,6 +343,7 @@ router.post('/graph-backfill', requireAge(), async (_req: Request, res: Response
 
     const stats = await graphStats();
 
+    invalidateGraphContextCache();
     logger.info(
       { specsProcessed, runsProcessed, stats },
       '[graph-backfill] Backfill completed'

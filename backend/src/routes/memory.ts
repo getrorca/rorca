@@ -1728,6 +1728,8 @@ router.patch('/items/:id', async (req: Request, res: Response) => {
     throw new ValidationError('No fields to update');
   }
 
+  setClauses.push('updated_at = NOW()');
+
   params.push(id);
   const sql = `UPDATE memories SET ${setClauses.join(', ')} WHERE id = $${paramIdx} RETURNING
     id, workspace_id, category, content, source_story_id, source_spec_id, source_run_id,
@@ -1784,7 +1786,7 @@ router.delete('/items/:id', async (req: Request, res: Response) => {
   );
   if (!existing) throw new NotFoundError('Memory not found');
 
-  await execute('UPDATE memories SET deleted_at = NOW() WHERE id = $1', [id]);
+  await execute('UPDATE memories SET deleted_at = NOW(), updated_at = NOW() WHERE id = $1', [id]);
   await emitMemoryWalEvent({
     eventType: 'memory_deleted',
     workspaceId: existing.workspace_id,
@@ -1823,7 +1825,7 @@ router.post('/items/:id/undelete', async (req: Request, res: Response) => {
   );
   if (!existing) throw new NotFoundError('Memory not found or not deleted');
 
-  await execute('UPDATE memories SET deleted_at = NULL WHERE id = $1', [id]);
+  await execute('UPDATE memories SET deleted_at = NULL, updated_at = NOW() WHERE id = $1', [id]);
   await emitMemoryWalEvent({
     eventType: 'memory_restored',
     workspaceId: existing.workspace_id,
@@ -1873,11 +1875,11 @@ router.post('/items/bulk', async (req: Request, res: Response) => {
 
   let sql: string;
   if (action === 'delete') {
-    sql = `UPDATE memories SET deleted_at = NOW() WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
+    sql = `UPDATE memories SET deleted_at = NOW(), updated_at = NOW() WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
   } else if (action === 'pin') {
-    sql = `UPDATE memories SET pinned = true WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
+    sql = `UPDATE memories SET pinned = true, updated_at = NOW() WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
   } else if (action === 'unpin') {
-    sql = `UPDATE memories SET pinned = false WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
+    sql = `UPDATE memories SET pinned = false, updated_at = NOW() WHERE id IN (${placeholders}) AND deleted_at IS NULL`;
   } else {
     throw new ValidationError('action must be delete, pin, or unpin');
   }

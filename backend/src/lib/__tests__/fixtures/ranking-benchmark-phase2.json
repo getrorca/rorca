@@ -1,0 +1,449 @@
+{
+  "version": 1,
+  "suite": "phase-2-graph-ranking",
+  "scenarios": [
+    {
+      "id": "direct-relevance",
+      "storyId": "GR2-006-01",
+      "workspaceId": "ws-benchmark",
+      "specId": "spec-phase2",
+      "queryText": "Preserve deterministic admin auth ranking in backend/routes/auth.ts",
+      "predictedPaths": ["backend/routes/auth.ts"],
+      "evaluationTimestamp": "2026-05-31T00:00:00.000Z",
+      "tags": ["direct-relevance", "graph-should-improve"],
+      "relevantIds": ["direct-graph"],
+      "baselineExpectedOrder": ["semantic-broad", "direct-graph"],
+      "graphExpectedOrder": ["direct-graph", "semantic-broad"],
+      "graphScoreWeight": 1,
+      "graphProximityAvailable": true,
+      "skills": [
+        {
+          "name": "Auth Security",
+          "content": "admin auth middleware ranking bearer verification deterministic retrieval ordering"
+        }
+      ],
+      "candidates": [
+        {
+          "id": "direct-graph",
+          "text": "Auth route memory: preserve deterministic admin auth ordering for the canonical backend auth handler.",
+          "origin": "search",
+          "baseScore": 0.64,
+          "matchType": "hybrid",
+          "category": "Pattern",
+          "confidence": "high",
+          "createdAt": "2026-05-28T00:00:00.000Z",
+          "updatedAt": "2026-05-28T00:00:00.000Z",
+          "canonicalKey": "memory:ws-benchmark::direct-graph",
+          "sourceSpecId": "spec-phase2",
+          "sourceSpecCanonicalKey": "spec:ws-benchmark::spec-phase2",
+          "sourceStoryId": "US-101",
+          "sourceStoryCanonicalKey": "story:ws-benchmark::spec-phase2::US-101",
+          "relatedFiles": ["backend/routes/auth.ts"],
+          "relatedFileKeys": ["file:ws-benchmark::backend/routes/auth.ts"],
+          "graphNodeType": "memory",
+          "graphActive": true,
+          "graphUpdatedAt": "2026-05-28T00:00:00.000Z",
+          "graphSignals": [
+            {
+              "fromCanonicalKey": "memory:ws-benchmark::direct-graph",
+              "toCanonicalKey": "file:ws-benchmark::backend/routes/auth.ts",
+              "relationship": "ABOUT",
+              "hops": 1,
+              "active": true,
+              "updatedAt": "2026-05-28T00:00:00.000Z"
+            }
+          ]
+        },
+        {
+          "id": "semantic-broad",
+          "text": "Admin auth ranking memory: preserve deterministic admin auth ranking, retrieval ordering, middleware validation, and bearer verification everywhere.",
+          "origin": "search",
+          "baseScore": 0.9,
+          "matchType": "hybrid",
+          "category": "Pattern",
+          "confidence": "high",
+          "createdAt": "2026-05-30T00:00:00.000Z",
+          "updatedAt": "2026-05-30T00:00:00.000Z",
+          "canonicalKey": "memory:ws-benchmark::semantic-broad",
+          "sourceSpecId": "spec-phase2",
+          "sourceSpecCanonicalKey": "spec:ws-benchmark::spec-phase2",
+          "sourceStoryId": "US-102",
+          "sourceStoryCanonicalKey": "story:ws-benchmark::spec-phase2::US-102",
+          "relatedFiles": ["backend/src/lib/retrieval-pipeline.ts"],
+          "relatedFileKeys": ["file:ws-benchmark::backend/src/lib/retrieval-pipeline.ts"],
+          "graphNodeType": "memory",
+          "graphActive": true,
+          "graphUpdatedAt": "2026-05-30T00:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "id": "indirect-relevance",
+      "storyId": "GR2-006-02",
+      "workspaceId": "ws-benchmark",
+      "specId": "spec-phase2",
+      "queryText": "Use graph context to prioritize auth route evidence for backend/routes/auth.ts",
+      "predictedPaths": ["backend/routes/auth.ts"],
+      "evaluationTimestamp": "2026-05-31T00:00:00.000Z",
+      "tags": ["indirect-relevance", "graph-should-improve"],
+      "relevantIds": ["indirect-graph"],
+      "baselineExpectedOrder": ["indirect-graph", "semantic-generic"],
+      "graphExpectedOrder": ["indirect-graph", "semantic-generic"],
+      "graphScoreWeight": 1,
+      "graphProximityAvailable": true,
+      "skills": [
+        {
+          "name": "Auth Security",
+          "content": "graph context admin auth workspace-scoped retrieval ordering"
+        }
+      ],
+      "candidates": [
+        {
+          "id": "indirect-graph",
+          "text": "Auth context memory: prior spec-level evidence links this story to deterministic auth route handling.",
+          "origin": "search",
+          "baseScore": 0.66,
+          "matchType": "hybrid",
+          "category": "Pattern",
+          "confidence": "high",
+          "createdAt": "2026-05-27T00:00:00.000Z",
+          "updatedAt": "2026-05-27T00:00:00.000Z",
+          "canonicalKey": "memory:ws-benchmark::indirect-graph",
+          "sourceSpecId": "spec-phase2",
+          "sourceSpecCanonicalKey": "spec:ws-benchmark::spec-phase2",
+          "sourceStoryId": "US-103",
+          "sourceStoryCanonicalKey": "story:ws-benchmark::spec-phase2::US-103",
+          "graphNodeType": "memory",
+          "graphActive": true,
+          "graphUpdatedAt": "2026-05-27T00:00:00.000Z",
+          "graphSignals": [
+            {
+              "fromCanonicalKey": "memory:ws-benchmark::indirect-graph",
+              "toCanonicalKey": "spec:ws-benchmark::spec-phase2",
+              "relationship": "DEPENDS_ON",
+              "hops": 2,
+              "active": true,
+              "updatedAt": "2026-05-27T00:00:00.000Z"
+            }
+          ]
+        },
+        {
+          "id": "semantic-generic",
+          "text": "Generic auth ranking memory: graph context, prioritization, backend auth, and retrieval ordering for many middleware tasks.",
+          "origin": "search",
+          "baseScore": 0.84,
+          "matchType": "hybrid",
+          "category": "Pattern",
+          "confidence": "medium",
+          "createdAt": "2026-05-30T00:00:00.000Z",
+          "updatedAt": "2026-05-30T00:00:00.000Z",
+          "canonicalKey": "memory:ws-benchmark::semantic-generic",
+          "graphNodeType": "memory",
+          "graphActive": true,
+          "graphUpdatedAt": "2026-05-30T00:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "id": "duplicate-ids-across-scopes",
+      "storyId": "GR2-006-03",
+      "workspaceId": "ws-benchmark",
+      "specId": "spec-phase2",
+      "queryText": "Rank workspace-scoped auth evidence without leaking duplicate story ids across tenants",
+      "predictedPaths": ["backend/routes/auth.ts"],
+      "evaluationTimestamp": "2026-05-31T00:00:00.000Z",
+      "tags": ["duplicate-ids-across-scopes", "graph-should-improve"],
+      "relevantIds": ["local-duplicate"],
+      "baselineExpectedOrder": ["foreign-duplicate", "local-duplicate"],
+      "graphExpectedOrder": ["local-duplicate", "foreign-duplicate"],
+      "graphScoreWeight": 1,
+      "graphProximityAvailable": true,
+      "skills": [
+        {
+          "name": "Scope Guardrails",
+          "content": "workspace scoped canonical ids prevent multi-tenant collisions"
+        }
+      ],
+      "candidates": [
+        {
+          "id": "local-duplicate",
+          "text": "Workspace-local auth memory for US-201 in spec-phase2 and backend/routes/auth.ts.",
+          "origin": "search",
+          "baseScore": 0.66,
+          "matchType": "hybrid",
+          "category": "Pattern",
+          "confidence": "high",
+          "createdAt": "2026-05-29T00:00:00.000Z",
+          "updatedAt": "2026-05-29T00:00:00.000Z",
+          "canonicalKey": "memory:ws-benchmark::local-duplicate",
+          "relatedFiles": ["backend/routes/auth.ts"],
+          "relatedFileKeys": ["file:ws-benchmark::backend/routes/auth.ts"],
+          "graphNodeType": "memory",
+          "graphActive": true,
+          "graphUpdatedAt": "2026-05-29T00:00:00.000Z",
+          "graphSignals": [
+            {
+              "fromCanonicalKey": "memory:ws-benchmark::local-duplicate",
+              "toCanonicalKey": "file:ws-benchmark::backend/routes/auth.ts",
+              "relationship": "ABOUT",
+              "hops": 1,
+              "active": true,
+              "updatedAt": "2026-05-29T00:00:00.000Z"
+            }
+          ]
+        },
+        {
+          "id": "foreign-duplicate",
+          "text": "Workspace-foreign auth memory for US-201 in another spec and another workspace, but with stronger semantic wording.",
+          "origin": "search",
+          "baseScore": 0.86,
+          "matchType": "hybrid",
+          "category": "Pattern",
+          "confidence": "high",
+          "createdAt": "2026-05-30T00:00:00.000Z",
+          "updatedAt": "2026-05-30T00:00:00.000Z",
+          "canonicalKey": "memory:ws-foreign::foreign-duplicate",
+          "sourceSpecId": "spec-phase2",
+          "sourceSpecCanonicalKey": "spec:ws-foreign::spec-phase2",
+          "sourceStoryId": "US-201",
+          "sourceStoryCanonicalKey": "story:ws-foreign::spec-phase2::US-201",
+          "relatedFiles": ["backend/routes/auth.ts"],
+          "relatedFileKeys": ["file:ws-foreign::backend/routes/auth.ts"],
+          "graphNodeType": "memory",
+          "graphActive": true,
+          "graphUpdatedAt": "2026-05-30T00:00:00.000Z",
+          "graphSignals": [
+            {
+              "fromCanonicalKey": "memory:ws-foreign::foreign-duplicate",
+              "toCanonicalKey": "file:ws-foreign::backend/routes/auth.ts",
+              "relationship": "ABOUT",
+              "hops": 1,
+              "active": true,
+              "updatedAt": "2026-05-30T00:00:00.000Z"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "stale-artifacts",
+      "storyId": "GR2-006-04",
+      "workspaceId": "ws-benchmark",
+      "specId": "spec-phase2",
+      "queryText": "Ignore stale graph artifacts and keep fresh auth evidence only",
+      "predictedPaths": ["backend/routes/auth.ts"],
+      "evaluationTimestamp": "2026-05-31T00:00:00.000Z",
+      "tags": ["stale-artifacts"],
+      "relevantIds": ["fresh-live"],
+      "baselineExpectedOrder": ["fresh-live"],
+      "graphExpectedOrder": ["fresh-live"],
+      "graphScoreWeight": 1,
+      "graphProximityAvailable": true,
+      "skills": [
+        {
+          "name": "Freshness Guardrails",
+          "content": "stale graph artifacts must not outrank live memories"
+        }
+      ],
+      "candidates": [
+        {
+          "id": "fresh-live",
+          "text": "Fresh auth route memory with live graph evidence for backend/routes/auth.ts.",
+          "origin": "graph",
+          "baseScore": 0.74,
+          "matchType": "graph",
+          "category": "Pattern",
+          "confidence": "high",
+          "createdAt": "2026-05-30T00:00:00.000Z",
+          "updatedAt": "2026-05-30T00:00:00.000Z",
+          "canonicalKey": "memory:ws-benchmark::fresh-live",
+          "sourceSpecId": "spec-phase2",
+          "sourceSpecCanonicalKey": "spec:ws-benchmark::spec-phase2",
+          "sourceStoryId": "US-105",
+          "sourceStoryCanonicalKey": "story:ws-benchmark::spec-phase2::US-105",
+          "relatedFiles": ["backend/routes/auth.ts"],
+          "relatedFileKeys": ["file:ws-benchmark::backend/routes/auth.ts"],
+          "graphNodeType": "memory",
+          "graphActive": true,
+          "graphUpdatedAt": "2026-05-30T00:00:00.000Z",
+          "graphSignals": [
+            {
+              "fromCanonicalKey": "memory:ws-benchmark::fresh-live",
+              "toCanonicalKey": "file:ws-benchmark::backend/routes/auth.ts",
+              "relationship": "ABOUT",
+              "hops": 1,
+              "active": true,
+              "updatedAt": "2026-05-30T00:00:00.000Z"
+            }
+          ]
+        },
+        {
+          "id": "stale-memory",
+          "text": "Stale auth route memory artifact with old graph evidence.",
+          "origin": "graph",
+          "baseScore": 0.88,
+          "matchType": "graph",
+          "category": "Pattern",
+          "confidence": "high",
+          "createdAt": "2024-01-01T00:00:00.000Z",
+          "updatedAt": "2024-01-01T00:00:00.000Z",
+          "canonicalKey": "memory:ws-benchmark::stale-memory",
+          "sourceSpecId": "spec-phase2",
+          "sourceSpecCanonicalKey": "spec:ws-benchmark::spec-phase2",
+          "sourceStoryId": "US-106",
+          "sourceStoryCanonicalKey": "story:ws-benchmark::spec-phase2::US-106",
+          "relatedFiles": ["backend/routes/auth.ts"],
+          "relatedFileKeys": ["file:ws-benchmark::backend/routes/auth.ts"],
+          "graphNodeType": "memory",
+          "graphActive": false,
+          "graphUpdatedAt": "2024-01-01T00:00:00.000Z",
+          "graphSignals": [
+            {
+              "fromCanonicalKey": "memory:ws-benchmark::stale-memory",
+              "toCanonicalKey": "file:ws-benchmark::backend/routes/auth.ts",
+              "relationship": "ABOUT",
+              "hops": 1,
+              "active": false,
+              "updatedAt": "2024-01-01T00:00:00.000Z"
+            }
+          ]
+        }
+      ]
+    },
+    {
+      "id": "pinned-content",
+      "storyId": "GR2-006-05",
+      "workspaceId": "ws-benchmark",
+      "specId": "spec-phase2",
+      "queryText": "Keep the pinned auth convention available even when fresher memories exist",
+      "predictedPaths": ["backend/routes/auth.ts"],
+      "evaluationTimestamp": "2026-05-31T00:00:00.000Z",
+      "tags": ["pinned-content"],
+      "relevantIds": ["pinned-old"],
+      "baselineExpectedOrder": ["pinned-old", "fresh-unpinned"],
+      "graphExpectedOrder": ["pinned-old", "fresh-unpinned"],
+      "graphScoreWeight": 0,
+      "graphProximityAvailable": true,
+      "skills": [
+        {
+          "name": "Pinned Memory",
+          "content": "pinned memories remain eligible regardless of age"
+        }
+      ],
+      "candidates": [
+        {
+          "id": "pinned-old",
+          "text": "Pinned auth convention: JWT bearer verification is the canonical admin path.",
+          "origin": "pinned",
+          "baseScore": 1,
+          "matchType": "cache",
+          "category": "Convention",
+          "confidence": "high",
+          "pinned": true,
+          "createdAt": "2025-05-01T00:00:00.000Z",
+          "updatedAt": "2025-05-01T00:00:00.000Z",
+          "canonicalKey": "memory:ws-benchmark::pinned-old",
+          "sourceSpecId": "spec-phase2",
+          "sourceSpecCanonicalKey": "spec:ws-benchmark::spec-phase2",
+          "sourceStoryId": "US-107",
+          "sourceStoryCanonicalKey": "story:ws-benchmark::spec-phase2::US-107",
+          "relatedFiles": ["backend/routes/auth.ts"],
+          "relatedFileKeys": ["file:ws-benchmark::backend/routes/auth.ts"],
+          "graphNodeType": "memory",
+          "graphActive": true,
+          "graphUpdatedAt": "2025-05-01T00:00:00.000Z",
+          "graphSignals": [
+            {
+              "fromCanonicalKey": "memory:ws-benchmark::pinned-old",
+              "toCanonicalKey": "file:ws-benchmark::backend/routes/auth.ts",
+              "relationship": "ABOUT",
+              "hops": 1,
+              "active": true,
+              "updatedAt": "2025-05-01T00:00:00.000Z"
+            }
+          ]
+        },
+        {
+          "id": "fresh-unpinned",
+          "text": "Fresh auth memory: deterministic ranking matters for admin bearer verification.",
+          "origin": "search",
+          "baseScore": 0.88,
+          "matchType": "hybrid",
+          "category": "Pattern",
+          "confidence": "high",
+          "createdAt": "2026-05-30T00:00:00.000Z",
+          "updatedAt": "2026-05-30T00:00:00.000Z",
+          "canonicalKey": "memory:ws-benchmark::fresh-unpinned",
+          "sourceSpecId": "spec-phase2",
+          "sourceSpecCanonicalKey": "spec:ws-benchmark::spec-phase2",
+          "relatedFiles": ["backend/routes/auth.ts"],
+          "relatedFileKeys": ["file:ws-benchmark::backend/routes/auth.ts"],
+          "graphNodeType": "memory",
+          "graphActive": true,
+          "graphUpdatedAt": "2026-05-30T00:00:00.000Z"
+        }
+      ]
+    },
+    {
+      "id": "recency-decay",
+      "storyId": "GR2-006-06",
+      "workspaceId": "ws-benchmark",
+      "specId": "spec-phase2",
+      "queryText": "Prefer the newer auth memory when two memories say nearly the same thing",
+      "predictedPaths": ["backend/routes/auth.ts"],
+      "evaluationTimestamp": "2026-05-31T00:00:00.000Z",
+      "tags": ["recency-decay"],
+      "relevantIds": ["recent-memory"],
+      "baselineExpectedOrder": ["recent-memory", "older-memory"],
+      "graphExpectedOrder": ["recent-memory", "older-memory"],
+      "graphScoreWeight": 0.35,
+      "graphProximityAvailable": true,
+      "skills": [
+        {
+          "name": "Freshness Guardrails",
+          "content": "newer direct evidence should beat older repetitive evidence"
+        }
+      ],
+      "candidates": [
+        {
+          "id": "recent-memory",
+          "text": "Recent auth memory: reject invalid admin bearer tokens immediately.",
+          "origin": "search",
+          "baseScore": 0.79,
+          "matchType": "hybrid",
+          "category": "Pattern",
+          "confidence": "high",
+          "createdAt": "2026-05-29T00:00:00.000Z",
+          "updatedAt": "2026-05-29T00:00:00.000Z",
+          "canonicalKey": "memory:ws-benchmark::recent-memory",
+          "sourceSpecId": "spec-phase2",
+          "sourceSpecCanonicalKey": "spec:ws-benchmark::spec-phase2",
+          "relatedFiles": ["backend/routes/auth.ts"],
+          "relatedFileKeys": ["file:ws-benchmark::backend/routes/auth.ts"],
+          "graphNodeType": "memory",
+          "graphActive": true,
+          "graphUpdatedAt": "2026-05-29T00:00:00.000Z"
+        },
+        {
+          "id": "older-memory",
+          "text": "Older auth memory: reject invalid admin bearer tokens immediately after several retries.",
+          "origin": "search",
+          "baseScore": 0.77,
+          "matchType": "hybrid",
+          "category": "Pattern",
+          "confidence": "medium",
+          "createdAt": "2025-11-01T00:00:00.000Z",
+          "updatedAt": "2025-11-01T00:00:00.000Z",
+          "canonicalKey": "memory:ws-benchmark::older-memory",
+          "sourceSpecId": "spec-phase2",
+          "sourceSpecCanonicalKey": "spec:ws-benchmark::spec-phase2",
+          "relatedFiles": ["backend/routes/auth.ts"],
+          "relatedFileKeys": ["file:ws-benchmark::backend/routes/auth.ts"],
+          "graphNodeType": "memory",
+          "graphActive": true,
+          "graphUpdatedAt": "2025-11-01T00:00:00.000Z"
+        }
+      ]
+    }
+  ]
+}

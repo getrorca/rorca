@@ -15,39 +15,34 @@ const mockRetrieveContext = jest.fn();
 const mockGetDirectionLayers = jest.fn();
 const mockGetInstalledSkills = jest.fn();
 const mockCheckAge = jest.fn();
-const mockLoadRorcaConfig = jest.fn();
 const mockEcholocate = jest.fn();
 const mockInferSkillsFromStack = jest.fn();
 
 jest.mock('../../db/index', () => ({
-  query: (...args) => mockQuery(...args),
-  queryOne: (...args) => mockQueryOne(...args),
+  query: (...args: unknown[]) => mockQuery(...args),
+  queryOne: (...args: unknown[]) => mockQueryOne(...args),
 }));
 
 jest.mock('../memory-router', () => ({
-  retrieveContext: (...args) => mockRetrieveContext(...args),
+  retrieveContext: (...args: unknown[]) => mockRetrieveContext(...args),
 }));
 
 jest.mock('../context-cache', () => ({
-  getDirectionLayers: (...args) => mockGetDirectionLayers(...args),
-  getInstalledSkills: (...args) => mockGetInstalledSkills(...args),
+  getDirectionLayers: (...args: unknown[]) => mockGetDirectionLayers(...args),
+  getInstalledSkills: (...args: unknown[]) => mockGetInstalledSkills(...args),
 }));
 
 jest.mock('../age-guard', () => ({
-  checkAge: (...args) => mockCheckAge(...args),
-}));
-
-jest.mock('../rorca-config', () => ({
-  loadRorcaConfig: (...args) => mockLoadRorcaConfig(...args),
+  checkAge: (...args: unknown[]) => mockCheckAge(...args),
 }));
 
 jest.mock('../workspace-echolocation', () => ({
-  echolocate: (...args) => mockEcholocate(...args),
-  inferSkillsFromStack: (...args) => mockInferSkillsFromStack(...args),
+  echolocate: (...args: unknown[]) => mockEcholocate(...args),
+  inferSkillsFromStack: (...args: unknown[]) => mockInferSkillsFromStack(...args),
 }));
 
 describe('context-enrichment', () => {
-  let workspacePath;
+  let workspacePath: string;
 
   beforeEach(() => {
     jest.resetModules();
@@ -89,7 +84,6 @@ describe('context-enrichment', () => {
     );
 
     mockCheckAge.mockResolvedValue(false);
-    mockLoadRorcaConfig.mockImplementation(() => { throw new Error('missing config'); });
     mockRetrieveContext.mockResolvedValue({
       direction: { standards: 'L1', conventions: 'L2', project: 'L3' },
       memory: [{ text: 'Pinned memory', score: 1, source: 'cache' }],
@@ -141,7 +135,7 @@ describe('context-enrichment', () => {
     expect(mockRetrieveContext).not.toHaveBeenCalled();
     expect(result.graphContext).toBeNull();
     expect(result.graphSection).toBe('');
-    expect(result.memory.map((entry) => entry.text)).toEqual([
+    expect(result.memory.map((entry: { text: string }) => entry.text)).toEqual([
       'Pinned memory',
       'Recent memory',
     ]);

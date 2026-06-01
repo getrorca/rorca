@@ -166,6 +166,9 @@ interface MemoryProjectionRow {
   source_story_id: string | null;
   source_spec_id: string | null;
   related_files: string[] | string | null;
+  pinned: boolean | null;
+  created_at: string | null;
+  updated_at: string | null;
 }
 
 function parseMemoryRelatedFiles(value: string[] | string | null | undefined): string[] {
@@ -235,7 +238,10 @@ async function handleMemoryCreated(event: WalEvent): Promise<void> {
 
   const persisted = /^\d+$/.test(memoryId)
     ? await queryOne<MemoryProjectionRow>(
-      `SELECT category, source_story_id, source_spec_id, related_files
+      `SELECT category, source_story_id, source_spec_id, related_files,
+              COALESCE(pinned, false) AS pinned,
+              created_at,
+              updated_at
          FROM memories
         WHERE id = $1 AND workspace_id = $2 AND deleted_at IS NULL`,
       [memoryId, workspaceId],
@@ -250,6 +256,9 @@ async function handleMemoryCreated(event: WalEvent): Promise<void> {
       ...(payload.relatedFiles ?? []),
       ...(payload.related_files ?? []),
     ],
+    pinned: false,
+    created_at: null,
+    updated_at: null,
   };
 
   const projection = projectMemoryRelationships(persisted ?? fallbackRow);
@@ -266,18 +275,24 @@ async function handleMemoryCreated(event: WalEvent): Promise<void> {
     ? [persisted.category]
     : payload.categories || (payload.category ? [payload.category] : ['unknown']);
 
+  const metadata = {
+    pinned: Boolean((persisted ?? fallbackRow).pinned),
+    createdAt: (persisted ?? fallbackRow).created_at,
+    updatedAt: (persisted ?? fallbackRow).updated_at,
+  };
+
   if (sourceStoryId) {
     for (const category of categories) {
-      await addMemoryLink(memoryId, sourceStoryId, sourceSpecId, workspaceId, category);
+      await addMemoryLink(memoryId, sourceStoryId, sourceSpecId, workspaceId, category, metadata);
     }
   }
 
   if (sourceSpecId) {
-    await addMemorySourceSpec(memoryId, sourceSpecId, workspaceId);
+    await addMemorySourceSpec(memoryId, sourceSpecId, workspaceId, metadata);
   }
 
   for (const filePath of relatedFiles) {
-    await addMemoryAboutFile(memoryId, filePath, workspaceId);
+    await addMemoryAboutFile(memoryId, filePath, workspaceId, metadata);
   }
 
   logger.info(

@@ -5,9 +5,31 @@
  * See LICENSE file in the project root for full license text.
  */
 
+import {
+  buildFileNodeKey,
+  buildMemoryNodeKey,
+  buildSpecNodeKey,
+  buildStoryNodeKey,
+  normalizeGraphFilePath,
+} from './knowledge-graph';
+import { logger } from './logger';
+import type { RetrievalGuardrailsConfig } from './rorca-config';
+
 export interface RetrievalSkill {
   name: string;
   content: string;
+}
+
+export type GraphProjectionNodeType = 'story' | 'memory' | 'file' | 'spec' | 'convention' | 'skill';
+
+export interface GraphProjectionSignal {
+  fromCanonicalKey: string;
+  toCanonicalKey: string;
+  relationship: string;
+  hops: number;
+  weight?: number;
+  active?: boolean | null;
+  updatedAt?: string | null;
 }
 
 export interface RetrievalCandidateInput {
@@ -23,12 +45,21 @@ export interface RetrievalCandidateInput {
   source?: string | null;
   pinned?: boolean;
   createdAt?: string | null;
+  updatedAt?: string | null;
   relatedFiles?: string[];
+  relatedFileKeys?: string[];
   sourceStoryId?: string | null;
+  sourceStoryCanonicalKey?: string;
   sourceSpecId?: string | null;
+  sourceSpecCanonicalKey?: string;
   sourceRunId?: number | null;
   graphRelationship?: string;
   graphHops?: number;
+  graphNodeType?: GraphProjectionNodeType | string | null;
+  graphActive?: boolean | null;
+  graphUpdatedAt?: string | null;
+  graphSignals?: GraphProjectionSignal[];
+  canonicalKey?: string;
 }
 
 export interface MatchedSkill {
@@ -36,9 +67,146 @@ export interface MatchedSkill {
   score: number;
 }
 
+export type GraphRagScoreSchemaVersion = 'v2';
+
+export interface GraphRagScoreComponent {
+  score: number;
+}
+
+export interface GraphRagProximityComponent extends GraphRagScoreComponent {
+  hops: number | null;
+  relationship?: string;
+  proximityUnavailable: boolean;
+  nodeType?: GraphProjectionNodeType | 'unknown';
+  signalCount?: number;
+  scopeValid?: boolean;
+  stale?: boolean;
+}
+
+export interface GraphRagScopeStrengthComponent extends GraphRagScoreComponent {
+  workspace: number;
+  spec: number;
+  story: number;
+  file: number;
+  workspaceKey: string;
+  specKey: string | null;
+  storyKey: string | null;
+  fileKeys: string[];
+}
+
+export interface GraphRagProvenanceComponent extends GraphRagScoreComponent {
+  confidence: string | null;
+  sourceType: string | null;
+  source: string | null;
+}
+
+export interface GraphRagRetrievalSignalComponent extends GraphRagScoreComponent {
+  base: number;
+  lexical: number;
+  semantic: number;
+}
+
+export interface GraphRagSkillAlignmentComponent extends GraphRagScoreComponent {
+  matchedSkills: string[];
+}
+
+export interface GraphRagHistoricalComponent extends GraphRagScoreComponent {
+  feedbackKey: string;
+}
+
+export interface GraphRagPenaltyComponent extends GraphRagScoreComponent {
+  comparedTo: string | null;
+  similarity: number;
+}
+
+export interface GraphRagScoreBreakdown {
+  directGraphProximity: GraphRagProximityComponent;
+  scopeStrength: GraphRagScopeStrengthComponent;
+  recency: GraphRagScoreComponent;
+  pinnedStatus: GraphRagScoreComponent;
+  provenanceConfidence: GraphRagProvenanceComponent;
+  retrievalSignal: GraphRagRetrievalSignalComponent;
+  skillAlignment: GraphRagSkillAlignmentComponent;
+  historicalUsefulness: GraphRagHistoricalComponent;
+  diversityPenalty: GraphRagPenaltyComponent;
+  echoChamberPenalty: GraphRagPenaltyComponent;
+  repetitionPenalty: GraphRagPenaltyComponent;
+  duplicationPenalty: GraphRagPenaltyComponent;
+}
+
+export interface GraphRagTieBreak {
+  canonicalKey: string;
+  sourceStoryKey: string | null;
+  storySlug: string | null;
+  candidateId: string;
+}
+
+export interface GraphRagCandidateValidation {
+  valid: boolean;
+  issues: string[];
+}
+
+export interface GraphRagRerankMetadata {
+  requestedGraphScoreWeight: number;
+  appliedGraphScoreWeight: number;
+  semanticRankScore: number;
+  blendedScore: number;
+  preRerankPosition: number | null;
+  finalPosition: number | null;
+  rerankedBy: 'graph' | 'semantic';
+}
+
+export interface GraphRagScoreContract {
+  schemaVersion: GraphRagScoreSchemaVersion;
+  score: number;
+  bounded: true;
+  deterministic: true;
+  tieBreak: GraphRagTieBreak;
+  breakdown: GraphRagScoreBreakdown;
+  validation: GraphRagCandidateValidation;
+  rerank: GraphRagRerankMetadata;
+}
+
+export type GraphRagRetrievalMode = 'semantic-only' | 'semantic-only-lite' | 'graph-reranked';
+
+export interface GraphRagExplainabilityScoreBreakdown {
+  total: number;
+  semantic: number;
+  structural: number;
+  graph: number;
+  provenance: number;
+  recency: number;
+  pinned: number;
+  skills: number;
+  historical: number;
+  diversityPenalty: number;
+  echoChamberPenalty: number;
+  repetitionPenalty: number;
+  duplicationPenalty: number;
+}
+
+export interface GraphRagCandidateExplainability {
+  scoringVersion: GraphRagScoreSchemaVersion;
+  retrievalMode: GraphRagRetrievalMode;
+  scoreBreakdown: GraphRagExplainabilityScoreBreakdown;
+  provenanceEdges: string[];
+  provenanceConfidence: string | null;
+  provenanceSourceType: string | null;
+  provenanceSource: string | null;
+  graphNodeType: GraphRagProximityComponent['nodeType'];
+  graphSignalCount: number;
+  rankReasons: string[];
+  preRerankPosition: number | null;
+  finalPosition: number | null;
+  rerankedBy: 'graph' | 'semantic';
+  tieBreak: GraphRagTieBreak;
+  validationIssues: string[];
+}
+
 export interface RankedRetrievalCandidate extends RetrievalCandidateInput {
   key: string;
   tokenCount: number;
+  canonicalKey: string;
   lexicalScore: number;
   semanticScore: number;
   graphScore: number;
@@ -47,11 +215,15 @@ export interface RankedRetrievalCandidate extends RetrievalCandidateInput {
   fileOverlapScore: number;
   validatorScore: number;
   historicalScore: number;
+  semanticRankScore: number;
   finalScore: number;
+  preRerankPosition: number | null;
+  rerankedBy: 'graph' | 'semantic';
   decision: 'keep' | 'drop' | 'needs-more' | 'conflict';
   conflictsWith: string[];
   supersededBy?: string;
   reasons: string[];
+  scoring: GraphRagScoreContract;
 }
 
 export interface RankRetrievalCandidatesResult {
@@ -60,7 +232,87 @@ export interface RankRetrievalCandidatesResult {
   candidates: RankedRetrievalCandidate[];
   needsMoreEvidence: boolean;
   contradictions: Array<[string, string]>;
+  graphScoreWeight: number;
+  graphRerankAppliedWeight: number;
+  graphRerankChanged: boolean;
+  graphRerankedCandidateKeys: string[];
 }
+
+export interface GraphRagSurfaceDocumentation {
+  surface: string;
+  file: string;
+  mode: 'scored' | 'signal-provider' | 'semantic-only';
+  details: string;
+}
+
+export const GRAPH_RAG_SCORE_SCHEMA_VERSION: GraphRagScoreSchemaVersion = 'v2';
+
+export interface GraphRagScoreContractDocumentation {
+  schemaVersion: GraphRagScoreSchemaVersion;
+  purpose: string;
+  ordering: string;
+  scoreRange: { min: 0; max: 1 };
+  liteModeBehavior: string;
+  scoredSurfaces: GraphRagSurfaceDocumentation[];
+  signalProviders: GraphRagSurfaceDocumentation[];
+  semanticOnlySurfaces: GraphRagSurfaceDocumentation[];
+}
+
+export const GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION: GraphRagScoreContractDocumentation = {
+  schemaVersion: GRAPH_RAG_SCORE_SCHEMA_VERSION,
+  purpose: 'GraphRAG scoring is a deterministic reranking layer over semantically eligible canonical memory candidates. It never creates identity, scope, or candidate eligibility from graph score values.',
+  ordering: 'Select eligible candidates with the semantic rank score first, subtract duplication/diversity/repetition penalties, enforce the anti-echo-chamber dominance cap during top-N selection, then blend semanticRankScore with directGraphProximity by graph weight, then sort by blended score descending, semanticRankScore descending, tieBreak.canonicalKey ascending, tieBreak.sourceStoryKey ascending, tieBreak.storySlug ascending, then tieBreak.candidateId ascending.',
+  scoreRange: { min: 0, max: 1 },
+  liteModeBehavior: 'When Apache AGE is unavailable (lite mode), directGraphProximity.score is forced to 0, directGraphProximity.proximityUnavailable is set to true, applied graph rerank weight is forced to 0, and retrieval falls back to semantic ranking plus recency-sorted Postgres memory context.',
+  scoredSurfaces: [
+    {
+      surface: 'retrieveContext()',
+      file: 'backend/src/lib/memory-router.ts',
+      mode: 'scored',
+      details: 'Primary GraphRAG scoring surface. Canonical memory candidates are scored, tie-broken, and selected here before prompt assembly.',
+    },
+    {
+      surface: 'Story prompt builders',
+      file: 'backend/src/lib/execution-engine.ts, backend/src/lib/spec-job-handlers.ts, backend/src/routes/specs.ts',
+      mode: 'scored',
+      details: 'These surfaces consume retrieveContext() outputs, so story prompts inherit the GraphRAG scoring contract indirectly.',
+    },
+    {
+      surface: 'Recall query ranking',
+      file: 'backend/src/routes/recall.ts',
+      mode: 'scored',
+      details: 'GET /api/recall uses retrieveContext() when query/storyText is supplied, so returned memories are ranked by this contract.',
+    },
+    {
+      surface: 'Context enrichment / direction synthesis',
+      file: 'backend/src/lib/context-enrichment.ts, backend/src/lib/direction-stack.ts',
+      mode: 'scored',
+      details: 'Higher-level context assembly reuses retrieveContext() and therefore consumes the same scoring output.',
+    },
+  ],
+  signalProviders: [
+    {
+      surface: 'getGraphContext()',
+      file: 'backend/src/lib/graph-context.ts',
+      mode: 'signal-provider',
+      details: 'Produces canonical graph proximity inputs and restores search_path in finally blocks; it feeds the score contract but is not itself the scorer.',
+    },
+  ],
+  semanticOnlySurfaces: [
+    {
+      surface: 'GET /api/specs/:specId/knowledge-graph',
+      file: 'backend/src/routes/specs.ts',
+      mode: 'semantic-only',
+      details: 'Remains a raw graph exploration endpoint. It returns graph-linked memories, conventions, and stories without GraphRAG score objects.',
+    },
+    {
+      surface: 'Spec review knowledge graph tab',
+      file: 'src/components/GraphTabWithSubTabs.tsx',
+      mode: 'semantic-only',
+      details: 'Displays the knowledge-graph endpoint for operator review and stays semantic-only until explicitly upgraded.',
+    },
+  ],
+};
 
 const STOPWORDS = new Set([
   'the', 'and', 'for', 'with', 'that', 'this', 'from', 'into', 'then', 'have', 'been',
@@ -68,8 +320,183 @@ const STOPWORDS = new Set([
   'also', 'when', 'where', 'which', 'while', 'using', 'used', 'need', 'make', 'just',
 ]);
 
+const RETRIEVAL_SCORE_WEIGHTS = {
+  directGraphProximity: 0.18,
+  scopeStrength: 0.18,
+  recency: 0.1,
+  pinnedStatus: 0.1,
+  provenanceConfidence: 0.12,
+  retrievalSignal: 0.17,
+  skillAlignment: 0.08,
+  historicalUsefulness: 0.07,
+} as const;
+
+function weightedContribution(score: number, weight: number, multiplier = 1): number {
+  return roundScore(score * weight * multiplier);
+}
+
+function summarizeProvenanceEdges(candidate: Pick<RetrievalCandidateInput, 'graphSignals' | 'graphRelationship'>): string[] {
+  const signals = candidate.graphSignals ?? [];
+  if (signals.length === 0) {
+    return candidate.graphRelationship ? [`${candidate.graphRelationship} x1`] : [];
+  }
+
+  const counts = new Map<string, number>();
+  for (const signal of signals) {
+    const relationship = signal.relationship || candidate.graphRelationship || 'RELATED_TO';
+    counts.set(relationship, (counts.get(relationship) ?? 0) + 1);
+  }
+
+  return [...counts.entries()]
+    .sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0]))
+    .map(([relationship, count]) => `${relationship} x${count}`);
+}
+
+export function inferGraphRagRetrievalMode(scoring: Pick<GraphRagScoreContract, 'breakdown' | 'rerank'>): GraphRagRetrievalMode {
+  if (scoring.rerank.appliedGraphScoreWeight > 0) {
+    return 'graph-reranked';
+  }
+  if (
+    scoring.rerank.requestedGraphScoreWeight > 0
+    && scoring.breakdown.directGraphProximity.proximityUnavailable
+  ) {
+    return 'semantic-only-lite';
+  }
+  return 'semantic-only';
+}
+
+export function buildGraphRagExplainability(
+  candidate: Pick<RetrievalCandidateInput, 'graphSignals' | 'graphRelationship'> & {
+    scoring: GraphRagScoreContract;
+    reasons?: string[];
+  },
+): GraphRagCandidateExplainability {
+  const { scoring } = candidate;
+  const semanticMultiplier = 1 - scoring.rerank.appliedGraphScoreWeight;
+  const scoreBreakdown: GraphRagExplainabilityScoreBreakdown = {
+    total: roundScore(scoring.score),
+    semantic: weightedContribution(
+      scoring.breakdown.retrievalSignal.score,
+      RETRIEVAL_SCORE_WEIGHTS.retrievalSignal,
+      semanticMultiplier,
+    ),
+    structural: weightedContribution(
+      scoring.breakdown.scopeStrength.score,
+      RETRIEVAL_SCORE_WEIGHTS.scopeStrength,
+      semanticMultiplier,
+    ),
+    graph: roundScore(scoring.breakdown.directGraphProximity.score * scoring.rerank.appliedGraphScoreWeight),
+    provenance: weightedContribution(
+      scoring.breakdown.provenanceConfidence.score,
+      RETRIEVAL_SCORE_WEIGHTS.provenanceConfidence,
+      semanticMultiplier,
+    ),
+    recency: weightedContribution(
+      scoring.breakdown.recency.score,
+      RETRIEVAL_SCORE_WEIGHTS.recency,
+      semanticMultiplier,
+    ),
+    pinned: weightedContribution(
+      scoring.breakdown.pinnedStatus.score,
+      RETRIEVAL_SCORE_WEIGHTS.pinnedStatus,
+      semanticMultiplier,
+    ),
+    skills: weightedContribution(
+      scoring.breakdown.skillAlignment.score,
+      RETRIEVAL_SCORE_WEIGHTS.skillAlignment,
+      semanticMultiplier,
+    ),
+    historical: weightedContribution(
+      scoring.breakdown.historicalUsefulness.score,
+      RETRIEVAL_SCORE_WEIGHTS.historicalUsefulness,
+      semanticMultiplier,
+    ),
+    diversityPenalty: roundScore(-1 * scoring.breakdown.diversityPenalty.score * semanticMultiplier),
+    echoChamberPenalty: roundScore(-1 * scoring.breakdown.echoChamberPenalty.score * semanticMultiplier),
+    repetitionPenalty: roundScore(-1 * scoring.breakdown.repetitionPenalty.score * semanticMultiplier),
+    duplicationPenalty: roundScore(-1 * scoring.breakdown.duplicationPenalty.score * semanticMultiplier),
+  };
+
+  return {
+    scoringVersion: scoring.schemaVersion,
+    retrievalMode: inferGraphRagRetrievalMode(scoring),
+    scoreBreakdown,
+    provenanceEdges: summarizeProvenanceEdges(candidate),
+    provenanceConfidence: scoring.breakdown.provenanceConfidence.confidence,
+    provenanceSourceType: scoring.breakdown.provenanceConfidence.sourceType,
+    provenanceSource: scoring.breakdown.provenanceConfidence.source,
+    graphNodeType: scoring.breakdown.directGraphProximity.nodeType ?? 'unknown',
+    graphSignalCount: scoring.breakdown.directGraphProximity.signalCount ?? candidate.graphSignals?.length ?? 0,
+    rankReasons: candidate.reasons ?? [],
+    preRerankPosition: scoring.rerank.preRerankPosition,
+    finalPosition: scoring.rerank.finalPosition,
+    rerankedBy: scoring.rerank.rerankedBy,
+    tieBreak: scoring.tieBreak,
+    validationIssues: scoring.validation.issues,
+  };
+}
+
+const DUPLICATION_PENALTIES = {
+  contradiction: 0.08,
+  superseded: 0.18,
+} as const;
+
+const WORKSPACE_SCOPED_GRAPH_TYPES = new Set<GraphProjectionNodeType>([
+  'story',
+  'memory',
+  'file',
+  'spec',
+  'convention',
+]);
+
+const GRAPH_RELATIONSHIP_WEIGHTS: Record<string, number> = {
+  TOUCHES: 1,
+  ABOUT: 0.97,
+  LEARNED_FROM: 0.95,
+  FROM_SPEC: 0.92,
+  BELONGS_TO: 0.9,
+  APPLIES_TO: 0.88,
+  USED_IN: 0.84,
+  DEPENDS_ON: 0.72,
+  IN_WORKSPACE: 0.55,
+  conflict: 0.7,
+};
+
+const GRAPH_NODE_TYPE_WEIGHTS: Record<GraphProjectionNodeType, number> = {
+  memory: 1,
+  story: 0.96,
+  file: 0.94,
+  spec: 0.9,
+  convention: 0.88,
+  skill: 0.86,
+};
+
+const GRAPH_STALE_MAX_AGE_DAYS: Record<GraphProjectionNodeType, number> = {
+  memory: 365,
+  story: 180,
+  file: 365,
+  spec: 730,
+  convention: 730,
+  skill: 365,
+};
+
+const DEFAULT_RETRIEVAL_GUARDRAILS: RetrievalGuardrailsConfig = {
+  version: 1,
+  recencyDecayLambda: 0.0077,
+  dominanceThreshold: 0.4,
+  dominanceTopN: 5,
+  minDiversityFloor: 2,
+  pinnedRecencyFloor: 1,
+  lowConfidenceClusterPenalty: 0.18,
+  highConfidenceExempt: true,
+};
+
 function clamp(value: number, min: number = 0, max: number = 1): number {
   return Math.max(min, Math.min(max, value));
+}
+
+function roundScore(value: number): number {
+  return Number(clamp(value).toFixed(6));
 }
 
 function estimateTokens(text: string): number {
@@ -98,7 +525,16 @@ function tokenOverlap(a: string[], b: string[]): number {
   for (const token of aSet) {
     if (bSet.has(token)) overlap++;
   }
-  return overlap / Math.max(aSet.size, bSet.size);
+  return roundScore(overlap / Math.max(aSet.size, bSet.size));
+}
+
+function canonicalFileKeys(workspaceId: string, paths: string[]): string[] {
+  return unique(
+    paths
+      .map(normalizeGraphFilePath)
+      .filter(Boolean)
+      .map(filePath => buildFileNodeKey(workspaceId, filePath)),
+  ).sort();
 }
 
 function inferSubject(text: string): string {
@@ -126,30 +562,61 @@ function confidenceScore(confidence?: string | null): number {
   }
 }
 
-function freshnessScore(candidate: RetrievalCandidateInput): number {
-  if (candidate.pinned) return 1;
-  if (!candidate.createdAt) return 0.6;
-
-  const ageMs = Math.max(0, Date.now() - new Date(candidate.createdAt).getTime());
-  const ageDays = ageMs / (1000 * 60 * 60 * 24);
-
-  let halfLifeDays = 90;
-  const category = (candidate.category || '').toLowerCase();
+function provenanceSourceScore(candidate: RetrievalCandidateInput): number {
   const sourceType = (candidate.sourceType || '').toLowerCase();
-
-  if (category.includes('convention')) halfLifeDays = 365;
-  else if (category.includes('bug')) halfLifeDays = 120;
-  else if (sourceType === 'synthesis') halfLifeDays = 45;
-  else if (sourceType === 'manual' || sourceType === 'mcp') halfLifeDays = 180;
-
-  return clamp(Math.exp(-Math.log(2) * (ageDays / halfLifeDays)));
+  const source = (candidate.source || '').toLowerCase();
+  if (candidate.pinned) return 1;
+  if (sourceType === 'manual' || sourceType === 'mcp') return 0.95;
+  if (candidate.origin === 'graph') return 0.9;
+  if (candidate.origin === 'search') return 0.85;
+  if (source.includes('wal')) return 0.8;
+  if (candidate.origin === 'cache') return 0.72;
+  if (sourceType === 'synthesis') return 0.62;
+  return 0.75;
 }
 
-function fileOverlapScore(predictedPaths: string[], relatedFiles: string[]): number {
-  if (predictedPaths.length === 0 || relatedFiles.length === 0) return 0;
-  const pathTokens = unique(predictedPaths.flatMap(tokenize));
-  const relatedTokens = unique(relatedFiles.flatMap(tokenize));
-  return tokenOverlap(pathTokens, relatedTokens);
+function parseTimestamp(value?: string | null): number | null {
+  if (!value) return null;
+  const parsed = new Date(value).getTime();
+  return Number.isFinite(parsed) ? parsed : null;
+}
+
+function inferReferenceTimestamp(explicit: string | undefined, candidates: RetrievalCandidateInput[]): number {
+  const explicitTs = parseTimestamp(explicit);
+  if (explicitTs != null) return explicitTs;
+
+  const timestamps = candidates
+    .map(candidate => parseTimestamp(candidate.updatedAt ?? candidate.createdAt))
+    .filter((value): value is number => value != null);
+
+  return timestamps.length > 0 ? Math.max(...timestamps) : 0;
+}
+
+function recencyScore(
+  candidate: RetrievalCandidateInput,
+  referenceTimestamp: number,
+  guardrails: RetrievalGuardrailsConfig,
+): number {
+  const candidateTimestamp = parseTimestamp(candidate.updatedAt ?? candidate.createdAt);
+  if (candidateTimestamp == null || referenceTimestamp <= 0) {
+    return candidate.pinned ? guardrails.pinnedRecencyFloor : 0.5;
+  }
+
+  const ageMs = Math.max(0, referenceTimestamp - candidateTimestamp);
+  const ageDays = ageMs / (1000 * 60 * 60 * 24);
+  const decay = Math.exp(-guardrails.recencyDecayLambda * ageDays);
+  const bounded = roundScore(decay);
+
+  if (candidate.pinned) {
+    return roundScore(Math.max(guardrails.pinnedRecencyFloor, bounded));
+  }
+
+  return bounded;
+}
+
+function fileOverlapScore(predictedFileKeys: string[], relatedFileKeys: string[]): number {
+  if (predictedFileKeys.length === 0 || relatedFileKeys.length === 0) return 0;
+  return tokenOverlap(predictedFileKeys, relatedFileKeys);
 }
 
 export function matchSkillsToQuery(
@@ -158,17 +625,17 @@ export function matchSkillsToQuery(
   predictedPaths: string[] = [],
 ): MatchedSkill[] {
   const queryTokens = unique([...tokenize(queryText), ...predictedPaths.flatMap(tokenize)]);
-  const matched = skills
+  return skills
     .map(skill => {
       const skillTokens = unique(tokenize(`${skill.name} ${skill.content.slice(0, 1200)}`));
-      const score = tokenOverlap(queryTokens, skillTokens);
-      return { name: skill.name, score };
+      return { name: skill.name, score: tokenOverlap(queryTokens, skillTokens) };
     })
     .filter(skill => skill.score >= 0.05)
-    .sort((a, b) => b.score - a.score)
+    .sort((a, b) => {
+      if (b.score !== a.score) return b.score - a.score;
+      return a.name.localeCompare(b.name);
+    })
     .slice(0, 5);
-
-  return matched;
 }
 
 function validatorScore(candidate: RetrievalCandidateInput, matchedSkills: MatchedSkill[]): { score: number; reasons: string[] } {
@@ -186,93 +653,842 @@ function validatorScore(candidate: RetrievalCandidateInput, matchedSkills: Match
     ? [`Matched skills supported this candidate: ${skillMatches.map(s => s.name).join(', ')}`]
     : ['Skills weakly related; candidate kept but not strongly endorsed'];
 
-  return { score: clamp(0.35 + best), reasons };
+  return { score: roundScore(0.35 + best), reasons };
 }
 
 function semanticScore(candidate: RetrievalCandidateInput): number {
   if (candidate.origin === 'cache' || candidate.origin === 'pinned') return 0.55;
   if (candidate.origin === 'graph') return 0.6;
   switch (candidate.matchType) {
-    case 'semantic': return clamp(candidate.baseScore);
-    case 'hybrid': return clamp(candidate.baseScore);
-    case 'keyword': return clamp(candidate.baseScore * 0.75);
-    default: return clamp(candidate.baseScore);
+    case 'semantic':
+    case 'hybrid':
+      return roundScore(candidate.baseScore);
+    case 'keyword':
+      return roundScore(candidate.baseScore * 0.75);
+    default:
+      return roundScore(candidate.baseScore);
   }
-}
-
-function graphScore(candidate: RetrievalCandidateInput, predictedPaths: string[]): number {
-  const fileScore = fileOverlapScore(predictedPaths, candidate.relatedFiles || []);
-  if (candidate.origin === 'graph') {
-    const hopPenalty = candidate.graphHops && candidate.graphHops > 1 ? 0.1 * (candidate.graphHops - 1) : 0;
-    return clamp(0.85 + fileScore - hopPenalty);
-  }
-  return clamp(fileScore);
 }
 
 function lexicalScore(queryText: string, candidate: RetrievalCandidateInput): number {
   return tokenOverlap(tokenize(queryText), tokenize(candidate.text));
 }
 
+function retrievalSignalScore(baseScore: number, lexical: number, semantic: number): number {
+  return roundScore((clamp(baseScore) * 0.4) + (lexical * 0.25) + (semantic * 0.35));
+}
+
+function parseGraphNodeType(candidate: RetrievalCandidateInput): GraphProjectionNodeType | null {
+  const raw = (candidate.graphNodeType || '').trim().toLowerCase();
+  if (raw === 'story' || raw === 'memory' || raw === 'file' || raw === 'spec' || raw === 'convention' || raw === 'skill') {
+    return raw;
+  }
+  if (raw) return null;
+  if (candidate.canonicalKey?.startsWith('story:')) return 'story';
+  if (candidate.canonicalKey?.startsWith('memory:')) return 'memory';
+  if (candidate.canonicalKey?.startsWith('file:')) return 'file';
+  if (candidate.canonicalKey?.startsWith('spec:')) return 'spec';
+  if (candidate.canonicalKey?.startsWith('convention:')) return 'convention';
+  if (candidate.canonicalKey?.startsWith('skill:')) return 'skill';
+  return candidate.id.startsWith('cache:') || candidate.id.startsWith('conflict:') ? null : 'memory';
+}
+
+function workspaceScopedKeyPrefix(nodeType: GraphProjectionNodeType, workspaceId: string): string | null {
+  return WORKSPACE_SCOPED_GRAPH_TYPES.has(nodeType)
+    ? `${nodeType}:${workspaceId}::`
+    : null;
+}
+
+function keyBelongsToWorkspaceScope(key: string | undefined, workspaceId: string): boolean {
+  if (!key) return false;
+  const type = key.split(':', 1)[0]?.toLowerCase() as GraphProjectionNodeType | undefined;
+  if (!type || !WORKSPACE_SCOPED_GRAPH_TYPES.has(type)) return false;
+  return key.startsWith(`${type}:${workspaceId}::`);
+}
+
+function keyBelongsToForeignWorkspace(key: string | undefined, workspaceId: string): boolean {
+  if (!key) return false;
+  const type = key.split(':', 1)[0]?.toLowerCase() as GraphProjectionNodeType | undefined;
+  if (!type || !WORKSPACE_SCOPED_GRAPH_TYPES.has(type)) return false;
+  return !key.startsWith(`${type}:${workspaceId}::`);
+}
+
+function projectionFreshnessScore(
+  updatedAt: string | null | undefined,
+  nodeType: GraphProjectionNodeType,
+  referenceTimestamp: number,
+): number {
+  const ts = parseTimestamp(updatedAt);
+  if (ts == null || referenceTimestamp <= 0) return 0.55;
+  const ageMs = Math.max(0, referenceTimestamp - ts);
+  const ageDays = ageMs / (1000 * 60 * 60 * 24);
+  const maxAgeDays = GRAPH_STALE_MAX_AGE_DAYS[nodeType];
+  if (ageDays > maxAgeDays) return 0;
+  return roundScore(1 - (ageDays / maxAgeDays));
+}
+
+function projectionArtifactIsUsable(
+  active: boolean | null | undefined,
+  updatedAt: string | null | undefined,
+  nodeType: GraphProjectionNodeType,
+  referenceTimestamp: number,
+): { usable: boolean; stale: boolean; freshness: number } {
+  if (active === false) {
+    return { usable: false, stale: true, freshness: 0 };
+  }
+
+  const hasSignal = active === true || parseTimestamp(updatedAt) != null;
+  if (!hasSignal) {
+    return { usable: false, stale: true, freshness: 0 };
+  }
+
+  const freshness = projectionFreshnessScore(updatedAt, nodeType, referenceTimestamp);
+  if (freshness <= 0 && parseTimestamp(updatedAt) != null) {
+    return { usable: false, stale: true, freshness: 0 };
+  }
+
+  return { usable: true, stale: false, freshness: active === true && parseTimestamp(updatedAt) == null ? 0.7 : freshness };
+}
+
+function deriveProjectionSignals(candidate: RetrievalCandidateInput): GraphProjectionSignal[] {
+  if (candidate.graphSignals && candidate.graphSignals.length > 0) {
+    return candidate.graphSignals;
+  }
+
+  if (!candidate.canonicalKey) return [];
+
+  const updatedAt = candidate.graphUpdatedAt ?? candidate.createdAt ?? null;
+  const active = candidate.graphActive;
+  const hops = Math.max(1, candidate.graphHops ?? 1);
+  const signals: GraphProjectionSignal[] = [];
+
+  if (candidate.sourceStoryCanonicalKey) {
+    signals.push({
+      fromCanonicalKey: candidate.canonicalKey,
+      toCanonicalKey: candidate.sourceStoryCanonicalKey,
+      relationship: 'LEARNED_FROM',
+      hops,
+      active,
+      updatedAt,
+    });
+  }
+
+  if (candidate.sourceSpecCanonicalKey) {
+    signals.push({
+      fromCanonicalKey: candidate.canonicalKey,
+      toCanonicalKey: candidate.sourceSpecCanonicalKey,
+      relationship: 'FROM_SPEC',
+      hops,
+      active,
+      updatedAt,
+    });
+  }
+
+  for (const fileKey of candidate.relatedFileKeys ?? []) {
+    signals.push({
+      fromCanonicalKey: candidate.canonicalKey,
+      toCanonicalKey: fileKey,
+      relationship: candidate.graphRelationship || 'ABOUT',
+      hops,
+      active,
+      updatedAt,
+    });
+  }
+
+  return signals;
+}
+
+function signalScopeSpecificity(
+  signal: GraphProjectionSignal,
+  context: { workspaceId: string; specId?: string; storyId?: string; predictedFileKeys: string[] },
+): number {
+  const keys = [signal.fromCanonicalKey, signal.toCanonicalKey].filter(Boolean);
+  const storyKey = context.specId && context.storyId
+    ? buildStoryNodeKey(context.workspaceId, context.specId, context.storyId)
+    : null;
+  const specKey = context.specId ? buildSpecNodeKey(context.workspaceId, context.specId) : null;
+  const specStoryPrefix = context.specId ? `story:${context.workspaceId}::${context.specId}::` : null;
+
+  if (storyKey && keys.includes(storyKey)) return 1;
+  if (keys.some(key => context.predictedFileKeys.includes(key))) return 0.95;
+  if (specKey && (keys.includes(specKey) || keys.some(key => key.startsWith(specStoryPrefix || '')))) return 0.86;
+  if (keys.some(key => keyBelongsToWorkspaceScope(key, context.workspaceId))) return 0.64;
+  return 0;
+}
+
+function candidateScopeValid(
+  candidate: RetrievalCandidateInput,
+  nodeType: GraphProjectionNodeType,
+  context: { workspaceId: string; specId?: string; storyId?: string; predictedFileKeys: string[] },
+  signals: GraphProjectionSignal[],
+): boolean {
+  const storyKey = context.specId && context.storyId
+    ? buildStoryNodeKey(context.workspaceId, context.specId, context.storyId)
+    : null;
+  const specKey = context.specId ? buildSpecNodeKey(context.workspaceId, context.specId) : null;
+  const specStoryPrefix = context.specId ? `story:${context.workspaceId}::${context.specId}::` : null;
+
+  if (candidate.canonicalKey && keyBelongsToForeignWorkspace(candidate.canonicalKey, context.workspaceId)) {
+    return false;
+  }
+  if (candidate.sourceStoryCanonicalKey && keyBelongsToForeignWorkspace(candidate.sourceStoryCanonicalKey, context.workspaceId)) {
+    return false;
+  }
+  if (candidate.sourceSpecCanonicalKey && keyBelongsToForeignWorkspace(candidate.sourceSpecCanonicalKey, context.workspaceId)) {
+    return false;
+  }
+  if ((candidate.relatedFileKeys ?? []).some(key => keyBelongsToForeignWorkspace(key, context.workspaceId))) {
+    return false;
+  }
+  if (signals.some(signal => keyBelongsToForeignWorkspace(signal.fromCanonicalKey, context.workspaceId) || keyBelongsToForeignWorkspace(signal.toCanonicalKey, context.workspaceId))) {
+    return false;
+  }
+
+  const prefix = workspaceScopedKeyPrefix(nodeType, context.workspaceId);
+  if (prefix && candidate.canonicalKey && !candidate.canonicalKey.startsWith(prefix)) {
+    return false;
+  }
+
+  if (!context.specId) {
+    return true;
+  }
+
+  if (nodeType === 'story') {
+    return candidate.canonicalKey?.startsWith(specStoryPrefix || '') ?? false;
+  }
+  if (nodeType === 'spec') {
+    return candidate.canonicalKey === specKey;
+  }
+  if (nodeType === 'memory') {
+    if (candidate.sourceSpecCanonicalKey) return candidate.sourceSpecCanonicalKey === specKey;
+    if (candidate.sourceStoryCanonicalKey) return candidate.sourceStoryCanonicalKey.startsWith(specStoryPrefix || '');
+  }
+  if (nodeType === 'file' && candidate.canonicalKey && context.predictedFileKeys.includes(candidate.canonicalKey)) {
+    return true;
+  }
+
+  return signals.some(signal => signalScopeSpecificity(signal, context) > 0.8)
+    || (storyKey ? candidate.sourceStoryCanonicalKey === storyKey : false)
+    || (specKey ? candidate.sourceSpecCanonicalKey === specKey : false);
+}
+
+function relationshipWeight(relationship?: string): number {
+  return GRAPH_RELATIONSHIP_WEIGHTS[relationship || ''] ?? 0.4;
+}
+
+function hopStrength(hops: number | null | undefined): number {
+  if (!hops || hops <= 1) return 1;
+  if (hops === 2) return 0.72;
+  if (hops === 3) return 0.5;
+  return 0.35;
+}
+
+function signalStrength(
+  signal: GraphProjectionSignal,
+  nodeType: GraphProjectionNodeType,
+  context: { workspaceId: string; specId?: string; storyId?: string; predictedFileKeys: string[] },
+  referenceTimestamp: number,
+): number {
+  const scopeSpecificity = signalScopeSpecificity(signal, context);
+  if (scopeSpecificity <= 0) return 0;
+
+  const freshness = projectionFreshnessScore(signal.updatedAt, nodeType, referenceTimestamp);
+  const weight = clamp(signal.weight ?? 1);
+  const score = (
+    (relationshipWeight(signal.relationship) * 0.45)
+    + (hopStrength(signal.hops) * 0.22)
+    + (weight * 0.1)
+    + (scopeSpecificity * 0.13)
+    + (freshness * 0.1)
+  ) * GRAPH_NODE_TYPE_WEIGHTS[nodeType];
+
+  return roundScore(score);
+}
+
+export function scoreGraphCandidateFromProjection(input: {
+  candidate: RetrievalCandidateInput;
+  workspaceId: string;
+  specId?: string;
+  storyId?: string;
+  predictedFileKeys: string[];
+  graphProximityAvailable: boolean;
+  referenceTimestamp: number;
+}): GraphRagProximityComponent {
+  const { candidate, graphProximityAvailable, predictedFileKeys, referenceTimestamp } = input;
+  const nodeType = parseGraphNodeType(candidate);
+
+  if (!graphProximityAvailable) {
+    return {
+      score: 0,
+      hops: candidate.graphHops ?? null,
+      relationship: candidate.graphRelationship,
+      proximityUnavailable: true,
+      nodeType: nodeType ?? 'unknown',
+      signalCount: 0,
+      scopeValid: true,
+      stale: false,
+    };
+  }
+
+  if (!nodeType) {
+    if (candidate.graphNodeType) {
+      logger.warn({ graphNodeType: candidate.graphNodeType, candidateId: candidate.id }, '[retrieval-pipeline] Unsupported graph node type — returning zero score');
+    }
+    return {
+      score: 0,
+      hops: candidate.graphHops ?? null,
+      relationship: candidate.graphRelationship,
+      proximityUnavailable: false,
+      nodeType: 'unknown',
+      signalCount: 0,
+      scopeValid: false,
+      stale: false,
+    };
+  }
+
+  const context = {
+    workspaceId: input.workspaceId,
+    specId: input.specId,
+    storyId: input.storyId,
+    predictedFileKeys,
+  };
+
+  const candidateProjectionState = projectionArtifactIsUsable(
+    candidate.graphActive,
+    candidate.graphUpdatedAt ?? candidate.createdAt,
+    nodeType,
+    referenceTimestamp,
+  );
+  if (!candidateProjectionState.usable) {
+    return {
+      score: 0,
+      hops: candidate.graphHops ?? null,
+      relationship: candidate.graphRelationship,
+      proximityUnavailable: false,
+      nodeType,
+      signalCount: 0,
+      scopeValid: false,
+      stale: candidateProjectionState.stale,
+    };
+  }
+
+  const allSignals = deriveProjectionSignals(candidate);
+  const scopeValid = candidateScopeValid(candidate, nodeType, context, allSignals);
+  if (!scopeValid) {
+    return {
+      score: 0,
+      hops: candidate.graphHops ?? null,
+      relationship: candidate.graphRelationship,
+      proximityUnavailable: false,
+      nodeType,
+      signalCount: 0,
+      scopeValid: false,
+      stale: false,
+    };
+  }
+
+  const activeSignals = allSignals.filter((signal) => {
+    const state = projectionArtifactIsUsable(
+      signal.active ?? candidate.graphActive,
+      signal.updatedAt ?? candidate.graphUpdatedAt ?? candidate.createdAt,
+      nodeType,
+      referenceTimestamp,
+    );
+    return state.usable && signalScopeSpecificity(signal, context) > 0;
+  });
+
+  const overlap = fileOverlapScore(predictedFileKeys, candidate.relatedFileKeys ?? []);
+  if (activeSignals.length === 0) {
+    return {
+      score: roundScore(overlap * 0.18),
+      hops: candidate.graphHops ?? null,
+      relationship: candidate.graphRelationship,
+      proximityUnavailable: false,
+      nodeType,
+      signalCount: 0,
+      scopeValid: true,
+      stale: false,
+    };
+  }
+
+  const rankedSignals = activeSignals
+    .map(signal => ({ signal, score: signalStrength(signal, nodeType, context, referenceTimestamp) }))
+    .sort((a, b) => b.score - a.score);
+
+  const strongest = rankedSignals[0];
+  const second = rankedSignals[1];
+  const combinedScore = roundScore(
+    (strongest.score * 0.82)
+    + ((second?.score ?? 0) * 0.08)
+    + (overlap * 0.1),
+  );
+
+  return {
+    score: combinedScore,
+    hops: strongest.signal.hops ?? candidate.graphHops ?? null,
+    relationship: strongest.signal.relationship || candidate.graphRelationship,
+    proximityUnavailable: false,
+    nodeType,
+    signalCount: activeSignals.length,
+    scopeValid: true,
+    stale: false,
+  };
+}
+
+function graphScore(
+  candidate: RetrievalCandidateInput,
+  predictedFileKeys: string[],
+  graphProximityAvailable: boolean,
+  context: { workspaceId: string; specId?: string; storyId?: string },
+  referenceTimestamp: number,
+): GraphRagProximityComponent {
+  return scoreGraphCandidateFromProjection({
+    candidate,
+    workspaceId: context.workspaceId,
+    specId: context.specId,
+    storyId: context.storyId,
+    predictedFileKeys,
+    graphProximityAvailable,
+    referenceTimestamp,
+  });
+}
+
+function scopeStrength(
+  candidate: RetrievalCandidateInput,
+  context: { workspaceId: string; specId?: string; storyId?: string; predictedFileKeys: string[] },
+): GraphRagScopeStrengthComponent {
+  const workspaceKey = `workspace:${context.workspaceId}`;
+  const specKey = context.specId ? buildSpecNodeKey(context.workspaceId, context.specId) : null;
+  const storyKey = context.specId && context.storyId
+    ? buildStoryNodeKey(context.workspaceId, context.specId, context.storyId)
+    : null;
+  const fileKeys = context.predictedFileKeys;
+
+  const workspace = 1;
+  const spec = context.specId
+    ? (candidate.sourceSpecId === context.specId ? 1 : candidate.sourceSpecId ? 0.25 : 0)
+    : 0;
+  const story = context.storyId
+    ? (candidate.sourceStoryId === context.storyId ? 1 : candidate.sourceStoryId ? 0.15 : 0)
+    : 0;
+  const file = fileOverlapScore(context.predictedFileKeys, candidate.relatedFileKeys ?? []);
+
+  return {
+    score: roundScore((workspace * 0.35) + (spec * 0.3) + (story * 0.2) + (file * 0.15)),
+    workspace,
+    spec: roundScore(spec),
+    story: roundScore(story),
+    file: roundScore(file),
+    workspaceKey,
+    specKey,
+    storyKey,
+    fileKeys,
+  };
+}
+
+function provenanceConfidence(candidate: RetrievalCandidateInput): GraphRagProvenanceComponent {
+  const confidence = confidenceScore(candidate.confidence);
+  const sourceScore = provenanceSourceScore(candidate);
+  return {
+    score: roundScore((confidence * 0.75) + (sourceScore * 0.25)),
+    confidence: candidate.confidence ?? null,
+    sourceType: candidate.sourceType ?? null,
+    source: candidate.source ?? null,
+  };
+}
+
+function resolveCanonicalKey(candidate: RetrievalCandidateInput, workspaceId: string): string | undefined {
+  if (candidate.canonicalKey?.trim()) return candidate.canonicalKey.trim();
+  if (!candidate.id || candidate.id.startsWith('cache:') || candidate.id.startsWith('conflict:')) {
+    return undefined;
+  }
+  return buildMemoryNodeKey(workspaceId, candidate.id);
+}
+
+function resolveRelatedFileKeys(candidate: RetrievalCandidateInput, workspaceId: string): string[] {
+  if (candidate.relatedFileKeys && candidate.relatedFileKeys.length > 0) {
+    return unique(candidate.relatedFileKeys.filter(Boolean)).sort();
+  }
+  return canonicalFileKeys(workspaceId, candidate.relatedFiles ?? []);
+}
+
+function buildTieBreak(
+  candidate: RetrievalCandidateInput,
+  canonicalKey: string,
+  workspaceId: string,
+): GraphRagTieBreak {
+  const sourceStoryKey = candidate.sourceStoryCanonicalKey
+    ?? (candidate.sourceSpecId && candidate.sourceStoryId
+      ? buildStoryNodeKey(workspaceId, candidate.sourceSpecId, candidate.sourceStoryId)
+      : null);
+
+  return {
+    canonicalKey,
+    sourceStoryKey,
+    storySlug: candidate.sourceStoryId ?? null,
+    candidateId: candidate.id,
+  };
+}
+
+function compareTieBreak(a: GraphRagTieBreak, b: GraphRagTieBreak): number {
+  if (a.canonicalKey !== b.canonicalKey) {
+    return a.canonicalKey.localeCompare(b.canonicalKey);
+  }
+  const aStoryKey = a.sourceStoryKey ?? '';
+  const bStoryKey = b.sourceStoryKey ?? '';
+  if (aStoryKey !== bStoryKey) {
+    return aStoryKey.localeCompare(bStoryKey);
+  }
+  const aStorySlug = a.storySlug ?? '';
+  const bStorySlug = b.storySlug ?? '';
+  if (aStorySlug !== bStorySlug) {
+    return aStorySlug.localeCompare(bStorySlug);
+  }
+  return a.candidateId.localeCompare(b.candidateId);
+}
+
+function compareByScore(a: RankedRetrievalCandidate, b: RankedRetrievalCandidate): number {
+  if (b.finalScore !== a.finalScore) return b.finalScore - a.finalScore;
+  if (b.semanticRankScore !== a.semanticRankScore) return b.semanticRankScore - a.semanticRankScore;
+  return compareTieBreak(a.scoring.tieBreak, b.scoring.tieBreak);
+}
+
+function compareBySemanticRank(a: RankedRetrievalCandidate, b: RankedRetrievalCandidate): number {
+  if (b.semanticRankScore !== a.semanticRankScore) return b.semanticRankScore - a.semanticRankScore;
+  return compareTieBreak(a.scoring.tieBreak, b.scoring.tieBreak);
+}
+
 function mmrSimilarity(a: RankedRetrievalCandidate, b: RankedRetrievalCandidate): number {
   return tokenOverlap(tokenize(a.text), tokenize(b.text));
 }
 
+function resolveGuardrailsConfig(
+  input?: Partial<RetrievalGuardrailsConfig> | null,
+): RetrievalGuardrailsConfig {
+  return {
+    ...DEFAULT_RETRIEVAL_GUARDRAILS,
+    ...(input ?? {}),
+  };
+}
+
+function candidateTimestamp(candidate: RetrievalCandidateInput): number {
+  return parseTimestamp(candidate.updatedAt ?? candidate.createdAt) ?? 0;
+}
+
+function isHighConfidence(candidate: RetrievalCandidateInput): boolean {
+  return (candidate.confidence || '').toLowerCase() === 'high';
+}
+
+function isLowQuality(candidate: RetrievalCandidateInput): boolean {
+  if (candidate.pinned) return false;
+  const confidence = (candidate.confidence || '').toLowerCase();
+  if (confidence === 'low') return true;
+  return confidence !== 'high' && candidate.baseScore < 0.55;
+}
+
+function isDominanceExempt(candidate: RetrievalCandidateInput, guardrails: RetrievalGuardrailsConfig): boolean {
+  return Boolean(candidate.pinned) || (guardrails.highConfidenceExempt && isHighConfidence(candidate));
+}
+
+function primaryClusterKey(candidate: RetrievalCandidateInput): string {
+  if (candidate.relatedFileKeys && candidate.relatedFileKeys.length > 0) {
+    return `cluster:file:${candidate.relatedFileKeys[0]}`;
+  }
+  if (candidate.sourceStoryCanonicalKey) {
+    return `cluster:story:${candidate.sourceStoryCanonicalKey}`;
+  }
+  if (candidate.sourceSpecCanonicalKey) {
+    return `cluster:spec:${candidate.sourceSpecCanonicalKey}`;
+  }
+  if (candidate.sourceRunId != null) {
+    return `cluster:run:${candidate.sourceRunId}`;
+  }
+  if (candidate.source?.trim()) {
+    return `cluster:source:${candidate.source.trim().toLowerCase()}`;
+  }
+  return `cluster:origin:${candidate.origin}:${(candidate.category || 'memory').toLowerCase()}`;
+}
+
+function candidateDominanceBuckets(candidate: RetrievalCandidateInput): string[] {
+  const buckets = new Set<string>([primaryClusterKey(candidate)]);
+  const fileKeys = candidate.relatedFileKeys ?? [];
+  for (const fileKey of fileKeys) {
+    buckets.add(`bucket:file:${fileKey}`);
+  }
+  if (fileKeys.length === 0 && candidate.sourceSpecCanonicalKey) {
+    buckets.add(`bucket:spec:${candidate.sourceSpecCanonicalKey}`);
+  }
+  return [...buckets];
+}
+
+function repetitionGroupKey(candidate: RetrievalCandidateInput): string {
+  return `${primaryClusterKey(candidate)}::${inferSubject(candidate.text) || candidate.id}`;
+}
+
+function compareByQualityThenRecency(a: RankedRetrievalCandidate, b: RankedRetrievalCandidate): number {
+  if (Number(b.pinned) !== Number(a.pinned)) return Number(b.pinned) - Number(a.pinned);
+  if (Number(isHighConfidence(b)) !== Number(isHighConfidence(a))) {
+    return Number(isHighConfidence(b)) - Number(isHighConfidence(a));
+  }
+  if (b.semanticRankScore !== a.semanticRankScore) return b.semanticRankScore - a.semanticRankScore;
+  const tsDiff = candidateTimestamp(b) - candidateTimestamp(a);
+  if (tsDiff !== 0) return tsDiff;
+  return compareTieBreak(a.scoring.tieBreak, b.scoring.tieBreak);
+}
+
+function computeDominancePenalty(
+  selected: RankedRetrievalCandidate[],
+  candidate: RankedRetrievalCandidate,
+  guardrails: RetrievalGuardrailsConfig,
+): { score: number; comparedTo: string | null; similarity: number; blocked: boolean } {
+  if (selected.length === 0 || isDominanceExempt(candidate, guardrails)) {
+    return { score: 0, comparedTo: null, similarity: 0, blocked: false };
+  }
+
+  const projectedWindow = Math.min(guardrails.dominanceTopN, selected.length + 1);
+  if (projectedWindow < guardrails.minDiversityFloor) {
+    return { score: 0, comparedTo: null, similarity: 0, blocked: false };
+  }
+
+  const capWindow = guardrails.dominanceTopN;
+  const cap = Math.max(1, Math.ceil(capWindow * guardrails.dominanceThreshold));
+  const buckets = candidateDominanceBuckets(candidate);
+  const counts = new Map<string, number>();
+  for (const existing of selected.slice(0, projectedWindow - 1)) {
+    for (const bucket of candidateDominanceBuckets(existing)) {
+      counts.set(bucket, (counts.get(bucket) ?? 0) + 1);
+    }
+  }
+
+  let blocked = false;
+  let worstRatio = 0;
+  let comparedTo: string | null = null;
+  for (const bucket of buckets) {
+    const projectedCount = (counts.get(bucket) ?? 0) + 1;
+    const ratio = projectedCount / Math.max(projectedWindow, capWindow);
+    if (projectedCount > cap) {
+      blocked = true;
+      if (ratio > worstRatio) {
+        worstRatio = ratio;
+        comparedTo = bucket;
+      }
+    }
+  }
+
+  const score = blocked ? roundScore(Math.min(0.35, worstRatio - guardrails.dominanceThreshold)) : 0;
+  return { score, comparedTo, similarity: roundScore(worstRatio), blocked };
+}
+
+function applyLowConfidenceRepetitionPenalties(
+  candidates: RankedRetrievalCandidate[],
+  guardrails: RetrievalGuardrailsConfig,
+): void {
+  const groups = new Map<string, RankedRetrievalCandidate[]>();
+  for (const candidate of candidates) {
+    if (!candidate.scoring.validation.valid || !isLowQuality(candidate)) continue;
+    const key = repetitionGroupKey(candidate);
+    const existing = groups.get(key) ?? [];
+    existing.push(candidate);
+    groups.set(key, existing);
+  }
+
+  for (const group of groups.values()) {
+    if (group.length < 2) continue;
+    group.sort(compareByQualityThenRecency);
+    const anchor = group[0];
+    const repeatFactor = clamp((group.length - 1) / Math.max(1, guardrails.dominanceTopN - 1));
+
+    for (const repeated of group.slice(1)) {
+      const confidenceFactor = 1 - confidenceScore(repeated.confidence);
+      const ageFactor = anchor.createdAt && repeated.createdAt && candidateTimestamp(anchor) > candidateTimestamp(repeated)
+        ? 1
+        : 0.75;
+      const penalty = roundScore(
+        guardrails.lowConfidenceClusterPenalty
+        * Math.max(0.35, repeatFactor)
+        * Math.max(0.35, confidenceFactor)
+        * ageFactor,
+      );
+      repeated.scoring.breakdown.repetitionPenalty = {
+        score: penalty,
+        comparedTo: anchor.key,
+        similarity: roundScore(tokenOverlap(tokenize(anchor.text), tokenize(repeated.text))),
+      };
+      repeated.reasons.push(`Penalized repeated low-confidence cluster pattern anchored by ${anchor.id}`);
+    }
+  }
+}
+
+function buildValidation(
+  candidate: RetrievalCandidateInput,
+  canonicalKey: string | undefined,
+  graph: GraphRagProximityComponent,
+): GraphRagCandidateValidation {
+  const issues: string[] = [];
+  if (!canonicalKey) issues.push('Candidate is missing a resolvable canonical memory key; scoring consumes identity and cannot invent it');
+  if (!candidate.text?.trim()) issues.push('Candidate text is empty');
+  if (candidate.origin === 'graph' && graph.scopeValid === false) {
+    issues.push('Graph candidate is outside the active workspace/spec scope or lacks scoped canonical projection evidence');
+  }
+  if (candidate.origin === 'graph' && graph.stale) {
+    issues.push('Graph candidate is stale or inactive in the canonical projection');
+  }
+  if (candidate.graphNodeType && graph.nodeType === 'unknown') {
+    issues.push(`Unsupported graph node type: ${candidate.graphNodeType}`);
+  }
+  return { valid: issues.length === 0, issues };
+}
+
+function scorePositiveSignals(
+  breakdown: Omit<GraphRagScoreBreakdown, 'diversityPenalty' | 'echoChamberPenalty' | 'repetitionPenalty' | 'duplicationPenalty'>,
+): number {
+  return roundScore(
+    (breakdown.directGraphProximity.score * RETRIEVAL_SCORE_WEIGHTS.directGraphProximity)
+    + (breakdown.scopeStrength.score * RETRIEVAL_SCORE_WEIGHTS.scopeStrength)
+    + (breakdown.recency.score * RETRIEVAL_SCORE_WEIGHTS.recency)
+    + (breakdown.pinnedStatus.score * RETRIEVAL_SCORE_WEIGHTS.pinnedStatus)
+    + (breakdown.provenanceConfidence.score * RETRIEVAL_SCORE_WEIGHTS.provenanceConfidence)
+    + (breakdown.retrievalSignal.score * RETRIEVAL_SCORE_WEIGHTS.retrievalSignal)
+    + (breakdown.skillAlignment.score * RETRIEVAL_SCORE_WEIGHTS.skillAlignment)
+    + (breakdown.historicalUsefulness.score * RETRIEVAL_SCORE_WEIGHTS.historicalUsefulness)
+  );
+}
+
 export function rankRetrievalCandidates(input: {
+  workspaceId: string;
+  specId?: string;
+  storyId?: string;
   queryText: string;
   predictedPaths?: string[];
   candidates: RetrievalCandidateInput[];
   skills: RetrievalSkill[];
   historicalUsefulness?: Map<string, number>;
   tokenBudget: number;
+  graphProximityAvailable?: boolean;
+  graphScoreWeight?: number;
+  evaluationTimestamp?: string;
+  guardrails?: Partial<RetrievalGuardrailsConfig>;
 }): RankRetrievalCandidatesResult {
   const predictedPaths = input.predictedPaths ?? [];
+  const predictedFileKeys = canonicalFileKeys(input.workspaceId, predictedPaths);
   const historicalUsefulness = input.historicalUsefulness ?? new Map<string, number>();
+  const graphProximityAvailable = input.graphProximityAvailable ?? true;
+  const requestedGraphScoreWeight = roundScore(input.graphScoreWeight ?? 0);
+  const appliedGraphScoreWeight = graphProximityAvailable ? requestedGraphScoreWeight : 0;
   const matchedSkills = matchSkillsToQuery(input.queryText, input.skills, predictedPaths);
   const contradictions: Array<[string, string]> = [];
+  const guardrails = resolveGuardrailsConfig(input.guardrails);
+  const referenceTimestamp = inferReferenceTimestamp(input.evaluationTimestamp, input.candidates);
 
   const enriched: RankedRetrievalCandidate[] = input.candidates.map((candidate) => {
+    const invalidCanonicalKey = `invalid:memory:${input.workspaceId}::${candidate.id || 'missing-id'}`;
+    const canonicalKey = resolveCanonicalKey(candidate, input.workspaceId) ?? invalidCanonicalKey;
+    const relatedFileKeys = resolveRelatedFileKeys(candidate, input.workspaceId);
+    const graph = graphScore(
+      { ...candidate, relatedFileKeys, canonicalKey },
+      predictedFileKeys,
+      graphProximityAvailable,
+      {
+        workspaceId: input.workspaceId,
+        specId: input.specId,
+        storyId: input.storyId,
+      },
+      referenceTimestamp,
+    );
+    const validation = buildValidation(candidate, canonicalKey === invalidCanonicalKey ? undefined : canonicalKey, graph);
     const lexical = lexicalScore(input.queryText, candidate);
     const semantic = semanticScore(candidate);
-    const graph = graphScore(candidate, predictedPaths);
-    const fresh = freshnessScore(candidate);
-    const conf = confidenceScore(candidate.confidence);
-    const files = fileOverlapScore(predictedPaths, candidate.relatedFiles || []);
     const validator = validatorScore(candidate, matchedSkills);
-    const historical = historicalUsefulness.get(`memory:${candidate.id}`)
-      ?? historicalUsefulness.get(candidate.id)
-      ?? 0.5;
-
-    const finalScore = clamp(
-      (candidate.baseScore * 0.22)
-      + (lexical * 0.18)
-      + (semantic * 0.14)
-      + (graph * 0.14)
-      + (fresh * 0.10)
-      + (conf * 0.07)
-      + (files * 0.05)
-      + (validator.score * 0.07)
-      + (historical * 0.03),
+    const scope = scopeStrength({ ...candidate, relatedFileKeys }, {
+      workspaceId: input.workspaceId,
+      specId: input.specId,
+      storyId: input.storyId,
+      predictedFileKeys,
+    });
+    const recency = recencyScore(candidate, referenceTimestamp, guardrails);
+    const provenance = provenanceConfidence(candidate);
+    const retrievalSignal = {
+      score: retrievalSignalScore(candidate.baseScore, lexical, semantic),
+      base: roundScore(candidate.baseScore),
+      lexical,
+      semantic,
+    };
+    const skillAlignment = {
+      score: roundScore(validator.score),
+      matchedSkills: matchedSkills.map(skill => skill.name),
+    };
+    const feedbackKey = validation.valid ? canonicalKey : `invalid:memory:${candidate.id}`;
+    const historical = roundScore(
+      historicalUsefulness.get(feedbackKey)
+      ?? historicalUsefulness.get(`memory:${candidate.id}`)
+      ?? 0.5,
     );
+    const positiveBreakdown = {
+      directGraphProximity: graph,
+      scopeStrength: scope,
+      recency: { score: recency },
+      pinnedStatus: { score: candidate.pinned ? 1 : 0 },
+      provenanceConfidence: provenance,
+      retrievalSignal,
+      skillAlignment,
+      historicalUsefulness: { score: historical, feedbackKey },
+    };
+    const semanticEligibilityBreakdown = {
+      ...positiveBreakdown,
+      directGraphProximity: {
+        ...graph,
+        score: 0,
+      },
+    };
+    const provisionalScore = validation.valid ? scorePositiveSignals(semanticEligibilityBreakdown) : 0;
 
-    const rankedCandidate: RankedRetrievalCandidate = {
+    return {
       ...candidate,
-      key: `memory:${candidate.id}`,
+      canonicalKey,
+      relatedFileKeys,
+      key: canonicalKey,
       tokenCount: estimateTokens(candidate.text),
       lexicalScore: lexical,
       semanticScore: semantic,
-      graphScore: graph,
-      freshnessScore: fresh,
-      confidenceScore: conf,
-      fileOverlapScore: files,
+      graphScore: graph.score,
+      freshnessScore: recency,
+      confidenceScore: provenance.score,
+      fileOverlapScore: scope.file,
       validatorScore: validator.score,
       historicalScore: historical,
-      finalScore,
-      decision: 'keep',
+      semanticRankScore: provisionalScore,
+      finalScore: provisionalScore,
+      preRerankPosition: null,
+      rerankedBy: 'semantic',
+      decision: validation.valid ? 'keep' : 'drop',
       conflictsWith: [],
-      reasons: validator.reasons,
+      reasons: [...validator.reasons, ...validation.issues],
       supersededBy: undefined,
+      scoring: {
+        schemaVersion: GRAPH_RAG_SCORE_SCHEMA_VERSION,
+        score: provisionalScore,
+        bounded: true,
+        deterministic: true,
+        tieBreak: buildTieBreak(candidate, canonicalKey, input.workspaceId),
+        validation,
+        breakdown: {
+          ...positiveBreakdown,
+          diversityPenalty: { score: 0, comparedTo: null, similarity: 0 },
+          echoChamberPenalty: { score: 0, comparedTo: null, similarity: 0 },
+          repetitionPenalty: { score: 0, comparedTo: null, similarity: 0 },
+          duplicationPenalty: { score: 0, comparedTo: null, similarity: 0 },
+        },
+        rerank: {
+          requestedGraphScoreWeight,
+          appliedGraphScoreWeight,
+          semanticRankScore: provisionalScore,
+          blendedScore: provisionalScore,
+          preRerankPosition: null,
+          finalPosition: null,
+          rerankedBy: 'semantic',
+        },
+      },
     };
-    return rankedCandidate;
   });
 
   const bySubject = new Map<string, RankedRetrievalCandidate[]>();
@@ -286,7 +1502,12 @@ export function rankRetrievalCandidates(input: {
 
   for (const group of bySubject.values()) {
     if (group.length < 2) continue;
-    group.sort((a, b) => new Date(b.createdAt || 0).getTime() - new Date(a.createdAt || 0).getTime());
+    group.sort((a, b) => {
+      const tsDiff = candidateTimestamp(b) - candidateTimestamp(a);
+      if (tsDiff !== 0) return tsDiff;
+      return compareTieBreak(a.scoring.tieBreak, b.scoring.tieBreak);
+    });
+
     const newest = group[0];
     for (const older of group.slice(1)) {
       const similarity = tokenOverlap(tokenize(newest.text), tokenize(older.text));
@@ -302,26 +1523,83 @@ export function rankRetrievalCandidates(input: {
         older.conflictsWith.push(newest.key);
         newest.decision = 'conflict';
         older.decision = 'conflict';
-        older.finalScore = clamp(older.finalScore - 0.08);
+        older.scoring.breakdown.duplicationPenalty = {
+          score: DUPLICATION_PENALTIES.contradiction,
+          comparedTo: newest.key,
+          similarity,
+        };
+        older.reasons.push(`Conflicts with newer memory ${newest.id}`);
         contradictions.push([newest.key, older.key]);
       } else if (similarity >= 0.55) {
         older.supersededBy = newest.key;
         older.decision = 'drop';
-        older.finalScore = clamp(older.finalScore - 0.18);
+        older.scoring.breakdown.duplicationPenalty = {
+          score: DUPLICATION_PENALTIES.superseded,
+          comparedTo: newest.key,
+          similarity,
+        };
         older.reasons.push(`Superseded by newer memory ${newest.id}`);
       }
     }
   }
 
-  enriched.sort((a, b) => b.finalScore - a.finalScore);
+  applyLowConfidenceRepetitionPenalties(enriched, guardrails);
+
+  enriched.sort(compareBySemanticRank);
+
+  for (let index = 0; index < enriched.length; index++) {
+    const candidate = enriched[index];
+    if (!candidate.scoring.validation.valid) {
+      candidate.semanticRankScore = 0;
+      candidate.finalScore = 0;
+      candidate.scoring.score = 0;
+      candidate.scoring.rerank.semanticRankScore = 0;
+      candidate.scoring.rerank.blendedScore = 0;
+      continue;
+    }
+
+    const stronger = enriched.slice(0, index).filter(other => other.scoring.validation.valid);
+    const bestSimilar = stronger.reduce<{ similarity: number; key: string | null }>(
+      (best, other) => {
+        const similarity = mmrSimilarity(other, candidate);
+        if (similarity > best.similarity) {
+          return { similarity, key: other.key };
+        }
+        return best;
+      },
+      { similarity: 0, key: null },
+    );
+
+    candidate.scoring.breakdown.diversityPenalty = {
+      score: roundScore(bestSimilar.similarity * 0.12),
+      comparedTo: bestSimilar.key,
+      similarity: roundScore(bestSimilar.similarity),
+    };
+
+    const penalties = candidate.scoring.breakdown.diversityPenalty.score
+      + candidate.scoring.breakdown.echoChamberPenalty.score
+      + candidate.scoring.breakdown.repetitionPenalty.score
+      + candidate.scoring.breakdown.duplicationPenalty.score;
+    candidate.semanticRankScore = roundScore(candidate.scoring.score - penalties);
+    candidate.finalScore = candidate.semanticRankScore;
+    candidate.scoring.score = candidate.semanticRankScore;
+    candidate.scoring.rerank.semanticRankScore = candidate.semanticRankScore;
+    candidate.scoring.rerank.blendedScore = candidate.semanticRankScore;
+  }
+
+  enriched.sort(compareBySemanticRank);
 
   const selected: RankedRetrievalCandidate[] = [];
   let tokensUsed = 0;
 
   for (const candidate of enriched) {
-    if (candidate.finalScore < 0.18) {
+    if (!candidate.scoring.validation.valid) {
+      candidate.decision = 'drop';
+      continue;
+    }
+    if (candidate.semanticRankScore < 0.18) {
       candidate.decision = candidate.decision === 'conflict' ? 'conflict' : 'drop';
-      candidate.reasons.push('Dropped for low final score');
+      candidate.reasons.push('Dropped for low semantic rank score');
       continue;
     }
     if (candidate.supersededBy) continue;
@@ -329,13 +1607,26 @@ export function rankRetrievalCandidates(input: {
     const maxSimilarity = selected.length === 0
       ? 0
       : Math.max(...selected.map(existing => mmrSimilarity(existing, candidate)));
-    const mmrScore = (0.78 * candidate.finalScore) - (0.22 * maxSimilarity);
+    const mmrScore = roundScore((0.78 * candidate.semanticRankScore) - (0.22 * maxSimilarity));
 
     if (mmrScore < 0.12) {
       candidate.decision = 'drop';
       candidate.reasons.push('Dropped for low diversity-adjusted score');
       continue;
     }
+
+    const dominancePenalty = computeDominancePenalty(selected, candidate, guardrails);
+    candidate.scoring.breakdown.echoChamberPenalty = {
+      score: dominancePenalty.score,
+      comparedTo: dominancePenalty.comparedTo,
+      similarity: dominancePenalty.similarity,
+    };
+    if (dominancePenalty.blocked) {
+      candidate.decision = 'drop';
+      candidate.reasons.push('Dropped by anti-echo-chamber dominance cap');
+      continue;
+    }
+
     if (tokensUsed + candidate.tokenCount > input.tokenBudget) {
       candidate.decision = 'drop';
       candidate.reasons.push('Dropped for token budget');
@@ -347,18 +1638,72 @@ export function rankRetrievalCandidates(input: {
     tokensUsed += candidate.tokenCount;
   }
 
-  const needsMoreEvidence = selected.length === 0 || selected[0].finalScore < 0.32;
+  const needsMoreEvidence = selected.length === 0 || selected[0].semanticRankScore < 0.32;
   if (needsMoreEvidence) {
     for (const candidate of selected) {
       if (candidate.decision === 'keep') candidate.decision = 'needs-more';
     }
   }
 
+  selected.forEach((candidate, index) => {
+    candidate.preRerankPosition = index + 1;
+    candidate.finalScore = candidate.semanticRankScore;
+    candidate.rerankedBy = 'semantic';
+    candidate.scoring.score = candidate.semanticRankScore;
+    candidate.scoring.rerank.semanticRankScore = candidate.semanticRankScore;
+    candidate.scoring.rerank.blendedScore = candidate.semanticRankScore;
+    candidate.scoring.rerank.preRerankPosition = index + 1;
+    candidate.scoring.rerank.finalPosition = index + 1;
+    candidate.scoring.rerank.rerankedBy = 'semantic';
+  });
+
+  if (appliedGraphScoreWeight > 0) {
+    for (const candidate of selected) {
+      const blendedScore = roundScore(
+        (candidate.semanticRankScore * (1 - appliedGraphScoreWeight))
+        + (candidate.graphScore * appliedGraphScoreWeight),
+      );
+      candidate.finalScore = blendedScore;
+      candidate.scoring.score = blendedScore;
+      candidate.scoring.rerank.blendedScore = blendedScore;
+    }
+
+    selected.sort(compareByScore);
+  }
+
+  selected.forEach((candidate, index) => {
+    const finalPosition = index + 1;
+    const orderChanged = candidate.preRerankPosition !== finalPosition;
+    const rerankedBy: 'graph' | 'semantic' = appliedGraphScoreWeight > 0 && candidate.graphScore > 0 && orderChanged
+      ? 'graph'
+      : 'semantic';
+    candidate.rerankedBy = rerankedBy;
+    candidate.scoring.rerank.finalPosition = finalPosition;
+    candidate.scoring.rerank.rerankedBy = rerankedBy;
+  });
+
+  const graphRerankedCandidateKeys = selected
+    .filter(candidate => candidate.rerankedBy === 'graph')
+    .map(candidate => candidate.key);
+  const graphRerankChanged = graphRerankedCandidateKeys.length > 0;
+
+  const selectedIdentity = new Set(selected.map(candidate => `${candidate.key}::${candidate.id}::${candidate.origin}`));
+  const orderedCandidates = [
+    ...selected,
+    ...enriched
+      .filter(candidate => !selectedIdentity.has(`${candidate.key}::${candidate.id}::${candidate.origin}`))
+      .sort(compareBySemanticRank),
+  ];
+
   return {
     matchedSkills,
     selected,
-    candidates: enriched,
+    candidates: orderedCandidates,
     needsMoreEvidence,
     contradictions,
+    graphScoreWeight: requestedGraphScoreWeight,
+    graphRerankAppliedWeight: appliedGraphScoreWeight,
+    graphRerankChanged,
+    graphRerankedCandidateKeys,
   };
 }

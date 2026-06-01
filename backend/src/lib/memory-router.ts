@@ -28,14 +28,29 @@ import {
 } from './context-cache';
 import { hybridSearch, type SearchResult } from './search';
 import { logger } from './logger';
-import { queryRelated, queryImpact, graphStats } from './knowledge-graph';
+import {
+  buildFileNodeKey,
+  buildMemoryNodeKey,
+  buildSpecNodeKey,
+  buildStoryNodeKey,
+  queryRelated,
+  queryImpact,
+  graphStats,
+} from './knowledge-graph';
 import { getGraphContext } from './graph-context';
 import {
+  buildGraphRagExplainability,
   rankRetrievalCandidates,
+  type GraphProjectionSignal,
+  type GraphRagCandidateExplainability,
+  type GraphRagScoreContract,
   type RetrievalCandidateInput,
 } from './retrieval-pipeline';
 import { persistRetrievalTelemetry, recordRetrievalTelemetry } from './retrieval-telemetry';
 import { getHistoricalUsefulnessMap, recordRetrievalSelection } from './retrieval-feedback';
+import { checkAge } from './age-guard';
+import { resolveGraphScoringRollout } from './graph-scoring-rollout';
+import { loadRorcaConfig, defaultRorcaConfig, type RetrievalGuardrailsConfig } from './rorca-config';
 import { query as dbQuery } from '../db/index';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -46,6 +61,11 @@ export interface MemoryEntryResult {
   source: 'cache' | 'search';
   id?: string;
   sourceType?: string;
+  canonicalKey?: string;
+  preRerankPosition?: number | null;
+  rerankedBy?: 'graph' | 'semantic';
+  scoring?: GraphRagScoreContract;
+  explainability?: GraphRagCandidateExplainability;
 }
 
 export interface SkillContent {
@@ -69,9 +89,20 @@ interface MemoryMetadataRow {
   source: string | null;
   pinned: boolean;
   created_at: string;
+  updated_at: string | null;
   source_story_id: string | null;
   source_spec_id: string | null;
   source_run_id: number | null;
+}
+
+interface WorkspacePathRow {
+  path: string;
+}
+
+interface GraphMemorySignal {
+  relationship: string;
+  hops: number;
+  matchedPath?: string;
 }
 
 export interface RetrievedContext {
@@ -95,6 +126,11 @@ export interface RetrievedContext {
     needsMoreEvidence?: boolean;
     matchedSkills?: string[];
     selectedCandidateIds?: string[];
+    selectedCandidateKeys?: string[];
+    graphScoreWeight?: number;
+    graphRerankAppliedWeight?: number;
+    graphRerankChanged?: boolean;
+    graphRerankedCandidateKeys?: string[];
     telemetryId?: string;
   };
 }
@@ -102,6 +138,9 @@ export interface RetrievedContext {
 export interface RetrieveContextOptions {
   maxTokens?: number;
   includeGraph?: boolean;
+  graphScoreWeight?: number;
+  workspacePath?: string;
+  explain?: boolean;
   /** Predicted file paths for graph traversal (PG-016) */
   predictedPaths?: string[];
   /** Current story ID for graph traversal context */
@@ -221,6 +260,71 @@ function parseRelatedFiles(value: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+async function resolveWorkspacePath(workspaceId: string): Promise<string | undefined> {
+  try {
+    const rows = await dbQuery<WorkspacePathRow>(
+      'SELECT path FROM workspaces WHERE id = $1 LIMIT 1',
+      [workspaceId],
+    );
+    return rows[0]?.path;
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveRetrievalSettings(
+  workspaceId: string,
+  options?: RetrieveContextOptions,
+): Promise<{ graphScoreWeight: number; guardrails: RetrievalGuardrailsConfig }> {
+  const defaults = defaultRorcaConfig().context.retrieval;
+  const workspacePath = options?.workspacePath ?? await resolveWorkspacePath(workspaceId);
+
+  if (!workspacePath) {
+    return {
+      graphScoreWeight: resolveGraphScoringRollout({
+        explicitWeight: options?.graphScoreWeight,
+        configWeight: defaults.graphScoreWeight,
+      }).weight,
+      guardrails: defaults.guardrails,
+    };
+  }
+
+  try {
+    const retrieval = loadRorcaConfig(workspacePath).context.retrieval;
+    return {
+      graphScoreWeight: resolveGraphScoringRollout({
+        explicitWeight: options?.graphScoreWeight,
+        configWeight: retrieval.graphScoreWeight,
+      }).weight,
+      guardrails: retrieval.guardrails,
+    };
+  } catch (error) {
+    logger.warn({ error, workspaceId }, '[memory-router] Failed to load retrieval config — falling back to defaults');
+    return {
+      graphScoreWeight: resolveGraphScoringRollout({
+        explicitWeight: options?.graphScoreWeight,
+        configWeight: defaults.graphScoreWeight,
+      }).weight,
+      guardrails: defaults.guardrails,
+    };
+  }
+}
+
+function appendGraphSignal(
+  candidate: RetrievalCandidateInput,
+  signal: GraphProjectionSignal,
+): void {
+  const existing = candidate.graphSignals ?? [];
+  const duplicate = existing.some((entry) =>
+    entry.fromCanonicalKey === signal.fromCanonicalKey
+    && entry.toCanonicalKey === signal.toCanonicalKey
+    && entry.relationship === signal.relationship
+    && entry.hops === signal.hops,
+  );
+  if (duplicate) return;
+  candidate.graphSignals = [...existing, signal];
 }
 
 // ─── Key Phrase Extraction ──────────────────────────────────────────────────
@@ -343,6 +447,9 @@ export async function retrieveContext(
   const maxTokens = options?.maxTokens ?? DEFAULT_MAX_TOKENS;
   const includeGraph = options?.includeGraph ?? false;
   const wsId = String(workspaceId);
+  const retrievalSettings = await resolveRetrievalSettings(wsId, options);
+  const graphScoreWeight = retrievalSettings.graphScoreWeight;
+  const ageAvailable = includeGraph ? await checkAge() : false;
 
   let cagHits = 0;
   let ragHits = 0;
@@ -380,7 +487,7 @@ export async function retrieveContext(
     + estimateTokens(layers.schemaSnapshot || '');
 
   const remainingTokens = maxTokens - directionTokens;
-  const budgets = calculateBudgets(remainingTokens, includeGraph);
+  const budgets = calculateBudgets(remainingTokens, includeGraph && ageAvailable);
 
   const predictedPaths = options?.predictedPaths ?? extractFilePaths(storyText);
 
@@ -399,12 +506,13 @@ export async function retrieveContext(
          source,
          COALESCE(pinned, false) AS pinned,
          created_at,
+         updated_at,
          source_story_id,
          source_spec_id,
          source_run_id
        FROM memories
        WHERE workspace_id = $1 AND deleted_at IS NULL
-       ORDER BY pinned DESC, created_at DESC
+       ORDER BY pinned DESC, COALESCE(updated_at, created_at) DESC
        LIMIT 250`,
       [wsId],
     );
@@ -430,24 +538,70 @@ export async function retrieveContext(
     origin: RetrievalCandidateInput['origin'],
     baseScore: number,
     matchType: RetrievalCandidateInput['matchType'],
-  ): RetrievalCandidateInput => ({
-    id: String(row.id),
-    text: row.content,
-    title: row.category || 'Memory Entry',
-    origin,
-    baseScore,
-    matchType,
-    category: row.category,
-    confidence: row.confidence,
-    sourceType: row.source_type,
-    source: row.source,
-    pinned: row.pinned,
-    createdAt: row.created_at,
-    relatedFiles: parseRelatedFiles(row.related_files),
-    sourceStoryId: row.source_story_id,
-    sourceSpecId: row.source_spec_id,
-    sourceRunId: row.source_run_id,
-  });
+  ): RetrievalCandidateInput => {
+    const relatedFiles = parseRelatedFiles(row.related_files);
+    const canonicalKey = buildMemoryNodeKey(wsId, String(row.id));
+    const relatedFileKeys = relatedFiles.map(filePath => buildFileNodeKey(wsId, filePath)).filter(Boolean).sort();
+    const sourceStoryCanonicalKey = row.source_story_id && row.source_spec_id
+      ? buildStoryNodeKey(wsId, row.source_spec_id, row.source_story_id)
+      : undefined;
+    const sourceSpecCanonicalKey = row.source_spec_id
+      ? buildSpecNodeKey(wsId, row.source_spec_id)
+      : undefined;
+    const graphSignals = [
+      ...(sourceStoryCanonicalKey ? [{
+        fromCanonicalKey: canonicalKey,
+        toCanonicalKey: sourceStoryCanonicalKey,
+        relationship: 'LEARNED_FROM',
+        hops: 1,
+        active: true,
+        updatedAt: row.updated_at ?? row.created_at,
+      }] : []),
+      ...(sourceSpecCanonicalKey ? [{
+        fromCanonicalKey: canonicalKey,
+        toCanonicalKey: sourceSpecCanonicalKey,
+        relationship: 'FROM_SPEC',
+        hops: 1,
+        active: true,
+        updatedAt: row.updated_at ?? row.created_at,
+      }] : []),
+      ...relatedFileKeys.map(fileKey => ({
+        fromCanonicalKey: canonicalKey,
+        toCanonicalKey: fileKey,
+        relationship: 'ABOUT',
+        hops: 1,
+        active: true,
+        updatedAt: row.updated_at ?? row.created_at,
+      })),
+    ];
+    return {
+      id: String(row.id),
+      text: row.content,
+      title: row.category || 'Memory Entry',
+      origin,
+      baseScore,
+      matchType,
+      category: row.category,
+      confidence: row.confidence,
+      sourceType: row.source_type,
+      source: row.source,
+      pinned: row.pinned,
+      createdAt: row.created_at,
+      updatedAt: row.updated_at ?? row.created_at,
+      relatedFiles,
+      relatedFileKeys,
+      sourceStoryId: row.source_story_id,
+      sourceStoryCanonicalKey,
+      sourceSpecId: row.source_spec_id,
+      sourceSpecCanonicalKey,
+      sourceRunId: row.source_run_id,
+      graphNodeType: 'memory',
+      graphActive: true,
+      graphUpdatedAt: row.updated_at ?? row.created_at,
+      graphSignals,
+      canonicalKey,
+    };
+  };
 
   // ── PG-022: Pinned memories become top-priority candidates ──────────────
 
@@ -473,6 +627,7 @@ export async function retrieveContext(
           matchType: 'cache',
           createdAt: entry.ts,
           relatedFiles: [],
+          relatedFileKeys: [],
         });
   }
 
@@ -523,6 +678,8 @@ export async function retrieveContext(
             matchType: result.matchType,
             sourceType: result.sourceType,
             relatedFiles: [],
+            relatedFileKeys: [],
+            canonicalKey: result.sourceId ? buildMemoryNodeKey(wsId, result.sourceId) : undefined,
           });
     }
   }
@@ -535,20 +692,75 @@ export async function retrieveContext(
   let graphContext: GraphContext | undefined;
   let graphSection: string | undefined;
   let graphTokensUsed = 0;
+  let graphProximityAvailable = ageAvailable;
   if (includeGraph) {
     try {
       // PG-016: Use getGraphContext() for deep traversal when predictedPaths provided
       const currentStoryId = options?.storyId ?? '';
       const currentSpecId = options?.specId;
+      const graphSignalsByMemoryId = new Map<string, GraphMemorySignal[]>();
+      const graphSignalsByText = new Map<string, GraphMemorySignal[]>();
+
+      const rememberGraphSignal = (memoryId: string, text: string, signal: GraphMemorySignal): void => {
+        const mergeInto = (store: Map<string, GraphMemorySignal[]>, key: string): void => {
+          if (!key) return;
+          const existing = store.get(key) ?? [];
+          store.set(key, [...existing, signal]);
+        };
+        mergeInto(graphSignalsByMemoryId, memoryId);
+        mergeInto(graphSignalsByText, text);
+      };
+
+      const applyCandidateGraphSignals = (): void => {
+        for (const candidate of retrievalCandidates) {
+          if (!candidate.canonicalKey) {
+            continue;
+          }
+          const signals = [
+            ...(graphSignalsByMemoryId.get(candidate.id) ?? []),
+            ...(graphSignalsByText.get(candidate.text) ?? []),
+          ];
+          if (signals.length === 0) {
+            continue;
+          }
+
+          for (const signal of signals) {
+            if (!signal.matchedPath) {
+              continue;
+            }
+            const matchedFileKey = buildFileNodeKey(wsId, signal.matchedPath);
+            if (!matchedFileKey) {
+              continue;
+            }
+
+            appendGraphSignal(candidate, {
+              fromCanonicalKey: candidate.canonicalKey,
+              toCanonicalKey: matchedFileKey,
+              relationship: signal.relationship,
+              hops: signal.hops,
+              active: true,
+              updatedAt: candidate.graphUpdatedAt ?? candidate.createdAt ?? null,
+            });
+            candidate.graphRelationship = signal.relationship;
+            candidate.graphHops = candidate.graphHops == null
+              ? signal.hops
+              : Math.min(candidate.graphHops, signal.hops);
+            candidate.graphNodeType = candidate.graphNodeType ?? 'memory';
+            candidate.graphActive = candidate.graphActive ?? true;
+            candidate.graphUpdatedAt = candidate.graphUpdatedAt ?? candidate.createdAt ?? null;
+            candidate.relatedFiles = [...new Set([...(candidate.relatedFiles ?? []), signal.matchedPath])].sort();
+            candidate.relatedFileKeys = [...new Set([...(candidate.relatedFileKeys ?? []), matchedFileKey])].sort();
+          }
+        }
+      };
 
       if (predictedPaths.length > 0 && currentStoryId) {
         const fullCtx = await getGraphContext(currentStoryId, predictedPaths, workspaceId, 2, currentSpecId);
+        graphProximityAvailable = !fullCtx.proximityUnavailable;
 
-        // Map full graph context to the simpler GraphContext for backward compat
         const relatedStories: GraphContext['relatedStories'] = fullCtx.fileHistory.flatMap(fh =>
           fh.touchedByStories.map(sid => ({ id: sid, title: sid, relevance: 0.7 })),
         );
-        // Deduplicate
         const seenIds = new Set<string>();
         const dedupedStories = relatedStories.filter(s => {
           if (seenIds.has(s.id)) return false;
@@ -570,30 +782,18 @@ export async function retrieveContext(
         graphHits = fullCtx.relatedMemories.length + fullCtx.relatedConventions.length + fullCtx.fileHistory.length;
         graphContext = { relatedStories: dedupedStories, fileTouches, conventionLinks };
         for (const memory of fullCtx.relatedMemories) {
-          const row = rowsById.get(memory.memoryId) ?? rowsByContent.get(memory.text);
-          addCandidate(row
-            ? {
-                ...rowToCandidate(row, 'graph', 0.72, 'graph'),
-                graphRelationship: memory.relationship,
-                graphHops: memory.hops,
-              }
-            : {
-                id: memory.memoryId,
-                text: memory.text,
-                title: 'Graph Memory',
-                origin: 'graph',
-                baseScore: 0.72,
-                matchType: 'graph',
-                graphRelationship: memory.relationship,
-                graphHops: memory.hops,
-                relatedFiles: predictedPaths,
-              });
+          if (memory.relationship === 'conflict') continue;
+          rememberGraphSignal(memory.memoryId, memory.text, {
+            relationship: memory.relationship,
+            hops: memory.hops,
+            matchedPath: memory.matchedPath,
+          });
         }
+        applyCandidateGraphSignals();
         const budgeted = trimGraphContextForBudget(fullCtx, budgets.graph);
         graphSection = budgeted.graphSection;
         graphTokensUsed = budgeted.graphTokens;
-      } else {
-        // Fallback: use queryImpact for file-path-based lookup
+      } else if (ageAvailable) {
         const stats = await graphStats();
         if (stats.available && stats.vertexCount > 0) {
           const filePaths = extractFilePaths(storyText);
@@ -641,15 +841,21 @@ export async function retrieveContext(
           graphSection = budgeted.graphSection;
           graphTokensUsed = budgeted.graphTokens;
         } else {
+          graphProximityAvailable = false;
           graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
         }
+      } else {
+        graphProximityAvailable = false;
+        logger.warn({ workspaceId: wsId }, '[memory-router] AGE unavailable in lite mode — skipping Cypher graph traversal and keeping semantic ranking only');
+        graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
       }
 
       logger.debug(
-        { workspaceId: wsId, graphHits, graphTokensUsed },
+        { workspaceId: wsId, graphHits, graphTokensUsed, graphScoreWeight },
         '[memory-router] Graph context retrieved',
       );
     } catch (err) {
+      graphProximityAvailable = false;
       logger.warn({ err, workspaceId: wsId }, '[memory-router] Graph context retrieval failed — using empty');
       graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
     }
@@ -659,24 +865,38 @@ export async function retrieveContext(
 
   const historicalUsefulness = await getHistoricalUsefulnessMap(
     wsId,
-    retrievalCandidates.map(candidate => `memory:${candidate.id}`),
+    [...new Set(retrievalCandidates.flatMap(candidate => [
+      candidate.canonicalKey,
+      `memory:${candidate.id}`,
+    ].filter((value): value is string => Boolean(value))))],
   );
 
   const ranked = rankRetrievalCandidates({
+    workspaceId: wsId,
+    specId: options?.specId,
+    storyId: options?.storyId,
     queryText: storyText,
     predictedPaths,
     candidates: retrievalCandidates,
     skills: cachedSkills,
     historicalUsefulness,
     tokenBudget: budgets.memory,
+    graphProximityAvailable,
+    graphScoreWeight,
+    guardrails: retrievalSettings.guardrails,
   });
 
   memoryEntries = ranked.selected.map(candidate => ({
     text: candidate.text,
     score: candidate.finalScore,
-    source: candidate.origin === 'search' || candidate.origin === 'graph' ? 'search' : 'cache',
+    source: candidate.origin === 'search' ? 'search' : 'cache',
     id: candidate.id,
     sourceType: candidate.sourceType || candidate.origin,
+    canonicalKey: candidate.canonicalKey,
+    preRerankPosition: candidate.preRerankPosition,
+    rerankedBy: candidate.rerankedBy,
+    scoring: options?.explain ? candidate.scoring : undefined,
+    explainability: options?.explain ? buildGraphRagExplainability(candidate) : undefined,
   }));
   memoryTokensUsed = ranked.selected.reduce((sum, candidate) => sum + candidate.tokenCount, 0);
 
@@ -729,6 +949,9 @@ export async function retrieveContext(
       origin: candidate.origin,
       sourceType: candidate.sourceType || undefined,
       finalScore: candidate.finalScore,
+      semanticRankScore: candidate.semanticRankScore,
+      preRerankPosition: candidate.preRerankPosition,
+      rerankedBy: candidate.rerankedBy,
       decision: candidate.decision,
       freshnessScore: candidate.freshnessScore,
       validatorScore: candidate.validatorScore,
@@ -737,6 +960,8 @@ export async function retrieveContext(
       reasons: candidate.reasons,
       conflictsWith: candidate.conflictsWith,
       supersededBy: candidate.supersededBy,
+      scoring: candidate.scoring,
+      explainability: buildGraphRagExplainability(candidate),
     })),
     latencyMs,
     retrievalTier: tier,
@@ -754,7 +979,18 @@ export async function retrieveContext(
   );
 
   logger.info(
-    { workspaceId: wsId, tier, cagHits, ragHits, graphHits, totalTokens, latencyMs },
+    {
+      workspaceId: wsId,
+      tier,
+      cagHits,
+      ragHits,
+      graphHits,
+      totalTokens,
+      latencyMs,
+      graphScoreWeight,
+      graphRerankAppliedWeight: ranked.graphRerankAppliedWeight,
+      graphRerankChanged: ranked.graphRerankChanged,
+    },
     '[memory-router] Context retrieved',
   );
 
@@ -774,6 +1010,11 @@ export async function retrieveContext(
       needsMoreEvidence: ranked.needsMoreEvidence,
       matchedSkills: ranked.matchedSkills.map(skill => skill.name),
       selectedCandidateIds: ranked.selected.map(candidate => candidate.id),
+      selectedCandidateKeys: ranked.selected.map(candidate => candidate.key),
+      graphScoreWeight: ranked.graphScoreWeight,
+      graphRerankAppliedWeight: ranked.graphRerankAppliedWeight,
+      graphRerankChanged: ranked.graphRerankChanged,
+      graphRerankedCandidateKeys: ranked.graphRerankedCandidateKeys,
       telemetryId: telemetry.id,
     },
   };
