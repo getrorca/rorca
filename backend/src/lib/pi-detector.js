@@ -40,7 +40,23 @@ function parseVersion(output) {
 }
 function parseBoolean(value) {
     const normalized = value.trim().toLowerCase();
-    return normalized === '✓' || normalized === 'true';
+    return normalized === '✓' || normalized === 'true' || normalized === 'yes';
+}
+function parseTokenCount(value) {
+    const normalized = value.trim().toUpperCase();
+    const match = normalized.match(/^(\d+(?:\.\d+)?)([KM])?$/);
+    if (!match) {
+        const fallback = Number(normalized);
+        return Number.isFinite(fallback) ? fallback : 0;
+    }
+    const amount = Number(match[1]);
+    if (!Number.isFinite(amount))
+        return 0;
+    switch (match[2]) {
+        case 'M': return Math.round(amount * 1_000_000);
+        case 'K': return Math.round(amount * 1_000);
+        default: return Math.round(amount);
+    }
 }
 /**
  * Detect pi binary: resolve path, run --version, parse output.
@@ -91,16 +107,21 @@ export function parsePiModelTable(stdout) {
     try {
         return stdout
             .split('\n')
-            .map((line) => line.trim())
-            .filter((line) => line.length > 0 && !line.startsWith('─') && !line.startsWith('│ Provider'))
+            .map((line) => line.replace(/\x1B\[[0-?]*[ -/]*[@-~]/g, '').trim())
+            .filter((line) => line.length > 0 && !line.startsWith('─'))
             .map((line) => line.replace(/^│\s*/, '').replace(/\s*│$/, ''))
             .map((line) => line.split(/ {2,}/).map((part) => part.trim()))
             .filter((parts) => parts.length >= 6)
+            .filter(([provider, model]) => {
+            const normalizedProvider = provider.toLowerCase();
+            const normalizedModel = model.toLowerCase();
+            return normalizedProvider !== 'provider' && normalizedModel !== 'model';
+        })
             .map(([provider, model, contextTokens, maxOutTokens, thinking, images]) => ({
             provider,
             model,
-            contextTokens: Number(contextTokens) || 0,
-            maxOutTokens: Number(maxOutTokens) || 0,
+            contextTokens: parseTokenCount(contextTokens),
+            maxOutTokens: parseTokenCount(maxOutTokens),
             thinking: parseBoolean(thinking),
             images: parseBoolean(images),
         }));
@@ -111,11 +132,16 @@ export function parsePiModelTable(stdout) {
 }
 export function listPiModels(binPath) {
     try {
-        const stdout = execSync(`"${binPath}" --list-models`, {
+        const result = spawnSync(binPath, ['--list-models'], {
             encoding: 'utf8',
             timeout: 10000,
+            stdio: ['ignore', 'pipe', 'pipe'],
         });
-        return parsePiModelTable(stdout);
+        if (result.error) {
+            return [];
+        }
+        const raw = `${result.stdout ?? ''}\n${result.stderr ?? ''}`;
+        return parsePiModelTable(raw);
     }
     catch {
         return [];

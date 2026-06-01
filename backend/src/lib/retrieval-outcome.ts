@@ -20,6 +20,14 @@ export function buildRetrievalSelectionsFromContext(
 ): RetrievalSelection[] {
   if (!retrieved) return [];
   const skillName = retrieved.meta.matchedSkills?.[0];
+  const canonicalKeys = retrieved.meta.selectedCandidateKeys ?? [];
+  if (canonicalKeys.length > 0) {
+    return canonicalKeys.map((candidateKey) => ({
+      candidateKey,
+      candidateKind: 'memory',
+      skillName,
+    }));
+  }
   return (retrieved.meta.selectedCandidateIds ?? []).map((candidateId) => ({
     candidateKey: `memory:${candidateId}`,
     candidateKind: 'memory',

@@ -1,53 +1,12 @@
 {
-  "specId": "Rorca Graph Identity Phase 1 Remaining",
-  "runId": 20260316000340,
-  "startedAt": "2026-05-31T21:58:50.668Z",
-  "lastUpdatedAt": "2026-05-31T22:37:16.545Z",
-  "completedStories": [
-    {
-      "storyId": "GI-003",
-      "title": "Re-key graph writes to canonical identity while preserving current semantics",
-      "status": "passed",
-      "startedAt": "2026-05-31T21:34:19.764Z",
-      "finishedAt": "2026-05-31T21:42:17.153Z",
-      "agentType": "pi",
-      "model": "openai-codex/gpt-5.4",
-      "elapsedMs": 477389
-    },
-    {
-      "storyId": "GI-004",
-      "title": "Complete memory provenance for graph reconstruction from relational truth",
-      "status": "passed",
-      "startedAt": "2026-05-31T22:01:01.550Z",
-      "finishedAt": "2026-05-31T22:12:41.703Z",
-      "agentType": "pi",
-      "model": "openai-codex/gpt-5.4",
-      "elapsedMs": 700153
-    },
-    {
-      "storyId": "GI-005",
-      "title": "Scope graph retrieval, query, and cache flows to canonical identity",
-      "status": "passed",
-      "startedAt": "2026-05-31T22:12:57.947Z",
-      "finishedAt": "2026-05-31T22:27:29.922Z",
-      "agentType": "pi",
-      "model": "openai-codex/gpt-5.4",
-      "elapsedMs": 871975
-    },
-    {
-      "storyId": "GI-006",
-      "title": "Add projection lifecycle cleanup via deletion sync or reconciliation pruning",
-      "status": "passed",
-      "startedAt": "2026-05-31T22:27:44.448Z",
-      "finishedAt": "2026-05-31T22:37:03.260Z",
-      "agentType": "pi",
-      "model": "openai-codex/gpt-5.4",
-      "elapsedMs": 558812
-    }
-  ],
+  "specId": "Rorca GraphRAG Phase 2 Scoring and Reranking",
+  "runId": 20260316000347,
+  "startedAt": "2026-05-31T23:56:39.394Z",
+  "lastUpdatedAt": "2026-05-31T23:56:40.250Z",
+  "completedStories": [],
   "failedStories": [],
   "skippedStories": [],
-  "currentStory": "GI-007",
+  "currentStory": "GR2-001",
   "decisions": [],
-  "resumedFromStory": "GI-003"
+  "resumedFromStory": null
 }
