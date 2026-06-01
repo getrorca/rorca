@@ -8,7 +8,6 @@ export default [
       'dist/**',
       'node_modules/**',
       'backend/**',
-      'vscode-extension/**',
       'rorca-vscode/**',
       'e2e/**',
       '*.config.js',

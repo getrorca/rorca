@@ -8,6 +8,8 @@ backend/.env
 dist
 .DS_Store
 *.log
+/*.tgz
+/rorca-baseline.json
 
 # Local-only helper trees
 .claude/

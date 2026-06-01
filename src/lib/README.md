@@ -199,7 +199,7 @@ With this enabled, all animations should run at 0ms duration instantly.
 
 ## Next Steps
 
-1. **Read**: Start with `ANIMATIONS_QUICK_START.md` (1 page)
+1. **Read**: Start with `docs/archive/implementation-notes/ANIMATIONS_QUICK_START.md` (1 page)
 2. **Integrate**: Use `ANIMATIONS_INTEGRATION_EXAMPLE.md` for your panel
 3. **Reference**: Consult `ANIMATIONS_GUIDE.md` for all options
 4. **Build**: Run `npm run build` to verify
