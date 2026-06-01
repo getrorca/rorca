@@ -1,14 +1,13 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
 import type { Request, Response, NextFunction } from 'express';
 import crypto, { randomUUID } from 'crypto';
 import jwt from 'jsonwebtoken';
-import { supabaseAdmin } from '../lib/supabase';
 
 export interface AuthUser {
   id: string;
@@ -37,7 +36,6 @@ export const LOCAL_ADMIN = {
 };
 
 export const JWT_SECRET = process.env.JWT_SECRET || 'rorca-dev-secret-change-in-production';
-const SUPABASE_AUTH_ENABLED = Boolean(process.env.SUPABASE_URL?.trim());
 const ENCRYPTION_KEY = crypto.createHash('sha256').update(JWT_SECRET).digest();
 const ENCRYPTION_ALGO = 'aes-256-gcm' as const;
 
@@ -157,21 +155,6 @@ export async function resolveAuthUserFromToken(token: string): Promise<AuthUser 
     return null;
   }
 
-  if (SUPABASE_AUTH_ENABLED) {
-    const { data, error } = await supabaseAdmin.auth.getUser(token);
-    const user = data.user;
-    if (!error && user?.id && user.email) {
-      const appUser = await getOrCreateAppUser(user.id, user.email, user.email_confirmed_at ?? null);
-      return {
-        id: appUser.id,
-        email: user.email,
-        supabaseId: user.id,
-        role: appUser.role,
-        plan: appUser.plan ?? undefined,
-      };
-    }
-  }
-
   if (process.env.NODE_ENV === 'test') {
     return resolveAuthUserFromLocalJwt(token);
   }
@@ -195,12 +178,6 @@ export async function authRequired(req: Request, res: Response, next: NextFuncti
   // populated req.user (LOCAL_ADMIN or a validated Supabase user). Pass through.
   if (process.env.AUTH_REQUIRED !== 'true') {
     if (!req.user) req.user = LOCAL_ADMIN;
-    next();
-    return;
-  }
-
-  if (!SUPABASE_AUTH_ENABLED) {
-    req.user = LOCAL_ADMIN;
     next();
     return;
   }

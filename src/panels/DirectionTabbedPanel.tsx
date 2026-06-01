@@ -1,26 +1,24 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
 import { useState, useEffect, useCallback } from 'react';
-import { Layers, BookOpen, Users, Sparkles, Pin } from 'lucide-react';
+import { Layers, BookOpen, Sparkles, Pin } from 'lucide-react';
 import { useWorkspace } from '../contexts/WorkspaceContext';
 import { apiFetch } from '../lib/apiFetch';
 import DirectionStackPanel from './DirectionStackPanel';
-import TeamDirectionPanel from './TeamDirectionPanel';
 import MemoryPanel from './MemoryPanel';
 
-// ULT-008: 3 tabs — Stack, Memory, Team
+// OSS edition: Stack + Memory only
 
-type DirectionTab = 'stack' | 'memory' | 'team';
+type DirectionTab = 'stack' | 'memory';
 
 const TABS: { id: DirectionTab; label: string; icon: typeof Layers }[] = [
   { id: 'stack', label: 'Stack', icon: Layers },
   { id: 'memory', label: 'Memory', icon: BookOpen },
-  { id: 'team', label: 'Team', icon: Users },
 ];
 
 type HealthLevel = 'green' | 'amber' | 'red';
@@ -172,7 +170,6 @@ export default function DirectionTabbedPanel() {
       >
         {activeTab === 'stack' && <DirectionStackPanel />}
         {activeTab === 'memory' && <MemoryPanel />}
-        {activeTab === 'team' && <TeamDirectionPanel />}
       </div>
     </div>
   );

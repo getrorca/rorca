@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -152,6 +152,6 @@ export const SAMPLE_PR_TEMPLATE_DATA: PrTemplateData = {
     agentType: 'claude',
     model: 'claude-opus-4-6',
     diffStats: '12 files changed, 487 insertions(+), 23 deletions(-)',
-    diffSummary: '- Added GitHub OAuth integration with encrypted token storage\n- Created auto-PR creation flow in `github-pr-creator.ts`\n- Added PR template renderer with Handlebars-style substitution\n- Implementation note: used `fetch` directly instead of Octokit (lighter dependency)',
+    diffSummary: '- Added GitHub token-based repository integration\n- Created auto-PR creation flow in `github-pr-creator.ts`\n- Added PR template renderer with Handlebars-style substitution\n- Implementation note: used `fetch` directly instead of Octokit (lighter dependency)',
   },
 };

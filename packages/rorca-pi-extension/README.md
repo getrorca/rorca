@@ -471,4 +471,4 @@ If you want to publish it externally, see:
 
 ## License
 
-BUSL-1.1
+Apache-2.0

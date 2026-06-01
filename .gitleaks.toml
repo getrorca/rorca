@@ -1,0 +1,28 @@
+title = "Rorca Gitleaks Config"
+
+[extend]
+useDefault = true
+
+[allowlist]
+  description = "Known-safe examples, docs, and test fixtures"
+  regexes = [
+    '''PLACEHOLDER_KEY_HERE''',
+    '''YOUR_[A-Z_]+_HERE''',
+    '''CHANGE_ME''',
+    '''REPLACE_WITH_REAL_[A-Z_]+''',
+    '''sk-\.\.\.''',
+    '''sb_publishable_.*''',
+    '''[Rr][Ee][Dd][Aa][Cc][Tt][Ee][Dd]''',
+  ]
+  paths = [
+    '''\.md$''',
+    '''docs/.*''',
+    '''forge/specs/.*''',
+    '''tests?/.*''',
+    '''examples?/.*''',
+    '''fixtures?/.*''',
+    '''\.env\.example$''',
+    '''\.env\.local\.example$''',
+    '''backend/\.env\.example$''',
+    '''packages/rorca-pi-extension/SCREENSHOT.*''',
+  ]

@@ -280,7 +280,7 @@ The script checks:
 - [ ] Nginx denies access to dotfiles
 - [ ] Rate limiting is active on auth and LLM endpoints
 - [ ] CORS_ORIGIN matches only your frontend domain
-- [ ] GitHub OAuth secrets (if used) are set via environment, not code
+- [ ] Optional GitHub tokens/credentials (if used) are provided via environment or local CLI auth, not hardcoded
 - [ ] Regular backups are configured and tested with a restore drill
 
 ## 10. Troubleshooting

@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -9,11 +9,10 @@ import { useState, type ComponentType } from 'react';
 import { Link, NavLink } from 'react-router-dom';
 import {
   Settings2, Layers, Route, Zap, Variable, Play, Webhook, Users,
-  User, CreditCard, Keyboard, ArrowLeft, ChevronRight,
-  Key, Code2, Bell, Plug, Rss, LayoutGrid, ScrollText,
+  Keyboard, ArrowLeft, ChevronRight,
+  Code2, Rss,
   type LucideIcon,
 } from 'lucide-react';
-import { Github } from './icons/GithubIcon';
 import type { PanelId } from './Sidebar';
 import type { SettingsTab } from '../panels/SettingsPanel';
 
@@ -43,7 +42,6 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
       { id: 'env-vars',  label: 'Environment',     icon: Variable  },
       { id: 'hooks',     label: 'Pipeline Hooks',  icon: Webhook   },
       { id: 'agents',    label: 'Agent Profiles',  icon: Users     },
-      { id: 'team',      label: 'Team',            icon: Users     },
       { id: 'context',   label: 'Context Routing', icon: Route     },
     ],
   },
@@ -57,34 +55,12 @@ const SETTINGS_GROUPS: SettingsGroup[] = [
     ],
   },
   {
-    id: 'integrations',
-    label: 'Integrations',
-    items: [
-      { id: 'integrations', label: 'Overview',  icon: LayoutGrid },
-      { id: 'github',     label: 'GitHub',    icon: Github },
-      { id: 'slack',     label: 'Slack',    icon: Plug, badge: 'Soon' },
-      { id: 'linear',    label: 'Linear',   icon: Plug, badge: 'Soon' },
-      { id: 'vercel',    label: 'Vercel',   icon: Plug, badge: 'Soon' },
-    ],
-  },
-  {
-    id: 'account',
-    label: 'Account',
-    items: [
-      { id: 'account',   label: 'Profile',         icon: User       },
-      { id: 'billing',   label: 'Billing',         icon: CreditCard },
-      { id: 'shortcuts', label: 'Shortcuts',       icon: Keyboard   },
-      { id: 'notifications', label: 'Notifications', icon: Bell     },
-      { id: 'audit-log', label: 'Audit Log',       icon: ScrollText },
-    ],
-  },
-  {
     id: 'system',
     label: 'System',
     items: [
-      { id: 'system',    label: 'Activity',           icon: Rss        },
-      { id: 'api-keys',  label: 'API Keys',         icon: Key        },
-      { id: 'developer', label: 'Developer Tools',  icon: Code2      },
+      { id: 'shortcuts', label: 'Shortcuts',       icon: Keyboard },
+      { id: 'system',    label: 'Activity',        icon: Rss },
+      { id: 'developer', label: 'Developer Tools', icon: Code2 },
     ],
   },
 ];

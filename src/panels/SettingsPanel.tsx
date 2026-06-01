@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -13,15 +13,11 @@ import { useActiveSettingsTab } from '../routes';
 
 export type SettingsTab =
   // Workspace group
-  | 'general' | 'env-vars' | 'hooks' | 'agents' | 'context' | 'team'
+  | 'general' | 'env-vars' | 'hooks' | 'agents' | 'context'
   // Execution group
   | 'providers' | 'direction' | 'pipeline'
-  // Integrations group
-  | 'integrations' | 'github' | 'slack' | 'linear' | 'vercel' | 'audit-log'
-  // Account group
-  | 'account' | 'billing' | 'shortcuts' | 'notifications'
   // System group
-  | 'system' | 'api-keys' | 'developer';
+  | 'shortcuts' | 'system' | 'developer';
 
 // ─── Lazy-loaded sub-components ──────────────────────────────────────────────
 
@@ -53,18 +49,9 @@ const ProviderSettingsTab = lazy(() =>
   import('./settings/ProviderSettingsTab').then((m) => ({ default: m.ProviderSettingsTab })),
 );
 
-const GitHubSettingsTab = lazy(() =>
-  import('./settings/GitHubSettingsTab').then((m) => ({ default: m.GitHubSettingsTab })),
-);
-
 const ShortcutsSettingsTab = lazy(() =>
   import('./settings/ShortcutsSettingsTab').then((m) => ({ default: m.ShortcutsSettingsTab })),
 );
-
-const AccountSettingsTab = lazy(() =>
-  import('./settings/AccountSettingsTab').then((m) => ({ default: m.AccountSettingsTab })),
-);
-
 
 const UnifiedActivitySection = lazy(() =>
   import('./settings/UnifiedActivitySection').then((m) => ({ default: m.UnifiedActivitySection })),
@@ -74,33 +61,12 @@ const DeadLetterQueueSection = lazy(() =>
   import('./settings/DeadLetterQueueSection').then((m) => ({ default: m.DeadLetterQueueSection })),
 );
 
-
-const ApiKeysSection = lazy(() =>
-  import('./settings/ApiKeysSection'),
-);
-
 const DeveloperToolsSection = lazy(() =>
   import('./settings/DeveloperToolsSection'),
 );
 
 const KnowledgeGraphSection = lazy(() =>
   import('./settings/KnowledgeGraphSection').then((m) => ({ default: m.KnowledgeGraphSection })),
-);
-
-const IntegrationPlaceholder = lazy(() =>
-  import('./settings/IntegrationPlaceholder'),
-);
-
-const IntegrationsHubTab = lazy(() =>
-  import('./settings/IntegrationsHubTab').then((m) => ({ default: m.IntegrationsHubTab })),
-);
-
-const IntegrationAuditLogTab = lazy(() =>
-  import('./settings/IntegrationAuditLogTab').then((m) => ({ default: m.IntegrationAuditLogTab })),
-);
-
-const TeamSettingsTab = lazy(() =>
-  import('./settings/TeamSettingsTab').then((m) => ({ default: m.TeamSettingsTab })),
 );
 
 
@@ -133,24 +99,12 @@ export default function SettingsPanel() {
           {activeTab === 'env-vars' && <DirectionSettings.WsEnvVarsSection />}
           {activeTab === 'hooks' && <DirectionSettings.WsHooksSection />}
           {activeTab === 'agents' && <DirectionSettings.WsAgentsSection />}
-          {activeTab === 'team' && <TeamSettingsTab />}
           {activeTab === 'context' && <DirectionSettings.WsContextSection />}
           {/* Execution group */}
           {activeTab === 'providers' && <ProviderSettingsTab />}
           {activeTab === 'direction' && <DirectionSettings.WsDirectionSection />}
           {activeTab === 'pipeline' && <DirectionSettings.WsPipelineSection />}
-          {/* Integrations group */}
-          {activeTab === 'integrations' && <IntegrationsHubTab />}
-          {activeTab === 'audit-log' && <IntegrationAuditLogTab />}
-          {activeTab === 'github' && <GitHubSettingsTab />}
-          {activeTab === 'slack' && <IntegrationPlaceholder name="Slack" description="Get run notifications, approve specs via interactive buttons, and receive failure alerts — all in your team's Slack channels." />}
-          {activeTab === 'linear' && <IntegrationPlaceholder name="Linear" description="Import Linear issues as specs, sync story progress to sub-issues, and auto-update parent issues when runs complete." />}
-          {activeTab === 'vercel' && <IntegrationPlaceholder name="Vercel" description="Auto-deploy on run completion, get preview URLs in Run View, and promote to production with one click." />}
-          {/* Account group */}
-          {activeTab === 'account' && <AccountSettingsTab />}
-          {activeTab === 'billing' && <IntegrationPlaceholder name="Billing" description="Manage your subscription, invoices, and payment method. Coming soon." />}
           {activeTab === 'shortcuts' && <ShortcutsSettingsTab />}
-          {activeTab === 'notifications' && <IntegrationPlaceholder name="Notifications" description="Configure email, webhook, and in-app notification preferences. Coming soon." />}
           {/* System group */}
           {activeTab === 'system' && (
             <>
@@ -161,7 +115,6 @@ export default function SettingsPanel() {
               <UnifiedActivitySection />
             </>
           )}
-          {activeTab === 'api-keys' && <ApiKeysSection />}
           {activeTab === 'developer' && <DeveloperToolsSection />}
         </Suspense>
       </div>

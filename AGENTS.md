@@ -6,7 +6,6 @@ File governance, behavioral rules, and agent persona zones for the Rorca codebas
 Rorca is an AI spec orchestration and pipeline management platform for autonomous software development.
 - **Dashboard** (`/src`): React 18 + Vite + Tailwind on :5210
 - **Backend** (`/backend`): Express.js + PostgreSQL 16 on :3030
-- **Landing Page** (`/landing-page`): Next.js 14 + Tailwind v4 + Framer Motion on :3002
 - **Execution Engine**: `claude --print` (Claude sub), `opencode run` (75+ providers), `codex` (ChatGPT sub)
 
 ## File Ownership Zones
@@ -44,7 +43,7 @@ Use this annotation shape for every exposed route:
  *   get:
  *     summary: List specs
  *     x-rorca-tier: public
- *     x-rorca-rationale: "Read-only spec listing — stable local/MCP surface with no billing or admin action."
+ *     x-rorca-rationale: "Read-only spec listing — stable local/MCP surface with no write or operator-only side effects."
  *     x-rorca-public-api: true
  *     responses:
  *       200: { description: OK }
@@ -52,10 +51,10 @@ Use this annotation shape for every exposed route:
 ```
 
 Choose tiers this way:
-- `public`: safe local automation and CLI/MCP use, no billing/admin side effects
-- `auth`: user-owned settings or profile data, still MCP-callable
-- `paid`: subscription-gated product surface, never MCP-callable
-- `admin`: local operator-only maintenance and licensing, never MCP-callable
+- `public`: safe local automation and CLI/MCP use, no write or operator-only side effects
+- `auth`: user-owned local settings or profile data, still MCP-callable
+- `paid`: non-OSS gated product surface, never MCP-callable
+- `admin`: local operator-only maintenance, never MCP-callable
 
 ### Backend Libs (`backend/src/lib/`)
 - **Owner**: Architect

@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -10,26 +10,18 @@ import path from 'node:path';
 import { fileURLToPath } from 'node:url';
 
 export const ROOT_DIR = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..');
+export const APACHE_SPDX = 'Apache-2.0';
 
-export const MIT_SPDX = 'MIT';
-export const BUSL_SPDX = 'BUSL-1.1';
-
-export const MIT_HEADER = `/**
+export const APACHE_HEADER = `/**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: MIT
- */
-`;
-
-export const BUSL_HEADER = `/**
- * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 `;
 
 export const SOURCE_EXTENSIONS = new Set(['.ts', '.tsx', '.js', '.jsx']);
-const SKIP_DIR_NAMES = new Set(['node_modules', 'dist', '.git', '.rorca', 'coverage']);
+const SKIP_DIR_NAMES = new Set(['node_modules', 'dist', '.git', '.rorca', 'coverage', 'landing-page']);
 
 export function relPath(filePath: string): string {
   return path.relative(ROOT_DIR, filePath).split(path.sep).join('/');
@@ -41,20 +33,7 @@ export function hasSupportedSourceExtension(filePath: string): boolean {
 
 export function shouldSkipFile(filePath: string): boolean {
   const normalized = relPath(filePath);
-
-  if (normalized.endsWith('.d.ts')) {
-    return true;
-  }
-
-  if (normalized.startsWith('forge/specs/')) {
-    return true;
-  }
-
-  if (normalized.startsWith('backend/src/db/pg-migrations/')) {
-    return true;
-  }
-
-  return false;
+  return normalized.endsWith('.d.ts') || normalized.startsWith('forge/specs/') || normalized.startsWith('backend/src/db/pg-migrations/');
 }
 
 export async function collectSourceFiles(startDir: string): Promise<string[]> {
@@ -63,27 +42,19 @@ export async function collectSourceFiles(startDir: string): Promise<string[]> {
 
   async function walk(currentDir: string): Promise<void> {
     const entries = await fs.readdir(currentDir, { withFileTypes: true });
-
     for (const entry of entries) {
       const fullPath = path.join(currentDir, entry.name);
-
       if (entry.isDirectory()) {
-        if (!SKIP_DIR_NAMES.has(entry.name)) {
-          await walk(fullPath);
-        }
+        if (!SKIP_DIR_NAMES.has(entry.name)) await walk(fullPath);
         continue;
       }
-
-      if (!entry.isFile() || !hasSupportedSourceExtension(fullPath) || shouldSkipFile(fullPath)) {
-        continue;
-      }
-
+      if (!entry.isFile() || !hasSupportedSourceExtension(fullPath) || shouldSkipFile(fullPath)) continue;
       files.push(fullPath);
     }
   }
 
   await walk(absoluteStart);
-  files.sort((left, right) => relPath(left).localeCompare(relPath(right)));
+  files.sort((a, b) => relPath(a).localeCompare(relPath(b)));
   return files;
 }
 
@@ -98,11 +69,15 @@ export function detectSpdx(text: string): string | null {
 
 export function expectedSpdxForFile(filePath: string): string | null {
   const normalized = relPath(filePath);
-  if (normalized.startsWith('packages/rorca-cli/')) {
-    return MIT_SPDX;
-  }
-  if (normalized.startsWith('backend/') || normalized.startsWith('src/')) {
-    return BUSL_SPDX;
+  if (
+    normalized.startsWith('packages/') ||
+    normalized.startsWith('backend/') ||
+    normalized.startsWith('src/') ||
+    normalized.startsWith('scripts/') ||
+    normalized.startsWith('bin/') ||
+    normalized.startsWith('shared/')
+  ) {
+    return APACHE_SPDX;
   }
   return null;
 }
@@ -112,9 +87,7 @@ export function isRelativeLikeImport(specifier: string): boolean {
 }
 
 export async function resolveRelativeImport(fromFile: string, specifier: string): Promise<string | null> {
-  if (!isRelativeLikeImport(specifier)) {
-    return null;
-  }
+  if (!isRelativeLikeImport(specifier)) return null;
 
   const basePath = specifier.startsWith('/')
     ? path.resolve(ROOT_DIR, `.${specifier}`)
@@ -129,11 +102,9 @@ export async function resolveRelativeImport(fromFile: string, specifier: string)
   for (const candidate of candidates) {
     try {
       const stat = await fs.stat(candidate);
-      if (stat.isFile()) {
-        return candidate;
-      }
+      if (stat.isFile()) return candidate;
     } catch {
-      // Ignore unresolved candidates.
+      // ignore
     }
   }
 

@@ -1,11 +1,22 @@
 node_modules
 .env
+.env.local
+backend/.env
 *.db
 *.db-shm
 *.db-wal
 dist
 .DS_Store
 *.log
+
+# Local-only helper trees
+.claude/
+.opencode/
+.pi/
+.rorca/
+default-personas/
+go-to-market/
+MEMORY.md
 
 # OCT-024: node-pty native prebuilds (platform-specific, rebuilt on install)
 backend/node_modules/node-pty/prebuilds/
@@ -14,6 +25,9 @@ backend/node_modules/node-pty/prebuilds/
 progress.txt
 .rorca/run-state.json
 .rorca/memory/health-log.json
+.rorca/auth-boundary-progress.md
+.rorca/memory/MEMORY.md
+.rorca/memory/MEMORY_ARCHIVE.md
 
 # Postgres backup files (auto-generated, not for git)
 backend/backups/
@@ -29,3 +43,11 @@ rorca
 # Supabase local development artifacts
 supabase/.branches/
 supabase/.temp/
+
+# Local run/test artifacts
+forge/logs/
+forge/specs/archive/
+forge/specs/approved/
+forge/specs/logs/
+forge/specs/pending/
+test-results/

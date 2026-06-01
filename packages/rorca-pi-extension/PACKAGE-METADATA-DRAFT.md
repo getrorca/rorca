@@ -18,7 +18,7 @@ Current notable fields:
 - `version: "0.1.0"`
 - `private: true`
 - `type: "module"`
-- `license: "BSL-1.1"`
+- `license: "Apache-2.0"`
 - `peerDependencies: { "@mariozechner/pi-coding-agent": "*" }`
 - `pi.extensions: ["./extensions"]`
 
@@ -125,7 +125,7 @@ Keep aligned with your actual legal intent.
 Current:
 
 ```json
-"license": "BSL-1.1"
+"license": "Apache-2.0"
 ```
 
 If that remains the intended public license posture, keep it.
@@ -222,7 +222,7 @@ This is a draft example only.
   "description": "Pi-native extension for Rorca: forge specs, trigger Pi-backed runs, watch progress live, and bridge Rorca MCP tools into Pi.",
   "private": false,
   "type": "module",
-  "license": "BSL-1.1",
+  "license": "Apache-2.0",
   "author": "Rorca",
   "homepage": "https://github.com/<org>/<repo>/tree/main/packages/rorca-pi-extension",
   "repository": {

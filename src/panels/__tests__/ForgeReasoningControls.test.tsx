@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -124,7 +124,7 @@ function buildSpecsPanelMock(overrides: {
     if (path.includes('/api/direction/models')) return { models, defaultModel: 'claude-opus-4-6' };
     if (path.includes('/api/vault/keys/default-provider')) return { provider: 'claude-cli' };
     if (path.includes('/api/config') && !path.includes('opencode') && !path.includes('embedding') && !path.includes('orchestration') && !path.includes('model-capability') && !path.includes('claude-auth') && !path.includes('ollama')) {
-      return { agentType: 'claude', agentModel: null, claudeBin: '/usr/local/bin/claude', opencodeBin: null, codexBin: null, piBin: null, opencodeInstalled: false, opencodeVersion: null, codexInstalled: false, codexVersion: null, piInstalled: false, piVersion: null, copilotConnected: false, copilotUsername: null };
+      return { agentType: 'claude', agentModel: null, claudeBin: '/usr/local/bin/claude', opencodeBin: null, codexBin: null, piBin: null, opencodeInstalled: false, opencodeVersion: null, codexInstalled: false, codexVersion: null, piInstalled: false, piVersion: null };
     }
     if (path.includes('/api/config/opencode-models')) return { models: [], grouped: {}, ollamaAvailable: false };
     if (path.includes('/api/workflow-router/resolved')) return { model: null };

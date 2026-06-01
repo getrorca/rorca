@@ -14,7 +14,7 @@ It is designed to feel good across the full Rorca product surface:
 [![CI](https://github.com/getrorca/rorca/actions/workflows/ci.yml/badge.svg)](https://github.com/getrorca/rorca/actions/workflows/ci.yml)
 ![Status](https://img.shields.io/badge/status-beta-orange)
 ![Node](https://img.shields.io/badge/node-%3E%3D20-green)
-![License](https://img.shields.io/badge/license-BUSL--1.1-blue)
+![License](https://img.shields.io/badge/license-Apache--2.0-blue)
 
 ---
 
@@ -472,11 +472,9 @@ npx tsc --noEmit
 rorca/
 ├── src/                         # dashboard frontend
 ├── backend/                     # API, MCP, retrieval, execution engine
-├── landing-page/                # public site
 ├── packages/                    # extension packages, including Pi extension
-├── docs/                        # architecture notes and deep dives
+├── docs/                        # public architecture notes and OSS docs
 ├── forge/                       # local runtime/spec assets
-├── default-personas/            # built-in persona overlays
 └── scripts/                     # dev and maintenance scripts
 ```
 
@@ -534,19 +532,17 @@ Prefer the explicit path:
 
 ## Further reading
 
+- `docs/context-injection.md`
 - `docs/graph-rag-deep-dive.md`
-- `docs/graph-rag-implementation-backlog.md`
-- `docs/graph-rag-implementation-progress.md`
-- `docs/cross-cli-spec-creation-plan.md`
+- `docs/OPEN_API_CONTRACT.md`
+- `docs/troubleshooting.md`
 - `packages/rorca-pi-extension/README.md`
 
 ---
 
 ## License
 
-This repository is currently licensed under the **Business Source License 1.1 (BUSL-1.1)**.
+This repository is licensed under the **Apache License, Version 2.0**.
 See:
 - `LICENSE`
 - `LICENSE-NOTICES.md`
-
-If the licensing model changes as the project opens up further, the repository should be updated to reflect that explicitly.

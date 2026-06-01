@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -13,15 +13,11 @@ import type { SettingsTab } from './panels/SettingsPanel';
 /** Valid settings sub-tabs for URL validation */
 const VALID_SETTINGS_TABS: readonly SettingsTab[] = [
   // Workspace group
-  'general', 'env-vars', 'hooks', 'agents', 'context', 'team',
+  'general', 'env-vars', 'hooks', 'agents', 'context',
   // Execution group
   'providers', 'direction', 'pipeline',
-  // Integrations group
-  'integrations', 'github', 'slack', 'linear', 'vercel', 'audit-log',
-  // Account group
-  'account', 'billing', 'shortcuts', 'notifications',
   // System group
-  'system', 'api-keys', 'developer',
+  'shortcuts', 'system', 'developer',
 ] as const;
 
 /**

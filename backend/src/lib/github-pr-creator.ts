@@ -1,7 +1,7 @@
 /**
  * Copyright (c) 2026 Rorca Inc.
- * SPDX-License-Identifier: BUSL-1.1
- * Licensed under the Business Source License 1.1.
+ * SPDX-License-Identifier: Apache-2.0
+ * Licensed under the Apache License, Version 2.0.
  * See LICENSE file in the project root for full license text.
  */
 
@@ -17,7 +17,7 @@
  *
  * Flow:
  *   1. Look up workspace_github_webhooks → get repo_owner, repo_name, auto_pr config
- *   2. Look up github_connections → decrypt OAuth token
+ *   2. Resolve a local GitHub token for repository access
  *   3. Query story_results + token_usage + pipeline_runs for PR body
  *   4. Check for existing open PR (GET /repos/:owner/:repo/pulls?head=branch)
  *   5. Create (POST) or update (PATCH) PR
@@ -103,7 +103,7 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
     return;
   }
 
-  // 2. Look up GitHub OAuth token (first user — single-user local tool)
+  // 2. Resolve a GitHub token (single-user local tool)
   const userRow = await queryOne<{ id: string }>('SELECT id FROM users LIMIT 1');
   if (!userRow) {
     logger.info({ runId }, '[auto-pr] Skipping auto-PR: no users configured');
@@ -116,7 +116,7 @@ export async function createOrUpdateAutoPr(opts: AutoPrOptions): Promise<void> {
   );
 
   if (!ghConn) {
-    logger.info({ runId }, '[auto-pr] Skipping auto-PR: no GitHub OAuth token found');
+    logger.info({ runId }, '[auto-pr] Skipping auto-PR: no GitHub token found');
     return;
   }
 
