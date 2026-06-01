@@ -2,11 +2,22 @@
   "specId": "Rorca GraphRAG Phase 2 Scoring and Reranking",
   "runId": 20260316000347,
   "startedAt": "2026-05-31T23:56:39.394Z",
-  "lastUpdatedAt": "2026-05-31T23:56:40.250Z",
-  "completedStories": [],
+  "lastUpdatedAt": "2026-06-01T00:13:24.738Z",
+  "completedStories": [
+    {
+      "storyId": "GR2-001",
+      "title": "Define the GraphRAG scoring contract and candidate schema",
+      "status": "passed",
+      "startedAt": "2026-05-31T23:56:46.126Z",
+      "finishedAt": "2026-06-01T00:13:11.423Z",
+      "agentType": "pi",
+      "model": "openai-codex/gpt-5.4",
+      "elapsedMs": 985297
+    }
+  ],
   "failedStories": [],
   "skippedStories": [],
-  "currentStory": "GR2-001",
+  "currentStory": "GR2-002",
   "decisions": [],
   "resumedFromStory": null
 }

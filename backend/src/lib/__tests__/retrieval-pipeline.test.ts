@@ -10,8 +10,17 @@ import {
   GRAPH_RAG_SCORE_SCHEMA_VERSION,
   matchSkillsToQuery,
   rankRetrievalCandidates,
+  scoreGraphCandidateFromProjection,
   type RetrievalCandidateInput,
 } from '../retrieval-pipeline';
+import {
+  buildConventionNodeKey,
+  buildFileNodeKey,
+  buildMemoryNodeKey,
+  buildSkillNodeKey,
+  buildSpecNodeKey,
+  buildStoryNodeKey,
+} from '../knowledge-graph';
 import { clearRetrievalTelemetry, getRecentRetrievalTelemetry, recordRetrievalTelemetry } from '../retrieval-telemetry';
 import { meanReciprocalRank, ndcgAtK, precisionAtK } from '../retrieval-evals';
 
@@ -30,6 +39,18 @@ function runRanking(candidates: RetrievalCandidateInput[]) {
     skills: [{ name: 'Auth Security', content: 'auth middleware jwt bearer token authorization retrieval ranking' }],
     tokenBudget: 2000,
     evaluationTimestamp: '2026-05-31T00:00:00.000Z',
+  });
+}
+
+function scoreProjection(candidate: RetrievalCandidateInput, specId: string = SPEC_ID) {
+  return scoreGraphCandidateFromProjection({
+    candidate,
+    workspaceId: WORKSPACE_ID,
+    specId,
+    storyId: STORY_ID,
+    predictedFileKeys: [buildFileNodeKey(WORKSPACE_ID, 'backend/routes/auth.ts')],
+    graphProximityAvailable: true,
+    referenceTimestamp: new Date('2026-05-31T00:00:00.000Z').getTime(),
   });
 }
 
@@ -73,6 +94,14 @@ describe('retrieval-pipeline', () => {
         category: 'Convention',
         confidence: 'high',
         createdAt: '2026-05-01T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceStoryId: 'US-002',
+        sourceStoryCanonicalKey: buildStoryNodeKey(WORKSPACE_ID, SPEC_ID, 'US-002'),
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+        graphNodeType: 'memory',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-01T00:00:00.000Z',
         graphRelationship: 'conflict',
         graphHops: 1,
       },
@@ -152,6 +181,11 @@ describe('retrieval-pipeline', () => {
         createdAt: '2026-05-08T00:00:00.000Z',
         sourceSpecId: SPEC_ID,
         sourceStoryId: 'US-011',
+        sourceStoryCanonicalKey: buildStoryNodeKey(WORKSPACE_ID, SPEC_ID, 'US-011'),
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        graphNodeType: 'memory',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-08T00:00:00.000Z',
         graphRelationship: 'TOUCHES',
         graphHops: 1,
         relatedFiles: ['backend/routes/auth.ts'],
@@ -272,6 +306,281 @@ describe('retrieval-pipeline', () => {
     expect(result.selected).toEqual([]);
     expect(result.contradictions).toEqual([]);
     expect(result.needsMoreEvidence).toBe(true);
+  });
+
+  test('scores supported canonical projection node types in scope', () => {
+    const specKey = buildSpecNodeKey(WORKSPACE_ID, SPEC_ID);
+    const storyKey = buildStoryNodeKey(WORKSPACE_ID, SPEC_ID, STORY_ID);
+    const fileKey = buildFileNodeKey(WORKSPACE_ID, 'backend/routes/auth.ts');
+
+    const candidates: RetrievalCandidateInput[] = [
+      {
+        id: 'story-node',
+        text: 'Story candidate',
+        origin: 'graph',
+        baseScore: 0.6,
+        canonicalKey: storyKey,
+        graphNodeType: 'story',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+        graphSignals: [{ fromCanonicalKey: storyKey, toCanonicalKey: specKey, relationship: 'BELONGS_TO', hops: 1, active: true, updatedAt: '2026-05-30T00:00:00.000Z' }],
+      },
+      {
+        id: 'memory-node',
+        text: 'Memory candidate',
+        origin: 'graph',
+        baseScore: 0.6,
+        canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'mem-1'),
+        graphNodeType: 'memory',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+        sourceSpecCanonicalKey: specKey,
+        sourceStoryCanonicalKey: storyKey,
+        graphSignals: [{ fromCanonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'mem-1'), toCanonicalKey: fileKey, relationship: 'ABOUT', hops: 1, active: true, updatedAt: '2026-05-30T00:00:00.000Z' }],
+      },
+      {
+        id: 'file-node',
+        text: 'File candidate',
+        origin: 'graph',
+        baseScore: 0.6,
+        canonicalKey: fileKey,
+        graphNodeType: 'file',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+        graphSignals: [{ fromCanonicalKey: fileKey, toCanonicalKey: storyKey, relationship: 'TOUCHES', hops: 1, active: true, updatedAt: '2026-05-30T00:00:00.000Z' }],
+      },
+      {
+        id: 'spec-node',
+        text: 'Spec candidate',
+        origin: 'graph',
+        baseScore: 0.6,
+        canonicalKey: specKey,
+        graphNodeType: 'spec',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+        graphSignals: [{ fromCanonicalKey: specKey, toCanonicalKey: storyKey, relationship: 'BELONGS_TO', hops: 1, active: true, updatedAt: '2026-05-30T00:00:00.000Z' }],
+      },
+      {
+        id: 'convention-node',
+        text: 'Convention candidate',
+        origin: 'graph',
+        baseScore: 0.6,
+        canonicalKey: buildConventionNodeKey(WORKSPACE_ID, 'auth-convention'),
+        graphNodeType: 'convention',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+        graphSignals: [{ fromCanonicalKey: buildConventionNodeKey(WORKSPACE_ID, 'auth-convention'), toCanonicalKey: fileKey, relationship: 'APPLIES_TO', hops: 1, active: true, updatedAt: '2026-05-30T00:00:00.000Z' }],
+      },
+      {
+        id: 'skill-node',
+        text: 'Skill candidate',
+        origin: 'graph',
+        baseScore: 0.6,
+        canonicalKey: buildSkillNodeKey('Auth Security', 'auto-match'),
+        graphNodeType: 'skill',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+        graphSignals: [{ fromCanonicalKey: buildSkillNodeKey('Auth Security', 'auto-match'), toCanonicalKey: storyKey, relationship: 'USED_IN', hops: 1, active: true, updatedAt: '2026-05-30T00:00:00.000Z' }],
+      },
+    ];
+
+    for (const candidate of candidates) {
+      const score = scoreProjection(candidate);
+      expect(score.score).toBeGreaterThan(0);
+      expect(score.scopeValid).toBe(true);
+      expect(score.nodeType).toBe(candidate.graphNodeType);
+    }
+  });
+
+  test('keeps duplicate story ids distinct by canonical spec-scoped keys', () => {
+    const specAStoryKey = buildStoryNodeKey(WORKSPACE_ID, 'spec-a', 'US-001');
+    const specBStoryKey = buildStoryNodeKey(WORKSPACE_ID, 'spec-b', 'US-001');
+
+    const inScope = scoreProjection({
+      id: 'US-001',
+      text: 'Story in active spec',
+      origin: 'graph',
+      baseScore: 0.6,
+      canonicalKey: specAStoryKey,
+      graphNodeType: 'story',
+      graphActive: true,
+      graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+      graphSignals: [{ fromCanonicalKey: specAStoryKey, toCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, 'spec-a'), relationship: 'BELONGS_TO', hops: 1, active: true, updatedAt: '2026-05-30T00:00:00.000Z' }],
+    }, 'spec-a');
+
+    const outOfScope = scoreProjection({
+      id: 'US-001',
+      text: 'Story in other spec',
+      origin: 'graph',
+      baseScore: 0.6,
+      canonicalKey: specBStoryKey,
+      graphNodeType: 'story',
+      graphActive: true,
+      graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+      graphSignals: [{ fromCanonicalKey: specBStoryKey, toCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, 'spec-b'), relationship: 'BELONGS_TO', hops: 1, active: true, updatedAt: '2026-05-30T00:00:00.000Z' }],
+    }, 'spec-a');
+
+    expect(inScope.score).toBeGreaterThan(0);
+    expect(outOfScope.score).toBe(0);
+    expect(outOfScope.scopeValid).toBe(false);
+    expect(specAStoryKey).not.toBe(specBStoryKey);
+  });
+
+  test('keeps duplicate file paths distinct by workspace-scoped canonical keys', () => {
+    const localPath = 'src/index.ts';
+    const fileWs1 = buildFileNodeKey(WORKSPACE_ID, localPath);
+    const fileWs2 = buildFileNodeKey('ws-2', localPath);
+    const storyKey = buildStoryNodeKey(WORKSPACE_ID, SPEC_ID, STORY_ID);
+
+    const inScope = scoreProjection({
+      id: localPath,
+      text: 'Workspace-local file',
+      origin: 'graph',
+      baseScore: 0.6,
+      canonicalKey: fileWs1,
+      graphNodeType: 'file',
+      graphActive: true,
+      graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+      graphSignals: [{ fromCanonicalKey: fileWs1, toCanonicalKey: storyKey, relationship: 'TOUCHES', hops: 1, active: true, updatedAt: '2026-05-30T00:00:00.000Z' }],
+    });
+
+    const leaked = scoreProjection({
+      id: localPath,
+      text: 'Foreign workspace file',
+      origin: 'graph',
+      baseScore: 0.6,
+      canonicalKey: fileWs2,
+      graphNodeType: 'file',
+      graphActive: true,
+      graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+      graphSignals: [{ fromCanonicalKey: fileWs2, toCanonicalKey: buildStoryNodeKey('ws-2', SPEC_ID, STORY_ID), relationship: 'TOUCHES', hops: 1, active: true, updatedAt: '2026-05-30T00:00:00.000Z' }],
+    });
+
+    expect(inScope.score).toBeGreaterThan(0);
+    expect(leaked.score).toBe(0);
+    expect(leaked.scopeValid).toBe(false);
+    expect(fileWs1).not.toBe(fileWs2);
+  });
+
+  test('suppresses stale projection artifacts and mixed weak graph signals', () => {
+    const freshDirect = scoreProjection({
+      id: 'mem-fresh',
+      text: 'Fresh direct memory',
+      origin: 'graph',
+      baseScore: 0.6,
+      canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'mem-fresh'),
+      graphNodeType: 'memory',
+      graphActive: true,
+      graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+      relatedFileKeys: [buildFileNodeKey(WORKSPACE_ID, 'backend/routes/auth.ts')],
+      graphSignals: [{ fromCanonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'mem-fresh'), toCanonicalKey: buildFileNodeKey(WORKSPACE_ID, 'backend/routes/auth.ts'), relationship: 'ABOUT', hops: 1, active: true, updatedAt: '2026-05-30T00:00:00.000Z' }],
+    });
+
+    const staleIndirect = scoreProjection({
+      id: 'mem-stale',
+      text: 'Stale indirect memory',
+      origin: 'graph',
+      baseScore: 0.6,
+      canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'mem-stale'),
+      graphNodeType: 'memory',
+      graphActive: false,
+      graphUpdatedAt: '2023-01-01T00:00:00.000Z',
+      graphSignals: [{ fromCanonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'mem-stale'), toCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID), relationship: 'DEPENDS_ON', hops: 3, active: false, updatedAt: '2023-01-01T00:00:00.000Z' }],
+    });
+
+    const weakIndirect = scoreProjection({
+      id: 'mem-indirect',
+      text: 'Weak indirect memory',
+      origin: 'graph',
+      baseScore: 0.6,
+      canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'mem-indirect'),
+      graphNodeType: 'memory',
+      graphActive: true,
+      graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+      graphSignals: [{ fromCanonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'mem-indirect'), toCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID), relationship: 'DEPENDS_ON', hops: 3, active: true, updatedAt: '2026-05-30T00:00:00.000Z' }],
+    });
+
+    expect(freshDirect.score).toBeGreaterThan(weakIndirect.score);
+    expect(staleIndirect.score).toBe(0);
+    expect(staleIndirect.stale).toBe(true);
+  });
+
+  test('gracefully returns zero for missing graph data and unsupported node types', () => {
+    const missingGraph = scoreProjection({
+      id: 'mem-missing',
+      text: 'Missing graph data',
+      origin: 'graph',
+      baseScore: 0.6,
+      canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'mem-missing'),
+      graphNodeType: 'memory',
+      graphActive: true,
+      graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+      graphSignals: [],
+    });
+
+    const unsupported = scoreProjection({
+      id: 'unknown-1',
+      text: 'Unknown graph node type',
+      origin: 'graph',
+      baseScore: 0.6,
+      canonicalKey: 'workspace:ws-1::mystery:1',
+      graphNodeType: 'mystery',
+      graphActive: true,
+      graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+      graphSignals: [],
+    });
+
+    expect(missingGraph.score).toBe(0);
+    expect(missingGraph.signalCount).toBe(0);
+    expect(unsupported.score).toBe(0);
+    expect(unsupported.nodeType).toBe('unknown');
+  });
+
+  test('drops stale graph candidates during ranking instead of throwing', () => {
+    const result = runRanking([
+      {
+        id: 'live-graph',
+        text: 'Auth route memory with fresh direct evidence',
+        origin: 'graph',
+        baseScore: 0.75,
+        matchType: 'graph',
+        category: 'Pattern',
+        confidence: 'high',
+        createdAt: '2026-05-30T00:00:00.000Z',
+        canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'live-graph'),
+        graphNodeType: 'memory',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        sourceStoryId: 'US-050',
+        sourceStoryCanonicalKey: buildStoryNodeKey(WORKSPACE_ID, SPEC_ID, 'US-050'),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+      {
+        id: 'stale-graph',
+        text: 'Stale graph artifact',
+        origin: 'graph',
+        baseScore: 0.8,
+        matchType: 'graph',
+        category: 'Pattern',
+        confidence: 'high',
+        createdAt: '2024-01-01T00:00:00.000Z',
+        canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'stale-graph'),
+        graphNodeType: 'memory',
+        graphActive: false,
+        graphUpdatedAt: '2024-01-01T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+    ]);
+
+    expect(result.selected.map(candidate => candidate.id)).toContain('live-graph');
+    expect(result.selected.map(candidate => candidate.id)).not.toContain('stale-graph');
+    expect(result.candidates.find(candidate => candidate.id === 'stale-graph')?.scoring.validation.issues).toContain(
+      'Graph candidate is stale or inactive in the canonical projection',
+    );
   });
 
   test('documents scored and semantic-only GraphRAG surfaces', () => {

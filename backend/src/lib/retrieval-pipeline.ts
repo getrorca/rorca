@@ -12,10 +12,23 @@ import {
   buildStoryNodeKey,
   normalizeGraphFilePath,
 } from './knowledge-graph';
+import { logger } from './logger';
 
 export interface RetrievalSkill {
   name: string;
   content: string;
+}
+
+export type GraphProjectionNodeType = 'story' | 'memory' | 'file' | 'spec' | 'convention' | 'skill';
+
+export interface GraphProjectionSignal {
+  fromCanonicalKey: string;
+  toCanonicalKey: string;
+  relationship: string;
+  hops: number;
+  weight?: number;
+  active?: boolean | null;
+  updatedAt?: string | null;
 }
 
 export interface RetrievalCandidateInput {
@@ -40,6 +53,10 @@ export interface RetrievalCandidateInput {
   sourceRunId?: number | null;
   graphRelationship?: string;
   graphHops?: number;
+  graphNodeType?: GraphProjectionNodeType | string | null;
+  graphActive?: boolean | null;
+  graphUpdatedAt?: string | null;
+  graphSignals?: GraphProjectionSignal[];
   canonicalKey?: string;
 }
 
@@ -58,6 +75,10 @@ export interface GraphRagProximityComponent extends GraphRagScoreComponent {
   hops: number | null;
   relationship?: string;
   proximityUnavailable: boolean;
+  nodeType?: GraphProjectionNodeType | 'unknown';
+  signalCount?: number;
+  scopeValid?: boolean;
+  stale?: boolean;
 }
 
 export interface GraphRagScopeStrengthComponent extends GraphRagScoreComponent {
@@ -257,6 +278,45 @@ const DUPLICATION_PENALTIES = {
   superseded: 0.18,
 } as const;
 
+const WORKSPACE_SCOPED_GRAPH_TYPES = new Set<GraphProjectionNodeType>([
+  'story',
+  'memory',
+  'file',
+  'spec',
+  'convention',
+]);
+
+const GRAPH_RELATIONSHIP_WEIGHTS: Record<string, number> = {
+  TOUCHES: 1,
+  ABOUT: 0.97,
+  LEARNED_FROM: 0.95,
+  FROM_SPEC: 0.92,
+  BELONGS_TO: 0.9,
+  APPLIES_TO: 0.88,
+  USED_IN: 0.84,
+  DEPENDS_ON: 0.72,
+  IN_WORKSPACE: 0.55,
+  conflict: 0.7,
+};
+
+const GRAPH_NODE_TYPE_WEIGHTS: Record<GraphProjectionNodeType, number> = {
+  memory: 1,
+  story: 0.96,
+  file: 0.94,
+  spec: 0.9,
+  convention: 0.88,
+  skill: 0.86,
+};
+
+const GRAPH_STALE_MAX_AGE_DAYS: Record<GraphProjectionNodeType, number> = {
+  memory: 365,
+  story: 180,
+  file: 365,
+  spec: 730,
+  convention: 730,
+  skill: 365,
+};
+
 function clamp(value: number, min: number = 0, max: number = 1): number {
   return Math.max(min, Math.min(max, value));
 }
@@ -441,38 +501,379 @@ function retrievalSignalScore(baseScore: number, lexical: number, semantic: numb
   return roundScore((clamp(baseScore) * 0.4) + (lexical * 0.25) + (semantic * 0.35));
 }
 
-function graphScore(
+function parseGraphNodeType(candidate: RetrievalCandidateInput): GraphProjectionNodeType | null {
+  const raw = (candidate.graphNodeType || '').trim().toLowerCase();
+  if (raw === 'story' || raw === 'memory' || raw === 'file' || raw === 'spec' || raw === 'convention' || raw === 'skill') {
+    return raw;
+  }
+  if (raw) return null;
+  if (candidate.canonicalKey?.startsWith('story:')) return 'story';
+  if (candidate.canonicalKey?.startsWith('memory:')) return 'memory';
+  if (candidate.canonicalKey?.startsWith('file:')) return 'file';
+  if (candidate.canonicalKey?.startsWith('spec:')) return 'spec';
+  if (candidate.canonicalKey?.startsWith('convention:')) return 'convention';
+  if (candidate.canonicalKey?.startsWith('skill:')) return 'skill';
+  return candidate.id.startsWith('cache:') || candidate.id.startsWith('conflict:') ? null : 'memory';
+}
+
+function workspaceScopedKeyPrefix(nodeType: GraphProjectionNodeType, workspaceId: string): string | null {
+  return WORKSPACE_SCOPED_GRAPH_TYPES.has(nodeType)
+    ? `${nodeType}:${workspaceId}::`
+    : null;
+}
+
+function keyBelongsToWorkspaceScope(key: string | undefined, workspaceId: string): boolean {
+  if (!key) return false;
+  const type = key.split(':', 1)[0]?.toLowerCase() as GraphProjectionNodeType | undefined;
+  if (!type || !WORKSPACE_SCOPED_GRAPH_TYPES.has(type)) return false;
+  return key.startsWith(`${type}:${workspaceId}::`);
+}
+
+function keyBelongsToForeignWorkspace(key: string | undefined, workspaceId: string): boolean {
+  if (!key) return false;
+  const type = key.split(':', 1)[0]?.toLowerCase() as GraphProjectionNodeType | undefined;
+  if (!type || !WORKSPACE_SCOPED_GRAPH_TYPES.has(type)) return false;
+  return !key.startsWith(`${type}:${workspaceId}::`);
+}
+
+function projectionFreshnessScore(
+  updatedAt: string | null | undefined,
+  nodeType: GraphProjectionNodeType,
+  referenceTimestamp: number,
+): number {
+  const ts = parseTimestamp(updatedAt);
+  if (ts == null || referenceTimestamp <= 0) return 0.55;
+  const ageMs = Math.max(0, referenceTimestamp - ts);
+  const ageDays = ageMs / (1000 * 60 * 60 * 24);
+  const maxAgeDays = GRAPH_STALE_MAX_AGE_DAYS[nodeType];
+  if (ageDays > maxAgeDays) return 0;
+  return roundScore(1 - (ageDays / maxAgeDays));
+}
+
+function projectionArtifactIsUsable(
+  active: boolean | null | undefined,
+  updatedAt: string | null | undefined,
+  nodeType: GraphProjectionNodeType,
+  referenceTimestamp: number,
+): { usable: boolean; stale: boolean; freshness: number } {
+  if (active === false) {
+    return { usable: false, stale: true, freshness: 0 };
+  }
+
+  const hasSignal = active === true || parseTimestamp(updatedAt) != null;
+  if (!hasSignal) {
+    return { usable: false, stale: true, freshness: 0 };
+  }
+
+  const freshness = projectionFreshnessScore(updatedAt, nodeType, referenceTimestamp);
+  if (freshness <= 0 && parseTimestamp(updatedAt) != null) {
+    return { usable: false, stale: true, freshness: 0 };
+  }
+
+  return { usable: true, stale: false, freshness: active === true && parseTimestamp(updatedAt) == null ? 0.7 : freshness };
+}
+
+function deriveProjectionSignals(candidate: RetrievalCandidateInput): GraphProjectionSignal[] {
+  if (candidate.graphSignals && candidate.graphSignals.length > 0) {
+    return candidate.graphSignals;
+  }
+
+  if (!candidate.canonicalKey) return [];
+
+  const updatedAt = candidate.graphUpdatedAt ?? candidate.createdAt ?? null;
+  const active = candidate.graphActive;
+  const hops = Math.max(1, candidate.graphHops ?? 1);
+  const signals: GraphProjectionSignal[] = [];
+
+  if (candidate.sourceStoryCanonicalKey) {
+    signals.push({
+      fromCanonicalKey: candidate.canonicalKey,
+      toCanonicalKey: candidate.sourceStoryCanonicalKey,
+      relationship: 'LEARNED_FROM',
+      hops,
+      active,
+      updatedAt,
+    });
+  }
+
+  if (candidate.sourceSpecCanonicalKey) {
+    signals.push({
+      fromCanonicalKey: candidate.canonicalKey,
+      toCanonicalKey: candidate.sourceSpecCanonicalKey,
+      relationship: 'FROM_SPEC',
+      hops,
+      active,
+      updatedAt,
+    });
+  }
+
+  for (const fileKey of candidate.relatedFileKeys ?? []) {
+    signals.push({
+      fromCanonicalKey: candidate.canonicalKey,
+      toCanonicalKey: fileKey,
+      relationship: candidate.graphRelationship || 'ABOUT',
+      hops,
+      active,
+      updatedAt,
+    });
+  }
+
+  return signals;
+}
+
+function signalScopeSpecificity(
+  signal: GraphProjectionSignal,
+  context: { workspaceId: string; specId?: string; storyId?: string; predictedFileKeys: string[] },
+): number {
+  const keys = [signal.fromCanonicalKey, signal.toCanonicalKey].filter(Boolean);
+  const storyKey = context.specId && context.storyId
+    ? buildStoryNodeKey(context.workspaceId, context.specId, context.storyId)
+    : null;
+  const specKey = context.specId ? buildSpecNodeKey(context.workspaceId, context.specId) : null;
+  const specStoryPrefix = context.specId ? `story:${context.workspaceId}::${context.specId}::` : null;
+
+  if (storyKey && keys.includes(storyKey)) return 1;
+  if (keys.some(key => context.predictedFileKeys.includes(key))) return 0.95;
+  if (specKey && (keys.includes(specKey) || keys.some(key => key.startsWith(specStoryPrefix || '')))) return 0.86;
+  if (keys.some(key => keyBelongsToWorkspaceScope(key, context.workspaceId))) return 0.64;
+  return 0;
+}
+
+function candidateScopeValid(
   candidate: RetrievalCandidateInput,
-  predictedFileKeys: string[],
-  graphProximityAvailable: boolean,
-): GraphRagProximityComponent {
+  nodeType: GraphProjectionNodeType,
+  context: { workspaceId: string; specId?: string; storyId?: string; predictedFileKeys: string[] },
+  signals: GraphProjectionSignal[],
+): boolean {
+  const storyKey = context.specId && context.storyId
+    ? buildStoryNodeKey(context.workspaceId, context.specId, context.storyId)
+    : null;
+  const specKey = context.specId ? buildSpecNodeKey(context.workspaceId, context.specId) : null;
+  const specStoryPrefix = context.specId ? `story:${context.workspaceId}::${context.specId}::` : null;
+
+  if (candidate.canonicalKey && keyBelongsToForeignWorkspace(candidate.canonicalKey, context.workspaceId)) {
+    return false;
+  }
+  if (candidate.sourceStoryCanonicalKey && keyBelongsToForeignWorkspace(candidate.sourceStoryCanonicalKey, context.workspaceId)) {
+    return false;
+  }
+  if (candidate.sourceSpecCanonicalKey && keyBelongsToForeignWorkspace(candidate.sourceSpecCanonicalKey, context.workspaceId)) {
+    return false;
+  }
+  if ((candidate.relatedFileKeys ?? []).some(key => keyBelongsToForeignWorkspace(key, context.workspaceId))) {
+    return false;
+  }
+  if (signals.some(signal => keyBelongsToForeignWorkspace(signal.fromCanonicalKey, context.workspaceId) || keyBelongsToForeignWorkspace(signal.toCanonicalKey, context.workspaceId))) {
+    return false;
+  }
+
+  const prefix = workspaceScopedKeyPrefix(nodeType, context.workspaceId);
+  if (prefix && candidate.canonicalKey && !candidate.canonicalKey.startsWith(prefix)) {
+    return false;
+  }
+
+  if (!context.specId) {
+    return true;
+  }
+
+  if (nodeType === 'story') {
+    return candidate.canonicalKey?.startsWith(specStoryPrefix || '') ?? false;
+  }
+  if (nodeType === 'spec') {
+    return candidate.canonicalKey === specKey;
+  }
+  if (nodeType === 'memory') {
+    if (candidate.sourceSpecCanonicalKey) return candidate.sourceSpecCanonicalKey === specKey;
+    if (candidate.sourceStoryCanonicalKey) return candidate.sourceStoryCanonicalKey.startsWith(specStoryPrefix || '');
+  }
+  if (nodeType === 'file' && candidate.canonicalKey && context.predictedFileKeys.includes(candidate.canonicalKey)) {
+    return true;
+  }
+
+  return signals.some(signal => signalScopeSpecificity(signal, context) > 0.8)
+    || (storyKey ? candidate.sourceStoryCanonicalKey === storyKey : false)
+    || (specKey ? candidate.sourceSpecCanonicalKey === specKey : false);
+}
+
+function relationshipWeight(relationship?: string): number {
+  return GRAPH_RELATIONSHIP_WEIGHTS[relationship || ''] ?? 0.4;
+}
+
+function hopStrength(hops: number | null | undefined): number {
+  if (!hops || hops <= 1) return 1;
+  if (hops === 2) return 0.72;
+  if (hops === 3) return 0.5;
+  return 0.35;
+}
+
+function signalStrength(
+  signal: GraphProjectionSignal,
+  nodeType: GraphProjectionNodeType,
+  context: { workspaceId: string; specId?: string; storyId?: string; predictedFileKeys: string[] },
+  referenceTimestamp: number,
+): number {
+  const scopeSpecificity = signalScopeSpecificity(signal, context);
+  if (scopeSpecificity <= 0) return 0;
+
+  const freshness = projectionFreshnessScore(signal.updatedAt, nodeType, referenceTimestamp);
+  const weight = clamp(signal.weight ?? 1);
+  const score = (
+    (relationshipWeight(signal.relationship) * 0.45)
+    + (hopStrength(signal.hops) * 0.22)
+    + (weight * 0.1)
+    + (scopeSpecificity * 0.13)
+    + (freshness * 0.1)
+  ) * GRAPH_NODE_TYPE_WEIGHTS[nodeType];
+
+  return roundScore(score);
+}
+
+export function scoreGraphCandidateFromProjection(input: {
+  candidate: RetrievalCandidateInput;
+  workspaceId: string;
+  specId?: string;
+  storyId?: string;
+  predictedFileKeys: string[];
+  graphProximityAvailable: boolean;
+  referenceTimestamp: number;
+}): GraphRagProximityComponent {
+  const { candidate, graphProximityAvailable, predictedFileKeys, referenceTimestamp } = input;
+  const nodeType = parseGraphNodeType(candidate);
+
   if (!graphProximityAvailable) {
     return {
       score: 0,
       hops: candidate.graphHops ?? null,
       relationship: candidate.graphRelationship,
       proximityUnavailable: true,
+      nodeType: nodeType ?? 'unknown',
+      signalCount: 0,
+      scopeValid: true,
+      stale: false,
     };
   }
 
-  const relatedFileKeys = candidate.relatedFileKeys ?? [];
-  const fileScore = fileOverlapScore(predictedFileKeys, relatedFileKeys);
-  if (candidate.origin === 'graph') {
-    const hopPenalty = candidate.graphHops && candidate.graphHops > 1 ? 0.1 * (candidate.graphHops - 1) : 0;
+  if (!nodeType) {
+    if (candidate.graphNodeType) {
+      logger.warn({ graphNodeType: candidate.graphNodeType, candidateId: candidate.id }, '[retrieval-pipeline] Unsupported graph node type — returning zero score');
+    }
     return {
-      score: roundScore(0.82 + (fileScore * 0.18) - hopPenalty),
+      score: 0,
       hops: candidate.graphHops ?? null,
       relationship: candidate.graphRelationship,
       proximityUnavailable: false,
+      nodeType: 'unknown',
+      signalCount: 0,
+      scopeValid: false,
+      stale: false,
     };
   }
 
-  return {
-    score: roundScore(fileScore * 0.45),
-    hops: candidate.graphHops ?? null,
-    relationship: candidate.graphRelationship,
-    proximityUnavailable: false,
+  const context = {
+    workspaceId: input.workspaceId,
+    specId: input.specId,
+    storyId: input.storyId,
+    predictedFileKeys,
   };
+
+  const candidateProjectionState = projectionArtifactIsUsable(
+    candidate.graphActive,
+    candidate.graphUpdatedAt ?? candidate.createdAt,
+    nodeType,
+    referenceTimestamp,
+  );
+  if (!candidateProjectionState.usable) {
+    return {
+      score: 0,
+      hops: candidate.graphHops ?? null,
+      relationship: candidate.graphRelationship,
+      proximityUnavailable: false,
+      nodeType,
+      signalCount: 0,
+      scopeValid: false,
+      stale: candidateProjectionState.stale,
+    };
+  }
+
+  const allSignals = deriveProjectionSignals(candidate);
+  const scopeValid = candidateScopeValid(candidate, nodeType, context, allSignals);
+  if (!scopeValid) {
+    return {
+      score: 0,
+      hops: candidate.graphHops ?? null,
+      relationship: candidate.graphRelationship,
+      proximityUnavailable: false,
+      nodeType,
+      signalCount: 0,
+      scopeValid: false,
+      stale: false,
+    };
+  }
+
+  const activeSignals = allSignals.filter((signal) => {
+    const state = projectionArtifactIsUsable(
+      signal.active ?? candidate.graphActive,
+      signal.updatedAt ?? candidate.graphUpdatedAt ?? candidate.createdAt,
+      nodeType,
+      referenceTimestamp,
+    );
+    return state.usable && signalScopeSpecificity(signal, context) > 0;
+  });
+
+  const overlap = fileOverlapScore(predictedFileKeys, candidate.relatedFileKeys ?? []);
+  if (activeSignals.length === 0) {
+    return {
+      score: roundScore(overlap * 0.18),
+      hops: candidate.graphHops ?? null,
+      relationship: candidate.graphRelationship,
+      proximityUnavailable: false,
+      nodeType,
+      signalCount: 0,
+      scopeValid: true,
+      stale: false,
+    };
+  }
+
+  const rankedSignals = activeSignals
+    .map(signal => ({ signal, score: signalStrength(signal, nodeType, context, referenceTimestamp) }))
+    .sort((a, b) => b.score - a.score);
+
+  const strongest = rankedSignals[0];
+  const second = rankedSignals[1];
+  const combinedScore = roundScore(
+    (strongest.score * 0.82)
+    + ((second?.score ?? 0) * 0.08)
+    + (overlap * 0.1),
+  );
+
+  return {
+    score: combinedScore,
+    hops: strongest.signal.hops ?? candidate.graphHops ?? null,
+    relationship: strongest.signal.relationship || candidate.graphRelationship,
+    proximityUnavailable: false,
+    nodeType,
+    signalCount: activeSignals.length,
+    scopeValid: true,
+    stale: false,
+  };
+}
+
+function graphScore(
+  candidate: RetrievalCandidateInput,
+  predictedFileKeys: string[],
+  graphProximityAvailable: boolean,
+  context: { workspaceId: string; specId?: string; storyId?: string },
+  referenceTimestamp: number,
+): GraphRagProximityComponent {
+  return scoreGraphCandidateFromProjection({
+    candidate,
+    workspaceId: context.workspaceId,
+    specId: context.specId,
+    storyId: context.storyId,
+    predictedFileKeys,
+    graphProximityAvailable,
+    referenceTimestamp,
+  });
 }
 
 function scopeStrength(
@@ -578,10 +979,23 @@ function mmrSimilarity(a: RankedRetrievalCandidate, b: RankedRetrievalCandidate)
   return tokenOverlap(tokenize(a.text), tokenize(b.text));
 }
 
-function buildValidation(candidate: RetrievalCandidateInput, canonicalKey?: string): GraphRagCandidateValidation {
+function buildValidation(
+  candidate: RetrievalCandidateInput,
+  canonicalKey: string | undefined,
+  graph: GraphRagProximityComponent,
+): GraphRagCandidateValidation {
   const issues: string[] = [];
   if (!canonicalKey) issues.push('Candidate is missing a resolvable canonical memory key; scoring consumes identity and cannot invent it');
   if (!candidate.text?.trim()) issues.push('Candidate text is empty');
+  if (candidate.origin === 'graph' && graph.scopeValid === false) {
+    issues.push('Graph candidate is outside the active workspace/spec scope or lacks scoped canonical projection evidence');
+  }
+  if (candidate.origin === 'graph' && graph.stale) {
+    issues.push('Graph candidate is stale or inactive in the canonical projection');
+  }
+  if (candidate.graphNodeType && graph.nodeType === 'unknown') {
+    issues.push(`Unsupported graph node type: ${candidate.graphNodeType}`);
+  }
   return { valid: issues.length === 0, issues };
 }
 
@@ -622,12 +1036,22 @@ export function rankRetrievalCandidates(input: {
   const enriched: RankedRetrievalCandidate[] = input.candidates.map((candidate) => {
     const invalidCanonicalKey = `invalid:memory:${input.workspaceId}::${candidate.id || 'missing-id'}`;
     const canonicalKey = resolveCanonicalKey(candidate, input.workspaceId) ?? invalidCanonicalKey;
-    const validation = buildValidation(candidate, canonicalKey === invalidCanonicalKey ? undefined : canonicalKey);
     const relatedFileKeys = resolveRelatedFileKeys(candidate, input.workspaceId);
+    const graph = graphScore(
+      { ...candidate, relatedFileKeys, canonicalKey },
+      predictedFileKeys,
+      graphProximityAvailable,
+      {
+        workspaceId: input.workspaceId,
+        specId: input.specId,
+        storyId: input.storyId,
+      },
+      referenceTimestamp,
+    );
+    const validation = buildValidation(candidate, canonicalKey === invalidCanonicalKey ? undefined : canonicalKey, graph);
     const lexical = lexicalScore(input.queryText, candidate);
     const semantic = semanticScore(candidate);
     const validator = validatorScore(candidate, matchedSkills);
-    const graph = graphScore({ ...candidate, relatedFileKeys }, predictedFileKeys, graphProximityAvailable);
     const scope = scopeStrength({ ...candidate, relatedFileKeys }, {
       workspaceId: input.workspaceId,
       specId: input.specId,

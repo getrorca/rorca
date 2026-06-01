@@ -444,6 +444,40 @@ export async function retrieveContext(
     matchType: RetrievalCandidateInput['matchType'],
   ): RetrievalCandidateInput => {
     const relatedFiles = parseRelatedFiles(row.related_files);
+    const canonicalKey = buildMemoryNodeKey(wsId, String(row.id));
+    const relatedFileKeys = relatedFiles.map(filePath => buildFileNodeKey(wsId, filePath)).filter(Boolean).sort();
+    const sourceStoryCanonicalKey = row.source_story_id && row.source_spec_id
+      ? buildStoryNodeKey(wsId, row.source_spec_id, row.source_story_id)
+      : undefined;
+    const sourceSpecCanonicalKey = row.source_spec_id
+      ? buildSpecNodeKey(wsId, row.source_spec_id)
+      : undefined;
+    const graphSignals = [
+      ...(sourceStoryCanonicalKey ? [{
+        fromCanonicalKey: canonicalKey,
+        toCanonicalKey: sourceStoryCanonicalKey,
+        relationship: 'LEARNED_FROM',
+        hops: 1,
+        active: true,
+        updatedAt: row.created_at,
+      }] : []),
+      ...(sourceSpecCanonicalKey ? [{
+        fromCanonicalKey: canonicalKey,
+        toCanonicalKey: sourceSpecCanonicalKey,
+        relationship: 'FROM_SPEC',
+        hops: 1,
+        active: true,
+        updatedAt: row.created_at,
+      }] : []),
+      ...relatedFileKeys.map(fileKey => ({
+        fromCanonicalKey: canonicalKey,
+        toCanonicalKey: fileKey,
+        relationship: 'ABOUT',
+        hops: 1,
+        active: true,
+        updatedAt: row.created_at,
+      })),
+    ];
     return {
       id: String(row.id),
       text: row.content,
@@ -458,17 +492,17 @@ export async function retrieveContext(
       pinned: row.pinned,
       createdAt: row.created_at,
       relatedFiles,
-      relatedFileKeys: relatedFiles.map(filePath => buildFileNodeKey(wsId, filePath)).filter(Boolean).sort(),
+      relatedFileKeys,
       sourceStoryId: row.source_story_id,
-      sourceStoryCanonicalKey: row.source_story_id && row.source_spec_id
-        ? buildStoryNodeKey(wsId, row.source_spec_id, row.source_story_id)
-        : undefined,
+      sourceStoryCanonicalKey,
       sourceSpecId: row.source_spec_id,
-      sourceSpecCanonicalKey: row.source_spec_id
-        ? buildSpecNodeKey(wsId, row.source_spec_id)
-        : undefined,
+      sourceSpecCanonicalKey,
       sourceRunId: row.source_run_id,
-      canonicalKey: buildMemoryNodeKey(wsId, String(row.id)),
+      graphNodeType: 'memory',
+      graphActive: true,
+      graphUpdatedAt: row.created_at,
+      graphSignals,
+      canonicalKey,
     };
   };
 
