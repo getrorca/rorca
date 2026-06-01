@@ -8,7 +8,7 @@ import {
   readSnapshot,
   writeContractMarkdown,
   writeSnapshot,
-} from './public-contract-lib';
+} from '../packages/rorca-public-contract/src/index';
 
 const cwd = process.cwd();
 const docsDir = path.join(cwd, 'docs');
