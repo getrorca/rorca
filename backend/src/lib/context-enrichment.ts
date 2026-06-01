@@ -34,6 +34,10 @@ export interface ContextEnrichmentMeta {
   tier: ContextRetrievalTier;
   mode: ContextRetrievalMode;
   graphAvailable: boolean;
+  graphScoreWeight: number;
+  graphRerankAppliedWeight: number;
+  graphRerankChanged: boolean;
+  graphRerankedCandidateKeys: string[];
   predictedPaths: string[];
   inferredSkills: string[];
 }
@@ -314,6 +318,10 @@ async function buildDirectionOnlyContext(
       tier: computeTier({ cagHits: memory.length + budgetedSkills.length, ragHits: 0, graphHits: 0 }),
       mode,
       graphAvailable: false,
+      graphScoreWeight: 0,
+      graphRerankAppliedWeight: 0,
+      graphRerankChanged: false,
+      graphRerankedCandidateKeys: [],
       predictedPaths: [],
       inferredSkills,
     },
@@ -347,9 +355,17 @@ export async function buildContextForStory(
 
   const graphAvailable = options.includeGraph === false ? false : await checkAge();
   const predictedPaths = await resolvePredictedPaths(workspace.path, story, options.predictedPaths);
+  let graphScoreWeight = 0;
+  try {
+    graphScoreWeight = loadRorcaConfig(workspace.path).context.retrieval.graphScoreWeight;
+  } catch (error) {
+    logger.warn({ error, workspaceId }, '[context-enrichment] failed to load graph score weight — using safe default');
+  }
   const retrieved = await retrieveContext(workspaceId, storyText, {
     maxTokens,
     includeGraph: graphAvailable,
+    graphScoreWeight,
+    workspacePath: workspace.path,
     predictedPaths,
     storyId: story?.id,
     specId,
@@ -376,6 +392,10 @@ export async function buildContextForStory(
       }),
       mode,
       graphAvailable,
+      graphScoreWeight: retrieved.meta.graphScoreWeight ?? graphScoreWeight,
+      graphRerankAppliedWeight: retrieved.meta.graphRerankAppliedWeight ?? 0,
+      graphRerankChanged: retrieved.meta.graphRerankChanged ?? false,
+      graphRerankedCandidateKeys: retrieved.meta.graphRerankedCandidateKeys ?? [],
       predictedPaths,
       inferredSkills,
     },

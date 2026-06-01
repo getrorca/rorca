@@ -80,6 +80,9 @@
       "ledgerPath": ".rorca/memory/MEMORY.md",
       "maxEntries": 500,
       "autoCapture": true
+    },
+    "retrieval": {
+      "graphScoreWeight": 0
     }
   },
   "teleology": {

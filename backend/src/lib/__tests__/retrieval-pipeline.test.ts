@@ -28,16 +28,25 @@ const WORKSPACE_ID = 'ws-1';
 const SPEC_ID = 'spec-graph';
 const STORY_ID = 'GR2-001';
 
-function runRanking(candidates: RetrievalCandidateInput[]) {
+function runRanking(
+  candidates: RetrievalCandidateInput[],
+  options: {
+    graphScoreWeight?: number;
+    graphProximityAvailable?: boolean;
+    specId?: string;
+  } = {},
+) {
   return rankRetrievalCandidates({
     workspaceId: WORKSPACE_ID,
-    specId: SPEC_ID,
+    specId: options.specId ?? SPEC_ID,
     storyId: STORY_ID,
     queryText: 'Fix admin auth middleware and preserve deterministic retrieval ordering',
     predictedPaths: ['backend/routes/auth.ts'],
     candidates,
     skills: [{ name: 'Auth Security', content: 'auth middleware jwt bearer token authorization retrieval ranking' }],
     tokenBudget: 2000,
+    graphScoreWeight: options.graphScoreWeight,
+    graphProximityAvailable: options.graphProximityAvailable,
     evaluationTimestamp: '2026-05-31T00:00:00.000Z',
   });
 }
@@ -263,6 +272,194 @@ describe('retrieval-pipeline', () => {
       sourceStoryKey: 'story:ws-1::spec-graph::US-002',
       storySlug: 'US-002',
     });
+  });
+
+  test('reranks only the semantically eligible slice when graph weight is enabled', () => {
+    const candidates: RetrievalCandidateInput[] = [
+      {
+        id: 'semantic-first',
+        text: 'Fix admin auth middleware and preserve deterministic retrieval ordering for bearer verification',
+        origin: 'search',
+        baseScore: 0.88,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'high',
+        createdAt: '2026-05-10T00:00:00.000Z',
+        canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'semantic-first'),
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        sourceStoryId: 'US-010',
+        sourceStoryCanonicalKey: buildStoryNodeKey(WORKSPACE_ID, SPEC_ID, 'US-010'),
+        graphNodeType: 'memory',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-10T00:00:00.000Z',
+      },
+      {
+        id: 'graph-close',
+        text: 'Auth middleware: preserve ordering in backend/routes/auth.ts',
+        origin: 'search',
+        baseScore: 0.62,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'high',
+        createdAt: '2026-05-10T00:00:00.000Z',
+        canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'graph-close'),
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        sourceStoryId: 'US-011',
+        sourceStoryCanonicalKey: buildStoryNodeKey(WORKSPACE_ID, SPEC_ID, 'US-011'),
+        relatedFiles: ['backend/routes/auth.ts'],
+        graphNodeType: 'memory',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-10T00:00:00.000Z',
+        graphSignals: [{
+          fromCanonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'graph-close'),
+          toCanonicalKey: buildFileNodeKey(WORKSPACE_ID, 'backend/routes/auth.ts'),
+          relationship: 'ABOUT',
+          hops: 1,
+          active: true,
+          updatedAt: '2026-05-10T00:00:00.000Z',
+        }],
+      },
+      {
+        id: 'cache:filtered-out',
+        text: 'Low quality unrelated memory',
+        origin: 'search',
+        baseScore: 0.1,
+        matchType: 'keyword',
+        category: 'Pattern',
+        confidence: 'low',
+        createdAt: '2026-05-10T00:00:00.000Z',
+      },
+    ];
+
+    const semanticOnly = runRanking(candidates, { graphScoreWeight: 0 });
+    const reranked = runRanking(candidates, { graphScoreWeight: 1 });
+
+    expect(semanticOnly.selected.map(candidate => candidate.id)).toEqual(['semantic-first', 'graph-close']);
+    expect(reranked.selected.map(candidate => candidate.id)).toEqual(['graph-close', 'semantic-first']);
+    expect(reranked.selected.map(candidate => candidate.id)).not.toContain('cache:filtered-out');
+    expect(reranked.selected[0]?.preRerankPosition).toBe(2);
+    expect(reranked.selected[0]?.rerankedBy).toBe('graph');
+    expect(reranked.graphRerankChanged).toBe(true);
+    expect(reranked.graphRerankedCandidateKeys).toContain('memory:ws-1::graph-close');
+  });
+
+  test('falls back to the semantic order when graph reranking is disabled or unavailable', () => {
+    const candidates: RetrievalCandidateInput[] = [
+      {
+        id: 'semantic-first',
+        text: 'Fix admin auth middleware and preserve deterministic retrieval ordering for bearer verification',
+        origin: 'search',
+        baseScore: 0.88,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'high',
+        createdAt: '2026-05-10T00:00:00.000Z',
+        canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'semantic-first'),
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        graphNodeType: 'memory',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-10T00:00:00.000Z',
+      },
+      {
+        id: 'graph-close',
+        text: 'Auth middleware: preserve ordering in backend/routes/auth.ts',
+        origin: 'search',
+        baseScore: 0.62,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'high',
+        createdAt: '2026-05-10T00:00:00.000Z',
+        canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'graph-close'),
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+        graphNodeType: 'memory',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-10T00:00:00.000Z',
+        graphSignals: [{
+          fromCanonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'graph-close'),
+          toCanonicalKey: buildFileNodeKey(WORKSPACE_ID, 'backend/routes/auth.ts'),
+          relationship: 'ABOUT',
+          hops: 1,
+          active: true,
+          updatedAt: '2026-05-10T00:00:00.000Z',
+        }],
+      },
+    ];
+
+    const configuredOff = runRanking(candidates, { graphScoreWeight: 0 });
+    const unavailable = runRanking(candidates, { graphScoreWeight: 0.35, graphProximityAvailable: false });
+
+    expect(unavailable.selected.map(candidate => candidate.id)).toEqual(configuredOff.selected.map(candidate => candidate.id));
+    expect(unavailable.graphRerankAppliedWeight).toBe(0);
+    expect(unavailable.graphRerankChanged).toBe(false);
+    expect(unavailable.selected.every(candidate => candidate.rerankedBy === 'semantic')).toBe(true);
+  });
+
+  test('never lets foreign workspace graph signals promote a candidate during reranking', () => {
+    const candidates: RetrievalCandidateInput[] = [
+      {
+        id: 'local-graph',
+        text: 'Local auth memory with in-scope graph proximity',
+        origin: 'search',
+        baseScore: 0.6,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'high',
+        createdAt: '2026-05-10T00:00:00.000Z',
+        canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'local-graph'),
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+        graphNodeType: 'memory',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-10T00:00:00.000Z',
+        graphSignals: [{
+          fromCanonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'local-graph'),
+          toCanonicalKey: buildFileNodeKey(WORKSPACE_ID, 'backend/routes/auth.ts'),
+          relationship: 'ABOUT',
+          hops: 1,
+          active: true,
+          updatedAt: '2026-05-10T00:00:00.000Z',
+        }],
+      },
+      {
+        id: 'foreign-graph',
+        text: 'Foreign workspace auth memory that should not be promoted',
+        origin: 'search',
+        baseScore: 0.79,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'high',
+        createdAt: '2026-05-10T00:00:00.000Z',
+        canonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'foreign-graph'),
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFileKeys: [buildFileNodeKey('ws-2', 'backend/routes/auth.ts')],
+        graphNodeType: 'memory',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-10T00:00:00.000Z',
+        graphSignals: [{
+          fromCanonicalKey: buildMemoryNodeKey('ws-2', 'foreign-graph'),
+          toCanonicalKey: buildFileNodeKey('ws-2', 'backend/routes/auth.ts'),
+          relationship: 'ABOUT',
+          hops: 1,
+          active: true,
+          updatedAt: '2026-05-10T00:00:00.000Z',
+        }],
+      },
+    ];
+
+    const result = runRanking(candidates, { graphScoreWeight: 1 });
+
+    expect(result.selected.map(candidate => candidate.id)).toEqual(['local-graph', 'foreign-graph']);
+    expect(result.selected[0]?.graphScore).toBeGreaterThan(result.selected[1]?.graphScore ?? 0);
+    expect(result.selected[1]?.rerankedBy).toBe('semantic');
+    expect(result.selected[1]?.scoring.breakdown.directGraphProximity.scopeValid).toBe(false);
+    expect(result.selected[1]?.graphScore).toBe(0);
   });
 
   test('drops candidates without resolvable canonical keys and marks lite-mode proximity gaps explicitly', () => {

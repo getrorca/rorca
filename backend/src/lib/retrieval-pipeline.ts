@@ -142,6 +142,16 @@ export interface GraphRagCandidateValidation {
   issues: string[];
 }
 
+export interface GraphRagRerankMetadata {
+  requestedGraphScoreWeight: number;
+  appliedGraphScoreWeight: number;
+  semanticRankScore: number;
+  blendedScore: number;
+  preRerankPosition: number | null;
+  finalPosition: number | null;
+  rerankedBy: 'graph' | 'semantic';
+}
+
 export interface GraphRagScoreContract {
   schemaVersion: GraphRagScoreSchemaVersion;
   score: number;
@@ -150,6 +160,7 @@ export interface GraphRagScoreContract {
   tieBreak: GraphRagTieBreak;
   breakdown: GraphRagScoreBreakdown;
   validation: GraphRagCandidateValidation;
+  rerank: GraphRagRerankMetadata;
 }
 
 export interface RankedRetrievalCandidate extends RetrievalCandidateInput {
@@ -164,7 +175,10 @@ export interface RankedRetrievalCandidate extends RetrievalCandidateInput {
   fileOverlapScore: number;
   validatorScore: number;
   historicalScore: number;
+  semanticRankScore: number;
   finalScore: number;
+  preRerankPosition: number | null;
+  rerankedBy: 'graph' | 'semantic';
   decision: 'keep' | 'drop' | 'needs-more' | 'conflict';
   conflictsWith: string[];
   supersededBy?: string;
@@ -178,6 +192,10 @@ export interface RankRetrievalCandidatesResult {
   candidates: RankedRetrievalCandidate[];
   needsMoreEvidence: boolean;
   contradictions: Array<[string, string]>;
+  graphScoreWeight: number;
+  graphRerankAppliedWeight: number;
+  graphRerankChanged: boolean;
+  graphRerankedCandidateKeys: string[];
 }
 
 export interface GraphRagSurfaceDocumentation {
@@ -202,10 +220,10 @@ export interface GraphRagScoreContractDocumentation {
 
 export const GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION: GraphRagScoreContractDocumentation = {
   schemaVersion: GRAPH_RAG_SCORE_SCHEMA_VERSION,
-  purpose: 'GraphRAG scoring is a deterministic ranking layer over canonical graph identity and scoped source truth. It never creates identity or scope from score values.',
-  ordering: 'Sort by score descending, then tieBreak.canonicalKey ascending, then tieBreak.sourceStoryKey ascending, then tieBreak.storySlug ascending, then tieBreak.candidateId ascending.',
+  purpose: 'GraphRAG scoring is a deterministic reranking layer over semantically eligible canonical memory candidates. It never creates identity, scope, or candidate eligibility from graph score values.',
+  ordering: 'Select eligible candidates with the semantic rank score first, then blend semanticRankScore with directGraphProximity by graph weight, then sort by blended score descending, semanticRankScore descending, tieBreak.canonicalKey ascending, tieBreak.sourceStoryKey ascending, tieBreak.storySlug ascending, then tieBreak.candidateId ascending.',
   scoreRange: { min: 0, max: 1 },
-  liteModeBehavior: 'When Apache AGE is unavailable (lite mode), directGraphProximity.score is forced to 0 and directGraphProximity.proximityUnavailable is set to true.',
+  liteModeBehavior: 'When Apache AGE is unavailable (lite mode), directGraphProximity.score is forced to 0, directGraphProximity.proximityUnavailable is set to true, and applied graph rerank weight is forced to 0.',
   scoredSurfaces: [
     {
       surface: 'retrieveContext()',
@@ -972,6 +990,12 @@ function compareTieBreak(a: GraphRagTieBreak, b: GraphRagTieBreak): number {
 
 function compareByScore(a: RankedRetrievalCandidate, b: RankedRetrievalCandidate): number {
   if (b.finalScore !== a.finalScore) return b.finalScore - a.finalScore;
+  if (b.semanticRankScore !== a.semanticRankScore) return b.semanticRankScore - a.semanticRankScore;
+  return compareTieBreak(a.scoring.tieBreak, b.scoring.tieBreak);
+}
+
+function compareBySemanticRank(a: RankedRetrievalCandidate, b: RankedRetrievalCandidate): number {
+  if (b.semanticRankScore !== a.semanticRankScore) return b.semanticRankScore - a.semanticRankScore;
   return compareTieBreak(a.scoring.tieBreak, b.scoring.tieBreak);
 }
 
@@ -1023,12 +1047,15 @@ export function rankRetrievalCandidates(input: {
   historicalUsefulness?: Map<string, number>;
   tokenBudget: number;
   graphProximityAvailable?: boolean;
+  graphScoreWeight?: number;
   evaluationTimestamp?: string;
 }): RankRetrievalCandidatesResult {
   const predictedPaths = input.predictedPaths ?? [];
   const predictedFileKeys = canonicalFileKeys(input.workspaceId, predictedPaths);
   const historicalUsefulness = input.historicalUsefulness ?? new Map<string, number>();
   const graphProximityAvailable = input.graphProximityAvailable ?? true;
+  const requestedGraphScoreWeight = roundScore(input.graphScoreWeight ?? 0);
+  const appliedGraphScoreWeight = graphProximityAvailable ? requestedGraphScoreWeight : 0;
   const matchedSkills = matchSkillsToQuery(input.queryText, input.skills, predictedPaths);
   const contradictions: Array<[string, string]> = [];
   const referenceTimestamp = inferReferenceTimestamp(input.evaluationTimestamp, input.candidates);
@@ -1086,7 +1113,14 @@ export function rankRetrievalCandidates(input: {
       skillAlignment,
       historicalUsefulness: { score: historical, feedbackKey },
     };
-    const provisionalScore = validation.valid ? scorePositiveSignals(positiveBreakdown) : 0;
+    const semanticEligibilityBreakdown = {
+      ...positiveBreakdown,
+      directGraphProximity: {
+        ...graph,
+        score: 0,
+      },
+    };
+    const provisionalScore = validation.valid ? scorePositiveSignals(semanticEligibilityBreakdown) : 0;
 
     return {
       ...candidate,
@@ -1102,7 +1136,10 @@ export function rankRetrievalCandidates(input: {
       fileOverlapScore: scope.file,
       validatorScore: validator.score,
       historicalScore: historical,
+      semanticRankScore: provisionalScore,
       finalScore: provisionalScore,
+      preRerankPosition: null,
+      rerankedBy: 'semantic',
       decision: validation.valid ? 'keep' : 'drop',
       conflictsWith: [],
       reasons: [...validator.reasons, ...validation.issues],
@@ -1118,6 +1155,15 @@ export function rankRetrievalCandidates(input: {
           ...positiveBreakdown,
           diversityPenalty: { score: 0, comparedTo: null, similarity: 0 },
           duplicationPenalty: { score: 0, comparedTo: null, similarity: 0 },
+        },
+        rerank: {
+          requestedGraphScoreWeight,
+          appliedGraphScoreWeight,
+          semanticRankScore: provisionalScore,
+          blendedScore: provisionalScore,
+          preRerankPosition: null,
+          finalPosition: null,
+          rerankedBy: 'semantic',
         },
       },
     };
@@ -1176,13 +1222,16 @@ export function rankRetrievalCandidates(input: {
     }
   }
 
-  enriched.sort(compareByScore);
+  enriched.sort(compareBySemanticRank);
 
   for (let index = 0; index < enriched.length; index++) {
     const candidate = enriched[index];
     if (!candidate.scoring.validation.valid) {
+      candidate.semanticRankScore = 0;
       candidate.finalScore = 0;
       candidate.scoring.score = 0;
+      candidate.scoring.rerank.semanticRankScore = 0;
+      candidate.scoring.rerank.blendedScore = 0;
       continue;
     }
 
@@ -1206,11 +1255,14 @@ export function rankRetrievalCandidates(input: {
 
     const penalties = candidate.scoring.breakdown.diversityPenalty.score
       + candidate.scoring.breakdown.duplicationPenalty.score;
-    candidate.finalScore = roundScore(candidate.scoring.score - penalties);
-    candidate.scoring.score = candidate.finalScore;
+    candidate.semanticRankScore = roundScore(candidate.scoring.score - penalties);
+    candidate.finalScore = candidate.semanticRankScore;
+    candidate.scoring.score = candidate.semanticRankScore;
+    candidate.scoring.rerank.semanticRankScore = candidate.semanticRankScore;
+    candidate.scoring.rerank.blendedScore = candidate.semanticRankScore;
   }
 
-  enriched.sort(compareByScore);
+  enriched.sort(compareBySemanticRank);
 
   const selected: RankedRetrievalCandidate[] = [];
   let tokensUsed = 0;
@@ -1220,9 +1272,9 @@ export function rankRetrievalCandidates(input: {
       candidate.decision = 'drop';
       continue;
     }
-    if (candidate.finalScore < 0.18) {
+    if (candidate.semanticRankScore < 0.18) {
       candidate.decision = candidate.decision === 'conflict' ? 'conflict' : 'drop';
-      candidate.reasons.push('Dropped for low final score');
+      candidate.reasons.push('Dropped for low semantic rank score');
       continue;
     }
     if (candidate.supersededBy) continue;
@@ -1230,7 +1282,7 @@ export function rankRetrievalCandidates(input: {
     const maxSimilarity = selected.length === 0
       ? 0
       : Math.max(...selected.map(existing => mmrSimilarity(existing, candidate)));
-    const mmrScore = roundScore((0.78 * candidate.finalScore) - (0.22 * maxSimilarity));
+    const mmrScore = roundScore((0.78 * candidate.semanticRankScore) - (0.22 * maxSimilarity));
 
     if (mmrScore < 0.12) {
       candidate.decision = 'drop';
@@ -1248,18 +1300,72 @@ export function rankRetrievalCandidates(input: {
     tokensUsed += candidate.tokenCount;
   }
 
-  const needsMoreEvidence = selected.length === 0 || selected[0].finalScore < 0.32;
+  const needsMoreEvidence = selected.length === 0 || selected[0].semanticRankScore < 0.32;
   if (needsMoreEvidence) {
     for (const candidate of selected) {
       if (candidate.decision === 'keep') candidate.decision = 'needs-more';
     }
   }
 
+  selected.forEach((candidate, index) => {
+    candidate.preRerankPosition = index + 1;
+    candidate.finalScore = candidate.semanticRankScore;
+    candidate.rerankedBy = 'semantic';
+    candidate.scoring.score = candidate.semanticRankScore;
+    candidate.scoring.rerank.semanticRankScore = candidate.semanticRankScore;
+    candidate.scoring.rerank.blendedScore = candidate.semanticRankScore;
+    candidate.scoring.rerank.preRerankPosition = index + 1;
+    candidate.scoring.rerank.finalPosition = index + 1;
+    candidate.scoring.rerank.rerankedBy = 'semantic';
+  });
+
+  if (appliedGraphScoreWeight > 0) {
+    for (const candidate of selected) {
+      const blendedScore = roundScore(
+        (candidate.semanticRankScore * (1 - appliedGraphScoreWeight))
+        + (candidate.graphScore * appliedGraphScoreWeight),
+      );
+      candidate.finalScore = blendedScore;
+      candidate.scoring.score = blendedScore;
+      candidate.scoring.rerank.blendedScore = blendedScore;
+    }
+
+    selected.sort(compareByScore);
+  }
+
+  selected.forEach((candidate, index) => {
+    const finalPosition = index + 1;
+    const orderChanged = candidate.preRerankPosition !== finalPosition;
+    const rerankedBy: 'graph' | 'semantic' = appliedGraphScoreWeight > 0 && candidate.graphScore > 0 && orderChanged
+      ? 'graph'
+      : 'semantic';
+    candidate.rerankedBy = rerankedBy;
+    candidate.scoring.rerank.finalPosition = finalPosition;
+    candidate.scoring.rerank.rerankedBy = rerankedBy;
+  });
+
+  const graphRerankedCandidateKeys = selected
+    .filter(candidate => candidate.rerankedBy === 'graph')
+    .map(candidate => candidate.key);
+  const graphRerankChanged = graphRerankedCandidateKeys.length > 0;
+
+  const selectedIdentity = new Set(selected.map(candidate => `${candidate.key}::${candidate.id}::${candidate.origin}`));
+  const orderedCandidates = [
+    ...selected,
+    ...enriched
+      .filter(candidate => !selectedIdentity.has(`${candidate.key}::${candidate.id}::${candidate.origin}`))
+      .sort(compareBySemanticRank),
+  ];
+
   return {
     matchedSkills,
     selected,
-    candidates: enriched,
+    candidates: orderedCandidates,
     needsMoreEvidence,
     contradictions,
+    graphScoreWeight: requestedGraphScoreWeight,
+    graphRerankAppliedWeight: appliedGraphScoreWeight,
+    graphRerankChanged,
+    graphRerankedCandidateKeys,
   };
 }

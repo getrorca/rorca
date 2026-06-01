@@ -14,6 +14,9 @@ export interface RetrievalTelemetryCandidate {
   origin: string;
   sourceType?: string;
   finalScore: number;
+  semanticRankScore?: number;
+  preRerankPosition?: number | null;
+  rerankedBy?: 'graph' | 'semantic';
   decision: 'keep' | 'drop' | 'needs-more' | 'conflict';
   freshnessScore: number;
   validatorScore: number;
@@ -137,6 +140,9 @@ function normalizeCandidates(value: unknown): RetrievalTelemetryCandidate[] {
       sourceType: typeof row.sourceType === 'string' ? row.sourceType : undefined,
       finalScore: row.finalScore,
       decision: (row.decision as RetrievalTelemetryCandidate['decision']) || 'drop',
+      semanticRankScore: typeof row.semanticRankScore === 'number' ? row.semanticRankScore : undefined,
+      preRerankPosition: typeof row.preRerankPosition === 'number' ? row.preRerankPosition : null,
+      rerankedBy: row.rerankedBy === 'graph' ? 'graph' : row.rerankedBy === 'semantic' ? 'semantic' : undefined,
       freshnessScore: typeof row.freshnessScore === 'number' ? row.freshnessScore : 0,
       validatorScore: typeof row.validatorScore === 'number' ? row.validatorScore : 0,
       graphScore: typeof row.graphScore === 'number' ? row.graphScore : 0,

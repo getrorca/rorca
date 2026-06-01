@@ -40,11 +40,14 @@ import {
 import { getGraphContext } from './graph-context';
 import {
   rankRetrievalCandidates,
+  type GraphProjectionSignal,
   type GraphRagScoreContract,
   type RetrievalCandidateInput,
 } from './retrieval-pipeline';
 import { persistRetrievalTelemetry, recordRetrievalTelemetry } from './retrieval-telemetry';
 import { getHistoricalUsefulnessMap, recordRetrievalSelection } from './retrieval-feedback';
+import { checkAge } from './age-guard';
+import { loadRorcaConfig } from './rorca-config';
 import { query as dbQuery } from '../db/index';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
@@ -56,6 +59,8 @@ export interface MemoryEntryResult {
   id?: string;
   sourceType?: string;
   canonicalKey?: string;
+  preRerankPosition?: number | null;
+  rerankedBy?: 'graph' | 'semantic';
   scoring?: GraphRagScoreContract;
 }
 
@@ -85,6 +90,16 @@ interface MemoryMetadataRow {
   source_run_id: number | null;
 }
 
+interface WorkspacePathRow {
+  path: string;
+}
+
+interface GraphMemorySignal {
+  relationship: string;
+  hops: number;
+  matchedPath?: string;
+}
+
 export interface RetrievedContext {
   direction: {
     standards?: string;
@@ -107,6 +122,10 @@ export interface RetrievedContext {
     matchedSkills?: string[];
     selectedCandidateIds?: string[];
     selectedCandidateKeys?: string[];
+    graphScoreWeight?: number;
+    graphRerankAppliedWeight?: number;
+    graphRerankChanged?: boolean;
+    graphRerankedCandidateKeys?: string[];
     telemetryId?: string;
   };
 }
@@ -114,6 +133,8 @@ export interface RetrievedContext {
 export interface RetrieveContextOptions {
   maxTokens?: number;
   includeGraph?: boolean;
+  graphScoreWeight?: number;
+  workspacePath?: string;
   /** Predicted file paths for graph traversal (PG-016) */
   predictedPaths?: string[];
   /** Current story ID for graph traversal context */
@@ -233,6 +254,67 @@ function parseRelatedFiles(value: string | null): string[] {
   } catch {
     return [];
   }
+}
+
+function parseGraphScoreWeight(raw: unknown): number | undefined {
+  if (typeof raw === 'number' && Number.isFinite(raw)) {
+    return Math.max(0, Math.min(1, raw));
+  }
+  if (typeof raw === 'string' && raw.trim()) {
+    const parsed = Number(raw.trim());
+    if (Number.isFinite(parsed)) {
+      return Math.max(0, Math.min(1, parsed));
+    }
+  }
+  return undefined;
+}
+
+async function resolveWorkspacePath(workspaceId: string): Promise<string | undefined> {
+  try {
+    const rows = await dbQuery<WorkspacePathRow>(
+      'SELECT path FROM workspaces WHERE id = $1 LIMIT 1',
+      [workspaceId],
+    );
+    return rows[0]?.path;
+  } catch {
+    return undefined;
+  }
+}
+
+async function resolveGraphScoreWeight(
+  workspaceId: string,
+  options?: RetrieveContextOptions,
+): Promise<number> {
+  const explicit = parseGraphScoreWeight(options?.graphScoreWeight);
+  if (explicit != null) return explicit;
+
+  const envWeight = parseGraphScoreWeight(process.env.RORCA_GRAPH_SCORE_WEIGHT);
+  if (envWeight != null) return envWeight;
+
+  const workspacePath = options?.workspacePath ?? await resolveWorkspacePath(workspaceId);
+  if (!workspacePath) return 0;
+
+  try {
+    return parseGraphScoreWeight(loadRorcaConfig(workspacePath).context.retrieval.graphScoreWeight) ?? 0;
+  } catch (error) {
+    logger.warn({ error, workspaceId }, '[memory-router] Failed to load graph score weight from config — falling back to semantic-only');
+    return 0;
+  }
+}
+
+function appendGraphSignal(
+  candidate: RetrievalCandidateInput,
+  signal: GraphProjectionSignal,
+): void {
+  const existing = candidate.graphSignals ?? [];
+  const duplicate = existing.some((entry) =>
+    entry.fromCanonicalKey === signal.fromCanonicalKey
+    && entry.toCanonicalKey === signal.toCanonicalKey
+    && entry.relationship === signal.relationship
+    && entry.hops === signal.hops,
+  );
+  if (duplicate) return;
+  candidate.graphSignals = [...existing, signal];
 }
 
 // ─── Key Phrase Extraction ──────────────────────────────────────────────────
@@ -355,6 +437,8 @@ export async function retrieveContext(
   const maxTokens = options?.maxTokens ?? DEFAULT_MAX_TOKENS;
   const includeGraph = options?.includeGraph ?? false;
   const wsId = String(workspaceId);
+  const graphScoreWeight = await resolveGraphScoreWeight(wsId, options);
+  const ageAvailable = includeGraph ? await checkAge() : false;
 
   let cagHits = 0;
   let ragHits = 0;
@@ -392,7 +476,7 @@ export async function retrieveContext(
     + estimateTokens(layers.schemaSnapshot || '');
 
   const remainingTokens = maxTokens - directionTokens;
-  const budgets = calculateBudgets(remainingTokens, includeGraph);
+  const budgets = calculateBudgets(remainingTokens, includeGraph && ageAvailable);
 
   const predictedPaths = options?.predictedPaths ?? extractFilePaths(storyText);
 
@@ -595,131 +679,176 @@ export async function retrieveContext(
   let graphContext: GraphContext | undefined;
   let graphSection: string | undefined;
   let graphTokensUsed = 0;
-  let graphProximityAvailable = true;
+  let graphProximityAvailable = ageAvailable;
   if (includeGraph) {
-    try {
-      // PG-016: Use getGraphContext() for deep traversal when predictedPaths provided
-      const currentStoryId = options?.storyId ?? '';
-      const currentSpecId = options?.specId;
+    if (!ageAvailable) {
+      graphProximityAvailable = false;
+      graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
+    } else {
+      try {
+        // PG-016: Use getGraphContext() for deep traversal when predictedPaths provided
+        const currentStoryId = options?.storyId ?? '';
+        const currentSpecId = options?.specId;
+        const graphSignalsByMemoryId = new Map<string, GraphMemorySignal[]>();
+        const graphSignalsByText = new Map<string, GraphMemorySignal[]>();
 
-      if (predictedPaths.length > 0 && currentStoryId) {
-        const fullCtx = await getGraphContext(currentStoryId, predictedPaths, workspaceId, 2, currentSpecId);
-        graphProximityAvailable = !fullCtx.proximityUnavailable;
+        const rememberGraphSignal = (memoryId: string, text: string, signal: GraphMemorySignal): void => {
+          const mergeInto = (store: Map<string, GraphMemorySignal[]>, key: string): void => {
+            if (!key) return;
+            const existing = store.get(key) ?? [];
+            store.set(key, [...existing, signal]);
+          };
+          mergeInto(graphSignalsByMemoryId, memoryId);
+          mergeInto(graphSignalsByText, text);
+        };
 
-        // Map full graph context to the simpler GraphContext for backward compat
-        const relatedStories: GraphContext['relatedStories'] = fullCtx.fileHistory.flatMap(fh =>
-          fh.touchedByStories.map(sid => ({ id: sid, title: sid, relevance: 0.7 })),
-        );
-        // Deduplicate
-        const seenIds = new Set<string>();
-        const dedupedStories = relatedStories.filter(s => {
-          if (seenIds.has(s.id)) return false;
-          seenIds.add(s.id);
-          return true;
-        });
+        const applyCandidateGraphSignals = (): void => {
+          for (const candidate of retrievalCandidates) {
+            if (!candidate.canonicalKey) {
+              continue;
+            }
+            const signals = [
+              ...(graphSignalsByMemoryId.get(candidate.id) ?? []),
+              ...(graphSignalsByText.get(candidate.text) ?? []),
+            ];
+            if (signals.length === 0) {
+              continue;
+            }
 
-        const fileTouches: GraphContext['fileTouches'] = fullCtx.fileHistory.map(fh => ({
-          path: fh.path,
-          storyIds: fh.touchedByStories,
-        }));
-
-        const conventionLinks: GraphContext['conventionLinks'] = fullCtx.relatedConventions.map(c => ({
-          from: c.name,
-          to: c.appliesTo,
-          type: 'APPLIES_TO',
-        }));
-
-        graphHits = fullCtx.relatedMemories.length + fullCtx.relatedConventions.length + fullCtx.fileHistory.length;
-        graphContext = { relatedStories: dedupedStories, fileTouches, conventionLinks };
-        for (const memory of fullCtx.relatedMemories) {
-          const row = rowsById.get(memory.memoryId) ?? rowsByContent.get(memory.text);
-          addCandidate(row
-            ? {
-                ...rowToCandidate(row, 'graph', 0.72, 'graph'),
-                graphRelationship: memory.relationship,
-                graphHops: memory.hops,
+            for (const signal of signals) {
+              if (!signal.matchedPath) {
+                continue;
               }
-            : {
-                id: memory.memoryId,
-                text: memory.text,
-                title: 'Graph Memory',
-                origin: 'graph',
-                baseScore: 0.72,
-                matchType: 'graph',
-                graphRelationship: memory.relationship,
-                graphHops: memory.hops,
-                relatedFiles: predictedPaths,
-                relatedFileKeys: predictedPaths.map(filePath => buildFileNodeKey(wsId, filePath)).filter(Boolean).sort(),
-                canonicalKey: memory.memoryId.startsWith('conflict:')
-                  ? undefined
-                  : buildMemoryNodeKey(wsId, memory.memoryId),
+              const matchedFileKey = buildFileNodeKey(wsId, signal.matchedPath);
+              if (!matchedFileKey) {
+                continue;
+              }
+
+              appendGraphSignal(candidate, {
+                fromCanonicalKey: candidate.canonicalKey,
+                toCanonicalKey: matchedFileKey,
+                relationship: signal.relationship,
+                hops: signal.hops,
+                active: true,
+                updatedAt: candidate.graphUpdatedAt ?? candidate.createdAt ?? null,
               });
-        }
-        const budgeted = trimGraphContextForBudget(fullCtx, budgets.graph);
-        graphSection = budgeted.graphSection;
-        graphTokensUsed = budgeted.graphTokens;
-      } else {
-        // Fallback: use queryImpact for file-path-based lookup
-        const stats = await graphStats();
-        if (stats.available && stats.vertexCount > 0) {
-          const filePaths = extractFilePaths(storyText);
-          const storyIds = extractStoryIds(storyText);
-
-          const relatedStories: GraphContext['relatedStories'] = [];
-          const fileTouches: GraphContext['fileTouches'] = [];
-          const conventionLinks: GraphContext['conventionLinks'] = [];
-
-          for (const fp of filePaths.slice(0, 5)) {
-            const impact = await queryImpact(fp, wsId);
-            for (const s of impact.stories) {
-              if (!relatedStories.some(rs => rs.id === s.id)) {
-                relatedStories.push({ id: s.id, title: s.title, relevance: 0.8 });
-              }
-            }
-            if (impact.stories.length > 0) {
-              fileTouches.push({ path: fp, storyIds: impact.stories.map(s => s.id) });
-            }
-            for (const c of impact.conventions) {
-              conventionLinks.push({ from: c.name, to: fp, type: 'APPLIES_TO' });
+              candidate.graphRelationship = signal.relationship;
+              candidate.graphHops = candidate.graphHops == null
+                ? signal.hops
+                : Math.min(candidate.graphHops, signal.hops);
+              candidate.graphNodeType = candidate.graphNodeType ?? 'memory';
+              candidate.graphActive = candidate.graphActive ?? true;
+              candidate.graphUpdatedAt = candidate.graphUpdatedAt ?? candidate.createdAt ?? null;
+              candidate.relatedFiles = [...new Set([...(candidate.relatedFiles ?? []), signal.matchedPath])].sort();
+              candidate.relatedFileKeys = [...new Set([...(candidate.relatedFileKeys ?? []), matchedFileKey])].sort();
             }
           }
+        };
 
-          for (const sid of storyIds.slice(0, 5)) {
-            const related = await queryRelated('Story', sid, 2, ['DEPENDS_ON', 'TOUCHES'], {
-              workspaceId: wsId,
-              specId: currentSpecId,
+        if (predictedPaths.length > 0 && currentStoryId) {
+          const fullCtx = await getGraphContext(currentStoryId, predictedPaths, workspaceId, 2, currentSpecId);
+          graphProximityAvailable = !fullCtx.proximityUnavailable;
+
+          // Map full graph context to the simpler GraphContext for backward compat
+          const relatedStories: GraphContext['relatedStories'] = fullCtx.fileHistory.flatMap(fh =>
+            fh.touchedByStories.map(sid => ({ id: sid, title: sid, relevance: 0.7 })),
+          );
+          // Deduplicate
+          const seenIds = new Set<string>();
+          const dedupedStories = relatedStories.filter(s => {
+            if (seenIds.has(s.id)) return false;
+            seenIds.add(s.id);
+            return true;
+          });
+
+          const fileTouches: GraphContext['fileTouches'] = fullCtx.fileHistory.map(fh => ({
+            path: fh.path,
+            storyIds: fh.touchedByStories,
+          }));
+
+          const conventionLinks: GraphContext['conventionLinks'] = fullCtx.relatedConventions.map(c => ({
+            from: c.name,
+            to: c.appliesTo,
+            type: 'APPLIES_TO',
+          }));
+
+          graphHits = fullCtx.relatedMemories.length + fullCtx.relatedConventions.length + fullCtx.fileHistory.length;
+          graphContext = { relatedStories: dedupedStories, fileTouches, conventionLinks };
+          for (const memory of fullCtx.relatedMemories) {
+            if (memory.relationship === 'conflict') continue;
+            rememberGraphSignal(memory.memoryId, memory.text, {
+              relationship: memory.relationship,
+              hops: memory.hops,
+              matchedPath: memory.matchedPath,
             });
-            for (const r of related) {
-              const props = r.properties as Record<string, string>;
-              if (r.label === 'Story' && props.id && !relatedStories.some(rs => rs.id === props.id)) {
-                relatedStories.push({ id: props.id, title: props.title || props.id, relevance: 0.6 });
-              }
-            }
           }
-
-          graphHits = relatedStories.length + fileTouches.length + conventionLinks.length;
-          graphContext = { relatedStories, fileTouches, conventionLinks };
-          const budgeted = trimGraphContextForBudget({
-            relatedMemories: [],
-            relatedConventions: conventionLinks.map(c => ({ name: c.from, content: c.from, appliesTo: c.to })),
-            fileHistory: fileTouches.map(f => ({ path: f.path, touchedByStories: f.storyIds, lastModifiedSpec: '' })),
-          }, budgets.graph);
+          applyCandidateGraphSignals();
+          const budgeted = trimGraphContextForBudget(fullCtx, budgets.graph);
           graphSection = budgeted.graphSection;
           graphTokensUsed = budgeted.graphTokens;
         } else {
-          graphProximityAvailable = false;
-          graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
-        }
-      }
+          // Fallback: use queryImpact for file-path-based lookup
+          const stats = await graphStats();
+          if (stats.available && stats.vertexCount > 0) {
+            const filePaths = extractFilePaths(storyText);
+            const storyIds = extractStoryIds(storyText);
 
-      logger.debug(
-        { workspaceId: wsId, graphHits, graphTokensUsed },
-        '[memory-router] Graph context retrieved',
-      );
-    } catch (err) {
-      graphProximityAvailable = false;
-      logger.warn({ err, workspaceId: wsId }, '[memory-router] Graph context retrieval failed — using empty');
-      graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
+            const relatedStories: GraphContext['relatedStories'] = [];
+            const fileTouches: GraphContext['fileTouches'] = [];
+            const conventionLinks: GraphContext['conventionLinks'] = [];
+
+            for (const fp of filePaths.slice(0, 5)) {
+              const impact = await queryImpact(fp, wsId);
+              for (const s of impact.stories) {
+                if (!relatedStories.some(rs => rs.id === s.id)) {
+                  relatedStories.push({ id: s.id, title: s.title, relevance: 0.8 });
+                }
+              }
+              if (impact.stories.length > 0) {
+                fileTouches.push({ path: fp, storyIds: impact.stories.map(s => s.id) });
+              }
+              for (const c of impact.conventions) {
+                conventionLinks.push({ from: c.name, to: fp, type: 'APPLIES_TO' });
+              }
+            }
+
+            for (const sid of storyIds.slice(0, 5)) {
+              const related = await queryRelated('Story', sid, 2, ['DEPENDS_ON', 'TOUCHES'], {
+                workspaceId: wsId,
+                specId: currentSpecId,
+              });
+              for (const r of related) {
+                const props = r.properties as Record<string, string>;
+                if (r.label === 'Story' && props.id && !relatedStories.some(rs => rs.id === props.id)) {
+                  relatedStories.push({ id: props.id, title: props.title || props.id, relevance: 0.6 });
+                }
+              }
+            }
+
+            graphHits = relatedStories.length + fileTouches.length + conventionLinks.length;
+            graphContext = { relatedStories, fileTouches, conventionLinks };
+            const budgeted = trimGraphContextForBudget({
+              relatedMemories: [],
+              relatedConventions: conventionLinks.map(c => ({ name: c.from, content: c.from, appliesTo: c.to })),
+              fileHistory: fileTouches.map(f => ({ path: f.path, touchedByStories: f.storyIds, lastModifiedSpec: '' })),
+            }, budgets.graph);
+            graphSection = budgeted.graphSection;
+            graphTokensUsed = budgeted.graphTokens;
+          } else {
+            graphProximityAvailable = false;
+            graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
+          }
+        }
+
+        logger.debug(
+          { workspaceId: wsId, graphHits, graphTokensUsed, graphScoreWeight },
+          '[memory-router] Graph context retrieved',
+        );
+      } catch (err) {
+        graphProximityAvailable = false;
+        logger.warn({ err, workspaceId: wsId }, '[memory-router] Graph context retrieval failed — using empty');
+        graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
+      }
     }
   }
 
@@ -744,15 +873,18 @@ export async function retrieveContext(
     historicalUsefulness,
     tokenBudget: budgets.memory,
     graphProximityAvailable,
+    graphScoreWeight,
   });
 
   memoryEntries = ranked.selected.map(candidate => ({
     text: candidate.text,
     score: candidate.finalScore,
-    source: candidate.origin === 'search' || candidate.origin === 'graph' ? 'search' : 'cache',
+    source: candidate.origin === 'search' ? 'search' : 'cache',
     id: candidate.id,
     sourceType: candidate.sourceType || candidate.origin,
     canonicalKey: candidate.canonicalKey,
+    preRerankPosition: candidate.preRerankPosition,
+    rerankedBy: candidate.rerankedBy,
     scoring: candidate.scoring,
   }));
   memoryTokensUsed = ranked.selected.reduce((sum, candidate) => sum + candidate.tokenCount, 0);
@@ -806,6 +938,9 @@ export async function retrieveContext(
       origin: candidate.origin,
       sourceType: candidate.sourceType || undefined,
       finalScore: candidate.finalScore,
+      semanticRankScore: candidate.semanticRankScore,
+      preRerankPosition: candidate.preRerankPosition,
+      rerankedBy: candidate.rerankedBy,
       decision: candidate.decision,
       freshnessScore: candidate.freshnessScore,
       validatorScore: candidate.validatorScore,
@@ -832,7 +967,18 @@ export async function retrieveContext(
   );
 
   logger.info(
-    { workspaceId: wsId, tier, cagHits, ragHits, graphHits, totalTokens, latencyMs },
+    {
+      workspaceId: wsId,
+      tier,
+      cagHits,
+      ragHits,
+      graphHits,
+      totalTokens,
+      latencyMs,
+      graphScoreWeight,
+      graphRerankAppliedWeight: ranked.graphRerankAppliedWeight,
+      graphRerankChanged: ranked.graphRerankChanged,
+    },
     '[memory-router] Context retrieved',
   );
 
@@ -853,6 +999,10 @@ export async function retrieveContext(
       matchedSkills: ranked.matchedSkills.map(skill => skill.name),
       selectedCandidateIds: ranked.selected.map(candidate => candidate.id),
       selectedCandidateKeys: ranked.selected.map(candidate => candidate.key),
+      graphScoreWeight: ranked.graphScoreWeight,
+      graphRerankAppliedWeight: ranked.graphRerankAppliedWeight,
+      graphRerankChanged: ranked.graphRerankChanged,
+      graphRerankedCandidateKeys: ranked.graphRerankedCandidateKeys,
       telemetryId: telemetry.id,
     },
   };

@@ -822,6 +822,7 @@ describe('CIE E2E: .rorca/config.json Schema Validation', () => {
       expect(result.data.execution.waveParallelism).toBe(false);
       expect(result.data.execution.storyTimeoutMin).toBe(45);
       expect(result.data.execution.maxRetries).toBe(3);
+      expect(result.data.context.retrieval.graphScoreWeight).toBe(0);
     }
   });
 
@@ -835,11 +836,17 @@ describe('CIE E2E: .rorca/config.json Schema Validation', () => {
         ],
         tokenBudget: 12000,
       },
+      context: {
+        retrieval: {
+          graphScoreWeight: 0.3,
+        },
+      },
     });
     expect(result.success).toBe(true);
     if (result.success) {
       expect(result.data.routing.scopes).toHaveLength(2);
       expect(result.data.routing.tokenBudget).toBe(12000);
+      expect(result.data.context.retrieval.graphScoreWeight).toBe(0.3);
     }
   });
 
@@ -866,6 +873,7 @@ describe('CIE E2E: .rorca/config.json Schema Validation', () => {
     // Should not throw, just returns defaults with a console warning
     const config = loadRorcaConfig(tmpDir);
     expect(config.routing.tokenBudget).toBe(32000);
+    expect(config.context.retrieval.graphScoreWeight).toBe(0);
   });
 
   it('writeRorcaConfig creates .rorca/ dir structure and invalidates cache', () => {
