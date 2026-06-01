@@ -34,6 +34,7 @@ function runRanking(
     graphScoreWeight?: number;
     graphProximityAvailable?: boolean;
     specId?: string;
+    guardrails?: Parameters<typeof rankRetrievalCandidates>[0]['guardrails'];
   } = {},
 ) {
   return rankRetrievalCandidates({
@@ -48,6 +49,7 @@ function runRanking(
     graphScoreWeight: options.graphScoreWeight,
     graphProximityAvailable: options.graphProximityAvailable,
     evaluationTimestamp: '2026-05-31T00:00:00.000Z',
+    guardrails: options.guardrails,
   });
 }
 
@@ -780,9 +782,249 @@ describe('retrieval-pipeline', () => {
     );
   });
 
+  test('newer direct evidence outranks an older repetitive low-confidence pattern', () => {
+    const candidates: RetrievalCandidateInput[] = [
+      {
+        id: 'pattern-old-1',
+        text: 'Auth retries: always retry admin bearer failures three times before surfacing errors',
+        origin: 'search',
+        baseScore: 0.71,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'low',
+        createdAt: '2025-12-01T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+      {
+        id: 'pattern-old-2',
+        text: 'Auth retries: retry admin bearer failures repeatedly before surfacing errors',
+        origin: 'search',
+        baseScore: 0.68,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'low',
+        createdAt: '2026-01-10T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+      {
+        id: 'fresh-direct',
+        text: 'Auth middleware: preserve deterministic JWT bearer verification and fail immediately on invalid admin tokens',
+        origin: 'search',
+        baseScore: 0.79,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'high',
+        createdAt: '2026-05-30T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+    ];
+
+    const result = runRanking(candidates);
+
+    expect(result.selected[0]?.id).toBe('fresh-direct');
+    expect(result.selected.map(candidate => candidate.id)).not.toEqual(['pattern-old-1', 'pattern-old-2']);
+    expect(result.candidates.find(candidate => candidate.id === 'pattern-old-2')?.scoring.breakdown.repetitionPenalty.score ?? 0).toBeGreaterThan(0);
+  });
+
+  test('pinned content can intentionally outrank newer unpinned content', () => {
+    const candidates: RetrievalCandidateInput[] = [
+      {
+        id: 'pinned-old',
+        text: 'Pinned auth memory: keep JWT bearer verification as the canonical admin path',
+        origin: 'pinned',
+        baseScore: 1,
+        matchType: 'cache',
+        category: 'Convention',
+        confidence: 'high',
+        pinned: true,
+        createdAt: '2025-06-01T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+      {
+        id: 'fresh-unpinned',
+        text: 'Fresh auth memory: deterministic ordering matters for admin bearer verification',
+        origin: 'search',
+        baseScore: 0.88,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'high',
+        createdAt: '2026-05-30T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+    ];
+
+    const result = runRanking(candidates);
+
+    expect(result.selected[0]?.id).toBe('pinned-old');
+    expect(result.selected[0]?.freshnessScore).toBe(1);
+  });
+
+  test('anti-echo-chamber guardrail caps one file cluster from dominating the top results', () => {
+    const result = runRanking([
+      {
+        id: 'cluster-a-1',
+        text: 'Auth cluster memory one for backend/routes/auth.ts',
+        origin: 'search',
+        baseScore: 0.74,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'medium',
+        createdAt: '2026-05-28T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+      {
+        id: 'cluster-a-2',
+        text: 'Auth cluster memory two for backend/routes/auth.ts',
+        origin: 'search',
+        baseScore: 0.73,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'medium',
+        createdAt: '2026-05-27T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+      {
+        id: 'cluster-a-3',
+        text: 'Auth cluster memory three for backend/routes/auth.ts',
+        origin: 'search',
+        baseScore: 0.72,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'medium',
+        createdAt: '2026-05-26T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+      {
+        id: 'cluster-b-1',
+        text: 'Worker queue memory for backend/src/worker.ts',
+        origin: 'search',
+        baseScore: 0.7,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'medium',
+        createdAt: '2026-05-29T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/src/worker.ts'],
+      },
+      {
+        id: 'cluster-c-1',
+        text: 'Graph context memory for backend/src/lib/graph-context.ts',
+        origin: 'search',
+        baseScore: 0.69,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'medium',
+        createdAt: '2026-05-29T12:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/src/lib/graph-context.ts'],
+      },
+    ], {
+      guardrails: {
+        dominanceThreshold: 0.4,
+        dominanceTopN: 5,
+        minDiversityFloor: 2,
+        highConfidenceExempt: false,
+      },
+    });
+
+    const dominantClusterSelections = result.selected.filter(candidate =>
+      candidate.relatedFileKeys?.includes(buildFileNodeKey(WORKSPACE_ID, 'backend/routes/auth.ts')),
+    );
+
+    expect(dominantClusterSelections.length).toBeLessThanOrEqual(2);
+    expect(result.selected.some(candidate => candidate.id === 'cluster-b-1' || candidate.id === 'cluster-c-1')).toBe(true);
+    expect(result.candidates.find(candidate => candidate.id === 'cluster-a-3')?.decision).toBe('drop');
+  });
+
+  test('stops the bad-pattern-resurfacing failure mode from accumulating across runs', () => {
+    const result = runRanking([
+      {
+        id: 'bad-run-1',
+        text: 'Bad auth pattern: retry invalid admin bearer tokens until they succeed',
+        origin: 'search',
+        baseScore: 0.67,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'low',
+        createdAt: '2026-02-01T00:00:00.000Z',
+        sourceRunId: 101,
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+      {
+        id: 'bad-run-2',
+        text: 'Bad auth pattern: keep retrying invalid bearer tokens before failing',
+        origin: 'search',
+        baseScore: 0.66,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'low',
+        createdAt: '2026-03-01T00:00:00.000Z',
+        sourceRunId: 102,
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+      {
+        id: 'bad-run-3',
+        text: 'Bad auth pattern: repeated bearer retries on invalid admin auth',
+        origin: 'search',
+        baseScore: 0.65,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'low',
+        createdAt: '2026-04-01T00:00:00.000Z',
+        sourceRunId: 103,
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+      {
+        id: 'good-direct',
+        text: 'Good auth evidence: reject invalid admin bearer tokens immediately and log the failure once',
+        origin: 'search',
+        baseScore: 0.8,
+        matchType: 'hybrid',
+        category: 'Pattern',
+        confidence: 'high',
+        createdAt: '2026-05-30T00:00:00.000Z',
+        sourceRunId: 104,
+        sourceSpecId: SPEC_ID,
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        relatedFiles: ['backend/routes/auth.ts'],
+      },
+    ]);
+
+    const selectedBadPatterns = result.selected.filter(candidate => candidate.id.startsWith('bad-run-'));
+
+    expect(result.selected[0]?.id).toBe('good-direct');
+    expect(selectedBadPatterns.length).toBeLessThanOrEqual(1);
+    expect(result.candidates.find(candidate => candidate.id === 'bad-run-2')?.scoring.breakdown.repetitionPenalty.score ?? 0).toBeGreaterThan(0);
+    expect(result.candidates.find(candidate => candidate.id === 'bad-run-3')?.scoring.breakdown.repetitionPenalty.score ?? 0).toBeGreaterThan(0);
+  });
+
   test('documents scored and semantic-only GraphRAG surfaces', () => {
-    expect(GRAPH_RAG_SCORE_SCHEMA_VERSION).toBe('v1');
-    expect(GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION.schemaVersion).toBe('v1');
+    expect(GRAPH_RAG_SCORE_SCHEMA_VERSION).toBe('v2');
+    expect(GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION.schemaVersion).toBe('v2');
     expect(GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION.ordering).toContain('tieBreak.canonicalKey');
     expect(GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION.liteModeBehavior).toContain('proximityUnavailable');
     expect(GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION.scoredSurfaces.some(surface => surface.surface === 'retrieveContext()')).toBe(true);

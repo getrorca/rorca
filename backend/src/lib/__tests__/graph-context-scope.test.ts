@@ -46,7 +46,12 @@ jest.mock('../logger', () => ({
   },
 }));
 
+jest.mock('../age-guard', () => ({
+  checkAge: jest.fn().mockResolvedValue(true),
+}));
+
 import { get, set } from '../context-cache';
+import { checkAge } from '../age-guard';
 import {
   buildGraphContextCacheKey,
   getGraphContext,
@@ -54,6 +59,7 @@ import {
 
 const mockCacheGet = get as jest.MockedFunction<typeof get>;
 const mockCacheSet = set as jest.MockedFunction<typeof set>;
+const mockCheckAge = checkAge as jest.MockedFunction<typeof checkAge>;
 
 function cypherSqlCalls(): string[] {
   return mockClientQuery.mock.calls
@@ -65,6 +71,7 @@ describe('graph context scoping', () => {
   beforeEach(() => {
     jest.clearAllMocks();
     mockCacheGet.mockReturnValue(undefined);
+    mockCheckAge.mockResolvedValue(true);
     mockClientQuery.mockImplementation(async () => ({ rows: [], rowCount: 0 }));
     mockQuery.mockResolvedValue([]);
   });
@@ -92,5 +99,36 @@ describe('graph context scoping', () => {
       expect.any(Object),
       'warm',
     );
+  });
+
+  it('falls back to workspace/spec-scoped Postgres memories in lite mode', async () => {
+    mockCheckAge.mockResolvedValue(false);
+    mockQuery.mockResolvedValue([
+      {
+        id: '101',
+        content: 'Pinned fallback memory',
+        pinned: true,
+        created_at: '2026-05-01T00:00:00.000Z',
+        updated_at: '2026-05-30T00:00:00.000Z',
+        source_story_id: 'US-009',
+        source_spec_id: 'spec-a',
+        related_files: ['src/app.ts'],
+      },
+    ]);
+
+    const ctx = await getGraphContext('US-001', ['./src/app.ts'], 'ws-1', 2, 'spec-a');
+
+    expect(ctx.proximityUnavailable).toBe(true);
+    expect(ctx.relatedMemories[0]).toMatchObject({
+      memoryId: '101',
+      matchedPath: 'src/app.ts',
+      relationship: 'pinned fallback recency match',
+    });
+    expect(ctx.fileHistory[0]).toMatchObject({
+      path: 'src/app.ts',
+      touchedByStories: ['US-009'],
+      lastModifiedSpec: 'spec-a',
+    });
+    expect(cypherSqlCalls()).toEqual([]);
   });
 });

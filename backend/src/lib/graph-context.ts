@@ -29,6 +29,7 @@ import {
 import { get, set } from './context-cache';
 import { query } from '../db/index';
 import { logger } from './logger';
+import { checkAge } from './age-guard';
 
 // ─── Types ──────────────────────────────────────────────────────────────────
 
@@ -59,6 +60,17 @@ export interface GraphContext {
   impactRadius: number;
   graphHits: number;
   proximityUnavailable: boolean;
+}
+
+interface FallbackMemoryRow {
+  id: string;
+  content: string;
+  pinned: boolean;
+  created_at: string;
+  updated_at: string | null;
+  source_story_id: string | null;
+  source_spec_id: string | null;
+  related_files: string[] | string | null;
 }
 
 // ─── Cache Key ──────────────────────────────────────────────────────────────
@@ -125,6 +137,115 @@ async function cypherQuery<T = Record<string, unknown>>(
   }
 }
 
+function parseRelatedFiles(value: string[] | string | null | undefined): string[] {
+  const parsed = Array.isArray(value)
+    ? value
+    : typeof value === 'string'
+      ? (() => {
+          try {
+            const json = JSON.parse(value) as unknown;
+            return Array.isArray(json) ? json : [];
+          } catch {
+            return [];
+          }
+        })()
+      : [];
+
+  return parsed
+    .filter((file): file is string => typeof file === 'string' && file.trim().length > 0)
+    .map(normalizeGraphFilePath)
+    .filter(Boolean);
+}
+
+async function buildFallbackGraphContext(
+  workspaceId: string | number,
+  predictedPaths: string[],
+  specId?: string,
+): Promise<GraphContext> {
+  const normalizedPaths = [...new Set(predictedPaths.map(normalizeGraphFilePath).filter(Boolean))];
+  const empty: GraphContext = {
+    relatedMemories: [],
+    relatedConventions: [],
+    fileHistory: [],
+    impactRadius: 0,
+    graphHits: 0,
+    proximityUnavailable: true,
+  };
+
+  if (normalizedPaths.length === 0) {
+    return empty;
+  }
+
+  const params: Array<string | string[]> = [String(workspaceId), normalizedPaths];
+  let specClause = '';
+  if (specId) {
+    params.push(specId);
+    specClause = 'AND source_spec_id = $3';
+  }
+
+  const rows = await query<FallbackMemoryRow>(
+    `SELECT id::text AS id,
+            content,
+            COALESCE(pinned, false) AS pinned,
+            created_at,
+            updated_at,
+            source_story_id,
+            source_spec_id,
+            related_files
+       FROM memories
+      WHERE workspace_id = $1
+        AND deleted_at IS NULL
+        ${specClause}
+        AND EXISTS (
+          SELECT 1
+            FROM jsonb_array_elements_text(related_files) AS rf(path)
+           WHERE rf.path = ANY($2::text[])
+        )
+      ORDER BY pinned DESC, COALESCE(updated_at, created_at) DESC
+      LIMIT 12`,
+    params,
+  );
+
+  const historyByPath = new Map<string, FileHistory>();
+  const relatedMemories: RelatedMemory[] = [];
+
+  for (const row of rows) {
+    const relatedFiles = parseRelatedFiles(row.related_files);
+    const matchedPath = relatedFiles.find(file => normalizedPaths.includes(file));
+    if (!matchedPath) continue;
+
+    relatedMemories.push({
+      memoryId: row.id,
+      text: row.content,
+      relationship: row.pinned ? 'pinned fallback recency match' : 'fallback recency match',
+      hops: 0,
+      matchedPath,
+    });
+
+    const existing = historyByPath.get(matchedPath) ?? {
+      path: matchedPath,
+      touchedByStories: [],
+      lastModifiedSpec: row.source_spec_id ?? '',
+    };
+    if (row.source_story_id && !existing.touchedByStories.includes(row.source_story_id)) {
+      existing.touchedByStories.push(row.source_story_id);
+    }
+    if (!existing.lastModifiedSpec && row.source_spec_id) {
+      existing.lastModifiedSpec = row.source_spec_id;
+    }
+    historyByPath.set(matchedPath, existing);
+  }
+
+  return {
+    relatedMemories,
+    relatedConventions: [],
+    fileHistory: [...historyByPath.values()],
+    impactRadius: relatedMemories.length + historyByPath.size,
+    graphHits: relatedMemories.length + historyByPath.size,
+    proximityUnavailable: true,
+  };
+}
+
 // ─── Main Entry Point ───────────────────────────────────────────────────────
 
 /**
@@ -176,6 +297,13 @@ export async function getGraphContext(
     proximityUnavailable: false,
   };
 
+  if (!(await checkAge())) {
+    const fallback = await buildFallbackGraphContext(workspaceId, normalizedPredictedPaths, specId);
+    logger.warn({ storyId, workspaceId, specId: specId ?? null }, '[graph-context] AGE unavailable in lite mode — using recency-sorted Postgres fallback');
+    set(cacheKey, fallback, 'warm');
+    return fallback;
+  }
+
   // Guard: check if graph is available
   try {
     const stats = await graphStats();
@@ -186,9 +314,10 @@ export async function getGraphContext(
       return result;
     }
   } catch {
-    result.proximityUnavailable = true;
-    logger.warn({ storyId }, '[graph-context] graph stats check failed');
-    return result;
+    const fallback = await buildFallbackGraphContext(workspaceId, normalizedPredictedPaths, specId);
+    logger.warn({ storyId, workspaceId, specId: specId ?? null }, '[graph-context] graph stats check failed — using recency fallback');
+    set(cacheKey, fallback, 'warm');
+    return fallback;
   }
 
   const uniqueNodes = new Set<string>();

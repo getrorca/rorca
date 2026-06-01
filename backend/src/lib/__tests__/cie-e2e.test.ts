@@ -823,6 +823,12 @@ describe('CIE E2E: .rorca/config.json Schema Validation', () => {
       expect(result.data.execution.storyTimeoutMin).toBe(45);
       expect(result.data.execution.maxRetries).toBe(3);
       expect(result.data.context.retrieval.graphScoreWeight).toBe(0);
+      expect(result.data.context.retrieval.guardrails).toMatchObject({
+        version: 1,
+        recencyDecayLambda: 0.0077,
+        dominanceThreshold: 0.4,
+        minDiversityFloor: 2,
+      });
     }
   });
 
@@ -839,6 +845,16 @@ describe('CIE E2E: .rorca/config.json Schema Validation', () => {
       context: {
         retrieval: {
           graphScoreWeight: 0.3,
+          guardrails: {
+            version: 1,
+            recencyDecayLambda: 0.0125,
+            dominanceThreshold: 0.5,
+            dominanceTopN: 6,
+            minDiversityFloor: 3,
+            pinnedRecencyFloor: 1,
+            lowConfidenceClusterPenalty: 0.22,
+            highConfidenceExempt: false,
+          },
         },
       },
     });
@@ -847,6 +863,14 @@ describe('CIE E2E: .rorca/config.json Schema Validation', () => {
       expect(result.data.routing.scopes).toHaveLength(2);
       expect(result.data.routing.tokenBudget).toBe(12000);
       expect(result.data.context.retrieval.graphScoreWeight).toBe(0.3);
+      expect(result.data.context.retrieval.guardrails).toMatchObject({
+        version: 1,
+        recencyDecayLambda: 0.0125,
+        dominanceThreshold: 0.5,
+        dominanceTopN: 6,
+        minDiversityFloor: 3,
+        highConfidenceExempt: false,
+      });
     }
   });
 
@@ -874,6 +898,7 @@ describe('CIE E2E: .rorca/config.json Schema Validation', () => {
     const config = loadRorcaConfig(tmpDir);
     expect(config.routing.tokenBudget).toBe(32000);
     expect(config.context.retrieval.graphScoreWeight).toBe(0);
+    expect(config.context.retrieval.guardrails.version).toBe(1);
   });
 
   it('writeRorcaConfig creates .rorca/ dir structure and invalidates cache', () => {
