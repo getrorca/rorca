@@ -11,6 +11,9 @@ import { query, queryOne } from '../db/index';
 import { broadcastAll } from '../lib/sse-hub';
 import { logger } from '../lib/logger';
 import {
+  GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION,
+} from '../lib/retrieval-pipeline';
+import {
   listPersistedRetrievalTelemetry,
   listRetrievalTelemetry,
   summarizePersistedRetrievalTelemetry,
@@ -111,7 +114,7 @@ router.get('/stats', async (_req: Request, res: Response, next: NextFunction) =>
  * /api/graph/retrieval-telemetry:
  *   get:
  *     tags: [Graph]
- *     summary: Get recent retrieval telemetry and feedback rows for operator debugging
+ *     summary: Get recent retrieval telemetry, score-contract metadata, and feedback rows for operator debugging
  *     operationId: getRetrievalTelemetry
  *     x-rorca-tier: admin
  *     x-rorca-rationale: "Retrieval telemetry exposes operator-only debugging and ranking internals and should remain admin-only."
@@ -126,7 +129,7 @@ router.get('/stats', async (_req: Request, res: Response, next: NextFunction) =>
  *         description: Max telemetry events / feedback rows to return
  *     responses:
  *       200:
- *         description: Recent retrieval telemetry and feedback summary
+ *         description: Recent retrieval telemetry, GraphRAG score-contract metadata (including scored vs semantic-only consumer surfaces), and feedback summary
  */
 router.get('/retrieval-telemetry', async (req: Request, res: Response, next: NextFunction) => {
   try {
@@ -146,6 +149,7 @@ router.get('/retrieval-telemetry', async (req: Request, res: Response, next: Nex
     res.json({
       workspaceId: workspaceId ?? null,
       limit,
+      scoreContract: GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION,
       events,
       persistedEvents,
       feedback,

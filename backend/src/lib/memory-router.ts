@@ -28,10 +28,19 @@ import {
 } from './context-cache';
 import { hybridSearch, type SearchResult } from './search';
 import { logger } from './logger';
-import { queryRelated, queryImpact, graphStats } from './knowledge-graph';
+import {
+  buildFileNodeKey,
+  buildMemoryNodeKey,
+  buildSpecNodeKey,
+  buildStoryNodeKey,
+  queryRelated,
+  queryImpact,
+  graphStats,
+} from './knowledge-graph';
 import { getGraphContext } from './graph-context';
 import {
   rankRetrievalCandidates,
+  type GraphRagScoreContract,
   type RetrievalCandidateInput,
 } from './retrieval-pipeline';
 import { persistRetrievalTelemetry, recordRetrievalTelemetry } from './retrieval-telemetry';
@@ -46,6 +55,8 @@ export interface MemoryEntryResult {
   source: 'cache' | 'search';
   id?: string;
   sourceType?: string;
+  canonicalKey?: string;
+  scoring?: GraphRagScoreContract;
 }
 
 export interface SkillContent {
@@ -95,6 +106,7 @@ export interface RetrievedContext {
     needsMoreEvidence?: boolean;
     matchedSkills?: string[];
     selectedCandidateIds?: string[];
+    selectedCandidateKeys?: string[];
     telemetryId?: string;
   };
 }
@@ -430,24 +442,35 @@ export async function retrieveContext(
     origin: RetrievalCandidateInput['origin'],
     baseScore: number,
     matchType: RetrievalCandidateInput['matchType'],
-  ): RetrievalCandidateInput => ({
-    id: String(row.id),
-    text: row.content,
-    title: row.category || 'Memory Entry',
-    origin,
-    baseScore,
-    matchType,
-    category: row.category,
-    confidence: row.confidence,
-    sourceType: row.source_type,
-    source: row.source,
-    pinned: row.pinned,
-    createdAt: row.created_at,
-    relatedFiles: parseRelatedFiles(row.related_files),
-    sourceStoryId: row.source_story_id,
-    sourceSpecId: row.source_spec_id,
-    sourceRunId: row.source_run_id,
-  });
+  ): RetrievalCandidateInput => {
+    const relatedFiles = parseRelatedFiles(row.related_files);
+    return {
+      id: String(row.id),
+      text: row.content,
+      title: row.category || 'Memory Entry',
+      origin,
+      baseScore,
+      matchType,
+      category: row.category,
+      confidence: row.confidence,
+      sourceType: row.source_type,
+      source: row.source,
+      pinned: row.pinned,
+      createdAt: row.created_at,
+      relatedFiles,
+      relatedFileKeys: relatedFiles.map(filePath => buildFileNodeKey(wsId, filePath)).filter(Boolean).sort(),
+      sourceStoryId: row.source_story_id,
+      sourceStoryCanonicalKey: row.source_story_id && row.source_spec_id
+        ? buildStoryNodeKey(wsId, row.source_spec_id, row.source_story_id)
+        : undefined,
+      sourceSpecId: row.source_spec_id,
+      sourceSpecCanonicalKey: row.source_spec_id
+        ? buildSpecNodeKey(wsId, row.source_spec_id)
+        : undefined,
+      sourceRunId: row.source_run_id,
+      canonicalKey: buildMemoryNodeKey(wsId, String(row.id)),
+    };
+  };
 
   // ── PG-022: Pinned memories become top-priority candidates ──────────────
 
@@ -473,6 +496,7 @@ export async function retrieveContext(
           matchType: 'cache',
           createdAt: entry.ts,
           relatedFiles: [],
+          relatedFileKeys: [],
         });
   }
 
@@ -523,6 +547,8 @@ export async function retrieveContext(
             matchType: result.matchType,
             sourceType: result.sourceType,
             relatedFiles: [],
+            relatedFileKeys: [],
+            canonicalKey: result.sourceId ? buildMemoryNodeKey(wsId, result.sourceId) : undefined,
           });
     }
   }
@@ -535,6 +561,7 @@ export async function retrieveContext(
   let graphContext: GraphContext | undefined;
   let graphSection: string | undefined;
   let graphTokensUsed = 0;
+  let graphProximityAvailable = true;
   if (includeGraph) {
     try {
       // PG-016: Use getGraphContext() for deep traversal when predictedPaths provided
@@ -543,6 +570,7 @@ export async function retrieveContext(
 
       if (predictedPaths.length > 0 && currentStoryId) {
         const fullCtx = await getGraphContext(currentStoryId, predictedPaths, workspaceId, 2, currentSpecId);
+        graphProximityAvailable = !fullCtx.proximityUnavailable;
 
         // Map full graph context to the simpler GraphContext for backward compat
         const relatedStories: GraphContext['relatedStories'] = fullCtx.fileHistory.flatMap(fh =>
@@ -587,6 +615,10 @@ export async function retrieveContext(
                 graphRelationship: memory.relationship,
                 graphHops: memory.hops,
                 relatedFiles: predictedPaths,
+                relatedFileKeys: predictedPaths.map(filePath => buildFileNodeKey(wsId, filePath)).filter(Boolean).sort(),
+                canonicalKey: memory.memoryId.startsWith('conflict:')
+                  ? undefined
+                  : buildMemoryNodeKey(wsId, memory.memoryId),
               });
         }
         const budgeted = trimGraphContextForBudget(fullCtx, budgets.graph);
@@ -641,6 +673,7 @@ export async function retrieveContext(
           graphSection = budgeted.graphSection;
           graphTokensUsed = budgeted.graphTokens;
         } else {
+          graphProximityAvailable = false;
           graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
         }
       }
@@ -650,6 +683,7 @@ export async function retrieveContext(
         '[memory-router] Graph context retrieved',
       );
     } catch (err) {
+      graphProximityAvailable = false;
       logger.warn({ err, workspaceId: wsId }, '[memory-router] Graph context retrieval failed — using empty');
       graphContext = { relatedStories: [], fileTouches: [], conventionLinks: [] };
     }
@@ -659,16 +693,23 @@ export async function retrieveContext(
 
   const historicalUsefulness = await getHistoricalUsefulnessMap(
     wsId,
-    retrievalCandidates.map(candidate => `memory:${candidate.id}`),
+    [...new Set(retrievalCandidates.flatMap(candidate => [
+      candidate.canonicalKey,
+      `memory:${candidate.id}`,
+    ].filter((value): value is string => Boolean(value))))],
   );
 
   const ranked = rankRetrievalCandidates({
+    workspaceId: wsId,
+    specId: options?.specId,
+    storyId: options?.storyId,
     queryText: storyText,
     predictedPaths,
     candidates: retrievalCandidates,
     skills: cachedSkills,
     historicalUsefulness,
     tokenBudget: budgets.memory,
+    graphProximityAvailable,
   });
 
   memoryEntries = ranked.selected.map(candidate => ({
@@ -677,6 +718,8 @@ export async function retrieveContext(
     source: candidate.origin === 'search' || candidate.origin === 'graph' ? 'search' : 'cache',
     id: candidate.id,
     sourceType: candidate.sourceType || candidate.origin,
+    canonicalKey: candidate.canonicalKey,
+    scoring: candidate.scoring,
   }));
   memoryTokensUsed = ranked.selected.reduce((sum, candidate) => sum + candidate.tokenCount, 0);
 
@@ -737,6 +780,7 @@ export async function retrieveContext(
       reasons: candidate.reasons,
       conflictsWith: candidate.conflictsWith,
       supersededBy: candidate.supersededBy,
+      scoring: candidate.scoring,
     })),
     latencyMs,
     retrievalTier: tier,
@@ -774,6 +818,7 @@ export async function retrieveContext(
       needsMoreEvidence: ranked.needsMoreEvidence,
       matchedSkills: ranked.matchedSkills.map(skill => skill.name),
       selectedCandidateIds: ranked.selected.map(candidate => candidate.id),
+      selectedCandidateKeys: ranked.selected.map(candidate => candidate.key),
       telemetryId: telemetry.id,
     },
   };

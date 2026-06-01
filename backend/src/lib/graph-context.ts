@@ -57,6 +57,7 @@ export interface GraphContext {
   fileHistory: FileHistory[];
   impactRadius: number;
   graphHits: number;
+  proximityUnavailable: boolean;
 }
 
 // ─── Cache Key ──────────────────────────────────────────────────────────────
@@ -171,17 +172,20 @@ export async function getGraphContext(
     fileHistory: [],
     impactRadius: 0,
     graphHits: 0,
+    proximityUnavailable: false,
   };
 
   // Guard: check if graph is available
   try {
     const stats = await graphStats();
     if (!stats.available || stats.vertexCount === 0) {
+      result.proximityUnavailable = !stats.available;
       logger.debug({ storyId }, '[graph-context] graph empty or unavailable — returning empty');
       set(cacheKey, result, 'warm');
       return result;
     }
   } catch {
+    result.proximityUnavailable = true;
     logger.warn({ storyId }, '[graph-context] graph stats check failed');
     return result;
   }
