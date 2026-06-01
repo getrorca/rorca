@@ -6,6 +6,7 @@
  */
 
 import {
+  buildGraphRagExplainability,
   GRAPH_RAG_SCORE_CONTRACT_DOCUMENTATION,
   GRAPH_RAG_SCORE_SCHEMA_VERSION,
   matchSkillsToQuery,
@@ -216,6 +217,112 @@ describe('retrieval-pipeline', () => {
       tieBreak: candidate.scoring.tieBreak,
     })));
     expect(first.selected.map(candidate => candidate.id)).toEqual(second.selected.map(candidate => candidate.id));
+  });
+
+  test('builds a stable flat explainability payload for ranked candidates', () => {
+    const candidates: RetrievalCandidateInput[] = [
+      {
+        id: 'debug-1',
+        text: 'Auth routing: keep workspace-scoped graph retrieval deterministic and debuggable',
+        origin: 'graph',
+        baseScore: 0.83,
+        matchType: 'graph',
+        category: 'Pattern',
+        confidence: 'high',
+        source: 'retrieval-feedback',
+        sourceType: 'memory',
+        createdAt: '2026-05-30T00:00:00.000Z',
+        sourceSpecId: SPEC_ID,
+        sourceStoryId: 'US-012',
+        sourceStoryCanonicalKey: buildStoryNodeKey(WORKSPACE_ID, SPEC_ID, 'US-012'),
+        sourceSpecCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+        graphNodeType: 'memory',
+        graphActive: true,
+        graphUpdatedAt: '2026-05-30T00:00:00.000Z',
+        graphRelationship: 'DEPENDS_ON',
+        graphHops: 1,
+        relatedFiles: ['backend/routes/auth.ts'],
+        graphSignals: [
+          {
+            fromCanonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'debug-1'),
+            toCanonicalKey: buildStoryNodeKey(WORKSPACE_ID, SPEC_ID, 'US-012'),
+            relationship: 'DEPENDS_ON',
+            hops: 1,
+            active: true,
+            updatedAt: '2026-05-30T00:00:00.000Z',
+          },
+          {
+            fromCanonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'debug-1'),
+            toCanonicalKey: buildSpecNodeKey(WORKSPACE_ID, SPEC_ID),
+            relationship: 'DEPENDS_ON',
+            hops: 1,
+            active: true,
+            updatedAt: '2026-05-30T00:00:00.000Z',
+          },
+          {
+            fromCanonicalKey: buildMemoryNodeKey(WORKSPACE_ID, 'debug-1'),
+            toCanonicalKey: buildFileNodeKey(WORKSPACE_ID, 'backend/routes/auth.ts'),
+            relationship: 'CITED_BY',
+            hops: 2,
+            active: true,
+            updatedAt: '2026-05-30T00:00:00.000Z',
+          },
+        ],
+      },
+    ];
+
+    const first = runRanking(candidates, { graphScoreWeight: 0.35 });
+    const second = runRanking(candidates, { graphScoreWeight: 0.35 });
+    const firstExplainability = buildGraphRagExplainability(first.selected[0]!);
+    const secondExplainability = buildGraphRagExplainability(second.selected[0]!);
+
+    expect(Object.keys(firstExplainability.scoreBreakdown)).toEqual([
+      'total',
+      'semantic',
+      'structural',
+      'graph',
+      'provenance',
+      'recency',
+      'pinned',
+      'skills',
+      'historical',
+      'diversityPenalty',
+      'echoChamberPenalty',
+      'repetitionPenalty',
+      'duplicationPenalty',
+    ]);
+    expect(firstExplainability).toMatchObject({
+      scoringVersion: GRAPH_RAG_SCORE_SCHEMA_VERSION,
+      retrievalMode: 'graph-reranked',
+      provenanceEdges: ['DEPENDS_ON x2', 'CITED_BY x1'],
+      provenanceConfidence: 'high',
+      provenanceSourceType: 'memory',
+      provenanceSource: 'retrieval-feedback',
+      graphSignalCount: 3,
+      rerankedBy: expect.stringMatching(/graph|semantic/),
+      tieBreak: {
+        canonicalKey: 'memory:ws-1::debug-1',
+        sourceStoryKey: 'story:ws-1::spec-graph::US-012',
+        storySlug: 'US-012',
+        candidateId: 'debug-1',
+      },
+      scoreBreakdown: {
+        total: expect.any(Number),
+        semantic: expect.any(Number),
+        structural: expect.any(Number),
+        graph: expect.any(Number),
+        provenance: expect.any(Number),
+        recency: expect.any(Number),
+        pinned: expect.any(Number),
+        skills: expect.any(Number),
+        historical: expect.any(Number),
+        diversityPenalty: expect.any(Number),
+        echoChamberPenalty: expect.any(Number),
+        repetitionPenalty: expect.any(Number),
+        duplicationPenalty: expect.any(Number),
+      },
+    });
+    expect(firstExplainability).toEqual(secondExplainability);
   });
 
   test('resolves score ties consistently across shuffled input order using canonical keys then story scope', () => {
