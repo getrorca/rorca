@@ -12,6 +12,7 @@ import { INTERNAL_SERVICE_TOKEN } from '../lib/auth-utils';
 import { createBackup, pruneOldBackups } from './backup';
 import { logger } from './logger';
 import { pruneExpiredMcpAuditLogs, runMcpAuditAnomalyScan } from './mcp-audit';
+import { getRunPtyRetentionDays, pruneExpiredRunPtyCaptures } from './run-pty-store';
 
 interface ScheduleRow {
   id: number;
@@ -216,8 +217,10 @@ export async function registerSchedulesWithBoss(
 let lastBackupDate: string | null = null;
 let backupIntervalHandle: ReturnType<typeof setInterval> | null = null;
 let lastMcpAuditPruneDate: string | null = null;
+let lastRunPtyPruneDate: string | null = null;
 let mcpAuditAnomalyHandle: ReturnType<typeof setInterval> | null = null;
 let mcpAuditRetentionHandle: ReturnType<typeof setInterval> | null = null;
+let runPtyRetentionHandle: ReturnType<typeof setInterval> | null = null;
 
 async function checkDailyBackup(): Promise<void> {
   const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
@@ -291,6 +294,30 @@ export function startMcpAuditScheduler(): void {
   }
 }
 
+async function checkDailyRunPtyRetention(): Promise<void> {
+  const today = new Date().toISOString().slice(0, 10);
+  if (lastRunPtyPruneDate === today) return;
+
+  const now = new Date();
+  if (now.getHours() < 4) return;
+
+  lastRunPtyPruneDate = today;
+  const retentionDays = getRunPtyRetentionDays();
+  const deletedRows = await pruneExpiredRunPtyCaptures(retentionDays);
+  logger.info({ deletedRows, retentionDays }, '[Scheduler] PTY capture retention run completed');
+}
+
+export function startRunPtyRetentionScheduler(): void {
+  if (runPtyRetentionHandle) return;
+
+  logger.info('[Scheduler] Starting PTY capture retention check — running every 60s');
+  runPtyRetentionHandle = setInterval(() => {
+    checkDailyRunPtyRetention().catch((err) => logger.error({ err }, '[Scheduler] PTY capture retention check error'));
+  }, 60_000);
+  runPtyRetentionHandle.unref();
+  checkDailyRunPtyRetention().catch((err) => logger.error({ err }, '[Scheduler] Initial PTY capture retention check error'));
+}
+
 export function stopMcpAuditScheduler(): void {
   if (mcpAuditAnomalyHandle) {
     clearInterval(mcpAuditAnomalyHandle);
@@ -302,6 +329,12 @@ export function stopMcpAuditScheduler(): void {
   }
 }
 
+export function stopRunPtyRetentionScheduler(): void {
+  if (!runPtyRetentionHandle) return;
+  clearInterval(runPtyRetentionHandle);
+  runPtyRetentionHandle = null;
+}
+
 // ─── Legacy API shim (used by server.ts) ────────────────────────────────────
 // The Express server no longer handles cron scheduling (that's the worker's job),
 // but it still manages the daily backup interval.
@@ -309,9 +342,11 @@ export function stopMcpAuditScheduler(): void {
 export function startScheduler(): void {
   startDailyBackupScheduler();
   startMcpAuditScheduler();
+  startRunPtyRetentionScheduler();
 }
 
 export function stopScheduler(): void {
   stopDailyBackupScheduler();
   stopMcpAuditScheduler();
+  stopRunPtyRetentionScheduler();
 }

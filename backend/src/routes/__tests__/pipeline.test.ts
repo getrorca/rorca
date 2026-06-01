@@ -10,6 +10,7 @@ import * as os from 'os';
 import * as path from 'path';
 import type { Express } from 'express';
 import request from 'supertest';
+import { gzipSync } from 'zlib';
 import { getAuthToken } from './helpers/auth-helper';
 import { query, queryOne, execute } from '../../db/index';
 
@@ -1197,7 +1198,7 @@ describe('GET /api/pipeline/runs/:runId/output', () => {
     expect(body).toContain('event: done');
   });
 
-  test('replays PTY chunks from the dedicated capture store from byte 0', async () => {
+  test('replays gzip-compressed PTY chunks from the dedicated capture store from byte 0', async () => {
     const inserted = await queryOne<{ id: number }>(
       `INSERT INTO pipeline_runs (spec_path, workspace_id, status, terminal_mode, agent, agent_type)
        VALUES ('forge/specs/approved/output-pty.json', 'ws-pipe', 'done', 'pty', 'claude', 'claude')
@@ -1206,16 +1207,17 @@ describe('GET /api/pipeline/runs/:runId/output', () => {
     const runId = inserted!.id;
 
     const chunk = Buffer.from('\u001b[32mpty hello\u001b[0m\r\n', 'utf8');
+    const compressedChunk = gzipSync(chunk);
 
     await execute(
-      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status, total_output_bytes)
-       VALUES ($1, 'ws-pipe', '/tmp/workspace', 'claude', 'exited', $2)`,
-      [runId, chunk.length],
+      `INSERT INTO run_pty_sessions (run_id, workspace_id, cwd, agent_type, status, total_output_bytes, total_stored_bytes)
+       VALUES ($1, 'ws-pipe', '/tmp/workspace', 'claude', 'exited', $2, $3)`,
+      [runId, chunk.length, compressedChunk.length],
     );
     await execute(
-      `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk)
-       VALUES ($1, 0, $2)`,
-      [runId, chunk],
+      `INSERT INTO run_pty_output_chunks (run_id, sequence, chunk, compression, byte_length, stored_byte_length)
+       VALUES ($1, 1, $2, 'gzip', $3, $4)`,
+      [runId, compressedChunk, chunk.length, compressedChunk.length],
     );
 
     const res = await request(app)
