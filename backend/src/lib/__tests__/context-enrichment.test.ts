@@ -15,7 +15,6 @@ const mockRetrieveContext = jest.fn();
 const mockGetDirectionLayers = jest.fn();
 const mockGetInstalledSkills = jest.fn();
 const mockCheckAge = jest.fn();
-const mockLoadRorcaConfig = jest.fn();
 const mockEcholocate = jest.fn();
 const mockInferSkillsFromStack = jest.fn();
 
@@ -35,10 +34,6 @@ jest.mock('../context-cache', () => ({
 
 jest.mock('../age-guard', () => ({
   checkAge: (...args: unknown[]) => mockCheckAge(...args),
-}));
-
-jest.mock('../rorca-config', () => ({
-  loadRorcaConfig: (...args: unknown[]) => mockLoadRorcaConfig(...args),
 }));
 
 jest.mock('../workspace-echolocation', () => ({
@@ -89,7 +84,6 @@ describe('context-enrichment', () => {
     );
 
     mockCheckAge.mockResolvedValue(false);
-    mockLoadRorcaConfig.mockImplementation(() => { throw new Error('missing config'); });
     mockRetrieveContext.mockResolvedValue({
       direction: { standards: 'L1', conventions: 'L2', project: 'L3' },
       memory: [{ text: 'Pinned memory', score: 1, source: 'cache' }],
@@ -107,7 +101,6 @@ describe('context-enrichment', () => {
       expect.stringContaining('Refactor the auth panel'),
       expect.objectContaining({
         includeGraph: false,
-        graphScoreWeight: 0,
         storyId: 'US-001',
       }),
     );
