@@ -107,6 +107,15 @@ import { autoSynthesizeMemory } from './auto-memory';
 import { writeMemoryMd } from './memory-projection';
 import { getDirectionLayers } from './context-cache';
 import { synthesize } from './direction-stack';
+import {
+  createContextTraceWriter,
+  toContextTraceWalPayload,
+  CONTEXT_TRACE_WAL_EVENT_TYPE,
+  type ContextTraceArtifactWriter,
+  type ContextTracePhase,
+  type ContextTraceStatus,
+  type ContextTraceMetrics,
+} from './context-trace';
 // execution-engine.ts intentionally does not use withUserClient(). It runs as a
 // system child process with RORCA_PROCESS_ROLE=engine, spawned by the worker on
 // behalf of the application, so its database access must remain service-role and
@@ -954,6 +963,53 @@ async function emitWalEvent(
     };
     writeFallbackResult(_fallbackCwd, entry);
   }
+}
+
+/**
+ * CTM-002: Emit a single context-trace point.
+ *
+ * Persists the heavy raw `payload` to the per-run artifact (off the hot path),
+ * then broadcasts a metadata-only `context_trace` WAL event carrying only the
+ * lightweight {@link ContextTraceEvent} and its `rawRef` pointer. The browser
+ * fetches the raw payload lazily by `rawRef` when a user opens a detail view.
+ *
+ * Fully nonfatal: a disabled writer or a failed append simply skips the emit.
+ */
+async function emitContextTrace(
+  writer: ContextTraceArtifactWriter | null,
+  port: number,
+  workspaceId: string | null,
+  phase: ContextTracePhase,
+  payload: unknown,
+  opts: {
+    status?: ContextTraceStatus;
+    storyId?: string | null;
+    specId?: string;
+    metrics?: ContextTraceMetrics;
+    label?: string;
+  },
+): Promise<void> {
+  if (!writer || !workspaceId) return;
+
+  const event = writer.appendEvent(phase, payload, {
+    status: opts.status,
+    storyId: opts.storyId ?? null,
+    metrics: opts.metrics,
+    label: opts.label,
+  });
+  // appendEvent returns null when the writer is inactive or the append failed —
+  // skip the SSE emit cleanly so we never stream a metadata event without a
+  // resolvable raw payload behind it.
+  if (!event) return;
+
+  await emitWalEvent(
+    port,
+    CONTEXT_TRACE_WAL_EVENT_TYPE,
+    workspaceId,
+    toContextTraceWalPayload(event) as unknown as Record<string, unknown>,
+    opts.storyId ?? undefined,
+    opts.specId,
+  );
 }
 
 /** POST a story result to the backend with retry + fallback. */
@@ -4445,6 +4501,12 @@ async function executeStory(
   // Set fallback context so emitWalEvent / postStoryResult can write .rorca-results.jsonl
   setFallbackContext(effectiveCwd, config.runId);
 
+  // CTM-002: per-story context-trace writer. Raw payloads land in the run's
+  // append-only artifact; only metadata-only events stream over SSE. Nonfatal —
+  // a disabled writer means emitContextTrace becomes a no-op.
+  const currentSpecId = path.basename(config.jsonPath, '.json');
+  const traceWriter = createContextTraceWriter(effectiveCwd, config.runId);
+
   // Per-story agent resolution: explicit override > story.agent field > run-level config
   let effectiveAgent: AgentType = storyAgentOverride ?? resolveStoryAgent(story, config.agentType);
 
@@ -4584,8 +4646,8 @@ async function executeStory(
   let retrievalNeedsMoreEvidence = false;
 
   if (workspaceId) {
+    const retrievalStartedAt = Date.now();
     try {
-      const currentSpecId = path.basename(config.jsonPath, '.json');
       const retrieved = await retrieveContext(workspaceId, buildStoryText(story), {
         maxTokens: 6000,
         includeGraph: config.includeGraph,
@@ -4608,8 +4670,35 @@ async function executeStory(
       if (graphSection) {
         logger.info(`  [graph] Injected graph context for ${story.id} (${graphHits ?? 0} graph hits)`);
       }
+
+      // CTM-002: retrieval trace point — metadata streams, raw recovers lazily.
+      await emitContextTrace(traceWriter, config.port, workspaceId, 'memory', {
+        memorySection: retrievedMemorySection,
+        graphSection,
+        selections: retrievalSelections,
+        meta: retrieved.meta,
+      }, {
+        status: retrievalNeedsMoreEvidence ? 'partial' : 'ok',
+        storyId: story.id,
+        specId: currentSpecId,
+        label: `retrieval:${story.id}`,
+        metrics: {
+          fileCount: retrievalSelections.length,
+          durationMs: Date.now() - retrievalStartedAt,
+          bytes: Buffer.byteLength(retrievedMemorySection) + Buffer.byteLength(graphSection),
+        },
+      });
     } catch (err: any) {
       logger.warn(`  [retrieval] Context retrieval failed for ${story.id}: ${err.message}`);
+      await emitContextTrace(traceWriter, config.port, workspaceId, 'memory', {
+        error: err?.message ?? String(err),
+      }, {
+        status: 'error',
+        storyId: story.id,
+        specId: currentSpecId,
+        label: `retrieval:${story.id}`,
+        metrics: { durationMs: Date.now() - retrievalStartedAt },
+      });
     }
   }
 
@@ -4639,6 +4728,20 @@ async function executeStory(
   const piServerSkillFiles = effectiveAgent === 'pi'
     ? buildPiServerSkillFiles(effectiveCwd, config.runId).skillFiles
     : [];
+
+  // CTM-002: arbiter trace point — the synthesized L1→L5 direction stack. Only
+  // produced for the pi agent (buildPiSessionOptions runs synthesize()).
+  if (piSessionOptions?.directionText) {
+    await emitContextTrace(traceWriter, config.port, workspaceId, 'context', {
+      directionText: piSessionOptions.directionText,
+    }, {
+      status: 'ok',
+      storyId: story.id,
+      specId: currentSpecId,
+      label: `arbiter:${story.id}`,
+      metrics: { bytes: Buffer.byteLength(piSessionOptions.directionText) },
+    });
+  }
 
   let promptBody = buildPrompt(
     story,
@@ -4690,6 +4793,22 @@ async function executeStory(
   }
 
   const promptLogFile = path.join(logDir, `${story.id}_prompt.txt`);
+
+  // CTM-002: prompt-assembly trace point — the fully assembled agent prompt.
+  // This is the last context-assembly phase, so the per-story trace writer is
+  // closed right after to release its file descriptor (idempotent, nonfatal).
+  await emitContextTrace(traceWriter, config.port, workspaceId, 'prompt', {
+    prompt: promptBody,
+    agentType: effectiveAgent,
+    mode,
+  }, {
+    status: 'ok',
+    storyId: story.id,
+    specId: currentSpecId,
+    label: `prompt:${story.id}`,
+    metrics: { bytes: Buffer.byteLength(promptBody) },
+  });
+  await traceWriter.close();
 
   const recordPiProgress = (update: {
     completedWork?: string[];
