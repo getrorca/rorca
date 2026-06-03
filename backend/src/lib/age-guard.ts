@@ -9,16 +9,27 @@ import type { RequestHandler } from 'express';
 import { isAgeAvailable } from './db-strategy';
 
 let _ageAvailable: boolean | null = null;
+let _ageAvailableCheckedAt = 0;
+const AGE_NEGATIVE_TTL_MS = 60_000;
 
 export async function checkAge(): Promise<boolean> {
+  if (_ageAvailable === true) return true;
+  if (_ageAvailable === false) {
+    const elapsed = Date.now() - _ageAvailableCheckedAt;
+    if (elapsed < AGE_NEGATIVE_TTL_MS) return false;
+    _ageAvailable = null;
+  }
+
   if (_ageAvailable === null) {
     _ageAvailable = await isAgeAvailable();
+    _ageAvailableCheckedAt = Date.now();
   }
   return _ageAvailable;
 }
 
 export function invalidateAgeCache(): void {
   _ageAvailable = null;
+  _ageAvailableCheckedAt = 0;
 }
 
 export function getAgeUnavailableBody(): {

@@ -20,6 +20,13 @@
  */
 
 import 'dotenv/config';
+import { applySelectedDbModeEnvironment } from './lib/db-strategy';
+
+const workerDbModeBootstrap = applySelectedDbModeEnvironment();
+if (workerDbModeBootstrap.changed) {
+  console.info(`[db-mode] Using ${workerDbModeBootstrap.mode} database ${workerDbModeBootstrap.databaseUrl}`);
+}
+
 // Mark this process as 'worker' so db/index.ts doesn't register its own
 // SIGTERM handler — the worker manages pool teardown in its shutdown() function.
 process.env.RORCA_PROCESS_ROLE = 'worker';

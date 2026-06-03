@@ -30,12 +30,24 @@ function getDbModePath(): string {
   return path.join(getRorcaHome(), DB_MODE_FILENAME);
 }
 
-function parseDatabaseHost(databaseUrl: string): string | null {
+function parseDatabaseUrl(databaseUrl: string): URL | null {
   try {
-    return new URL(databaseUrl).hostname.toLowerCase();
+    return new URL(databaseUrl);
   } catch {
     return null;
   }
+}
+
+function parseDatabaseHost(databaseUrl: string): string | null {
+  return parseDatabaseUrl(databaseUrl)?.hostname.toLowerCase() ?? null;
+}
+
+function parseDatabasePort(databaseUrl: string): number | null {
+  const url = parseDatabaseUrl(databaseUrl);
+  if (!url) return null;
+  if (!url.port) return 5432;
+  const parsed = Number.parseInt(url.port, 10);
+  return Number.isFinite(parsed) ? parsed : null;
 }
 
 function isRemoteHost(host: string | null): boolean {
@@ -43,9 +55,12 @@ function isRemoteHost(host: string | null): boolean {
   return host !== 'localhost' && host !== '127.0.0.1' && host !== '::1';
 }
 
-function readDbModeFile(): string | null {
+function readDbModeFile(): DbMode | null {
   try {
-    return fs.readFileSync(getDbModePath(), 'utf8').trim().toLowerCase();
+    const value = fs.readFileSync(getDbModePath(), 'utf8').trim().toLowerCase();
+    return value === 'docker' || value === 'native' || value === 'byop'
+      ? value
+      : null;
   } catch {
     return null;
   }
@@ -86,7 +101,17 @@ export function detectDbMode(): DbMode {
   if (databaseUrl && isRemoteHost(parseDatabaseHost(databaseUrl))) {
     return 'byop';
   }
-  return readDbModeFile() === 'docker' ? 'docker' : 'native';
+
+  const persistedMode = readDbModeFile();
+  if (persistedMode === 'docker' || persistedMode === 'native') {
+    return persistedMode;
+  }
+
+  const localPort = databaseUrl ? parseDatabasePort(databaseUrl) : null;
+  if (localPort === DOCKER_PORT) return 'docker';
+  if (localPort === resolveNativePort()) return 'native';
+
+  return 'native';
 }
 
 export function setDbMode(mode: DbMode): void {
@@ -105,6 +130,29 @@ export function getDbConnectionString(mode: DbMode): string {
     return process.env.DATABASE_URL || '';
   }
   return `postgres://rorca:rorca@localhost:${resolveNativePort()}/rorca`;
+}
+
+export function applySelectedDbModeEnvironment(env: NodeJS.ProcessEnv = process.env): {
+  mode: DbMode;
+  databaseUrl: string;
+  changed: boolean;
+} {
+  const mode = detectDbMode();
+  const current = env.DATABASE_URL?.trim() || '';
+
+  if (mode === 'byop') {
+    return {
+      mode,
+      databaseUrl: current,
+      changed: false,
+    };
+  }
+
+  const databaseUrl = getDbConnectionString(mode);
+  const changed = current !== databaseUrl;
+  env.DATABASE_URL = databaseUrl;
+
+  return { mode, databaseUrl, changed };
 }
 
 export async function isAgeAvailable(): Promise<boolean> {
