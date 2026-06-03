@@ -890,6 +890,40 @@ const ExplicitDraftContextUsedSchema = z.object({
   meta: z.record(z.string(), z.unknown()),
 });
 
+const ExplicitDraftContextSummarySchema = z.object({
+  directionLayers: z.object({
+    l1: z.boolean(),
+    l2: z.object({ present: z.boolean(), domain: z.string().nullable() }).passthrough(),
+    l3: z.boolean(),
+    l1Title: z.string().nullable().optional(),
+    l2Title: z.string().nullable().optional(),
+    l3Title: z.string().nullable().optional(),
+    l1Tokens: z.number().nonnegative().optional(),
+    l2Tokens: z.number().nonnegative().optional(),
+    l3Tokens: z.number().nonnegative().optional(),
+  }).passthrough().optional(),
+  skills: z.array(z.string()).optional(),
+  memoryEntries: z.number().int().nonnegative().optional(),
+  agentsMd: z.boolean().optional(),
+  template: z.string().nullable().optional(),
+  schemaSnapshot: z.boolean().optional(),
+  gitMemory: z.boolean().optional(),
+  estimatedTokens: z.number().nonnegative().optional(),
+  modelContextWindow: z.number().positive().optional(),
+  vectorHits: z.number().int().nonnegative().optional(),
+  graphHits: z.number().int().nonnegative().optional(),
+  retrievalTier: z.enum(['cache', 'search', 'hybrid']).optional(),
+  retrievalLatencyMs: z.number().nonnegative().optional(),
+  retrieval: z.object({
+    cagHits: z.number().int().nonnegative(),
+    ragHits: z.number().int().nonnegative(),
+    graphHits: z.number().int().nonnegative(),
+    tier: z.enum(['cache', 'search', 'hybrid']),
+    latencyMs: z.number().nonnegative(),
+  }).optional(),
+  predictedFiles: z.array(z.string()).optional(),
+}).passthrough();
+
 const PersistSpecDraftSchema = z.object({
   workspaceId: z.union([z.string().min(1), z.number()]),
   title: z.string().min(1),
@@ -903,6 +937,7 @@ const PersistSpecDraftSchema = z.object({
   mermaidDiagram: z.string().optional(),
   model: z.string().optional(),
   contextUsed: ExplicitDraftContextUsedSchema.optional(),
+  contextSummary: ExplicitDraftContextSummarySchema.optional(),
   reasoning: ExplicitDraftReasoningSchema.optional(),
   overwrite: z.boolean().optional(),
   source: z.string().optional(),
@@ -1043,6 +1078,64 @@ function resolveSpecPostSaveOptions(input?: Partial<SpecPostSaveOptions>): SpecP
   };
 }
 
+function isObjectRecord(value: unknown): value is Record<string, unknown> {
+  return !!value && typeof value === 'object' && !Array.isArray(value);
+}
+
+function buildContextSummaryFromExplicitDraftContext(input: {
+  contextUsed?: unknown;
+  contextSummary?: Record<string, unknown>;
+  model?: string;
+}): Record<string, unknown> | undefined {
+  if (isObjectRecord(input.contextSummary) && Object.keys(input.contextSummary).length > 0) {
+    return input.contextSummary;
+  }
+
+  if (!isObjectRecord(input.contextUsed)) return undefined;
+  const meta = isObjectRecord(input.contextUsed.meta) ? input.contextUsed.meta : null;
+  if (!meta) return undefined;
+
+  const retrieval = isObjectRecord(meta.retrieval) ? meta.retrieval : null;
+  const contextWindow = (input.model ? getModelInfo(input.model)?.contextWindow : undefined) ?? 200000;
+  const normalized: Record<string, unknown> = {
+    directionLayers: {
+      l1: meta.standards === true,
+      l2: { present: meta.conventions === true, domain: typeof meta.domain === 'string' ? meta.domain : null },
+      l3: meta.project === true,
+      ...(typeof meta.l1Title === 'string' ? { l1Title: meta.l1Title } : {}),
+      ...(typeof meta.l2Title === 'string' ? { l2Title: meta.l2Title } : {}),
+      ...(typeof meta.l3Title === 'string' ? { l3Title: meta.l3Title } : {}),
+      ...(typeof meta.l1Tokens === 'number' ? { l1Tokens: meta.l1Tokens } : {}),
+      ...(typeof meta.l2Tokens === 'number' ? { l2Tokens: meta.l2Tokens } : {}),
+      ...(typeof meta.l3Tokens === 'number' ? { l3Tokens: meta.l3Tokens } : {}),
+    },
+    skills: Array.isArray(meta.skills) ? meta.skills.filter((item): item is string => typeof item === 'string') : [],
+    memoryEntries: typeof meta.memoryEntries === 'number' ? meta.memoryEntries : 0,
+    agentsMd: meta.agentsMd === true,
+    template: typeof meta.template === 'string' ? meta.template : null,
+    schemaSnapshot: meta.schema === true || meta.schemaSnapshot === true,
+    gitMemory: meta.gitMemory === true,
+    estimatedTokens: typeof meta.totalTokens === 'number' ? meta.totalTokens : 0,
+    modelContextWindow: typeof meta.modelContextWindow === 'number' ? meta.modelContextWindow : contextWindow,
+    ...(Array.isArray(meta.predictedFiles) ? { predictedFiles: meta.predictedFiles.filter((item): item is string => typeof item === 'string') } : {}),
+  };
+
+  if (retrieval) {
+    const tier = retrieval.tier === 'search' || retrieval.tier === 'hybrid' ? retrieval.tier : 'cache';
+    const cagHits = typeof retrieval.cagHits === 'number' ? retrieval.cagHits : 0;
+    const ragHits = typeof retrieval.ragHits === 'number' ? retrieval.ragHits : 0;
+    const graphHits = typeof retrieval.graphHits === 'number' ? retrieval.graphHits : 0;
+    const latencyMs = typeof retrieval.latencyMs === 'number' ? retrieval.latencyMs : 0;
+    normalized.vectorHits = ragHits;
+    normalized.graphHits = graphHits;
+    normalized.retrievalTier = tier;
+    normalized.retrievalLatencyMs = latencyMs;
+    normalized.retrieval = { cagHits, ragHits, graphHits, tier, latencyMs };
+  }
+
+  return normalized;
+}
+
 async function seedPersistGenerationLog(input: {
   slug: string;
   source: string;
@@ -1053,10 +1146,16 @@ async function seedPersistGenerationLog(input: {
   postSave: SpecPostSaveOptions;
   normalizationChanges: Array<{ from?: string; to: string; reason: string }>;
   contextUsed?: unknown;
+  contextSummary?: Record<string, unknown>;
   reasoning?: unknown;
 }): Promise<void> {
   const pendingEnrichment = input.postSave.enrich;
   const status = pendingEnrichment ? 'pending_enrichment' : 'persisted';
+  const resolvedContextSummary = buildContextSummaryFromExplicitDraftContext({
+    contextUsed: input.contextUsed,
+    contextSummary: input.contextSummary,
+    model: input.model,
+  });
   const summaryJson = {
     source: input.source,
     title: input.title,
@@ -1065,6 +1164,7 @@ async function seedPersistGenerationLog(input: {
     pendingEnrichment,
     postSave: input.postSave,
     normalizationChanges: input.normalizationChanges,
+    ...(resolvedContextSummary ? { contextSummary: resolvedContextSummary } : {}),
     ...(input.contextUsed !== undefined ? { contextUsed: input.contextUsed } : {}),
     ...(input.reasoning !== undefined ? { reasoning: input.reasoning } : {}),
   };
@@ -1086,9 +1186,13 @@ async function seedPersistGenerationLog(input: {
       input.model?.trim() || 'explicit-draft',
       'api',
       0,
-      pendingEnrichment
-        ? 'Explicit draft persisted; pending post-save enrichment'
-        : 'Explicit draft persisted without post-save enrichment',
+      resolvedContextSummary
+        ? (pendingEnrichment
+          ? 'Explicit draft persisted with captured context summary; pending post-save enrichment'
+          : 'Explicit draft persisted with captured context summary')
+        : (pendingEnrichment
+          ? 'Explicit draft persisted; pending post-save enrichment'
+          : 'Explicit draft persisted without post-save enrichment'),
       'none',
       JSON.stringify(summaryJson),
       status,
@@ -1167,6 +1271,7 @@ interface ForgePersistResult {
   normalization: { changes: PersistSpecDraftNormalizationChange[] };
   overwrote: boolean;
   postSave: SpecPostSaveOptions;
+  contextSummary?: Record<string, unknown>;
 }
 
 async function persistExplicitDraftInternal(
@@ -1189,6 +1294,11 @@ async function persistExplicitDraftInternal(
   const overwrite = body.overwrite === true;
   const postSave = resolveSpecPostSaveOptions(body.postSave);
   const draftStories = body.stories ?? body.userStories ?? [];
+  const resolvedContextSummary = buildContextSummaryFromExplicitDraftContext({
+    contextUsed: body.contextUsed,
+    contextSummary: body.contextSummary as Record<string, unknown> | undefined,
+    model: body.model,
+  });
 
   const { stories: normalizedStories, changes } = normalizeExplicitDraftStories(draftStories, body.storyPrefix);
 
@@ -1226,6 +1336,7 @@ async function persistExplicitDraftInternal(
     mermaidDiagram: mermaidDiagram || undefined,
     model: body.model,
     contextUsed: body.contextUsed as any,
+    contextSummary: resolvedContextSummary,
     reasoning: body.reasoning,
     source,
   });
@@ -1255,6 +1366,7 @@ async function persistExplicitDraftInternal(
     postSave,
     normalizationChanges: changes,
     contextUsed: body.contextUsed,
+    contextSummary: resolvedContextSummary,
     reasoning: body.reasoning,
   });
 
@@ -1287,6 +1399,7 @@ async function persistExplicitDraftInternal(
     normalization: { changes },
     overwrote: hadExistingSpec,
     postSave,
+    ...(resolvedContextSummary ? { contextSummary: resolvedContextSummary } : {}),
   };
 }
 
@@ -3656,6 +3769,18 @@ router.post('/generate', validateBody(GenerateSpecSchema), async (req: Request, 
  *               source:
  *                 type: string
  *                 description: Provenance tag stored in the spec JSON (defaults to explicit-draft)
+ *               contextUsed:
+ *                 type: object
+ *                 description: Optional synthesized context text + metadata captured by a skill-first caller.
+ *                 properties:
+ *                   text: { type: string }
+ *                   meta:
+ *                     type: object
+ *                     additionalProperties: true
+ *               contextSummary:
+ *                 type: object
+ *                 description: Optional canonical context summary used by the Spec Detail Context tab (direction layers, retrieval metrics, token estimates, etc.).
+ *                 additionalProperties: true
  *               postSave:
  *                 type: object
  *                 properties:

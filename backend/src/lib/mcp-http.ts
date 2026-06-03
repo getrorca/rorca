@@ -92,7 +92,10 @@ interface OpenAPIPropertySchema {
   default?: unknown;
   format?: string;
   nullable?: boolean;
-  items?: { type?: string };
+  $ref?: string;
+  items?: OpenAPIPropertySchema;
+  properties?: Record<string, OpenAPIPropertySchema>;
+  additionalProperties?: boolean | OpenAPIPropertySchema;
   minimum?: number;
   maximum?: number;
 }
@@ -302,6 +305,12 @@ function generateToolName(method: string, path: string, allPaths: Map<string, st
 function openApiTypeToZod(prop: OpenAPIPropertySchema, required: boolean): z.ZodType {
   let schema: z.ZodType;
 
+  if (prop.$ref) {
+    let refSchema: z.ZodType = z.record(z.string(), z.unknown());
+    if (prop.description) refSchema = refSchema.describe(prop.description);
+    return required ? refSchema : refSchema.optional();
+  }
+
   switch (prop.type) {
     case 'integer':
     case 'number': {
@@ -316,11 +325,24 @@ function openApiTypeToZod(prop: OpenAPIPropertySchema, required: boolean): z.Zod
       schema = boolSchema;
       break;
     }
+    case 'object': {
+      let objectSchema: z.ZodType = prop.properties
+        ? z.object(Object.fromEntries(
+          Object.entries(prop.properties).map(([key, child]) => [key, openApiTypeToZod(child, false)]),
+        )).passthrough()
+        : z.record(z.string(), z.unknown());
+      if (prop.description) objectSchema = objectSchema.describe(prop.description);
+      schema = objectSchema;
+      break;
+    }
     case 'array': {
-      const itemType = prop.items?.type === 'number' || prop.items?.type === 'integer'
-        ? z.number()
-        : z.string();
-      let arrSchema = z.array(itemType);
+      let itemSchema: z.ZodType;
+      if (prop.items) {
+        itemSchema = openApiTypeToZod(prop.items, true);
+      } else {
+        itemSchema = z.unknown();
+      }
+      let arrSchema = z.array(itemSchema);
       if (prop.description) arrSchema = arrSchema.describe(prop.description);
       schema = arrSchema;
       break;
@@ -389,7 +411,10 @@ function collectInputSchemaParts(operation: OpenAPIOperation): {
         default: propSchema.default,
         format: propSchema.format,
         nullable: propSchema.nullable,
+        $ref: propSchema.$ref,
         items: propSchema.items,
+        properties: propSchema.properties,
+        additionalProperties: propSchema.additionalProperties,
         minimum: propSchema.minimum,
         maximum: propSchema.maximum,
       };
@@ -409,7 +434,10 @@ function collectInputSchemaParts(operation: OpenAPIOperation): {
         default: propSchema.default,
         format: propSchema.format,
         nullable: propSchema.nullable,
+        $ref: propSchema.$ref,
         items: propSchema.items,
+        properties: propSchema.properties,
+        additionalProperties: propSchema.additionalProperties,
         minimum: propSchema.minimum,
         maximum: propSchema.maximum,
       };

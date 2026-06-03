@@ -1320,33 +1320,30 @@ export function getGenerationLogPresentation(log: Pick<GenerationLog, 'status' |
  *   - Enrich shape: { directionLayers: [...], memory: { cagHits, ragHits, graphHits, tier, latencyMs }, tokenBudget, flags }
  * Returns null if neither field is parseable or contains meaningful data.
  */
-function parseContextSummary(log: GenerationLog): ContextSummary | null {
-  // Try context_summary_json first (richer, used by enrich and newer generate)
-  const jsonStr = log.context_summary_json ?? log.context_summary;
-  if (!jsonStr) return null;
-
-  let parsed: any;
-  try {
-    parsed = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr;
-  } catch {
-    return null;
-  }
-
+function normalizeContextSummaryPayload(parsed: unknown): ContextSummary | null {
   if (!parsed || typeof parsed !== 'object' || Object.keys(parsed).length === 0) return null;
 
+  const record = parsed as Record<string, any>;
+
   // Already in standard ContextSummary shape (has { l1, l2, l3 } object)
-  if (parsed.directionLayers && !Array.isArray(parsed.directionLayers)) {
-    return parsed as ContextSummary;
+  if (record.directionLayers && !Array.isArray(record.directionLayers)) {
+    return record as ContextSummary;
+  }
+
+  // Persisted explicit-draft wrapper shape: { ..., contextSummary: { ... } }
+  if (record.contextSummary && typeof record.contextSummary === 'object') {
+    const nested = normalizeContextSummaryPayload(record.contextSummary);
+    if (nested) return nested;
   }
 
   // Enrich shape: directionLayers is an array, memory holds retrieval metrics
-  if (Array.isArray(parsed.directionLayers) && parsed.memory) {
-    const mem = parsed.memory as {
+  if (Array.isArray(record.directionLayers) && record.memory) {
+    const mem = record.memory as {
       cagHits?: number; ragHits?: number; graphHits?: number;
       tier?: string; latencyMs?: number; count?: number;
     };
     const layerPresent = (lyr: string) => {
-      const found = (parsed.directionLayers as any[]).find((d: any) => d.layer === lyr);
+      const found = (record.directionLayers as any[]).find((d: any) => d.layer === lyr);
       return found?.present ?? false;
     };
     const normalized: ContextSummary = {
@@ -1355,14 +1352,14 @@ function parseContextSummary(log: GenerationLog): ContextSummary | null {
         l2: { present: layerPresent('L2'), domain: null },
         l3: layerPresent('L3'),
       },
-      skills: parsed.skills ?? [],
+      skills: record.skills ?? [],
       memoryEntries: mem.count ?? 0,
-      agentsMd: parsed.flags?.agent ?? false,
+      agentsMd: record.flags?.agent ?? false,
       template: null,
-      schemaSnapshot: parsed.flags?.schema ?? false,
-      gitMemory: parsed.flags?.gitMemory ?? false,
-      estimatedTokens: parsed.tokenBudget?.used ?? 0,
-      modelContextWindow: parsed.tokenBudget?.limit ?? 200000,
+      schemaSnapshot: record.flags?.schema ?? false,
+      gitMemory: record.flags?.gitMemory ?? false,
+      estimatedTokens: record.tokenBudget?.used ?? 0,
+      modelContextWindow: record.tokenBudget?.limit ?? 200000,
       retrieval: {
         cagHits: mem.cagHits ?? 0,
         ragHits: mem.ragHits ?? 0,
@@ -1374,7 +1371,62 @@ function parseContextSummary(log: GenerationLog): ContextSummary | null {
     return normalized;
   }
 
+  // Fallback explicit-draft payload carrying only contextUsed/meta.
+  const meta = record.contextUsed?.meta;
+  if (meta && typeof meta === 'object') {
+    const metaRecord = meta as Record<string, any>;
+    return {
+      directionLayers: {
+        l1: metaRecord.standards === true,
+        l2: { present: metaRecord.conventions === true, domain: typeof metaRecord.domain === 'string' ? metaRecord.domain : null },
+        l3: metaRecord.project === true,
+        ...(typeof metaRecord.l1Title === 'string' ? { l1Title: metaRecord.l1Title } : {}),
+        ...(typeof metaRecord.l2Title === 'string' ? { l2Title: metaRecord.l2Title } : {}),
+        ...(typeof metaRecord.l3Title === 'string' ? { l3Title: metaRecord.l3Title } : {}),
+        ...(typeof metaRecord.l1Tokens === 'number' ? { l1Tokens: metaRecord.l1Tokens } : {}),
+        ...(typeof metaRecord.l2Tokens === 'number' ? { l2Tokens: metaRecord.l2Tokens } : {}),
+        ...(typeof metaRecord.l3Tokens === 'number' ? { l3Tokens: metaRecord.l3Tokens } : {}),
+      },
+      skills: Array.isArray(metaRecord.skills) ? metaRecord.skills.filter((item: unknown): item is string => typeof item === 'string') : [],
+      memoryEntries: typeof metaRecord.memoryEntries === 'number' ? metaRecord.memoryEntries : 0,
+      agentsMd: metaRecord.agentsMd === true,
+      template: typeof metaRecord.template === 'string' ? metaRecord.template : null,
+      schemaSnapshot: metaRecord.schema === true || metaRecord.schemaSnapshot === true,
+      gitMemory: metaRecord.gitMemory === true,
+      estimatedTokens: typeof metaRecord.totalTokens === 'number' ? metaRecord.totalTokens : 0,
+      modelContextWindow: typeof metaRecord.modelContextWindow === 'number' ? metaRecord.modelContextWindow : 200000,
+      ...(Array.isArray(metaRecord.predictedFiles) ? { predictedFiles: metaRecord.predictedFiles.filter((item: unknown): item is string => typeof item === 'string') } : {}),
+      ...(metaRecord.retrieval && typeof metaRecord.retrieval === 'object' ? {
+        retrieval: {
+          cagHits: typeof metaRecord.retrieval.cagHits === 'number' ? metaRecord.retrieval.cagHits : 0,
+          ragHits: typeof metaRecord.retrieval.ragHits === 'number' ? metaRecord.retrieval.ragHits : 0,
+          graphHits: typeof metaRecord.retrieval.graphHits === 'number' ? metaRecord.retrieval.graphHits : 0,
+          tier: metaRecord.retrieval.tier === 'search' || metaRecord.retrieval.tier === 'hybrid' ? metaRecord.retrieval.tier : 'cache',
+          latencyMs: typeof metaRecord.retrieval.latencyMs === 'number' ? metaRecord.retrieval.latencyMs : 0,
+        },
+        vectorHits: typeof metaRecord.retrieval.ragHits === 'number' ? metaRecord.retrieval.ragHits : 0,
+        graphHits: typeof metaRecord.retrieval.graphHits === 'number' ? metaRecord.retrieval.graphHits : 0,
+        retrievalTier: metaRecord.retrieval.tier === 'search' || metaRecord.retrieval.tier === 'hybrid' ? metaRecord.retrieval.tier : 'cache',
+        retrievalLatencyMs: typeof metaRecord.retrieval.latencyMs === 'number' ? metaRecord.retrieval.latencyMs : 0,
+      } : {}),
+    };
+  }
+
   return null;
+}
+
+export function parseContextSummary(log: GenerationLog): ContextSummary | null {
+  const jsonStr = log.context_summary_json ?? log.context_summary;
+  if (!jsonStr) return null;
+
+  let parsed: unknown;
+  try {
+    parsed = typeof jsonStr === 'string' ? JSON.parse(jsonStr) : jsonStr;
+  } catch {
+    return null;
+  }
+
+  return normalizeContextSummaryPayload(parsed);
 }
 
 /** Rough per-1K-token cost estimates by model family (input/output). */

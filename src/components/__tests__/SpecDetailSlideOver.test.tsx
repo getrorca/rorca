@@ -6,7 +6,54 @@
  */
 
 import { describe, it, expect } from 'vitest';
-import { getGenerationLogPresentation } from '../SpecDetailSlideOver';
+import { getGenerationLogPresentation, parseContextSummary } from '../SpecDetailSlideOver';
+
+describe('parseContextSummary', () => {
+  it('extracts a nested contextSummary from persisted explicit-draft logs', () => {
+    const summary = parseContextSummary({
+      context_summary_json: JSON.stringify({
+        source: 'skill-first',
+        contextSummary: {
+          directionLayers: {
+            l1: true,
+            l2: { present: true, domain: 'devtools' },
+            l3: true,
+          },
+          skills: ['rorca-forge'],
+          memoryEntries: 4,
+          agentsMd: true,
+          template: null,
+          schemaSnapshot: true,
+          gitMemory: false,
+          estimatedTokens: 1234,
+          modelContextWindow: 200000,
+          retrieval: {
+            cagHits: 2,
+            ragHits: 5,
+            graphHits: 3,
+            tier: 'hybrid',
+            latencyMs: 42,
+          },
+        },
+      }),
+    } as any);
+
+    expect(summary).toMatchObject({
+      directionLayers: {
+        l1: true,
+        l2: { present: true, domain: 'devtools' },
+        l3: true,
+      },
+      retrieval: {
+        cagHits: 2,
+        ragHits: 5,
+        graphHits: 3,
+        tier: 'hybrid',
+        latencyMs: 42,
+      },
+    });
+  });
+});
 
 describe('getGenerationLogPresentation', () => {
   it('renders persisted explicit drafts as successful persistence, not failure', () => {
