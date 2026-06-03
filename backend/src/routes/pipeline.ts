@@ -35,9 +35,11 @@ import { isPiExternalOrchestrationEnabled } from '../lib/pi-execution-mode';
 import { synthesize } from '../lib/direction-stack';
 import { scanRequiredEngines, countStoriesByEngine, resolveStoryAgent, reroutedStories, type EngineUserStory } from '../lib/execution-engine';
 import { readRunState, type RunState } from '../lib/run-state';
+import { lookupTraceRecord, parseRawRef, getTraceArtifactPath } from '../lib/context-trace';
 import { checkSpec, type CapabilityStory, type StoryCapabilityReport } from '../lib/tool-capability-checker';
 import { loadOrchestrationConfig, type CapabilityMismatchMode } from '../lib/complexity-scorer';
 import { buildStoryExecutionPacket, detectExecutionModeFromSpec } from '../lib/story-execution-packet';
+import { buildQuickRunContextBlocks, readContractMemory, routeWorkspaceContext, validateRoutingContract } from '../lib/workspace-context-routing';
 import { readFallbackResults, deleteFallbackFile, getFallbackFilename, type FallbackResultEntry } from '../lib/resilient-post';
 import { advanceQueue } from '../lib/run-queue';
 import { compileWaves, isCycleError, type Wave, type UserStory as WaveUserStory } from '../lib/wave-compiler';
@@ -234,8 +236,15 @@ function buildExecutionReadinessSummary(
   }>;
 } {
   const mode = detectExecutionModeFromSpec(specJson as { mode?: string; phases?: unknown });
+  // CTM-006: Resolve the workspace-context signal once through the canonical path
+  // so every story's readiness reflects the same context-blindness verdict.
+  const wsRouting = routeWorkspaceContext(workspacePath);
+  const workspaceContext = {
+    richnessScore: wsRouting.richnessScore,
+    contractSatisfied: wsRouting.contract.satisfied,
+  };
   const stories = ((specJson.userStories ?? []) as CapabilityStory[]).map((story) => {
-    const packet = buildStoryExecutionPacket(workspacePath, story, mode);
+    const packet = buildStoryExecutionPacket(workspacePath, story, mode, workspaceContext);
     return {
       storyId: story.id,
       storyTitle: story.title,
@@ -2339,38 +2348,41 @@ router.post('/quick-run', async (req: Request, res: Response) => {
     }
 
     // 8. Generate 1-story spec via LLM
-    // Read MEMORY.md from workspace root (best-effort, silent on error)
+    // CTM-006: Route quick-run context injection through the canonical workspace-context path.
+    // Validate the .rorca / AGENTS.md / MEMORY.md contract once, then resolve MEMORY.md and
+    // installed skills against it so quick-run specs are never context blind by accident.
+    const routingContract = validateRoutingContract(workspace.path);
+
+    // Read MEMORY.md from workspace root (best-effort, silent on error).
+    // Keep the root-relative read so the contract's resolved path can never break a
+    // workspace whose ledger lives at the conventional root MEMORY.md.
     let memoryContent = '';
     try {
-      const memoryRaw = await fs.promises.readFile(path.join(workspace.path, 'MEMORY.md'), 'utf8');
-      memoryContent = memoryRaw.slice(0, 2000);
+      memoryContent = await fs.promises.readFile(path.join(workspace.path, 'MEMORY.md'), 'utf8');
     } catch (err: unknown) {
-      // ENOENT or any read error — silently skip
+      // ENOENT or any read error — fall back to the contract-resolved ledger (also nonfatal)
       if (err instanceof Error) void err.message;
+      memoryContent = readContractMemory(workspace.path, routingContract);
     }
 
     // Fetch installed skills for this workspace (best-effort, silent on error)
-    let skillsContext = '';
+    let installedSkills: Array<{ name: string; description: string | null }> = [];
     try {
-      const skillRows = await query<{ name: string; description: string | null }>(
+      installedSkills = await query<{ name: string; description: string | null }>(
         `SELECT name, description FROM installed_skills ORDER BY name`,
         [],
       );
-      if (skillRows.length > 0) {
-        const skillLines = skillRows.map(s => `- ${s.name}: ${s.description ?? ''}`).join('\n');
-        skillsContext = `=== INSTALLED SKILLS ===\n${skillLines}`;
-      }
     } catch (err: unknown) {
       // DB error — silently skip
       if (err instanceof Error) void err.message;
     }
 
-    // Build ordered context blocks and filter empty entries
-    const contextBlocks = [
-      directionContext.trim() ? `=== DIRECTION STACK ===\n${directionContext.trim()}` : '',
-      memoryContent.trim() ? `=== MEMORY.md ===\n${memoryContent.trim()}` : '',
-      skillsContext,
-    ].filter(Boolean);
+    // Build ordered, non-empty context blocks via the single deterministic assembler.
+    const { blocks: contextBlocks } = buildQuickRunContextBlocks({
+      directionContext,
+      memoryContent,
+      installedSkills,
+    });
 
     const instructions = [
       '=== INSTRUCTIONS: READ THIS FIRST ===',
@@ -3126,6 +3138,106 @@ router.get('/runs/:runId', async (req: Request, res: Response) => {
     });
   } catch (error: any) {
     handleRouteError(res, error, '[Pipeline] Get run');
+  }
+});
+
+// ─── GET /api/pipeline/runs/:runId/context-trace/:rawRef — Lazy raw payload ───
+// CTM-002: context-trace metadata streams over SSE without the heavy payload.
+// The browser calls this endpoint only when a user opens a detail view, so the
+// raw blob is read from the run's on-disk artifact on demand. Run-scoped:
+// the rawRef's embedded runId must match the path runId.
+
+/**
+ * @swagger
+ * /api/pipeline/runs/{runId}/context-trace/{rawRef}:
+ *   get:
+ *     tags: [Pipeline]
+ *     summary: Resolve a context-trace raw payload by rawRef
+ *     operationId: getContextTraceRaw
+ *     x-rorca-tier: public
+ *     x-rorca-rationale: "Read-only context-trace inspection of local run artifacts — no write or operator-only side effects, safe for CLI/MCP."
+ *     x-rorca-public-api: true
+ *     description: |
+ *       Lazily resolves the full raw payload for a single context-trace event,
+ *       referenced by its deterministic rawRef (r{runId}:{seq}). Metadata-only
+ *       events are streamed over SSE; this endpoint returns the heavy payload
+ *       kept off the hot path in the run's append-only artifact.
+ *     parameters:
+ *       - in: path
+ *         name: runId
+ *         required: true
+ *         schema: { type: integer }
+ *       - in: path
+ *         name: rawRef
+ *         required: true
+ *         schema: { type: string }
+ *         description: "Deterministic raw payload pointer, e.g. r42:7"
+ *     responses:
+ *       200:
+ *         description: Raw payload record
+ *         content:
+ *           application/json:
+ *             schema:
+ *               type: object
+ *               properties:
+ *                 rawRef: { type: string }
+ *                 runId: { type: integer }
+ *                 seq: { type: integer }
+ *                 phase: { type: string }
+ *                 ts: { type: string }
+ *                 payload: {}
+ *       400: { description: "Malformed rawRef" }
+ *       404: { description: "Run or raw payload not found" }
+ *       422: { description: "Artifact present but payload unrecoverable (corrupt)" }
+ */
+router.get('/runs/:runId/context-trace/:rawRef', async (req: Request, res: Response) => {
+  try {
+    const runId = parseInt(String(req.params.runId), 10);
+    if (isNaN(runId)) {
+      throw new ValidationError('Invalid runId');
+    }
+
+    const rawRef = String(req.params.rawRef);
+    const parsed = parseRawRef(rawRef);
+    if (!parsed) {
+      throw new ValidationError('Malformed rawRef');
+    }
+
+    // Run-scoped validation: a rawRef encodes its own runId; it must match the
+    // path runId so a trace cannot be read across run boundaries.
+    if (parsed.runId !== runId) {
+      throw new ValidationError('rawRef does not belong to this run');
+    }
+
+    const runRow = await queryOne('SELECT workspace_id FROM pipeline_runs WHERE id = $1', [runId]) as { workspace_id: string } | undefined;
+    if (!runRow) {
+      throw new NotFoundError('Run not found');
+    }
+
+    const workspace = await queryOne('SELECT path FROM workspaces WHERE id = $1', [runRow.workspace_id]) as { path: string } | undefined;
+    if (!workspace) {
+      throw new NotFoundError('Workspace not found');
+    }
+
+    const record = lookupTraceRecord(workspace.path, rawRef);
+    if (record) {
+      res.json(record);
+      return;
+    }
+
+    // No record. Distinguish a genuinely-absent trace from a corrupt artifact:
+    // if the artifact file exists but yields no record for an otherwise valid
+    // in-run rawRef, the artifact is unreadable/corrupt — return 422 with a
+    // safe placeholder body instead of a misleading 404. lookupTraceRecord is
+    // already nonfatal (a decompress failure yields no record, never throws).
+    const artifactExists = fs.existsSync(getTraceArtifactPath(workspace.path, runId));
+    if (artifactExists) {
+      throw new UnprocessableError('Context-trace artifact present but payload could not be recovered (corrupt or pruned)');
+    }
+
+    throw new NotFoundError('Context-trace payload not found');
+  } catch (error: any) {
+    handleRouteError(res, error, '[Pipeline] Get context-trace raw');
   }
 });
 

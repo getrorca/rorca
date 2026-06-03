@@ -423,6 +423,11 @@ function SpecDetailContent({
   const [enrichState, setEnrichState] = useState<'idle' | 'enriching'>('idle');
   const [enrichRefreshKey, setEnrichRefreshKey] = useState(0);
 
+  // Above-the-fold context summary — parsed from the latest generation log so
+  // context usage is visible without opening the Context tab. Null when no
+  // persisted context exists yet (older specs predate context logging).
+  const [headlineContext, setHeadlineContext] = useState<ContextSummary | null>(null);
+
   // Approve/Reject
   const [actionLoading, setActionLoading] = useState(false);
 
@@ -475,6 +480,22 @@ function SpecDetailContent({
 
   // Reset tab on spec change
   useEffect(() => { setActiveTab(initialTab ?? 'stories'); }, [specId, initialTab]);
+
+  // Fetch the latest generation log so the context summary can be surfaced
+  // above the fold. Re-runs after enrichment so the headline reflects the
+  // richer summary. Tolerates older logs that lack a parseable summary.
+  useEffect(() => {
+    if (!specId) return;
+    let cancelled = false;
+    apiFetch<GenerationLog | { logs: GenerationLog[] }>(`/api/specs/${specId}/generation-log`)
+      .then(res => {
+        if (cancelled) return;
+        const latest = 'logs' in res ? res.logs[0] : res;
+        setHeadlineContext(latest ? parseContextSummary(latest) : null);
+      })
+      .catch(() => { if (!cancelled) setHeadlineContext(null); });
+    return () => { cancelled = true; };
+  }, [specId, enrichRefreshKey]);
 
   // Check if workspace has an active run (so we can show Queue button upfront)
   useEffect(() => {
@@ -597,13 +618,27 @@ function SpecDetailContent({
     if (!workspaceId) return;
     setEnrichState('enriching');
     try {
-      const res = await apiFetch<{ ok: boolean; retrieval_method?: string }>(`/api/specs/${specId}/enrich`, {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ workspaceId }),
-      });
+      // Backend contract: { success, retrieval_method, storiesEnriched }. We only
+      // read this lightweight metadata — never any raw retrieval blob — so the
+      // Context tab summary refresh stays compare/replay/export safe.
+      const res = await apiFetch<{ success?: boolean; retrieval_method?: string; storiesEnriched?: number }>(
+        `/api/specs/${specId}/enrich`,
+        {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ workspaceId }),
+        },
+      );
       const method = res.retrieval_method ?? 'direction-only';
-      toast.show(`Spec enriched via ${method}`, 'success');
+      const count = res.storiesEnriched ?? 0;
+      toast.show(
+        count > 0
+          ? `Enriched ${count} ${count === 1 ? 'story' : 'stories'} via ${method}`
+          : `Spec enriched via ${method}`,
+        'success',
+      );
+      // Refresh the headline + Context tab summary so the new retrieval badge and
+      // per-story annotations appear without a manual reload.
       setEnrichRefreshKey(k => k + 1);
     } catch (err: unknown) {
       toast.show(err instanceof Error ? err.message : 'Enrichment failed', 'error');
@@ -638,6 +673,24 @@ function SpecDetailContent({
       for (const sk of (s as any).suggestedSkills ?? []) seen.add(sk.name ?? sk);
     }
     return seen.size;
+  }, [stories]);
+
+  // Skill relevance details for the above-the-fold context card — derived from
+  // story suggestedSkills (max relevance per unique name).
+  const headlineSkillDetails = useMemo(() => {
+    const toSkill = (raw: unknown): SuggestedSkill =>
+      typeof raw === 'string' ? { name: raw } : (raw as SuggestedSkill);
+    const map = new Map<string, SuggestedSkill>();
+    for (const story of stories) {
+      for (const raw of ((story as any).suggestedSkills ?? [])) {
+        const sk = toSkill(raw);
+        const existing = map.get(sk.name);
+        if (!existing || (sk.relevance ?? 0) > (existing.relevance ?? 0)) {
+          map.set(sk.name, sk);
+        }
+      }
+    }
+    return Array.from(map.values());
   }, [stories]);
 
   const tabs: { id: PreviewTab; label: string; badge?: string; icon?: typeof History }[] = [
@@ -733,6 +786,18 @@ function SpecDetailContent({
         <div className="flex-1 flex items-center justify-center text-muted text-sm">Failed to load spec detail</div>
       ) : (
         <>
+          {/* Above-the-fold context summary — visible regardless of active tab
+              whenever persisted context exists, so users see direction layers,
+              skill relevance, and injected files without opening the Context tab. */}
+          {headlineContext && (
+            <div className="px-4 pt-3 pb-1 shrink-0 border-b border-border">
+              <ContextSummaryCard
+                summary={headlineContext}
+                skillDetails={headlineSkillDetails.length > 0 ? headlineSkillDetails : undefined}
+              />
+            </div>
+          )}
+
           {/* Tab strip */}
           <div role="tablist" className="flex border-b border-border shrink-0 overflow-x-auto">
             {tabs.map(tab => (
@@ -1312,6 +1377,68 @@ export function getGenerationLogPresentation(log: Pick<GenerationLog, 'status' |
   };
 }
 
+/* ─── CTM-008: Retrieval-method badge + per-story annotation preview ───────── */
+
+const RETRIEVAL_METHOD_BADGE_CLASSES: Record<string, string> = {
+  pgvector: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
+  graph: 'bg-purple-500/15 text-purple-400 border-purple-500/30',
+  fulltext: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
+  'direction-only': 'bg-gray-500/15 text-gray-400 border-gray-500/30',
+};
+
+/**
+ * Map an enrichment retrieval method to its display label + badge classes.
+ * Unknown methods fall back to the neutral direction-only styling so the badge
+ * always renders rather than crashing on a method the UI hasn't seen yet.
+ */
+export function getRetrievalMethodPresentation(method: string): { label: string; badgeClassName: string } {
+  return {
+    label: method,
+    badgeClassName: RETRIEVAL_METHOD_BADGE_CLASSES[method] ?? RETRIEVAL_METHOD_BADGE_CLASSES['direction-only'],
+  };
+}
+
+export interface StoryContextAnnotation {
+  storyId: string;
+  storyTitle: string;
+  /** First 3 lines of the ## Context section — safe to render inline. */
+  preview: string;
+  /** Whether the annotation has more than the previewed lines. */
+  hasMore: boolean;
+  /** Full ## Context section text — derived on demand, never persisted to global state. */
+  fullText: string;
+}
+
+/**
+ * Extract per-story ## Context annotations from the local story list.
+ *
+ * Trace-safe by construction: this reads the already-loaded story descriptions
+ * (metadata) and returns only short preview slices. It never reaches into any
+ * raw retrieval blob nor stows anything on `window`/global state — the inspector
+ * stays compare/replay/export friendly because only derived metadata is exposed.
+ */
+export function extractStoryContextAnnotations(
+  stories: Array<{ id: string; title?: string; description?: unknown }>,
+): StoryContextAnnotation[] {
+  const annotations: StoryContextAnnotation[] = [];
+  for (const story of stories) {
+    const desc = story.description;
+    if (typeof desc !== 'string' || !desc.includes('## Context')) continue;
+    const ctxMatch = desc.match(/## Context\n([\s\S]*?)(?:\n##|$)/);
+    const fullText = ctxMatch ? ctxMatch[1].trim() : '';
+    if (!fullText) continue;
+    const lines = fullText.split('\n');
+    annotations.push({
+      storyId: story.id,
+      storyTitle: story.title ?? story.id,
+      preview: lines.slice(0, 3).join('\n'),
+      hasMore: lines.length > 3,
+      fullText,
+    });
+  }
+  return annotations;
+}
+
 /**
  * Parse a context summary from a generation log row.
  * Priority: context_summary_json > context_summary (JSON parse).
@@ -1621,50 +1748,33 @@ function GenerationLogTab({ specId, stories, refreshKey }: { specId: string; sto
 
             {/* Retrieval method badge + per-story annotation preview (enriched entries) */}
             {log.enriched && log.retrieval_method && (() => {
-              const methodColors: Record<string, string> = {
-                pgvector: 'bg-blue-500/15 text-blue-400 border-blue-500/30',
-                graph: 'bg-purple-500/15 text-purple-400 border-purple-500/30',
-                fulltext: 'bg-amber-500/15 text-amber-400 border-amber-500/30',
-                'direction-only': 'bg-gray-500/15 text-gray-400 border-gray-500/30',
-              };
-              const colorClass = methodColors[log.retrieval_method] ?? methodColors['direction-only'];
-
-              // Collect stories that have a ## Context section in their description
-              const annotatedStories = stories.filter(s => {
-                const desc = (s as any).description ?? '';
-                return typeof desc === 'string' && desc.includes('## Context');
-              });
+              const { label, badgeClassName } = getRetrievalMethodPresentation(log.retrieval_method);
+              // Derive annotations from already-loaded story metadata only — no raw
+              // retrieval blobs are read or stashed in global state (trace-safe).
+              const annotations = extractStoryContextAnnotations(stories);
 
               return (
-                <div className="px-4 py-3 border-t border-border/50">
+                <div className="px-4 py-3 border-t border-border/50" data-testid="retrieval-method-section">
                   <div className="flex items-center gap-2 mb-2">
-                    <span className={`inline-flex items-center px-2 py-0.5 text-[10px] font-semibold rounded border ${colorClass}`}>
-                      {log.retrieval_method}
+                    <span className={`inline-flex items-center px-2 py-0.5 text-[10px] font-semibold rounded border ${badgeClassName}`} data-testid="retrieval-method-badge">
+                      {label}
                     </span>
                     <span className="text-[10px] text-muted">retrieval method</span>
                   </div>
-                  {annotatedStories.length > 0 && (
+                  {annotations.length > 0 && (
                     <div className="space-y-1">
-                      <p className="text-[10px] text-muted mb-1">Story annotations ({annotatedStories.length})</p>
-                      {annotatedStories.map(story => {
-                        const desc: string = (story as any).description ?? '';
-                        const ctxMatch = desc.match(/## Context\n([\s\S]*?)(?:\n##|$)/);
-                        const ctxText = ctxMatch ? ctxMatch[1].trim() : '';
-                        const lines = ctxText.split('\n');
-                        const preview = lines.slice(0, 3).join('\n');
-                        const hasMore = lines.length > 3;
-                        return (
-                          <details key={story.id} className="group rounded border border-border/50 bg-bg/50 overflow-hidden">
-                            <summary className="flex items-center gap-2 px-2 py-1.5 text-xs cursor-pointer select-none list-none hover:bg-panel transition-colors">
-                              <span className="font-mono text-[10px] text-accent shrink-0">{story.id}</span>
-                              <span className="text-muted truncate">{story.title}</span>
-                            </summary>
-                            <div className="px-2 pb-2">
-                              <StoryAnnotationPreview preview={preview} hasMore={hasMore} fullText={ctxText} />
-                            </div>
-                          </details>
-                        );
-                      })}
+                      <p className="text-[10px] text-muted mb-1">Story annotations ({annotations.length})</p>
+                      {annotations.map(annotation => (
+                        <details key={annotation.storyId} className="group rounded border border-border/50 bg-bg/50 overflow-hidden">
+                          <summary className="flex items-center gap-2 px-2 py-1.5 text-xs cursor-pointer select-none list-none hover:bg-panel transition-colors">
+                            <span className="font-mono text-[10px] text-accent shrink-0">{annotation.storyId}</span>
+                            <span className="text-muted truncate">{annotation.storyTitle}</span>
+                          </summary>
+                          <div className="px-2 pb-2">
+                            <StoryAnnotationPreview preview={annotation.preview} hasMore={annotation.hasMore} fullText={annotation.fullText} />
+                          </div>
+                        </details>
+                      ))}
                     </div>
                   )}
                 </div>

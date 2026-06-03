@@ -322,6 +322,58 @@ describe("rorca pi extension commands", () => {
     expect(notifications[0]?.message).toContain("falling back to direct retry");
   });
 
+  it("enriches a spec via the direct enrich API and reports the retrieval method", async () => {
+    const { commands, register } = createRegistry();
+    let state: ExtensionState = { lastSpecSlug: "oauth-login" };
+    const api = {
+      resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
+      enrichSpec: vi.fn(async () => ({ retrievalMethod: "pgvector", storiesEnriched: 3 })),
+    } as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillWorkflow: vi.fn(),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx, notifications } = createContext();
+    await commands.get("rorca-enrich")!("oauth-login --workspace cashflow", ctx);
+
+    expect(api.enrichSpec).toHaveBeenCalledWith("oauth-login", "cashflow");
+    expect(state.workspaceId).toBe("cashflow");
+    expect(state.lastSpecSlug).toBe("oauth-login");
+    expect(notifications.at(-1)?.message).toContain("Enriched oauth-login (3 stories) via pgvector");
+  });
+
+  it("enriches the last spec when no slug is provided", async () => {
+    const { commands, register } = createRegistry();
+    let state: ExtensionState = { lastSpecSlug: "billing-flow" };
+    const api = {
+      resolveWorkspace: vi.fn(async () => ({ id: "cashflow", label: "Cashflow", path: "/repo" })),
+      enrichSpec: vi.fn(async () => ({ retrievalMethod: "direction-only", storiesEnriched: 0 })),
+    } as any;
+
+    registerRorcaCommands(register, {
+      api,
+      watch: { start: vi.fn(), stop: vi.fn(), currentRunId: () => null } as any,
+      dispatchSkillWorkflow: vi.fn(),
+      getState: () => state,
+      updateState: (patch) => {
+        state = { ...state, ...patch };
+      },
+    });
+
+    const { ctx, notifications } = createContext();
+    await commands.get("rorca-enrich")!("--workspace cashflow", ctx);
+
+    expect(api.enrichSpec).toHaveBeenCalledWith("billing-flow", "cashflow");
+    expect(notifications.at(-1)?.message).toContain("Enriched billing-flow (no new stories) via direction-only");
+  });
+
   it("shows run status details", async () => {
     const { commands, register } = createRegistry();
     const detail: PipelineRunDetailResponse = {

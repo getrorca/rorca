@@ -14,6 +14,8 @@
  * block story completion or the next story from starting.
  */
 
+import * as fs from 'fs';
+import * as path from 'path';
 import { execute, query, queryOne } from '../db/index';
 import { chatComplete, type ChatMessage } from './llm-client';
 import { embedText, prepareText } from './embedding-pipeline';
@@ -21,6 +23,8 @@ import { logger } from './logger';
 import { broadcastAll, type WalEvent } from './sse-hub';
 import { resolveWorkflowConfig } from './workflow-config-resolver';
 import { resolveStoryMemoryProvenance } from './memory-provenance';
+import { hydrateSchema } from './schema-hydrator';
+import { gitMapStep, gitReduceStep, getLatestHash, getCurrentHead } from './git-hydrator';
 
 // ─── Constants ──────────────────────────────────────────────────────────────
 
@@ -673,4 +677,325 @@ Respond with ONLY a JSON array (no markdown fences, no explanation):
       logger.warn(`[auto-memory] Run synthesis failed for run #${runId}: ${err.message}`);
     }
   }
+}
+
+// ─── Workspace Context Auto-Hydration (CTM-005) ─────────────────────────────
+
+/**
+ * Git memory is considered stale once its last hydration is older than this.
+ * Spec generation uses this together with a HEAD-changed check to decide whether
+ * to fire a non-blocking git rehydration.
+ */
+export const GIT_MEMORY_STALENESS_MS = 24 * 60 * 60 * 1000; // 24h
+
+interface WorkspaceContextFreshnessRow {
+  schema_snapshot: string | null;
+  schema_snapshot_at: string | null;
+  schema_table_count: number | null;
+  last_ingested_commit_hash: string | null;
+  git_commit_count: number | null;
+  git_memory_hydrated_at: string | null;
+}
+
+/**
+ * Pure freshness predicate for git memory. Returns true when memory is missing
+ * (never hydrated) or older than `thresholdMs`. Exported for focused testing.
+ */
+export function isGitMemoryStale(
+  hydratedAt: string | Date | null | undefined,
+  now: number = Date.now(),
+  thresholdMs: number = GIT_MEMORY_STALENESS_MS,
+): boolean {
+  if (!hydratedAt) return true;
+  const ts = hydratedAt instanceof Date ? hydratedAt.getTime() : Date.parse(hydratedAt);
+  if (Number.isNaN(ts)) return true;
+  return now - ts >= thresholdMs;
+}
+
+async function getWorkspaceContextFreshness(workspaceId: string): Promise<WorkspaceContextFreshnessRow | undefined> {
+  return queryOne<WorkspaceContextFreshnessRow>(
+    `SELECT schema_snapshot, schema_snapshot_at, schema_table_count,
+            last_ingested_commit_hash, git_commit_count, git_memory_hydrated_at
+       FROM workspace_context WHERE workspace_id = $1`,
+    [workspaceId],
+  );
+}
+
+/**
+ * Hydrates the schema snapshot for a workspace from its migration files.
+ * Non-fatal: returns a result object and never throws.
+ */
+async function hydrateWorkspaceSchema(
+  workspaceId: string,
+  workspacePath: string,
+): Promise<{ ok: boolean; tableCount: number }> {
+  try {
+    const schemaResult = hydrateSchema(workspacePath);
+    const snapshotAt = new Date().toISOString();
+    await execute(
+      `INSERT INTO workspace_context (workspace_id, schema_snapshot, schema_table_count, schema_snapshot_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT(workspace_id) DO UPDATE SET
+         schema_snapshot = EXCLUDED.schema_snapshot,
+         schema_table_count = EXCLUDED.schema_table_count,
+         schema_snapshot_at = EXCLUDED.schema_snapshot_at`,
+      [workspaceId, schemaResult.snapshot || null, schemaResult.tableNames.length, snapshotAt],
+    );
+    try {
+      await execute(
+        "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('hydrate_schema', $1, $2)",
+        [workspaceId, JSON.stringify({ tableCount: schemaResult.tableNames.length, trigger: 'auto' })],
+      );
+    } catch { /* best-effort WAL */ }
+    return { ok: true, tableCount: schemaResult.tableNames.length };
+  } catch (err: any) {
+    logger.warn(`[auto-memory] Schema hydration failed for workspace ${workspaceId}: ${err?.message ?? err}`);
+    return { ok: false, tableCount: 0 };
+  }
+}
+
+/**
+ * Hydrates git memory for a workspace via map/reduce over commits since the last
+ * ingested hash. Persists the latest hash, commit count, and hydration timestamp.
+ * Non-fatal: returns a result object and never throws.
+ */
+async function hydrateWorkspaceGit(
+  workspaceId: string,
+  workspacePath: string,
+  workspaceLabel: string,
+  lastIngestedHash: string | null,
+  priorCommitCount: number,
+): Promise<{ ok: boolean; newCommits: number; commitCount: number }> {
+  try {
+    const summaries = await gitMapStep({
+      workspacePath,
+      fromHash: lastIngestedHash ?? undefined,
+    });
+
+    const newCommits = summaries.reduce((acc, s) => acc + s.commitCount, 0);
+    if (newCommits > 0) {
+      try {
+        await gitReduceStep({ summaries, workspaceLabel });
+      } catch (reduceErr: any) {
+        logger.warn(`[auto-memory] Git reduce failed for workspace ${workspaceId}: ${reduceErr?.message ?? reduceErr}`);
+      }
+    }
+
+    const latestHash = getLatestHash(summaries) ?? lastIngestedHash ?? null;
+    const totalCommitCount = priorCommitCount + newCommits;
+    const hydratedAt = new Date().toISOString();
+
+    await execute(
+      `INSERT INTO workspace_context (workspace_id, last_ingested_commit_hash, git_commit_count, git_memory_hydrated_at)
+       VALUES ($1, $2, $3, $4)
+       ON CONFLICT(workspace_id) DO UPDATE SET
+         last_ingested_commit_hash = EXCLUDED.last_ingested_commit_hash,
+         git_commit_count = EXCLUDED.git_commit_count,
+         git_memory_hydrated_at = EXCLUDED.git_memory_hydrated_at`,
+      [workspaceId, latestHash, totalCommitCount, hydratedAt],
+    );
+
+    try {
+      await execute(
+        "INSERT INTO wal_events (event_type, workspace_id, payload) VALUES ('hydrate_git', $1, $2)",
+        [workspaceId, JSON.stringify({ commitCount: totalCommitCount, newCommits, trigger: 'auto' })],
+      );
+    } catch { /* best-effort WAL */ }
+
+    return { ok: true, newCommits, commitCount: totalCommitCount };
+  } catch (err: any) {
+    logger.warn(`[auto-memory] Git hydration failed for workspace ${workspaceId}: ${err?.message ?? err}`);
+    return { ok: false, newCommits: 0, commitCount: priorCommitCount };
+  }
+}
+
+/**
+ * Fire-and-forget workspace context hydration. Triggered after workspace
+ * registration so schema + git memory autohydrate without blocking the response.
+ *
+ * Non-fatal: every step is independently guarded and all errors are logged.
+ * Never throws — safe to call without awaiting.
+ */
+export async function autoHydrateWorkspaceContext(input: {
+  workspaceId: string;
+  workspacePath: string;
+  workspaceLabel: string;
+  types?: Array<'schema' | 'git'>;
+}): Promise<{ schema?: { ok: boolean; tableCount: number }; git?: { ok: boolean; newCommits: number; commitCount: number } }> {
+  const { workspaceId, workspacePath, workspaceLabel } = input;
+  const types = input.types ?? ['schema', 'git'];
+  const result: { schema?: { ok: boolean; tableCount: number }; git?: { ok: boolean; newCommits: number; commitCount: number } } = {};
+
+  try {
+    if (types.includes('schema')) {
+      result.schema = await hydrateWorkspaceSchema(workspaceId, workspacePath);
+    }
+
+    if (types.includes('git')) {
+      const existing = await getWorkspaceContextFreshness(workspaceId);
+      result.git = await hydrateWorkspaceGit(
+        workspaceId,
+        workspacePath,
+        workspaceLabel,
+        existing?.last_ingested_commit_hash ?? null,
+        existing?.git_commit_count ?? 0,
+      );
+    }
+  } catch (err: any) {
+    // Defensive outer guard — individual steps already swallow their errors.
+    logger.warn(`[auto-memory] autoHydrateWorkspaceContext failed for ${workspaceId}: ${err?.message ?? err}`);
+  }
+
+  return result;
+}
+
+/**
+ * On spec generation, rehydrate git memory only when HEAD has moved past the last
+ * ingested commit AND the last hydration is stale or missing. Runs fire-and-forget;
+ * returns a small status object describing the decision for observability/trace data.
+ *
+ * Non-fatal: never throws.
+ */
+export async function maybeRehydrateGitMemoryOnSpecGen(input: {
+  workspaceId: string;
+  workspacePath: string;
+  workspaceLabel: string;
+  now?: number;
+  thresholdMs?: number;
+}): Promise<{ triggered: boolean; reason: 'head_unchanged' | 'fresh' | 'no_head' | 'stale_head_changed' }> {
+  const { workspaceId, workspacePath, workspaceLabel } = input;
+  const now = input.now ?? Date.now();
+  const thresholdMs = input.thresholdMs ?? GIT_MEMORY_STALENESS_MS;
+
+  try {
+    const ctx = await getWorkspaceContextFreshness(workspaceId);
+    const currentHead = await getCurrentHead(workspacePath);
+
+    if (!currentHead) {
+      return { triggered: false, reason: 'no_head' };
+    }
+
+    const headChanged = currentHead !== (ctx?.last_ingested_commit_hash ?? null);
+    if (!headChanged) {
+      return { triggered: false, reason: 'head_unchanged' };
+    }
+
+    const stale = isGitMemoryStale(ctx?.git_memory_hydrated_at ?? null, now, thresholdMs);
+    if (!stale) {
+      return { triggered: false, reason: 'fresh' };
+    }
+
+    // HEAD moved and memory is stale/missing — rehydrate in the background.
+    void hydrateWorkspaceGit(
+      workspaceId,
+      workspacePath,
+      workspaceLabel,
+      ctx?.last_ingested_commit_hash ?? null,
+      ctx?.git_commit_count ?? 0,
+    ).catch((err) => {
+      logger.warn(`[auto-memory] background git rehydration failed for ${workspaceId}: ${(err as Error)?.message ?? err}`);
+    });
+
+    return { triggered: true, reason: 'stale_head_changed' };
+  } catch (err: any) {
+    logger.warn(`[auto-memory] maybeRehydrateGitMemoryOnSpecGen failed for ${workspaceId}: ${err?.message ?? err}`);
+    return { triggered: false, reason: 'no_head' };
+  }
+}
+
+export interface ContextHealthSummary {
+  workspaceId: string;
+  schemaPresent: boolean;
+  schemaTableCount: number;
+  schemaHydratedAt: string | null;
+  gitHydrated: boolean;
+  gitCommitCount: number;
+  gitMemoryHydratedAt: string | null;
+  gitMemoryStale: boolean;
+  claudeMdPresent: boolean;
+  /** Composite 0-100 readiness score. */
+  contextScore: number;
+  /** Coarse readiness bucket the UI can map to an indicator color. */
+  readiness: 'ready' | 'partial' | 'absent';
+  /** True when the UI should surface a non-blocking nudge to hydrate context. */
+  needsHydration: boolean;
+  /** Human-readable nudge message, or null when context is healthy. */
+  nudge: string | null;
+}
+
+/**
+ * Builds a concrete context-health/readiness summary for a workspace so the UI can
+ * render readiness indicators and a non-blocking nudge when memory is absent or stale.
+ *
+ * Non-fatal: filesystem and DB errors degrade gracefully to "absent". Never throws.
+ */
+export async function buildContextHealthSummary(input: {
+  workspaceId: string;
+  workspacePath: string;
+  now?: number;
+  thresholdMs?: number;
+}): Promise<ContextHealthSummary> {
+  const { workspaceId, workspacePath } = input;
+  const now = input.now ?? Date.now();
+  const thresholdMs = input.thresholdMs ?? GIT_MEMORY_STALENESS_MS;
+
+  let ctx: WorkspaceContextFreshnessRow | undefined;
+  try {
+    ctx = await getWorkspaceContextFreshness(workspaceId);
+  } catch (err: any) {
+    logger.warn(`[auto-memory] buildContextHealthSummary DB read failed for ${workspaceId}: ${err?.message ?? err}`);
+  }
+
+  const schemaPresent = !!ctx?.schema_snapshot;
+  const schemaTableCount = ctx?.schema_table_count ?? 0;
+  const gitCommitCount = ctx?.git_commit_count ?? 0;
+  const gitHydrated = !!ctx?.git_memory_hydrated_at && gitCommitCount > 0;
+  const gitMemoryStale = isGitMemoryStale(ctx?.git_memory_hydrated_at ?? null, now, thresholdMs);
+
+  let claudeMdPresent = false;
+  try {
+    claudeMdPresent = fs.existsSync(path.join(workspacePath, 'CLAUDE.md'));
+  } catch { /* non-fatal */ }
+
+  const contextScore = Math.min(
+    (schemaPresent ? 35 : 0) +
+    (gitHydrated ? 35 : 0) +
+    (claudeMdPresent ? 30 : 0),
+    100,
+  );
+
+  let readiness: ContextHealthSummary['readiness'];
+  if (contextScore >= 70) readiness = 'ready';
+  else if (contextScore > 0) readiness = 'partial';
+  else readiness = 'absent';
+
+  // Nudge when memory is absent or stale, but never block the caller.
+  let nudge: string | null = null;
+  if (!schemaPresent && !gitHydrated) {
+    nudge = 'Workspace context has not been hydrated yet. Run hydration to give spec generation schema and git memory.';
+  } else if (gitHydrated && gitMemoryStale) {
+    nudge = 'Git memory is stale. Re-hydrate to capture recent commits before generating specs.';
+  } else if (!schemaPresent) {
+    nudge = 'Schema snapshot is missing. Hydrate schema so specs can reference your data model.';
+  } else if (!gitHydrated) {
+    nudge = 'Git memory is absent. Hydrate git history to enrich spec generation.';
+  }
+
+  const needsHydration = nudge !== null;
+
+  return {
+    workspaceId,
+    schemaPresent,
+    schemaTableCount,
+    schemaHydratedAt: ctx?.schema_snapshot_at ?? null,
+    gitHydrated,
+    gitCommitCount,
+    gitMemoryHydratedAt: ctx?.git_memory_hydrated_at ?? null,
+    gitMemoryStale,
+    claudeMdPresent,
+    contextScore,
+    readiness,
+    needsHydration,
+    nudge,
+  };
 }

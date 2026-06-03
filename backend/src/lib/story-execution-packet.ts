@@ -24,6 +24,22 @@ export interface ExecutionPacketStory {
   files?: string[];
 }
 
+/**
+ * CTM-006: Minimal workspace-context signal consumed by readiness scoring.
+ *
+ * This is intentionally a structural subset of the canonical
+ * `WorkspaceContextRouting.contract` + `richnessScore` shape so callers can pass
+ * the canonical routing decision straight through without this pure lib importing
+ * route/echolocation code. Keeping it deterministic means a context-blind
+ * workspace is flagged the same way everywhere.
+ */
+export interface WorkspaceContextSignal {
+  /** 0–100 context richness from the canonical routing path. */
+  richnessScore?: number;
+  /** Whether the .rorca / AGENTS.md / MEMORY.md routing contract is satisfied. */
+  contractSatisfied?: boolean;
+}
+
 export interface StoryExecutionReadiness {
   score: number;
   grade: 'strong' | 'fair' | 'weak';
@@ -133,6 +149,7 @@ export function assessStoryExecutionReadiness(
   mode: StoryExecutionMode,
   candidateFiles: string[],
   candidateTests: string[],
+  workspaceContext?: WorkspaceContextSignal,
 ): StoryExecutionReadiness {
   const text = lowerStoryText(story);
   const strengths: string[] = [];
@@ -188,6 +205,19 @@ export function assessStoryExecutionReadiness(
     warnings.push('Expected output artifacts are not obvious.');
   }
 
+  // CTM-006: Fold the canonical workspace-context signal into readiness so a
+  // context-blind workspace is flagged here instead of being re-derived ad hoc.
+  if (workspaceContext) {
+    const { richnessScore, contractSatisfied } = workspaceContext;
+    if (contractSatisfied === true || (typeof richnessScore === 'number' && richnessScore >= 60)) {
+      score += 8;
+      strengths.push('Workspace carries rich routing context (stack, .rorca, governance).');
+    } else if (contractSatisfied === false || (typeof richnessScore === 'number' && richnessScore < 30)) {
+      score -= 8;
+      warnings.push('Workspace is context blind — missing .rorca / AGENTS.md / MEMORY.md routing context.');
+    }
+  }
+
   score = Math.max(0, Math.min(100, score));
   const grade: StoryExecutionReadiness['grade'] = score >= 55 ? 'strong' : score >= 30 ? 'fair' : 'weak';
 
@@ -205,6 +235,7 @@ export function buildStoryExecutionPacket(
   cwd: string,
   story: ExecutionPacketStory,
   mode: StoryExecutionMode,
+  workspaceContext?: WorkspaceContextSignal,
 ): StoryExecutionPacket {
   const candidateFiles = extractExecutionCandidateFiles(story);
   const candidateTests = inferPiCandidateTests(cwd, candidateFiles);
@@ -213,7 +244,7 @@ export function buildStoryExecutionPacket(
     getAcceptanceLines(story).map(item => `- ${item}`).join('\n') || undefined,
     mode,
   );
-  const readiness = assessStoryExecutionReadiness(story, mode, candidateFiles, candidateTests);
+  const readiness = assessStoryExecutionReadiness(story, mode, candidateFiles, candidateTests, workspaceContext);
 
   return {
     candidateFiles,

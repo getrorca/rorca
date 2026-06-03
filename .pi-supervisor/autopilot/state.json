@@ -1,0 +1,319 @@
+{
+  "updatedAt": "2026-05-06T19:10:42.729502+00:00",
+  "cycle": 74,
+  "currentPhaseId": null,
+  "phases": {
+    "run-cockpit": {
+      "status": "done",
+      "cycles": 35,
+      "greenStreak": 2,
+      "completedAt": "2026-05-06T09:37:38.192673+00:00",
+      "lastImplementerSummary": "Re-read the autopilot state and required Pi extension sources from disk, confirmed the Pi-native run cockpit implementation is present and terminal-safe in ~/.pi/agent/extensions/rorca/tui/run-view.ts, and re-ran the required validators successfully. No source edits were needed this cycle because the cockpit already appears implemented and validator-clean.",
+      "lastReviewerSummary": "Auto-review passed current phase gate.",
+      "lastKnownBugs": [],
+      "lastRegressions": [],
+      "lastRequiredMissing": [],
+      "lastValidationFailedCommands": [],
+      "lastBlockers": [],
+      "lastChangedFiles": [],
+      "lastImplementerSessionDelta": {
+        "assistant_messages": 8,
+        "tool_calls": 17,
+        "tool_results": 17,
+        "write_calls": 1,
+        "edit_calls": 0,
+        "bash_calls": 1,
+        "read_calls": 10,
+        "grep_calls": 1,
+        "find_calls": 0,
+        "ls_calls": 4
+      },
+      "lastReviewerSessionDelta": {
+        "assistant_messages": 0,
+        "tool_calls": 0,
+        "tool_results": 0,
+        "write_calls": 0,
+        "edit_calls": 0,
+        "bash_calls": 0,
+        "read_calls": 0,
+        "grep_calls": 0,
+        "find_calls": 0,
+        "ls_calls": 0
+      }
+    },
+    "board-and-detail": {
+      "status": "done",
+      "cycles": 21,
+      "greenStreak": 2,
+      "completedAt": "2026-05-06T10:10:36.064791+00:00",
+      "lastImplementerSummary": "Re-read the autopilot state and required Pi extension sources from disk, verified the Pi-native spec board/detail implementation remains present and terminal-safe in ~/.pi/agent/extensions/rorca/tui/spec-board.ts and spec-detail.ts, and re-ran the required validators successfully. No source edits were needed this cycle because the phase appears implemented and validator-clean.",
+      "lastReviewerSummary": "Auto-review passed current phase gate.",
+      "lastKnownBugs": [],
+      "lastRegressions": [],
+      "lastRequiredMissing": [],
+      "lastValidationFailedCommands": [],
+      "lastBlockers": [],
+      "lastChangedFiles": [],
+      "lastImplementerSessionDelta": {
+        "assistant_messages": 4,
+        "tool_calls": 12,
+        "tool_results": 12,
+        "write_calls": 1,
+        "edit_calls": 0,
+        "bash_calls": 1,
+        "read_calls": 10,
+        "grep_calls": 0,
+        "find_calls": 0,
+        "ls_calls": 0
+      },
+      "lastReviewerSessionDelta": {
+        "assistant_messages": 0,
+        "tool_calls": 0,
+        "tool_results": 0,
+        "write_calls": 0,
+        "edit_calls": 0,
+        "bash_calls": 0,
+        "read_calls": 0,
+        "grep_calls": 0,
+        "find_calls": 0,
+        "ls_calls": 0
+      }
+    },
+    "supporting-views": {
+      "status": "done",
+      "cycles": 6,
+      "greenStreak": 2,
+      "completedAt": "2026-05-06T14:35:41.652455+00:00",
+      "lastImplementerSummary": "Manually verified supporting views are Pi-native, wired through ctx.ui.custom overlays, and validator-clean. No active raw-terminal control remains in memory-browser.ts, direction-view.ts, or workspace-view.ts.",
+      "lastReviewerSummary": "Manual review passed current phase gate.",
+      "lastKnownBugs": [],
+      "lastRegressions": [],
+      "lastRequiredMissing": [],
+      "lastValidationFailedCommands": [],
+      "lastBlockers": [],
+      "lastChangedFiles": [
+        "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/memory-browser.ts"
+      ],
+      "lastImplementerSessionDelta": {
+        "assistant_messages": 8,
+        "tool_calls": 24,
+        "tool_results": 21,
+        "write_calls": 1,
+        "edit_calls": 0,
+        "bash_calls": 3,
+        "read_calls": 15,
+        "grep_calls": 5,
+        "find_calls": 0,
+        "ls_calls": 0
+      },
+      "lastReviewerSessionDelta": {
+        "assistant_messages": 0,
+        "tool_calls": 0,
+        "tool_results": 0,
+        "write_calls": 0,
+        "edit_calls": 0,
+        "bash_calls": 0,
+        "read_calls": 0,
+        "grep_calls": 0,
+        "find_calls": 0,
+        "ls_calls": 0
+      }
+    },
+    "command-surface": {
+      "status": "done",
+      "cycles": 1,
+      "greenStreak": 2,
+      "completedAt": "2026-05-06T14:35:41.652455+00:00",
+      "lastImplementerSummary": "Manually verified command surface wiring in index.ts routes to Pi-native board, spec, run, memory, direction, and workspace views while keeping /rorca-tui as an external fallback. Validators are green.",
+      "lastReviewerSummary": "Manual review passed current phase gate.",
+      "lastKnownBugs": [],
+      "lastRegressions": [],
+      "lastRequiredMissing": [],
+      "lastValidationFailedCommands": [],
+      "lastBlockers": [],
+      "lastChangedFiles": []
+    },
+    "ship-review": {
+      "status": "done",
+      "cycles": 9,
+      "greenStreak": 3,
+      "completedAt": "2026-05-06T19:10:42.729502+00:00",
+      "lastImplementerSummary": "Final manual ship-review pass after the spec-authoring addition: validators are green, active extension files remain free of forbidden terminal-ownership patterns, and the command surface now includes Pi-native run/board/spec/memory/direction/workspace views plus /rorca:new-spec and /rorca:forge for spec authoring. /rorca-tui remains the external fallback.",
+      "lastReviewerSummary": "Manual final review passed current phase gate.",
+      "lastKnownBugs": [],
+      "lastRegressions": [],
+      "lastRequiredMissing": [],
+      "lastValidationFailedCommands": [],
+      "lastBlockers": [],
+      "lastChangedFiles": [
+        "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/run-view.ts",
+        "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/spec-board.ts",
+        "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/spec-detail.ts"
+      ],
+      "lastImplementerSessionDelta": {
+        "assistant_messages": 9,
+        "tool_calls": 25,
+        "tool_results": 25,
+        "write_calls": 1,
+        "edit_calls": 3,
+        "bash_calls": 3,
+        "read_calls": 16,
+        "grep_calls": 2,
+        "find_calls": 0,
+        "ls_calls": 0
+      },
+      "lastReviewerSessionDelta": {
+        "assistant_messages": 0,
+        "tool_calls": 0,
+        "tool_results": 0,
+        "write_calls": 0,
+        "edit_calls": 0,
+        "bash_calls": 0,
+        "read_calls": 0,
+        "grep_calls": 0,
+        "find_calls": 0,
+        "ls_calls": 0
+      }
+    },
+    "spec-authoring": {
+      "status": "done",
+      "cycles": 3,
+      "greenStreak": 2,
+      "completedAt": "2026-05-06T19:04:50.248664+00:00",
+      "lastImplementerSummary": "Manually verified Pi-native spec authoring exists via /rorca:new-spec and /rorca:forge, backed by tui/spec-author.ts and wired in index.ts. Validators are green and no raw terminal ownership patterns were introduced.",
+      "lastReviewerSummary": "Manual review passed current phase gate.",
+      "lastKnownBugs": [],
+      "lastRegressions": [],
+      "lastRequiredMissing": [],
+      "lastValidationFailedCommands": [],
+      "lastBlockers": [],
+      "lastChangedFiles": [
+        "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/spec-author.ts"
+      ],
+      "lastImplementerSessionDelta": {
+        "assistant_messages": 6,
+        "tool_calls": 15,
+        "tool_results": 15,
+        "write_calls": 1,
+        "edit_calls": 1,
+        "bash_calls": 3,
+        "read_calls": 10,
+        "grep_calls": 0,
+        "find_calls": 0,
+        "ls_calls": 0
+      },
+      "lastReviewerSessionDelta": {
+        "assistant_messages": 0,
+        "tool_calls": 0,
+        "tool_results": 0,
+        "write_calls": 0,
+        "edit_calls": 0,
+        "bash_calls": 0,
+        "read_calls": 0,
+        "grep_calls": 0,
+        "find_calls": 0,
+        "ls_calls": 0
+      }
+    }
+  },
+  "consecutiveImplementerFailures": 2,
+  "consecutiveReviewerFailures": 0,
+  "consecutiveValidationFailures": 0,
+  "completedAt": "2026-05-06T19:10:42.729502+00:00",
+  "lastCycle": {
+    "phaseId": "ship-review",
+    "cycle": 73,
+    "implementer": {
+      "role": "implementer",
+      "exit_code": 90,
+      "log_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/ship-review-c073-implementer.log",
+      "duration_seconds": 73.67262450000271,
+      "session_file": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/sessions/ship-review-implementer-r072.jsonl",
+      "timed_out": false,
+      "diagnostics": [
+        "tool call budget exceeded (25 > 24)"
+      ],
+      "session_delta": {
+        "assistant_messages": 9,
+        "tool_calls": 25,
+        "tool_results": 25,
+        "write_calls": 1,
+        "edit_calls": 3,
+        "bash_calls": 3,
+        "read_calls": 16,
+        "grep_calls": 2,
+        "find_calls": 0,
+        "ls_calls": 0
+      },
+      "changed_files": [
+        "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/run-view.ts",
+        "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/spec-board.ts",
+        "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/spec-detail.ts"
+      ],
+      "artifact_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/handoffs/ship-review.json",
+      "artifact_updated": true,
+      "passed": false
+    },
+    "reviewer": {
+      "role": "reviewer-auto",
+      "exit_code": 0,
+      "log_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/ship-review-c073-reviewer.log",
+      "duration_seconds": 0.0,
+      "session_file": "auto-review",
+      "timed_out": false,
+      "diagnostics": [],
+      "session_delta": {
+        "assistant_messages": 0,
+        "tool_calls": 0,
+        "tool_results": 0,
+        "write_calls": 0,
+        "edit_calls": 0,
+        "bash_calls": 0,
+        "read_calls": 0,
+        "grep_calls": 0,
+        "find_calls": 0,
+        "ls_calls": 0
+      },
+      "changed_files": [],
+      "artifact_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/reviews/ship-review.json",
+      "artifact_updated": true,
+      "passed": true
+    },
+    "validators": [
+      {
+        "command": "npx tsc --noEmit",
+        "exit_code": 0,
+        "duration_seconds": 6.907944334030617,
+        "stdout_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/ship-review-c073-validator-01.stdout.log",
+        "stderr_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/ship-review-c073-validator-01.stderr.log",
+        "passed": true
+      },
+      {
+        "command": "python3 scripts/validate_rorca_pi_extension.py",
+        "exit_code": 0,
+        "duration_seconds": 0.025396290991920978,
+        "stdout_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/ship-review-c073-validator-02.stdout.log",
+        "stderr_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/ship-review-c073-validator-02.stderr.log",
+        "passed": true
+      },
+      {
+        "command": "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit",
+        "exit_code": 0,
+        "duration_seconds": 0.8774923749733716,
+        "stdout_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/ship-review-c073-validator-03.stdout.log",
+        "stderr_path": "/Users/dimitriteravanessian/rorca/.pi-supervisor/autopilot/logs/ship-review-c073-validator-03.stderr.log",
+        "passed": true
+      }
+    ],
+    "accepted": false,
+    "blockers": [
+      "implementer did not declare phase done",
+      "reviewer did not approve",
+      "reviewer found bugs",
+      "implementer confidence below threshold",
+      "reviewer confidence below threshold",
+      "tool call budget exceeded (25 > 24)"
+    ],
+    "requiredMissing": []
+  }
+}

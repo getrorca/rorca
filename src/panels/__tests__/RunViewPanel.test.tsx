@@ -7,6 +7,7 @@
 
 import { describe, it, expect, vi, beforeEach, beforeAll, afterAll } from 'vitest';
 import { screen, waitFor } from '@testing-library/react';
+import userEvent from '@testing-library/user-event';
 import { renderWithProviders, createMockWorkspace, createMockRun } from '../../test/helpers';
 import RunViewPanel from '../RunViewPanel';
 
@@ -270,6 +271,62 @@ describe('RunViewPanel', () => {
     const terminal = await screen.findByTestId('run-terminal');
     expect(terminal).toHaveAttribute('data-terminal-mode', 'pty');
     expect(screen.queryByTestId('multi-pane-terminal')).not.toBeInTheDocument();
+  });
+
+  it('surfaces per-story context (skills + files) in the Stories view', async () => {
+    const CONTEXT_RUN = createMockRun({
+      id: 55,
+      status: 'done',
+      spec_path: 'forge/specs/approved/ctx-feature.json',
+      workspace_id: 'ws-1',
+    });
+
+    mockApiFetch.mockImplementation(async (path: string) => {
+      if (path === '/api/workspaces') return WORKSPACE_RESPONSE;
+      if (path.includes(`/api/pipeline/runs/${CONTEXT_RUN.id}`)) {
+        return {
+          run: CONTEXT_RUN,
+          stories: [
+            { story_id: 'US-001', status: 'pass', elapsed_seconds: 20, started_at: null, finished_at: null, active_skills: JSON.stringify(['react']) },
+          ],
+          specStories: [
+            { id: 'US-001', title: 'Build Widget', suggestedSkills: [{ name: 'react', relevance: 8, reason: 'Component work' }] },
+          ],
+          specModel: 'claude-sonnet-4-6',
+          contextComparison: {
+            predicted: { 'US-001': { totalTokens: 1500, injectedFiles: ['src/widget.tsx'] } },
+            actual: { 'US-001': { contextFiles: ['src/widget.tsx', 'src/widget.test.tsx'] } },
+          },
+          storyTokenBreakdown: [
+            { storyId: 'US-001', status: 'pass', inputTokens: 1500, outputTokens: 400, modelUsed: 'claude-sonnet-4-6', costUsd: 0 },
+          ],
+        };
+      }
+      if (path.includes('/api/pipeline/runs')) return { items: [], total: 0, hasMore: false };
+      return {};
+    });
+
+    renderWithProviders(
+      <RunViewPanel runId={CONTEXT_RUN.id} onBack={vi.fn()} onNavigate={vi.fn()} />,
+    );
+
+    // Wait for run data to load
+    await waitFor(() => {
+      expect(
+        screen.queryByText(/ctx.feature/i) ?? document.querySelector('[data-testid="run-terminal"]'),
+      ).toBeInTheDocument();
+    }, { timeout: 3000 });
+
+    // Navigate to the Stories tab
+    const storiesTab = await screen.findByRole('button', { name: /stories/i });
+    await userEvent.click(storiesTab);
+
+    // The aggregate context summary bar reflects the wired per-story context:
+    // 1 unique skill, 2 unique context files, and avg input tokens per story.
+    const summaryBar = await screen.findByLabelText('Run context usage summary', {}, { timeout: 3000 });
+    expect(summaryBar).toHaveTextContent('1 skill');
+    expect(summaryBar).toHaveTextContent('2 files');
+    expect(summaryBar).toHaveTextContent(/~1\.5K tokens\/story/);
   });
 
   it('handles API error gracefully', async () => {

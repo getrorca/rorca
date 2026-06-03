@@ -158,6 +158,28 @@ test('POST /api/specs/generate with valid body returns slug, stories, diagrams, 
   expect(res.body.diagramsPath).toContain('auth-system-diagrams.md');
 });
 
+test('POST /api/specs/generate surfaces gitRehydration state in contextSummary (CTM-005)', async () => {
+  mockChatComplete.mockResolvedValue({ text: validLlmResponse, usage: { inputTokens: 100, outputTokens: 200 } });
+
+  const res = await request(app)
+    .post('/api/specs/generate')
+    .set('Authorization', `Bearer ${authToken}`)
+    .send({
+      workspaceId: 'ws-test',
+      domain: 'backend',
+      title: 'Hydration Trace',
+      brief: 'Observe hydration state',
+    });
+
+  expect(res.status).toBe(200);
+  expect(res.body.contextSummary).toBeDefined();
+  expect(res.body.contextSummary.gitRehydration).toBeDefined();
+  expect(typeof res.body.contextSummary.gitRehydration.triggered).toBe('boolean');
+  // tmpdir workspace is not a git repo, so HEAD cannot be resolved → no rehydration.
+  expect(res.body.contextSummary.gitRehydration.triggered).toBe(false);
+  expect(res.body.contextSummary.gitRehydration.reason).toBe('no_head');
+});
+
 test('POST /api/specs/generate with agentOverride=pi uses the Pi forge drafter path', async () => {
   mockDraftSpecWithPi.mockResolvedValue({
     text: validLlmResponse,
@@ -2273,5 +2295,143 @@ describe('POST /api/specs/:id/assign-models', () => {
 
     expect(res.status).toBe(200);
     expect(res.body.storiesAssigned).toBe(1);
+  });
+});
+
+describe('POST /api/specs/:specId/enrich (CTM-007 canonical context parity)', () => {
+  const specId = 'enrich-parity-spec';
+
+  function makeSpecFile(stories: object[], dir: 'pending' | 'approved' = 'pending') {
+    for (const existingDir of ['pending', 'approved'] as const) {
+      const existingPath = path.join(os.tmpdir(), 'forge', 'specs', existingDir, `${specId}.json`);
+      if (fs.existsSync(existingPath)) {
+        fs.rmSync(existingPath, { force: true });
+      }
+    }
+    const specsDir = path.join(os.tmpdir(), 'forge', 'specs', dir);
+    fs.mkdirSync(specsDir, { recursive: true });
+    const specContent = {
+      title: 'Enrich Parity Spec',
+      userStories: stories,
+      generatedAt: new Date().toISOString(),
+    };
+    const file = path.join(specsDir, `${specId}.json`);
+    fs.writeFileSync(file, JSON.stringify(specContent, null, 2), 'utf8');
+    return file;
+  }
+
+  test('persists a canonical context_summary_json matching the generate/persist contract', async () => {
+    mockChatComplete.mockResolvedValue({
+      text: '- Relevant convention: use apiFetch\n- Gotcha: strip claude env vars',
+      usage: { inputTokens: 12, outputTokens: 34 },
+    });
+
+    makeSpecFile([
+      { id: 'US-001', title: 'Login', description: 'Build login flow', acceptanceCriteria: ['User can submit credentials'], dependsOn: [] },
+      { id: 'US-002', title: 'Dashboard', description: 'Show dashboard', acceptanceCriteria: ['Shows recent activity'], dependsOn: ['US-001'] },
+    ]);
+
+    const res = await request(app)
+      .post(`/api/specs/${specId}/enrich`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    expect(res.body.storiesEnriched).toBe(2);
+    // retrieval_method must use the canonical vocabulary shared with
+    // memory-router / generate / persist, never a bespoke string.
+    expect(['cache', 'search', 'hybrid', 'none']).toContain(res.body.retrieval_method);
+
+    const logRes = await request(app)
+      .get(`/api/specs/${specId}/generation-log`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    expect(logRes.body).toBeTruthy();
+    expect(logRes.body.spec_slug).toBe(specId);
+    expect(logRes.body.status).toBe('completed');
+    expect(logRes.body.enriched).toBe(true);
+    expect(['cache', 'search', 'hybrid', 'none']).toContain(logRes.body.retrieval_method);
+    expect(logRes.body.retrieval_method).toBe(res.body.retrieval_method);
+
+    const summary = parsePayload(logRes.body.context_summary_json) as {
+      directionLayers: { l1: unknown; l2: { present: unknown; domain: unknown }; l3: unknown };
+      skills: unknown;
+      memoryEntries: unknown;
+      modelContextWindow: unknown;
+      memory?: unknown;
+      tokenBudget?: unknown;
+      flags?: unknown;
+    };
+
+    // Canonical directionLayers is an OBJECT ({l1, l2:{present,domain}, l3}),
+    // not the legacy array-of-{layer,present} shape.
+    expect(Array.isArray(summary.directionLayers)).toBe(false);
+    expect(typeof summary.directionLayers.l1).toBe('boolean');
+    expect(typeof summary.directionLayers.l2.present).toBe('boolean');
+    expect('domain' in summary.directionLayers.l2).toBe(true);
+    expect(typeof summary.directionLayers.l3).toBe('boolean');
+
+    // Canonical scalar fields present; divergent enrich-only fields absent.
+    expect(Array.isArray(summary.skills)).toBe(true);
+    expect(typeof summary.memoryEntries).toBe('number');
+    expect(summary.modelContextWindow).toBe(200000);
+    expect(summary.memory).toBeUndefined();
+    expect(summary.tokenBudget).toBeUndefined();
+    expect(summary.flags).toBeUndefined();
+
+    // The annotation came from chatComplete().text (ChatResult), not a stringified
+    // ChatResult — verify it was appended under a Context heading on disk.
+    const onDisk = JSON.parse(
+      fs.readFileSync(path.join(os.tmpdir(), 'forge', 'specs', 'pending', `${specId}.json`), 'utf8'),
+    ) as { userStories: Array<{ description: string }> };
+    expect(onDisk.userStories[0].description).toContain('## Context');
+    expect(onDisk.userStories[0].description).toContain('use apiFetch');
+    expect(onDisk.userStories[0].description).not.toContain('[object Object]');
+  });
+
+  test('reports retrieval_method none and omits retrieval block when no stories', async () => {
+    makeSpecFile([]);
+
+    const res = await request(app)
+      .post(`/api/specs/${specId}/enrich`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.storiesEnriched).toBe(0);
+    expect(res.body.retrieval_method).toBe('none');
+  });
+
+  test('survives per-story chatComplete failures and still writes a completed log (fallback)', async () => {
+    // First story annotation rejects, second resolves — enrich must skip the
+    // failed story rather than failing the whole run.
+    mockChatComplete
+      .mockRejectedValueOnce(new Error('Rate limit reached'))
+      .mockResolvedValue({ text: '- annotation ok', usage: { inputTokens: 5, outputTokens: 7 } });
+
+    makeSpecFile([
+      { id: 'US-001', title: 'First', description: 'First story', acceptanceCriteria: ['AC1'], dependsOn: [] },
+      { id: 'US-002', title: 'Second', description: 'Second story', acceptanceCriteria: ['AC2'], dependsOn: [] },
+    ]);
+
+    const res = await request(app)
+      .post(`/api/specs/${specId}/enrich`)
+      .set('Authorization', `Bearer ${authToken}`)
+      .send({ workspaceId: 'ws-test' });
+
+    expect(res.status).toBe(200);
+    expect(res.body.success).toBe(true);
+    // One story failed → only one enriched, run still succeeds.
+    expect(res.body.storiesEnriched).toBe(1);
+
+    const logRes = await request(app)
+      .get(`/api/specs/${specId}/generation-log`)
+      .set('Authorization', `Bearer ${authToken}`);
+
+    expect(logRes.status).toBe(200);
+    expect(logRes.body.status).toBe('completed');
+    expect(logRes.body.enriched).toBe(true);
   });
 });

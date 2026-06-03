@@ -14,6 +14,12 @@ const mockPrepareText = jest.fn((_: string, text: string) => text);
 const mockCollectStoryFileTouches = jest.fn();
 const mockBroadcastAll = jest.fn();
 const mockResolveWorkflowConfig = jest.fn();
+const mockHydrateSchema = jest.fn();
+const mockGitMapStep = jest.fn();
+const mockGitReduceStep = jest.fn();
+const mockGetLatestHash = jest.fn();
+const mockGetCurrentHead = jest.fn();
+const mockExistsSync = jest.fn();
 
 jest.mock('../../db/index', () => ({
   execute: mockExecute,
@@ -46,7 +52,29 @@ jest.mock('../workflow-config-resolver', () => ({
   resolveWorkflowConfig: mockResolveWorkflowConfig,
 }));
 
-import { autoSynthesizeMemory } from '../auto-memory';
+jest.mock('../schema-hydrator', () => ({
+  hydrateSchema: mockHydrateSchema,
+}));
+
+jest.mock('../git-hydrator', () => ({
+  gitMapStep: mockGitMapStep,
+  gitReduceStep: mockGitReduceStep,
+  getLatestHash: mockGetLatestHash,
+  getCurrentHead: mockGetCurrentHead,
+}));
+
+jest.mock('fs', () => ({
+  existsSync: (...args: unknown[]) => mockExistsSync(...args),
+}));
+
+import {
+  autoSynthesizeMemory,
+  isGitMemoryStale,
+  GIT_MEMORY_STALENESS_MS,
+  autoHydrateWorkspaceContext,
+  maybeRehydrateGitMemoryOnSpecGen,
+  buildContextHealthSummary,
+} from '../auto-memory';
 
 describe('autoSynthesizeMemory provenance hardening', () => {
   beforeEach(() => {
@@ -130,5 +158,186 @@ describe('autoSynthesizeMemory provenance hardening', () => {
       }),
     ]);
     expect(mockBroadcastAll).toHaveBeenCalled();
+  });
+});
+
+describe('isGitMemoryStale (CTM-005 freshness check)', () => {
+  const NOW = 1_000_000_000_000;
+
+  it('treats missing hydration as stale', () => {
+    expect(isGitMemoryStale(null, NOW)).toBe(true);
+    expect(isGitMemoryStale(undefined, NOW)).toBe(true);
+    expect(isGitMemoryStale('not-a-date', NOW)).toBe(true);
+  });
+
+  it('treats hydration older than the threshold as stale', () => {
+    const old = new Date(NOW - GIT_MEMORY_STALENESS_MS - 1).toISOString();
+    expect(isGitMemoryStale(old, NOW)).toBe(true);
+  });
+
+  it('treats recent hydration as fresh', () => {
+    const recent = new Date(NOW - 60_000).toISOString();
+    expect(isGitMemoryStale(recent, NOW)).toBe(false);
+  });
+
+  it('honors a custom threshold', () => {
+    const ts = new Date(NOW - 5_000).toISOString();
+    expect(isGitMemoryStale(ts, NOW, 1_000)).toBe(true);
+    expect(isGitMemoryStale(ts, NOW, 10_000)).toBe(false);
+  });
+});
+
+describe('autoHydrateWorkspaceContext (CTM-005 hydration triggers)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockHydrateSchema.mockReturnValue({ snapshot: 'CREATE TABLE x ();', tableNames: ['x'], fileCount: 1, migrationDir: '/m' });
+    mockGitMapStep.mockResolvedValue([{ fromHash: 'a', toHash: 'b', commitCount: 3, summary: 'did things' }]);
+    mockGitReduceStep.mockResolvedValue('# memory');
+    mockGetLatestHash.mockReturnValue('b');
+    mockQueryOne.mockResolvedValue(undefined);
+    mockExecute.mockResolvedValue({ rowCount: 1 });
+  });
+
+  it('hydrates schema and git, persisting hydration timestamp', async () => {
+    const result = await autoHydrateWorkspaceContext({
+      workspaceId: 'ws-1',
+      workspacePath: '/repo',
+      workspaceLabel: 'Repo',
+    });
+
+    expect(mockHydrateSchema).toHaveBeenCalledWith('/repo');
+    expect(mockGitMapStep).toHaveBeenCalledWith({ workspacePath: '/repo', fromHash: undefined });
+    expect(result.schema).toEqual({ ok: true, tableCount: 1 });
+    expect(result.git).toEqual({ ok: true, newCommits: 3, commitCount: 3 });
+
+    const gitInsert = mockExecute.mock.calls.find(([sql]) => String(sql).includes('git_memory_hydrated_at'));
+    expect(gitInsert).toBeDefined();
+  });
+
+  it('is non-fatal when git hydration throws', async () => {
+    mockGitMapStep.mockRejectedValue(new Error('Not a git repository'));
+    const result = await autoHydrateWorkspaceContext({
+      workspaceId: 'ws-1',
+      workspacePath: '/repo',
+      workspaceLabel: 'Repo',
+    });
+    expect(result.git).toEqual({ ok: false, newCommits: 0, commitCount: 0 });
+    expect(result.schema?.ok).toBe(true);
+  });
+
+  it('only hydrates requested types', async () => {
+    await autoHydrateWorkspaceContext({
+      workspaceId: 'ws-1',
+      workspacePath: '/repo',
+      workspaceLabel: 'Repo',
+      types: ['schema'],
+    });
+    expect(mockHydrateSchema).toHaveBeenCalled();
+    expect(mockGitMapStep).not.toHaveBeenCalled();
+  });
+});
+
+describe('maybeRehydrateGitMemoryOnSpecGen (CTM-005 stale rehydration)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockGitMapStep.mockResolvedValue([{ fromHash: 'a', toHash: 'c', commitCount: 1, summary: 's' }]);
+    mockGitReduceStep.mockResolvedValue('# memory');
+    mockGetLatestHash.mockReturnValue('c');
+    mockExecute.mockResolvedValue({ rowCount: 1 });
+  });
+
+  it('skips when HEAD is unchanged', async () => {
+    mockQueryOne.mockResolvedValue({ last_ingested_commit_hash: 'c', git_commit_count: 5, git_memory_hydrated_at: null });
+    mockGetCurrentHead.mockResolvedValue('c');
+
+    const r = await maybeRehydrateGitMemoryOnSpecGen({ workspaceId: 'ws-1', workspacePath: '/repo', workspaceLabel: 'Repo' });
+    expect(r).toEqual({ triggered: false, reason: 'head_unchanged' });
+    expect(mockGitMapStep).not.toHaveBeenCalled();
+  });
+
+  it('skips when HEAD changed but memory is fresh', async () => {
+    const fresh = new Date(Date.now() - 60_000).toISOString();
+    mockQueryOne.mockResolvedValue({ last_ingested_commit_hash: 'a', git_commit_count: 5, git_memory_hydrated_at: fresh });
+    mockGetCurrentHead.mockResolvedValue('c');
+
+    const r = await maybeRehydrateGitMemoryOnSpecGen({ workspaceId: 'ws-1', workspacePath: '/repo', workspaceLabel: 'Repo' });
+    expect(r).toEqual({ triggered: false, reason: 'fresh' });
+    expect(mockGitMapStep).not.toHaveBeenCalled();
+  });
+
+  it('triggers rehydration when HEAD changed and memory is stale', async () => {
+    mockQueryOne.mockResolvedValue({ last_ingested_commit_hash: 'a', git_commit_count: 5, git_memory_hydrated_at: null });
+    mockGetCurrentHead.mockResolvedValue('c');
+
+    const r = await maybeRehydrateGitMemoryOnSpecGen({ workspaceId: 'ws-1', workspacePath: '/repo', workspaceLabel: 'Repo' });
+    expect(r).toEqual({ triggered: true, reason: 'stale_head_changed' });
+    // Let the fire-and-forget hydration settle.
+    await new Promise((resolve) => setImmediate(resolve));
+    expect(mockGitMapStep).toHaveBeenCalled();
+  });
+
+  it('skips when HEAD cannot be resolved (not a repo)', async () => {
+    mockQueryOne.mockResolvedValue(undefined);
+    mockGetCurrentHead.mockResolvedValue(null);
+
+    const r = await maybeRehydrateGitMemoryOnSpecGen({ workspaceId: 'ws-1', workspacePath: '/repo', workspaceLabel: 'Repo' });
+    expect(r).toEqual({ triggered: false, reason: 'no_head' });
+  });
+});
+
+describe('buildContextHealthSummary (CTM-005 health/readiness)', () => {
+  beforeEach(() => {
+    jest.clearAllMocks();
+    mockExistsSync.mockReturnValue(false);
+  });
+
+  it('reports absent + nudge when nothing is hydrated', async () => {
+    mockQueryOne.mockResolvedValue(undefined);
+
+    const s = await buildContextHealthSummary({ workspaceId: 'ws-1', workspacePath: '/repo' });
+    expect(s.readiness).toBe('absent');
+    expect(s.schemaPresent).toBe(false);
+    expect(s.gitHydrated).toBe(false);
+    expect(s.needsHydration).toBe(true);
+    expect(s.nudge).toMatch(/has not been hydrated/i);
+    expect(s.contextScore).toBe(0);
+  });
+
+  it('flags stale git memory with a non-blocking nudge', async () => {
+    const old = new Date(Date.now() - GIT_MEMORY_STALENESS_MS - 1000).toISOString();
+    mockQueryOne.mockResolvedValue({
+      schema_snapshot: 'CREATE TABLE x ();',
+      schema_snapshot_at: new Date().toISOString(),
+      schema_table_count: 2,
+      last_ingested_commit_hash: 'abc',
+      git_commit_count: 10,
+      git_memory_hydrated_at: old,
+    });
+    mockExistsSync.mockReturnValue(true);
+
+    const s = await buildContextHealthSummary({ workspaceId: 'ws-1', workspacePath: '/repo' });
+    expect(s.gitHydrated).toBe(true);
+    expect(s.gitMemoryStale).toBe(true);
+    expect(s.needsHydration).toBe(true);
+    expect(s.nudge).toMatch(/stale/i);
+  });
+
+  it('reports ready with no nudge when fully hydrated and fresh', async () => {
+    const fresh = new Date(Date.now() - 60_000).toISOString();
+    mockQueryOne.mockResolvedValue({
+      schema_snapshot: 'CREATE TABLE x ();',
+      schema_snapshot_at: fresh,
+      schema_table_count: 2,
+      last_ingested_commit_hash: 'abc',
+      git_commit_count: 10,
+      git_memory_hydrated_at: fresh,
+    });
+    mockExistsSync.mockReturnValue(true);
+
+    const s = await buildContextHealthSummary({ workspaceId: 'ws-1', workspacePath: '/repo' });
+    expect(s.readiness).toBe('ready');
+    expect(s.needsHydration).toBe(false);
+    expect(s.nudge).toBeNull();
+    expect(s.contextScore).toBe(100);
   });
 });

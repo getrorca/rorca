@@ -1,0 +1,27 @@
+{
+  "phase_id": "run-cockpit",
+  "cycle": 2,
+  "summary": "Extended the Pi-native run cockpit story pane to surface backend context-comparison data per story, including predicted context tokens/files, actual injected files, and simple drift visibility, while keeping the implementation Pi-safe and validator-clean.",
+  "done": false,
+  "confidence": 0.76,
+  "files_changed": [
+    "/Users/dimitriteravanessian/.pi/agent/extensions/rorca/tui/run-view.ts"
+  ],
+  "validations_attempted": [
+    "npx tsc --noEmit",
+    "python3 scripts/validate_rorca_pi_extension.py",
+    "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit"
+  ],
+  "validations_passed": [
+    "npx tsc --noEmit",
+    "python3 scripts/validate_rorca_pi_extension.py",
+    "cd ~/.pi/agent/extensions/rorca && npx tsc --noEmit"
+  ],
+  "known_bugs": [],
+  "remaining_work": [
+    "Decide whether the run cockpit is feature-complete enough for this phase or still needs a richer Pi-native live log/output experience beyond periodic polling.",
+    "Add any missing run-level hooks or affordances the reviewer expects for failure triage and recovery in the Pi-native cockpit.",
+    "Have the reviewer verify the cockpit against real run data and confirm there are no UX regressions or API-shape mismatches."
+  ],
+  "notes": "Required supervisor files were re-read first. The handoff/review/validation JSON files for this phase did not yet exist on disk at the start of the cycle."
+}

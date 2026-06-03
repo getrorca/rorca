@@ -35,6 +35,7 @@ import { invalidateConfig } from '../lib/context-cache';
 import { populateConventionsFromConfig } from '../lib/knowledge-graph';
 import { NotFoundError, ValidationError } from '../lib/errors';
 import { handleRouteError } from '../lib/async-handler';
+import { routeWorkspaceContext } from '../lib/workspace-context-routing';
 
 const router = Router();
 
@@ -129,6 +130,44 @@ router.get('/:id/directory-tree', async (req: Request, res: Response) => {
   } catch (err: unknown) {
     handleRouteError(res, err, '[ContextRouting] Read directory');
   }
+});
+
+// ─── Canonical Workspace-Context Routing Decision ─────────────────────────────
+
+/**
+ * @swagger
+ * /api/workspaces/{id}/context-routing:
+ *   get:
+ *     summary: Get the canonical workspace-context routing decision
+ *     operationId: getWorkspaceContextRouting
+ *     x-rorca-tier: auth
+ *     x-rorca-rationale: "Routing decision reflects workspace-owned context state (stack, missing files, .rorca contract) and should only be exposed to authenticated callers."
+ *     description: >
+ *       CTM-006: Returns the single deterministic workspace-context routing decision —
+ *       detected stack, missing context files, a 0–100 richness score, and the validated
+ *       .rorca / AGENTS.md / MEMORY.md routing contract. Quick-run generation and
+ *       installed-skill injection route through this same path so the UI and execution
+ *       never disagree about whether a workspace is context blind.
+ *     tags: [Context Routing]
+ *     parameters:
+ *       - name: id
+ *         in: path
+ *         required: true
+ *         schema:
+ *           type: string
+ *     responses:
+ *       200:
+ *         description: Canonical routing decision
+ */
+router.get('/:id/context-routing', async (req: Request, res: Response) => {
+  const wsPath = await resolveWorkspacePath(req.params.id as string);
+  if (!wsPath) {
+    throw new NotFoundError('Workspace not found');
+    return;
+  }
+
+  const routing = routeWorkspaceContext(wsPath);
+  res.json({ routing });
 });
 
 // ─── Skills Listing ───────────────────────────────────────────────────────────

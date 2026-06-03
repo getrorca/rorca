@@ -18,6 +18,7 @@ import {
   gitReduceStep,
   getLatestHash,
 } from '../lib/git-hydrator';
+import { autoHydrateWorkspaceContext, buildContextHealthSummary } from '../lib/auto-memory';
 import { chatComplete } from '../lib/llm-client';
 import { validateDirectionYaml } from '../lib/direction-validator';
 import { parsePaginationParams, paginateArray } from '../lib/paginate';
@@ -182,6 +183,16 @@ router.post('/', authRequired, validateBody(CreateWorkspaceSchema), requirePlan(
     } catch {
       // Non-fatal — workspace still registers even if echolocation fails
     }
+
+    // CTM-005: Fire-and-forget schema + git-memory hydration after registration.
+    // Non-blocking — workspace creation must not wait on (or fail because of) hydration.
+    void autoHydrateWorkspaceContext({
+      workspaceId: id,
+      workspacePath: path,
+      workspaceLabel: label,
+    }).catch((err) => {
+      logger.warn(`[Workspaces] auto-hydration failed for ${id}: ${(err as Error)?.message ?? err}`);
+    });
 
     const needsBootstrap = (health?.score ?? 0) < 40;
     res.status(201).json({ workspace: parseWorkspace(row!), health, needsBootstrap });
@@ -2340,6 +2351,12 @@ ${dirListing.join('\n') || '(empty)'}
  *                 claudeMdPresent: { type: boolean }
  *                 skillsCount: { type: integer }
  *                 contextScore: { type: integer, description: "0-100 composite context readiness score" }
+ *                 readiness: { type: string, enum: [ready, partial, absent], description: "Coarse readiness bucket for indicator color" }
+ *                 needsHydration: { type: boolean, description: "True when the UI should show a non-blocking hydration nudge" }
+ *                 nudge: { type: string, nullable: true, description: "Human-readable nudge message when context is absent or stale" }
+ *                 gitMemoryStale: { type: boolean, description: "True when git memory hydration is missing or older than the staleness window" }
+ *                 gitMemoryHydratedAt: { type: string, format: date-time, nullable: true }
+ *                 schemaHydratedAt: { type: string, format: date-time, nullable: true }
  *       404: { description: "Workspace not found" }
  */
 router.get('/:id/context-health', async (req, res, next) => {
@@ -2390,7 +2407,27 @@ router.get('/:id/context-health', async (req, res, next) => {
       100
     );
 
-    res.json({ l3Present, gitMemoryCount, schemaPresent, claudeMdPresent, skillsCount, contextScore });
+    // CTM-005: Concrete readiness/nudge summary so the UI can show indicators and a
+    // non-blocking nudge when memory is absent or stale. Non-fatal.
+    const hydration = await buildContextHealthSummary({
+      workspaceId: req.params.id,
+      workspacePath: workspace.path,
+    });
+
+    res.json({
+      l3Present,
+      gitMemoryCount,
+      schemaPresent,
+      claudeMdPresent,
+      skillsCount,
+      contextScore,
+      readiness: hydration.readiness,
+      needsHydration: hydration.needsHydration,
+      nudge: hydration.nudge,
+      gitMemoryStale: hydration.gitMemoryStale,
+      gitMemoryHydratedAt: hydration.gitMemoryHydratedAt,
+      schemaHydratedAt: hydration.schemaHydratedAt,
+    });
   } catch (err) {
     next(err);
   }

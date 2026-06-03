@@ -1,0 +1,21 @@
+{
+  "updatedAt": "2026-05-06T08:11:47.542060+00:00",
+  "cycle": 1,
+  "currentPhaseId": "run-cockpit",
+  "phases": {
+    "run-cockpit": {
+      "status": "pending",
+      "cycles": 1,
+      "greenStreak": 0,
+      "completedAt": null,
+      "lastImplementerSummary": null,
+      "lastReviewerSummary": null,
+      "lastKnownBugs": [],
+      "lastRegressions": []
+    }
+  },
+  "consecutiveImplementerFailures": 0,
+  "consecutiveReviewerFailures": 0,
+  "consecutiveValidationFailures": 0,
+  "completedAt": null
+}

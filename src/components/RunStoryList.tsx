@@ -7,7 +7,7 @@
 
 import { useState, useEffect, useCallback, useMemo, useRef } from 'react';
 import { useVirtualizer } from '@tanstack/react-virtual';
-import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText, Share2, Globe } from 'lucide-react';
+import { CheckCircle2, XCircle, Circle, SkipForward, Loader2, ChevronDown, ChevronRight, GitMerge, Layers, Clock, RotateCcw, Ban, FileText, Share2, Globe, Sparkles, Files, Cpu } from 'lucide-react';
 import { Github } from './icons/GithubIcon';
 import { apiFetch } from '../lib/apiFetch';
 import { fetchStoryOutput, retryRun } from '../api/pipeline';
@@ -43,6 +43,20 @@ interface SpecStory {
   passes?: boolean;
 }
 
+/** CTM-004: Per-story context usage surfaced in the Stories accordion. */
+export interface StoryContextSkill {
+  name: string;
+  relevance?: number | null;
+  reason?: string | null;
+}
+
+export interface StoryContextInfo {
+  skills: StoryContextSkill[];
+  contextFiles: string[];
+  inputTokens: number;
+  outputTokens: number;
+}
+
 interface RunStoryListProps {
   runId: number;
   walEvents: WalEvent[];
@@ -50,6 +64,11 @@ interface RunStoryListProps {
   onRetryStory?: (storyId: string, newRunId: number) => void;
   parallelism?: number;
   includeGraph?: boolean;
+  /**
+   * CTM-004: Per-story context usage (skills, injected files, tokens), keyed by
+   * story ID. Optional — older runs without this data simply omit the accordion.
+   */
+  storyContext?: Map<string, StoryContextInfo>;
 }
 
 type DerivedStatus = 'pending' | 'running' | 'pass' | 'fail' | 'blocked' | 'excluded' | 'skip' | 'retry' | 'rate_limited';
@@ -192,7 +211,7 @@ const MAX_RETRIES = 3;
 
 // ─── Story row component ─────────────────────────────────────────────────────
 
-function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocused, includeGraph }: {
+function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocused, includeGraph, context }: {
   story: MergedStory;
   onStoryClick?: (storyId: string) => void;
   indented?: boolean;
@@ -200,6 +219,7 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
   onRetryStory?: (storyId: string) => void;
   isFocused?: boolean;
   includeGraph?: boolean;
+  context?: StoryContextInfo;
 }) {
   const cfg = STATUS_CONFIG[story.status] || STATUS_CONFIG.pending;
   const Icon = cfg.icon;
@@ -217,6 +237,16 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
   const [outputLoading, setOutputLoading] = useState(false);
   const [failureReason, setFailureReason] = useState<string | null>(null);
   const [retryLoading, setRetryLoading] = useState(false);
+
+  // CTM-004: Per-story context accordion (skills / files / tokens)
+  const [contextExpanded, setContextExpanded] = useState(false);
+  const hasContextTokens = !!context && (context.inputTokens > 0 || context.outputTokens > 0);
+  const hasContext = !!context && (context.skills.length > 0 || context.contextFiles.length > 0 || hasContextTokens);
+
+  const handleToggleContext = useCallback((e: React.MouseEvent) => {
+    e.stopPropagation();
+    setContextExpanded(prev => !prev);
+  }, []);
 
   // Track status transitions — animate only when status *changes* to pass
   const prevStatusRef = useRef<DerivedStatus>(story.status);
@@ -371,7 +401,81 @@ function StoryRow({ story, onStoryClick, indented, runId, onRetryStory, isFocuse
             RL{story.rateLimitAttempt}
           </span>
         )}
+        {/* CTM-004: Context accordion toggle — shown when per-story context exists */}
+        {hasContext && (
+          <button
+            onClick={handleToggleContext}
+            className={`shrink-0 inline-flex items-center gap-1 px-1.5 py-0.5 rounded text-[10px] font-medium transition-colors ${
+              contextExpanded ? 'text-accent bg-accent/10' : 'text-muted hover:text-[var(--text)] hover:bg-bg/60'
+            }`}
+            title={contextExpanded ? 'Collapse context' : 'Expand context'}
+            aria-label={contextExpanded ? 'Collapse context' : 'Expand context'}
+            aria-expanded={contextExpanded}
+          >
+            <ChevronRight size={11} className={`transition-transform duration-150 ${contextExpanded ? 'rotate-90' : ''}`} />
+            Context
+          </button>
+        )}
       </div>
+
+      {/* CTM-004: Per-story context accordion panel */}
+      {hasContext && contextExpanded && context && (
+        <div className={`${indented ? 'pl-6 pr-3' : 'px-3'} py-2 bg-bg/40 border-b border-border/50`}>
+          <div className="flex flex-col gap-2.5">
+            {context.skills.length > 0 && (
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
+                  <Sparkles size={10} className="text-purple-400" /> Skills
+                </p>
+                <div className="flex flex-wrap gap-1">
+                  {context.skills.map(sk => (
+                    <span
+                      key={sk.name}
+                      className="inline-flex items-center gap-1 px-1.5 py-0.5 rounded-full bg-purple-500/10 text-purple-400 text-[10px] font-medium"
+                      title={sk.reason ?? undefined}
+                    >
+                      {sk.name}
+                      {sk.relevance != null && (
+                        <span className={`text-[9px] font-semibold ${sk.relevance >= 7 ? 'text-purple-300' : 'text-purple-500/70'}`}>
+                          {sk.relevance}/10
+                        </span>
+                      )}
+                    </span>
+                  ))}
+                </div>
+              </div>
+            )}
+            {context.contextFiles.length > 0 && (
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
+                  <Files size={10} className="text-blue-400" /> Context Files ({context.contextFiles.length})
+                </p>
+                <div className="flex flex-wrap gap-1">
+                  {context.contextFiles.slice(0, 20).map(f => (
+                    <code key={f} className="px-1.5 py-0.5 rounded bg-panel text-[10px] font-mono text-accent/80 border border-border/60 break-all">
+                      {f}
+                    </code>
+                  ))}
+                  {context.contextFiles.length > 20 && (
+                    <span className="text-[10px] text-muted">+{context.contextFiles.length - 20} more</span>
+                  )}
+                </div>
+              </div>
+            )}
+            {hasContextTokens && (
+              <div>
+                <p className="text-[10px] font-semibold uppercase tracking-wider text-muted mb-1 flex items-center gap-1">
+                  <Cpu size={10} className="text-emerald-400" /> Tokens
+                </p>
+                <div className="flex items-center gap-4 text-[11px]">
+                  <span className="text-muted">In: <span className="text-[var(--text)] font-mono">{context.inputTokens.toLocaleString()}</span></span>
+                  <span className="text-muted">Out: <span className="text-[var(--text)] font-mono">{context.outputTokens.toLocaleString()}</span></span>
+                </div>
+              </div>
+            )}
+          </div>
+        </div>
+      )}
 
       {/* Expanded detail panel — for failed stories (story log) */}
       {isFailed && expanded && (
@@ -511,7 +615,7 @@ type VirtualItem =
 
 // ─── Main component ──────────────────────────────────────────────────────────
 
-export default function RunStoryList({ runId, walEvents, onStoryClick, onRetryStory, parallelism, includeGraph }: RunStoryListProps) {
+export default function RunStoryList({ runId, walEvents, onStoryClick, onRetryStory, parallelism, includeGraph, storyContext }: RunStoryListProps) {
   const [storyResults, setStoryResults] = useState<StoryResult[]>([]);
   const [specStories, setSpecStories] = useState<SpecStory[]>([]);
   const [loading, setLoading] = useState(true);
@@ -864,6 +968,23 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
     return { passed, failed, blocked, total };
   }, [mergedStories]);
 
+  // CTM-004: Aggregate context usage across stories for the header summary bar.
+  const contextSummary = useMemo(() => {
+    if (!storyContext || storyContext.size === 0) return null;
+    const skills = new Set<string>();
+    const files = new Set<string>();
+    let tokenSum = 0;
+    let tokenStories = 0;
+    for (const info of storyContext.values()) {
+      for (const sk of info.skills) skills.add(sk.name);
+      for (const f of info.contextFiles) files.add(f);
+      if (info.inputTokens > 0) { tokenSum += info.inputTokens; tokenStories++; }
+    }
+    const avgTokens = tokenStories > 0 ? tokenSum / tokenStories : 0;
+    if (skills.size === 0 && files.size === 0 && avgTokens === 0) return null;
+    return { skillCount: skills.size, fileCount: files.size, avgTokens };
+  }, [storyContext]);
+
   // ─── Build flat virtual items list ─────────────────────────────────────────
 
   const virtualItems = useMemo((): VirtualItem[] => {
@@ -1030,6 +1151,35 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
         )}
       </div>
 
+      {/* CTM-004: Context usage summary bar — aggregate skills/files/tokens */}
+      {contextSummary && (
+        <div
+          className="shrink-0 px-3 py-1.5 border-b border-border bg-panel/60 flex items-center gap-3 text-[11px] text-muted"
+          aria-label="Run context usage summary"
+        >
+          {contextSummary.skillCount > 0 && (
+            <span className="flex items-center gap-1">
+              <Sparkles size={11} className="text-purple-400 shrink-0" />
+              {contextSummary.skillCount} {contextSummary.skillCount === 1 ? 'skill' : 'skills'}
+            </span>
+          )}
+          {contextSummary.fileCount > 0 && (
+            <span className="flex items-center gap-1">
+              <Files size={11} className="text-blue-400 shrink-0" />
+              {contextSummary.fileCount} {contextSummary.fileCount === 1 ? 'file' : 'files'}
+            </span>
+          )}
+          {contextSummary.avgTokens > 0 && (
+            <span className="flex items-center gap-1">
+              <Cpu size={11} className="text-emerald-400 shrink-0" />
+              {contextSummary.avgTokens >= 1000
+                ? `~${(contextSummary.avgTokens / 1000).toFixed(1)}K`
+                : `~${Math.round(contextSummary.avgTokens)}`} tokens/story
+            </span>
+          )}
+        </div>
+      )}
+
       {/* Virtual scroll container */}
       <div
         ref={scrollContainerRef}
@@ -1074,6 +1224,7 @@ export default function RunStoryList({ runId, walEvents, onStoryClick, onRetrySt
                     indented={item.indented}
                     isFocused={isFocused}
                     includeGraph={includeGraph}
+                    context={storyContext?.get(item.story.storyId)}
                   />
                 ) : item.type === 'wave-header' ? (
                   <WaveHeader

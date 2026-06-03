@@ -11,6 +11,7 @@ import type {
   SpecDetail,
   TriggerPipelineResponse,
   Workspace,
+  WorkspaceContextRoutingResponse,
 } from "./types.js";
 
 export class RorcaApiClient {
@@ -97,6 +98,17 @@ export class RorcaApiClient {
     return this.fetchJson<SpecDetail>(`/api/specs/${encodeURIComponent(specSlug)}?workspaceId=${encodeURIComponent(workspaceId)}`);
   }
 
+  /**
+   * CTM-006: Fetch the canonical workspace-context routing decision so run/quick-run
+   * dispatch can warn when the workspace is context blind before launching.
+   */
+  async getContextRouting(workspaceId: string): Promise<WorkspaceContextRoutingResponse["routing"]> {
+    const response = await this.fetchJson<WorkspaceContextRoutingResponse>(
+      `/api/workspaces/${encodeURIComponent(workspaceId)}/context-routing`,
+    );
+    return response.routing;
+  }
+
   async getPiModels(): Promise<PiModel[]> {
     const response = await this.fetchJson<{ models: PiModel[] }>("/api/config/pi-models");
     return Array.isArray(response.models) ? response.models : [];
@@ -131,6 +143,26 @@ export class RorcaApiClient {
         ...(input.forceSequential ? { forceSequential: true } : {}),
       }),
     }, 60_000);
+  }
+
+  /**
+   * CTM-008: Trigger retroactive context enrichment for a spec. Returns only the
+   * lightweight retrieval metadata (method + story count) — never raw blobs — so
+   * callers stay trace-safe.
+   */
+  async enrichSpec(specSlug: string, workspaceId: string): Promise<{ retrievalMethod: string; storiesEnriched: number }> {
+    const response = await this.fetchJson<{ retrieval_method?: string; storiesEnriched?: number }>(
+      `/api/specs/${encodeURIComponent(specSlug)}/enrich`,
+      {
+        method: "POST",
+        body: JSON.stringify({ workspaceId }),
+      },
+      600_000,
+    );
+    return {
+      retrievalMethod: response.retrieval_method ?? "direction-only",
+      storiesEnriched: response.storiesEnriched ?? 0,
+    };
   }
 
   async getRun(runId: number): Promise<PipelineRunDetailResponse> {
